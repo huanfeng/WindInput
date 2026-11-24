@@ -2,17 +2,13 @@
 //! 推进 6b（临时词晋升计数），与各路选词出口同口径；内部开关 `input.top_commit_learn`
 //! 关掉时各路（含临拼）一律不造词、不推 6b。
 //!
-//! 现场：主路 `nihao` 先分步选「你」、再按 `,` 顶屏「好」，上屏「你好，」却什么也没学——
-//! 顶屏出口只记了词频，没把被顶的候选并进已转换段，`take_committed` 直接把段清掉了。
-//! 临拼的标点顶屏走 `commit_temp_pinyin_selected`，本就会学；其余出口都不学。
-//!
 //! 归属口径同各路选词：主路用活跃方案、临拼用目标方案、快捷输入用成员方案——拼音族
 //! 的临时词都落 `pinyin` 数据桶（`PINYIN_DATA_SCHEMA`）。
 //!
 //! 另钉三条口径：高亮是分步候选时顶屏只推 6b 不造词；次三选键越界 `commit_and_input`
 //! 也是顶屏（跟随开关）；整句候选造词后 6b 不再重复计数（`learned_code` 防 +2）。
 //!
-//! ⚠️ 依赖 `build_dev/data` 真实词库；缺失时**静默跳过**（判据是耗时 0.00s）。
+//! 依赖 `build_dev/data` 真实词库；缺失时静默跳过（判据是耗时 0.00s）。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -235,7 +231,7 @@ fn temp_pinyin_numpad_top_commit_learns() {
     let _ = std::fs::remove_file(&db);
 }
 
-/// 开关关掉：临拼的标点顶屏（修前本就会学的那一路）也不学。
+/// 开关关掉：临拼的标点顶屏也不学。
 #[test]
 fn switch_off_temp_pinyin_punct_top_commit_does_not_learn() {
     skip_without_data!();

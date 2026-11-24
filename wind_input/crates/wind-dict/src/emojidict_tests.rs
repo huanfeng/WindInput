@@ -29,14 +29,11 @@ fn roundtrip_lookup() {
     assert_eq!(r.lookup("没有"), None, "未收录的词返回 None");
 }
 
-/// ★ 同键**必须合并**，不是后者覆盖前者。
+/// 同键必须合并，不是后者覆盖前者。
 ///
-/// 真实场景取自两张上游表的同键（`emoji_word.txt` × `emoji_category.txt`，实测交集
-/// 14 个键且内容全不同）：「奖项」在 word 表只有 `🏅`，在 category 表是一整组。
-/// 覆盖式实现会把其中一整组整个丢掉。
-///
-/// ⚠️ 繁→简撞键那 12 组恰好是异体字指向同一 emoji，覆盖与合并结果相同——**别拿
-/// 那个场景来验这条**，它对错误实现没有判断力。
+/// 场景取自两张上游表的同键（`emoji_word.txt` × `emoji_category.txt`）：「奖项」在 word 表只有
+/// `🏅`，在 category 表是一整组，覆盖式实现会丢掉一整组。
+/// 别拿繁→简撞键来验这条：那些组恰好是异体字指向同一 emoji，覆盖与合并结果相同。
 #[test]
 fn colliding_keys_merge_not_overwrite() {
     let (_g, r) = write_read(&[("奖项", &["🏅"]), ("奖项", &["🏅", "🎖️", "🥇"])]);
@@ -48,14 +45,14 @@ fn colliding_keys_merge_not_overwrite() {
     );
 }
 
-/// 合并保**序**：先到的排前面（与 `sort_by` 的稳定性一同构成「先到先得」）。
+/// 合并保序：先到的排前面（与 `sort_by` 的稳定性一同构成「先到先得」）。
 #[test]
 fn merge_preserves_first_seen_order() {
     let (_g, r) = write_read(&[("x", &["1️⃣", "2️⃣"]), ("x", &["3️⃣", "1️⃣"])]);
     assert_eq!(r.lookup("x"), Some("1️⃣ 2️⃣ 3️⃣"));
 }
 
-/// 上游格式：值的首项是键本身，**必须按位置丢弃**。
+/// 上游格式：值的首项是键本身，必须按位置丢弃。
 #[test]
 fn parse_upstream_drops_first_value() {
     let got = parse_upstream("一個人\t一個人 👤\nID\tID 🆔 🪪\n", str::to_string);
@@ -68,8 +65,8 @@ fn parse_upstream_drops_first_value() {
     );
 }
 
-/// ⚠️ 归一后键与首项不再相等 —— 若把「丢首项」误写成「过滤等于键的项」，
-/// 繁体首项会被当成 emoji 收进去。本例即那个错误实现的指纹。
+/// 归一后键与首项不再相等：若把「丢首项」误写成「过滤等于键的项」，繁体首项会被当成
+/// emoji 收进去。本例即那个错误实现的指纹。
 #[test]
 fn parse_upstream_drops_by_position_not_by_equality() {
     // 归一：把「個」换成「个」，于是键 = 一个人，而值首项仍是 一個人。
@@ -114,7 +111,7 @@ fn truncated_file_does_not_panic() {
 
 // ── load_or_build（建缓存编排）─────────────────────────────────────────
 
-/// 多张表**按顺序**合并：精确词表的 emoji 排在分类表之前。
+/// 多张表按顺序合并：精确词表的 emoji 排在分类表之前。
 #[test]
 fn build_merges_tables_in_order() {
     let g = tempdir::Guard::new("wemj-order");
@@ -146,7 +143,7 @@ fn build_skips_missing_table() {
     assert_eq!(r.lookup("好"), Some("🙂"));
 }
 
-/// 全部表都读不到 ⇒ None，且**不留下缓存文件**（不能让空表被后续当成新鲜缓存复用）。
+/// 全部表都读不到 ⇒ None，且不留下缓存文件（不能让空表被后续当成新鲜缓存复用）。
 #[test]
 fn build_returns_none_when_no_source() {
     let g = tempdir::Guard::new("wemj-none");
@@ -155,11 +152,10 @@ fn build_returns_none_when_no_source() {
     assert!(!cache.exists(), "没建成就不该留下缓存文件");
 }
 
-/// ★★ 归一表必须参与指纹：`fp_extra` 变了就得重建。
+/// 归一表必须参与指纹：`fp_extra` 变了就得重建。
 ///
-/// 这是本编排最容易漏的一条——归一表不是要解析的词表，很自然就不会被放进 sources，
-/// 于是 OpenCC 数据升级后，同样的 emoji_word.txt 会**永久复用按旧归一表建的缓存**。
-/// 症状是「换了转换表但某些词还是打不出 emoji」，而源文件确实没动过，无从查起。
+/// 归一表不是要解析的词表，很容易漏放进 sources；漏了的话 OpenCC 数据升级后会永久复用按
+/// 旧归一表建的缓存，表现为换了转换表某些词仍打不出 emoji，而源文件确实没动过。
 #[test]
 fn rebuild_when_normalizer_source_changes() {
     let g = tempdir::Guard::new("wemj-fp");
@@ -256,12 +252,10 @@ fn sections_are_part_of_cache_fingerprint() {
     assert_eq!(b.lookup("甲"), None);
 }
 
-/// 源与指纹都没变时**复用**缓存，不重建。
+/// 源与指纹都没变时复用缓存，不重建。
 ///
-/// ⚠️ 判据不能是「缓存文件大小/mtime 没变」——重建会写出内容与长度都完全相同的文件，
-/// 那种断言对「每次都重建」的实现毫无判断力。这里改成**把缓存内容偷偷换掉**：指纹只
-/// 按源文件算、不看缓存内容，所以缓存仍判新鲜；此时查到替换后的内容即证明走的是缓存，
-/// 查到源文件的内容则证明重建了。
+/// 重建会写出完全相同的文件，「缓存大小/mtime 没变」对「每次都重建」的实现没有判断力。
+/// 这里偷换缓存内容：指纹只按源文件算，缓存仍判新鲜；查到替换后的内容即证明走的是缓存。
 #[test]
 fn reuses_fresh_cache() {
     let g = tempdir::Guard::new("wemj-fresh");
@@ -308,8 +302,7 @@ mod tempdir {
 }
 
 /// 行尾不挑食：emoji 表带 `#` 注释头时，孤立 `\r` 会让整份被当成一条注释 → 0 条。
-///
-/// ⚠️ 样本在代码里构造，不要改用仓库 fixture（git core.autocrlf 会按平台改行尾）。
+/// 样本在代码里构造，不要改用仓库 fixture（git core.autocrlf 会按平台改行尾）。
 #[test]
 fn line_endings_do_not_change_the_result() {
     let lf = "# emoji 表\n笑脸\t笑脸 😀\n大笑\t大笑 😂 🤣\n";

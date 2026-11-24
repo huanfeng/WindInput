@@ -62,9 +62,8 @@ fn b2(second: usize) -> u64 {
 
 /// 合法音节输入：更长音节的条目必须被拒，下一个音节的补全必须放行。
 ///
-/// 这是真实报障（打 `shen` 出 `sheng` 的字）的判据级复现。`sheng` 与 `shen` 在
-/// **音节数**上完全同形（都是 1），[`prefix_syllable_keep`] 分不开它们 —— 分开
-/// 两者的只有「输入末尾是不是候选的音节起点」。
+/// 防「打 `shen` 出 `sheng` 的字」。两者音节数都是 1，[`prefix_syllable_keep`] 分不开，
+/// 只能靠「输入末尾是不是候选的音节起点」。
 #[test]
 fn aligned_rejects_longer_syllable_but_keeps_next_syllable() {
     // 输入 shen（completed_len = 4）
@@ -114,7 +113,7 @@ fn aligned_passes_unknown_boundary_and_non_completions() {
     assert!(prefix_syllable_aligned(b1(), 100, 999));
 }
 
-/// 合成判据 = 音节数上限 **且** 边界对齐；两道各自独立，缺一不可。
+/// 合成判据 = 音节数上限且边界对齐；两道各自独立，缺一不可。
 #[test]
 fn entry_keep_requires_both_predicates() {
     // 音节数合格但不对齐（sheng 对 shen）⇒ 拒
@@ -355,10 +354,9 @@ fn reverse_index_arena_boundaries_dont_bleed() {
     assert!(idx.codes_of("").is_none(), "空词不应命中");
 }
 
-/// ★★★ **P1 的全部依据**：「逐库并集」与「先合并再构建」必须产出**完全相同**的索引。
+/// 「逐库并集」与「先合并再构建」必须产出完全相同的索引，这是不建 `combined.wdat` 的前提。
 ///
-/// 这条等价性成立，才谈得上删掉 `combined.wdat`（230MB 文件 + 30 秒构建）。
-/// 样本刻意覆盖三种合并才会遇到的冲突形态——只有其中任一被处理错，两侧就会分叉：
+/// 样本覆盖三种合并才会遇到的冲突形态，任一处理错两侧就会分叉：
 ///   ① 同 (text, code) 在两库权重不同  ② 同 text 不同 code 分散在两库
 ///   ③ 同 code 不同 text 分散在两库
 #[test]
@@ -439,8 +437,8 @@ fn reverse_index_empty_is_empty() {
     assert!(idx.codes_of("任意").is_none());
 }
 
-/// ★ S2 的退出判据：同一槽位、两份不同内容的源（用户目录覆盖了自带的同名词库）交替
-/// 加载，第二轮起**零重建**——两份各有各的文件，不再互相顶掉。
+/// 同一槽位、两份不同内容的源（用户目录覆盖了自带的同名词库）交替加载，第二轮起零重建——
+/// 两份各有各的文件，不再互相顶掉。
 #[test]
 fn alternating_sources_on_one_slot_do_not_rebuild_each_other() {
     let dir = std::env::temp_dir().join(format!("wind-slot-pingpong-{}", std::process::id()));
@@ -478,10 +476,8 @@ fn alternating_sources_on_one_slot_do_not_rebuild_each_other() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// 内容寻址之后「旧 `.fp` 挂在新 wdat 旁」在结构上不可能发生：重建永远写**新文件名**，
-/// 旧文件与它的 `.fp` 原封不动留到被 prune。本用例守的是这条新不变量：源内容一变，
-/// `source_file()` 换成另一个路径，二级缓存拿到的摘要随之不同；旧路径的 `.fp` 还在、
-/// 但没人再按它取摘要。
+/// 内容寻址下重建永远写新文件名，旧文件与它的 `.fp` 留到被 prune。本用例守的是：源内容一变，
+/// `source_file()` 换成另一个路径，二级缓存拿到的摘要随之不同。
 #[test]
 fn a_rebuild_lands_on_a_new_content_addressed_file() {
     let dir = std::env::temp_dir().join(format!("wind-stale-fp-{}", std::process::id()));

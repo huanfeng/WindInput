@@ -117,7 +117,7 @@ fn four_char_word_uses_range_rule() {
     assert_eq!(code, "klwn");
 }
 
-/// 五字及以上：`Za` 取的是**末字**，中间字全部跳过——中(k)+国(l)+人(w)+末字和(t)。
+/// 五字及以上：`Za` 取的是末字，中间字全部跳过——中(k)+国(l)+人(w)+末字和(t)。
 /// 这条专门盯住 `Z` 的语义：若把 `Z` 当成 A=0 序列的第 26 个字，此处会越界报错而非取到「和」。
 #[test]
 fn five_char_word_skips_middle_and_takes_last() {
@@ -191,14 +191,14 @@ fn exact_rule_wins_over_range_regardless_of_order() {
     );
 }
 
-// ───────────── GH#171：只用中文部分取码 ─────────────
+// ───────────── 只用中文部分取码 ─────────────
 
 fn encode(word: &str) -> Result<String, EncodeError> {
     let m = codes();
     encode_text(word, &wubi_spec(), |c, _| m.get(&c).cloned())
 }
 
-/// 姓名+手机号：数字整段跳过，按「张三」那部分取码（维护者已定：两者同码可接受）。
+/// 姓名+手机号：数字整段跳过，按「张三」那部分取码（两者同码可接受）。
 #[test]
 fn digits_are_skipped_and_han_part_is_encoded() {
     assert_eq!(encode("你好13800138000").unwrap(), "wqvb");
@@ -208,7 +208,7 @@ fn digits_are_skipped_and_han_part_is_encoded() {
     assert_eq!(encode("你好，").unwrap(), "wqvb", "全角标点同样跳过");
 }
 
-/// ★ 码表里**有码**的非汉字（`〇` 在五笔里是 `llll`、私用区字、部首…）照样参与取码，
+/// 码表里有码的非汉字（`〇` 在五笔里是 `llll`、私用区字、部首…）照样参与取码，
 /// 只有取不到码的非汉字才跳过。按「是不是汉字」一刀切会把「二〇二六」算成「二二六」的码。
 #[test]
 fn non_han_with_a_code_still_takes_part() {
@@ -235,7 +235,7 @@ fn no_han_left_still_fails() {
     assert_eq!(encode("ab"), Err(EncodeError::NoHanChars));
 }
 
-/// ★「你X好」保护不能被这次放宽连带打穿：X 是**取不到码的汉字**（生僻字）时仍整词作废。
+/// 「你X好」保护不能被连带打穿：X 是取不到码的汉字（生僻字）时仍整词作废。
 /// 只有非汉字才可跳过——把生僻字也跳过，就会静默造出「你好」的码。
 #[test]
 fn rare_han_without_code_still_fails_whole_word() {
@@ -252,7 +252,7 @@ fn single_char_word_keeps_direct_lookup() {
     assert_eq!(encode("a"), Err(EncodeError::MissingCode { ch: 'a' }));
 }
 
-/// 公式对每个字要取到第几位，要如实告诉码源——码源据此挑一条够长的码（GH#181②）。
+/// 公式对每个字要取到第几位，要如实告诉码源——码源据此挑一条够长的码。
 #[test]
 fn code_source_is_told_how_many_codes_each_char_needs() {
     let m = codes();
@@ -266,7 +266,7 @@ fn code_source_is_told_how_many_codes_each_char_needs() {
     assert_eq!(seen.into_inner(), vec![('中', 1), ('国', 1), ('人', 2)]);
 }
 
-// ───────────── GH#181①：按用户实际打的码挑全码 ─────────────
+// ───────────── 按用户实际打的码挑全码 ─────────────
 
 /// 多读音同长（嘞 le…/lw…）：全码表按权重挑了 le，用户打的是 lw → 必须取 lw 那条。
 #[test]

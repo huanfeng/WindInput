@@ -2,8 +2,7 @@ use super::*;
 use std::io::Write;
 
 /// `scan_weight_stats` 的画像：分位数、超范围计数、无权重条目分离统计。
-///
-/// 这是 `dict weight-check` 的**全部实质**——CLI 只是把它排版打印。
+/// `dict weight-check` 只是把它排版打印。
 #[test]
 fn scan_weight_stats_profiles_a_dict() {
     let path = std::env::temp_dir().join("wind_wscan_demo.dict.yaml");
@@ -97,11 +96,9 @@ columns:
     assert!(sc.is_compliant(), "无权重不是「超范围」");
 }
 
-/// 权重值域诊断的取数：超出 `WEIGHT_RANGE_MAX` 的条目被计入 `over_range`，
-/// 权重 0（无权重列/空列）**不计入分母**——那是「未定义」不是「超范围」。
-///
-/// 这条锁的是诊断的**准确性**：`over_range/weighted` 这个比例会出现在告警里，
-/// 把 0 权重算进分母会让百分比虚低，方案作者据此低估问题。
+/// 权重值域诊断的取数：超出 `WEIGHT_RANGE_MAX` 的条目计入 `over_range`，
+/// 权重 0（无权重列/空列）不计入分母——那是「未定义」不是「超范围」。
+/// `over_range/weighted` 会出现在告警里，0 权重进分母会让百分比虚低。
 #[test]
 fn weight_range_diagnostic_counts_only_real_weights() {
     let spec = ColumnSpec::from_layout(ColumnLayout::CodeFirst, false);
@@ -121,8 +118,7 @@ fn weight_range_diagnostic_counts_only_real_weights() {
     assert_eq!(st.max_weight, 10_359_470);
 }
 
-/// 反向锁：全部守约时诊断**一声不吭**（`over_range == 0`）。
-/// 干净的词库不该刷屏——这是 `log_if_dirty` 一贯的约定。
+/// 反向锁：全部守约时诊断一声不吭（`over_range == 0`），干净的词库不刷屏。
 #[test]
 fn well_behaved_dict_triggers_no_weight_warning() {
     let spec = ColumnSpec::from_layout(ColumnLayout::CodeFirst, false);
@@ -150,7 +146,6 @@ fn syllable_boundary_mask_basics() {
 }
 
 /// 端到端：rime 源 → 解析 → wdat 落盘 → mmap 读回，边界必须原样穿过整条链路。
-/// 这是 v4 的核心契约——此前边界在解析期就被 replace(' ',"") 丢弃，根本到不了磁盘。
 #[test]
 fn boundary_survives_wdat_roundtrip() {
     let dir = std::env::temp_dir().join("wind_boundary_roundtrip");
@@ -218,8 +213,6 @@ fn load_lowercased_english() {
     assert!(d.search("abc").iter().any(|(t, _, _)| t == "ABC"));
 }
 
-/// 并行解析：拼音格式（text\tcode\tweight，code 去空格）+ 注释/空行跳过，
-/// 小文件走串行分支，结果应完整正确。
 /// 取 fulls（(code, text, weight, boundary)）中某 text 的 (code, weight)。
 fn collect(entries: &[(String, String, i32, u64)], text: &str) -> Vec<(String, i32)> {
     entries
@@ -229,11 +222,8 @@ fn collect(entries: &[(String, String, i32, u64)], text: &str) -> Vec<(String, i
         .collect()
 }
 
-/// 取 abbrevs（(abbrev, text, weight)，无 boundary）中某 text 的 (abbrev, weight)。
-/// 取 abbrevs 中某**全拼码**对应的 `(简拼, weight)`。
-///
-/// ⚠️ 查询键已随 v5 从「词」改为「全拼码」——abbrevs 的第二个字段现在存的是码
-/// （AbbrevSection 是指向主键的二级索引，不再复制词本身）。
+/// 取 abbrevs 中某全拼码对应的 `(简拼, weight)`。abbrevs 的第二个字段存的是全拼码
+/// （AbbrevSection 是指向主键的二级索引，不复制词本身）。
 fn collect_ab(entries: &[(String, String, i32)], full_code: &str) -> Vec<(String, i32)> {
     entries
         .iter()
@@ -250,6 +240,8 @@ fn boundary_of(entries: &[(String, String, i32, u64)], text: &str) -> Option<u64
         .map(|(_, _, _, b)| *b)
 }
 
+/// 并行解析：拼音格式（text\tcode\tweight，code 去空格）+ 注释/空行跳过，
+/// 小文件走串行分支，结果应完整正确。
 #[test]
 fn parallel_parse_pinyin_format_small() {
     let path = std::env::temp_dir().join("wind_parrime_small.dict.yaml");
@@ -271,11 +263,10 @@ fn parallel_parse_pinyin_format_small() {
     assert_eq!(e.len(), 2, "应解析 2 条，跳过注释/空行: {e:?}");
     assert_eq!(collect(&e, "你好"), vec![("nihao".to_string(), 1200)]);
     assert_eq!(collect(&e, "你"), vec![("ni".to_string(), 800)]);
-    // 简拼：多音节 "ni hao"→"nh"；单音节 "ni" 无简拼。
-    // 查询键是**全拼码**（v5：AbbrevSection 存码不存词）。
+    // 简拼：多音节 "ni hao"→"nh"；单音节 "ni" 无简拼。查询键是全拼码。
     assert_eq!(collect_ab(&ab, "nihao"), vec![("nh".to_string(), 1200)]);
     assert!(collect_ab(&ab, "ni").is_empty(), "单音节不产简拼");
-    // 音节边界（v4）：源数据 "ni hao" 的空格是真值边界，不得随 code 拼平而丢弃。
+    // 音节边界：源数据 "ni hao" 的空格是真值边界，不得随 code 拼平而丢弃。
     // "nihao" 音节 ni|hao → 起始字节 {0,2} → 0b101。
     assert_eq!(
         boundary_of(&e, "你好"),
@@ -360,8 +351,8 @@ fn columns_header_is_authoritative() {
     assert_eq!(parse_columns_header(trailing), usable(1, 0, None));
 }
 
-/// `sort:` 是 librime 的库内同码排序键，本输入法不消费，取出仅为告警。
-/// 此前它被静默跳过：配置者把 `by_weight` 改成 `original` 观察不到任何变化也拿不到诊断。
+/// `sort:` 是 librime 的库内同码排序键，本输入法不消费，取出仅为告警
+/// （否则把 `by_weight` 改成 `original` 观察不到变化也拿不到诊断）。
 #[test]
 fn sort_header_is_detected_for_warning() {
     assert_eq!(
@@ -391,8 +382,8 @@ fn sort_header_is_detected_for_warning() {
     assert_eq!(parse_sort_header("---\nsort:\n...\n"), None);
 }
 
-/// **流式序列必须支持**：它是合法 YAML，且我们的警告文案就建议用户这么写。
-/// 只认块序列会让照建议改完的用户看到「改了没用」——本项目在这条路上吃过亏。
+/// 流式序列必须支持：它是合法 YAML，且警告文案就建议用户这么写；只认块序列会让照建议改完
+/// 的用户看到「改了没用」。
 #[test]
 fn columns_header_accepts_flow_sequence() {
     assert_eq!(
@@ -411,8 +402,8 @@ fn columns_header_accepts_flow_sequence() {
     );
 }
 
-/// 残缺声明要能被**区分地**诊断：把「声明不完整」误报成「未声明」，
-/// 会让照日志排查的人去看头部、发现声明确实存在，从而排除掉正确的线索。
+/// 残缺声明要能被区分地诊断：把「声明不完整」误报成「未声明」，会让照日志排查的人
+/// 看到头部声明确实存在，从而排除掉正确的线索。
 #[test]
 fn incomplete_columns_declaration_is_distinguished() {
     // 缺 code：librime 的自动编码词库形态（如 `columns: [text, weight]`）
@@ -427,7 +418,7 @@ fn incomplete_columns_declaration_is_distinguished() {
     );
 }
 
-/// 声明缺 code 的词库**整库跳过**，而不是降级探测。
+/// 声明缺 code 的词库整库跳过，而不是降级探测。
 /// 降级探测会把权重列当成编码（`is_code_shape("100")` 为真），静默灌进一整库垃圾编码。
 #[test]
 fn missing_code_column_skips_whole_dict() {
@@ -446,8 +437,8 @@ fn missing_code_column_skips_whole_dict() {
     );
 }
 
-/// **词条内容不该被当成排版空白**：以 U+3000 全角空格为词条的行，此前会被
-/// `str::trim()` 当缩进削掉（U+3000 属 Unicode White_Space），整行字段左移一格。
+/// 以 U+3000 全角空格为词条的行不得被 `str::trim()` 当缩进削掉（U+3000 属 Unicode
+/// White_Space），否则整行字段左移一格。
 #[test]
 fn leading_fullwidth_space_text_is_preserved() {
     let path = std::env::temp_dir().join("wind_leading_ws.dict.yaml");
@@ -476,9 +467,8 @@ fn leading_fullwidth_space_text_is_preserved() {
 
 /// 词条文本的转义序列须还原为真字符：`\n`→换行、`\t`→制表、`\\`→反斜杠。
 ///
-/// **未知序列必须原样保留**——这是破坏面的边界：`C:\Users` 里的 `\U` 不在转义表中，
-/// 反转义后仍是 `\U`，存量词库里的 Windows 路径不会被静默改写。想要字面 `\n` 两字符
-/// 的用户写 `\\n` 即可。
+/// 未知序列必须原样保留：`C:\Users` 里的 `\U` 不在转义表中，反转义后仍是 `\U`，
+/// 存量词库里的 Windows 路径不会被静默改写。想要字面 `\n` 两字符的写 `\\n`。
 #[test]
 fn text_escape_sequences_are_unescaped() {
     let path = std::env::temp_dir().join("wind_text_escape.dict.yaml");
@@ -509,14 +499,11 @@ fn text_escape_sequences_are_unescaped() {
     );
 }
 
-/// **末列 text 的尾随空白是词条内容，不是排版噪声**。
+/// 末列 text 的尾随空白是词条内容，不是排版噪声。
 ///
-/// 从前 `parse_rime_line` 先对整行 `trim_end` 再切列，于是 CodeFirst 布局下（text 落
-/// 末列）词条的尾随空格被连带剥掉，而 TextFirst 布局下不受影响——同一份词条，换个列序
-/// 语义就变了。蒙古文 toli 词库整库以空格收尾（空格是蒙文的词间分隔），中招后连续上屏
-/// 的词会粘成一坨。现在取值逐字段处理：text 原样，code/weight 各自 `trim_end`。
-///
-/// 同时锁住转义序列仍然存活（它在 trim 阶段本就是可见字符，剥不掉）。
+/// 整行 `trim_end` 再切列会让 CodeFirst 布局（text 落末列）丢掉尾随空格，同一词条换个列序
+/// 语义就变了；蒙古文 toli 词库整库以空格收尾，丢了会让连续上屏的词粘在一起。
+/// 故逐字段处理：text 原样，code/weight 各自 `trim_end`。同时锁住转义序列仍然存活。
 #[test]
 fn trailing_whitespace_in_last_text_column_is_preserved() {
     let path = std::env::temp_dir().join("wind_trail_ws.dict.yaml");
@@ -545,9 +532,8 @@ fn trailing_whitespace_in_last_text_column_is_preserved() {
     );
 }
 
-/// **TextFirst 布局下末列是 code/weight，它们的尾随空白仍须剥掉**——那两列的行尾空白
-/// 只可能是排版噪声。整行 trim 撤掉后，这活由逐列 `trim_end`/`trim` 接手；不接就会
-/// 出现 `"abc "` 这样打不出来的编码、和 `"5 ".parse()` 失败退化成 0 的权重。
+/// TextFirst 布局下末列是 code/weight，它们的尾随空白仍须剥掉（只可能是排版噪声）；
+/// 否则会出现 `"abc "` 这样打不出来的编码、和 `"5 ".parse()` 失败退化成 0 的权重。
 #[test]
 fn trailing_whitespace_in_code_and_weight_still_trimmed() {
     let path = std::env::temp_dir().join("wind_trail_ws_code.dict.yaml");
@@ -572,8 +558,8 @@ fn trailing_whitespace_in_code_and_weight_still_trimmed() {
     );
 }
 
-/// **蒙古文 toli 的真实形态**：CodeFirst 两列、词条内部与末尾都有空格。
-/// 内部空格是词间分隔（必须原样），末尾空格同理——两者是同一套约定的两处体现。
+/// 蒙古文 toli 的真实形态：CodeFirst 两列、词条内部与末尾都有空格（蒙文的词间分隔），
+/// 都必须原样保留。
 #[test]
 fn mongolian_two_column_dict_keeps_inner_and_trailing_spaces() {
     let path = std::env::temp_dir().join("wind_toli_shape.dict.yaml");
@@ -619,9 +605,8 @@ fn empty_text_or_code_rows_are_skipped() {
     assert_eq!(collect(&e, "好"), vec![("hao".to_string(), 9)]);
 }
 
-/// **编码在前的拼音库不得被当成形码**：librime 完全允许 `columns: [code, text, weight]`，
-/// 而旧判据只看列顺序，会把它整库当五笔处理——**丢掉整张简拼表、音节边界全归零**，
-/// 双拼与整句逻辑集体降级回 DAG 猜切分。空格是音节的正面证据，应胜过列顺序惯例。
+/// 编码在前的拼音库不得被当成形码：librime 允许 `columns: [code, text, weight]`，只看列顺序
+/// 会丢掉整张简拼表、音节边界全归零。空格是音节的正面证据，应胜过列顺序惯例。
 #[test]
 fn code_first_pinyin_dict_keeps_syllables() {
     let py = std::env::temp_dir().join("wind_syl_codefirst.dict.yaml");
@@ -650,10 +635,9 @@ fn code_first_pinyin_dict_keeps_syllables() {
     );
 }
 
-/// 编码在前 + 无空格 → 五笔类形码，boundary 恒 0（= 无边界信息，消费方降级 DAG）。
-/// 与之对照，**text 在前且无空格**的单音节拼音词条（`好\thao`）必须保留 `0b1`——
-/// 「整串是一个音节」是真信息，双拼真值校验要用它。无空格时数据本身区分不了这两者，
-/// 故沿用列顺序惯例兜底。
+/// 编码在前 + 无空格 → 五笔类形码，boundary 恒 0（无边界信息，消费方降级 DAG）。
+/// 对照：text 在前且无空格的单音节拼音词条（`好\thao`）必须保留 `0b1`，双拼真值校验要用它。
+/// 无空格时数据本身区分不了这两者，故沿用列顺序惯例兜底。
 #[test]
 fn spaceless_code_first_is_form_code_but_text_first_keeps_single_syllable() {
     let wubi = std::env::temp_dir().join("wind_syl_wubi.dict.yaml");
@@ -686,7 +670,7 @@ fn spaceless_code_first_is_form_code_but_text_first_keeps_single_syllable() {
     );
 }
 
-/// `# no comment` 是**整行精确匹配**：行中间出现、或带后缀的同名子串都不算。
+/// `# no comment` 是整行精确匹配：行中间出现、或带后缀的同名子串都不算。
 #[test]
 fn no_comment_directive_requires_exact_line() {
     assert_eq!(find_no_comment_directive("a\n# no comment\nb\n"), Some(2));
@@ -726,8 +710,7 @@ fn no_comment_directive_requires_exact_line() {
     );
 }
 
-/// `# no comment` 之后 `#` 是**数据**：这是 Rime 让 `#` 本身能当词条/编码的唯一途径。
-/// 与用户报的 `@` 打不出来是同一类缺口——只是触发条件不同。
+/// `# no comment` 之后 `#` 是数据：这是 Rime 让 `#` 本身能当词条/编码的唯一途径。
 #[test]
 fn hash_becomes_data_after_no_comment_directive() {
     let path = std::env::temp_dir().join("wind_no_comment.dict.yaml");
@@ -771,7 +754,7 @@ fn hash_stays_comment_without_directive() {
     assert_eq!(collect(&e, "字"), vec![("abc".to_string(), 5)]);
 }
 
-/// **并行分块边界**：指令在正文靠前，而后续 `#` 词条散落在各块。
+/// 并行分块边界：指令在正文靠前，而后续 `#` 词条散落在各块。
 /// 注释开关是跨行有状态的，若不预先求出全局偏移，后面的块会误判为「注释仍生效」。
 #[test]
 fn no_comment_directive_survives_parallel_chunking() {
@@ -797,7 +780,7 @@ fn no_comment_directive_survives_parallel_chunking() {
     assert_eq!(collect(&e, "#59999"), vec![("c59999".to_string(), 59999)]);
 }
 
-/// 缺 `...` 分隔行 → 零条目（此前是全链路最沉默的一处，现已有 warn）。
+/// 缺 `...` 分隔行 → 零条目（并有 warn）。
 #[test]
 fn missing_body_separator_yields_zero_entries() {
     let path = std::env::temp_dir().join("wind_no_sep.dict.yaml");
@@ -810,9 +793,9 @@ fn missing_body_separator_yields_zero_entries() {
     assert!(e.is_empty());
 }
 
-/// 未声明 `columns:` 时按 librime 默认取第 3 列作权重，**第 4 列及以后一律不读**。
-/// 真实样本：`wubi86_jidian_extra_district.dict.yaml` 是 `text\tcode\t\t区号` 四列，
-/// 第 3 列为空（→ 权重 0）、第 4 列是行政区划编号——它不得被当成权重。
+/// 未声明 `columns:` 时按 librime 默认取第 3 列作权重，第 4 列及以后一律不读。
+/// 样本取自 `wubi86_jidian_extra_district.dict.yaml`：`text\tcode\t\t区号` 四列，
+/// 第 3 列为空（→ 权重 0）、第 4 列是行政区划编号，不得被当成权重。
 #[test]
 fn undeclared_columns_ignore_everything_past_weight() {
     let path = std::env::temp_dir().join("wind_cols_undeclared_extra.dict.yaml");
@@ -868,7 +851,7 @@ fn two_column_rows_survive_when_weight_column_absent() {
 }
 
 /// 声明与内容形态冲突时以声明为准：英文词库两列都是 ASCII，探测必然弃权，
-/// 只有声明能救。这正是 wubi86_jidian_english（`abs\tABS\t100`）的形状。
+/// 只有声明能救（如 wubi86_jidian_english 的 `abs\tABS\t100`）。
 #[test]
 fn declared_columns_win_over_ambiguous_content() {
     let path = std::env::temp_dir().join("wind_cols_declared.dict.yaml");
@@ -891,8 +874,8 @@ fn declared_columns_win_over_ambiguous_content() {
     );
 }
 
-/// **本次修复的核心回归**：纯 ASCII 词条（快符 `@`、ASCII 参数的 `$CC(...)`）此前会被
-/// 当成码列，与编码整个对调、静默装出镜像垃圾词条。列序须由全文一次判定，不受单行影响。
+/// 纯 ASCII 词条（快符 `@`、ASCII 参数的 `$CC(...)`）不得被当成码列与编码对调、装出镜像
+/// 垃圾词条。列序须由全文一次判定，不受单行影响。
 #[test]
 fn ascii_text_entries_not_mistaken_for_code_column() {
     let path = std::env::temp_dir().join("wind_kf_ascii.dict.yaml");
@@ -963,7 +946,6 @@ fn ambiguous_lines_abstain_and_default_to_text_first() {
 }
 
 /// 列序是文件级属性：同一文件内少数派行不得把自己那行翻过来。
-/// （旧实现逐行猜，同文件可出现两种列序并存。）
 #[test]
 fn layout_is_file_level_not_per_line() {
     let path = std::env::temp_dir().join("wind_layout_filelevel.dict.yaml");
@@ -985,7 +967,7 @@ fn layout_is_file_level_not_per_line() {
     assert_eq!(collect(&e, "字0"), vec![("code0".to_string(), 0)]);
 }
 
-/// 列序纠错（t172）只认编码列里的 `$SS(` 类 marker：单凭 `{` 不对调（反例）；
+/// 列序纠错只认编码列里的 `$SS(` 类 marker：单凭 `{` 不对调（反例）；
 /// 真有 marker 时照旧对调（正例）。
 #[test]
 fn cmdbar_swap_requires_marker_not_bare_brace() {

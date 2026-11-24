@@ -24,8 +24,7 @@ fn build_owned(tmp_name: &str, data: &[(String, Vec<(String, i32)>)]) -> std::pa
     p
 }
 
-/// 参考实现 = 改造前的「DFS 全量收集 → 稳定排序 → 截断」。作为差分对比的黄金标准：
-/// top-N 堆的输出必须与它**逐条相同**（含顺序），否则即为正确性回归。
+/// 参考实现：「DFS 全量收集 → 稳定排序 → 截断」。top-N 堆的输出必须与它逐条相同（含顺序）。
 fn reference_prefix(r: &WdatReader, prefix: &str, limit: usize) -> Vec<DictEntry> {
     let v = &r.main;
     let Some(start) = r.walk(v, prefix) else {
@@ -49,7 +48,7 @@ fn reference_prefix(r: &WdatReader, prefix: &str, limit: usize) -> Vec<DictEntry
     out
 }
 
-/// 通配查询的**全遍历参考实现**：全树 DFS 收集全部条目 → 按 pattern 过滤 →
+/// 通配查询的全遍历参考实现：全树 DFS 收集全部条目 → 按 pattern 过滤 →
 /// 等长 / 更长两档各自按 (weight 降, order 升) 稳定排序 → 等长先取满 `limit`，余额给更长档。
 /// DFS 序即叶号序（构建期按 code 字典序分配），故稳定排序的 tie-break 与 `RankKey` 一致。
 fn reference_pattern(
@@ -136,7 +135,7 @@ fn search_pattern_matches_full_scan() {
     let _ = std::fs::remove_file(&p);
 }
 
-/// ★ 等长档不得被更长的高权重编码挤出配额（Review Focus 第 5 条）。
+/// 等长档不得被更长的高权重编码挤出配额。
 #[test]
 fn search_pattern_equal_length_never_crowded_out() {
     let p = build(
@@ -182,12 +181,10 @@ fn assert_same(actual: &[DictEntry], expect: &[DictEntry], ctx: &str) {
     assert_eq!(a, b, "{ctx}");
 }
 
-/// top-N 堆 == 全量排序取前 N，在**权重与 order 全部打平**时也成立。
+/// top-N 堆 == 全量排序取前 N，在权重与 order 全部打平时也成立。
 ///
-/// 这是 `ok` 拼字词库的真实形状：88020 条无 weight 列（全取 default_weight），
-/// 每 code 单条（order 恒 0）。此时两级排序键完全失效，顺序只由稳定排序的
-/// 「保持 DFS 序」兜底——正是 top-N 堆最容易与全排序分歧之处（堆本身不稳定，
-/// 靠 `RankKey::seq` 复现）。
+/// 对应无 weight 列、每 code 单条的拼字词库形状：两级排序键全部失效，顺序只由「保持 DFS 序」
+/// 兜底；堆本身不稳定，靠 `RankKey::seq` 复现，这正是最容易与全排序分歧之处。
 #[test]
 fn topn_prefix_matches_full_sort_when_all_keys_tie() {
     let data: Vec<(String, Vec<(String, i32)>)> = (0..500u32)
@@ -238,12 +235,10 @@ fn topn_prefix_matches_full_sort_mixed_weights() {
     let _ = std::fs::remove_file(&p);
 }
 
-/// **剪枝确实发生**：权重有区分度时，小 limit 的访问状态数须远低于全遍历。
+/// 剪枝确实发生：权重有区分度时，小 limit 的访问状态数须远低于全遍历。
 ///
-/// ⚠️ 上面两个对拍测试证明不了这件事。`..._all_keys_tie` 里 weight 全为 0，剪枝判据
-/// `bound < worst.weight` 即 `0 < 0` 恒假，分支限界**退化成全遍历**，结果自然一致——
-/// 剪枝逻辑若被误删或写成恒不触发，那个测试照样全绿。本测试直接钉 `states_visited`，
-/// 是「剪枝真的执行了」唯一的证据。
+/// 对拍测试证明不了这件事：`..._all_keys_tie` 里 weight 全为 0，`bound < worst.weight` 恒假，
+/// 剪枝退化成全遍历，剪枝逻辑被误删也照样全绿。这里直接钉 `states_visited`。
 #[test]
 fn bnb_actually_prunes_when_weights_differ() {
     let data: Vec<(String, Vec<(String, i32)>)> = (0..676u32)
@@ -346,15 +341,14 @@ fn syllable_capped_prunes_by_code_len() {
     let _ = std::fs::remove_file(&p);
 }
 
-/// **剪枝判据必须是严格小于**，放宽成 `<=` 即静默漏候选。
+/// 剪枝判据必须是严格小于，放宽成 `<=` 即静默漏候选。
 ///
-/// 上界只覆盖 RankKey 的首要键 weight。`bound == 第 limit 名的 weight` 时，该子树内
-/// 仍可能有同 weight 但 order/leaf 更小的条目应当取代第 limit 名。
+/// 上界只覆盖 RankKey 的首要键 weight，`bound == 第 limit 名的 weight` 时子树内仍可能有同
+/// weight 但 order/leaf 更小的条目应当取代第 limit 名。
 ///
-/// 构造刻意让**出队顺序完全确定**（否则 `<` 与 `<=` 的差异会随 tie 顺序时隐时现，
-/// 测试变成抛硬币）：`za` 一个叶子内含两条（300/100）**一次性填满 limit=2**，
-/// 于是 worst 的 weight=100 由它独自决定；此时唯一待展开的 `a` 子树 maxw 恰为 100。
-/// `甲`(order=0, leaf=0) 优于 `丙`(order=1, leaf=1)，故必须能取代它。
+/// 构造让出队顺序完全确定（否则差异随 tie 顺序时隐时现）：`za` 一个叶子内含两条（300/100）
+/// 一次性填满 limit=2，worst 的 weight=100 由它独自决定；唯一待展开的 `a` 子树 maxw 恰为 100，
+/// 其中 `甲`(order=0, leaf=0) 优于 `丙`(order=1, leaf=1)，必须能取代它。
 #[test]
 fn pruning_bound_must_be_strictly_less() {
     let p = build(
@@ -383,7 +377,7 @@ fn pruning_bound_must_be_strictly_less() {
     let _ = std::fs::remove_file(&p);
 }
 
-/// `maxw` 必须是**真实上界**：偏大只是剪枝变弱（结果仍正确），偏小则静默漏候选。
+/// `maxw` 必须是真实上界：偏大只是剪枝变弱，偏小则静默漏候选。
 /// 逐前缀与暴力遍历子树求得的最大 weight 对拍。
 #[test]
 fn maxw_equals_brute_force_subtree_max() {
@@ -419,11 +413,10 @@ fn maxw_equals_brute_force_subtree_max() {
     let _ = std::fs::remove_file(&p);
 }
 
-/// **护栏**：DFS 必须遍历完整棵子树，不得早停。
+/// 护栏：DFS 必须遍历完整棵子树，不得早停。
 ///
-/// 最高权重的词放在字典序最末。若把本函数「优化」成 `codetable.rs` / `binformat.rs`
-/// 那种「攒够 limit(*2) 就 break」，DFS 按字典序推进，这条永远进不了结果集——
-/// 那正是本次修复**刻意没有采用**早停方案的原因（8.8 万条的库上偏差极显著）。
+/// 最高权重的词放在字典序最末。若改成 `codetable.rs` / `binformat.rs` 那种「攒够 limit(*2)
+/// 就 break」，DFS 按字典序推进，这条永远进不了结果集。
 #[test]
 fn topn_prefix_keeps_high_weight_entry_at_lexical_tail() {
     let mut data: Vec<(String, Vec<(String, i32)>)> = (0..400u32)
@@ -447,7 +440,7 @@ fn topn_prefix_keeps_high_weight_entry_at_lexical_tail() {
     let _ = std::fs::remove_file(&p);
 }
 
-/// `has_longer_code` 的基本语义：只认**严格更长**的后继，前缀自身成词不算。
+/// `has_longer_code` 的基本语义：只认严格更长的后继，前缀自身成词不算。
 #[test]
 fn has_longer_code_semantics() {
     let p = build(
@@ -472,12 +465,11 @@ fn has_longer_code_semantics() {
     let _ = std::fs::remove_file(&p);
 }
 
-/// `has_longer_code` 与旧判据（`search_prefix(_, 64)` 再 `any(code 更长)`）在
-/// **未触发截断**时逐一致——覆盖「前缀自身成词 / 中间节点 / 叶子 / 不存在」四类位置。
+/// `has_longer_code` 与旧判据（`search_prefix(_, 64)` 再 `any(code 更长)`）在未触发截断时
+/// 一致——覆盖「前缀自身成词 / 中间节点 / 叶子 / 不存在」四类位置。
 ///
-/// 二者并非全等：旧判据经权重排序截断，长码候选权重偏低被挤出前 64 名时会漏判成
-/// false。新实现直接问 trie，故 **新 ⊇ 旧**（只会更保守，不会更激进）——这正是
-/// 「更长后继」作为上屏安全阀所需的方向。本测试锁住未截断场景下二者不得分歧。
+/// 截断时旧判据会因长码权重低被挤出前 64 名而漏判；新实现直接问 trie，故新 ⊇ 旧，只会更
+/// 保守，这正是「更长后继」作为上屏安全阀所需的方向。
 #[test]
 fn has_longer_code_agrees_with_legacy_predicate_when_untruncated() {
     let data: Vec<(String, Vec<(String, i32)>)> = (0..300u32)
@@ -601,8 +593,8 @@ fn prefix_collects_subtree_with_codes() {
     let _ = std::fs::remove_file(&p);
 }
 
-/// 回归（wdat v3）：无权重（全同权）时，跨编码前缀查询应按**全局 order（词库出现顺序）**
-/// 排列，而非退化为编码字母序。构造 order 与字母序相反以区分两者。
+/// 无权重（全同权）时，跨编码前缀查询应按全局 order（词库出现顺序）排列，而非退化为
+/// 编码字母序。构造 order 与字母序相反以区分两者。
 #[test]
 fn prefix_no_weight_sorts_by_global_order_not_code() {
     let p = std::env::temp_dir().join("wdat_global_order_test.wdat");
@@ -664,9 +656,8 @@ fn for_each_enumerates_all() {
     let _ = std::fs::remove_file(&p);
 }
 
-/// **对拍**：同一份数据分别建 wdb(binformat) 与 wdat，比对精确/前缀/全枚举查询结果一致
-/// （按 (code,text,weight) 集合比较，忽略 natural_order 这一格式差异）。这是 wdb→wdat
-/// 迁移的核心正确性保证。
+/// 对拍：同一份数据分别建 wdb(binformat) 与 wdat，比对精确/前缀/全枚举查询结果一致
+/// （按 (code,text,weight) 集合比较，忽略 natural_order 这一格式差异）。
 #[test]
 fn parity_with_wdb() {
     use crate::binformat::{DictReader, DictWriter};
@@ -751,11 +742,10 @@ fn parity_with_wdb() {
     let _ = std::fs::remove_file(&wdat_path);
 }
 
-/// `pool_hash` 的**低位**必须分布开——开放寻址取槽用的是 `h & mask`。
+/// `pool_hash` 的低位必须分布开——开放寻址取槽用的是 `h & mask`。
 ///
-/// 去重测试守不住这条：哈希再烂，判等也是逐字节的，结果永远对，只是线性探测退化成
-/// 长链扫描、构建变慢。这里直接数「不同的落点」：两字中文串（与真实词库同形）在
-/// 2^17 槽上应接近随机分布；低位只由头两字节决定时，落点数会塌到零头。
+/// 去重测试守不住这条：判等是逐字节的，哈希再烂结果也对，只是线性探测退化成长链扫描。
+/// 这里直接数不同落点：两字中文串在 2^17 槽上应接近随机分布。
 #[test]
 fn pool_hash_spreads_low_bits_for_short_cjk_strings() {
     let mask = (1usize << 17) - 1;
@@ -773,7 +763,7 @@ fn pool_hash_spreads_low_bits_for_short_cjk_strings() {
         }
     }
     // 65536 个键扔进 131072 个槽，理想随机约落 51.6k 个不同槽（1-e^-0.5 的期望）。
-    // 下限取 45k 留足余量；去掉终混的 `rotate_left` 时实测只落 128 个槽。
+    // 下限取 45k 留足余量；去掉终混的 `rotate_left` 时只落 128 个槽。
     assert!(
         homes.len() > 45_000,
         "{n} 个两字串只落在 {} 个不同的槽——低位没混开，线性探测会退化成长链",
@@ -781,12 +771,9 @@ fn pool_hash_spreads_low_bits_for_short_cjk_strings() {
     );
 }
 
-/// 字符串池必须**真的**去重：同一文本无论来自哪个 code、哪个段，都返回同一个偏移，
-/// 且 `buf` 里只存一份。
-///
-/// 端到端的 roundtrip 用例守不住这条——去重失效时每份副本各自正确，读出来的候选一模
-/// 一样，只是文件白白变大、构建期白白多占内存。而去重**错**（返回了别人的偏移）才是
-/// 功能性事故：读出来是另一个词。两个方向这里都断言。
+/// 字符串池必须真的去重：同一文本无论来自哪个 code、哪个段，都返回同一个偏移，且 `buf`
+/// 里只存一份。roundtrip 用例守不住这条（去重失效时读出来照样对，只是文件变大）；
+/// 去重错（返回别人的偏移）则会读出另一个词。两个方向这里都断言。
 #[test]
 fn string_pool_dedups_and_never_returns_a_foreign_offset() {
     let mut pool = StringPool::new();
@@ -831,10 +818,8 @@ fn string_pool_dedups_and_never_returns_a_foreign_offset() {
     assert_eq!(pool.buf.len(), expect, "buf 应恰好装下每个唯一文本一份");
 }
 
-/// 简拼 AbbrevSection 往返：简拼查得到、按权重排序，且**不污染全拼**精确/前缀查询。
-///
-/// ⚠️ **条目内容已随 v5 从「词」改为「全拼码」**（二级索引指向主键）。取出的
-/// `DictEntry::text` 现在装的是码，调用方拿它去主表装配候选。
+/// 简拼 AbbrevSection 往返：简拼查得到、按权重排序，且不污染全拼精确/前缀查询。
+/// 条目内容是全拼码（二级索引指向主键），`DictEntry::text` 装的是码，调用方拿它去主表装配候选。
 #[test]
 fn abbrev_section_roundtrip() {
     let p = std::env::temp_dir().join("wdat_abbrev_test.wdat");
@@ -852,7 +837,7 @@ fn abbrev_section_roundtrip() {
 
     let r = WdatReader::open(&p).unwrap();
     assert!(r.has_abbrev());
-    // 简拼命中 + 权重降序；取出的是**全拼码**。
+    // 简拼命中 + 权重降序；取出的是全拼码。
     let nh = r.search_abbrev("nh", 10);
     assert_eq!(nh.len(), 2);
     assert_eq!(nh[0].text, "nihao", "按权重降序，且存的是码: {nh:?}");
@@ -860,7 +845,7 @@ fn abbrev_section_roundtrip() {
     assert_eq!(r.search_abbrev("bj", 10)[0].text, "beijing");
     assert_eq!(r.search_abbrev("nhm", 10)[0].text, "nihaoma");
     assert!(r.search_abbrev("zzz", 10).is_empty());
-    // **不污染全拼**：全拼 search/search_prefix 不应命中简拼码。
+    // 不污染全拼：全拼 search/search_prefix 不应命中简拼码。
     assert!(r.search("nh").is_empty(), "全拼精确不应命中简拼码 nh");
     assert_eq!(r.search("nihao")[0].text, "你好");
     let pre = r.search_prefix("n", 100);
@@ -909,11 +894,9 @@ fn shared_prefix_and_branching() {
     let _ = std::fs::remove_file(&p);
 }
 
-/// 回归测试：复刻真实故障现场的 key 形态——上百万条、编码几乎全落在 6/8 位、
-/// 字母表仅 a-z（真实样本见 feihuzj2 方案的 `feihuzj2_extra_jichu_pro.dict.yaml`，
-/// 146 万 key）。旧的线性探测 `find_base` 在这种"深、密、共享前缀"的输入下会
-/// 退化为 O(状态数²)，实测数分钟不收敛、内存被撑到 GB 级（见 [`FreeList`] 顶部
-/// 说明）。这里用 1/5 规模（30 万 key）验证新实现在合理时间内完成且结果正确。
+/// 复刻「深、密、共享前缀」的 key 形态：编码几乎全落在 6/8 位、字母表仅 a-z（形如百万级
+/// key 的形码扩展词库）。线性探测 `find_base` 在这种输入下退化为 O(状态数²)（见 [`FreeList`]
+/// 顶部说明）。这里用 30 万 key 验证在合理时间内完成且结果正确。
 #[test]
 fn large_scale_build_stays_fast_and_correct() {
     fn gen_code(mut n: u64, len: usize) -> String {
@@ -1079,7 +1062,7 @@ fn stream_writer_rejects_unsorted_codes() {
 }
 
 /// 游标按字节序严格递增、短码先于长码，且与 `for_each_entry` 的 (code,text,weight)
-/// 序列**完全一致**（含同码多条与跨段重复）；`leaf_entries` 与精确查询一致。
+/// 序列完全一致（含同码多条与跨段重复）；`leaf_entries` 与精确查询一致。
 #[test]
 fn code_cursor_is_sorted_and_matches_for_each_entry() {
     let p = build(

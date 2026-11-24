@@ -9,11 +9,10 @@
 //! `UPDATE_GOLDEN` 只认精确的 `1`，且设了 `CI` 时拒绝写入。
 //!
 //! 重录：`UPDATE_GOLDEN=1 cargo test -p wind-coordinator --test ui_stream_golden`。
-//! **基线已提交后不得重录**——重录就失去了比对的意义。
+//! 基线已提交后不得重录，重录就失去了比对的意义。
 //!
-//! 脚本前先 `set_caret_independent(true)`（首显闸门对新组合首帧 arm 兜底 timer 并丢弃该帧，
-//! 出不出帧取决于定时器与按键谁先到）并等 `prepare` 就绪（冷启动惰性索引未建好时，
-//! 首批候选 tooltip 缺「编码」段），这两项都会让基线随时序抖动，故在录制前去掉。
+//! 录制前先 `set_caret_independent(true)`（否则首显闸门的兜底 timer 与按键谁先到决定出不出帧）
+//! 并等 `prepare` 就绪（否则冷启动首批候选 tooltip 缺「编码」段），两者都会让基线随时序抖动。
 //!
 //! 第二段 `first_show_gate_holds_until_caret`（基线 `desktop_ui_stream_gate.txt`）走桌面生产配置
 //! （不设 caret_independent），覆盖首显闸门「先压后放」与 caret 坐标透传到 UpdateCandidates /
@@ -278,16 +277,13 @@ fn desktop_ui_stream_matches_golden() {
 
 /// 首显闸门 + 坐标透传（桌面生产路径：不设 caret_independent）。
 ///
-/// 只测「先压后放」的顺序：没有 caret 时新组合首帧被闸门压住（`notify_ui_update` 里
-/// `arm_pending_first_show` 后 return），喂权威 caret 后出帧且帧里带着该坐标。
-///
-/// 实际依赖（没有一项靠 sleep 猜时间）：
-/// - 冷启动：预热时按 `w` 并 `recv` 到含「编码」段的候选帧（即 `spawn_index_warm` 的补刷帧
-///   已到），再 Esc 排空，之后的帧都是稳态。60s 超时即失败。
-/// - 兜底定时器：非 fast 档为硬编码 150ms（first_show.rs `first_show_fallback_ms`），不可配。
-///   录制步骤里按键后用 `try_iter` 立即确认无候选帧并马上喂 caret，间隔是微秒级；
-///   极端调度延迟 >150ms 让定时器先触发时，帧序会变化、测试**明确失败**（不会静默通过）。
-///   Esc 触发 `reset_first_show` 作废预热遗留的 pending 与 timer，不靠等待。
+/// 只测「先压后放」：没有 caret 时新组合首帧被闸门压住，喂权威 caret 后出帧且帧里带着该坐标。
+/// 不靠 sleep：
+/// - 冷启动：预热时按 `w` 并 `recv` 到含「编码」段的候选帧（`spawn_index_warm` 的补刷帧已到），
+///   再 Esc 排空，之后都是稳态；60s 超时即失败。
+/// - 兜底定时器：非 fast 档硬编码 150ms（`first_show_fallback_ms`）。按键后用 `try_iter` 确认无帧
+///   并马上喂 caret；调度延迟超过 150ms 时帧序变化，测试会明确失败而非静默通过。
+///   Esc 触发 `reset_first_show` 作废预热遗留的 pending 与 timer。
 #[test]
 fn first_show_gate_holds_until_caret() {
     let dd = data_dir();

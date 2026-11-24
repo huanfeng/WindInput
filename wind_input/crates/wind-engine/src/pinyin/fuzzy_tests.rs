@@ -110,7 +110,7 @@ fn any_enabled_reflects_each_group() {
 
 // ------------------------------------------------------------ retroflex_relaxed
 
-/// 三个卷舌组各管各的，且**只认自己那一组**——`zh_z` 开着不该让 `ch` 段跟着放宽。
+/// 三个卷舌组各管各的，且只认自己那一组——`zh_z` 开着不该让 `ch` 段跟着放宽。
 #[test]
 fn retroflex_relaxed_is_per_group() {
     for (head, on) in [
@@ -136,7 +136,7 @@ fn retroflex_relaxed_is_per_group() {
 }
 
 /// 判据不得依赖组表把长的那端写在 `a` 还是 `b`（无序对），也不得与
-/// [`initials_fuzzy_equal`] 混用 —— 后者对 zh/z 这类**恒返回 true**（首字母相同），
+/// [`initials_fuzzy_equal`] 混用——后者对 zh/z 这类恒返回 true（首字母相同），
 /// 拿它当判据等于开关形同虚设。
 #[test]
 fn retroflex_relaxed_differs_from_initials_fuzzy_equal() {
@@ -163,7 +163,7 @@ fn fuzzy_spellings_empty_when_all_disabled() {
     assert!(fuzzy_spellings(&FuzzyConfig::default()).is_empty());
 }
 
-/// 只收**不是合法音节**的拼写：`jin`→`jing` 那侧本就切得出来，不必注册。
+/// 只收不是合法音节的拼写：`jin`→`jing` 那侧本就切得出来，不必注册。
 #[test]
 fn fuzzy_spellings_only_collects_invalid_ones() {
     let out = fuzzy_spellings(&cfg(|c| c.in_ing = true));
@@ -206,7 +206,7 @@ fn fuzzy_spellings_respects_enabled_groups() {
 
 // ------------------------------------------------------------ 多音节整码展开
 
-/// 按给定切分展开整码的模糊变体（**不含原码**），各取改动最少的形态：
+/// 按给定切分展开整码的模糊变体（不含原码），各取改动最少的形态：
 /// `(变体码, 改动处数, 变体边界)`。走生产同一份 `LatticeBuilder::fuzzy_spans`。
 fn expand_masked(syllables: &[&str], c: &FuzzyConfig) -> Vec<(String, usize, u64)> {
     use super::super::dag::SegGraph;
@@ -251,7 +251,7 @@ fn fuzzy_count_of(out: &[(String, usize)], code: &str) -> Option<usize> {
     out.iter().find(|(c, _)| c == code).map(|(_, k)| *k)
 }
 
-/// 变体码的边界按**变体音节**的长度记（`zong|guo` → `zhong|guo` 是 {0,5} 而非 {0,4}）。
+/// 变体码的边界按变体音节的长度记（`zong|guo` → `zhong|guo` 是 {0,5} 而非 {0,4}）。
 #[test]
 fn expand_tracks_variant_boundaries() {
     let out = expand_masked(&["zong", "guo"], &cfg(|c| c.zh_z = true));
@@ -288,7 +288,7 @@ fn expand_single_syllable() {
     );
 }
 
-/// 非首音节的**声母**变体必须能生成：`zhongzou` → 「中州」需要第 2 音节 zou→zhou。
+/// 非首音节的声母变体必须能生成：`zhongzou` → 「中州」需要第 2 音节 zou→zhou。
 #[test]
 fn expand_covers_non_initial_syllable_initial() {
     let out = expand(&["zhong", "zou"], &cfg(|c| c.zh_z = true));
@@ -299,7 +299,7 @@ fn expand_covers_non_initial_syllable_initial() {
     );
 }
 
-/// 非首音节的**韵母**变体：`beijin` → `beijing`（第 2 音节 in→ing）。
+/// 非首音节的韵母变体：`beijin` → `beijing`（第 2 音节 in→ing）。
 #[test]
 fn expand_covers_non_initial_syllable_final() {
     let out = expand(&["bei", "jin"], &cfg(|c| c.in_ing = true));
@@ -310,11 +310,11 @@ fn expand_covers_non_initial_syllable_final() {
     );
 }
 
-/// **多处音节同时模糊**：`beijinsi` → `beijingshi`（北京市）需要第 2 音节 in→ing
-/// **且** 第 3 音节 s→sh。
+/// 多处音节同时模糊：`beijinsi` → `beijingshi`（北京市）需要第 2 音节 in→ing
+/// 且第 3 音节 s→sh。
 ///
-/// ★ 计数须为 **2** —— 惩罚按改动处数累乘（`0.5^2`），对齐 librime
-/// `kFuzzySpellingPenalty` 与 libime `fuzzyCost` 的逐个累加。
+/// 计数须为 2：惩罚按改动处数累乘（`0.5^2`），对齐 librime `kFuzzySpellingPenalty` 与
+/// libime `fuzzyCost` 的逐个累加。
 #[test]
 fn expand_covers_multiple_syllables_at_once() {
     let c = cfg(|c| {
@@ -333,8 +333,8 @@ fn expand_covers_multiple_syllables_at_once() {
     assert_eq!(fuzzy_count_of(&out, "beijinshi"), Some(1));
 }
 
-/// **回归守卫（钉死旧 bug）**：对多音节**拼接串**整体调 `fuzzy_variants` 拿不到
-/// 非首音节的声母变体——声母规则是 `starts_with`。多音节必须逐音节展开。
+/// 对多音节拼接串整体调 `fuzzy_variants` 拿不到非首音节的声母变体（声母规则是
+/// `starts_with`），多音节必须逐音节展开。
 #[test]
 fn whole_string_variants_miss_non_initial_initials() {
     let c = cfg(|c| {
@@ -368,11 +368,8 @@ fn expand_keeps_fewest_edits_beyond_layer_budget() {
 
 // ------------------------------------------------- 音节内声母 × 韵母的交叉组合
 
-/// **本次修复的核心**：同一音节里声母与韵母**同时**模糊。
-/// `senxiao` → 「生肖」需要 `sen` 一次性走完 s→sh **且** en→eng。
-///
-/// 旧实现把声母规则与韵母规则**并列** push 进同一个 Vec，各自作用于原始输入，
-/// 只能产出「改一处」的结果：`sen` → [`shen`, `seng`]，独缺 `sheng`。
+/// 同一音节里声母与韵母同时模糊：`senxiao` → 「生肖」需要 `sen` 一次性走完 s→sh 且 en→eng。
+/// 声母规则与韵母规则各自作用于原始输入的话，只能产出 [`shen`, `seng`]，独缺 `sheng`。
 #[test]
 fn variants_cross_initial_and_final_within_one_syllable() {
     let c = cfg(|c| {
@@ -418,10 +415,9 @@ fn variants_cross_is_symmetric() {
     assert!(v.contains(&"sen".to_string()), "实际: {v:?}");
 }
 
-/// 声母表须按长度降序匹配：`sheng` 的声母是 `sh` 而非 `s`。
-/// 旧实现里 `sh→s` 与 `s→sh` 两条规则都对 `sheng` 的 `starts_with` 成立，
-/// 于是凭空造出 `shheng`；韵母侧 `find("en")` 在 `sheng` 中间命中，又造出 `shengg`。
-/// 这些非法码查不到词，只白白吃掉组合预算。
+/// 声母表须按长度降序匹配：`sheng` 的声母是 `sh` 而非 `s`。否则 `sh→s` 与 `s→sh` 都对
+/// `sheng` 成立会造出 `shheng`，韵母 `find("en")` 在中间命中又造出 `shengg`——这些非法码
+/// 查不到词，只白白吃掉组合预算。
 #[test]
 fn variants_produce_no_garbage_codes() {
     let c = cfg(|c| {
@@ -460,7 +456,7 @@ fn final_rules_do_not_leak_across_groups() {
 }
 
 /// `y`/`w` 必须计入声母表：否则 `yin` 的韵母成了整串 `yin`、与 `in` 不等，
-/// `yin`→`ying` 会从既有行为退化（旧实现靠 `find("in")` 蒙对）。
+/// `yin`→`ying` 就出不来。
 #[test]
 fn zero_consonant_initials_still_match_finals() {
     let c = cfg(|c| c.in_ing = true);
@@ -483,7 +479,7 @@ fn variants_reject_invalid_syllables() {
     assert!(FuzzyMatcher::fuzzy_variants("zhuan", &c).contains(&"zhuang".to_string()));
 }
 
-/// 裸声母/半成品码（`s`、`sh`）不是合法音节，此时**不**做合法性过滤 ——
+/// 裸声母/半成品码（`s`、`sh`）不是合法音节，此时不做合法性过滤——
 /// 单音节查询路径会拿未成音节的 code 直接进来，过滤会误杀既有召回。
 #[test]
 fn bare_initial_keeps_loose_matching() {
@@ -499,7 +495,7 @@ fn expand_empty_input_is_safe() {
 
 // ------------------------------------------------------------ un_ong / eng_ong
 
-/// 断言 `from` 在 `c` 下的变体**恰好**是 `expect`（顺序无关）。
+/// 断言 `from` 在 `c` 下的变体恰好是 `expect`（顺序无关）。
 fn assert_variants(from: &str, c: &FuzzyConfig, expect: &[&str]) {
     let mut got = FuzzyMatcher::fuzzy_variants(from, c);
     got.sort();
@@ -540,8 +536,8 @@ fn un_ong_pairs_legal_syllables_both_ways() {
 }
 
 /// `jun`/`qun`/`xun` 的韵母切出来是 `un`（`split_initial_final` 按字面切，不还原 ü），
-/// 对端 `jong`/`qong`/`xong` 不是音节，须被过滤。**不**映射到 `jiong`/`qiong`/`xiong`
-/// —— 那是 iong 韵，不属于本组。`shun`→`shong` 同理。
+/// 对端 `jong`/`qong`/`xong` 不是音节，须被过滤。不映射到 `jiong`/`qiong`/`xiong`
+/// （那是 iong 韵，不属于本组）。`shun`→`shong` 同理。
 #[test]
 fn un_ong_filters_illegal_counterparts() {
     let c = cfg(|c| c.un_ong = true);
@@ -584,7 +580,7 @@ fn eng_ong_pairs_only_legal_syllables() {
 }
 
 /// `ong` 同属两组（与声母 `l` 同属 n↔l、r↔l 同形）：两组都开时两个对端都出。
-/// 但**不传递**：只取与原韵母直接成对的对端 —— `dun` 不经 `ong` 走到 `deng`，
+/// 但不传递：只取与原韵母直接成对的对端——`dun` 不经 `ong` 走到 `deng`，
 /// `den` 也不经 `eng` 走到 `dong`。
 #[test]
 fn ong_groups_expand_direct_pairs_only() {
@@ -638,9 +634,8 @@ fn un_ong_expands_within_multi_syllable_code() {
     assert!(out.iter().any(|(_, k)| *k == 1));
 }
 
-/// 切分层：打的那端不成音节时照样注册（与 `tin`→`ting` 同一机制），
-/// 但**零声母**的 `ong`（来自 `eng`→`ong`）不注册 —— 它会在 `xi|ong`、`ji|ong`
-/// 处凭空造出新切分，而没有人会用 `ong` 去打「鞥」。
+/// 切分层：打的那端不成音节时照样注册（与 `tin`→`ting` 同一机制），但零声母的 `ong`
+/// （来自 `eng`→`ong`）不注册——它会在 `xi|ong`、`ji|ong` 处凭空造出新切分。
 #[test]
 fn fuzzy_spellings_for_ong_groups() {
     let un = fuzzy_spellings(&cfg(|c| c.un_ong = true));

@@ -7,8 +7,8 @@ fn graph(input: &str) -> SegGraph {
 
 /// 模糊拼写层让「本身不成音节的错音串」切得动。
 ///
-/// 这是模糊音能被执行的**前提**：变体展开发生在切分之后，切不出 `tin|zhi` 就等于
-/// 整条模糊链路一次都没跑 —— 用户看到的是「开了 in-ing，`tinzhi` 仍然打不出停止」。
+/// 这是模糊音能被执行的前提：变体展开发生在切分之后，切不出 `tin|zhi` 就等于整条模糊链路
+/// 没跑——开了 in-ing，`tinzhi` 仍然打不出停止。
 #[test]
 fn fuzzy_spelling_layer_makes_mistyped_code_segmentable() {
     use crate::pinyin::fuzzy::{FuzzyConfig, fuzzy_spellings};
@@ -45,18 +45,11 @@ fn fuzzy_spelling_layer_makes_mistyped_code_segmentable() {
     );
 }
 
-/// 模糊拼写层**只在原本切不动的地方添边**：输入本身已是合法音节序列时，
-/// 从起点可达的那部分切分图逐位不变。
+/// 模糊拼写层只在原本切不动的地方添边：输入本身已是合法音节序列时，从起点可达的那部分
+/// 切分图逐位不变。这样「开模糊音后候选变了」才能归因到变体展开，而不是切分。
 ///
-/// 这条不变量把「模糊音开了之后候选变了」拆成两件事：切分变了（本改动的责任）与
-/// 变体展开带来了新候选（模糊音本来的效果）。没有它，任何一次排序波动都会被归到
-/// 切分头上 —— 实测 `xian` 开全组后「西安」从第 3 退到第 6，正是后者（`ian_iang`
-/// 让「香/想/相」进来竞争），与切分无关。
-///
-/// ⚠️ **只断言可达位置**：不可达位置上确实会多出边，`zhongguo` 的位置 1 就多了一条
-/// `ho`（f_h 组，`ho`→`fo`）。它构不成任何从 0 起的切分，`LatticeBuilder::build` 也
-/// 有 `require_reachable` 守卫把它挡在外面。把断言写成「所有位置」会把这类无害差异
-/// 报成回归。
+/// 只断言可达位置：不可达位置上确实会多出边（如 `zhongguo` 位置 1 的 `ho`，f_h 组），它构不成
+/// 从 0 起的切分，`LatticeBuilder::build` 的 `require_reachable` 也会挡住；断言所有位置会误报。
 #[test]
 fn fuzzy_spelling_layer_does_not_disturb_valid_input() {
     use crate::pinyin::fuzzy::{FuzzyConfig, fuzzy_spellings};
@@ -129,10 +122,8 @@ fn fuzzy_spelling_layer_does_not_disturb_valid_input() {
     }
 }
 
-/// 定长枚举必须给出**全部**同音节数的切分，不能只给最大匹配那一条。
-///
-/// `angan` 上 `an|gan` 与 `ang|an` 都是合法的 2 音节切分——正是这种歧义让
-/// `maximum_match` 无从取舍，也正是字数约束之外还需要读音消歧的原因。
+/// 定长枚举必须给出全部同音节数的切分，不能只给最大匹配那一条。
+/// `angan` 上 `an|gan` 与 `ang|an` 都是合法的 2 音节切分，`maximum_match` 无从取舍。
 #[test]
 fn enumerates_every_split_of_the_same_length() {
     let mut ps = graph("angan").paths_with_edges(0, 5, 2, 16);

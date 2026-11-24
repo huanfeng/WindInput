@@ -63,13 +63,10 @@ fn tag_participates_in_fingerprint() {
     );
 }
 
-/// ⚠️ 回归：**跨读缓冲区边界的大文件，流式哈希必须与整读等价**。
+/// 跨读缓冲区边界的大文件，流式哈希必须与整读等价。
 ///
-/// `fingerprint` 从 `std::fs::read` 整读改为 64 KB 分块流式（峰值 11.6 MB → 1.5 MB），
-/// 而本模块其余用例的源文件都只有几十字节，**只走得到单块路径**——分块拼接一旦写错
-/// （少喂尾块、多喂一次、长度字段错位），小文件全都照常通过，真实词库（base.dict.yaml
-/// 近 10 MB）却会静默换指纹，表现为**全部存量缓存一次性失效、每次启动重建几十秒**。
-///
+/// 其余用例的源文件只有几十字节，只走单块路径；分块拼接写错（少喂尾块、多喂一次、长度错位）
+/// 时真实词库会静默换指纹，全部存量缓存失效、每次启动重建。
 /// 三个尺寸分别压住：恰好一块、块边界 ±1、多块且尾块不满。
 #[test]
 fn streaming_hash_matches_whole_read_across_chunk_boundaries() {
@@ -83,7 +80,7 @@ fn streaming_hash_matches_whole_read_across_chunk_boundaries() {
         let content: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
         let src = tmp(&format!("chunk_{size}.bin"), &content);
 
-        // 参考值：按改动前的整读方式逐字节复算，与 fingerprint() 严格同构。
+        // 参考值：整读后逐字节复算，与 fingerprint() 严格同构。
         let mut h = std::collections::hash_map::DefaultHasher::new();
         h.write_u32(PARSE_SEMANTICS_VERSION);
         h.write(b"t");
@@ -115,15 +112,11 @@ fn fresh_only_when_content_matches() {
     assert!(cache_is_fresh(&cache, &[&src], "t"));
 }
 
-/// ⚠️ 回归：**源文件稳定缺失时，缓存必须照常可复用**。
+/// 源文件稳定缺失时，缓存必须照常可复用。
 ///
-/// 真机现场（2026-08-24，feihuzj2 方案）：11 个词库里 `feihuzj2_extra_gr.dict.yaml`
-/// 不存在（用户/安装目录均无），而它 `default_enabled = true` 故仍进 `sources`。
-/// 旧实现 `std::fs::read(p).ok()?` 让整份指纹变 `None` ⇒ `.fp` 永不写、
-/// `cache_is_fresh` 恒 false ⇒ `combined.wdat` **每次引擎重建都要重算 30 秒**。
-/// 磁盘上「其余词库 `.fp` 都在、唯独 combined 没有」是该故障唯一的外部指纹。
-///
-/// 三条断言对应三种状态迁移，缺一条这个 bug 都可能以另一种形态回来。
+/// 启用的词库文件不存在（`default_enabled = true` 仍进 `sources`）时，若整份指纹变 `None`，
+/// `.fp` 永不写、`cache_is_fresh` 恒 false，每次引擎重建都要重算合并索引。
+/// 三条断言对应三种状态迁移。
 #[test]
 fn absent_source_is_hashable_and_reappearing_invalidates() {
     let present = tmp("absent_src_present.txt", b"hello");
@@ -189,8 +182,8 @@ fn missing_cache_not_fresh() {
     assert!(!cache_is_fresh(&cache, &[&src], "t"));
 }
 
-/// 二级缓存摘要的三级回退各有确定取值，且**互不相等**——三者若有两个碰撞，
-/// 「有指纹」与「只有文件」就会被当成同一状态。
+/// 二级缓存摘要的三级回退各有确定取值，且互不相等——两个碰撞就会把「有指纹」与
+/// 「只有文件」当成同一状态。
 #[test]
 fn cache_digest_falls_back_in_three_distinguishable_levels() {
     let src = tmp("digest_src.txt", b"payload");
@@ -250,9 +243,8 @@ fn derived_cache_tracks_digests_order_and_tag() {
         std::slice::from_ref(&a),
         REVERSE_INDEX_TAG
     ));
-    // tag 变了（格式/语义升级）。刻意用一个**不可能成为真实 tag** 的串——
-    // 写成「下一个版本号」的话，`REVERSE_INDEX_TAG` 升版那天这条会静默变成
-    // 「拿同一个 tag 比同一个 tag」，从此恒真。（本测试已经这么绊过一次。）
+    // tag 变了。刻意用不可能成为真实 tag 的串：写成「下一个版本号」的话，
+    // `REVERSE_INDEX_TAG` 升版后这条会变成拿同一个 tag 比同一个 tag，恒真。
     assert!(!derived_cache_is_fresh(
         &cache,
         &[a, b],
@@ -260,8 +252,7 @@ fn derived_cache_tracks_digests_order_and_tag() {
     ));
 }
 
-/// 二级缓存的「源缺失」是可哈希的稳定状态（`absent`），而**补上之后必须失效**。
-/// 这是一级指纹那条 30 秒重建 bug 的同族形态，在二级上提前钉死。
+/// 二级缓存的「源缺失」是可哈希的稳定状态（`absent`），而补上之后必须失效。
 #[test]
 fn derived_cache_handles_absent_source_and_its_return() {
     let cache = tmp("derived_absent.cache", b"<index>");
@@ -294,9 +285,8 @@ fn mtime_of(p: &Path) -> std::time::SystemTime {
     std::fs::metadata(p).unwrap().modified().unwrap()
 }
 
-/// 快路径：源没动就不算全量指纹。证据是 `FULL_HASHES` 计数不增加——比「换内容、回拨
-/// mtime」那种证法可靠：Unix 上任何写入都会推进 ctime（用户态改不了），换内容再回拨
-/// mtime 本来就该被识破。
+/// 快路径：源没动就不算全量指纹，证据是 `FULL_HASHES` 计数不增加。不用「换内容、回拨 mtime」
+/// 来证：Unix 上写入必推进 ctime，那种改动本就该被识破。
 #[test]
 fn fast_path_skips_full_hash_when_stamps_unchanged() {
     let hashes = || FULL_HASHES.with(|c| c.get());
@@ -318,9 +308,8 @@ fn fast_path_skips_full_hash_when_stamps_unchanged() {
     assert!(st_sidecar(&cache).is_file(), "全量判新鲜后应回写 .st");
 }
 
-/// 只刷新 mtime、内容不变（scp / 部署 / git checkout 的日常）：仍新鲜，且 .st 被刷成
-/// 新的 mtime，下一次又能走快路径。这正是「拒绝 mtime 判重建」与「用 mtime 跳过算指纹」
-/// 的分界：前者误判多建一次库，后者误判只多算一次哈希。
+/// 只刷新 mtime、内容不变（scp / 部署 / git checkout）：仍新鲜，且 .st 刷成新 mtime，下次又能走快路径。
+/// mtime 只用来跳过算指纹，不用来判重建：误判的代价只是多算一次哈希。
 #[test]
 fn mtime_refresh_without_content_change_stays_fresh_and_refreshes_st() {
     let src = tmp("st_touch_src.txt", b"content");
@@ -449,8 +438,7 @@ fn st_fast_path_is_bound_to_tag_and_semantics_version() {
 }
 
 /// 刚写入的源（mtime 在 racy 窗口内）不记 stamp，`.st` 不写；时间戳足够旧才写。
-/// 否则同一 mtime 刻度内的第二次同长度写入会骗过快路径——
-/// `mtime_change_keeps_fresh_content_change_invalidates` 正是那个现场。
+/// 否则同一 mtime 刻度内的第二次同长度写入会骗过快路径。
 #[test]
 fn racy_recent_mtime_is_not_recorded() {
     let src = tmp("st_racy_src.txt", b"fresh"); // mtime = 现在
@@ -570,7 +558,7 @@ fn truncated_or_overlong_st_is_ignored() {
     assert!(!st_matches(&cache, fp.trim(), "t", &[&src], &stamps));
 }
 
-/// racy 的基准是取 stamp **之前**的时刻：哈希期间无论过去多久，取 stamp 那一刻起
+/// racy 的基准是取 stamp 之前的时刻：哈希期间无论过去多久，取 stamp 那一刻起
 /// 2 秒内的 mtime 都算 racy。
 #[test]
 fn racy_basis_is_the_moment_before_stamping() {
@@ -592,8 +580,7 @@ fn racy_basis_is_the_moment_before_stamping() {
 }
 
 /// Unix 上换文件（rename 进来的新 inode）即使 len 与 mtime 都一样也不走快路径。
-/// 注意 rename 与 `set_mtime` 本身都会推进 ctime，所以本用例单靠 ctime 也会红——它守的
-/// 是「换文件即失效」这条可观测行为，不是 ino 字段单独的作用。
+/// rename 与 `set_mtime` 本身都会推进 ctime，所以这里守的是「换文件即失效」，不是 ino 字段单独的作用。
 #[cfg(unix)]
 #[test]
 fn replacing_the_file_invalidates_fast_path() {

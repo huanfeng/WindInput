@@ -61,9 +61,8 @@ fn cand_b(text: &str, code: &str, weight: i32, no: i32, boundary: u64) -> Candid
     }
 }
 
-/// 同 text 去重**不得吞掉来源归属**：右键删除按 `is_user_dict`/`is_temp_dict` 决定去
-/// 哪张表删，而 `redb` 的 `remove` 对不存在的 key 静默成功——丢掉标记的代价不是报错，
-/// 是「点多少次都无作用」（2026-09-03 用户实测「再也不好」）。
+/// 同 text 去重不得吞掉来源归属：右键删除按 `is_user_dict`/`is_temp_dict` 决定去哪张表删，
+/// 而 `redb` 的 `remove` 对不存在的 key 静默成功，丢掉标记就是「点多少次都无作用」。
 ///
 /// 用户层与临时层同注册在拼音引擎的 store DictManager 里，同文时后者整条被丢弃。
 #[test]
@@ -92,12 +91,10 @@ fn dedup_same_text_merges_source_flags() {
     );
 }
 
-/// 跨层「更长后继」判据**必须逐层原样问**，不能走 `merge_search`。
+/// 跨层「更长后继」判据必须逐层原样问，不能走 `merge_search`。
 ///
-/// 合并期会按 text 去重并「同 text 取最短码」：同一个词在高优先层有短码、在系统层有
-/// 长码时，合并结果只剩短码——正好把本判据要找的信息抹掉。这曾是旧实现
-/// （`search_prefix(input, 64)` 再 `.any(code 更长)`）的漏判来源，会让「用户还能接着
-/// 打」的情形被误判成「已到底」，进而触发不该发生的自动上屏 / 顶码。
+/// 合并期按 text 去重并「同 text 取最短码」，同一个词高优先层有短码、系统层有长码时只剩短码，
+/// 正好抹掉本判据要找的信息，会把「还能接着打」误判成「已到底」，触发不该有的自动上屏 / 顶码。
 #[test]
 fn has_longer_code_bypasses_dedup_shortest_code() {
     let c = CompositeDict::new();
@@ -112,7 +109,7 @@ fn has_longer_code_bypasses_dedup_shortest_code() {
         items: vec![cand("好", "okzz", 500, 0)],
     }));
 
-    // 旧路径：合并去重后同 text 取最短码 "ok"，长度不大于输入 → 漏判为 false。
+    // 对照：合并去重后同 text 取最短码 "ok"，长度不大于输入 → 漏判为 false。
     let merged_says = {
         let n = "ok".chars().count();
         c.search_prefix("ok", 64)
@@ -177,13 +174,11 @@ fn has_longer_code_skips_disabled_layers() {
     assert!(!c.has_longer_code("ok"), "禁用后该层不得参与判据");
 }
 
-/// **boundary 必须与 code 同进同出**（合并期的错位陷阱）。
-/// boundary 描述的是 code 的音节切分，二者是一对；若换了码却留着旧码的边界，
-/// 就会配出「A 层的 code + B 层的 boundary」这种自相矛盾的候选，
-/// 下游按错位边界校验会静默误杀候选。
+/// boundary 必须与 code 同进同出：二者描述同一个音节切分，换了码却留着旧码的边界会配出
+/// 自相矛盾的候选，下游按错位边界校验会静默误杀候选。
 #[test]
 fn boundary_travels_with_code_on_merge() {
-    // ① 同 text 去重：code/boundary 保留**首个出现层**（高优先层），只有 weight 跨层继承。
+    // ① 同 text 去重：code/boundary 保留首个出现层（高优先层），只有 weight 跨层继承。
     let c = CompositeDict::new();
     c.register_layer(Box::new(MockLayer {
         name: "user".into(),
@@ -423,9 +418,8 @@ fn higher_priority_layer_type_wins_over_system() {
 // ==================================================================
 // 跨词库同词合并：权重取「已启用层的最大值」
 //
-// 用户可见语义：同一个词同时被多个词库收录、各库给的权重不同时，按**最高权重**
-// 参与排序；关掉出该权重的那个库，就回退到剩余启用库里的最高值。
-// 下面这组用例把这条语义在三条查询路径 + 开关组合 + 排序层级上钉死。
+// 同一个词被多个词库收录、权重不同时按最高权重参与排序；关掉出该权重的库，就回退到
+// 剩余启用库里的最高值。下面在三条查询路径 + 开关组合 + 排序层级上钉死这条语义。
 // ==================================================================
 
 /// 跨库合并专用测试层：可配 `base_order`、可热启停，精确/前缀/简拼三条路径都有真实返回。
@@ -504,11 +498,10 @@ impl DictLayer for FlexLayer {
     }
 }
 
-/// 三条查询路径**共用同一套 max 语义**。
+/// 三条查询路径共用同一套 max 语义。
 ///
-/// 此前只有精确查询（`dedup_same_text_inherits_higher_weight`）有守门。而扩展词库
-/// 场景下用户看到的候选大多来自前缀补全与简拼召回——那两条若失守，表现正是
-/// 「开了高权重的扩展库却没提前」，且精确查询的测试全绿，从测试上看不出任何异常。
+/// 扩展词库场景下候选大多来自前缀补全与简拼召回，只守精确查询的话那两条失守也全绿，
+/// 表现为「开了高权重的扩展库却没提前」。
 #[test]
 fn cross_layer_max_weight_holds_for_all_query_kinds() {
     // 主库权重 100，扩展库同词权重 500。三条路径都应合并成一条、权重 500。
@@ -532,11 +525,10 @@ fn cross_layer_max_weight_holds_for_all_query_kinds() {
     }
 }
 
-/// **关闭词库 → 权重回退到剩余启用层的最高值**（本条是该特性的核心语义）。
+/// 关闭词库 → 权重回退到剩余启用层的最高值。
 ///
-/// 回退不是一段专门的回退代码，而是「每次查询按当前启用集现算」的自然结果：
-/// `merge_search` 开头就跳过禁用层。故本用例同时守着「关掉不残留」与「开回来即恢复」
-/// 两个方向——只测其中一个方向时，把 max 缓存进快照的实现也能通过。
+/// 回退是「每次查询按当前启用集现算」的自然结果（`merge_search` 开头跳过禁用层）。同时守
+/// 「关掉不残留」与「开回来即恢复」两个方向，只测一个方向时把 max 缓存进快照的实现也能过。
 #[test]
 fn disabling_layer_falls_back_to_next_highest_weight() {
     let c = CompositeDict::new();
@@ -573,10 +565,8 @@ fn disabling_layer_falls_back_to_next_highest_weight() {
     assert_eq!(w(&c), 900, "重新开启应立即恢复最高权重");
 }
 
-/// **同 code 时**，max 与注册顺序、层类型优先级都无关；而 natural_order 恒随高优先层。
-///
-/// 这两件事互不牵连，正是合并期最容易搞混的一处：拿到一条「权重来自扩展库、出现序来自
-/// 用户层」的候选是**预期行为**，不是 bug。
+/// 同 code 时，max 与注册顺序、层类型优先级都无关；而 natural_order 恒随高优先层。
+/// 拿到「权重来自扩展库、出现序来自用户层」的候选是预期行为。
 #[test]
 fn max_weight_independent_of_layer_order_and_type() {
     let c = CompositeDict::new();
@@ -593,17 +583,12 @@ fn max_weight_independent_of_layer_order_and_type() {
     assert_eq!(r[0].natural_order, 3, "natural_order 随高优先层（用户层）");
 }
 
-/// ★★★ **权重不跨码位漂移**：同一个字在两层有**不同编码**时，各自的权重互不继承。
+/// 权重不跨码位漂移：同一个字在两层有不同编码时，各自的权重互不继承。
 ///
-/// `zhong`→「中」与 `z`→「中」是**两个独立词条**，各有各的权重。呈现上按 text 去重只
-/// 留一条（用户不该在候选里看到两个「中」），但留下来那条必须带**它自己码位**的权重
-/// ——否则候选会带着「别的码位的权重」参与排序。码表方案尤其不能这样：那里码长本身
-/// 就是分档依据，简码条目凭空拿到全码条目的高权重会直接改掉首选。
-///
-/// 「多个词库收录同一条、按最高权重算」这条用户可见语义，主键是 `(code, text)`
-/// 而不是 `text` —— 见 `max_weight_independent_of_layer_order_and_type` 那条对照。
-///
-/// 曾经反了：跨码位无条件取 max，`code="z"` 的候选带着 `zhong` 的 900 分。
+/// `zhong`→「中」与 `z`→「中」是两个独立词条。呈现上按 text 去重只留一条，但留下那条必须带
+/// 它自己码位的权重；码表方案里简码条目拿到全码条目的高权重会直接改掉首选。
+/// 「按最高权重算」的主键是 `(code, text)` 而不是 `text`，见
+/// `max_weight_independent_of_layer_order_and_type`。
 #[test]
 fn weight_does_not_leak_across_code_positions() {
     let c = CompositeDict::new();
@@ -626,11 +611,10 @@ fn weight_does_not_leak_across_code_positions() {
     );
 }
 
-/// 前缀查询换成最短码时，**权重与码整组同换**（换码＝改换词条）。
+/// 前缀查询换成最短码时，权重与码整组同换（换码即改换词条）。
 ///
-/// 与 [`weight_does_not_leak_across_code_positions`] 是同一条原则的另一面：权重恒随
-/// 它自己的码位走。只钉「不继承」不钉「换码要换权重」的话，一个换了 code 却留着旧码
-/// 权重的实现照样能让那条测试变绿，而它配出的正是「A 码位的编码 + B 码位的权重」。
+/// 与 [`weight_does_not_leak_across_code_positions`] 互为两面：只钉「不继承」的话，换了 code
+/// 却留着旧码权重的实现照样能过那条测试。
 #[test]
 fn shortest_code_swap_carries_its_own_weight() {
     let c = CompositeDict::new();
@@ -650,13 +634,11 @@ fn shortest_code_swap_carries_its_own_weight() {
     );
 }
 
-/// **跨库权重比较不需要两库配同一个 `base_order`**：默认排序 `better` 的层级是
-/// 「weight 降 → base_order 升 → natural_order 升」，base_order 只在**等权时**决定
-/// 库间先后，压不住权重。
+/// 跨库权重比较不需要两库配同一个 `base_order`：`better` 的层级是「weight 降 → base_order 升
+/// → natural_order 升」，base_order 只在等权时决定库间先后。
 ///
-/// 反向对照放在同一个用例里：`[engine.codetable].base_sort = "natural"` 的方案走
-/// `by_natural`，那条路**完全忽略权重**——此时跨库 max 取到多高都不改变呈现顺序。
-/// 「调了权重没生效」的头号嫌疑就是它，两条一起钉住才能把责任分清。
+/// 反向对照：`[engine.codetable].base_sort = "natural"` 走 `by_natural`，完全忽略权重，
+/// 跨库 max 取到多高都不改变呈现顺序——「调了权重没生效」的头号嫌疑就是它。
 #[test]
 fn weight_outranks_base_order_unless_base_sort_is_natural() {
     let c = CompositeDict::new();
@@ -683,11 +665,8 @@ fn weight_outranks_base_order_unless_base_sort_is_natural() {
     );
 }
 
-/// 同 text 合并后 `base_order` 跟着**首个出现层**走（与 code/natural_order 同组），
-/// 只有 weight 跨层继承。
-///
-/// 后果值得知道：主库也收录该词时，合并结果落在主库档位；主库没有时，同一个词就落在
-/// 扩展库档位。等权场景下这会表现为「同一个词，装不装主库位置不一样」。
+/// 同 text 合并后 `base_order` 跟着首个出现层走（与 code/natural_order 同组），只有 weight
+/// 跨层继承。后果：等权时同一个词装不装主库，落的档位不一样。
 #[test]
 fn merged_candidate_keeps_first_layer_base_order() {
     let c = CompositeDict::new();
@@ -708,8 +687,8 @@ fn merged_candidate_keeps_first_layer_base_order() {
     assert_eq!(r2[0].base_order, 5, "主库不参与后，档位落到扩展库");
 }
 
-/// 通配合并：**同 text 同 code** 才合并（取更高权重）；同字不同码各留一条——学码要看到
-/// 每个码位。排序等长档在前，高权重的更长编码也排不到等长之前。
+/// 通配合并：同 text 同 code 才合并（取更高权重）；同字不同码各留一条，学码要看到每个码位。
+/// 排序等长档在前，高权重的更长编码也排不到等长之前。
 #[test]
 fn pattern_merges_by_text_and_code_equal_length_first() {
     let slot = crate::layer::WILDCARD_SLOT;

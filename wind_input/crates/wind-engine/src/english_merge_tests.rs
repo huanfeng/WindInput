@@ -49,10 +49,8 @@ fn english_texts(cands: &[Candidate]) -> Vec<&str> {
         .collect()
 }
 
-/// ★ 本模块存在的理由：拼音把配额吐满时，英文仍须在场。
-///
-/// 正向对照（`calm`）必须先立——否则「洪水下在场」可能只是因为假引擎压根没产出，
-/// 断言变成空转（对照 `MixedEngine` 那条同名教训）。
+/// 本模块存在的理由：拼音把配额吐满时，英文仍须在场。
+/// 先立正向对照（`calm`），否则「洪水下在场」可能只是假引擎压根没产出，断言空转。
 #[test]
 fn english_survives_pinyin_flood() {
     let eng = FakeEnglish(vec![("hello", "hello"), ("help", "help")]);
@@ -77,10 +75,7 @@ fn english_survives_pinyin_flood() {
     assert_eq!(flooded.len(), max, "腾座后总数不得超出 max_candidates");
 }
 
-/// ★ 只收精确命中：前缀扩展一条都不进列表。
-///
-/// 真机现象：全拼打 `hen` 混进 hen / hence / henceforth / Henderson / Hendrix 五条，
-/// 后四条纯噪音；混输打 `github` 混进 8 条 GitHub 开头的长词组。
+/// 只收精确命中：前缀扩展一条都不进列表（否则 `hen` 会混进 hence / Henderson 等噪音）。
 #[test]
 fn prefix_expansions_are_dropped() {
     let eng = FakeEnglish(vec![
@@ -103,10 +98,8 @@ fn prefix_expansions_are_dropped() {
     );
 }
 
-/// ★ 上屏否决仍按**前缀**判，不随 `lookup` 一起收窄成精确。
-///
-/// 收窄了的话，五笔打到第 4 键 `gith` 时精确命中还不存在 ⇒ 否决不生效 ⇒ 满码把中文
-/// 顶上屏 ⇒ `github` 永远敲不完。这正是 `block_commit` 要防的事。
+/// 上屏否决仍按前缀判，不随 `lookup` 一起收窄成精确：否则五笔打到第 4 键 `gith` 时精确
+/// 命中还不存在，满码把中文顶上屏，`github` 永远敲不完（`block_commit` 要防的事）。
 #[test]
 fn veto_still_matches_prefix() {
     let eng = FakeEnglish(vec![("github", "GitHub")]);
@@ -197,7 +190,7 @@ fn short_input_skips_lookup() {
     assert!(!lookup(&eng, "he", 2).is_empty());
 }
 
-/// 拼音补全判据：整串**任何切法**都切不成完整全拼音节才补。
+/// 拼音补全判据：整串任何切法都切不成完整全拼音节才补。
 #[test]
 fn prefix_complete_only_when_not_full_pinyin() {
     // 切不完整 ⇒ 补。

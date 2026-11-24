@@ -2,9 +2,8 @@ use super::*;
 use crate::codetable::CodetableDict;
 use std::io::Write;
 
-/// 系统层须把词典的音节边界带进候选（精确 + 前缀两条路）。
-/// 回归防线：boundary 曾在 SystemDictLayer::search 处被 `dict.search()` 三元组截断，
-/// 使 search_with_boundary 沦为全仓无消费方的死代码。
+/// 系统层须把词典的音节边界带进候选（精确 + 前缀两条路），不得在 `SystemDictLayer::search`
+/// 处截断成三元组。
 #[test]
 fn system_layer_carries_boundary_into_candidates() {
     let path = std::env::temp_dir().join("wind_layer_boundary.dict.yaml");
@@ -68,10 +67,8 @@ fn default_weight_overrides_all_entry_weights() {
     assert_eq!(r[1].text, "乙");
 }
 
-/// 反向对照的基线：**不配 `default_weight` 时，扩展库的高权重如实参与跨库取最大值**。
-///
-/// 与下一条配对存在。只有基线在，才能说明下一条的「没生效」是 `default_weight` 造成的，
-/// 而不是跨库合并本身没做——否则两种根因在测试上长得一模一样。
+/// 反向对照的基线：不配 `default_weight` 时，扩展库的高权重如实参与跨库取最大值。
+/// 有它才能说明下一条的「没生效」是 `default_weight` 造成的，而不是跨库合并本身没做。
 #[test]
 fn cross_layer_max_weight_with_real_system_layers() {
     let mut main = CodetableDict::empty();
@@ -104,14 +101,11 @@ fn cross_layer_max_weight_with_real_system_layers() {
     );
 }
 
-/// **`default_weight` 先抹平本库权重，再参与跨库取最大值。**
+/// `default_weight` 先抹平本库权重，再参与跨库取最大值。
 ///
-/// 这是「扩展词库明明权重更高却没生效」的一条真实路径：库文件里写着 9999，但
-/// `[[dictionaries]].default_weight` 把整库压成了一个档位，参与比较的是那个档位。
-/// 换一个没配该项的词库就复现不出来——正是「同一版本、有人中招有人没有」的成因之一。
-///
-/// 与归一化的分工别搞混：`weight_spec` 是**保序压缩**（不颠倒库内高低），
-/// `default_weight` 是**抹平**（库内高低全部消失）。
+/// 库文件里写着 9999，但 `[[dictionaries]].default_weight` 把整库压成一个档位，参与比较的
+/// 是那个档位——「扩展词库明明权重更高却没生效」的一条成因。
+/// 与归一化的分工：`weight_spec` 是保序压缩（不颠倒库内高低），`default_weight` 是抹平。
 #[test]
 fn default_weight_flattens_before_cross_layer_max() {
     let mut main = CodetableDict::empty();
@@ -142,9 +136,8 @@ fn default_weight_flattens_before_cross_layer_max() {
     );
 }
 
-/// 禁用的扩展库**完全不参与** max：关掉后回退到剩余启用库，开回来即恢复。
-/// 与 composite 层的同名语义同轴，这里用真实 `SystemDictLayer` 再验一遍——
-/// 层的 `enabled` 是它自己的原子标志，composite 的 mock 层验不到这份实现。
+/// 禁用的扩展库完全不参与 max：关掉后回退到剩余启用库，开回来即恢复。
+/// 层的 `enabled` 是它自己的原子标志，composite 的 mock 层验不到，这里用真实 `SystemDictLayer` 再验。
 #[test]
 fn disabled_system_layer_excluded_from_cross_layer_max() {
     let mut main = CodetableDict::empty();
@@ -201,7 +194,7 @@ fn system_layer_answers_pattern_queries() {
     assert_eq!(got, [("甲", "ab", false), ("丙", "abcd", true)]);
 }
 
-/// ★ `entries_digest` 必须随**枚举结果的每个来源**变：词库内容、文件（无 `.fp` 时的
+/// `entries_digest` 必须随枚举结果的每个来源变：词库内容、文件（无 `.fp` 时的
 /// `大小:mtime`）、两项权重换算。缺一项，英文词组索引就会在那一项变了之后读回旧文件。
 ///
 /// 内存词库（wdat 写失败的降级形态）给 `None`：没有稳定产物可比 ⇒ 派生索引不落盘。

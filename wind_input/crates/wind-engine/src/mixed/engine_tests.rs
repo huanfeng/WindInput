@@ -60,8 +60,7 @@ fn pinyin_gets_minimum_quota_when_codetable_floods() {
     assert_eq!(cands.len() - py, 8);
 }
 
-/// ★ 反向锁：尾部**没有**拼音候选时（`kh` 663 条这类非音节码、纯五笔溢出串），
-/// 一条码表候选都不许被挤掉 —— 行为与改动前完全一致。
+/// 反向锁：尾部没有拼音候选时（`kh` 这类非音节码、纯五笔溢出串），一条码表候选都不许被挤掉。
 #[test]
 fn no_pinyin_means_no_codetable_is_evicted() {
     let mut cands: Vec<Candidate> = (0..20)
@@ -128,15 +127,11 @@ fn convert_applies_pinyin_quota() {
     assert_eq!(py, 2, "convert 必须走带配额的截断");
 }
 
-// ── 截断的**存活集合**契约（`sort_dedup_truncate`）──
+// ── 截断的存活集合契约（`sort_dedup_truncate`，见 `docs/design/mixed-source-tier-quota.md`）──
 //
-// 本组测试是「拆权重加成、改来源分组配额」（`docs/design/mixed-source-tier-quota.md`）
-// 的第 1 步：**在改动前锁住现状**。上面那组只断言了各来源的候选**数**，而数相等不等于
-// 集合相等 —— 置顶（shadow pin）在协调器应用、位于引擎截断之后，被截掉的候选规则读得到
-// 却没有目标可顶，表现为「置顶了但没反应」且完全静默。故判据须是集合。
-//
-// 标注 `[改动后必须仍然通过]` 的，是新方案**必须复现**的性质；
-// 标注 `[后续步骤会改]` 的，锁的是当前实现的顺序，改完应当变红——那正是要看见的信号。
+// 上面那组只断言各来源的候选数，而数相等不等于集合相等：置顶（shadow pin）在协调器应用、
+// 位于引擎截断之后，被截掉的候选规则读得到却没有目标可顶，表现为「置顶了但没反应」且
+// 完全静默。故判据须是集合。
 
 /// 带编码的码表候选（去重与并码位测试用）。
 fn ct_cand_coded(text: &str, code: &str, weight: i32) -> Candidate {
@@ -153,7 +148,7 @@ fn py_cand_coded(text: &str, code: &str, weight: i32) -> Candidate {
     }
 }
 
-/// 测试用截断上下文。两个判据串默认取一个**不会命中任何候选**的串，使全部候选落到
+/// 测试用截断上下文。两个判据串默认取一个不会命中任何候选的串，使全部候选落到
 /// 非精确档——想测档 0 / 档 2 的分野时显式传入对应的码。
 fn tctx<'a>(codetable_exact: &'a str, english_exact: &'a str) -> TruncationCtx<'a> {
     TruncationCtx {
@@ -162,10 +157,10 @@ fn tctx<'a>(codetable_exact: &'a str, english_exact: &'a str) -> TruncationCtx<'
     }
 }
 
-/// 取 `(source, text)` 集合——**存活集合**判据的统一写法。
+/// 取 `(source, text)` 集合——存活集合判据的统一写法。
 ///
-/// 用 `{:?}` 而非直接排序 `CandidateSource`：给共享 crate 的枚举加 `Ord` 只为一个测试
-/// 排序不值当，且会凭空造出一个「来源有大小」的语义——本设计恰恰在说来源之间不可比。
+/// 用 `{:?}` 而非给共享 crate 的 `CandidateSource` 加 `Ord`：那会凭空造出「来源有大小」的
+/// 语义，而本设计恰恰在说来源之间不可比。
 fn survivor_set(cands: &[Candidate]) -> Vec<(String, String)> {
     let mut v: Vec<(String, String)> = cands
         .iter()
@@ -175,7 +170,7 @@ fn survivor_set(cands: &[Candidate]) -> Vec<(String, String)> {
     v
 }
 
-/// **[改动后必须仍然通过]** 存活的是**哪些**候选，不只是几条。
+/// 存活的是哪些候选，不只是几条。
 ///
 /// 码表 12 条（权重递减）+ 拼音 5 条，`max=10` ⇒ 拼音保底 2 席、码表 8 席。
 /// 码表留权重最高的 8 条（码0..码7），拼音从被截掉的尾部按序补 2 条（拼0、拼1）。
@@ -195,11 +190,8 @@ fn survivor_set_is_the_contract_not_the_count() {
     assert_eq!(survivor_set(&cands), expect);
 }
 
-/// **[改动后必须仍然通过]** 同 `text` 跨来源时保留**码表**那条。
-///
-/// 现状靠加成保证（码表精确 +1e7 vs 拼音 ÷100，排序后码表在前，去重保留第一条）。
-/// 拆掉加成后这个隐含保证消失，必须显式定义跨来源保留优先级——本测试就是那条定义。
-/// 用拼音「的」（真实词频 15,378,475，全表最高之一）作对手：没有档位它会碾压码表。
+/// 同 `text` 跨来源时保留码表那条：跨来源保留优先级须显式定义，不能隐含在权重加成里。
+/// 用拼音「的」（真实词频全表最高之一）作对手：没有档位它会碾压码表。
 #[test]
 fn same_text_across_sources_keeps_codetable() {
     let mut cands = vec![
@@ -217,10 +209,8 @@ fn same_text_across_sources_keeps_codetable() {
     assert_eq!(cands[0].code, "r");
 }
 
-/// **[改动后必须仍然通过]** 同来源同文并码位；跨来源**不并**（两套编码不同域）。
-///
-/// 反向锁的理由见 `Candidate::absorb_codes_from`：跨来源并入会给码表凭空造出
-/// 「拼音码位有常用字」的假事实，反过来误滤同码的码表生僻字。
+/// 同来源同文并码位；跨来源不并（两套编码不同域）。理由见 `Candidate::absorb_codes_from`：
+/// 跨来源并入会给码表造出「拼音码位有常用字」的假事实，反过来误滤同码的码表生僻字。
 #[test]
 fn dedup_merges_codes_within_source_only() {
     let mut same = vec![
@@ -243,12 +233,9 @@ fn dedup_merges_codes_within_source_only() {
     );
 }
 
-/// **[改动后必须仍然通过]** 短语必须活过码表洪水。
+/// 短语必须活过码表洪水：短语在档 1、码表前缀补全在档 2 ⇒ 短语权重再低也先活。
 ///
-/// 短语在档 1、码表前缀补全在档 2 ⇒ 短语权重再低也先活。短语量本来就极少，被高冲突码
-/// 挤掉是纯粹的功能缺失。
-///
-/// ⚠️ 本引擎目前**收不到**短语候选（`is_phrase` 无生产置位点，见 `truncation_tier`），
+/// 本引擎目前收不到短语候选（`is_phrase` 无生产置位点，见 `truncation_tier`），
 /// 故这条锁的是函数契约而非生产行为。
 #[test]
 fn phrase_survives_codetable_flood() {
@@ -267,10 +254,8 @@ fn phrase_survives_codetable_flood() {
     );
 }
 
-/// **[改动后必须仍然通过]** 码表精确全码不被高频前缀补全挤掉（生产路径 `convert`）。
-///
-/// 这是加成在承担的**真正职责**：精确 `code == input` 权重可能远低于某条前缀补全，
-/// 靠 +1e7 vs +500K 的档差活下来并排在前。新方案必须复现。
+/// 码表精确全码不被高频前缀补全挤掉（生产路径 `convert`）：精确 `code == input` 的权重
+/// 可能远低于某条前缀补全，仍须活下来并排在前。
 #[test]
 fn exact_code_outranks_high_weight_prefix_completion() {
     let mut entries: Vec<(String, String, i32)> = vec![("aa".into(), "精确低频".into(), 1)];
@@ -287,13 +272,10 @@ fn exact_code_outranks_high_weight_prefix_completion() {
     );
 }
 
-/// **[改动后必须仍然通过]** 码表精确/补全的分野由**档位**保证，不再靠权重量级。
-///
-/// 档位显式化之后，这条在函数层就成立了——此前只有生产路径成立（靠 +1e7 与 +500K
-/// 的差），直接调本函数时 weight 说了算。
+/// 码表精确/补全的分野由档位保证，不靠权重量级：直接调本函数时也成立。
 #[test]
 fn exact_beats_completion_at_function_level_not_only_via_boosts() {
-    // 模拟码表子引擎的输出：精确在前（cmp_exact_first），但权重低得多、且**不带加成**。
+    // 模拟码表子引擎的输出：精确在前（cmp_exact_first），但权重低得多、且不带加成。
     let mut cands = vec![
         ct_cand_coded("精确低频", "aa", 1),
         ct_cand_coded("补全", "aab", 9000),
@@ -306,14 +288,11 @@ fn exact_beats_completion_at_function_level_not_only_via_boosts() {
     );
 }
 
-/// ★ **档内保持子引擎原序**——层级链不再被 weight 抹掉。
+/// 档内保持子引擎原序，层级链不被 weight 抹掉。
 ///
-/// 拼音候选全部落进档 3。若档内按 weight 重排，拼音引擎自己的排序链
-/// （`cmp_match_layers().then(weight)`）就会被抹掉——其中层级键（简拼 / 前缀补全 /
-/// 子短语 / 全拼降级）是**布尔的、等价于惩罚 ∞**，weight 表达不了。高词频简拼会因此
-/// 反超低词频精确候选，而子引擎明明把精确排在了前面。
-///
-/// 稳定排序 + 只按档位排 ⇒ 同档保持传入次序 = 子引擎原序。
+/// 拼音候选全部落进档 3。拼音引擎的排序链（`cmp_match_layers().then(weight)`）里，层级键
+/// （简拼 / 前缀补全 / 子短语 / 全拼降级）是布尔的、等价于惩罚 ∞，weight 表达不了；档内按
+/// weight 重排会让高词频简拼反超低词频精确候选。稳定排序 + 只按档位排 ⇒ 同档保持子引擎原序。
 #[test]
 fn within_tier_keeps_sub_engine_order() {
     let abbrev = Candidate {
@@ -330,12 +309,11 @@ fn within_tier_keeps_sub_engine_order() {
     );
 }
 
-/// ★ **英文有保底席位**：码表洪水下英文精确照样活到最后（至多 `english_max_count` 条）。
+/// 英文有保底席位：码表洪水下英文精确照样活到最后（至多 `english_max_count` 条）。
 ///
-/// 英文精确与码表前缀补全同档（档 2，历史包袱见 [`MixedEngine::truncation_tier`]），档内按
-/// 合并顺序、码表先入，单靠档位英文会被整片挤掉——那正是此前记录的已知缺口。现由
-/// `truncate_with_english_seats` 先腾座、后追加兑现保底，与码表方案的 `english_merge::merge`
-/// 同一手法。显示序仍由协调器决定，本档位只决定截断存活。
+/// 英文精确与码表前缀补全同档（档 2，见 [`MixedEngine::truncation_tier`]），档内码表先入，
+/// 单靠档位英文会被整片挤掉。`truncate_with_english_seats` 先腾座、后追加兑现保底，与码表
+/// 方案的 `english_merge::merge` 同一手法。显示序仍由协调器决定，本档位只决定截断存活。
 #[test]
 fn english_survives_codetable_flood() {
     // 码表 1 条精确全码 + 20 条前缀补全（真实词频 9000 递减）。
@@ -533,7 +511,7 @@ fn ct_engine_clear(entries: &[(&str, &str, i32)]) -> Box<dyn Engine> {
     Box::new(CodeTableEngine::new(4, opts, Arc::new(dm)))
 }
 
-/// 清空守护专用假拼音：**恒无候选**（has_pinyin=false，把协调器的候选非空复核排除在外），
+/// 清空守护专用假拼音：恒无候选（has_pinyin=false，把协调器的候选非空复核排除在外），
 /// 仅可配「整串是否为合法拼音前缀」——正是本守护要验的那一位。
 struct FakePinyinPrefix {
     may_continue: bool,
@@ -600,7 +578,7 @@ fn clear_fires_when_pinyin_guard_disabled() {
     );
 }
 
-/// 开关关 + 拼音**确有候选** → 同样清空。锁住「两道守护一起受开关支配」，
+/// 开关关 + 拼音确有候选 → 同样清空。锁住「两道守护一起受开关支配」，
 /// 只放开其中一道等于没放开（nunl 即便无候选也会被 may_continue 拦住）。
 #[test]
 fn clear_fires_when_guard_disabled_even_with_pinyin_candidates() {
@@ -624,7 +602,7 @@ fn clear_fires_when_guard_disabled_even_with_pinyin_candidates() {
     assert!(r.should_clear, "① 关时有拼音候选也不得拦清空");
 }
 
-/// 反向锁：开关**开**（出厂默认）时两道守护照常拦住，勿把上面两例误改成无条件清空。
+/// 反向锁：开关开（出厂默认）时两道守护照常拦住，勿把上面两例误改成无条件清空。
 #[test]
 fn clear_still_vetoed_when_guard_enabled() {
     let e = MixedEngine::new(
@@ -644,14 +622,14 @@ fn clear_still_vetoed_when_guard_enabled() {
 
 #[test]
 fn overflow_never_clears() {
-    // 超长（>max_code_len）**有意**不清空：已切入纯拼音语境，「码表满码无候选」前提不成立。
+    // 超长（>max_code_len）有意不清空：已切入纯拼音语境，「码表满码无候选」前提不成立。
     let r = mixed_with_prefix_pinyin(false)
         .convert("qqqqq", 50)
         .unwrap();
     assert!(!r.should_clear, "overflow 分支不得产生清空");
 }
 
-// ── 顶码上屏：与满码全码自动上屏**共用同一套**拼音①②否决 ──
+// ── 顶码上屏：与满码全码自动上屏共用同一套拼音①②否决 ──
 
 #[test]
 fn topcode_vetoed_by_pinyin_candidate() {
@@ -770,7 +748,7 @@ fn topcode_override_ignores_pinyin_veto() {
 #[test]
 fn topcode_vetoed_by_single_syllable_prefix_when_block_on_pinyin_off() {
     // ① 关、② 开：前缀 "wang" 是单个完整拼音音节（中途打拼音词 wangba）→ 抑制顶码，
-    // 即便 "wangb" 尚未构成完整拼音词（用户实测：① 关时 wangb 仍顶 佢 的 bug）。
+    // 即便 "wangb" 尚未构成完整拼音词。
     let primary = ct_engine_topcode(&[("wang", "王", 100)]);
     let e = MixedEngine::new(
         primary,
@@ -820,7 +798,7 @@ fn topcode_allowed_for_multi_syllable_prefix_when_block_on_pinyin_off() {
 
 #[test]
 fn topcode_vetoed_by_pinyin_only_overflow() {
-    // 与 `topcode_allowed_when_both_guards_off` 构成**单一变量对照**：同样的码表/假拼音/
+    // 与 `topcode_allowed_when_both_guards_off` 构成单一变量对照：同样的码表/假拼音/
     // 输入串、同样 ①② 都关，唯一差别是 ⓪ 开 → 拦截只可能来自 ⓪。
     let primary = ct_engine_topcode(&[("wang", "王", 100)]);
     let e = MixedEngine::new(
@@ -846,10 +824,8 @@ fn topcode_vetoed_by_pinyin_only_overflow() {
 
 #[test]
 fn topcode_pinyin_only_overflow_protects_youyoud() {
-    // 真机回归（用户实测）：混输下打 `youyoud`（悠悠的），第 5 键 `o` 使缓冲 "youyo" 超 4 码
-    // → 旧实现顶出 `youy` 的首选「变凉」+ 余码 `oud`。
-    //
-    // 本例精确复刻当时 ①② 双双落空的判据状态，故只有 ⓪ 能救：
+    // 混输下打 `youyoud`（悠悠的），第 5 键 `o` 使缓冲 "youyo" 超 4 码，不得顶出 `youy` 的
+    // 首选「变凉」+ 余码 `oud`。本例让 ①② 双双落空，只有 ⓪ 能救：
     // - ① 关（用户层 auto_commit_block_on_pinyin=false 覆盖了系统层的 true）；
     // - ②(b) 落空：前 4 码 "youy" = you + 残尾 y，不是完整音节（syllables=2 使
     //   completed_syllable_count != 1）；
@@ -877,9 +853,8 @@ fn topcode_pinyin_only_overflow_protects_youyoud() {
 
 #[test]
 fn topcode_allowed_when_overflow_has_no_pinyin() {
-    // ⓪ 开但整串**无**拼音候选（纯五笔溢出）→ 必须放行顶码。
-    // 一刀切禁顶会让用户卡死：convert_overflow 此时只查拼音，同样交不出候选，
-    // 那串既不上屏也没候选，没有出口。
+    // ⓪ 开但整串无拼音候选（纯五笔溢出）→ 必须放行顶码。一刀切禁顶会让用户卡死：
+    // convert_overflow 此时只查拼音，同样交不出候选，那串既不上屏也没候选。
     let primary = ct_engine_topcode(&[("aaaa", "工", 100)]);
     let e = MixedEngine::new(
         primary,
@@ -926,10 +901,9 @@ fn topcode_override_beats_pinyin_only_overflow() {
 
 // ── ③ auto_commit_block_on_english：有英文候选时顶码不得抢 ──
 
-/// 真机场景：`gith` 在五笔主码表是「不算」，英文词库有 GitHub。打 github 到第 5 键 `u`
-/// 时缓冲 `githu` 超 4 码，旧实现顶出「不算」+ 余码 `u`。
-/// **secondary=None 是刻意的**：一并锁住「③ 必须在 `Some(sec)` 块之外」——英文守护与
-/// 拼音子引擎无关，纯码表 + 英文的混输同样该生效。
+/// `gith` 在五笔主码表是「不算」，英文词库有 GitHub：打到第 5 键 `u` 时缓冲 `githu` 超 4 码，
+/// 不得顶出「不算」+ 余码 `u`。secondary=None 是刻意的：一并锁住「③ 必须在 `Some(sec)` 块
+/// 之外」——英文守护与拼音子引擎无关，纯码表 + 英文的混输同样该生效。
 #[test]
 fn topcode_vetoed_by_english_candidate() {
     let primary = ct_engine_topcode(&[("gith", "不算", 1822)]);
@@ -1128,13 +1102,11 @@ fn english_engine(entries: &[(&str, &str, i32)]) -> Arc<dyn Engine> {
 #[test]
 fn mixed_mixes_english_when_enabled() {
     // enable_english（english=Some）：混输主路径应混入英文词库候选。
-    // ⚠️ 判据是**精确命中**——显示侧走 `english_for_display`，前缀扩展不入列
-    // （见该函数文档）。此前本用例打 `hel` 期望出 `hello`，那是收窄前的行为。
-    // ⚠️ 词必须 ≤ 4 字符：`ct_engine` 的 max_code_length=4，更长的输入走
-    // `convert_overflow`，而该分支在 `secondary=None`（本用例无拼音子引擎）时直接
-    // 早退只查码表，英文根本不参与——那样测的就不是本用例要测的东西了。
-    // 码表侧给 `help` / `hel` 都备好中文候选：中文侧为空时英文改给前缀补全（见
-    // `english_merge::select`），那是另一条路，不是本用例要测的。
+    // 判据是精确命中：显示侧走 `english_for_display`，前缀扩展不入列。
+    // 词必须 ≤ 4 字符：`ct_engine` 的 max_code_length=4，更长的输入走 `convert_overflow`，
+    // 而它在 `secondary=None` 时早退只查码表，英文不参与。
+    // 码表侧给 `help` / `hel` 都备好中文候选：中文侧为空时英文改给前缀补全
+    // （见 `english_merge::select`），那是另一条路。
     let primary = ct_engine(&[("hao", "好", 100), ("help", "帮", 100)], false);
     let english = english_engine(&[("help", "help", 50), ("helpful", "helpful", 40)]);
     let e = MixedEngine::new(
@@ -1164,7 +1136,7 @@ fn mixed_mixes_english_when_enabled() {
         "同一次查询里的前缀扩展 helpful 不得入列"
     );
 
-    // ★ 前缀扩展不入列：打 `hel` 一条英文都不该有。
+    // 前缀扩展不入列：打 `hel` 一条英文都不该有。
     let r_prefix = e.convert("hel", 50).unwrap();
     assert!(
         !r_prefix
@@ -1203,10 +1175,7 @@ fn mixed_no_english_when_disabled() {
 #[test]
 fn mixed_english_respects_min_length() {
     // min_english_length=3：2 字符以内不查英文，3 字符起才混入。
-    //
-    // ★ 短词 `he` 在词库里是**精确命中**，却仍须被长度闸门挡掉——这样测的才是长度闸门
-    // 本身。收窄前用的是「`he` 无精确命中、`hel` 前缀命中 hello」，长度闸门与精确性
-    // 两个判据混在一起，闸门失效也测不出来。
+    // 短词 `he` 在词库里是精确命中，却仍须被长度闸门挡掉，这样测的才是闸门本身。
     // 码表侧 `he` / `hel` 都有中文候选：中文侧为空时长度门槛另按 2 放宽（前缀补全那条路）。
     let primary = ct_engine(&[("x", "叉", 100), ("hela", "乐", 100)], false);
     let english = english_engine(&[("he", "he", 60), ("hel", "hel", 50)]);
@@ -1426,8 +1395,8 @@ fn wildcard_merges_literal_mixed_with_primary_pattern() {
     );
 }
 
-/// ★ Review Focus 1：码表之间按 (text, code) 去重（同字不同码各留），拼音与**任一**
-/// 码表候选同字即丢——包括与排在字面之后的通配**更长**补全同字。
+/// 码表之间按 (text, code) 去重（同字不同码各留），拼音与任一码表候选同字即丢——包括与
+/// 排在字面之后的通配更长补全同字。
 #[test]
 fn wildcard_merge_drops_pinyin_same_text_keeps_codetable_codes() {
     let e = mixed_wc(
@@ -1460,7 +1429,7 @@ fn wildcard_merge_drops_pinyin_same_text_keeps_codetable_codes() {
     );
 }
 
-/// ★ Review Focus 3：通配结果全排在字面之前，截断后拼音仍有保底席位。
+/// 通配结果全排在字面之前，截断后拼音仍有保底席位。
 #[test]
 fn wildcard_merge_keeps_pinyin_quota() {
     let e = mixed_wc(

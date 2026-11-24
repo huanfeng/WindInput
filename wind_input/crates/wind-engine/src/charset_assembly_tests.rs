@@ -10,12 +10,10 @@ fn charset_banner_matches_store_backfill() {
     );
 }
 
-/// 造合并结果：先垫两个**模拟出厂的区块类**，再叠加测试自己那份。
+/// 造合并结果：先垫两个模拟出厂的区块类，再叠加测试自己那份。
 ///
-/// ⚠️ 区块类已经全部搬进 `data/charsets/blocks.yaml`，代码里不再有内置清单
-/// （那正是本轮改造要消灭的形态）。单元测试不读那个文件——要它就得依赖仓库布局，
-/// 而这些用例测的是「叠加」这件事本身，不是块表的内容。真实出厂文件由
-/// `tests/charset_factory_assembly.rs` 验。
+/// 区块类在 `data/charsets/blocks.yaml`，单元测试不读它（测的是「叠加」本身，不是块表内容）；
+/// 真实出厂文件由 `tests/charset_factory_assembly.rs` 验。
 fn merged(text: &str) -> BTreeMap<String, MergedClass> {
     let mut m = BTreeMap::new();
     for stub in [
@@ -49,10 +47,8 @@ fn no_config_means_no_opinion() {
     }
 }
 
-/// ★★ 给内置块配一条属性时，块的 `ranges` 必须留着——这是「叠加而非替换」那条。
-///
-/// 替换语义下这个类会没有 `ranges`、一个字符都命中不了，而用户看到的是
-/// 「我配了 no_freq，没反应」。
+/// 给内置块配一条属性时，块的 `ranges` 必须留着（叠加而非替换）；替换语义下这个类一个
+/// 字符都命中不了，用户看到的是「配了 no_freq 没反应」。
 #[test]
 fn overlaying_a_builtin_block_keeps_its_ranges() {
     let defs = merged("---\nkey: 表情符号\nno_freq: true\n");
@@ -81,10 +77,8 @@ fn a_custom_class_is_created_with_default_order() {
     assert_eq!(reg.verdict_of("☀"), Some(false));
 }
 
-/// ★ 自定义类的 `order`（缺省 100）比内置块类（900）靠前 ⇒ 它表的态说了算。
-///
-/// 反过来的话，用户新建一个类怎么配都不会生效——而内置块类全都不表态，
-/// 这种「被不表态的类挡住」是最难查的一种没反应。
+/// 自定义类的 `order`（缺省 100）比内置块类（900）靠前 ⇒ 它表的态说了算。
+/// 反过来的话用户新建的类会被不表态的内置块类挡住，怎么配都不生效。
 #[test]
 fn a_custom_class_outranks_the_builtin_blocks() {
     let defs = merged("---\nkey: mine\nranges:\n  - U+4E00-U+4EFF\ndefault: rare\n");
@@ -106,10 +100,8 @@ fn removal_beats_a_builtin_range() {
     assert!(reg.no_freq("😁"), "同块的其余字符不受影响");
 }
 
-/// ★★ 字表读不到时，「域内名单外 ⇒ 生僻」这一半必须**撤销**，不能拿空名单去判。
-///
-/// 没有这条防线，`common_chars.txt` 一旦读不到，每个汉字都落进「域内、名单外」
-/// ⇒ 全部判生僻 ⇒ 用户候选被过滤到几乎不剩，而只有一条 warn。
+/// 字表读不到时，「域内名单外 ⇒ 生僻」这一半必须撤销，不能拿空名单去判；否则每个汉字都
+/// 判生僻，候选被过滤到几乎不剩，而只有一条 warn。
 #[test]
 fn a_scoped_class_without_members_gives_up_its_verdict() {
     let defs = merged(concat!(
@@ -205,12 +197,10 @@ fn apply_covers_every_field() {
 
 /// 外部字表的行尾不挑食。
 ///
-/// 这是 `CommonChars::load` **同一种文件的第二条路径**（`file:` 存在的理由就是
-/// 兼容 `schemas/common_chars.txt`）。cb70b849 修了前者却漏了这里——带 `#` 注释
-/// 头的 CR 文件会被整份当成一条注释，一个成员都收不到，而上面那句注释写的
-/// 「全程无报错」正是这个症状。
-///
-/// ⚠️ 样本在代码里构造，不要改用仓库 fixture（git core.autocrlf 会按平台改行尾）。
+/// 这是 `CommonChars::load` 同一种文件的第二条路径（`file:` 存在的理由就是兼容
+/// `schemas/common_chars.txt`），两处都得认孤立 `\r`：带 `#` 注释头的 CR 文件会被整份
+/// 当成一条注释，一个成员都收不到且无报错。
+/// 样本在代码里构造，不要改用仓库 fixture（git core.autocrlf 会按平台改行尾）。
 #[test]
 fn member_file_line_endings_do_not_change_the_result() {
     let dir = std::env::temp_dir().join(format!("wind-memberfile-eol-{}", std::process::id()));

@@ -21,15 +21,12 @@ fn temp_dir(tag: &str) -> PathBuf {
 /// 把 `path` 的 mtime 拨回 `before` 那一刻，并断言「大小 + mtime」与之逐字段相同。
 ///
 /// 「重建前后 stamp 恰好一致」在生产上是时序赌局（同一 mtime 刻度内完成两次写入），
-/// 让测试去赌就会得到假绿——曾实证：`note_replaced` 注释掉后三条测试照样全过。
-/// 这里把赌局改成前提：拨回 mtime，并当场校验前提确已成立（大小若变了就直接报错，
-/// 免得测试悄悄退化成「在测 stamp 判据还灵不灵」）。
+/// 让测试去赌会假绿（`note_replaced` 注释掉照样全过）。这里把它变成前提并当场校验，
+/// 大小若变了直接报错，免得测试退化成在测 stamp 判据。
 ///
-/// ⚠️ 这几条测试守的是 Windows 语义（被 mmap 的文件照样能被 rename 覆盖），而本函数
-/// 要对一个**正被 mmap 的文件**再开一个写句柄去 `SetFileTime`。理论上不冲突
-/// （std 开文件带 `FILE_SHARE_WRITE`，section 不挡写句柄，改的又只是元数据），
-/// Linux 上实测全绿，但尚无 Windows 运行证据——Windows 上若在此处失败，是夹具的
-/// 问题而非被测逻辑的问题。
+/// 这几条测试守的是 Windows 语义（被 mmap 的文件照样能被 rename 覆盖），本函数要对正被
+/// mmap 的文件再开写句柄去 `SetFileTime`。理论上不冲突（std 带 `FILE_SHARE_WRITE`，只改
+/// 元数据），但只在 Linux 上跑过；Windows 上若在此处失败，是夹具的问题而非被测逻辑的问题。
 fn force_same_stamp(path: &Path, before: &std::fs::Metadata) {
     std::fs::File::options()
         .write(true)
@@ -115,7 +112,7 @@ fn file_lock_does_not_block_different_paths() {
     done.join().expect("锁不同路径不应被阻塞");
 }
 
-/// 并发加载同一份 yaml：无论谁先建好缓存，最终所有调用方都应拿到**同一个** reader。
+/// 并发加载同一份 yaml：无论谁先建好缓存，最终所有调用方都应拿到同一个 reader。
 /// 若 single-flight 失效，多个线程会各自重建、rename 互撞，落到不同文件上。
 #[test]
 fn concurrent_load_converges_to_one_reader() {
@@ -155,27 +152,14 @@ fn concurrent_load_converges_to_one_reader() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// 与 `dropping_all_holders_releases_the_mapping` 互为反面：**持有期间**文件不可替换。
+/// 词库在仍被持有时被重建，随后的取用必须拿到新内容，不得复用陈旧 reader。
 ///
-/// 这条 OS 行为是两件事的共同依据：池存 `Weak` 而非 `Arc`（否则 reader 永久驻留，
-/// 重建永久失败），以及 `EngineManager` 里那两条「可能正被其他方案 mmap 持有」的告警
-/// ——invalidate 单个方案时，共享同一份词库的其他引擎仍持有映射，重建因此失败并降级
-/// 到临时副本。有了这个测试，那条因果链就不再是推测。
-/// 词库在**仍被持有**时被重建，随后的取用必须拿到新内容，不得复用陈旧 reader。
+/// 池化后若只按路径命中，就会把仍指向替换前数据的 reader 交出去，表现为「改了词库不生效，
+/// 重启才行」。前提（本测试同时锁定）：rename 覆盖一个正被 mmap 的文件会成功，旧 view
+/// 继续看到旧数据，所以不能指望「重建失败」来兜底。
 ///
-/// 这是本模块最容易出错的一点，也是引入池之后唯一可能造成**功能性**回归的地方：
-/// 池之前每个引擎各自 `open`，天然读到当前文件；池化后若只按路径命中，就会把仍指向
-/// 替换前数据的 reader 交出去，表现为「改了词库不生效，重启才行」。
-///
-/// 前提事实（本测试同时锁定）：Windows 上 rename 覆盖一个正被 mmap 的文件是**会成功**
-/// 的，旧 view 继续看到旧数据——所以不能指望"重建失败"来兜底。
-///
-/// # 为什么要人为把 mtime 拨回去
-///
-/// 这一条曾是**时序相关**的假绿：两次写入落在同一个 mtime 刻度内才暴露缺陷，机器慢一点
-/// 就自动变绿。变异检验实证——把 `note_replaced` 注释掉，它照样通过。所以这里不靠运气
-/// 制造「stamp 相同」，而是重建后显式把 mtime 拨回替换前的值，再断言新旧 stamp 确实
-/// 逐字段相同：判据的两个字段就此**双双失效**，只剩替换代数能救。
+/// 重建后用 `force_same_stamp` 把 mtime 拨回，让 stamp 判据的两个字段双双失效，只剩替换
+/// 代数能救；靠时序制造「stamp 相同」会假绿。
 #[test]
 fn rebuilt_file_is_not_served_from_stale_entry() {
     let dir = temp_dir("rebuild");
@@ -186,7 +170,7 @@ fn rebuilt_file_is_not_served_from_stale_entry() {
     assert_eq!(held.search("aa").len(), 1);
 
     // 持有期间重建该词库（WdatWriter 内部走 tmp + rename）。
-    // 码长与字数刻意与旧内容一致 → 文件大小不变 → 判据的「大小」一栏先失效。
+    // 码长与字数与旧内容一致 → 文件大小不变 → 判据的「大小」一栏先失效。
     let mut d = CodetableDict::empty();
     d.merge_single("bb".into(), "新".into(), 1, 0);
     let mut w = WdatWriter::new();
@@ -217,7 +201,7 @@ fn rebuilt_file_is_not_served_from_stale_entry() {
 }
 
 /// 注释库同理：`write_comment_wcmt` 也必须通知本池，否则挂载着注释库的方案重建后
-/// 仍供出旧释义。与上一条分开写，是因为三个写盘口各挂各的钩子，漏一个测不出来。
+/// 仍供出旧释义。三个写盘口各挂各的钩子，漏一个就得单独测出来。
 #[test]
 fn rebuilt_comment_dict_is_not_served_from_stale_entry() {
     let dir = temp_dir("rebuild-wcmt");

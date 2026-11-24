@@ -1,20 +1,16 @@
 //! 真实词典端到端测试
 //!
 //! 加载仓库内的真实五笔/拼音词典，验证 CachedDict → DictWriter → DictReader (mmap)
-//! 整条查询管道正确。这是 binformat entry_off 字节偏移 bug 的真实数据回归保护。
+//! 整条查询管道正确，守住 binformat `entry_off` 字节偏移这类静默错位的 bug。
 //!
 //! 测试会在词典文件存在时运行；缺失时自动跳过（CI 无数据环境）。
 
 use std::path::PathBuf;
 use wind_dict::cached::CachedDict;
 
-/// 仓库内 build_dev 数据目录。
-///
-/// ⚠️ 这里原本只写**两级** `../../build_dev/...`，解析到 `wind_input/build_dev/`——那个目录
-/// 不存在，于是本文件两个用例长期静默走「跳过」分支、计数照常绿（判据只有耗时 0.00s），
-/// 而它们守的正是 binformat `entry_off` 字节偏移那类最容易静默错位的 bug。仓库根才是
-/// `build_dev` 的位置（三级：crates/wind-dict → crates → wind_input → 仓库根）。
-/// 同款坑见 `wind-engine/tests/engine_manager.rs`，那边早已修正。两处都试，取真有数据的。
+/// 仓库内 build_dev 数据目录（仓库根，三级：crates/wind-dict → crates → wind_input → 根）。
+/// 路径写错时两个用例会静默走「跳过」分支、计数照常绿（判据只有耗时 0.00s）。
+/// 两处都试，取真有数据的。
 fn data_schemas() -> PathBuf {
     let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let root = base.join("../../../build_dev/data/schemas");
@@ -24,16 +20,12 @@ fn data_schemas() -> PathBuf {
         .unwrap_or(root)
 }
 
-/// 把词典源**拷进独占的临时目录**再返回新路径；源不存在时返回 None（调用方跳过）。
+/// 把词典源拷进独占的临时目录再返回新路径；源不存在时返回 None（调用方跳过）。
 ///
-/// ⚠️ 不能原地加载：`CachedDict::load` 在**源文件旁**重建 `.wdat` 缓存，而源在
-/// `build_dev/` 下——本仓的 worktree 里那是指向主仓的 junction。原地跑等于每次
-/// `cargo test` 都改写主仓的构建产物（这两份是 5 MB / 31 MB），与并发构建、以及正在
-/// mmap 这些文件的运行中服务互踩。本文件此前恰好因为路径写错而一直跳过，所以没炸过。
-///
-/// 目录名带 pid + 词典名：本仓常态是多 worktree / 多会话并行跑测试，同进程内两个用例
-/// 也各占一份，互不干扰。**刻意只拷 yaml、不拷 wdat**——本测试要的就是
-/// 「yaml → wdat → mmap 全路径」，缓存必须是现建的。
+/// 不能原地加载：`CachedDict::load` 在源文件旁重建 `.wdat`，而 worktree 里的 `build_dev/`
+/// 是指向主仓的链接，原地跑会改写主仓的构建产物，与并发构建、正在 mmap 它们的服务互踩。
+/// 目录名带 pid + 词典名，多 worktree / 多会话并行互不干扰。只拷 yaml、不拷 wdat：
+/// 本测试要的就是现建缓存。
 fn stage(rel: &str) -> Option<PathBuf> {
     let src = data_schemas().join(rel);
     if !src.is_file() {
@@ -58,8 +50,8 @@ fn test_real_wubi_candidates() {
 
     let dict = CachedDict::load(&path).expect("加载五笔词典");
     assert!(!dict.is_empty(), "五笔词典应非空");
-    // 缓存必须是**这次**建出来的：拷贝过来的只有 yaml，wdat 出现即证明走完了
-    // yaml → wdat → mmap 全路径（本文件守的 entry_off 回归只在这条路上成立）。
+    // 缓存必须是这次建出来的：拷贝过来的只有 yaml，wdat 出现即证明走完了
+    // yaml → wdat → mmap 全路径。
     assert!(
         dict.source_file()
             .is_some_and(|w| w.is_file() && w.parent() == path.parent()),
@@ -116,16 +108,12 @@ fn test_real_pinyin_candidates() {
     let _ = std::fs::remove_dir_all(path.parent().expect("临时目录"));
 }
 
-/// **蒙古文词条的尾随空格必须活着走完 yaml → wdat → mmap 全路径**。
+/// 蒙古文词条的尾随空格必须活着走完 yaml → wdat → mmap 全路径。
 ///
-/// 蒙文以空格作词间分隔，toli 词库（`schemas/toli/toli.dict.yaml`）37.6 万条里
-/// 99.9995% 以空格收尾。它声明 `columns: [code, text, weight]` 而正文只有两列，
-/// text 正好落在**末列**——从前 `parse_rime_line` 先整行 `trim_end` 再切列，
-/// 那段空格被当排版噪声剥掉，连续上屏的词会粘成一坨。
-///
-/// 这里不引真词库（16 MB，且不在仓内），而是照它的形态自造：同样的 `columns:` 声明、
-/// 同样的两列、同样的 PUA 码位 + 内部空格 + 尾随空格。**走 CachedDict 是关键**——
-/// 解析层修对了而缓存层再吃掉，症状只在第二次启动（命中缓存）时复现，最难排查。
+/// 蒙文以空格作词间分隔，toli 词库几乎全部词条以空格收尾，且声明三列、正文两列，text 落在
+/// 末列，整行 `trim_end` 会让连续上屏的词粘在一起。这里照其形态自造（同样的 `columns:`
+/// 声明、两列、PUA 码位 + 内部空格 + 尾随空格）。必须走 CachedDict：缓存层吃掉空格的话
+/// 症状只在命中缓存时出现。
 #[test]
 fn test_mongolian_trailing_space_survives_cache_pipeline() {
     let dir = std::env::temp_dir().join(format!("wind-toli-{}", std::process::id()));

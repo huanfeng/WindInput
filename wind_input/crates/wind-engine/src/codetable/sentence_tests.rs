@@ -4,9 +4,8 @@ use wind_dict::layer::{DictLayer, LayerType};
 
 /// 最小内存词库层：直接持 `(code, text, weight)` 列表。
 ///
-/// 不用真实 wdat：本模块的判据全在「码长关系 + 权重量纲」上，
-/// 手写词条才能把一简/二简/全码的**结构**摆到台面上，
-/// 真实词库反而会把判据淹没在 8.8 万条噪声里（且 worktree 未必有 build_dev/data）。
+/// 本模块的判据全在「码长关系 + 权重量纲」上，手写词条才能把一简/二简/全码的结构摆清楚；
+/// 真实词库会把判据淹没在噪声里（且 worktree 未必有 build_dev/data）。
 struct MemLayer(Vec<(String, String, i32)>);
 
 impl MemLayer {
@@ -67,7 +66,7 @@ impl DictLayer for MemLayer {
 }
 
 /// 五笔结构的缩微模型：一简 / 二简 / 三简 / 3 码全码 / 4 码全码 / 4 码词组俱全，
-/// 且**权重照抄极点词库的层级带**（简码 9999/9950/9000，全码带百位）。
+/// 权重照抄极点词库的层级带（简码 9999/9950/9000，全码带百位）。
 fn dm() -> DictManager {
     let dm = DictManager::new();
     dm.register_layer(Box::new(MemLayer::new(&[
@@ -117,8 +116,7 @@ fn short_code_index_marks_only_short_entries() {
     assert_eq!(idx.resolve("aaa", "工", 9000), (800, true));
     // 4 码全码不是简码，权重原样。
     assert_eq!(idx.resolve("aaaa", "工", 800), (800, false));
-    // ★ 3 码全码「皮 hci」**不是**简码——它没有更长的码。
-    //   这条是「整句只认 4 码单元」那条捷径走不通的判据现场。
+    // 3 码全码「皮 hci」不是简码——它没有更长的码，所以「整句只认 4 码单元」走不通。
     assert_eq!(idx.resolve("hci", "皮", 1200), (1200, false));
     // 词组不是简码。
     assert_eq!(idx.resolve("aawt", "工作", 1241), (1241, false));
@@ -127,18 +125,14 @@ fn short_code_index_marks_only_short_entries() {
     assert_eq!(idx.resolve("aa", "式", 9950), (500, true));
 
     // 进表的恰是简码那几条：a/g/d/w 四个一简 + aa/wt 两个二简 + aaa 一个三简。
-    //
-    // ⚠️ 这个数字是**夹具结构的函数**，不是随手写的常量：改夹具必须回头核对。
-    // 首次写成 7 时夹具里的二简还没配全码 —— 它们那时其实是「二简位上的全码字」，
-    // 索引不收是对的，错的是断言。数字对不上时先问夹具对不对。
+    // 这个数字是夹具结构的函数（二简得配了全码才算简码），改夹具必须回头核对。
     assert_eq!(idx.len(), 7, "简码条目数");
 }
 
 #[test]
 fn sentence_prefers_word_over_short_code_chain() {
     // `aawt` 整串就是「工作」一个词 ⇒ 按约定不产整句（交给精确匹配路径）。
-    // 这里验证的是**更长的串**里，词边能赢过简码链：
-    // `aawtaawt` 应解成「工作工作」而不是「工工何…」之类的简码碎片。
+    // 这里验证更长的串里词边能赢过简码链：`aawtaawt` 应解成「工作工作」而不是简码碎片。
     let dm = dm();
     let r = decoder().decode("aawtaawt", &dm).expect("应有整串解");
     assert_eq!(r.text, "工作工作");
@@ -163,10 +157,9 @@ fn single_word_solution_is_rejected() {
 
 /// 特殊语法词条（`$CC` 命令 / `{..}` 模板）不进整句 lattice。
 ///
-/// 它们要到协调器 `finalize_candidates` 才展开，且只认「整条候选即命令」的锚定，
-/// 拼进整句就是把源码当文本显示/上屏（AtomGit#1「整句模式中出现直通内容」：
-/// `niys'oix` → 「你用$CC(\"[查]：{last(1)}\",…」）。与逆切分 `split_segment` 同判据
-/// 同命运：剔光的段视同无码 ⇒ 含该段的整句解不存在。
+/// 它们要到协调器 `finalize_candidates` 才展开，且只认「整条候选即命令」，拼进整句就是把
+/// 源码当文本显示/上屏。与逆切分 `split_segment` 同判据：剔光的段视同无码 ⇒ 含该段的
+/// 整句解不存在。
 #[test]
 fn direct_command_entry_never_enters_sentence_lattice() {
     let dm = DictManager::new();
@@ -184,8 +177,7 @@ fn direct_command_entry_never_enters_sentence_lattice() {
     assert_eq!(r.text, "你用偶", "直通源码须让位给正常词条");
     assert_eq!(r.words, vec!["你用", "偶"]);
 
-    // 对照组：段码**只有**直通词条时，整段视同无码 ⇒ 覆盖整串的解不存在 ⇒ 不产整句
-    // （不再是「显示源码」，也轮不到「把动作拼进文本上屏」——动作不在整句文本域）。
+    // 对照组：段码只有直通词条时，整段视同无码 ⇒ 覆盖整串的解不存在 ⇒ 不产整句。
     let dm2 = DictManager::new();
     dm2.register_layer(Box::new(MemLayer::new(&[
         ("niys", "你用", 900),
@@ -233,10 +225,8 @@ fn plain_type_entry_joins_sentence_with_typed_text() {
 #[test]
 fn unreachable_input_yields_none() {
     // 尾部 `z` 无任何词条 ⇒ 没有覆盖整串的路径 ⇒ 不产整句。
-    //
-    // ⚠️ 这条测的是 `log_prob.is_finite()` 而非 `words.is_empty()`：
-    // decode 在 dp[len] 不可达时会「从最远可达位置回溯」并返回一条**部分路径**，
-    // 只看 words 非空会误判为有解。
+    // 测 `log_prob.is_finite()` 而非 `words.is_empty()`：dp[len] 不可达时 decode 会从最远
+    // 可达位置回溯并返回一条部分路径。
     let dm = dm();
     assert!(decoder().decode("aawtz", &dm).is_none());
 }
@@ -261,11 +251,9 @@ fn tail_short_code_is_penalized_less_than_middle() {
 
 #[test]
 fn same_span_prefers_frequency_not_word_length() {
-    // ★ 同跨度下**纯按词频**，不因「是词组」而偏好 —— 这条锁住的是实测推翻拼音
-    //   多字词加成的那次改动（见 `score_code_node` 文档 ①）。
-    //
-    //   现场就是真实词库里的 `ggll`：单字「一」与四字词「来来回回」同码同跨度，
-    //   「一」词频更高。加回 `+3.0×√字数` 的加成后「来来回回」会赢，本测试会红。
+    // 同跨度下纯按词频，不因「是词组」而偏好（见 `score_code_node` 文档 ①）。
+    // 形如真实词库的 `ggll`：单字「一」与四字词「来来回回」同码同跨度，「一」词频更高；
+    // 加回多字词加成的话「来来回回」会赢，本测试会红。
     let dm = DictManager::new();
     dm.register_layer(Box::new(MemLayer::new(&[
         ("g", "一", 9999),
@@ -283,21 +271,19 @@ fn same_span_prefers_frequency_not_word_length() {
 
 #[test]
 fn pinyin_freq_overrides_codetable_weight_bands() {
-    // ★★ 词频来源的核心行为：接上拼音词库后，**完全不看码表 weight**。
+    // 词频来源的核心行为：接上拼音词库后完全不看码表 weight。
     //
-    //   夹具让同一条边（`wh`）上两个字对抗，两套权重给出**相反**的结论：
-    //   - 码表 weight：「丁」9950（简码带）vs「个」100（普通带）⇒ 丁赢
-    //   - 真实词频：  「个」215733       vs「丁」1000        ⇒ 个赢
-    //
-    //   必须同码同跨度才构成竞争 —— 首版拿「个 wh」对「修 wht」，跨度不同、
-    //   压根不在一条边上，测的其实是「哪条路径走得通」。
+    // 同一条边（`wh`）上两个字对抗，两套权重给出相反结论：
+    // - 码表 weight：「丁」9950（简码带）vs「个」100（普通带）⇒ 丁赢
+    // - 真实词频：  「个」215733       vs「丁」1000        ⇒ 个赢
+    // 必须同码同跨度才构成竞争，跨度不同就不在一条边上，测的只是哪条路径走得通。
     let entries: &[(&str, &str, i32)] =
         &[("wh", "丁", 9950), ("wh", "个", 100), ("hci", "皮", 1200)];
     let dm = DictManager::new();
     dm.register_layer(Box::new(MemLayer::new(entries)));
 
-    // 「拼音词库」：只需是一份带真实词频的 (code,text,weight) 表，码是什么无所谓
-    //  —— `SentenceFreq` 按 **text** 查，不碰码。
+    // 「拼音词库」：只需是一份带真实词频的 (code,text,weight) 表，码是什么无所谓——
+    // `SentenceFreq` 按 text 查，不碰码。
     let py = || {
         CachedDict::Memory({
             let mut d = wind_dict::codetable::CodetableDict::empty();
@@ -312,9 +298,8 @@ fn pinyin_freq_overrides_codetable_weight_bands() {
     let r = with_freq.decode("whhci", &dm).expect("应有整串解");
     assert_eq!(r.words, vec!["个", "皮"], "接上真实词频后应按词频选「个」");
 
-    // 对照：退化路径（无拼音词库）被权重带带偏，选「丁」。
-    // 这条**不是**在锁定错误行为，而是标明「没有词频来源时准确率确实会掉」，
-    // 免得日后有人以为退化路径同样可靠。
+    // 对照：退化路径（无拼音词库）被权重带带偏，选「丁」。不是锁定错误行为，而是标明
+    // 没有词频来源时准确率确实会掉。
     let r2 = decoder().decode("whhci", &dm).expect("应有整串解");
     assert_eq!(
         r2.words,
@@ -336,14 +321,14 @@ fn sentence_freq_falls_back_to_oov_for_missing_text() {
     });
     let f = SentenceFreq::build(&dm, &py);
     assert_eq!(f.get("兲"), OOV_FREQ, "码表有、拼音库无 ⇒ 兜底为罕见");
-    // ★ 只留交集：拼音库里的「的」不在码表里，不该进表（内存 20MB→3MB 的由来）。
+    // 只留交集：拼音库里的「的」不在码表里，不该进表（控制内存）。
     assert_eq!(f.len(), 0, "只保留码表里出现过的 text");
 }
 
 #[test]
 fn split_code_marks_engine_chosen_boundaries() {
-    // 切分串必须来自 Viterbi **实际走的**那条路径（boundary），不是按词长重猜——
-    // 同一串码可有多种切法，谎报切分正是拼音侧记过一次的教训。
+    // 切分串必须来自 Viterbi 实际走的那条路径（boundary），不是按词长重猜——
+    // 同一串码可有多种切法。
     let dm = dm();
     let r = decoder().decode("aawtaawt", &dm).expect("应有整串解");
     assert_eq!(r.split_code("aawtaawt"), "aawt@aawt".replace('@', SEP));
@@ -351,9 +336,8 @@ fn split_code_marks_engine_chosen_boundaries() {
 
 #[test]
 fn manual_separator_splits_into_segments() {
-    // ★ 手动分隔符：每段独立解码。`aa` + `wt` 各是一个二简字，
-    //   **段内各只有一个词** —— 首版把「至少两个词」判在段级，这种最典型的
-    //   分隔符用法会被整个否掉。判据必须是整体词数。
+    // 手动分隔符：每段独立解码。`aa` + `wt` 各是一个二简字、段内各只有一个词，
+    // 所以「至少两个词」必须按整体词数判，不能判在段级。
     let dm = dm();
     let input = format!("aa{SEP}wt");
     let r = decoder().decode(&input, &dm).expect("分段应能解出");
@@ -364,7 +348,7 @@ fn manual_separator_splits_into_segments() {
 
 #[test]
 fn manual_separator_overrides_greedy_split() {
-    // 分隔符的**用途**：把本该被贪心切走的串掰开。
+    // 分隔符的用途：把本该被贪心切走的串掰开。
     // `aawt` 整串是词「工作」，加了分隔符后强制读成两个二简字。
     let dm = dm();
     let joined = decoder().decode("aawtaawt", &dm).expect("应有解");
@@ -431,7 +415,7 @@ const CHARS: [(&str, i32); 5] = [
 
 #[test]
 fn composes_lexicon_word_across_char_units() {
-    // ★ 词典组词的核心行为：码表里没有「甲乙」，逐字打出来也要认得它是个词。
+    // 词典组词的核心行为：码表里没有「甲乙」，逐字打出来也要认得它是个词。
     let dm = compose_dm();
     let with_word = [&CHARS[..], &[("甲乙", 500_000)]].concat();
     let r = decoder()
@@ -439,7 +423,7 @@ fn composes_lexicon_word_across_char_units() {
         .decode("aabbcc", &dm)
         .expect("应有整串解");
     assert_eq!(r.words, vec!["甲乙", "丙"]);
-    // 组出的词在组合区仍按**编码单元**切分：用户打的是三个码，不是两个。
+    // 组出的词在组合区仍按编码单元切分：用户打的是三个码，不是两个。
     assert_eq!(r.split_code("aabbcc"), "aa@bb@cc".replace('@', SEP));
 
     // 对照：拼音库里没有这个词 ⇒ 不组词，每边罚让 2 条边的切法赢。
@@ -454,7 +438,7 @@ fn composes_lexicon_word_across_char_units() {
 #[test]
 fn composed_word_may_cover_whole_input() {
     // 超码长时一个词覆盖整串也要放行：它只能是组词边，精确路径产不出来，
-    // 照「排除单词解」的老规矩就是把这条候选整个弄丢（逐字打「喃喃自语」的实测现场）。
+    // 「排除单词解」会把这条候选整个弄丢（如逐字打「喃喃自语」）。
     let dm = compose_dm();
     let with_word = [&CHARS[..], &[("甲乙丙", 500_000)]].concat();
     let r = decoder()
@@ -516,10 +500,8 @@ impl DictLayer for UserLayer {
 
 #[test]
 fn user_word_missing_from_lexicon_gets_floor_frequency() {
-    // 用户造的词（人名、新词）多半不在拼音库里。按「罕见」计价，它在整句里永远输给
-    // 逐字拆开；给它组词表的入表门槛作下限，才能赢回来。
-    //
-    // 竞争者：`xxyy` 也能切成两个高频字「子」+「丑」。
+    // 用户造的词（人名、新词）多半不在拼音库里，按「罕见」计价永远输给逐字拆开；
+    // 给它组词表的入表门槛作下限才能赢回来。竞争者：`xxyy` 也能切成高频字「子」+「丑」。
     let entries: &[(&str, &str, i32)] = &[("xx", "子", 500), ("yy", "丑", 500), ("zz", "寅", 500)];
     let py = pinyin_dict(&[
         ("子", 100_000),
