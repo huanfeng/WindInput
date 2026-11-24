@@ -1,11 +1,8 @@
 use super::*;
 use std::collections::BTreeSet;
 
-/// 注册表里的值域与 `NewlineStyle` 的变体集是两处独立事实。
-///
-/// 不一致的后果有先例：值域不受约束时，设置端 manifest 抄错了选项，用户选的那一档
-/// 被静默当成另一档，界面与行为不一致且没有任何测试拦得住（见
-/// `EMPTY_CODE_BEHAVIOR_VALUES` 的注释）。
+/// 注册表里的值域与 `NewlineStyle` 的变体集是两处独立事实，必须一致；
+/// 否则设置端选的一档会被静默当成另一档（同 `EMPTY_CODE_BEHAVIOR_VALUES`）。
 #[test]
 fn newline_style_values_match_enum() {
     use crate::app_compat::NewlineStyle;
@@ -29,12 +26,10 @@ fn newline_style_values_match_enum() {
     }
 }
 
-/// 跨仓契约：`Float` 键必须吃得下 **TOML 整数**。
+/// 跨仓契约：`Float` 键必须吃得下 TOML 整数。
 ///
-/// wind-setting 的 number 控件写回时会做 `if v.fract() == 0.0 { Value::from(v as i64) }`
-/// ——用户在设置页把半衰期填 `72`，落到 config.toml 里就是整数 `72` 而非 `72.0`。
-/// 而 core 侧这些字段是 `f64`。两边隔着一个进程和一次文件往返，**没有任何编译期约束**
-/// 能发现不匹配；真出问题的表现是「设置页填了值，重启后回到默认」这种最难查的静默失效。
+/// wind-setting 写回整数值的浮点时会落成 `72` 而非 `72.0`，两边没有编译期约束；
+/// 不匹配的表现是「设置页填了值，重启后回到默认」的静默失效。
 #[test]
 fn float_fields_accept_integer_toml_values() {
     use crate::config::{CodetableFrequency, PinyinFrequency};
@@ -50,14 +45,10 @@ fn float_fields_accept_integer_toml_values() {
 }
 
 /// L1↔L2 同源：`ui.toolbar.items` 的出厂值在 Rust 默认值与 `data/config.toml` 里
-/// 必须逐项相同（`config-design-rules.md` §R4）。
+/// 必须逐项相同（`config-design-rules.md` §R4）。顺序即渲染顺序，所以不能只比集合。
 ///
-/// 这个键的顺序**有语义**（数组顺序即工具栏渲染顺序），所以不能只比集合。两侧任一
-/// 处改了顺序或成员而另一处没跟，新装用户与老用户看到的工具栏就不一样——而这种
-/// 差异不会有任何其它测试报出来。
-///
-/// 放在本 crate 是因为**只有这里读得到 L2**（`data_config_toml()`）；协调器侧那条
-/// 同名意图的测试只能覆盖 L1，两条不重复。
+/// 放在本 crate 是因为只有这里读得到 L2（`data_config_toml()`）；协调器侧同名意图的
+/// 测试只覆盖 L1。
 #[test]
 fn toolbar_items_l1_matches_l2() {
     let l1 = crate::Config::default().ui.toolbar.items;
@@ -71,11 +62,8 @@ fn toolbar_items_l1_matches_l2() {
         .map(|v| v.as_str().expect("items 元素须为字符串").to_string())
         .collect();
     assert_eq!(l1, l2, "ui.toolbar.items 的 L1 默认值与 L2 出厂文件不一致");
-    // 两侧都必须是登记过的键，否则出厂配置里就躺着一个会被解析跳过的条目。
-    //
-    // ⚠️ 先剥 `-` 前缀：那是**值域自带的语法**（「在这个位置，但不显示」），出厂
-    // 的 `-s2t` 是合法条目而非拼错。按裸键名比会把它判成未登记——测试红了却指向
-    // 一个不存在的问题，而真正的拼错（`-punkt`）照样被这条拦下。
+    // 两侧都必须是登记过的键。先剥 `-` 前缀：那是值域自带的语法（「在这个位置但不显示」），
+    // 出厂的 `-s2t` 是合法条目，按裸键名比会误报。
     for k in &l2 {
         let key = k.strip_prefix('-').unwrap_or(k);
         assert!(
@@ -86,10 +74,8 @@ fn toolbar_items_l1_matches_l2() {
 }
 
 /// L1↔L2 同源：`ui.tooltip.sections` 的出厂段列表在 Rust 默认值与 `data/config.toml` 里
-/// 必须逐段、逐字段相同（`config-design-rules.md` §R4）。
-///
-/// 数组在预置文件里是**整体覆盖**：L2 少写一段 = 成品里没有那一段，改了模板而 L1 没跟 =
-/// 「恢复默认」与新装用户看到的不是同一份气泡。两种都不会有别的测试报出来。
+/// 必须逐段、逐字段相同（`config-design-rules.md` §R4）。数组在预置文件里是整体覆盖，
+/// 不一致即「恢复默认」与新装用户看到的气泡不同。
 #[test]
 fn tooltip_sections_l1_matches_l2() {
     let l1 = crate::Config::default().ui.tooltip.sections;
@@ -187,14 +173,11 @@ fn dict_cache_policy_l1_matches_l2() {
     assert_eq!(l2, l1);
 }
 
-/// 解析仓库内系统预置 `data/config.toml`。
-/// ★★★ 出厂 `keys.key_actions` 里的动词必须真的编译得进热键表。
+/// 出厂 `keys.key_actions` 里的动词必须真的编译得进热键表。
 ///
-/// 动词值域散在**三处**：`BoundAction::parse`（引导键链 / 方案级表）、
-/// `hotkey::hotkey_action_entry`（组合键白名单）、协调器的分派臂。只加第一处的症状是
-/// ——出厂热键按下去什么都不发生，与「这个键根本没绑」完全同形，唯一线索是日志里
-/// 一行 `组合键不支持动词 ... 忽略`。软键盘的 `ctrl+shift+k` 就是这么漏的，
-/// 部署到真机翻日志才发现。
+/// 动词值域散在三处：`BoundAction::parse`、`hotkey::hotkey_action_entry`（组合键白名单）、
+/// 协调器的分派臂。只加第一处时出厂热键按下无反应，与「没绑」同形，只在日志留一行
+/// `组合键不支持动词 ... 忽略`。
 #[test]
 fn factory_combo_key_actions_are_accepted_by_the_hotkey_compiler() {
     let Some(actions) = data_config_toml()
@@ -223,14 +206,9 @@ fn factory_combo_key_actions_are_accepted_by_the_hotkey_compiler() {
 
 /// 出厂 `[keys]` 段里的热键串必须真的解析得动。
 ///
-/// L2 覆盖 L1，写错一个字（`Ctrl-Shift-K`、`ctrl-shift-k`）的表现是**静默失效**：
-/// `parse_hotkey` 返回 `None` ⇒ 那条不进热键表 ⇒ 与「这个键根本没绑」完全同形，
-/// 日志里一个字都没有。软键盘的出厂绑定从 `key_actions` 挪进 `keys.softkeyboard`
-/// 时补的这道闸——那次挪动的全部意义就是让这条绑定生效且可关，写错即两头落空。
-///
-/// ★ 判据自动排除模板与非热键串，**不用手写清单**：L1 默认值解析得动的字段，L2 那份
-/// 也必须解析得动。`pin_candidate = "ctrl+number"` 这类模板在 L1 就解析不动，自动跳过；
-/// 将来往 `[keys]` 加新的热键字段也自动纳入。
+/// 写错一个字时 `parse_hotkey` 返回 `None`，那条静默不进热键表，日志无任何痕迹。
+/// 判据自动排除模板与非热键串：L1 默认值解析得动的字段，L2 也必须解析得动
+/// （`pin_candidate = "ctrl+number"` 这类模板在 L1 就解析不动，自动跳过），新字段自动纳入。
 #[test]
 fn factory_keys_hotkeys_are_parsable() {
     let l1 = toml::Value::try_from(Config::default()).expect("默认配置应可序列化");
@@ -263,6 +241,7 @@ fn factory_keys_hotkeys_are_parsable() {
     );
 }
 
+/// 解析仓库内系统预置 `data/config.toml`。
 fn data_config_toml() -> toml::Value {
     // CARGO_MANIFEST_DIR = <repo>/wind_input/crates/wind-config
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../data/config.toml");
@@ -351,23 +330,15 @@ fn registry_covers_every_config_key() {
 
 /// 刻意不写进 `data/config.toml` 的键（配套 [`data_config_toml_covers_registry`]）。
 ///
-/// 二者均为**结构体数组**（`StructList`）。本文件写出的数组是整体覆盖而非合并，
-/// 一旦列进预置文件就会把当时的定义冻结成快照，日后改代码侧默认值全被静默遮蔽。
-/// 故其真相源留在 `config.rs` 的 `Default`，预置文件只在注释里说明。
-///
-/// **加条目前请三思**：豁免一个键 = 它的默认值从此不在说明书里，
-/// 只有「写进去会造成实际危害」才够格，「懒得写」不够格。
+/// 二者均为结构体数组（`StructList`），写进预置文件会整体覆盖、把当时的定义冻结成快照，
+/// 日后改代码侧默认值全被静默遮蔽；故真相源留在 `config.rs` 的 `Default`。
+/// 只有「写进去会造成实际危害」才够格加进这里。
 const ABSENT_FROM_DATA_CONFIG: &[&str] = &[
     "schema.mix_modes",
-    // 注释词库挂载列表：**出厂为空数组**（不随附任何注释词库——词典内容多有版权，
-    // 由用户自行放置）。写进预置文件除了一行 `comment_dicts = []` 没有任何信息量，
-    // 而它一旦以数组表形态出现，用户增删条目就会与预置层的整表覆盖语义纠缠。
-    // 格式与示例在文档站 customize/candidate-comment。
+    // 注释词库挂载列表：出厂为空数组（词典多有版权，由用户自行放置），写出来没有信息量，
+    // 却会与预置层的整表覆盖语义纠缠。格式见文档站 customize/candidate-comment。
     "ui.comment_dicts",
-    // 工具栏自定义按钮：同上，**出厂为空数组**。写出一行 `buttons = []` 没有信息量，
-    // 却会把空数组冻结成 L2 值；而它一旦以数组表形态出现，用户增删按钮就要与预置层
-    // 的整表覆盖语义纠缠。格式与示例写在 `[ui.toolbar]` 段的注释里（不是数组表，
-    // 只是注释），用户照抄即可。
+    // 工具栏自定义按钮：同上，出厂为空数组。格式与示例写在 `[ui.toolbar]` 段的注释里。
     "ui.toolbar.buttons",
     // 候选注释的用户模板与分配：用户结构化内容，出厂为空。出厂模板与分配放在
     // `system.comments.toml`——config.toml 的表逐键深合并，写进这里的出厂行会在用户
@@ -377,16 +348,14 @@ const ABSENT_FROM_DATA_CONFIG: &[&str] = &[
     "ui.comment.assign.type",
     "ui.comment.assign.schema",
     "ui.comment.assign.mode",
-    // 扩展列表：同上，**出厂为空数组**，条目随用户安装的扩展增减。
+    // 扩展列表：同上，出厂为空数组，条目随用户安装的扩展增减。
     "extensions.list",
 ];
 
 /// `data/config.toml` 必须显式列出注册表里的每一个键（豁免名单除外）。
 ///
-/// 与 [`data_config_toml_has_no_orphan_keys`] 互为反向：那个测试管「不许多」，
-/// 这个管「不许少」。缺了这一侧，新增配置项时漏写预置文件不会被任何测试发现——
-/// 本测试补上前，预置文件已积压 31 个缺键（模糊音 10 项、自动造词 5 项、
-/// 拼音调频衰减 3 项、截图热键、日志滚动 2 项等）。
+/// 与 [`data_config_toml_has_no_orphan_keys`] 互为反向：那个管「不许多」，这个管「不许少」；
+/// 缺了这一侧，新增配置项时漏写预置文件不会被发现。
 #[test]
 fn data_config_toml_covers_registry() {
     let toml_keys: BTreeSet<String> = leaf_keys_of(&data_config_toml()).into_iter().collect();
@@ -603,11 +572,8 @@ fn data_config_toml_values_pass_validation() {
 
 /// [`SCHEMA_OVERRIDES`] 里的每条登记都必须指到真实存在的键（或非空的段）。
 ///
-/// 这道闸拦的是**键名漂移**：全局键被改名或删掉之后，表里那条会静默失配，
-/// 设置页那一行就不再提示可被方案覆盖——而这种缺失没有任何别的东西看得见。
-///
-/// ⚠️ 它拦不住反方向（core 新增了方案级字段却没往表里加一条）：那层对应关系只存在于
-/// `resolved()` 的函数体里，类型系统与本测试都看不见。见 `SCHEMA_OVERRIDES` 的文档。
+/// 拦的是键名漂移：全局键改名或删掉后，设置页那一行静默不再提示可被方案覆盖。
+/// 拦不住反方向（core 新增方案级字段却没登记），那层对应只存在于 `resolved()` 函数体里。
 #[test]
 fn schema_overrides_point_at_real_keys() {
     for o in SCHEMA_OVERRIDES {
@@ -653,10 +619,8 @@ fn schema_override_prefix_matches_only_that_section() {
     assert!(schema_override_of("input.punct.smart_list").is_none());
 }
 
-/// 登记的段名必须是方案文件里真实存在的段——它原样进设置页提示，用户照着写。
-///
-/// 现场：`[codetable]` / `[aux_code]` 挂了很久，而这两段实际在 `[engine.*]` 下、也没有
-/// serde 别名；照提示写进方案文件的配置会被静默忽略（`Schema` 不拒未知字段）。
+/// 登记的段名必须是方案文件里真实存在的段——它原样进设置页提示，用户照着写；
+/// 写错段名的配置会被静默忽略（`Schema` 不拒未知字段）。
 #[test]
 fn schema_override_sections_exist_in_schema() {
     // 可选子段默认是 None、序列化时不出现，先填上才能在树里找到它们。
@@ -683,15 +647,13 @@ fn schema_override_sections_exist_in_schema() {
     }
 }
 
-/// 段前缀**不递归**：子段要么自己登记，要么不该被标记。
+/// 段前缀不递归：子段要么自己登记，要么不该被标记。
 ///
-/// 现场：第一版用递归前缀，`schema.codetable.auto_phrase.*` 六个键被一并标成
-/// 「可被方案覆盖」，而 `CodetableGlobal::resolved` 折叠到 `frequency` 就返回了，
-/// 根本不读 auto_phrase。标错比漏标更糟——用户会去方案里写一段不会被读的配置，
-/// 写了没反应还以为是自己写错了。
+/// 递归前缀会把 `schema.codetable.auto_phrase.*` 一并标成可覆盖，而
+/// `CodetableGlobal::resolved` 根本不读它；标错比漏标更糟，用户会写一段不会被读的配置。
 #[test]
 fn section_prefix_does_not_leak_into_subsections() {
-    // 登记了的子段：命中，且命中的是**子段那一条**（提示文案要说 [engine.codetable.frequency]）。
+    // 登记了的子段：命中，且命中的是子段那一条（提示文案要说 [engine.codetable.frequency]）。
     let hit = schema_override_of("schema.codetable.frequency.half_life")
         .expect("frequency 子段已单独登记，应命中");
     assert_eq!(hit.section, "[engine.codetable.frequency]");
@@ -707,15 +669,11 @@ fn section_prefix_does_not_leak_into_subsections() {
         );
     }
 }
-/// 写盘闸的判据必须**按「整值覆盖」而不是按 Map** 分类。
+/// 写盘闸的判据必须按「整值覆盖」而不是按 Map 分类。
 ///
-/// 这条钉的是 0.120 周期的一个真实缺陷：`config.setItems` 的降级闸写成了
-/// `matches!(ty, FieldType::Map(_))`，于是 `ui.toolbar.items`、`ui.langbar.badges`
-/// 这些数组型键全部漏在门外——设置端把数组也是整份发送的，失效形态与 Map 完全一样
-/// （段降级 ⇒ base 是出厂值 ⇒ 用户改一格保存 ⇒ 原有内容永久消失）。
-///
-/// 逐个变体断言而不是只测两三个键：加新变体时这里编译不过（`is_whole_value_leaf`
-/// 的 match 是穷举的），作者被迫回答「写它是整体换掉还是只动一个值」。
+/// 设置端把数组也整份发送，只认 Map 会漏掉 `ui.toolbar.items` 等数组键：段降级时 base 是
+/// 出厂值，用户改一格保存，原有内容永久消失。逐变体断言是为了加新变体时
+/// `is_whole_value_leaf` 的穷举 match 逼作者回答「整体换掉还是只动一个值」。
 #[test]
 fn whole_value_leaf_covers_arrays_not_just_maps() {
     for ty in [

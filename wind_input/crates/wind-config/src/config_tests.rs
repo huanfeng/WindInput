@@ -81,7 +81,7 @@ fn desktop_toggle_alone_activates_factory_model() {
     assert!(g.active());
 }
 
-/// ★ 老配置：只手写了 weight + model（没有 enabled）的桌面用户，叠在出厂 enabled=false 上
+/// 老配置：只手写了 weight + model（没有 enabled）的桌面用户，叠在出厂 enabled=false 上
 /// 也必须照旧生效——否则升级后模型被悄悄关掉。
 #[test]
 fn desktop_legacy_weight_and_model_stay_active_over_factory_false() {
@@ -174,16 +174,11 @@ fn codetable_wildcard_single_only_folds_from_schema() {
     );
 }
 
-/// ★ 便携闸门**只许挡便携这一侧**：非便携下 `user_config_marker_path()` 必须仍给出路径。
+/// 便携闸门只许挡便携这一侧：非便携下 `user_config_marker_path()` 必须仍给出路径。
 ///
-/// `tests/portable_no_seen_marker.rs` 钉的是低后果那一侧（便携版多出一个没人读的
-/// 文件）。真正贵的是反过来：闸门若误伤安装版，`user_config_seen()` 恒 false →
-/// `probe_user_config` 把「定制用户但漫游还没挂上」当成「默认用户」→ 不等，直接按
-/// 出厂配置起来，用户开机看到设置全丢。把 `is_portable()` 那三行改成恒返回 `None`
-/// 这个变异，便携那条测试是全绿的，只有本条会红。
-///
-/// 只取路径、不碰盘：本测试二进制里没有任何地方设 `WIND_INSTALL_ROOT`（全 crate 仅
-/// `variant.rs` 一处读它），故 `is_portable()` 在这里恒 false，断言是确定性的。
+/// 闸门误伤安装版时 `user_config_seen()` 恒 false，`probe_user_config` 会把「漫游还没挂上」
+/// 当成默认用户直接按出厂配置起来；`tests/portable_no_seen_marker.rs` 只钉另一侧，拦不住它。
+/// 本测试二进制不设 `WIND_INSTALL_ROOT`，`is_portable()` 恒 false，断言是确定性的。
 #[test]
 fn install_build_still_gets_a_marker_path() {
     assert!(
@@ -196,15 +191,8 @@ fn install_build_still_gets_a_marker_path() {
     );
 }
 
-/// ★ `EmojiConfig` 的两条默认值来源必须给出**同一个结果**。
-///
-/// serde 的 `#[serde(default = "f")]` 管「配置文件里缺这个键」，`Default::default()`
-/// 管「代码里造一个空配置」。两者若各写各的字面量，改默认值时必然漏掉一边，于是
-/// 「用户没写这一段」与「代码里 default()」行为不同——而这种分叉只在其中一条路径上
-/// 表现出来，是最难对上账的那种。本测试是那条不变量的守门人。
-///
-/// ⚠️ 判据取**整个结构相等**而非逐字段列举：逐字段写的话，将来新增字段忘了加断言，
-/// 测试照样绿。
+/// `EmojiConfig` 的两条默认值来源（serde 缺键与 `Default::default()`）必须给出同一个结果，
+/// 否则「用户没写这一段」与代码构造的空配置行为分叉。判整个结构相等，新增字段自动纳入。
 #[test]
 fn emoji_config_default_matches_empty_toml() {
     let from_empty: EmojiConfig = toml::from_str("").expect("空表应能反序列化");
@@ -226,14 +214,10 @@ fn emoji_config_ships_disabled() {
     assert_eq!(d.max_hosts, 1, "只扩首选是控制候选序号漂移的主要手段");
 }
 
-/// ★ 语法模型的默认值必须是「什么都不发生」：`weight = 0` **且** `model` 为空。
+/// 语法模型的默认值必须是「什么都不发生」：`weight = 0` 且 `model` 为空。
 ///
-/// 守的是一个真实发生过的隐患：`model` 的默认值一度是 `zh-hans-bgw.gram`，
-/// 于是用户「只把 weight 调成非 0」就会静默启用它——而该模型在 192 条整句
-/// 评测上实测为 **−4**（设计文档 §8）。默认值把人导向一个质量为负的模型，
-/// 且当事人完全不知情。
-///
-/// 谁要改回某个具体模型名，先解释清楚为什么默认开启它是安全的。
+/// `model` 有默认值时，用户只调 weight 就会静默启用一个整句评测为负的模型（设计文档 §8）。
+/// 要改成默认某个具体模型，先说明默认开启它为什么安全。
 #[test]
 fn grammar_defaults_to_disabled_and_no_model() {
     let g = PinyinGrammar::default();
@@ -269,9 +253,7 @@ fn grammar_enabled_only_vetoes() {
 }
 
 /// 注释库的方案限定：`schemas` 留空适用于全部方案，非空则只在列出的方案下加载。
-///
-/// 「留空=全部」这个方向不能反：反过来的话，用户手写一条却没写 `schemas` 就是
-/// 「配了完全没反应」，而那是本仓反复出现的最难自查的一类故障。
+/// 方向不能反，否则用户手写一条没写 `schemas` 就是「配了没反应」。
 #[test]
 fn comment_dict_schema_scoping() {
     let global = CommentDictSpec::default();
@@ -345,8 +327,8 @@ fn nav_keys_fold_into_session_actions_preserving_defaults() {
             sa.get(key)
         );
     }
-    // ★★ 存储层必须保持原样：设置页的四个勾选框读的正是它。曾经在 normalize 里
-    // clear 掉，后果是出厂默认在界面上全显示为未勾选（每个用户都会遇到）。
+    // 存储层必须保持原样：设置页的四个勾选框读的正是它，在 normalize 里清掉会让出厂默认
+    // 在界面上全显示为未勾选。
     assert_eq!(
         c.keys.page_keys,
         default_page_keys(),
@@ -377,11 +359,9 @@ fn default_select_key_group_folds_into_session_actions() {
     );
 }
 
-/// 修饰键选词组（走 keyup 轻敲）折算成四个纯修饰键名。
-///
-/// ⚠️ 这些键名必须同时被 `hotkey::session_key_to_vk` 与
-/// `wind_keys::keymap::session_key_name_to_vk` 认得——一期漏了后者，三期补上，
-/// 由 wind-coordinator 的跨 crate 测试守。
+/// 修饰键选词组（走 keyup 轻敲）折算成四个纯修饰键名。这些键名必须同时被
+/// `hotkey::session_key_to_vk` 与 `wind_keys::keymap::session_key_name_to_vk` 认得，
+/// 后者由 wind-coordinator 的跨 crate 测试守。
 #[test]
 fn modifier_select_group_folds_to_modifier_key_names() {
     let mut c = Config::default();
@@ -404,7 +384,7 @@ fn modifier_select_group_folds_to_modifier_key_names() {
     }
 }
 
-/// 以词定字组折算，含 `brackets`——它**不在**选词键组的值域里。
+/// 以词定字组折算，含 `brackets`——它不在选词键组的值域里。
 ///
 /// 回归点：两组曾被张冠李戴（用选词键组的解析器解以词定字配置），`brackets` 静默失效。
 #[test]
@@ -427,11 +407,8 @@ fn select_char_group_folds_including_brackets() {
     );
 }
 
-/// ★★ 撞键裁决：`comma_period` 同时配给以词定字与选词时，**以词定字赢**。
-///
-/// 这不是随意选的——主输入路径上 `select_char_index` 的判定在 `select_key_offset`
-/// 之前，折算顺序必须复现那个顺序。搞反了的表现是「一直用的 `,` 突然从取字变成选次选」，
-/// 而用户什么都没改。
+/// 撞键裁决：`comma_period` 同时配给以词定字与选词时，以词定字赢——复现主输入路径上
+/// `select_char_index` 先于 `select_key_offset` 的判定顺序。
 #[test]
 fn select_char_wins_when_group_claimed_by_both() {
     let mut c = Config::default();
@@ -487,11 +464,8 @@ fn select_ordinals_are_range_checked() {
     }
 }
 
-/// ★ page 组优先于 highlight 组——复现 `NavKeys::classify` 的 `.find()` 语义。
-///
-/// 两组都声明 `tab` 时（`page_keys=[shift_tab]` + 默认 `highlight_keys=[…, tab]`），
-/// 旧实现按「page 全部 push 完再 push highlight」建表，`.find()` 取到 page 那条。
-/// 搞反了的表现是「一直用的 Tab 突然从翻页变成移高亮」，用户什么都没改。
+/// page 组优先于 highlight 组，复现 `NavKeys::classify` 的 `.find()` 语义：两组都声明
+/// `tab` 时 Tab 仍是翻页，否则用户什么都没改 Tab 就变成移高亮。
 #[test]
 fn nav_fold_gives_page_group_priority_over_highlight() {
     let mut c = Config::default();
@@ -506,7 +480,7 @@ fn nav_fold_gives_page_group_priority_over_highlight() {
     assert_eq!(sa.get("shift+tab").map(String::as_str), Some("page_prev"));
 }
 
-/// 用户**显式**写在 `session_actions` 里的键不被折算覆盖：新配置优先于存量迁移。
+/// 用户显式写在 `session_actions` 里的键不被折算覆盖：新配置优先于存量迁移。
 /// 这是「用户要 Tab 清空、但 highlight_keys 默认还带着 tab」时唯一正确的裁决。
 #[test]
 fn explicit_session_action_survives_nav_fold() {
@@ -524,11 +498,10 @@ fn explicit_session_action_survives_nav_fold() {
     );
 }
 
-/// ★★ 用户把 `page_keys` 清成 `[]` 的**意图不能丢**。
+/// 用户把 `page_keys` 清成 `[]` 的意图不能丢。
 ///
-/// 这正是「默认值必须留在被折算的那一侧」的理由：若把出厂绑定直接写进
-/// `session_actions`，空数组就与「从没配过」同形，折算跳过而默认绑定仍在——
-/// 用户明明关掉了翻页键，重启后又回来了。五c 折算 `trigger_keys` 时踩过。
+/// 这正是默认值必须留在被折算一侧的理由：出厂绑定若直接写进 `session_actions`，空数组就与
+/// 「从没配过」同形，用户关掉的翻页键重启后又回来。
 #[test]
 fn cleared_page_keys_yield_no_paging_binds() {
     let mut c = Config::default();
@@ -541,11 +514,10 @@ fn cleared_page_keys_yield_no_paging_binds() {
     assert!(sa.is_empty(), "全部清空时不应折算出任何绑定，实际 {sa:?}");
 }
 
-/// ★★★ `normalize` **不得**碰这两处——折算是消费层的视图，不是存储层的改写。
+/// `normalize` 不得碰这两处——折算是消费层的视图，不是存储层的改写。
 ///
-/// 2026-08-11 回归守门：曾在 normalize 里折算并 clear 四个原字段，后果是设置页读到的
-/// 四项恒为空（出厂默认非空，每个用户都遇到）、勾选后重开又变空、在高级表里删掉一条
-/// 折算来的绑定下次又被折算回来。判据见 `effective_session_actions` 的文档。
+/// 在 normalize 里折算并清空原字段会让设置页读到的四项恒为空、删掉的折算绑定下次又被
+/// 折算回来。判据见 `effective_session_actions` 的文档。
 #[test]
 fn normalize_does_not_rewrite_key_group_storage() {
     let mut c = Config::default();
@@ -615,10 +587,9 @@ fn effective_session_actions_is_pure() {
     assert_eq!(a, b);
 }
 
-/// ⚠️ 组名展开表里的键名是**跨 crate 拼写契约**（消费端在 `wind-keys` 与
-/// `hotkey.rs` 各有一份解析）。这里只能守住「本 crate 自己认得」这一半：
-/// 写错的键名会让绑定解析不出 VK，表现为「升级后翻页键全没了」且无任何报错。
-/// 另一半（两份解析表一致）由 `wind-coordinator` 的跨 crate 测试守。
+/// 组名展开表里的键名是跨 crate 拼写契约（`wind-keys` 与 `hotkey.rs` 各有一份解析）。
+/// 这里只守「本 crate 认得」这一半，写错表现为翻页键静默失效；两份解析表一致由
+/// `wind-coordinator` 的跨 crate 测试守。
 #[test]
 fn nav_group_names_resolve() {
     for g in [
@@ -648,11 +619,8 @@ fn nav_group_names_resolve() {
     }
 }
 
-/// `clear` 是 `cancel` 的别名，且**只有一个规范名**回写。
-///
-/// 两个名字对应两种心智（「清空」vs「取消」），但内核只有一种行为——否则就成了
-/// 「两个名字行为微妙不同」这种最难查的配置陷阱。回写只用 `cancel`，避免同一份配置
-/// 在两次保存后出现两种写法。
+/// `clear` 是 `cancel` 的别名，内核只有一种行为，回写只用规范名 `cancel`，
+/// 避免同一份配置两次保存后出现两种写法。
 #[test]
 fn clear_parses_as_cancel_alias() {
     assert_eq!(SessionAction::parse("cancel"), SessionAction::Cancel);
@@ -666,11 +634,10 @@ fn clear_parses_as_cancel_alias() {
     );
 }
 
-/// ★ 「要不要有候选」的判据挂在**动作**上，不在消费点。
+/// 「要不要有候选」的判据挂在动作上，不在消费点。
 ///
-/// 导航类在没有候选时无事可做；`cancel` 则在「打了码还没出候选」时恰恰必须生效——
-/// 网址模式（原样累积文本、从不产候选）就是这一格。判据写到消费点上就要维护三份
-/// 一致的守卫，那正是本仓栽过四次的形状。
+/// 导航类没有候选时无事可做；`cancel` 在「打了码还没出候选」（如网址模式）时恰恰必须生效。
+/// 判据放到消费点上就要维护多份一致的守卫。
 #[test]
 fn only_navigation_actions_require_candidates() {
     for a in [
@@ -687,7 +654,7 @@ fn only_navigation_actions_require_candidates() {
     );
 }
 
-/// `commit_highlighted`：解析与回写互逆，且**要候选**——没有高亮可上屏时按键回落原语义。
+/// `commit_highlighted`：解析与回写互逆，且要候选——没有高亮可上屏时按键回落原语义。
 #[test]
 fn commit_highlighted_round_trips_and_requires_candidates() {
     let a = SessionAction::parse(" Commit_Highlighted ");
@@ -704,7 +671,7 @@ fn commit_highlighted_round_trips_and_requires_candidates() {
     assert!(a.requires_candidates(), "无候选时无高亮可上屏，须放行按键");
 }
 
-/// `commit_code`：解析与回写互逆，且**不要候选**——空码上屏原码正是它的用处。
+/// `commit_code`：解析与回写互逆，且不要候选——空码上屏原码正是它的用处。
 #[test]
 fn commit_code_round_trips_and_works_without_candidates() {
     let a = SessionAction::parse(" Commit_Code ");
@@ -717,12 +684,10 @@ fn commit_code_round_trips_and_works_without_candidates() {
     assert!(!a.requires_candidates(), "空码无候选时也要能上屏原码");
 }
 
-/// `command:<表达式>`：两张表同一套解析，表达式**原样保留大小写与内部空白**。
+/// `command:<表达式>`：两张表同一套解析，表达式原样保留大小写与内部空白。
 ///
-/// ★ `SessionAction::parse` 一上来就整串小写化，command 若排在那之后，
-/// `proc.run("C:\\Tools\\CharMap.exe")` 会被改写成全小写路径——Windows 上碰巧能跑，
-/// 网址与 `key.tap("Ctrl+Shift+P")` 就不行了。`parse_checked` 曾把小写化的副本传给
-/// `parse`，是同一个洞的第二个入口。
+/// `SessionAction::parse` 一上来就整串小写化，command 必须在那之前分出来，否则网址与
+/// `key.tap("Ctrl+Shift+P")` 会被改坏；`parse_checked` 也不能把小写化的副本传给 `parse`。
 #[test]
 fn command_verb_keeps_expression_verbatim_in_both_tables() {
     let raw = r#"  Command:proc.run("C:\\Tools\\Char Map.exe")  "#;
@@ -779,9 +744,7 @@ fn command_verb_policy() {
 }
 
 /// 存量迁移：`trigger_keys` 里的 z → `z_key_action`，其余字母丢弃。
-///
-/// 不迁移的后果是**静默失效**：解析端只认符号后 `filter_map` 会把字母无声吃掉，
-/// 配置文件里那行还在，用户完全看不出功能为什么没了。
+/// 不迁移的话解析端的 `filter_map` 会无声吃掉字母，功能静默失效。
 #[test]
 fn migrate_letter_trigger_keys_moves_z_to_action() {
     let mut c = Config::default();
@@ -793,7 +756,7 @@ fn migrate_letter_trigger_keys_moves_z_to_action() {
         "z 应折算成 z_key_action"
     );
     // 字母项被本步摘除；符号项随后由五c 的收编迁移移进 keys.key_actions
-    // （`normalize` 里两步依次跑）。断言它**去了哪**而不是「还在原地」——
+    // （`normalize` 里两步依次跑）。断言它去了哪而不是「还在原地」——
     // 后者在收编后是个必然失败的观察点，但字母摘除这条契约本身没变。
     assert!(
         c.input.temp_pinyin.trigger_keys.is_empty(),
@@ -810,10 +773,8 @@ fn migrate_letter_trigger_keys_moves_z_to_action() {
     );
 }
 
-/// 归属优先级与老的模式激活链一致：临拼 > mix。
-///
-/// （原先链中的「特殊模式」一环已随 `schema.special_modes` 废弃——z 要进 overlay
-/// 方案改为直接写 `z_key_action = "special:<方案id>"`，不再有可折算的来源。）
+/// 归属优先级与模式激活链一致：临拼 > mix（`schema.special_modes` 已废弃，z 进 overlay
+/// 方案改写 `z_key_action = "special:<方案id>"`）。
 #[test]
 fn migrate_letter_trigger_keys_follows_activation_priority() {
     let mut c = Config::default();
@@ -835,10 +796,8 @@ fn migrate_letter_trigger_keys_follows_activation_priority() {
     );
 }
 
-/// 五c 迁移：三处 `trigger_keys` 折算进 `keys.key_actions`。
-///
-/// 原为四处——`schema.special_modes[]` 那一处已随该键废弃而消失（实例集合改由带
-/// `[overlay]` 段的方案定义，引导键直接写 `keys.key_actions`）。
+/// 三处 `trigger_keys` 折算进 `keys.key_actions`（`schema.special_modes[]` 已废弃，
+/// 不再是来源）。
 #[test]
 fn migrate_trigger_keys_folds_all_four_sources() {
     let mut c = Config::default();
@@ -865,12 +824,9 @@ fn migrate_trigger_keys_folds_all_four_sources() {
     assert!(c.schema.mix_modes[0].trigger_keys.is_empty());
 }
 
-/// ★★ 争用同一个键时，归属必须复现 `try_activate_mode` 的**真实**调用顺序：
-/// 临英 > 临拼 > special > mix。
-///
-/// 设计文档 §1 曾把顺序写成「临英 > 快捷输入 > 临拼 > 特殊模式」，照那个迁移会让
-/// 「`;` 同时配给 mix 和临拼」的用户升级后进错模式——现象是「一直用的键突然变了
-/// 功能」，极难联想到是迁移干的。以代码为准。
+/// 争用同一个键时，归属必须复现 `try_activate_mode` 的真实调用顺序：
+/// 临英 > 临拼 > special > mix。以代码为准，不以设计文档为准；
+/// 顺序错了用户升级后会进错模式。
 #[test]
 fn migrate_trigger_keys_follows_real_activation_order() {
     let mut c = Config::default();
@@ -940,11 +896,10 @@ fn migrate_trigger_keys_skips_empty_and_unparsable() {
     );
 }
 
-/// 残留的 `schema.special_modes` **能被读出来**（供告警），且 `normalize` 后清空。
+/// 残留的 `schema.special_modes` 能被读出来（供告警），且 `normalize` 后清空。
 ///
-/// ★ 「读得出」这一条是关键：字段若直接删掉，serde 会静默丢弃整段——用户 config.toml
-/// 里那几行还在、看起来仍然生效，实际早已无人消费。本仓反复栽过的「配了没反应」正是
-/// 这个形状，故这里用 `Vec<toml::Value>` 把它接住，只为发一条 warn。
+/// 字段若直接删掉，serde 会静默丢弃整段，用户以为仍然生效；故用 `Vec<toml::Value>`
+/// 接住，只为发一条 warn。
 #[test]
 fn legacy_special_modes_is_read_then_cleared_with_warning() {
     let toml_src = r#"
@@ -967,7 +922,7 @@ show_all_on_enter = true
         c.schema.legacy_special_modes.is_empty(),
         "告警后须清空——留着会让后续「有没有配过」的判断读到假信号"
     );
-    // 且**不做**任何迁移：不得凭空往 key_actions 里塞绑定（见设计文档 §5）。
+    // 且不做任何迁移：不得凭空往 key_actions 里塞绑定（见设计文档 §5）。
     assert!(
         !c.keys
             .key_actions
@@ -1089,9 +1044,8 @@ fn quick_mix_layout(merged: toml::Value) -> LayoutIntent {
 
 /// 废弃键 `force_vertical` → `mix_modes[quick_mix].candidate_layout`。
 ///
-/// ★ 映射刻意不对称：`false` 迁成 **Follow 而非 Horizontal**。旧布尔的 false 语义是
-/// 「不强制」（跟随全局），迁成 Horizontal 会把从没开过这个开关、又把全局设成竖排的
-/// 用户强行钉在横排上。
+/// 映射刻意不对称：`false` 迁成 Follow 而非 Horizontal。旧 false 语义是「不强制」，
+/// 迁成 Horizontal 会把全局设成竖排的用户钉在横排上。
 #[test]
 fn force_vertical_migrates_into_quick_mix_candidate_layout() {
     for (old, want) in [
@@ -1247,7 +1201,7 @@ fn input_default_state_scope_defaults() {
 }
 
 /// `is_settled` 的语义边界：只有「再等也不会变」的两态算就绪。
-/// 尤其 `Ready { file_exists: false }` **必须**算就绪——全新安装本就没有
+/// 尤其 `Ready { file_exists: false }` 必须算就绪——全新安装本就没有
 /// config.toml（只在用户首次改设置时创建），把它当未就绪会让每个新用户白等整个超时。
 #[test]
 fn probe_settled_semantics() {
@@ -1414,7 +1368,7 @@ page_keys = ["pageupdown", "minus_equal"]
 
 #[test]
 fn prune_preserves_merged_result() {
-    // ★ 本轮修复的核心保证：被删的键都会从 L1⊕L2⊕L2.5 回落到同一个值，故清理对**当前**行为
+    // 本轮修复的核心保证：被删的键都会从 L1⊕L2⊕L2.5 回落到同一个值，故清理对当前行为
     // 零影响，只影响将来默认值变更能否到达该用户。这条不变量成立，清理才是安全的。
     let preset = preset_sample();
     let user = tv(r#"
@@ -1461,7 +1415,7 @@ show_source_hint = false
 
 #[test]
 fn prune_keeps_keys_absent_from_preset() {
-    // 出厂默认里没有的键一律保留：用户自定义标点映射这类**动态键**（键名由用户输入决定，
+    // 出厂默认里没有的键一律保留：用户自定义标点映射这类动态键（键名由用户输入决定，
     // 不可能出现在 preset 里）若被当成冗余删掉就是丢用户数据。废弃键的清理是另一件事，
     // 必须走显式名单，绝不能靠「preset 里没有」来推断。
     let preset = preset_sample();
@@ -1556,10 +1510,8 @@ fn already_materialized_only_trusts_explicit_version() {
     )));
 }
 
-/// ★ 回归闸：物化标记绝不能被 `prune_user_config` 清掉。
-///
-/// 标记一旦丢失，下次加载就会重新折算，把用户删掉的出厂绑定灌回去——本次修复
-/// 整个失效，且现象与修复前一模一样（"删了又回来"）。
+/// 回归闸：物化标记绝不能被 `prune_user_config` 清掉，否则下次加载重新折算，
+/// 用户删掉的出厂绑定又被灌回去。
 #[test]
 fn prune_keeps_materialize_marker() {
     let preset = toml::Value::try_from(Config::default()).unwrap();
@@ -1578,7 +1530,7 @@ fn prune_keeps_materialize_marker() {
     assert!(already_materialized(&user), "标记必须在清理后仍然存活");
 }
 
-/// ★★ 行为闸：已物化时，折算不得复活用户删掉的绑定。
+/// 行为闸：已物化时，折算不得复活用户删掉的绑定。
 ///
 /// 这正是报障现场——用户在设置页取消勾选反引号，保存后下次加载又被折算灌回去。
 #[test]
@@ -1620,7 +1572,7 @@ fn unmaterialized_config_still_folds_trigger_keys() {
 
 #[test]
 fn prune_keeps_map_subpaths() {
-    // `input.punct.custom_mappings` 在注册表里是 Map 类型——**整体**才是一个配置项。
+    // `input.punct.custom_mappings` 在注册表里是 Map 类型——整体才是一个配置项。
     // collect_leaf_paths 会把它下钻成 `...custom_mappings."'1"` 这种伪键，删单条是错的语义
     // （等于悄悄改写用户的标点映射表）。registry 保险必须拦住。
     assert!(
@@ -1666,12 +1618,10 @@ y = 2
     assert!(get_nested(&root, &["a"]).is_none(), "父表变空应逐级回收");
 }
 
-/// `MixModeConfig` 的两条默认值路径必须一致：serde 缺省（读一份没写该键的配置）与
-/// `Default::default()`（测试夹具 / 代码构造）。
+/// `MixModeConfig` 的两条默认值路径（serde 缺省与 `Default::default()`）必须一致。
 ///
-/// `free_input_takes_select_keys` 的 serde 缺省是 `true`，而 derive 出来的
-/// `bool::default()` 是 `false`——所以 `Default` 是手写的。本测试就是那条约束的守门：
-/// 日后再加带非零默认值的字段而忘了改手写 `Default`，这里会红。
+/// `free_input_takes_select_keys` 的 serde 缺省是 `true`，而 `bool::default()` 是 `false`，
+/// 所以 `Default` 是手写的；再加带非零默认值的字段而忘了改它，这里会红。
 #[test]
 fn mix_mode_config_serde_default_matches_default_impl() {
     let from_serde: MixModeConfig =
@@ -1691,7 +1641,7 @@ fn mix_mode_config_serde_default_matches_default_impl() {
     );
 }
 
-/// 退役键走显式名单清除，且**三类不得误伤**：同段里还活着的键、名字相似但仍在使用的
+/// 退役键走显式名单清除，且三类不得误伤：同段里还活着的键、名字相似但仍在使用的
 /// 另一个键、以及未登记的 Map 子路径。
 #[test]
 fn prune_retired_removes_dead_keys_only() {
@@ -1714,7 +1664,7 @@ enable_english = true
         get_nested(&root, &["schema", "quick_input", "decimal_places"]).is_some(),
         "同段里还活着的键不得误删"
     );
-    // ★ `schema.mix.enable_english` 是**另一个仍在使用的键**（混输引擎混入英文词库
+    // `schema.mix.enable_english` 是另一个仍在使用的键（混输引擎混入英文词库
     //   候选的开关，manager.rs 实读）。它与退役的 `schema.quick_input.enable_english`
     //   只是叶子名相同，按整条路径匹配才不会误伤。
     assert!(
@@ -1996,10 +1946,8 @@ fn test_merge_per_page_zero_keeps_default() {
     assert_eq!(cfg.ui.candidate.per_page, 7, "per_page=0 应保留默认 7");
 }
 
-/// 简繁两方向的生效口径：四种组合各一条。
-///
-/// 「两个都开 ⇒ s2t 赢」这一条是本函数存在的全部理由——另外三种组合任何写法都对，
-/// 只有冲突那格能分辨实现是否真的做了取舍。
+/// 简繁两方向的生效口径：四种组合各一条。只有「两个都开 ⇒ s2t 赢」那格能分辨实现
+/// 是否真的做了取舍。
 #[test]
 fn conversion_directions_resolve_conflict_toward_s2t() {
     let mut c = InputConfig::default();
@@ -2080,7 +2028,7 @@ fn test_tooltip_defaults() {
     );
 }
 
-/// ★ 只写过「与旧出厂相同」的旧开关的老用户：迁移不给本层写段列表，这批用户继续跟随出厂，
+/// 只写过「与旧出厂相同」的旧开关的老用户：迁移不给本层写段列表，这批用户继续跟随出厂，
 /// 而不是被钉在一份自定义段列表上。反向：真改过开关的用户，迁出的段列表留在用户层。
 #[test]
 fn default_legacy_switches_leave_no_sections_custom_ones_kept() {
@@ -2140,7 +2088,7 @@ fn enabled_labels(sections: &[TooltipSection]) -> Vec<&str> {
         .collect()
 }
 
-/// ★★ 拆字 + 拼音同开 → 一个合并段（`promote` 复现旧行序），不再有独立的拼音、拆字段。
+/// 拆字 + 拼音同开 → 一个合并段（`promote` 复现旧行序），不再有独立的拼音、拆字段。
 #[test]
 fn migrate_tooltip_chaizi_with_pinyin_becomes_merged_section() {
     let (secs, user) = tooltip_after_migration("[ui.tooltip]\nchaizi_enabled = true\n");
@@ -2206,8 +2154,8 @@ fn migrate_tooltip_code_and_debug_switches() {
     assert_eq!(enabled_labels(&secs), ["完整原文", "拼音", "释义", "调试"]);
 }
 
-/// 旧出厂 6 段（加「释义」之前，论坛 t282）原样躺在用户层的：视为冗余剪掉，跟随新出厂。
-/// 以前 `prune_redundant` 会把它当冗余删，出厂一变它就成了删不掉的「自定义」。
+/// 旧出厂 6 段（加「释义」之前）原样躺在用户层的：视为冗余剪掉，跟随新出厂；否则出厂一变它
+/// 就成了删不掉的「自定义」。
 /// 字段写得不全（serde 缺省补齐后相等）同样认；改过任何一处的不动。
 #[test]
 fn stale_factory_tooltip_sections_follow_new_factory() {
@@ -2331,7 +2279,7 @@ fn test_candidate_index_labels_and_truncate() {
     assert_eq!(c.truncate_display("一二"), "一二", "不足不截");
 }
 
-/// 截断按**字素簇**计（口径同悬停提示），不把 ZWJ 序列 / 组合符 / 变体选择符拦腰切开。
+/// 截断按字素簇计（口径同悬停提示），不把 ZWJ 序列 / 组合符 / 变体选择符拦腰切开。
 #[test]
 fn test_truncate_display_counts_graphemes() {
     let cfg = merged_with("[ui.candidate]\nmax_chars = 3\n");
@@ -2383,7 +2331,7 @@ fn test_user_index_label_optional() {
 
 #[test]
 fn test_index_label_slot_holds_multiple_chars() {
-    // 本次重构的核心判据：**一槽一串**，不再按 char 切。
+    // 本次重构的核心判据：一槽一串，不再按 char 切。
     // 三种旧形态下必被拆散的标签：括号数字、罗马数字、带 ZWJ 的组合 emoji。
     let cfg =
         merged_with("[ui.candidate]\nindex_labels = [\"(1)\", \"Ⅱ\", \"👨\\u200D👩\\u200D👧\"]\n");
@@ -2433,7 +2381,7 @@ fn test_migrate_empty_code_behavior_normalizes_illegal_values() {
         Some("clear"),
         "合法值不得被动——否则这条迁移会把用户设的 clear 抹成 commit"
     );
-    // ★ 标点独有的第三态必须活着穿过迁移。这条断言的存在意义：迁移一旦把合法值域
+    // 标点独有的第三态必须活着穿过迁移。这条断言的存在意义：迁移一旦把合法值域
     // 内联抄成 ["commit","clear"]（最自然的写法），存量配置里的 clear_no_input 会被
     // 静默抹回 commit——只在升过级的机器上复现，新装机器怎么测都是绿的。
     let mut v3: toml::Value =
@@ -2444,7 +2392,7 @@ fn test_migrate_empty_code_behavior_normalizes_illegal_values() {
         Some("clear_no_input"),
         "标点第三态被迁移抹掉了——合法值域须取自注册表，不能在迁移里另抄一份"
     );
-    // 反向夹逼：同一个值在回车上**不合法**，须归一为 commit。两条一起才拦得住
+    // 反向夹逼：同一个值在回车上不合法，须归一为 commit。两条一起才拦得住
     // 「图省事让三键共用一份值域」。
     let mut v4: toml::Value =
         toml::from_str("[input]\nenter_behavior = \"clear_no_input\"\n").unwrap();
@@ -2462,13 +2410,9 @@ fn test_migrate_empty_code_behavior_normalizes_illegal_values() {
 
 #[test]
 fn test_empty_code_behavior_registry_values_match_impl() {
-    // ★ 守门：注册表的值域必须与消费点实际认得的值一致。这三个键此前登记为 Str，
-    // 值域不受任何约束，设置端才得以抄进两个从未被实现的选项且无一层拦得住。
-    //
-    // ⚠️ 三键**不同值域**：标点多一个 `clear_no_input`（丢废码且吞标点），回车/空格的
-    // `clear` 本就是吞键态，给它们加同名值只会得到两个行为相同、用户无从分辨的选项。
-    // 分开断言正是为了拦「顺手统一成一样」——共用一个期望值的话，把标点的值域抄回
-    // 两态、或把新值扩散给另两键，测试都照样绿。
+    // 注册表的值域必须与消费点实际认得的值一致。三键值域不同：标点多一个
+    // `clear_no_input`（丢废码且吞标点），回车/空格的 `clear` 本就吞键。分开断言是为了拦
+    // 「顺手统一成一样」，共用一个期望值的话那种改动照样绿。
     let values_of = |key: &str| -> &'static [&'static str] {
         let f = crate::config_schema::field(key).expect("键须已登记");
         match f.ty {
@@ -2493,7 +2437,7 @@ fn test_empty_code_behavior_registry_values_match_impl() {
 #[test]
 fn test_migrate_index_labels_string_to_array() {
     // 存量迁移：旧的字符串形态按 char 拆成数组。不迁移的话 `try_into` 整体失败，
-    // 调用方 `unwrap_or_default()` 会把**全部**配置回落出厂值。
+    // 调用方 `unwrap_or_default()` 会把全部配置回落出厂值。
     let mut v: toml::Value = toml::from_str("[ui.candidate]\nindex_labels = \"asdf\"\n").unwrap();
     Config::migrate_index_labels_value(&mut v);
     assert_eq!(
@@ -2532,11 +2476,8 @@ fn test_load_survives_legacy_string_index_labels() {
 
 /// 复刻 [`Config::load`] 的「L1 默认 ⊕ 用户层 → 反序列化」链路。
 ///
-/// ⚠️ **刻意不调 `Config::load`**：它会走 `user_config_dir()` 去读真实
-/// `%APPDATA%\WindInput\config.toml`——那样测试的输入取决于跑测试的这台机器
-/// （本机有配置就测不出、别人机器上又是另一套），本仓也有过测试真写用户配置的前科。
-/// 段级降级的全部判定都在 `deserialize_with_section_fallback` 这个纯函数里，IO 留在
-/// `load()` 外层，测试只喂 `toml::Value`。
+/// 刻意不调 `Config::load`：它会读真实用户目录下的 config.toml，测试输入就取决于本机。
+/// 段级降级的判定都在纯函数 `deserialize_with_section_fallback` 里，测试只喂 `toml::Value`。
 fn merged_user_value(user_toml: &str) -> toml::Value {
     let mut merged = toml::Value::try_from(Config::default()).expect("默认配置应可序列化");
     merge_value(
@@ -2561,17 +2502,13 @@ fn stale_reverse_keys_load_without_section_fallback() {
 
 /// `ui` 段的毒：`ui.font.scripts` 是 `BTreeMap<String, Vec<String>>`。
 ///
-/// ★ 用 Map 型字段而不是「被删掉的普通字段的残留键」构造用例：全仓无
-/// `deny_unknown_fields` / `flatten` / `untagged`，普通 struct 的未知键被 serde 静默
-/// 丢弃，是**零风险**的，拿它构造用例会得到一个恒绿的假测试。Map 型字段对 serde 而言
-/// 「任何键都是已知的」，旧版残留项会被当真数据反序列化——那才是真实故障路径。
+/// 必须用 Map 型字段构造：全仓无 `deny_unknown_fields`/`flatten`/`untagged`，普通 struct
+/// 的未知键被静默丢弃，拿它构造会得到恒绿的假测试；Map 字段的残留项才会被当真数据反序列化。
 const POISON_UI: &str = "[ui.font]\nscripts = { latin = 42 }\n";
 /// `keys` 段的毒：`keys.key_actions` 是 `BTreeMap<String, String>`，值给整型。
 const POISON_KEYS: &str = "[keys]\nkey_actions = { F7 = 42 }\n";
-/// 分散在各段、**必须活下来**的用户设置。
-///
-/// `ui.candidate.per_page` 是关键一条：它与 [`POISON_UI`] **同属 `ui` 段但不同子表**，
-/// 用来钉住「降级只降到 `ui.font`，不牵连 `ui.candidate`」。
+/// 分散在各段、必须活下来的用户设置。`ui.candidate.per_page` 与 [`POISON_UI`] 同属 `ui`
+/// 段但不同子表，用来钉住「降级只降到 `ui.font`」。
 const HEALTHY_USER: &str = "\
 [schema]
 active = \"section_fallback_probe\"
@@ -2585,39 +2522,11 @@ enabled = false
 log_level = \"trace\"
 ";
 
-/// 坏段回落默认，**其余段的用户值逐键完好**。
+/// 坏段回落默认，其余段的用户值逐键完好。
 ///
-/// # 反事实验证（两轮，均已实跑，非声称）
-///
-/// **一、摘掉整个降级逻辑**——在 `deserialize_with_section_fallback` 开头插一行
-/// `return merged.try_into().unwrap_or_default();`（＝本机制上线前的等价行为），
-/// 重跑 `cargo test -p wind-config -j 2 -- section_fallback degradation_affects`：
-/// 9 个用例红 6 个，本用例红在第一条断言上：
-///
-/// ```text
-/// assertion `left == right` failed: schema 段无毒，用户值必须原样保留
-///   left: "" / right: "section_fallback_probe"
-/// ```
-///
-/// **二、只摘掉子表细化、保留段级降级**——让
-/// [`crate::section_fallback::narrow_bad_section`] 恒返回空表。
-/// 9 个用例红 5 个，红的正是粒度那几条：
-///
-/// ```text
-/// section_fallback_narrows_to_subtable_within_section:
-///   assertion failed: ui.candidate 不该被牵连   left: 7 / right: 9
-/// section_fallback_is_idempotent:
-///   left: ["ui"] / right: ["ui.font"]
-/// ```
-///
-/// 第二轮是「探两层」这项改进单独的守门：它证明这些断言测的是**粒度**，
-/// 而不是搭降级逻辑的便车。
-///
-/// 两轮里都仍绿、且**应该**绿的：
-/// [`section_fallback_is_transparent_when_healthy`]（断言成功路径与老行为一致，
-/// 两种摘法都没动成功路径）、[`degradation_affects_matches_subpaths`]（纯判据单测）；
-/// 第二轮另有 [`section_fallback_falls_back_to_whole_section_when_not_narrowable`]
-/// 仍绿，它测的正是细化不了时的退路。
+/// 摘掉整个降级逻辑或只摘掉子表细化（`narrow_bad_section` 恒返回空），本组用例都会红；
+/// [`section_fallback_is_transparent_when_healthy`]、[`degradation_affects_matches_subpaths`]、
+/// [`section_fallback_falls_back_to_whole_section_when_not_narrowable`] 在两种摘法下应保持绿。
 #[test]
 fn section_fallback_keeps_healthy_sections() {
     let merged = merged_user_value(&format!("{HEALTHY_USER}{POISON_UI}"));
@@ -2630,7 +2539,7 @@ fn section_fallback_keeps_healthy_sections() {
 
     let cfg = Config::deserialize_with_section_fallback(merged);
 
-    // 好段逐键保留。★ 这组断言**故意排在降级记录之前**：它们才是用户实际丢掉的东西，
+    // 好段逐键保留。这组断言故意排在降级记录之前：它们才是用户实际丢掉的东西，
     // 摘掉降级逻辑时应该由它们先红，指向「用户的方案设置没了」而不是「元信息对不上」。
     assert_eq!(
         cfg.schema.active, "section_fallback_probe",
@@ -2654,12 +2563,8 @@ fn section_fallback_keeps_healthy_sections() {
     );
 }
 
-/// ★ 降级粒度收到**子表**这一层：`ui.font.scripts` 有毒时只降 `ui.font`，
-/// `ui` 段其余子表的用户值一个不少。
-///
-/// 这条是「探两层」这项改进的全部意义所在。`ui` 一段有 99 个键——只降到段一级的话，
-/// 一个坏的字体映射就会把候选窗尺寸、位置、注释模板、工具栏、主题一起打回出厂，
-/// 离本机制想避免的「一切归零」只差一点。没有这条用例，这项改进等于没做。
+/// 降级粒度收到子表这一层：`ui.font.scripts` 有毒时只降 `ui.font`，`ui` 段其余子表的
+/// 用户值一个不少。只降到段一级的话，一个坏字体映射就会把候选窗、主题等一起打回出厂。
 #[test]
 fn section_fallback_narrows_to_subtable_within_section() {
     // 同一个 `ui` 段里铺开 4 个子表的用户值，只有 `ui.font` 那个有毒。
@@ -2728,22 +2633,13 @@ fn section_fallback_falls_back_to_whole_section_when_not_narrowable() {
     );
 }
 
-/// ★ 写盘闸的判据必须**两个方向都判**：降级段是待写路径的祖先、待写路径是降级段的祖先。
-///
-/// 只判前者会漏掉「写大表、坏在小格」——`materialize_key_actions` 要整表写 `keys`，
-/// 而降级粒度可以细到 `keys.key_actions`，漏判的后果是本该拦下的整表覆盖照样发生。
-/// 只判后者会漏掉「坏在大段、写小格」——`input.punct` 整段降级时，
-/// `input.punct.custom_mappings` 的种子同样是出厂值。
-///
 /// 一个重复键不该让整份配置失效——救回其余内容，并如实报出被跳过的行号。
-///
-/// 这是用户真机踩中的那份配置的最小形态。
 #[test]
 fn lenient_parse_salvages_around_duplicate_key() {
     let src = "[ui]\nx = 1\n\n[input]\nfoo = true\nfoo = false\nbar = 3\n";
     let r = parse_toml_lenient(src);
     assert!(!r.is_clean(), "重复键必须被记成语法故障");
-    // 行号是**用户在编辑器里看到的那个**（1-based），不是内部索引。
+    // 行号是用户在编辑器里看到的那个（1-based），不是内部索引。
     assert_eq!(r.skipped_lines, vec![6], "只该丢重复的那一行");
 
     let v = r.value.expect("其余内容必须救回来");
@@ -2760,11 +2656,9 @@ fn lenient_parse_salvages_around_duplicate_key() {
     );
 }
 
-/// ★ **段头坏掉时必须丢弃整段，而不是只删那一行。**
+/// 段头坏掉时必须丢弃整段，而不是只删那一行。
 ///
-/// 只删段头，它下面的键不会消失，而是被 TOML 归给**上一个段**——`b` 段的 `y`
-/// 会变成 `a.y` 并可能解析成功、真的生效。那不是「丢了配置」而是
-/// 「把配置搬到了别的段里」。**污染比丢失危险得多**：丢失看得见，污染看不见。
+/// 只删段头，它下面的键会被 TOML 归给上一个段并可能真的生效；污染比丢失危险，丢失看得见。
 #[test]
 fn lenient_parse_drops_whole_section_when_header_is_broken() {
     // `[b` 缺右括号 ⇒ 段头本身非法。
@@ -2775,17 +2669,15 @@ fn lenient_parse_drops_whole_section_when_header_is_broken() {
     assert_eq!(v["a"]["x"].as_integer(), Some(1));
     assert_eq!(v["c"]["w"].as_integer(), Some(3), "坏段之后的段要保住");
     assert!(v.get("b").is_none(), "坏掉的段整个不该出现");
-    // 本测试的**核心断言**：坏段里的键绝不能被吸进上一个段。
+    // 本测试的核心断言：坏段里的键绝不能被吸进上一个段。
     assert!(
         v["a"].get("y").is_none() && v["a"].get("z").is_none(),
         "段头被删后其下的键漂到了上一段——这正是本函数要防的污染"
     );
 }
 
-/// 完全不是 TOML 的内容（编码错乱、被别的文件覆盖）不该被「啃」成残骸。
-///
-/// 剔到上限仍不成立就整份作废：一份被啃得面目全非却能解析的配置，比一份
-/// 明确失败的配置危险——用户会以为它还在。
+/// 完全不是 TOML 的内容不该被「啃」成残骸：剔到上限仍不成立就整份作废，
+/// 面目全非却能解析的配置比明确失败的更危险。
 #[test]
 fn lenient_parse_gives_up_on_non_toml() {
     let src = "<!DOCTYPE html>\n<html><body>\n".repeat(40);
@@ -2794,11 +2686,10 @@ fn lenient_parse_gives_up_on_non_toml() {
     assert!(r.first_error.is_some());
 }
 
-/// ★ 「跳过了几行」**不等于**「救回来了」：啃到上限仍失败时两者同时成立，
-/// 而此时说「已跳过第 N 行后加载其余内容」是在撒谎——一个字都没加载。
+/// 「跳过了几行」不等于「救回来了」：啃到上限仍失败时一个字都没加载，不能说「已加载其余内容」。
 ///
-/// 判据必须是 `is_salvaged()`（真的解析出了内容），不是 `skipped_lines` 非空。
-/// 这条文案是 toast / CLI describe / CLI export 的共同来源，错一次错三处。
+/// 判据必须是 `is_salvaged()`，不是 `skipped_lines` 非空。这条文案是 toast / CLI describe /
+/// CLI export 的共同来源。
 #[test]
 fn describe_never_claims_success_when_nothing_was_salvaged() {
     let mut u = UnparsableLayer {
@@ -2830,11 +2721,8 @@ fn describe_never_claims_success_when_nothing_was_salvaged() {
     assert!(!ok.contains("未能加载"), "{ok}");
 }
 
-/// ★ 行号多到一定程度必须折叠。
-///
-/// 实跑撞到的：一份完全不是 TOML 的文件（编码错乱、被别的文件覆盖）会一路啃到
-/// `LENIENT_MAX_SKIPS`，于是 32 个行号全列进 toast 和设置页横幅——撑爆版面，
-/// 而那种情形下具体哪几行本就没意义（整份都没加载）。
+/// 行号多到一定程度必须折叠：整份不是 TOML 时会啃到 `LENIENT_MAX_SKIPS`，全列出来会撑爆
+/// toast 和设置页横幅，而那时具体行号本就没意义。
 #[test]
 fn lines_phrase_folds_long_lists() {
     let mk = |n: usize| UnparsableLayer {
@@ -2860,7 +2748,7 @@ fn lines_phrase_folds_long_lists() {
         many.chars().count() < 40,
         "折叠后仍然很长就等于没折叠：{many}"
     );
-    // ★ 量词自带：调用方直接嵌入，不再拼「第 {} 行」——那样折叠形态会拼出
+    // 量词自带：调用方直接嵌入，不再拼「第 {} 行」——那样折叠形态会拼出
     // 「第 …等 32 处 行」的语病（实跑撞到过）。
     assert!(
         many.starts_with("第 ") && many.contains(" 行"),
@@ -2868,7 +2756,7 @@ fn lines_phrase_folds_long_lists() {
     );
 }
 
-/// ★ 非 UTF-8 的配置文件要进 `unparsable`（关写盘闸），不能当「文件不存在」跳过。
+/// 非 UTF-8 的配置文件要进 `unparsable`（关写盘闸），不能当「文件不存在」跳过。
 #[test]
 fn non_utf8_config_is_reported_as_unparsable() {
     let dir = std::env::temp_dir().join(format!("wind_cfg_gbk_{}", std::process::id()));
@@ -2910,11 +2798,10 @@ fn lenient_parse_leaves_valid_toml_untouched() {
     assert_eq!(r.value.unwrap()["ui"]["x"].as_integer(), Some(1));
 }
 
-/// ★ 任一层语法不合法 ⇒ `taints` 对**任何**路径为真，四道写盘闸一并关上。
+/// 任一层语法不合法 ⇒ `taints` 对任何路径为真，四道写盘闸一并关上。
 ///
-/// 不做路径匹配是刻意的：被跳过的行落在哪一段**不可知**——救回的 Value 里
-/// 「被跳过的键」与「从未写过的键」完全同形。任何「只影响这几段」的判断都是猜，
-/// 猜错就是把残表写回磁盘。
+/// 不做路径匹配是刻意的：救回的 Value 里「被跳过的键」与「从未写过的键」同形，
+/// 「只影响这几段」的判断都是猜，猜错就是把残表写回磁盘。
 #[test]
 fn unparsable_layer_taints_every_path() {
     let deg = ConfigDegradation {
@@ -2938,7 +2825,10 @@ fn unparsable_layer_taints_every_path() {
     assert!(!ConfigDegradation::default().taints("keys"));
 }
 
-/// 两个方向各来一条断言，且各配一条**不该命中**的对照（否则「恒为 true」也能全绿）。
+/// 写盘闸的判据必须两个方向都判：降级段是待写路径的祖先（坏在大段、写小格，如
+/// `input.punct` 整段降级时写 `input.punct.custom_mappings`），待写路径是降级段的祖先
+/// （写大表、坏在小格，如 `materialize_key_actions` 整表写 `keys`）。
+/// 每个方向各配一条不该命中的对照，否则「恒为 true」也能全绿。
 #[test]
 fn taints_judges_both_ancestor_directions() {
     let deg = ConfigDegradation {
@@ -2955,7 +2845,7 @@ fn taints_judges_both_ancestor_directions() {
         deg.taints("keys"),
         "整表写 keys 时 keys.key_actions 降级必须拦下"
     );
-    // 对照：同段的**兄弟**子路径不受牵连，否则一个坏键会把整段的写盘全堵死
+    // 对照：同段的兄弟子路径不受牵连，否则一个坏键会把整段的写盘全堵死
     assert!(!deg.taints("input.symbol"));
     assert!(!deg.taints("keys.session_actions"));
     assert!(!deg.taints("ui"));
@@ -3008,11 +2898,8 @@ fn affects_agrees_with_taints_on_top_level_sections() {
     }
 }
 
-/// ★ 每条降级记录必须带**自己那一段**的错误，不能共用最初整份 `try_into` 的错误。
-///
-/// 多段同时有毒时，整份 `try_into` 的错误只点得到其中一个段。若把它拼进每一行 WARN，
-/// `[keys]` 那行携带的错误文本讲的会是 `ui.font.scripts`——排查的人被直接带到无关的段，
-/// 而这类误导比没有日志更费时间。
+/// 每条降级记录必须带自己那一段的错误，不能共用整份 `try_into` 的错误——那个错误只点得到
+/// 其中一段，拼进每行 WARN 会把排查的人带到无关的段。
 #[test]
 fn section_fallback_reports_per_section_error() {
     let merged = merged_user_value(&format!("{HEALTHY_USER}{POISON_UI}{POISON_KEYS}"));
@@ -3045,11 +2932,9 @@ fn section_fallback_reports_per_section_error() {
     );
 }
 
-/// [`ConfigDegradation::affects`] 的判据必须覆盖子路径。
-///
-/// 这是 [`Config::materialize_key_actions`] 闸三的判据。写成精确相等会漏判
-/// `keys.key_actions`——而漏判的后果是本该拦下的那次写盘照样发生，把一次可恢复的降级
-/// 变成磁盘上的永久数据丢失。
+/// [`ConfigDegradation::affects`] 的判据必须覆盖子路径。这是
+/// [`Config::materialize_key_actions`] 闸三的判据，写成精确相等会漏判 `keys.key_actions`，
+/// 让可恢复的降级变成磁盘上的永久数据丢失。
 #[test]
 fn degradation_affects_matches_subpaths() {
     let d = ConfigDegradation {
@@ -3078,10 +2963,8 @@ fn degradation_affects_matches_subpaths() {
     assert!(total.affects("ui"));
 }
 
-/// 多段同时有毒：两段都降级，好段不受牵连。
-///
-/// 这条守的是「逐段替换直到成功」那种错误实现——毒在 keys 时，替换 input 后仍然失败，
-/// 那种实现分不清 input 是否无辜，会连它一起降级。探针法对每段独立判定。
+/// 多段同时有毒：两段都降级，好段不受牵连。拦的是「逐段替换直到成功」的实现，
+/// 它分不清无辜段，会连带降级；探针法对每段独立判定。
 #[test]
 fn section_fallback_isolates_multiple_bad_sections() {
     let merged = merged_user_value(&format!("{HEALTHY_USER}{POISON_UI}{POISON_KEYS}"));
@@ -3105,10 +2988,8 @@ fn section_fallback_isolates_multiple_bad_sections() {
     assert!(cfg.keys.key_actions.is_empty());
 }
 
-/// 幂等：同一输入连跑两次结果一致；且把降级后的产物再喂回去，不再降级、值也不再变。
-///
-/// 后半条才是真正的幂等——「加载→写回→再加载」是设置页的实际链路，若第二轮又变一次，
-/// 用户会看到配置在两个状态间来回跳。
+/// 幂等：同一输入连跑两次结果一致；降级后的产物再喂回去不再降级、值也不再变。
+/// 后半条对应设置页「加载→写回→再加载」的实际链路。
 #[test]
 fn section_fallback_is_idempotent() {
     let input = merged_user_value(&format!("{HEALTHY_USER}{POISON_UI}"));
@@ -3166,12 +3047,9 @@ fn section_fallback_is_transparent_when_healthy() {
     );
 }
 
-/// `degradation` 是 `#[serde(skip)]` 的运行期元信息，不是配置键：既不进注册表覆盖
-/// 检查的叶子集合，也不会被 `config.get` 序列化回去写进用户 config.toml。
-///
-/// 破坏后的现象很隐蔽：一旦它被序列化，`prune`/`set_user_value` 那套按叶子路径工作的
-/// 逻辑会把它当成用户配置项处理，而 `registry_covers_every_config_key` 会因为多出
-/// 一个未登记键而红——但那时已经有用户的 config.toml 被写进了这个键。
+/// `degradation` 是 `#[serde(skip)]` 的运行期元信息，不是配置键：不进注册表叶子集合，
+/// 也不会被 `config.get` 序列化。一旦被序列化，`prune`/`set_user_value` 会把它当用户配置项
+/// 写进用户 config.toml。
 #[test]
 fn degradation_is_not_a_config_key() {
     let v = toml::Value::try_from(Config::default()).unwrap();
@@ -3187,16 +3065,10 @@ fn degradation_is_not_a_config_key() {
     );
 }
 
-/// ★★ 端到端：**带着 L1 默认层**跑迁移。
-///
-/// 上面几条迁移测试喂的是「只有旧键的裸 Value」，那个形态在生产里一次都不会出现——
-/// `Config::load` 的 L1 是 `toml::Value::try_from(Config::default())`，所有字段必然
-/// 已经在合并结果里了。只测裸 Value 的话，迁移即便**一次都不执行**，那几条测试照样全绿。
-///
-/// 这条测试就是补上那个缺口：按真实链路走一遍「用户层 ⊕ L1 默认」，断言最终
-/// 反序列化出来的值。关过编码提示的用户升级后提示自己回来，属于本仓反复出现的那类
-/// 「配了没反应 / 自己变回来」的静默失效。
 /// 旧字号开关迁移：跑真实链路（用户层迁移 → ⊕ L1 默认 → 反序列化），返回生效字号。
+///
+/// 必须带 L1 默认层：生产里合并结果必然含全部字段，只喂裸 Value 的话迁移即便一次都
+/// 不执行，测试也照样绿。
 fn font_size_after_migration(user_toml: &str) -> (f32, toml::Value) {
     let mut user: toml::Value = toml::from_str(user_toml).unwrap();
     Config::migrate_user_layer_value(&mut user);
@@ -3221,11 +3093,9 @@ fn migrate_font_size_follow_true_means_follow_theme() {
     );
 }
 
-/// 没写 `follow` 键、但写了 `font_size`：不能再当「旧格式、从未生效」清零——
-/// 新格式下用户自定义字号后落盘的正是这个形状（`font_size` 有值、`follow` 键
-/// 从未存在过），迁移不区分的话会把用户刚设的字号在下次启动时清成 0（本条测试
-/// 之前断言 `fs == 0.0`，编码的就是这个已修复的 bug：`prune_user_config` 每次
-/// 启动都跑迁移，导致「设置页改字号、保存生效，重启后又变回跟随主题」）。
+/// 没写 `follow` 键、但写了 `font_size`：这正是新格式下用户自定义字号后落盘的形状，
+/// 不能当「旧格式、从未生效」清零——`prune_user_config` 每次启动都跑迁移，清零会让
+/// 用户设的字号重启后变回跟随主题。
 #[test]
 fn migrate_font_size_missing_follow_keeps_new_format_value() {
     let (fs, _user) = font_size_after_migration("[ui.candidate]\nfont_size = 22\n");
@@ -3240,7 +3110,7 @@ fn migrate_font_size_follow_false_keeps_user_size() {
     assert_eq!(fs, 22.0);
 }
 
-/// ★ 旧版写回会剪掉等于出厂值的键：「关跟随、字号保持 18」的文件里只剩 follow=false。
+/// 旧版写回会剪掉等于出厂值的键：「关跟随、字号保持 18」的文件里只剩 follow=false。
 /// 不补 18 的话会落到新出厂值 0，用户被悄悄切回跟随主题。
 #[test]
 fn migrate_font_size_follow_false_without_size_restores_legacy_default() {
@@ -3367,7 +3237,7 @@ fn comment_above_defaults_off_and_round_trips() {
     assert!(v.ui.candidate.comment_above);
 }
 
-/// ★ `comment_max_chars`（横竖共用）→ 两个方向各一份。配过非 0 值的用户升级后
+/// `comment_max_chars`（横竖共用）→ 两个方向各一份。配过非 0 值的用户升级后
 /// 注释必须仍按原长度截断，否则表现是「候选栏莫名变宽」，无人会报 bug。
 #[test]
 fn migrate_comment_max_chars_copies_into_both_directions() {
@@ -3391,9 +3261,9 @@ fn migrate_comment_max_chars_copies_into_both_directions() {
     assert_eq!(v, before, "二次迁移须无变化");
 }
 
-/// 用户已显式写了新键时，旧键**不得**覆盖它——新键是更明确的意图。
+/// 用户已显式写了新键时，旧键不得覆盖它——新键是更明确的意图。
 ///
-/// ⚠️ 同时钉住「只补缺失的那一侧」：只写了竖排的用户，横排仍该从旧键拿到值。
+/// 同时钉住「只补缺失的那一侧」：只写了竖排的用户，横排仍该从旧键拿到值。
 #[test]
 fn migrate_comment_max_chars_keeps_explicit_new_keys() {
     let mut v: toml::Value =
@@ -3489,15 +3359,10 @@ fn correction_hint_parses_scope_and_tone() {
     assert!(h.fuzzy, "未写的键保持出厂值");
 }
 
-/// `auto_learn.max_word_length` 的默认值必须**两条路一致**：代码默认
-/// （`AutoLearnConfig::default()`）与配置默认（serde 缺键）都得是 10。
+/// `auto_learn.max_word_length` 的默认值两条路（`AutoLearnConfig::default()` 与 serde 缺键）
+/// 都得是 10，所以 `AutoLearnConfig` 不能 `derive(Default)`。
 ///
-/// 这正是 `AutoLearnConfig` 不能再 `derive(Default)` 的原因——derive 给零值，
-/// 而 `#[serde(default = "…")]` 给 10，同一个语义在两条路上分叉，且分叉只在
-/// 「用户配置里恰好没写这个键」时才显形。
-///
-/// 拼音造词分支在协调器的 headless 测试里执行不到（`is_pinyin()` 依赖引擎加载，
-/// 那里恒 false），故这条配置接线只能在本 crate 钉住。
+/// 拼音造词分支在协调器的 headless 测试里执行不到（`is_pinyin()` 恒 false），这条只能在本 crate 钉。
 #[test]
 fn auto_learn_max_word_length_default_is_consistent() {
     assert_eq!(
@@ -3559,7 +3424,7 @@ fn test_schema_modes_and_input_groups() {
     let c = Config::default();
     // 模式三件套归 schema
     assert_eq!(c.schema.mix_modes.len(), 1, "默认一个快捷 mix");
-    // 引导键的**默认值**仍挂在实例上（由 normalize 折算进 keys.key_actions）——
+    // 引导键的默认值仍挂在实例上（由 normalize 折算进 keys.key_actions）——
     // 放在被折算的一侧，「用户清空」才折算得出空。理由见 default_mix_modes。
     assert_eq!(c.schema.mix_modes[0].trigger_keys, vec!["semicolon"]);
     assert_eq!(c.schema.quick_input.decimal_places, 6);
@@ -3626,10 +3491,8 @@ fn test_smart_method_default_when_absent() {
     assert_eq!(cfg.smart_method, SmartMethod::DeleteReplace);
 }
 
-/// 混输简拼**出厂关**。它决定超码长顶码上屏可不可用（简拼候选「消费整串」会让归属恒判给
-/// 拼音，`pinyin_only_overflow` 随即独立拦下顶码），所以这个取值是一项产品决策，不是随手
-/// 挑的默认——没有守门测试的话改回去不会有任何测试变红（实测：只翻这一个值，全量 2754 条
-/// 无一失败）。
+/// 混输简拼出厂关。这是产品决策：简拼候选「消费整串」会让归属恒判给拼音，
+/// `pinyin_only_overflow` 随即拦下超码长顶码。本条是它唯一的钉子。
 #[test]
 fn mix_pinyin_abbrev_defaults_off() {
     assert!(
@@ -3638,11 +3501,8 @@ fn mix_pinyin_abbrev_defaults_off() {
     );
 }
 
-/// 第三处同源：serde 字段默认值（写了 `[schema.mix]` 段、没写这一项时取它）。
-///
-/// 它曾是 `default_true`，与 `Default` / `data/config.toml` 的 `false` 相反。`Config::load`
-/// 以 `Config::default()` 序列化值打底，所以那条路上触发不到；但直接反序列化部分配置的
-/// 调用方（测试、日后的新入口）会拿到与出厂相反的值。
+/// 第三处同源：serde 字段默认值（写了 `[schema.mix]` 段、没写这一项时取它）必须也是 `false`。
+/// `Config::load` 以 `Config::default()` 打底触发不到，但直接反序列化部分配置的调用方会拿到它。
 #[test]
 fn mix_pinyin_abbrev_serde_default_matches_default() {
     let v: Config = toml::from_str("[schema.mix]\nshow_source_hint = true\n").unwrap();
@@ -3654,9 +3514,8 @@ fn mix_pinyin_abbrev_serde_default_matches_default() {
 }
 
 /// 同源守门：L1（`MixGlobal::default()`）与 L2（`data/config.toml`）必须给出同一个值。
-/// 两者漂移的后果分两层：引擎单测跑在**现实中不存在的配置**下（全绿但保护实际是反的）、
-/// 以及 `preset_for_pruning` 拿 L1⊕L2⊕L2.5 判「用户值是否等于默认」时开始吃用户配置。
-/// 缺 `data/` 时静默跳过（全仓惯例）。
+/// 漂移时引擎单测跑在现实中不存在的配置下，且 `preset_for_pruning` 判「用户值是否等于默认」
+/// 会开始吃用户配置。缺 `data/` 时静默跳过（全仓惯例）。
 #[test]
 fn mix_pinyin_abbrev_l1_and_l2_agree() {
     let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../data");
@@ -3682,13 +3541,10 @@ fn mix_pinyin_abbrev_l1_and_l2_agree() {
     );
 }
 
-/// 取值守门：出简让全的**全局**出厂值是关。
+/// 取值守门：出简让全的全局出厂值是关。
 ///
-/// 0.118 曾是 3（全部简码置后）。全局基线是所有码表方案共用的，而「短码首选 = 简码」
-/// 只对五笔这类前缀式简码成立，第三方码表被它静默改了候选顺序。0.119 起改为全局关、
-/// 由方案在 `[engine.codetable]` 里自己声明（见 `wubi86_schema_declares_short_code_yield`）。
-///
-/// 只翻这个值不会有任何别的测试变红——它是产品决策，本条是它唯一的钉子。
+/// 全局基线是所有码表方案共用的，而「短码首选 = 简码」只对五笔这类前缀式简码成立；
+/// 由方案在 `[engine.codetable]` 里自己声明。本条是这项产品决策唯一的钉子。
 #[test]
 fn short_code_yield_defaults_off_globally() {
     assert_eq!(
@@ -3698,10 +3554,8 @@ fn short_code_yield_defaults_off_globally() {
     );
 }
 
-/// 同源守门：L1（`CodetableGlobal::default()`）与 L2（`data/config.toml`）必须一致。
-/// 漂移的后果同上面那条简拼守门：引擎单测跑在现实中不存在的配置下，且
-/// `preset_for_pruning` 会开始把用户显式设的值误判成默认而删掉。
-/// 缺 `data/` 时静默跳过（全仓惯例）。
+/// 同源守门：L1（`CodetableGlobal::default()`）与 L2（`data/config.toml`）必须一致，
+/// 理由同上面那条简拼守门。缺 `data/` 时静默跳过（全仓惯例）。
 #[test]
 fn short_code_yield_l1_and_l2_agree() {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -3728,21 +3582,13 @@ fn short_code_yield_l1_and_l2_agree() {
     );
 }
 
-/// 出厂方案守门：wubi86 **不**声明出简让全，与第三方码表一样跟随全局。
+/// 出厂方案守门：wubi86 不声明出简让全，与第三方码表一样跟随全局。
 ///
-/// 0.119 一度让 wubi86 自带 `short_code_yield_level = 3`，当天撤回。判据是
-/// **用户在全局页做的事必须能作用到出厂方案上**：方案级的 `Some(_)` 恒覆盖全局，
-/// 内置方案给自己配特例，等于把全局页那一项对它变成了摆设——而用户并不知道，
-/// 「方案自带」那个标记藏在方案级码表配置里。
+/// 方案级 `Some(_)` 恒覆盖全局，内置方案自带特例会让全局页那一项对它变成摆设，用户却不知道。
+/// 论证见 `docs/design/codetable-short-code-yields-full.md` §6.3；方案文件里刻意不留说明。
 ///
-/// 完整论证在 `docs/design/codetable-short-code-yields-full.md` §6.3。**方案文件里
-/// 刻意不留这段说明**：它随安装包发布，读者是用户与第三方方案作者，决策档案对他们
-/// 没有用处，只会让人误以为那是一条可以照抄的配置。
-///
-/// 断言走**真实的反序列化**而不是文本匹配：`CodeTableSpec` 的字段是 `Option` +
-/// `serde(default)`，于是「真的删掉」「注释掉」「键名写错」三者在这里等价，都是
-/// `None`——正是我们想要的等价。用 `is_none()` 而不是比对某个具体值，是为了让
-/// 补回**任何**档位都变红。
+/// 断言走真实反序列化：「删掉 / 注释掉 / 键名写错」都等价于 `None`；判 `is_none()`
+/// 是为了让补回任何档位都变红。
 #[test]
 fn wubi86_schema_does_not_declare_short_code_yield() {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -3765,7 +3611,7 @@ fn wubi86_schema_does_not_declare_short_code_yield() {
     );
 }
 
-/// 取值守门：单字输入的**全局**出厂值是关。
+/// 取值守门：单字输入的全局出厂值是关。
 ///
 /// 翻这个值不会有任何别的测试变红——它是产品决策，本条是它唯一的钉子。
 #[test]
@@ -3820,19 +3666,12 @@ fn single_char_l1_and_l2_agree() {
     );
 }
 
-/// 出厂方案守门：**所有内置方案**都不声明单字输入，一律跟随全局。
+/// 出厂方案守门：所有内置方案都不声明单字输入，一律跟随全局（判据同
+/// `wubi86_schema_does_not_declare_short_code_yield`）。
 ///
-/// 与 `wubi86_schema_does_not_declare_short_code_yield` 同一条判据：方案级
-/// `Some(_)` 恒压过全局 ⇒ 内置方案给自己配特例，等于把全局页那一项对它变成摆设，
-/// 而用户并不知道「方案自带」这回事。
-///
-/// ⚠️ 「五笔常开、拼音不开」是**文档与设置页引导**的事，不是出厂值的事。看到本条红了
-/// 而想给 wubi86 补一个 `true` 之前，先读 `CodeTableSpec::single_char` 的文档——0.119 的
-/// `short_code_yield_level` 正是这么栽的，当天撤回。
-///
-/// 遍历全部方案而非只查 wubi86：本字段与引擎类型无关，拼音方案同样配得了。
-/// 断言走真实反序列化，故「删掉 / 注释掉 / 键名写错」三者等价，都是 `None`；
-/// 判 `is_none()` 而不是比对某个具体值，是为了让补上**任何**取值都变红。
+/// 「五笔常开、拼音不开」是文档与设置页引导的事，不是出厂值的事；想给 wubi86 补 `true`
+/// 之前先读 `CodeTableSpec::single_char` 的文档。本字段与引擎类型无关，故遍历全部方案；
+/// 判 `is_none()` 让补上任何取值都变红。
 #[test]
 fn factory_schemas_do_not_declare_single_char() {
     let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../data/schemas");
@@ -3869,14 +3708,10 @@ fn factory_schemas_do_not_declare_single_char() {
     assert!(checked >= 3, "只扫到 {checked} 个方案文件，判据多半失效了");
 }
 
-/// 出厂守门：内置拼音方案**不得**自带 `[engine.pinyin].separator`。
+/// 出厂守门：内置拼音方案不得自带 `[engine.pinyin].separator`。
 ///
-/// 同 `wubi86_schema_does_not_declare_short_code_yield` 的形状与理由——方案级
-/// `Some(_)` 恒压过全局，一旦出厂方案声明了它，用户在全局页改分隔符对该方案
-/// 完全失效，而「方案自带」这件事藏在方案文件里，从设置页看不出来。
-///
-/// 这一项**存在的意义恰恰是让用户去覆盖它**（全拼用反引号作分隔符、双拼把反引号
-/// 留给辅助码），所以出厂留空、由用户或第三方方案作者按自己的键位预算填。
+/// 理由同 `wubi86_schema_does_not_declare_short_code_yield`：方案级 `Some(_)` 恒压过全局。
+/// 这一项本就是让用户按自己的键位预算覆盖的（全拼用反引号、双拼把反引号留给辅助码）。
 #[test]
 fn builtin_pinyin_schemas_do_not_declare_separator() {
     let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../data/schemas");
@@ -3896,12 +3731,10 @@ fn builtin_pinyin_schemas_do_not_declare_separator() {
     }
 }
 
-/// 取值守门：空码时按标点**出厂即丢弃废码**，而同族的回车/空格仍是 `commit`。
+/// 取值守门：空码时按标点出厂即丢弃废码，而同族的回车/空格仍是 `commit`。
 ///
-/// 三个值一起断言是刻意的：这组不一致是产品决策（判据见
-/// `default_punct_on_empty_behavior` 的注释），最可能的破坏方式不是有人把 clear 改回
-/// commit，而是有人「顺手把三个统一了」。分开写三条测试拦不住那种改动——它会让被改的
-/// 那条红、另两条绿，看起来像是只动了一个值。
+/// 这组不一致是产品决策（见 `default_punct_on_empty_behavior`）。三值一起断言是为了拦
+/// 「顺手把三个统一了」，分开写三条的话那种改动只会红一条，看起来像只动了一个值。
 #[test]
 fn empty_code_behavior_defaults_are_intentionally_asymmetric() {
     let c = InputConfig::default();
@@ -3919,10 +3752,8 @@ fn empty_code_behavior_defaults_are_intentionally_asymmetric() {
     );
 }
 
-/// 同源守门：L1（`InputConfig::default()`）与 L2（`data/config.toml`）必须给出同一个值。
-/// 漂移的后果有两层：单测跑在**现实中不存在的配置**下（全绿但保护是反的），以及
-/// `preset_for_pruning` 拿 L1⊕L2⊕L2.5 判「用户值是否等于默认」时开始吃用户配置。
-/// 缺 `data/` 时静默跳过（全仓惯例）。
+/// 同源守门：L1（`InputConfig::default()`）与 L2（`data/config.toml`）必须给出同一个值，
+/// 理由同 `MixGlobal` 那条。缺 `data/` 时静默跳过（全仓惯例）。
 #[test]
 fn empty_code_behavior_l1_and_l2_agree() {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -4006,11 +3837,8 @@ fn toolbar_english_and_hover_reveal_defaults() {
     assert!(!d.auto_hide_hover_reveal);
 }
 
-/// `rare_char` 必须解析成生僻字模式，且**未知动词仍回落 None**。
-///
-/// 后半条不是凑数：`BoundAction::parse` 的契约是「未知值一律 None，不静默变成别的
-/// 功能」。新增一个动词时最容易破坏的正是这条——比如顺手写成前缀匹配，
-/// 于是 `rare_char_xxx` 也进了生僻字模式。
+/// `rare_char` 必须解析成生僻字模式，且未知动词仍回落 None——`BoundAction::parse` 的契约
+/// 是未知值不静默变成别的功能（例如被写成前缀匹配后 `rare_char_xxx` 也命中）。
 #[test]
 fn rare_char_bound_action_parses() {
     assert_eq!(BoundAction::parse("rare_char"), BoundAction::RareChar);

@@ -22,13 +22,11 @@ fn cand_code(text: &str, code: &str) -> Candidate {
     }
 }
 
-/// 词频记账的码：**码表按输入码，拼音/英文按候选码**。
+/// 词频记账的码：码表按输入码，拼音/英文按候选码。
 ///
-/// 真机现场：五笔下 `de` 的「有」带的是词条全码 `def`（前缀补全）。若拿它当词频 key，
-/// 在 `de`/`def` 下选中后，打 `d` 时「有」也跟着前移——而 `d`/`de`/`def` 是三个独立
-/// 码位，各自首选本该独立（`ProtectPolicy` 按输入码长分级保护正以此为前提）。
-///
-/// 拼音反向：候选码是完整读音，打 `d` 选「东西」后打 `dongxi` 也该受益。
+/// 码表 `d`/`de`/`def` 是三个独立码位，若拿前缀补全带的全码 `def` 记账，打 `d` 时同一个字也会
+/// 前移（`ProtectPolicy` 按输入码长分级保护以此为前提）。拼音反向：候选码是完整读音，
+/// 打 `d` 选「东西」后打 `dongxi` 也该受益。
 #[test]
 fn freq_code_splits_codetable_from_pinyin() {
     let mut ct = cand_code("有", "def");
@@ -78,20 +76,14 @@ fn freq_code_english_scope_is_switchable() {
     );
 }
 
-/// 守门：**所有** `record_selection` 生产调用点的记账码都必须经 [`Coordinator::freq_code`]。
+/// 守门：所有 `record_selection` 生产调用点的记账码都必须经 [`Coordinator::freq_code`]。
 ///
-/// 这道机械检查是必需的，不是洁癖。漏掉一处的后果是**静默的**：写进 FREQ 表的是个
-/// 孤儿键（双拼击键 `siyr` / 带分隔符 `xi'an` / 前缀补全 `si`），读取端按候选码
-/// `siyuan` 查，永远查不到——用户选了词却毫无变化，而任何常规测试都不会失败，因为
-/// 写入本身成功了。三处漏网（标点顶屏 ×2、临拼小键盘 ×1）都是这么藏到真机上的。
-///
-/// 用 `include_str!` 编译期嵌入而非运行时读盘：CI 的 test 跑 Linux 宿主、clippy 交叉编
-/// Windows，运行时拼源码路径在两边语义不同，嵌入则与执行环境无关。
+/// 漏掉一处是静默的：写进 FREQ 表的是孤儿键（双拼击键 / 带分隔符 / 前缀补全码），读端按候选码
+/// 永远查不到，而写入本身成功，常规测试不会失败。用 `include_str!` 编译期嵌入而非运行时读盘：
+/// test 跑 Linux 宿主、clippy 交叉编 Windows，运行时拼源码路径两边语义不同。
 #[test]
 fn every_record_selection_call_goes_through_freq_code() {
-    // 判据是「实参文本里出现 freq_code」，这顺带强制**中转变量必须命名为 `freq_code`**
-    // ——名字即声明，读代码时不必回溯赋值处就知道它已分流过。
-    //
+    // 判据是「实参文本里出现 freq_code」，顺带强制中转变量必须命名为 `freq_code`。
     // 白名单：确有理由不走 freq_code 的调用点，键为其首个实参的源码文本。
     const ALLOWED: &[(&str, &str)] = &[
         (
@@ -99,8 +91,8 @@ fn every_record_selection_call_goes_through_freq_code() {
             "commit_top_text：顶码机制归属码表，prefix 即被顶出的输入码，本就是码表口径",
         ),
         // 纳入 `record_selection_in` 扫描后暴露的三处既有调用点，都属下面两类之一。
-        // ⚠️ 新增以 `code` 为名的调用点时，必须回到这里确认自己确实属于其中一类，
-        // 而不是顺手借用这条例外——本条按实参**文本**匹配，无法区分文件。
+        // 新增以 `code` 为名的调用点时，必须回到这里确认自己确实属于其中一类，
+        // 而不是顺手借用这条例外——本条按实参文本匹配，无法区分文件。
         (
             "code",
             "两类：① 转发层——`record_selection` / `record_selection_cand` 把自己的形参 \
@@ -122,19 +114,16 @@ fn every_record_selection_call_goes_through_freq_code() {
         // 只看 `#[cfg(test)]` 之前的部分：测试自己用字面量直接构造键是合法的。
         let prod = crate::source_scan::production_code(src);
         let prod = prod.as_str();
-        // 三个名字都扫：
-        // - `record_selection_cand` 是从候选本身分流 emoji 的薄包装，记账码的口径约束
-        //   对它同样成立，漏扫它就等于给新调用点开了后门；
-        // - `record_selection_in` 此前**整个漏在守卫之外**（临英那处一直没被检查）。
-        //   它多一个前置的 schema 实参，故记账码是第 2 个而不是第 1 个——不按位置分流
-        //   的话，扫到的会是归属方案而非码，判据当场失效且全绿。
+        // 三个名字都扫：`record_selection_cand` 是分流 emoji 的薄包装，口径约束同样成立；
+        // `record_selection_in` 多一个前置的 schema 实参，记账码是第 2 个——不按位置分流的话扫到的是
+        // 归属方案而非码，判据失效且全绿。
         let calls = [
             ".record_selection(",
             ".record_selection_cand(",
             ".record_selection_in(",
             ".record_selection_cand_in(",
             // 词频文本与历史文本分开给的完整版（英文大小写投影用）。名字不登记进来
-            // 就等于给记账码开了一扇后门——本守卫是按**调用点**扫的，扫不到的名字
+            // 就等于给记账码开了一扇后门——本守卫是按调用点扫的，扫不到的名字
             // 可以随便传一个没过 `freq_code` 的串。
             ".record_selection_cased_in(",
         ];
@@ -195,18 +184,8 @@ fn every_record_selection_call_goes_through_freq_code() {
              命名为 `freq_code`），确有理由不走的请加进本测试的 ALLOWED 并写明理由。",
         bad.join("\n  ")
     );
-    // 反向保证：若哪天调用点被重命名/重构掉，本测试不得退化成空跑而静默变绿。
-    //
-    // 下限随**有意的**收口下调过一次：进模式顶屏（临英 / mix / 特殊模式 / 临拼）原本各持
-    // 一份逐字相同的记账 + 拼接代码，合并进 `take_committed_with_highlight` 后四处并作一处，
-    // 12 → 9。下调前务必确认是合并而非漏调——这条断言的用途正是逼人回来说明减少的原因。
-    // `record_selection_cand` 的调用点计入同一总数（把某处改成它不会让计数下降）。
-    // ⚠️ 纳入 `record_selection_in` 后实扫 13（原 9、下限恰等实值零余量）；再加 `_cand_in` = 14；
-    // 大小写投影拆出 `record_selection_cased_in` 后 = 15：`record_selection_in` 内部新增一处
-    // 转调（净增 1），而 `record_selection_cand_in` 是把原有的 `_in` 调用**改成** `_cased_in`
-    // （改调不是新增）。⚠️ 一开始按「两处各加一个」写成 16，被本断言当场逮住。
-    // 改用 `production_code` 剔测试条目后，`coordinator.rs` 九百多行之后的生产代码不再被
-    // 截掉，实扫 21。
+    // 反向保证：调用点被重命名/重构掉时，本测试不得退化成空跑而静默变绿。下限只在有意合并调用点时
+    // 下调，下调前务必确认是合并而非漏调；`record_selection_cand` 的调用点计入同一总数。
     assert!(
         checked >= 21,
         "只扫到 {checked} 个 record_selection 调用点，远少于预期——\
@@ -214,14 +193,10 @@ fn every_record_selection_call_goes_through_freq_code() {
     );
 }
 
-/// 方案归属的**读 / 写 / 调试三处必须取自同一处**（`effective_data_schema`）。
+/// 方案归属的读 / 写 / 调试三处必须取自同一处（`effective_data_schema`）。
 ///
-/// 不一致的后果分两种，都很隐蔽：读写不同源 ⇒ 写进 qsym、读的是 wubi86，记账看着成功
-/// 而候选顺序永远不动；调试不同源 ⇒ 调试段显示的计数与排序实际用的不是同一个 key，
-/// 排查时被它带偏。
-///
-/// 判据是「首个实参 ∈ 允许集合」，这顺带强制中转变量必须叫 `owner`——名字之外的任何
-/// 变量名都会被拦下，逼新增调用点的人回到这里说明它取的是哪个方案。
+/// 读写不同源时记账看着成功而候选顺序永远不动；调试不同源会在排查时把人带偏。判据是「首个实参
+/// ∈ 允许集合」，顺带强制中转变量必须叫 `owner`，逼新增调用点的人回来说明它取的是哪个方案。
 #[test]
 fn schema_scoped_reads_writes_and_debug_share_one_source() {
     // `None` = 显式走 active 路径（普通输入）；其余必须能追溯到 effective_data_schema。
@@ -239,26 +214,14 @@ fn schema_scoped_reads_writes_and_debug_share_one_source() {
         // 返回值是同一个常量（那边写成 `Some(ENGLISH_SCHEMA.to_string())`）。三处读写
         // 端直接用常量而不绕 state，取值同源，故等同于走了那个函数。
         "Some(ENGLISH_SCHEMA)",
-        // ★ 登记的**例外**：临拼的用户数据归属（词频读写 + 候选调整读端），取自
-        // `overlay_engine_schema` 而**不是** `effective_data_schema`——后者对
-        // `TempPinyin` 返回 `None`（2026-08-04 用户拍板不在那里分流）。
-        //
-        // 这条例外站得住的理由不是「没有写端」，而是**读写四处一律取同一个值**：
-        // `update_temp_pinyin_candidates`（freq + shadow 两处读）与两个上屏出口的
-        // `record_selection_in`（写）全走本变量，折叠后同落 `"pinyin"` 桶，
-        // 与全拼/双拼方案自己读写的是同一份数据。不存在「写进 A、读的是 B」。
-        //
-        // 为什么必须分流而不能落 active：临拼打的是拼音，**编码域与码位结构都与码表
-        // 不同**（拼音键是全拼扁平码、跨码位共享；码表键是输入码、码位独立且带按码长
-        // 分级的简码保护）。归到主方案桶等于把拼音码混进五笔码位。
+        // 登记的例外：临拼的用户数据归属取自 `overlay_engine_schema`（`effective_data_schema` 对
+        // `TempPinyin` 返回 `None`）。站得住是因为读写四处（`update_temp_pinyin_candidates` 的两处读与
+        // 两个上屏出口的 `record_selection_in`）一律取本变量，折叠后同落 `"pinyin"` 桶。不能落 active：
+        // 拼音与码表的编码域与码位结构不同，归到主方案桶等于把拼音码混进五笔码位。
         "temp_pinyin_owner.as_deref()",
-        // ★ 同类例外：mix（快捷输入）的用户数据归属取**成员方案**。读端在
-        // `update_mix_candidates` 里逐成员段应用（那时 `member` 在手边），写端只拿得到
-        // 一个已合并的候选，故按来源反查（`mix_candidate_owner`）——两端落同一个桶。
-        //
-        // 为什么必须按成员而不是 active：mix 是融合方案，成员可以是任意方案（含第三方），
-        // 各自的词频/候选调整本就该记在各自桶里；按 active 归属会把拼音成员学到的东西
-        // 记进主方案（常是五笔）的桶。
+        // 同类例外：mix（快捷输入）的用户数据归属取成员方案。读端在 `update_mix_candidates` 里逐成员段
+        // 应用，写端按来源反查（`mix_candidate_owner`），两端落同一个桶；按 active 归属会把拼音成员学到的
+        // 东西记进主方案的桶。
         "mix_member_owner.as_deref()",
     ];
     const CALLS: &[&str] = &[
@@ -336,30 +299,19 @@ fn schema_scoped_reads_writes_and_debug_share_one_source() {
              三处必须同源，否则「写进 A、读的是 B」——记账看着成功，排序永远不动。",
         bad.join("\n  ")
     );
-    // 反向保证：调用点被改名或扫描失效时，本测试不得退化成空跑而静默变绿。
-    //
-    // ⚠️ 下限须**随 sources 扩容一起上调**，否则余量翻倍等于容忍悄悄丢掉调用点：
-    // 把 `handle_temp.rs` 加进 sources 后实扫 13 个（原 9 个，下限却还留在 6）；
-    // 临拼词频改走 `record_selection_in` 后 +2 = 15；mix 读写接入 + handle_mode.rs 进表 = 20；`_cand_in` 进 CALLS = 21。
-    // 改用 `production_code`（不再截断于首个 `#[cfg(test)]`）+ 步骤表三文件进表 + 扫
-    // `PassCtx { owner }` 后实扫 33。
-    // 与下调时同一条纪律——变动前先确认是「合并/删除」还是「漏调」。
+    // 反向保证：调用点被改名或扫描失效时，本测试不得退化成空跑而静默变绿。下限须随 sources 扩容
+    // 一起上调，否则余量变大等于容忍悄悄丢掉调用点；变动前先确认是「合并/删除」还是「漏调」。
     assert!(
         checked >= 33,
         "只扫到 {checked} 个方案归属调用点，少于预期——扫描方式失效了，先修测试"
     );
 }
 
-/// **候选装配的平行实现必须一起接 emoji 扩展**。
+/// 候选装配的平行实现必须一起接 emoji 扩展。
 ///
-/// `[input.emoji]` 是**全局**开关，临时模式没有自己的那一份 —— 用户开了它，就该在临拼、
-/// 快捷输入里同样生效（2026-09-08 用户拍板：「临时想用一下，就应该和正式的表现一致」）。
-/// emoji 是「按候选文本查表追加」的加工，与哪个引擎出的候选无关，三条路一视同仁。
-///
-/// ⚠️ **本条只锁「调用点存在」，锁不住行为**：`load_emoji_dict` 取 `Config::data_dir()`
-/// （安装根目录）而非 `new_headless(cfg, Some(data_dir), ..)` 注入的那个，故集成测试里
-/// emoji 表恒不加载 —— **主路径同样测不出来**，不是 overlay 独有的问题。要做行为测试，
-/// 得先让那个加载点接受注入路径。在此之前，这条机械扫描是唯一守得住的东西。
+/// `[input.emoji]` 是全局开关，临拼、快捷输入里同样生效；它按候选文本查表追加，与引擎无关。
+/// 本条只锁「调用点存在」，锁不住行为：`load_emoji_dict` 取 `Config::data_dir()` 而非注入的
+/// data_dir，集成测试里 emoji 表恒不加载（主路径同样测不出）。
 #[test]
 fn overlay_candidate_paths_apply_emoji_suggestions() {
     const TARGETS: &[(&str, &str, &str)] = &[
@@ -407,14 +359,11 @@ fn overlay_candidate_paths_apply_emoji_suggestions() {
     );
 }
 
-/// **shadow 的码必须处处归一**：读端 `apply_shadow` 与写端 `candidate_op_scope` 若各取
-/// 各的，失配是**完全静默**的——双拼下规则写进 `hao`、读的却是击键 `hc`，用户看到的只是
-/// 「置顶了没反应」，日志、界面、返回值全都正常。
+/// shadow 的码必须处处归一：读端 `apply_shadow` 与写端 `candidate_op_scope` 若各取各的，
+/// 失配完全静默（双拼下规则写进 `hao`、读的却是击键 `hc`，只表现为「置顶了没反应」）。
 ///
-/// 判据是「第二个实参 ∈ 允许集合」，顺带强制中转变量必须叫 `shadow_code`：任何别的名字
-/// 都会被拦下，逼新增调用点的人回到这里说明它取的是哪个码域。这套机械扫描是本仓的既有
-/// 先例（见上面两个测试），因为「N 个调用点都要做同一件事」这类不变量靠注释守不住——
-/// `freq_code` 那次连红四次才把四处遗漏抓干净。
+/// 判据是「第二个实参 ∈ 允许集合」，顺带强制中转变量必须叫 `shadow_code`。「N 个调用点都要做
+/// 同一件事」这类不变量靠注释守不住，故用机械扫描（同上面两个测试）。
 #[test]
 fn every_shadow_read_goes_through_normalized_code() {
     // 主输入路：一律走 `shadow_code_of` 取出的中转变量。
@@ -443,7 +392,7 @@ fn every_shadow_read_goes_through_normalized_code() {
         ("handle_candidate.rs", include_str!("handle_candidate.rs")),
         ("handle_special.rs", include_str!("handle_special.rs")),
         ("handle_menu.rs", include_str!("handle_menu.rs")),
-        // overlay 的候选装配是主输入路的**平行实现**，各自持一份 shadow 读取点
+        // overlay 的候选装配是主输入路的平行实现，各自持一份 shadow 读取点
         // （临英取小写化缓冲、临拼取引擎归一码）。此前本表漏了这个文件，那两处
         // 一直不受守卫——正是「N 个调用点做同一件事」最容易走散的地方。
         ("handle_temp.rs", include_str!("handle_temp.rs")),
@@ -527,7 +476,7 @@ fn every_shadow_read_goes_through_normalized_code() {
              确有理由不走的请加进本测试的 ALLOWED 并写明理由。",
         bad.join("\n  ")
     );
-    // ⚠️ 同上：`handle_temp.rs` 进 sources 后实扫 9（原 7、下限留在 5）；mix 接入后 10。
+    // 同上：`handle_temp.rs` 进 sources 后实扫 9（原 7、下限留在 5）；mix 接入后 10。
     // 步骤表改造后 shadow 码写在 `PassCtx { shadow_code }`，扫字面量 + direct_aux 进表后 12。
     assert!(
         checked >= 12,
@@ -617,12 +566,11 @@ fn cand_ordered(text: &str, base_order: i32, natural_order: i32, weight: i32) ->
     }
 }
 
-/// 混输打 `xu` 的三档现场（`per_page=7` 时「需」原本在第 125 位 / 第 18~20 页）：
-/// 码表精确「弱」(`xu`, 二简码) → 拼音精确「需」(`code==xu`, 该音节最高频字) →
-/// 码表前缀补全「弹幕」(`xuaj`, 要打满 4 码才精确)。
+/// 混输打 `xu` 的三档：码表精确「弱」(`xu`, 二简码) → 拼音精确「需」(`code==xu`) →
+/// 码表前缀补全「弹幕」(`xuaj`)。
 ///
 /// 权重取真实值：码表带 `PARTIAL_MATCH_BOOST`(500K)、拼音已 `÷PINYIN_TIER_SCALE`(100)，
-/// 所以「需」纯按权重必输（69 vs 501,554）——这一条锁的正是「层级先于权重」。
+/// 「需」纯按权重必输——这一条锁的正是「层级先于权重」。
 fn xu_scene() -> (Candidate, Candidate, Candidate) {
     let ct_exact = Candidate {
         text: "弱".into(),
@@ -667,7 +615,7 @@ fn mixed_pinyin_exact_sits_between_codetable_exact_and_prefix() {
     );
 }
 
-/// ★ 反向锁一：`mixed=false`（纯拼音/纯码表）时本档**不得生效**。
+/// 反向锁一：`mixed=false`（纯拼音/纯码表）时本档不得生效。
 /// 纯拼音下全体候选同为 Pinyin 来源，该键会退化成「is_common 优先」，把含生僻字的多字词
 /// 硬降到全部常用单字之后 —— 那是明显回归。此处以码表权重序验证键未参与。
 #[test]
@@ -681,14 +629,10 @@ fn non_mixed_keeps_weight_order_for_pinyin() {
     );
 }
 
-/// ★ **前缀短语排在码表前缀补全之后**，且不再依赖权重量级。
+/// 前缀短语排在码表前缀补全之后，且不依赖权重量级。
 ///
-/// 这条次序一直存在，但从前是**加成的副产品**：混输引擎给码表前缀补全 +500K，而前缀短语
-/// 拿原始权重（`PHRASE_WEIGHT_BASE` 只加给精确码短语），于是码表恒赢，`source_tier` 里
-/// 二者「同档比 weight」那一步从来没有真正裁决过。加成拆掉后它才第一次生效——而那是
-/// 「码表词频 vs 用户设定的短语权重」，两个不同量纲的数硬比。故拆成两档写死。
-///
-/// 用**短语权重高于码表**的取值，确保测的是档位而非权重。
+/// 二者比的是「码表词频 vs 用户设定的短语权重」，量纲不同，不能硬比，故拆成两档写死。
+/// 用短语权重高于码表的取值，确保测的是档位而非权重。
 #[test]
 fn mixed_prefix_phrase_sits_below_codetable_prefix() {
     let (_, _, ct_prefix) = xu_scene();
@@ -708,7 +652,7 @@ fn mixed_prefix_phrase_sits_below_codetable_prefix() {
     );
 }
 
-/// ★ 反向锁二：生僻拼音字（`is_common=false`）不提档，仍留在码表前缀补全之后。
+/// 反向锁二：生僻拼音字（`is_common=false`）不提档，仍留在码表前缀补全之后。
 /// 这一条锁住「不设条数上限、由检索范围把关」的设计——`xu` 有 329 条同音字，
 /// 若生僻字一并提档会把码表候选整片挤出候选配额。
 #[test]
@@ -742,10 +686,9 @@ fn mixed_within_pinyin_exact_tier_weight_still_decides() {
     assert_eq!(cands[0].text, "需", "同档内仍按权重降序（69 > 13）");
 }
 
-/// 回归：跨词库排序须以 `base_order` 隔离，`natural_order` 只在同档内当 tiebreaker。
-/// 复刻 flypy「y」现场——主库「一」(base_order=0, natural_order 大) vs 一简次选库「有时」
-/// (base_order=2, natural_order 小)：修复前协调器仅按 natural_order 升序会把「有时」拉到首位，
-/// 修复后「一」（更小 base_order）应稳居首位。两种模式（含/不含权重）都成立（此处权重均 0）。
+/// 跨词库排序须以 `base_order` 隔离，`natural_order` 只在同档内当 tiebreaker。复刻 flypy「y」：
+/// 主库「一」(base_order=0, natural_order 大) vs 一简次选库「有时」(base_order=2, natural_order 小)，
+/// 「一」应稳居首位。两种模式（含/不含权重）都成立（此处权重均 0）。
 #[test]
 fn base_order_wins_over_cross_dict_natural_order() {
     let yi = cand_ordered("一", 0, 57285, 0);
@@ -781,22 +724,14 @@ fn natural_mode_ignores_weight_weight_mode_respects_it() {
     );
 }
 
-/// 回归：码表精确匹配须先于高权重前缀词组，且该优先级**不得跨匹配层提拔**。
+/// 码表精确匹配须先于高权重前缀词组，且该优先级不得跨匹配层提拔。
 ///
-/// 复刻 usr 现场（古精86五笔）：简码「新」(usr, 11777) vs 前缀词组「新的」(usrq, 47487)。
-/// 引擎已排好序，但本函数会无条件重排全部候选——若不复刻 `is_exact_code` 键，引擎结果
-/// 会在这里被按纯权重推翻（原始 bug）。同时验证前缀枚举短语（`is_prefix=true`）仍留在
-/// 精确层之下，不因本键而上浮。
+/// 复刻古精86五笔 `usr`：简码「新」(usr, 11777) vs 前缀词组「新的」(usrq, 47487)。本函数会
+/// 无条件重排全部候选，若不复刻 `is_exact_code` 键，引擎结果会被按纯权重推翻。前缀枚举短语
+/// （`is_prefix=true`）仍留在精确层之下。
 ///
-/// ## ⚠️ 精确档**内部**的先后已改由权重裁决
-///
-/// 引导键组短语（`$SS`/`$AA`）此前带 `PHRASE_WEIGHT_BASE`(40M)，在精确档内**恒**居首；
-/// 那个常量已整体删除（见 `lookup` 分支的 `weight` 注释）。现在它与码表精确候选真比权重，
-/// 于是先后**取决于配置**：系统组短语实测 1230，会输给 11777 的简码；调到简码之上就赢。
-///
-/// 下方两个方向都断言。**只测一个方向证明不了裁决者是权重**——若某个更靠前的键碰巧
-/// 也给出同样次序，单向断言会一路绿到底（本仓踩过：混输六个加成里有恒赢的偏置，
-/// 拆掉后一批从未执行过的比较才第一次生效，而全套测试当时一条没红）。
+/// 精确档内部的先后由权重裁决：引导键组短语（`$SS`/`$AA`）与码表精确候选真比权重，先后取决于
+/// 配置。下方两个方向都断言——只测一个方向证明不了裁决者是权重。
 #[test]
 fn exact_code_outranks_prefix_but_stays_within_match_layer() {
     let exact = Candidate {
@@ -848,7 +783,7 @@ fn exact_code_outranks_prefix_but_stays_within_match_layer() {
     };
 
     // ① 系统组短语的真实权重（1230）低于该简码 → 组名落到简码之后，但仍在精确档内、
-    //    整体先于前缀词组。这是删掉 40M 后的**新行为**。
+    //    整体先于前缀词组。这是删掉 40M 后的新行为。
     assert_eq!(
         order_of(guide_group(1230), false),
         vec!["新", "组名", "新的", "短语"],

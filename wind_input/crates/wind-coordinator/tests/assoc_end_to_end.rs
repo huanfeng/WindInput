@@ -1,15 +1,8 @@
-//! 联想的**端到端**验证：真实词库 + 真实按键 + 真实上屏路径。
+//! 联想的端到端验证：真实词库 + 真实按键 + 真实上屏路径。
 //!
-//! # 为什么单元测试不够
-//!
-//! `handle_assoc::wiring_tests` 用的是 headless（无词库）协调器，词语联想在那里恒空
-//! ——它能验状态机与按键闸门，验不了「真机上打完一个字到底出不出联想」。
-//!
-//! 而真机第一次跑起来正是**什么都没出**，且日志一行都没有（`maybe_enter_assoc` 有三个
-//! 静默的 early-return）。本文件就是为了把那种情况变成一条会红的用例。
-//!
-//! 词典缺失时自动跳过 —— ⚠️ `build_dev/data` 不存在时**整族静默跳过而计数照绿**，
-//! 判据是耗时。见 project_build_dev_data_missing。
+//! `handle_assoc::wiring_tests` 用 headless（无词库）协调器，词语联想在那里恒空，只能验状态机与
+//! 按键闸门；「打完一个字到底出不出联想」只有这里能答（`maybe_enter_assoc` 有几个静默的
+//! early-return）。词典缺失时自动跳过——`build_dev/data` 不存在时整族静默跳过而计数照绿，看耗时判断。
 
 use std::path::PathBuf;
 use wind_bridge::handler::{KeyAction, KeyEventData, MessageHandler};
@@ -38,7 +31,7 @@ fn key_event(key_code: u32) -> KeyEventData {
     }
 }
 
-/// 按用户真机上的配置造协调器：**活跃方案是混输**，这正是词语联想差点整个失效的场景。
+/// 按用户真机上的配置造协调器：活跃方案是混输，这正是词语联想差点整个失效的场景。
 fn coord(kind: &str, schema: &str) -> std::sync::Arc<Coordinator> {
     coord_mode(kind, schema, "one_shot")
 }
@@ -63,14 +56,11 @@ fn coord_tweak(
     c
 }
 
-/// 词语联想的数据源是**反查索引**，而它在生产里由启动后的后台预热线程建好
-/// （`construct.rs` → `prewarm_indexes`）。headless 协调器不跑那个线程。
+/// 词语联想的数据源是反查索引，生产里由启动后的后台预热线程建好（`construct.rs` →
+/// `prewarm_indexes`），headless 协调器不跑那个线程。
 ///
-/// 索引改成「没就绪就返回空、绝不在按键线程上现建」之后（避免大词库把整机卡住），
-/// 测试若不自己预热，`assoc_prefix_words` 会如实给出「无联想」——那测的是夹具缺陷，
-/// 不是产品行为。生产/测试/移动端共用同一个 `prewarm_indexes`，三处不会漂移。
-///
-/// 智能档的下一词表也由它派后台加载、不等；这里等它装好，对应生产里「启动后早已就绪」。
+/// 索引没就绪时返回空、绝不在按键线程上现建，测试不自己预热就测的是夹具缺陷。生产/测试/移动端
+/// 共用同一个 `prewarm_indexes`。智能档的下一词表也由它派后台加载，这里等它装好。
 fn prewarm(c: &Coordinator) {
     c.prewarm_indexes();
     c.debug_wait_assoc_bigram(std::time::Duration::from_secs(10));
@@ -96,14 +86,10 @@ fn press(c: &Coordinator, code: &str) {
     }
 }
 
-/// 空格上屏当前高亮候选，返回真正写进宿主的文本。
-///
-/// ★ 两种形态都算数：
+/// 空格上屏当前高亮候选，返回真正写进宿主的文本。两种形态都算数：
 ///   - `InsertText`                 —— 没进联想态（或 `top_commit_mode = pre_confirm`）
-///   - `CommitThenDeferComposition` —— **进了联想态**：真提交 + 延到 keyup 才开占位组合
-///
-/// 后者正是联想能收到后续按键的关键（见 `Coordinator::assoc_composition`）。
-/// 本函数刻意两种都接：它要回答的是「上屏了什么」，而不是「走了哪条时序」。
+///   - `CommitThenDeferComposition` —— 进了联想态：真提交 + 延到 keyup 才开占位组合
+///     （联想能收到后续按键的关键，见 `Coordinator::assoc_composition`）
 fn commit_with_space(c: &Coordinator) -> String {
     match c.handle_key_event(&key_event(0x20)) {
         KeyAction::InsertText { text, .. } => text,
@@ -112,7 +98,7 @@ fn commit_with_space(c: &Coordinator) -> String {
     }
 }
 
-/// 上屏动作是否**带了占位组合**——联想态的命门。
+/// 上屏动作是否带了占位组合——联想态的命门。
 fn opened_composition(act: &KeyAction) -> bool {
     match act {
         KeyAction::CommitThenDeferComposition {
@@ -130,10 +116,8 @@ fn assoc_texts(c: &Coordinator) -> Vec<String> {
     c.debug_assoc_texts()
 }
 
-/// ★★★ **真机复现**：混输方案下打一个字上屏，词语联想要出得来。
-///
-/// `q` 在五笔 86 是「我」的首选码位之一；这里不钉死具体是哪个字，只要求
-/// 「上屏了一个汉字 ⇒ 联想非空」。钉死具体字会让词库一更新就假红。
+/// 混输方案下打一个字上屏，词语联想要出得来。只要求「上屏了一个汉字 ⇒ 联想非空」，
+/// 不钉死具体字，否则词库一更新就假红。
 #[test]
 fn word_assoc_appears_after_commit_on_mixed_schema() {
     let dir = data_dir();
@@ -159,7 +143,7 @@ fn word_assoc_appears_after_commit_on_mixed_schema() {
     println!("上屏 {committed:?} → 联想 {hits:?}");
 }
 
-/// **受控对照**：同样的操作，`kind = "off"` 时不该有联想。
+/// 受控对照：同样的操作，`kind = "off"` 时不该有联想。
 ///
 /// 少了这条，上一条可能只是因为联想态被别的什么东西填上了。
 #[test]
@@ -194,7 +178,7 @@ fn word_assoc_appears_on_codetable_schema() {
     );
 }
 
-/// 选中联想候选后，**只补出剩余部分**。
+/// 选中联想候选后，只补出剩余部分。
 #[test]
 fn selecting_assoc_commits_only_the_suffix() {
     let dir = data_dir();
@@ -221,12 +205,11 @@ fn selecting_assoc_commits_only_the_suffix() {
     );
 }
 
-/// ★ 智能联想里前缀延伸候选**只显示补出的那一截**（「中」→「国」，不是「中国」），
-/// 与同栏的下一词、标点同一口径；选中上屏的正是显示的那一截。
+/// 智能联想里前缀延伸候选只显示补出的那一截（「中」→「国」，不是「中国」），与同栏的下一词、
+/// 标点同一口径；选中上屏的正是显示的那一截。
 ///
-/// 对照用同一份词库的词语联想：它显示整词，去掉已在屏上的上文、按智能联想的口径筛过
-/// （补出部分不超过 `SMART_PREFIX_TAIL_MAX` 字、最多 `SMART_PREFIX_CAP` 条）后应与智能联想
-/// 逐条相同（桌面基线标点联想关、无历史，两档出的都只有前缀词）。
+/// 对照同一份词库的词语联想：整词去掉已在屏上的上文、按智能联想口径筛过（补出部分不超过
+/// `SMART_PREFIX_TAIL_MAX` 字、最多 `SMART_PREFIX_CAP` 条）后应逐条相同（桌面基线两档都只出前缀词）。
 #[test]
 fn smart_assoc_shows_only_the_continuation() {
     let dir = data_dir();
@@ -267,7 +250,7 @@ fn smart_assoc_shows_only_the_continuation() {
     assert_eq!(out, shown[0], "上屏的就是显示的那一截");
 }
 
-/// ★ 智能联想出「下一词」（离线蒸馏表 `data/assoc/assoc_bigram.txt`）：上屏「我」后首位是
+/// 智能联想出「下一词」（离线蒸馏表 `data/assoc/assoc_bigram.txt`）：上屏「我」后首位是
 /// 词内接续「们」（逐字打字最常要的），紧跟着是下一词「的」，名额用满。
 #[test]
 fn smart_assoc_brings_next_words() {
@@ -292,7 +275,7 @@ fn smart_assoc_brings_next_words() {
     );
 }
 
-/// ★ 宿主报了光标前文：逐字上屏「今」「天」，下一词按「今天」接，而不是按「天」。
+/// 宿主报了光标前文：逐字上屏「今」「天」，下一词按「今天」接，而不是按「天」。
 #[test]
 fn next_words_borrow_from_preceding_text() {
     let dir = data_dir();
@@ -320,9 +303,7 @@ fn next_words_borrow_from_preceding_text() {
     );
 }
 
-/// 真机那次的确切复现：混输方案打 `lwty` 空格上屏，看联想出不出。
-///
-/// 用户 2026-08-16 11:51 的日志里就是这一串（buf='lwty' → 2 候选 → 空格）。
+/// 混输方案打 `lwty`（2 个候选）空格上屏，联想要出得来。
 #[test]
 fn reproduce_user_lwty() {
     let dir = data_dir();
@@ -341,11 +322,10 @@ fn reproduce_user_lwty() {
     }
 }
 
-/// ★★★ **上屏进入联想态时必须带占位组合**——整条链的命门。
+/// 上屏进入联想态时必须带占位组合——整条链的命门。
 ///
-/// 没有它，TSF 的 `OnTestKeyDown` 判定「无会话」，退格/Esc 根本不会转发进服务端，
-/// 联想窗永远关不掉（2026-08-16 真机实测）。曾试过让宿主的 `_hasCandidates` 保持真，
-/// 但那是异步回填的，赢不了同一拍的同步判定。
+/// 没有它，TSF 的 `OnTestKeyDown` 判定「无会话」，退格/Esc 不会转发进服务端，联想窗关不掉。
+/// 让宿主的 `_hasCandidates` 保持真不行：它异步回填，赢不了同一拍的同步判定。
 #[test]
 fn entering_assoc_opens_placeholder_composition() {
     let dir = data_dir();
@@ -363,10 +343,7 @@ fn entering_assoc_opens_placeholder_composition() {
     );
 }
 
-/// **受控对照**：没进联想态时**不该**平白多出一个组合。
-///
-/// 少了这条，上一条可能只是因为「所有上屏都带组合」——那会在每次普通上屏后
-/// 都留一个悬空组合，是比联想失效严重得多的回归。
+/// 受控对照：没进联想态时不该平白多出一个组合，否则上一条可能只是因为「所有上屏都带组合」。
 #[test]
 fn plain_commit_opens_no_composition() {
     let dir = data_dir();
@@ -421,7 +398,7 @@ fn escape_closes_assoc_window() {
     assert!(matches!(act, KeyAction::ClearComposition), "实得 {act:?}");
 }
 
-/// 字母键**照常放行**——它会用新编码替换掉占位组合，不需要我们收尾。
+/// 字母键照常放行——它会用新编码替换掉占位组合，不需要我们收尾。
 #[test]
 fn letter_falls_through_and_starts_new_input() {
     let dir = data_dir();
@@ -442,11 +419,9 @@ fn letter_falls_through_and_starts_new_input() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 联想态 = **正常输入态，只是没有输入缓冲**
+// 联想态 = 正常输入态，只是没有输入缓冲
 //
-// 下面这组不是在测「我为联想写了什么」，而是在测「联想**没有**被做成特例」：
-// 候选就住在 `state.candidates` 里，于是主输入路的既有能力天然全部适用。
-// 每多一条通过的用例，就多一份「不需要为联想单独接线」的证据。
+// 这组测的是联想没有被做成特例：候选住在 `state.candidates` 里，主输入路的既有能力天然适用。
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// 进入联想态并返回候选列表（够长才好验翻页/二三候选）。
@@ -458,7 +433,7 @@ fn enter_assoc(c: &Coordinator) -> Vec<String> {
     hits
 }
 
-/// ★ 二三候选键（`;` / `'`）在联想态照常选词。
+/// 二三候选键（`;` / `'`）在联想态照常选词。
 #[test]
 fn select_keys_work_in_assoc() {
     let dir = data_dir();
@@ -487,7 +462,7 @@ fn select_keys_work_in_assoc() {
     }
 }
 
-/// ★ 上下移高亮在联想态照常工作，且空格上屏的是移动后的那条。
+/// 上下移高亮在联想态照常工作，且空格上屏的是移动后的那条。
 #[test]
 fn highlight_move_works_in_assoc() {
     let dir = data_dir();
@@ -515,10 +490,8 @@ fn highlight_move_works_in_assoc() {
     );
 }
 
-/// ★ 翻页键（PageDown）在联想态照常工作。
-///
-/// 候选不足一页时翻不动是正常的，故只断言「按键被消费掉而不是漏给宿主」——
-/// 漏给宿主才是联想被做成特例的症状。
+/// 翻页键（PageDown）在联想态照常工作。候选不足一页时翻不动是正常的，只断言按键被消费而不是
+/// 漏给宿主。
 #[test]
 fn paging_keys_are_consumed_in_assoc() {
     let dir = data_dir();
@@ -536,7 +509,7 @@ fn paging_keys_are_consumed_in_assoc() {
     assert!(!assoc_texts(&c).is_empty(), "翻页不该退出联想态");
 }
 
-/// ★ 持续档：选中一条之后接着给下一轮（「我」→「我们」→ 以「我们」开头的词）。
+/// 持续档：选中一条之后接着给下一轮（「我」→「我们」→ 以「我们」开头的词）。
 #[test]
 fn continuous_mode_chains_in_assoc() {
     let dir = data_dir();
@@ -565,7 +538,7 @@ fn continuous_mode_chains_in_assoc() {
     }
 }
 
-/// **受控对照**：一次性档同样操作**不**续轮。
+/// 受控对照：一次性档同样操作不续轮。
 #[test]
 fn one_shot_does_not_chain_in_assoc() {
     let dir = data_dir();
@@ -581,7 +554,7 @@ fn one_shot_does_not_chain_in_assoc() {
     assert!(assoc_texts(&c).is_empty(), "一次性档选完即止");
 }
 
-/// ★ 联想候选**不记词频**——它没有编码，记进去是一条永远查不到的空码行。
+/// 联想候选不记词频——它没有编码，记进去是一条永远查不到的空码行。
 #[test]
 fn assoc_commit_records_no_frequency() {
     let dir = data_dir();
@@ -591,8 +564,8 @@ fn assoc_commit_records_no_frequency() {
     }
     let c = coord("word", "wubi86_pinyin");
     enter_assoc(&c);
-    // 选中联想候选。没有 store 的 headless 下本就不会写，这里验的是**不 panic 且
-    // 上屏正确**——真正的守门在 `commit_selected` 里那句 `if !from_assoc`。
+    // 选中联想候选。没有 store 的 headless 下本就不会写，这里验的是不 panic 且
+    // 上屏正确——真正的守门在 `commit_selected` 里那句 `if !from_assoc`。
     let act = c.handle_key_event(&key_event(0x31));
     assert!(
         matches!(
@@ -603,16 +576,10 @@ fn assoc_commit_records_no_frequency() {
     );
 }
 
-/// ★★★ **联想态下按标点，不该顶屏联想候选。**
+/// 联想态下按标点，不该顶屏联想候选。
 ///
-/// 真机复现（2026-08-16）：打「我」上屏 → 联想首条「我们」→ 按「。」→ 得到「我我们。」
-///
-/// 两层错：
-///   ① 顶屏本身不该发生。顶码/顶屏的语义前提是「用户打了码、还没选词，按标点意味着
-///      『就选高亮那个吧』」。联想态**没有码**——高亮那条是输入法猜的，不是用户在选。
-///      用户按「。」的意图就是打个句号。
-///   ② 就算顶屏，也拿错了文本：联想的显示文本是整词「我们」，而屏幕上已经有「我」，
-///      真正该补的只有「们」。于是「我」+「我们」=「我我们」。
+/// 顶屏的前提是「用户打了码、按标点意味着就选高亮那个」；联想态没有码，高亮是输入法猜的。
+/// 何况联想显示的是整词，顶屏会把已在屏上的字重复一遍（「我」+「我们」=「我我们」）。
 #[test]
 fn punctuation_does_not_top_commit_assoc() {
     let dir = data_dir();
@@ -647,13 +614,10 @@ fn punctuation_does_not_top_commit_assoc() {
     assert!(assoc_texts(&c).is_empty(), "标点该收掉联想窗");
 }
 
-/// 回车：收窗 + 结束占位组合，**不**上屏高亮联想。
+/// 回车：收窗 + 结束占位组合，不上屏高亮联想（回车是终结性动作，替用户选一个是越权）。
 ///
-/// 回车是终结性动作（换行/发送），联想的高亮是输入法猜的，替用户选一个是越权。
-///
-/// 本条只管「不上屏」这一件事，**刻意接受两种收窗动作**：吃键还是把回车交还宿主由
-/// `enter_cancels_only` 定，各自由 `assoc_enter_*` 两条钉。断言写死成某一个变体，
-/// 会让这条在开关默认值翻转时误报成「上屏了联想」——那是它压根没在测的事。
+/// 只管「不上屏」，刻意接受两种收窗动作：吃键还是交还宿主由 `enter_cancels_only` 定，由
+/// `assoc_enter_*` 两条钉。
 #[test]
 fn enter_dismisses_assoc_without_committing() {
     let dir = data_dir();
@@ -676,10 +640,7 @@ fn enter_dismisses_assoc_without_committing() {
     );
 }
 
-/// ★ `space_commits = false` 时空格不选联想，只收窗并出空格。
-///
-/// 这一条曾在重构里**静默失效**——读它的那段代码被删掉了，配置还在但没有消费点。
-/// 属本仓反复出现的「配置就位、消费点不可达 ⇒ 开关毫无反应」。
+/// `space_commits = false` 时空格不选联想，只收窗并出空格。配置还在而消费点被删时它静默失效。
 #[test]
 fn space_commits_false_outputs_space_not_candidate() {
     let dir = data_dir();
@@ -712,7 +673,7 @@ fn space_commits_false_outputs_space_not_candidate() {
     }
 }
 
-/// **受控对照**：默认（`space_commits = true`）时空格**确实**选中联想。
+/// 受控对照：默认（`space_commits = true`）时空格确实选中联想。
 /// 少了它，上一条可能只是因为空格在联想态压根不工作。
 #[test]
 fn space_commits_true_selects_assoc() {
@@ -737,13 +698,10 @@ fn space_commits_true_selects_assoc() {
     }
 }
 
-/// ★ 联想态按引导键进模式**不顶屏**联想候选。
+/// 联想态按引导键进模式不顶屏联想候选（理由同标点）。
 ///
-/// 顶屏的语义前提是「用户打了码、还没选词，按这个键意味着『就选高亮那条吧』」。联想态
-/// 没有码——高亮那条是输入法猜的，此刻按引导键的意图就是进模式。
-///
-/// 标点键那条路（`commit_highlight_then_char`）早有同款守卫，但进模式顶屏走的是另一条
-/// （`take_committed_with_highlight`），判据必须自己带——它此前没有，联想候选会被顶上屏。
+/// 标点那条路（`commit_highlight_then_char`）有同款守卫，但进模式顶屏走的是
+/// `take_committed_with_highlight`，判据必须自己带。
 #[test]
 fn entering_mode_does_not_commit_assoc_candidate() {
     let dir = data_dir();
@@ -769,11 +727,11 @@ fn entering_mode_does_not_commit_assoc_candidate() {
 // ─────────────────────────────────────────────────────────────────────────────
 // 联想态的回车 / 退格：吃键还是交还宿主
 //
-// 两个键**默认相反**（回车透传、退格吃键），理由见 `AssociationConfig` 的字段文档。
-// 四条用例把两个开关的两种取值都钉死——只测一半会让「开关根本没接线」照样全绿。
+// 两个键默认相反（回车透传、退格吃键），理由见 `AssociationConfig` 的字段文档。
+// 四条用例把两个开关的两种取值都钉死，只测一半会让「开关根本没接线」照样全绿。
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// ★ 默认：联想态回车**交还宿主**（收窗 + 照常换行/发送），不必按两次。
+/// 默认：联想态回车交还宿主（收窗 + 照常换行/发送），不必按两次。
 #[test]
 fn assoc_enter_passes_through_by_default() {
     let dir = data_dir();
@@ -790,7 +748,7 @@ fn assoc_enter_passes_through_by_default() {
     assert!(assoc_texts(&c).is_empty(), "回车后联想窗该收起");
 }
 
-/// ★ `enter_cancels_only = true`：回车只收窗，键被吃掉（要按第二次才生效）。
+/// `enter_cancels_only = true`：回车只收窗，键被吃掉（要按第二次才生效）。
 #[test]
 fn assoc_enter_cancels_only_when_configured() {
     let dir = data_dir();
@@ -798,7 +756,7 @@ fn assoc_enter_cancels_only_when_configured() {
         eprintln!("!!! 跳过：build_dev 词库不存在");
         return;
     }
-    // 两个开关**同时设成与各自默认相反**：这样「回车读了退格那份配置」这类接错线
+    // 两个开关同时设成与各自默认相反：这样「回车读了退格那份配置」这类接错线
     // 也会被抓到——只翻一个开关时，另一个键的默认值恰好能让错误的读取蒙对。
     let c = coord_tweak("word", "wubi86_pinyin", |cfg| {
         cfg.input.association.enter_cancels_only = true;
@@ -812,7 +770,7 @@ fn assoc_enter_cancels_only_when_configured() {
     assert!(assoc_texts(&c).is_empty(), "回车后联想窗该收起");
 }
 
-/// ★ 默认：联想态退格**吃键**——与回车相反，透传会删掉刚上屏的字（不可逆）。
+/// 默认：联想态退格吃键——与回车相反，透传会删掉刚上屏的字（不可逆）。
 #[test]
 fn assoc_backspace_is_eaten_by_default() {
     let dir = data_dir();
@@ -829,7 +787,7 @@ fn assoc_backspace_is_eaten_by_default() {
     assert!(assoc_texts(&c).is_empty(), "退格后联想窗该收起");
 }
 
-/// ★ `backspace_cancels_only = false`：退格连同收窗一起交还宿主。
+/// `backspace_cancels_only = false`：退格连同收窗一起交还宿主。
 #[test]
 fn assoc_backspace_passes_through_when_configured() {
     let dir = data_dir();
@@ -852,23 +810,15 @@ fn assoc_backspace_passes_through_when_configured() {
 
 // ── 联想态下的「其它按键」 ────────────────────────────────────────────────────
 //
-// 退格与回车各有专门分支（上面四条），本节管的是**剩下那一大类**：在既有分支里落到
-// `PassThrough` 的键。用户报的是「Del / Home / End 按了没反应」，但名单数不清——
-// 左右/Home/End 一条臂、Del 一条臂、Insert 与 Tab 落兜底臂——故收口是按**动作**判的，
-// 见 `handle_assoc::assoc_release_on_passthrough`。
+// 退格与回车各有专门分支，本节管在既有分支里落到 `PassThrough` 的那一大类键（Del/Home/End/
+// 左右/Insert 等）。名单数不清，故收口按动作判，见 `handle_assoc::assoc_release_on_passthrough`。
 //
-// ⚠️⚠️ 这一族**必须走 `handle_key_event_policed`**（bridge 的真入口，server.rs 调的就是
-// 它）。收口挂在那个唯一出口上，改走内层 `handle_key_event` 会如实拿到 `PassThrough`
-// ——那正是修复前的症状，拿它写断言等于把 bug 钉成规范。
+// 这一族必须走 `handle_key_event_policed`（bridge 的真入口）：收口挂在那个唯一出口上，走内层
+// `handle_key_event` 拿到的 `PassThrough` 正是修复前的症状。
 
-/// 联想态下会落到透传的键。刻意**不含** ↑↓/PageUp/PageDown：那四个在联想态是翻页与
-/// 移高亮（`apply_session_action` 早就接住了），本就不该收窗。
-/// ⛔ **Tab 刻意不在列**——审查时按 C++ 的吃键表（`session_select_or_page` 同样「有
-/// session 就吃」）把它加进来过，实测拿到的是 `Consumed` 而非 `PassThrough`：Tab 是
-/// **辅助码触发键**（`enter_aux_code`），在协调器里有自己的归属。
-/// 用户看到的表象同样是「按了没反应」，但机制不同（键被干净吃掉，没有「吃了再吐」、
-/// 不丢键），该不该让它在联想态做点别的是另一个问题，不归本收口管。
-/// ★ 这正是「判据取动作、不取键名」的又一次兑现：按键名列表会把它错收进来。
+/// 联想态下会落到透传的键。刻意不含 ↑↓/PageUp/PageDown：那四个在联想态是翻页与移高亮。
+/// Tab 也不在列：它是辅助码触发键（`enter_aux_code`），会被干净地 `Consumed`，不属本收口——
+/// 这正是「判据取动作、不取键名」的理由。
 const ASSOC_PASSTHROUGH_KEYS: &[(u32, &str)] = &[
     (0x2E, "Delete"),
     (0x24, "Home"),
@@ -891,15 +841,11 @@ fn key_event_shift(key_code: u32) -> KeyEventData {
     key_event_mods(key_code, MOD_SHIFT)
 }
 
-/// ★★★ **用户报障**：联想窗弹出时「退格能删，Del / Home / End 却按了没反应」。
+/// 联想窗弹出时 Del / Home / End 等不得被吞。
 ///
-/// 根因不在这些键各自的分支里，而在联想态挂着的占位组合：它让 TSF 的
-/// `_HasInputSession()` 为真 ⇒ `OnTestKeyDown` 把这批键（C++ 归 `HotkeyType::CursorKey`）
-/// 全吃下转发；而协调器这边缓冲与已转换段皆空，一路落到 `PassThrough` ⇒ 「吃了再吐」
-/// 翻转，不补发 `WM_KEYDOWN` 的宿主直接丢键。
-///
-/// 正解是收组合 + 重放按键，顺带收窗——这些键要么移动宿主光标、要么改动光标后的文档，
-/// 联想赖以成立的上文已经断了，那批候选此刻就是错的。
+/// 联想态的占位组合让 TSF 的 `_HasInputSession()` 为真，`OnTestKeyDown` 把这批键（`HotkeyType::CursorKey`）
+/// 吃下转发；协调器缓冲为空而回 `PassThrough`，「吃了再吐」时不补发 `WM_KEYDOWN` 的宿主直接丢键。
+/// 正解是收组合 + 重放按键，顺带收窗：这些键动了光标或文档，联想赖以成立的上文已经断了。
 #[test]
 fn assoc_cursor_and_edit_keys_close_window_and_reach_host() {
     let dir = data_dir();
@@ -918,11 +864,8 @@ fn assoc_cursor_and_edit_keys_close_window_and_reach_host() {
     }
 }
 
-/// ★ 反向守卫：**光按下修饰键不该收窗**。
-///
-/// Shift+字母的物理形态是「先 Shift keydown、再字母 keydown」。若收口不排除纯修饰键，
-/// 第一下就把联想窗干掉了，第二下看到的已经是空闲态——修好的临英入口会被自己撞掉。
-/// Windows 侧这类 keydown 压根不转发，故这条钉的是薄宿主与未来的接线。
+/// 反向守卫：光按下修饰键不该收窗。Shift+字母是「先 Shift keydown、再字母 keydown」，第一下就收窗
+/// 会让临英入口被自己撞掉。Windows 侧这类 keydown 不转发，这条钉的是薄宿主与未来的接线。
 #[test]
 fn assoc_survives_bare_modifier_keydown() {
     let dir = data_dir();
@@ -932,13 +875,9 @@ fn assoc_survives_bare_modifier_keydown() {
     }
     let c = coord("word", "wubi86_pinyin");
     let hits = enter_assoc(&c);
-    // 值域必须写全（`handle_assoc::is_modifier_like_vk`）：0xA0-0xA3 四个纯修饰键与
-    // CapsLock(0x14) 之外，还有左右 Alt(0xA4/0xA5) 与未拆左右的笼统
-    // VK_SHIFT/VK_CONTROL/VK_MENU(0x10/0x11/0x12)。后五个在桌面 TSF 上到不了服务端
-    // （C++ `isModifierKeyItself` 不转发），本条钉的是**薄宿主**——而薄宿主恰恰是最
-    // 可能上报它们的那一类，守卫要是只覆盖桌面值域，就会在它唯一要保的场景下失效。
-    // 修饰键自己按下时，那一位修饰位就是按着的——真机上 Shift keydown 必带 MOD_SHIFT。
-    // 守卫按 vk 判，带不带位结论都一样；带上只是为了让用例复现的确实是它写的那个场景。
+    // 值域必须写全（`handle_assoc::is_modifier_like_vk`）：0xA0-0xA3、CapsLock(0x14)、左右 Alt(0xA4/0xA5)
+    // 与笼统的 VK_SHIFT/VK_CONTROL/VK_MENU(0x10/0x11/0x12)。后几个桌面 TSF 不转发，但薄宿主最可能
+    // 上报它们。守卫按 vk 判，带修饰位只是为了复现真机形态（Shift keydown 必带 MOD_SHIFT）。
     for (vk, mods) in [
         (0xA0u32, MOD_SHIFT),
         (0xA1, MOD_SHIFT),
@@ -960,11 +899,8 @@ fn assoc_survives_bare_modifier_keydown() {
     }
 }
 
-/// ★ Ctrl/Alt 组合**刻意也走改判**（`assoc_release_on_passthrough` 里那段星标）：
-/// 它们在联想态同样落 `PassThrough`（`MOD_SHORTCUT` 那条臂，缓冲与已转换段皆空），
-/// 同样被 TSF 的 `ctrl_alt_cleanup` 分支吃下转发 ⇒ 同一个「吃了再吐」。
-///
-/// 这是本次触及面最大的一格，故单独钉住：改判后 C++ 走 `_ReplayKeyToHost`，重放时物理
+/// Ctrl/Alt 组合刻意也走改判（`assoc_release_on_passthrough`）：它们在联想态同样落 `PassThrough`，
+/// 同样被 TSF 的 `ctrl_alt_cleanup` 分支吃下转发。改判后 C++ 走 `_ReplayKeyToHost`，重放时物理
 /// 修饰键仍按着，宿主 `GetKeyState` 能还原 Ctrl+A 语义。
 #[test]
 fn assoc_ctrl_combo_closes_window_and_reaches_host() {
@@ -982,11 +918,9 @@ fn assoc_ctrl_combo_closes_window_and_reaches_host() {
     assert!(assoc_texts(&c).is_empty(), "Ctrl+A 之后联想窗该收起");
 }
 
-/// ★ 联想态的候选热键（出厂置顶 Ctrl+数字、删除 Ctrl+Shift+数字）同样收组合 + 交还宿主。
-///
-/// 这组键在候选可见时被 TSF 用 RegisterHotKey 拦成系统热键、经 WM_HOTKEY 派发，原键已被
-/// 系统吃下；TSF 只在响应是「交还宿主」类时才注入原键。这里回 `Consumed` 就是丢键
-/// （浏览器 Ctrl+1 切标签没反应）。
+/// 联想态的候选热键（出厂置顶 Ctrl+数字、删除 Ctrl+Shift+数字）同样收组合 + 交还宿主。
+/// 这组键被 TSF 用 RegisterHotKey 拦成系统热键，TSF 只在「交还宿主」类响应时才注入原键，
+/// 回 `Consumed` 就是丢键（浏览器 Ctrl+1 切标签没反应）。
 #[test]
 fn assoc_candidate_hotkeys_close_window_and_reach_host() {
     let dir = data_dir();
@@ -1032,11 +966,10 @@ fn assoc_alt_digit_stays_with_alt_commit() {
     assert!(assoc_texts(&c).is_empty(), "Alt+1 上屏后联想窗该收起");
 }
 
-/// ★★★ **用户报障**：联想窗弹出时按 Shift+字母想打英文，字母却落进了中文码表缓冲。
+/// 联想窗弹出时按 Shift+字母要进临英，不能落进中文码表缓冲。
 ///
-/// 根因是 `try_activate_mode` 开头那句联想让位**让过头了**：它本意只为保住 `;`/`'` 的
-/// 二三候选键（见 `select_keys_work_in_assoc`），却把同一函数里的临英 Shift+字母分支
-/// 一起挡掉；即使不挡，那个分支的「无候选」门也会被联想候选拦住。
+/// `try_activate_mode` 开头的联想让位只为保住 `;`/`'` 的二三候选键（见 `select_keys_work_in_assoc`），
+/// 不能把临英 Shift+字母分支一起挡掉；那个分支的「无候选」门也不能被联想候选拦住。
 #[test]
 fn assoc_shift_letter_enters_temp_english() {
     let dir = data_dir();
@@ -1060,10 +993,8 @@ fn assoc_shift_letter_enters_temp_english() {
     assert!(assoc_texts(&c).is_empty(), "进临英后联想窗该收起");
 }
 
-/// ★ 同一入口的另一档：`shift_behavior = "direct_commit"` 时直接上屏大写字母。
-///
-/// 两档都测，是因为它们在同一个 `if` 里分叉：只测一档时，另一档漏了收联想窗
-/// （候选与临英候选住同一个 `state.candidates`）也照绿。
+/// 同一入口的另一档：`shift_behavior = "direct_commit"` 时直接上屏大写字母。两档在同一个 `if` 里
+/// 分叉，只测一档时另一档漏了收联想窗也照绿。
 #[test]
 fn assoc_shift_letter_direct_commits_when_configured() {
     let dir = data_dir();
@@ -1088,17 +1019,15 @@ fn assoc_shift_letter_direct_commits_when_configured() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// `select_keys_commit`：联想态让出二三候选键（论坛 t251）
+// `select_keys_commit`：联想态让出二三候选键
 //
-// 出厂 `true`（照常选第 2/3 条，由 `select_keys_work_in_assoc` 钉）。`false` 时联想态下
-// `;` `'` 不选联想：收窗，该键按「联想窗不在」处理——判据就是拿同一个键在空闲态的
-// 应答来比，而不是写死某个标点：`;` 出厂另绑了快捷输入，空闲态按它进的是模式。
+// 出厂 `true`（照常选第 2/3 条，由 `select_keys_work_in_assoc` 钉）。`false` 时 `;` `'` 不选联想，
+// 收窗后按「联想窗不在」处理。判据拿同一个键在空闲态的应答来比，不写死某个标点（`;` 出厂另绑了
+// 快捷输入）。
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// 上屏 / 组合动作的「对宿主可见的那部分」，用来比「联想态让出」与「空闲态」是否一致。
-///
-/// 联想态挂着占位组合，空闲态没有：同样出一个标点，前者可能是「替换占位组合」、后者是
-/// 「直接插入」，动作变体不必相同，真正要比的是**写进宿主的文本**与**新开的组合**。
+/// 上屏 / 组合动作中「对宿主可见的那部分」：写进宿主的文本与新开的组合。联想态挂着占位组合，
+/// 空闲态没有，动作变体不必相同。
 fn host_visible(act: &KeyAction) -> (String, String) {
     match act {
         KeyAction::InsertText {
@@ -1133,7 +1062,7 @@ fn yield_coord() -> std::sync::Arc<Coordinator> {
     })
 }
 
-/// ★ `select_keys_commit = false`：联想态按 `'`（三选键）不选联想，收窗并照空闲态出符号。
+/// `select_keys_commit = false`：联想态按 `'`（三选键）不选联想，收窗并照空闲态出符号。
 #[test]
 fn assoc_yields_quote_when_select_keys_commit_off() {
     let dir = data_dir();
@@ -1160,7 +1089,7 @@ fn assoc_yields_quote_when_select_keys_commit_off() {
     assert!(assoc_texts(&c).is_empty(), "联想窗该收起");
 }
 
-/// ★ 同上，`;`（二选键）。出厂 `;` 另绑快捷输入引导，空闲态按它进模式——让出后也该进。
+/// 同上，`;`（二选键）。出厂 `;` 另绑快捷输入引导，空闲态按它进模式——让出后也该进。
 #[test]
 fn assoc_yields_semicolon_when_select_keys_commit_off() {
     let dir = data_dir();
@@ -1218,7 +1147,7 @@ fn select_keys_commit_off_keeps_digit_selection_in_assoc() {
     );
 }
 
-/// **受控对照**：默认（`true`）时 `'` 在联想态确实选第 3 条——少了它，上面的让出用例
+/// 受控对照：默认（`true`）时 `'` 在联想态确实选第 3 条——少了它，上面的让出用例
 /// 可能只是因为 `'` 在联想态压根不选词。
 #[test]
 fn quote_selects_third_assoc_by_default() {

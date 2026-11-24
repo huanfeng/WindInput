@@ -1,7 +1,7 @@
 //! 直达热键进入特殊模式/临拼的单元测试（无头 Coordinator + 临时 store）。
 //! 不依赖引擎的行为（id→idx 定位、空前缀进入、半成品上屏）直接用空 `Coordinator`。
-//! 依赖引擎查询的用例**同样属于这里**，但必须自造 data_dir（见 `special_completion::data_dir`）
-//! ——别指望 `build_dev/data`，那是集成层「缺数据则整族静默跳过而计数照绿」的来源。
+//! 依赖引擎查询的用例也放这里，但必须自造 data_dir（见 `special_completion::data_dir`），
+//! 别依赖 `build_dev/data`——缺数据时整族静默跳过而计数照绿。
 use super::*;
 use crate::coordinator::Coordinator;
 use std::sync::Arc;
@@ -9,10 +9,7 @@ use wind_candidate::Candidate;
 use wind_config::Config;
 use wind_store::Store;
 
-/// 造一个含若干 overlay 方案的 data_dir。
-///
-/// 实例集合的真相源已是**方案文件目录**（带 `[overlay]` 段者入表），不再是
-/// `config.schema.special_modes` 数组——故装置从「造 Config」改成「造方案文件」。
+/// 造一个含若干 overlay 方案的 data_dir。实例集合的真相源是方案文件目录（带 `[overlay]` 段者入表）。
 fn data_dir_with_overlays(tag: &str, ids: &[&str]) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("wind_special_hk_data_{tag}"));
     let _ = std::fs::remove_dir_all(&dir);
@@ -44,11 +41,8 @@ fn coord_with_overlays(tag: &str, cfg: Config, ids: &[&str]) -> Arc<Coordinator>
     Coordinator::new_headless_with_store(cfg, dir.as_deref(), store)
 }
 
-/// id → 下标定位走 overlay 注册表（按方案 id 字典序），未知 id 返回 None。
-///
-/// ⚠️ **只断言相对顺序，不断言绝对下标**：`installed_schemas` 会一并扫描
-/// `Config::user_config_dir()/schemas`，开发机上那里可能装着真实的快符方案，
-/// 绝对下标会随之平移。这不是测试将就，而是下标语义本身就是「注册表内的位次」。
+/// id → 下标定位走 overlay 注册表（按方案 id 字典序），未知 id 返回 None。只断言相对顺序：
+/// `installed_schemas` 会一并扫描 `Config::user_config_dir()/schemas`，开发机上绝对下标会平移。
 #[test]
 fn special_mode_idx_locates_by_registry_order() {
     let c = coord_with_overlays("idx", Config::default(), &["zz_c", "zz_a", "zz_b"]);
@@ -199,9 +193,8 @@ fn set_common(c: &Coordinator, chars: impl IntoIterator<Item = char> + Clone) {
 
 /// ── 生僻字模式 ────────────────────────────────────────────────────────────
 ///
-/// 这几条**刻意不依赖真实词库**：本 worktree 没有 `build_dev/data` 时，依赖词库的
-/// 端到端用例会整族静默跳过而计数照绿（判据是耗时 0.00s）。模式的生命周期与准入
-/// 判据是这轮的核心性质，不能挂在一个可能没跑的测试上。
+/// 这几条刻意不依赖真实词库：缺 `build_dev/data` 时依赖词库的用例会静默跳过，模式的生命周期
+/// 与准入判据不能挂在一个可能没跑的测试上。
 mod rare_char {
     // 常用字表夹具上提到父模块：空码补全那族用例同样要装表，见 `set_common` 的说明。
     use super::set_common;
@@ -222,16 +215,13 @@ mod rare_char {
         assert_eq!(st.active, Some(ModeKind::RareChar));
         assert!(st.special_buffer.is_empty(), "顶字重开：进入时缓冲为空");
         assert!(st.input_buffer.is_empty(), "主输入缓冲一并清空");
-        // ⚠️ special 专属状态必须留在默认值：凡从 overlay_spec 取值的地方都会因此
+        // special 专属状态必须留在默认值：凡从 overlay_spec 取值的地方都会因此
         // 落到默认档（布局/注释跟随全局、show_all_on_enter=false），这是刻意的。
         assert!(st.overlay_spec.is_none(), "生僻字模式没有 [overlay] 段可读");
     }
 
-    /// 退出复用 `exit_special_mode`，模式与缓冲一并清干净。
-    ///
-    /// 留下一个没清的 `active` 会让后续按键继续走 overlay 分派，表现为「Esc 之后
-    /// 打字没反应」——而 `exit_special_mode` 是两个模式共用的那一份，这里钉住它对
-    /// 生僻字模式同样有效。
+    /// 退出复用 `exit_special_mode`，模式与缓冲一并清干净；留下 `active` 会让后续按键继续走
+    /// overlay 分派（「Esc 之后打字没反应」）。
     #[test]
     fn exits_cleanly() {
         let c = coord();
@@ -243,18 +233,14 @@ mod rare_char {
         assert!(st.preedit.is_empty());
     }
 
-    /// ★ 配置真的走到了判据。
-    ///
-    /// 本仓的经典失效形态是「配置四层就位、消费点却在不可达的调用点上」——开关配了
-    /// 毫无反应，且没有任何报错。这条测试从**配置**出发一路走到**候选列表**，
-    /// 中间任何一环断掉都会红：
+    /// 配置真的走到了判据：从配置一路走到候选列表，中间任何一环断掉都会红——
     /// `input.rare_char.include_blocks` → `charset_assembly` 装配期打 `in_rare` 标记
     /// → `EngineManager::charsets()` → `rare_admits` 的 extra 参数。
     #[test]
     fn include_blocks_config_reaches_the_verdict() {
         let mut cfg = Config::default();
         cfg.input.rare_char.include_blocks = vec!["emoji".to_string()];
-        // ★ `emoji` 不是内置区块组，它的成员来自出厂 charsets/emoji.yaml。
+        // `emoji` 不是内置区块组，它的成员来自出厂 charsets/emoji.yaml。
         // 不给 data_dir 的话这个名字解析不出来，测试会以「配置没生效」的形态失败
         // ——与真实故障同形，看不出根因是夹具缺文件。
         let dir = crate::charset_test_support::charsets_only_data_dir("rare_include");
@@ -274,14 +260,11 @@ mod rare_char {
         assert_eq!(got, vec!["龘", "😀"], "配置未生效或判据接错");
     }
 
-    /// ★★ 改 `input.rare_char.include_blocks` **不必切方案**就生效。
+    /// 改 `input.rare_char.include_blocks` 不必切方案就生效。
     ///
-    /// 它在 input 段，改它不会把 `schema_dirty` 标脏。registry 若只在
-    /// `reload_from_config`（受 schema_dirty 门控）里重装，用户改完毫无反应、要切一次
-    /// 方案或重启才生效——本仓反复出现的「运行时镜像态没回灌」那类缺陷，且全程无报错。
-    ///
-    /// 本条从「改配置」出发直接看候选列表，中间那一步（`rebuild_charsets` 挂在无条件
-    /// 重建 ConfigBundle 的路径上）断掉就会红。
+    /// 它在 input 段，不会把 `schema_dirty` 标脏；registry 若只在 `reload_from_config`（受 schema_dirty
+    /// 门控）里重装，用户改完要切方案或重启才生效。`rebuild_charsets` 挂在无条件重建 ConfigBundle
+    /// 的路径上，断掉就会红。
     #[test]
     fn include_blocks_takes_effect_without_a_schema_change() {
         let dir = crate::charset_test_support::charsets_only_data_dir("rare_hot");
@@ -320,11 +303,8 @@ mod rare_char {
         assert_eq!(got, vec!["龘"], "没配区块时域外字符不该进来");
     }
 
-    /// `$rare_char` 必须被进入门卫认作有效成员。
-    ///
-    /// 它不是真实方案，`ensure_schema` 对它必然失败 ⇒ 会被 `mix_members`（真实方案
-    /// 列表）滤掉。若门卫只看那份列表，一个只配了 `$rare_char` 的 mix 就**进都进不去**
-    /// ——按引导键毫无反应，且没有任何报错。
+    /// `$rare_char` 必须被进入门卫认作有效成员。它不是真实方案，会被 `mix_members` 滤掉；门卫若只看
+    /// 那份列表，只配了 `$rare_char` 的 mix 就进不去，且无任何报错。
     #[test]
     fn rare_char_member_is_recognized_by_the_entry_gate() {
         let mut cfg = Config::default();
@@ -348,10 +328,8 @@ mod rare_char {
         );
     }
 
-    /// 生僻字成员**不该**触发强制竖排。
-    ///
-    /// 竖排是 `mix_has_quick_input` 的语义（内置来源的候选是长文本，横排放不下），
-    /// 而生僻字成员产出的是普通单字。两个谓词合并的话，只配生僻字的 mix 会平白变竖排。
+    /// 生僻字成员不该触发强制竖排：竖排是 `mix_has_quick_input` 的语义（内置来源候选是长文本），
+    /// 生僻字产出的是普通单字。
     #[test]
     fn rare_char_member_does_not_force_vertical() {
         let mut cfg = Config::default();
@@ -367,10 +345,9 @@ mod rare_char {
 
     /// ── 真实词库端到端 ──────────────────────────────────────────────────
     ///
-    /// ⚠️ 上面那些用例走的都是自造夹具，验的是判据与生命周期；**真实词库下这个模式
-    /// 到底还剩几个候选**是另一回事，只有这里能答。缺数据时整族静默跳过而计数照绿
-    /// （本仓的老坑），故守卫里带 eprintln，别只看绿灯。
-    /// 补数据：worktree 根建 `build_dev` 符号链接指向主仓，或跑 `dev.ps1 gd`。
+    /// 上面用例走自造夹具，验判据与生命周期；真实词库下这个模式还剩几个候选只有这里能答。
+    /// 缺数据时整族静默跳过，故守卫里带 eprintln。补数据：worktree 根建 `build_dev` 符号链接指向
+    /// 主仓，或跑 `dev.ps1 gd`。
     fn wubi_coord(tag: &str) -> Option<std::sync::Arc<Coordinator>> {
         let d =
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data");
@@ -378,7 +355,7 @@ mod rare_char {
             eprintln!("跳过 {tag}：五笔词库不存在（build_dev/data 缺失）");
             return None;
         }
-        // ⚠️ charsets/ 缺失时**常用性判定整个不生效**（无人表态 ⇒ 一切兜底判常用）
+        // charsets/ 缺失时常用性判定整个不生效（无人表态 ⇒ 一切兜底判常用）
         // ⇒ 生僻字模式一条候选都留不下，测试会以「过滤写错了」的形态失败。
         // 它是构建产物的一部分（`Copy-Item data -Recurse`），过时的 build_dev 才会缺。
         assert!(
@@ -391,11 +368,8 @@ mod rare_char {
         Some(Coordinator::new_headless(cfg, Some(&d)))
     }
 
-    /// ★ 下推给引擎的准入与调用方兜底的过滤**必须同源**。
-    ///
-    /// 两者现在都走 `wind_candidate::rare_admits`，但它们是两处独立的调用点，
-    /// 将来任何一侧「顺手改一下判据」都不会有编译错误。失效是静默且方向相反的：
-    /// 引擎侧更严 ⇒ 调用方想要的候选压根没产出；引擎侧更松 ⇒ 白占配额还是被滤掉。
+    /// 下推给引擎的准入与调用方兜底的过滤必须同源（都走 `wind_candidate::rare_admits`）。两处独立
+    /// 调用点，改一侧没有编译错误：引擎侧更严则候选压根没产出，更松则白占配额。
     #[test]
     fn engine_side_admit_matches_caller_side_filter() {
         let c = coord();
@@ -442,7 +416,7 @@ mod rare_char {
 
     /// 拼音方案下的生僻字模式。与 `wubi_coord` 分开是因为两者暴露的问题不同：
     /// 码表方案的候选总数够不着取数上限，「截断 → 过滤」那个缺陷在五笔端到端测试里
-    /// **完全看不出来**。
+    /// 完全看不出来。
     fn pinyin_coord(tag: &str) -> Option<std::sync::Arc<Coordinator>> {
         let d =
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data");
@@ -453,7 +427,7 @@ mod rare_char {
             eprintln!("跳过 {tag}：拼音词库不存在（build_dev/data 缺失）");
             return None;
         }
-        // ⚠️ charsets/ 缺失时**常用性判定整个不生效**（无人表态 ⇒ 一切兜底判常用）
+        // charsets/ 缺失时常用性判定整个不生效（无人表态 ⇒ 一切兜底判常用）
         // ⇒ 生僻字模式一条候选都留不下，测试会以「过滤写错了」的形态失败。
         // 它是构建产物的一部分（`Copy-Item data -Recurse`），过时的 build_dev 才会缺。
         assert!(
@@ -466,13 +440,8 @@ mod rare_char {
         Some(Coordinator::new_headless(cfg, Some(&d)))
     }
 
-    /// ★★★ 高频音节在修复前只能出个位数候选。
-    ///
-    /// `yi` 这个音有 1183 个非常用字，而取数上限 100 施加在过滤**之前**、引擎又按
-    /// 常用度排序 ⇒ 修复前只漏出 4 个（漏掉 99.7%）。用户会认为功能坏了。
-    ///
-    /// 断言取「远多于修复前」而不是某个精确条数：条数随词库版本变，而 4 → 上百这个
-    /// 数量级差异不会因换词库而消失。
+    /// 高频音节也要出足候选：`yi` 的非常用字上千个，取数上限若施加在过滤之前、引擎又按常用度排序，
+    /// 过滤后只剩个位数。断言取「远多于个位数」而不是精确条数，条数随词库版本变。
     #[test]
     fn pinyin_high_frequency_syllable_is_not_starved_by_the_limit() {
         let Some(c) = pinyin_coord("yi") else { return };
@@ -486,10 +455,8 @@ mod rare_char {
         assert!(got.iter().all(|t| t.chars().count() == 1), "仍须只出单字");
     }
 
-    /// 候选总数**够不着**上限的码，不受重取影响（也不该白付一次重取）。
-    ///
-    /// `zhui` 全部候选 72 条 < 100，第一次就取全了；过滤后 57 条也够一页，
-    /// 于是 `refill_rare_if_short` 直接返回。这条钉住「常见情况不劣化」。
+    /// 候选总数够不着上限的码（`zhui`）第一次就取全了，`refill_rare_if_short` 直接返回，
+    /// 不白付一次重取。钉住「常见情况不劣化」。
     #[test]
     fn pinyin_short_candidate_list_needs_no_refill() {
         let Some(c) = pinyin_coord("zhui") else {
@@ -503,12 +470,8 @@ mod rare_char {
         );
     }
 
-    /// ★ 码表方案**也**受益于重取——这条测试写下时我以为它会证明「码表不变」，
-    /// 结果反过来证伪了那个假设：`ii` 从 1 条变 15 条。
-    ///
-    /// 留着它是为了钉住这个认知：截断的影响取决于**同码候选有多少**，与方案类型
-    /// 无关。二级简码 `ii` 同码字多，切掉大半；四码全码 `sivg` 只有一个解，不受影响
-    /// （由 `real_dict_keeps_only_the_rare_homograph` 钉住那一侧）。
+    /// 码表方案也受益于重取：截断的影响取决于同码候选有多少，与方案类型无关。二级简码 `ii`
+    /// 同码字多；四码全码 `sivg` 只有一个解（由 `real_dict_keeps_only_the_rare_homograph` 钉住）。
     #[test]
     fn codetable_short_code_also_gains_from_refill() {
         let Some(c) = wubi_coord("ii-refill") else {
@@ -536,7 +499,7 @@ mod rare_char {
         out
     }
 
-    /// 取某个码在**普通输入路**的候选文本（对照组）。
+    /// 取某个码在普通输入路的候选文本（对照组）。
     fn normal_cands(c: &Coordinator, code: &str) -> Vec<String> {
         let mut st = c.state.lock().unwrap();
         st.chinese_mode = true;
@@ -548,11 +511,8 @@ mod rare_char {
         out
     }
 
-    /// ★ 真实五笔词库下，同码位的常用字被滤掉、生僻字留下。
-    ///
-    /// `sivg` 是本仓反复出现的样本：常用「档」与生僻「桜」同码，检索范围放宽那一轮
-    /// 也用的它。这里精确断言而非只验性质——它稳定到足以当回归锁，词库升级真把它改了
-    /// 也该有人来看一眼。
+    /// 真实五笔词库下，同码位的常用字被滤掉、生僻字留下（`sivg`：常用「档」与生僻「桜」同码）。
+    /// 精确断言当回归锁，词库升级改了它也该有人来看一眼。
     #[test]
     fn real_dict_keeps_only_the_rare_homograph() {
         let Some(c) = wubi_coord("sivg") else { return };
@@ -568,10 +528,8 @@ mod rare_char {
         );
     }
 
-    /// ★ 真实词库下的性质断言：候选**非空**、**全是单字**、**全部判非常用**。
-    ///
-    /// 非空这一条最要紧——「严格过滤空了就空着」是设计取舍，但如果连 `a` 这种一级简码
-    /// 都滤空了，这个模式就是个摆设，而所有自造夹具的测试都不会红。
+    /// 真实词库下的性质断言：候选非空、全是单字、全部判非常用。非空最要紧——连一级简码 `a`
+    /// 都滤空的话这个模式就是摆设，而自造夹具的测试都不会红。
     #[test]
     fn real_dict_yields_single_uncommon_chars() {
         let Some(c) = wubi_coord("a") else { return };
@@ -620,7 +578,7 @@ mod rare_char {
         }
     }
 
-    /// ★ 生僻字模式不污染普通输入路：进出一趟之后，同一个码的普通候选逐字节不变。
+    /// 生僻字模式不污染普通输入路：进出一趟之后，同一个码的普通候选逐字节不变。
     ///
     /// 「完全不记词频」那条取舍的端到端体现——模式内选过什么都不该改变正常输入的顺序。
     #[test]
@@ -641,11 +599,8 @@ mod rare_char {
         }
     }
 
-    /// ★ 常用字表未加载时**整条不过滤**，而不是放行全部。
-    ///
-    /// 判据与 `apply_filter` 那道 `common_chars.is_empty()` 同源：表没加载时全体候选
-    /// 都会被判「非常用」，准入于是放行**全部**候选——那不是生僻字模式，是一个没有
-    /// 过滤的普通列表，而用户完全看不出区别（他会以为这个码下所有字都是生僻字）。
+    /// 常用字表未加载时整条不过滤，而不是放行全部。判据与 `apply_filter` 的
+    /// `common_chars.is_empty()` 同源：表没加载时全体候选都会被判「非常用」，那不是生僻字模式。
     #[test]
     fn no_filtering_when_common_table_is_missing() {
         let c = coord();
@@ -665,17 +620,13 @@ mod rare_char {
 }
 /// ── 特殊模式的空码补全 ────────────────────────────────────────────────────
 ///
-/// 「精确匹配 + 空码补全」（`single_code_input` + `single_code_complete`）下，当前码
-/// 无精确解、更长编码有解时，引擎把更长那条备进 `ConvertResult::completion_hints`，
-/// 由 `update_special_candidates` 判空后择一采纳。这一族钉的是**采纳路上的几道过滤
-/// 不能把它吃掉**，以及生僻准入那道只对生僻字模式生效。
+/// 「精确匹配 + 空码补全」下，当前码无精确解、更长编码有解时，引擎把更长那条备进
+/// `ConvertResult::completion_hints`，由 `update_special_candidates` 判空后采纳。这一族钉的是
+/// 采纳路上的过滤不能把它吃掉，以及生僻准入只对生僻字模式生效。
 ///
-/// ⚠️ 全族必须先 `set_common` 装表：生僻准入对空表整条早退（见
-/// `no_filtering_when_common_table_is_missing`），不装表的话那道过滤根本没跑，用例
-/// 照绿而缺陷原样活着 —— 论坛 t125 报的「快符空码不显示后续编码」正是这样躲过了
-/// 一整轮自动化测试，只在装了字表的真机上复现。
-///
-/// 刻意**不依赖 `build_dev/data`**：自造两张两条词条的小码表，缺数据也不会静默跳过。
+/// 全族必须先 `set_common` 装表：生僻准入对空表整条早退（见
+/// `no_filtering_when_common_table_is_missing`），不装表那道过滤根本没跑。
+/// 自造小码表，不依赖 `build_dev/data`。
 mod special_completion {
     use super::set_common;
     use crate::coordinator::Coordinator;
@@ -685,15 +636,12 @@ mod special_completion {
 
     /// overlay（快符）方案 id。`zz_` 前缀避开开发机上真实安装的方案。
     const KF: &str = "zz_kfx";
-    /// 主方案 id：生僻字模式用的是**活跃方案**的引擎，故它也要开这两个开关。
+    /// 主方案 id：生僻字模式用的是活跃方案的引擎，故它也要开这两个开关。
     const MAIN: &str = "zz_main";
 
-    /// 造数据目录：一个主方案 + 一个 overlay 方案，两者都是「精确匹配 + 空码补全」，
-    /// 码表里 `x` 本身**没有编码**，只有 `xab` / `xcd` 这些更长的。
-    ///
-    /// ⚠️ 开关写在**方案自己名下**而不是全局：overlay 方案不继承全局
-    /// `schema.codetable`（`EngineManager::codetable_baseline` 按 `[overlay]` 段分流，
-    /// 取内置基线），写全局对它一点作用都没有。
+    /// 造数据目录：一个主方案 + 一个 overlay 方案，都是「精确匹配 + 空码补全」，码表里 `x` 本身
+    /// 没有编码，只有 `xab` / `xcd`。开关写在方案自己名下：overlay 方案不继承全局 `schema.codetable`
+    /// （`EngineManager::codetable_baseline` 按 `[overlay]` 段分流）。
     fn data_dir(tag: &str) -> std::path::PathBuf {
         // 带 pid：并发跑同一条用例时，一方的 `remove_dir_all` 会在另一方正扫
         // `schemas/` 时把目录抽走，表现为偶发红在下面那句 `expect` 上、而错误信息
@@ -718,7 +666,7 @@ mod special_completion {
             ),
         )
         .unwrap();
-        // 快符表里是**符号**——正是 `rare_admits` 恒判 false 的那一类：它落在默认字表
+        // 快符表里是符号——正是 `rare_admits` 恒判 false 的那一类：它落在默认字表
         // 管辖域之外，`is_string_common` 对它恒真（语义是「忽略」而非「常用」），
         // 又没被 `include_blocks` 点名 ⇒ 生僻准入一施加就整批清空。
         std::fs::write(
@@ -735,7 +683,7 @@ mod special_completion {
             ),
         )
         .unwrap();
-        // 同一个码前缀下**一常用一生僻**：生僻字模式那条对照据此分辨准入是真的在判，
+        // 同一个码前缀下一常用一生僻：生僻字模式那条对照据此分辨准入是真的在判，
         // 而不是「全留」或「全滤」。
         std::fs::write(
             schemas.join(MAIN).join(format!("{MAIN}.dict.yaml")),
@@ -769,11 +717,8 @@ mod special_completion {
         out
     }
 
-    /// ★ 主用例（论坛 t125 的回归）：快符模式下空码补全必须出得来。
-    ///
-    /// 缺陷形态：补全旁路直接调了裸的 `retain_rare_admitted`，生僻准入于是施加到了
-    /// **所有**特殊模式上。快符候选是符号 ⇒ 准入恒判 false ⇒ 整批滤空 ⇒ 用户看到
-    /// 「有 `xab` 的编码，敲 `x` 却什么都不显示」。
+    /// 主用例：快符模式下空码补全必须出得来。补全旁路若直接调裸的 `retain_rare_admitted`，生僻准入
+    /// 会施加到所有特殊模式上，快符的符号候选被整批滤空。
     #[test]
     fn quick_symbol_completion_survives_rare_admission() {
         let c = coord("kf");
@@ -791,11 +736,8 @@ mod special_completion {
         );
     }
 
-    /// ★ 反向对照：生僻字模式下，同一条旁路**仍然**要筛。
-    ///
-    /// 没有这一条，把守卫连同过滤一起删掉也能让上一条绿——而那会让生僻字模式补出
-    /// 常用字来（原注释「本码没有生僻字时，补出来的却是个常用字」说的就是它）。
-    /// 这里一常用（我 `xab`）一生僻（龘 `xcd`）同码前缀，留下的必须只有生僻那个。
+    /// 反向对照：生僻字模式下同一条旁路仍然要筛，否则会补出常用字。一常用（我 `xab`）一生僻
+    /// （龘 `xcd`）同码前缀，留下的必须只有生僻那个；没有这条，删掉守卫连同过滤上一条也能绿。
     #[test]
     fn rare_char_mode_still_filters_its_completion() {
         let c = coord("rare");
@@ -810,13 +752,9 @@ mod special_completion {
         );
     }
 
-    /// **夹具自检**，不是回归用例：缺陷存在时它照绿。上面两条主用例的分流全靠
-    /// 「两种模式各自查的是哪张码表」，这里把那件事本身钉住。
-    ///
-    /// 光断言 `st.active` 是在复述 `enter_*` 自己那行赋值，测不出东西；真正会让主
-    /// 用例**静默空转**的是引擎选错表——`special_mode_idx` 在装了真实 overlay 方案的
-    /// 开发机上指到别人的方案、或生僻字模式没落回活跃方案，两条主用例都会变成在错
-    /// 误的码表上断言。故断言落在 `overlay_engine_schema` 上。
+    /// 夹具自检，不是回归用例：上面两条主用例全靠「两种模式各自查哪张码表」。引擎选错表
+    /// （`special_mode_idx` 指到开发机上别人的方案、或生僻字模式没落回活跃方案）会让主用例静默空转，
+    /// 故断言落在 `overlay_engine_schema` 上，而不是复述 `st.active`。
     #[test]
     fn the_two_modes_query_their_own_schema() {
         let c = coord("modes");

@@ -1,7 +1,5 @@
 //! 词频路由 / 选词记账 / 自动造词 / 加词的 crate 内行为测试（白盒，零 RPC）。
-//!
-//! 原住 webdata 契约测试；webdata 独立成 crate 后按「是否用 web_data_rpc」分拣：
-//! 用则留 wind-webdata（经公开面/debug_* 支撑），不用则属 coordinator 行为测试。
+//! 用到 web_data_rpc 的契约测试留在 wind-webdata。
 
 use crate::coordinator::CommittedSeg;
 use std::sync::Arc;
@@ -113,7 +111,7 @@ fn mixed_coord(tag: &str) -> (Arc<Coordinator>, Arc<Store>) {
     cfg.schema.available = vec!["mx_test".into(), "ct_test".into(), "py_test".into()];
     // 开启码表词频，供 apply_freq_rerank 测试生效（混输走码表 used-first 路径）。
     cfg.schema.codetable.frequency.enabled = true;
-    // 开启**拼音**自动造词：`learn_phrase_on_commit` 的产出恒是拼音词，闸门已统一归
+    // 开启拼音自动造词：`learn_phrase_on_commit` 的产出恒是拼音词，闸门已统一归
     // `[schema.pinyin.auto_learn]`。此前这里开的是 `codetable.auto_phrase.enabled`，
     // 那正是让功能对真实用户静默失效的错配（出厂 available 里没有纯拼音方案）。
     cfg.schema.pinyin.auto_learn.enabled = true;
@@ -128,18 +126,12 @@ fn mixed_coord(tag: &str) -> (Arc<Coordinator>, Arc<Store>) {
 /// 整句造词测试统一使用的字数上限（与出厂默认 10 一致；由 `pinyin_coord` 给两条分支同时设定）。
 const LEARN_MAX_LEN: usize = 10;
 
-/// 拼音方案（active=py_solo）的无头 Coordinator，用于整句造词测试。
+/// 拼音方案（active=py_solo）的无头 Coordinator，用于整句造词测试。闸门统一读
+/// `[schema.pinyin.auto_learn]`，只需配这一处。
 ///
-/// 闸门统一读 `[schema.pinyin.auto_learn]` 后，本 helper 只需配这一处。
-///
-/// ⚠️ 曾经这里**两条配置分支都得开**：那时 `learn_phrase_on_commit` 按 `is_pinyin()` 分流，
-/// 而 `is_pinyin()` 走 `active_engine()` → `ensure_loaded()`，**headless 环境里引擎加载不
-/// 起来、它恒为 false**，于是实际落在 codetable 分支。只配拼音那侧的话，用例会因为
-/// 「造词整条路径没执行」而齐刷刷假绿——其中三个断言的正是「不该造词」。
-/// 闸门归一之后这个环境依赖消失了，但下面每个「断言没有」的用例仍各配一条反向对照，
-/// 因为假绿的成因不止这一种。
-///
-/// `data_schema_id` 只读 `schema.toml` 的 `engine.type`，故存储归属仍是 "pinyin"。
+/// headless 下 `is_pinyin()` 恒 false（引擎加载不起来），假绿的成因不止一种，所以每个
+/// 「断言没有」的用例都各配一条反向对照。`data_schema_id` 只读 `schema.toml` 的
+/// `engine.type`，故存储归属仍是 "pinyin"。
 fn pinyin_coord(tag: &str) -> (Arc<Coordinator>, Arc<Store>) {
     use std::io::Write;
     let base_dir = std::env::temp_dir().join(format!("wind_coord_pysolo_{tag}"));
@@ -167,7 +159,7 @@ fn pinyin_coord(tag: &str) -> (Arc<Coordinator>, Arc<Store>) {
     (c, store)
 }
 
-/// 把一整句压成**单段** `committed_segs` —— 整句消费整串（`consumed == total` ⇒
+/// 把一整句压成单段 `committed_segs` —— 整句消费整串（`consumed == total` ⇒
 /// `partial == false`），故 `commit_selected` 只 push 这一段。这正是本组测试的前提条件。
 fn push_single_seg(c: &Coordinator, code: &str, text: &str, boundary: u64) {
     let mut st = c.state.lock().unwrap();
@@ -182,10 +174,8 @@ fn push_single_seg(c: &Coordinator, code: &str, text: &str, boundary: u64) {
     });
 }
 
-/// 智能组句生成的整句，一次上屏也要进临时词库。
-///
-/// 回归的是「整句长词打不出简拼」：整句只 push 一段，而旧守卫 `committed_segs.len() < 2`
-/// 问的是「用户是不是分步组的」，于是整句永远够不着门槛 —— 词没进临时库，简拼索引自然为空。
+/// 智能组句生成的整句，一次上屏也要进临时词库。整句只 push 一段，守卫若按
+/// `committed_segs.len() < 2` 判「是不是分步组的」，整句永远够不着门槛，简拼索引为空。
 #[test]
 fn single_segment_sentence_is_learned_and_abbrev_searchable() {
     let (c, store) = pinyin_coord("sentence_single");
@@ -221,11 +211,9 @@ fn single_segment_sentence_is_learned_and_abbrev_searchable() {
     );
 }
 
-/// 单段整句造词后，`learn_phrase_on_commit` 要把写入的 code 报给调用方，
-/// 好让 `handle_candidate` 的「6b 临时词使用累积」跳过同一条 —— 否则一次上屏 count +2。
-///
-/// 这条守的是返回值契约本身（6b 那段在 `commit_selected` 里，白盒测试够不着）：
-/// 返回 `Some(code)` 且 code 恰是本次候选的码时，调用方才有依据判断「刚写的就是它」。
+/// 单段整句造词后，`learn_phrase_on_commit` 要把写入的 code 报给调用方，好让
+/// `handle_candidate` 的「6b 临时词使用累积」跳过同一条，否则一次上屏 count +2。
+/// 6b 那段在 `commit_selected` 里，白盒够不着，这里守返回值契约本身。
 #[test]
 fn learn_returns_written_code_so_caller_can_skip_double_count() {
     let (c, store) = pinyin_coord("sentence_retcode");
@@ -257,10 +245,8 @@ fn learn_returns_written_code_so_caller_can_skip_double_count() {
     );
 }
 
-/// 单段但**不是**引擎新合成（用户直接选中的词典整词）不造词。
-///
-/// 判据取 `is_sentence` 而非「单段且够长」正是为了这条：词典里本就有「你好」，
-/// 再写一份临时词只会让候选面多一条同文项，且永远不会被用到。
+/// 单段但不是引擎新合成（用户直接选中的词典整词）不造词——判据取 `is_sentence` 而非
+/// 「单段且够长」，否则会多写一份永远用不到的同文临时词。
 #[test]
 fn single_segment_non_sentence_is_not_learned() {
     let (c, store) = pinyin_coord("sentence_nonsent");
@@ -285,10 +271,8 @@ fn single_segment_non_sentence_is_not_learned() {
     );
 }
 
-/// 超过 `max_word_length` 的整句整体放弃，不在中间切一刀。
-///
-/// 整句只有一段，`trim_segs_start` 裁不动它 —— 上限对整句能生效，全靠裁剪后的那道
-/// 「仍超则放弃」判断。少了它，配置项对整句形同虚设。
+/// 超过 `max_word_length` 的整句整体放弃，不在中间切一刀。整句只有一段，`trim_segs_start`
+/// 裁不动它，上限全靠裁剪后那道「仍超则放弃」判断。
 #[test]
 fn oversized_sentence_is_dropped_not_truncated() {
     let (c, store) = pinyin_coord("sentence_toolong");
@@ -438,17 +422,11 @@ fn pinyin_record_selection_ignores_source() {
     );
 }
 
-/// 回归：词频读写两端的 code 统一为**候选存储码**（全拼扁平域），而非输入缓冲（击键域）。
+/// 词频读写两端的 code 统一为候选存储码（全拼扁平域），而非输入缓冲（击键域）。
 ///
-/// 现场：双拼下缓冲是击键 `siyr`、候选码是全拼 `siyuan`（实测 `convert("siyr")` 出的
-/// 候选 code 恒为 `siyuan`）。写入端 `commit_selected` 用 `cand_code` → 键 `siyuan`；
-/// 读取端曾用输入缓冲 → 键 `siyr`。二者永不相等，**双拼下词频重排整体失效、tooltip
-/// 使用次数恒 0**。全拼带分隔符（`xi'an` → 码 `xian`）与前缀补全（`si` → 码 `sikao`）
-/// 同形态。
-///
-/// 判据刻意让「码 ≠ 缓冲」：读侧若退回用缓冲查，`recs` 为空、`apply_freq_rerank` 提前
-/// 返回，顺序不变 → 本用例挂。全仓 code 域标准（用户词库 key、造词码、加词码）皆为
-/// 全拼扁平码，本测试同时锁住词频与它们对齐。
+/// 双拼缓冲 `siyr` 的候选码是 `siyuan`；读端若用缓冲查，键永不相等，双拼下词频重排整体
+/// 失效、tooltip 使用次数恒 0（全拼分隔符与前缀补全同形态）。判据刻意让「码 ≠ 缓冲」：
+/// 读侧退回用缓冲时 `recs` 为空、顺序不变，本用例即挂。
 #[test]
 fn freq_lookup_uses_candidate_code_not_input_buffer() {
     use std::io::Write;
@@ -621,17 +599,12 @@ fn mixed_learn_phrase_same_source_only() {
         );
     }
 
-    // 全段码表 → **不造词**（本断言已反转，理由见下）。
+    // 全段码表 → 不造词。
     //
-    // ① 语义与本文件下方已移除的 `codetable_learn_phrase_ignores_source` 完全同源：码表词组
-    //    编码须按方案 `[[encoder.rules]]` 从各字**全码**取位（五笔「你好」= wqvb），各段码
-    //    拼接（aa + bb = "aabb"）得到的串在词库里查不到 —— 正是自动造词历史上「完全不工作」
-    //    的根因之一。码表侧造词已迁至 wind-coordinator 的 `auto_phrase` 连续单字缓冲。
-    // ② 它当时测的是**现实中不可达**的分支：码表候选 `consumed_length` 恒 0 ⇒ 永不 partial
-    //    ⇒ 单段即被 `reset_pinyin_composition` 清掉，混输下永远凑不满 2 段全码表。直到混输
-    //    超码长回捞的前缀候选开始如实标注 `consumed_length`（见 `mixed/engine.rs` 的
-    //    `convert_overflow`）这条路才第一次可达 —— 而可达之后产出的正是 ① 里那种错码，
-    //    还会与 auto_phrase 对同一次输入重复造词。故 `learn_phrase_on_commit` 显式跳过。
+    // 码表词组编码须按方案 `[[encoder.rules]]` 从各字全码取位（五笔「你好」= wqvb），各段码拼接
+    // 得到的串在词库里查不到；码表侧造词由 `auto_phrase` 连续单字缓冲负责。混输超码长回捞的前缀
+    // 候选如实标注 `consumed_length` 后这条路可达，故 `learn_phrase_on_commit` 显式跳过，
+    // 也避免与 auto_phrase 重复造词。
     {
         let mut st = c.state.lock().unwrap();
         st.committed_segs.clear();
@@ -662,20 +635,10 @@ fn mixed_learn_phrase_same_source_only() {
     }
 }
 
-// 【已移除】`codetable_learn_phrase_ignores_source`（P2d Task 4 回归）
-//
-// 该测试断言纯码表方案经 `committed_segs` 造词、编码为各段码**拼接**（aa + bb = "aabb"）。
-// 两点使其不再成立：
-//   ① 语义已判定为错。码表词组编码须按方案 `[[encoder.rules]]` 的公式从各字**全码**取位
-//      （五笔「你好」= wqvb），拼接各段码得到的串在词库里查不到 —— 这正是自动造词
-//      历史上「完全不工作」的根因之一。码表已迁至 wind-coordinator 的 `auto_phrase` 连续单字缓冲。
-//   ② 它本就只在**引擎加载失败**时才通过。测试方案 `ct_test` 无 `dictionaries`，引擎加载不出，
-//      `is_codetable()` 退化为 false，才落进非码表分支。真实码表方案不会走到这里。
-//
-// 替代覆盖：`tests/input_flow.rs` 的 `test_codetable_auto_phrase_*` 四条，用**真实 wubi86
-// 方案与词库**端到端验证取码、终止信号时机与开关闸门。
+// 码表方案的造词编码（按 `[[encoder.rules]]` 取码、终止信号时机与开关闸门）由
+// `tests/input_flow.rs` 的 `test_codetable_auto_phrase_*` 用真实 wubi86 方案端到端覆盖。
 
-/// P2d Task 5：混输 active 下手动加词（RPC dict.add）落主码表方案；primary 缺失则报错不 panic。
+/// 混输 active 下手动加词（RPC dict.add）落主码表方案；primary 缺失则报错不 panic。
 #[test]
 fn mixed_manual_addword_goes_to_primary() {
     let (c, store) = mixed_coord("manual_addword");
@@ -736,12 +699,9 @@ fn exclude_coord(tag: &str, exclude: &[&str]) -> (Arc<Coordinator>, Arc<Store>) 
         )
         .unwrap();
     }
-    // ★ 把仓里真实的出厂字符类目录复制进夹具。
-    //
-    // `exclude_blocks = ["emoji"]` 里的 `emoji` **不是**内置区块组——它的成员由
-    // data/charsets/emoji.yaml 那份精确字表给出（旧的「五个块并集」口径两个方向都不准，
-    // 见设计文档 §5.5）。不复制的话这个名字解析不出来，配置被当成「未识别」跳过，
-    // 测试会以「开关没生效」的形态失败，而根因是夹具缺文件。
+    // 把仓里真实的出厂字符类目录复制进夹具：`exclude_blocks = ["emoji"]` 的 `emoji` 不是内置区块组，
+    // 成员由 data/charsets/emoji.yaml 给出。缺这份文件时配置被当成「未识别」跳过，测试以
+    // 「开关没生效」的形态失败。
     crate::charset_test_support::copy_factory_charsets(&base_dir);
 
     let mut cfg = Config::default();
@@ -756,10 +716,8 @@ fn exclude_coord(tag: &str, exclude: &[&str]) -> (Arc<Coordinator>, Arc<Store>) 
     (c, store)
 }
 
-/// 写端：配了 emoji 排除后选中 emoji 不落库，而汉字照常落库。
-///
-/// 「汉字照常」这一半不能省——判据若误伤正文，症状是「这个字选多少次都不往前排」，
-/// 完全静默；只断言 emoji 那一半的话，把判据写成恒真也能通过。
+/// 写端：配了 emoji 排除后选中 emoji 不落库，而汉字照常落库。「汉字照常」这一半不能省，
+/// 否则判据写成恒真也能通过，而误伤正文完全静默。
 #[test]
 fn excluded_blocks_skip_freq_recording() {
     let (c, store) = exclude_coord("record", &["emoji"]);
@@ -824,16 +782,10 @@ fn empty_exclude_list_records_everything() {
     );
 }
 
-/// ★★ **两端同源**：读端与写端认的必须是同一批文本。
+/// 两端同源：读端（`apply_freq_rerank_in`）与写端（`record_selection_in`）认的必须是同一批文本。
 ///
-/// 词频有写（`record_selection_in`）、读（`apply_freq_rerank_in`）两个端点，只跳过一端的
-/// 两种失效**都完全静默**：
-///
-/// - 只跳写端 ⇒ 库里既有的 emoji 记录照旧参与重排，用户觉得开关没反应；
-/// - 只跳读端 ⇒ 记录继续累积，日后关掉开关那些 emoji 会突然全部浮上来。
-///
-/// 判据挂在两端都已经在读的 `FreqSettings` 上，故这里直接对着那个判据取样——一侧改了、
-/// 另一侧没跟上的情形在类型层面就不可能发生。样本覆盖 emoji 与正文两个方向。
+/// 只跳写端，库里既有的 emoji 记录照旧参与重排；只跳读端，记录继续累积、日后关掉开关会突然
+/// 浮上来。判据挂在两端都读的 `FreqSettings` 上，这里直接对着它取样，覆盖 emoji 与正文两个方向。
 #[test]
 fn both_freq_ends_share_one_verdict() {
     let (c, _store) = exclude_coord("same_verdict", &["emoji"]);
@@ -862,9 +814,8 @@ fn unknown_block_name_does_not_disable_the_rest() {
 
 // ── 临时词自动晋升校验（`maybe_promote_temp`）。
 //
-// 旧版 ②b 混合整句按击键混合码造词（`bzdnihao`，边界按击键逐字母记）。这类记录打不出来，
-// 晋升进用户库就是永久坏码。拼音族数据域（`pinyin`）晋升前校验码能否切回合法全拼音节；
-// 码表方案的码不是拼音，不校验。
+// 按击键混合码造的记录（如 `bzdnihao`）打不出来，晋升进用户库就是永久坏码。拼音族数据域
+// （`pinyin`）晋升前校验码能否切回合法全拼音节；码表方案的码不是拼音，不校验。
 
 fn promo_coord(tag: &str) -> (Arc<Coordinator>, Arc<Store>) {
     let path = std::env::temp_dir().join(format!("wind_promo_check_{tag}.redb"));
@@ -1050,10 +1001,8 @@ fn bump_threshold_follows_landing_bucket() {
     );
 }
 
-/// 词频文本空、上屏文本非空（空显示标签的 `$CC` 纯文本命令）：上屏历史照记。
-///
-/// 两条通路独立：词频没得记不等于这次没上屏——曾经空 `freq_text` 在记历史之前就 return，
-/// `;` 重复上屏取不到刚上屏的命令文本。
+/// 词频文本空、上屏文本非空（空显示标签的 `$CC` 纯文本命令）：上屏历史照记。两条通路独立，
+/// 否则 `;` 重复上屏取不到刚上屏的命令文本。
 #[test]
 fn empty_freq_text_still_records_commit_history() {
     let c = coord("empty_freq_text_history");
@@ -1064,7 +1013,7 @@ fn empty_freq_text_still_records_commit_history() {
     );
 }
 
-// ── `record_always`：只记次数、不调序（论坛 t278）──────────────────────────────
+// ── `record_always`：只记次数、不调序──────────────────────────────
 
 /// 单码表方案 `ct_test` 的 Coordinator；`schema_freq` 写进方案文件的 `[engine.codetable.frequency]`。
 fn record_always_coord(
@@ -1098,7 +1047,7 @@ fn record_always_coord(
     (c, store)
 }
 
-/// ★ 调频关 + `record_always` 开 ⇒ 写端照常记账。
+/// 调频关 + `record_always` 开 ⇒ 写端照常记账。
 ///
 /// 读端「不重排」要拿真实词库比候选页才测得出，见 `tests/freq_record_always.rs`。
 #[test]

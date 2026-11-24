@@ -2,9 +2,8 @@
 //! 临时 store。headless 无引擎，故候选由测试直接装填，覆盖的是辅助码自身的进出/筛选/
 //! 还原/上屏语义（`aux_code_settings` 经真实方案文件解析，证明配置接线的正确性）。
 //!
-//! ⚠️ 多数用例的 fixture 方案写了 `enabled = true`——**出厂是关的**。开关本身的
-//! 三态行为（默认关 / 方案覆盖开 / 方案覆盖关）由 `aux_code_disabled_*` 那组用例
-//! 单独覆盖，别让「fixture 开着」把默认值回归掩盖掉。
+//! 多数用例的 fixture 方案写了 `enabled = true`，而出厂是关的；开关三态由
+//! `aux_code_disabled_*` 那组用例单独覆盖。
 use super::*;
 use crate::coordinator::Coordinator;
 use std::sync::Arc;
@@ -180,21 +179,12 @@ fn esc_exits_and_restores_pinyin_composition() {
     assert!(matches!(act, KeyAction::UpdateComposition { .. }));
 }
 
-/// ★★ 自定义取消键（`session_actions` 里的 `cancel`）在辅助码态必须**连主组合一起
-/// 放弃**，不能只退筛选。
+/// 自定义取消键（`session_actions` 里的 `cancel`）在辅助码态必须连主组合一起放弃，不能只退筛选。
 ///
-/// `cancel_session` 末尾无条件 `notify_ui_hide` + `ClearComposition`，而
-/// `exit_aux_code` 是本仓唯一一个「退出后主组合仍存活」的退出函数（它按设计还原
-/// 拼音候选与 preedit）。两者直接拼在一起就自相矛盾：宿主收到「清掉组合」，协调器
-/// 这边 `input_buffer` 还是 `li`、候选还有三条——下一次敲 `a` 会让屏幕上凭空冒出
-/// `lia`。
-///
-/// 判据取「协调器状态与 ClearComposition 相符」，**不是**看返回的 KeyAction：
-/// 那个变体修不修都是 ClearComposition，按它断言测不出任何东西。
-///
-/// 与上面 `esc_exits_and_restores_pinyin_composition` 恰成对照：Esc 走
-/// `aux_code_exited`（还原拼音、返回 UpdateComposition），取消键走这里（整体放弃、
-/// 返回 ClearComposition）。两个动作语义不同，各走各的路。
+/// `exit_aux_code` 会还原拼音候选与 preedit，而 `cancel_session` 末尾无条件发
+/// `ClearComposition`；两者拼在一起时宿主清了组合、协调器 `input_buffer` 却还在。判据取
+/// 「协调器状态与 ClearComposition 相符」，返回值修不修都是 ClearComposition。
+/// 对照 `esc_exits_and_restores_pinyin_composition`：Esc 还原拼音，取消键整体放弃。
 #[test]
 fn cancel_session_in_aux_mode_clears_whole_composition() {
     let c = coord_with("cancel_whole");
@@ -336,10 +326,8 @@ fn ctrl_alt_guard_does_not_consume_as_code() {
     assert!(matches!(act, KeyAction::PassThrough));
 }
 
-/// 方案切换会失效辅助码表缓存：切方案后再次进入辅助码必须按新表重筛。
-/// 码表缓存是**全局一份**、不区分方案，而各方案码表不同（拼音笔画表 vs 双拼小鹤
-/// 全码表）——切方案若不清缓存，双拼会一直用拼音那份表。本测试用「重写码表文件 +
-/// `invalidate_aux_code_table`」模拟切方案钩子的行为，验证重挂生效。
+/// 方案切换会失效辅助码表缓存：切方案后再次进入辅助码必须按新表重筛。缓存全局一份、
+/// 不区分方案；用「重写码表文件 + `invalidate_aux_code_table`」模拟切方案钩子。
 #[test]
 fn schema_switch_invalidates_aux_code_table() {
     let c = coord_with("switch");
@@ -365,7 +353,7 @@ fn schema_switch_invalidates_aux_code_table() {
     );
 }
 
-/// 连续组句：选中只消费缓冲前缀的字词（部分消费）→ **不退出**辅助码模式，重建会话
+/// 连续组句：选中只消费缓冲前缀的字词（部分消费）→ 不退出辅助码模式，重建会话
 /// 继续筛下一段。用「李」consumed_length=1 < 缓冲 "li"(2) 制造逐步转换态；headless
 /// 无引擎，重转剩余编码得空候选，但模式态 / 前缀推进 / 会话重建必须正确。
 #[test]
@@ -397,16 +385,10 @@ fn partial_commit_stays_in_aux_mode_for_continuous_filter() {
     assert!(matches!(act, KeyAction::UpdateComposition { .. }));
 }
 
-/// ★★ 第三条选词路径（`select_page_candidate`）也要留在模式内。
+/// 第三条选词路径（`select_page_candidate`，修饰键作二三候选键的 keyup 落点）也要留在模式内，
+/// 否则按 `2` 能继续组句、轻敲 Shift 选同一个候选却退出辅助码。
 ///
-/// 它是「修饰键作二三候选键」的 keyup 落点（`handle_select_key_up` →
-/// `select_page_candidate`）。此前那一臂是 `commit_selected` + **无条件**
-/// `finish_aux_code_after_commit`，于是配了 `select_key_groups = lrshift` 的用户
-/// 打「没时间」时：按 `2` 能继续组句，轻敲 Shift 选同一个候选却直接退出辅助码——
-/// 同一个动作换个键换套语义。
-///
-/// 判据取「`active` 仍是 AuxCode 且缓冲已裁剪」，不是看返回的 `KeyAction` 变体：
-/// 留在模式内与退出模式都返回 `UpdateComposition`，按变体断言测不出任何东西。
+/// 判据取「`active` 仍是 AuxCode 且缓冲已裁剪」：留在模式内与退出都返回 `UpdateComposition`。
 #[test]
 fn select_page_candidate_partial_commit_stays_in_aux_mode() {
     let c = coord_with("continuous_selectkey");
@@ -416,7 +398,7 @@ fn select_page_candidate_partial_commit_stays_in_aux_mode() {
     let _ = c.handle_aux_code_key(&mut st, &key(vk_letter('M'), 0)); // 筛 m → 李/樱
     assert_eq!(st.active, Some(ModeKind::AuxCode));
 
-    // offset 0 = 首选（李）。走的是与键盘数字键**不同**的那条路径。
+    // offset 0 = 首选（李）。走的是与键盘数字键不同的那条路径。
     let act = c
         .select_page_candidate(&mut st, 0)
         .expect("页内有候选，不应越界");
@@ -484,11 +466,8 @@ fn arrow_navigation_does_not_lose_filter() {
 
 // ───────────────────────── 开关三态（出厂关 / 方案覆盖两个方向）─────────────────────────
 
-/// ★ 出厂默认**关闭**：方案配了 `files`、也绑了触发键，但没人写过 `enabled`
-/// —— 全局基线 `[schema.pinyin.aux_code].enabled = false` 说了算，门卫拒绝进入。
-///
-/// 「方案里配了码表」只表示「这个方案推荐这张表」，不构成开启意图。若哪天这条
-/// 判据被改回「files 非空即开」，本用例会立刻变红。
+/// 出厂默认关闭：方案配了 `files`、也绑了触发键，但没写 `enabled`，由全局基线
+/// `[schema.pinyin.aux_code].enabled = false` 说了算。「方案里配了码表」不构成开启意图。
 #[test]
 fn aux_code_disabled_by_default_does_not_enter() {
     let dir = data_dir_with_aux_enabled("default_off", None);
@@ -505,11 +484,8 @@ fn aux_code_disabled_by_default_does_not_enter() {
     assert_eq!(st.preedit, "li", "组合区原封不动");
 }
 
-/// ★ Tab 这类非符号键靠 `[session_actions]` 进辅助码。
-///
-/// `key_actions` 那张表**解析不出 `tab`**（`key_action_name_to_vk` 只认符号键、字母 z
-/// 与四个修饰键），写进去会被静默丢弃——这正是把 `aux_code` 也收进 `SessionAction`
-/// 的理由。两条路通向同一个 `enter_aux_code`，差别只在哪些键名解析得出来。
+/// Tab 这类非符号键靠 `[session_actions]` 进辅助码：`key_actions` 解析不出 `tab`
+/// （`key_action_name_to_vk` 只认符号键、字母 z 与四个修饰键），写进去会被静默丢弃。
 #[test]
 fn session_action_tab_enters_aux_code() {
     let c = coord_with_data_cfg("sess_tab", data_dir_with_aux("sess_tab"), |cfg| {
@@ -524,11 +500,8 @@ fn session_action_tab_enters_aux_code() {
     assert!(st.aux_code.is_some(), "overlay 三件套应已建立");
 }
 
-/// ★★ 无候选时**必须放行**，否则空闲按 Tab 就再也打不出制表符了。
-///
-/// 守的是 `requires_candidates()` 那道通用闸门：`AuxCode` 落在
-/// `!matches!(self, None | Cancel)` 的 true 侧是自动的，一旦有人给它加特例
-/// （比如照 `Cancel` 的样子放宽到「有会话即可」），这条就红。
+/// 无候选时必须放行，否则空闲按 Tab 就打不出制表符。守的是 `requires_candidates()` 通用闸门，
+/// 有人给 `AuxCode` 加特例（如照 `Cancel` 放宽到「有会话即可」）这条就红。
 #[test]
 fn session_action_tab_passes_through_without_candidates() {
     let c = coord_with_data_cfg("sess_tab_idle", data_dir_with_aux("sess_tab_idle"), |cfg| {
@@ -544,12 +517,8 @@ fn session_action_tab_passes_through_without_candidates() {
     assert_eq!(st.active, None);
 }
 
-/// ★★ 触发键在辅助码态里再按一次 = **退出**，绝不重入。
-///
-/// 真机症状（2026-08-22）：重入时 `preedit_prefix = format!("{旧 preedit}    ")`，
-/// 每按一次组合区就多 4 个空格，看起来像插进了一个越来越宽的制表符。
-/// 判据取「组合区长度不增长」而非只看 `active`——`active` 在重入后**仍是** AuxCode，
-/// 只看它这条测不出任何东西。
+/// 触发键在辅助码态里再按一次 = 退出，绝不重入（重入会让 `preedit_prefix` 每次多 4 个空格）。
+/// 判据取「组合区长度不增长」：重入后 `active` 仍是 AuxCode，只看它测不出。
 #[test]
 fn trigger_key_exits_instead_of_reentering() {
     let c = coord_with_data_cfg("sess_reenter", data_dir_with_aux("sess_reenter"), |cfg| {
@@ -573,10 +542,7 @@ fn trigger_key_exits_instead_of_reentering() {
     assert_eq!(st.candidates.len(), 3, "候选应还原");
 }
 
-/// 再按触发键**不能上屏**。
-///
-/// 少了「触发键退出」这一支，键会落到兜底臂「其余键：有候选则上屏高亮候选并退出」——
-/// 用户只是想退出，却把首选打了出去，是个破坏性动作。
+/// 再按触发键不能上屏：少了「触发键退出」这一支，键会落到兜底臂上屏高亮候选。
 #[test]
 fn trigger_key_does_not_commit_on_exit() {
     let c = coord_with_data_cfg("sess_nocommit", data_dir_with_aux("sess_nocommit"), |cfg| {
@@ -595,17 +561,11 @@ fn trigger_key_does_not_commit_on_exit() {
     assert!(st.committed_text.is_empty(), "不该有待上屏文本");
 }
 
-/// ★ 辅助码态里**字母恒是码元**，即便它在 `key_actions` 里绑了 `aux_code`。
+/// 辅助码态里字母恒是码元，即便它在 `key_actions` 里绑了 `aux_code`。
 ///
-/// 两张表在这一点上必须同规格。会话态那侧是天然的：`z` 在 `session_key_name_to_vk`
-/// 里标着 `printable: true`，而辅助码态取 `include_printable = false` ⇒ 自动排除。
-/// `key_actions` 那侧压根没有 `printable` 这个维度，得显式排。
-///
-/// 少了这一排的后果：配了 `z = "aux_code"` 的用户在辅助码里再也打不出 `z`——
-/// 而 `z` 是笔画码的「折」、也是形码方案的常用码元。
-///
-/// ⚠️ 进入侧：码表引擎里 z 绑 `aux_code` 本就无意义（辅助码只服务拼音）；拼音里绑了则
-/// 空缓冲按 z 即进辅助码，那是用户自己的配置。退出侧不论如何都让字母回到编码。
+/// 会话表那侧天然排除（`z` 标着 `printable: true`，辅助码态取 `include_printable = false`）；
+/// `key_actions` 没有 `printable` 维度，得显式排，否则配了 `z = "aux_code"` 的用户在辅助码里
+/// 打不出笔画码的「折」。进入侧不管，拼音里绑了 z 是用户自己的配置。
 #[test]
 fn letter_stays_code_input_even_when_bound_as_trigger() {
     let c = coord_with_data_cfg("sess_zletter", data_dir_with_aux("sess_zletter"), |cfg| {
@@ -629,16 +589,10 @@ fn letter_stays_code_input_even_when_bound_as_trigger() {
     );
 }
 
-/// ★ **临拼以外**的 overlay 模式里，触发键不得把辅助码套进来。
+/// 临拼以外的 overlay 模式里，触发键不得把辅助码套进来。
 ///
-/// `handle_candidate_nav` 被五个 overlay 共用，全都会把键送回 `apply_session_action`。
-/// 少了 `enter_aux_code` 的守卫，Tab 在特殊模式/临英/URL/mix 里都会夺走那个模式的
-/// 候选、改写 preedit。
-///
-/// ⚠️ 2026-08-30 起 `TempPinyin` **不在**本集合里——它产出的正是拼音候选，与辅助码
-/// 筛的对象同类，故单独放行（正向用例见 `enters_from_temp_pinyin_*`）。放行集合从
-/// 「只有主输入路」变成「主输入路 + 临拼」时，本用例覆盖的其余模式**一个都没少**，
-/// 反而补齐了 Url / Special / Mix 三个当初漏测的。
+/// `handle_candidate_nav` 被五个 overlay 共用，少了 `enter_aux_code` 的守卫，Tab 会夺走那个模式
+/// 的候选。`TempPinyin` 产出的正是拼音候选，单独放行（见 `enters_from_temp_pinyin_*`）。
 #[test]
 fn enter_is_refused_from_non_pinyin_overlay_modes() {
     let c = coord_with("overlay_guard");
@@ -661,7 +615,7 @@ fn enter_is_refused_from_non_pinyin_overlay_modes() {
     }
 }
 
-/// 装填「临时拼音组合中」的初始状态：码在 `temp_pinyin_buffer`（**不是** `input_buffer`），
+/// 装填「临时拼音组合中」的初始状态：码在 `temp_pinyin_buffer`（不是 `input_buffer`），
 /// 方案指向 fixture 的 pinyin，引导前缀 `z`。与 `seed_composition` 是同一批候选。
 fn seed_temp_pinyin(c: &Arc<Coordinator>) -> std::sync::MutexGuard<'_, crate::coordinator::State> {
     let mut st = c.state.lock().unwrap();
@@ -678,11 +632,9 @@ fn seed_temp_pinyin(c: &Arc<Coordinator>) -> std::sync::MutexGuard<'_, crate::co
     st
 }
 
-/// 在 `data_dir_with_aux` 之上再放一个**码表**方案，供「活跃方案 ≠ 临拼目标方案」的用例。
-///
-/// ⚠️ 没有这一步就测不出「按目标方案取绑定」——活跃与目标是同一个方案时，
-/// `bound_action_for`（活跃）与 `bound_action_in_schema`（目标）答案相同，变异不会变红。
-/// 这个方案**刻意不写** `[key_actions]`：绑定只存在于 pinyin 那份里。
+/// 在 `data_dir_with_aux` 之上再放一个码表方案，供「活跃方案 ≠ 临拼目标方案」的用例。
+/// 两者相同时 `bound_action_for` 与 `bound_action_in_schema` 答案相同，变异不会变红。
+/// 这个方案刻意不写 `[key_actions]`：绑定只存在于 pinyin 那份里。
 fn data_dir_with_codetable_active(tag: &str) -> std::path::PathBuf {
     let dir = data_dir_with_aux(tag);
     std::fs::write(
@@ -693,14 +645,11 @@ fn data_dir_with_codetable_active(tag: &str) -> std::path::PathBuf {
     dir
 }
 
-/// 临拼里按**目标方案**（拼音/双拼）`[key_actions]` 声明的辅助码触发键即可进入。
+/// 临拼里按目标方案（拼音/双拼）`[key_actions]` 声明的辅助码触发键即可进入。
 ///
-/// 真实场景：五笔主方案 + z 引导临拼，而 `backtick = "aux_code"` 写在
-/// 出厂 shuangpin.schema.toml 里。活跃方案（五笔）那张表没有这条绑定，
-/// 按活跃方案取则**永远进不去**，且无任何日志。
-///
-/// ★ 辅助码是「编码类」动词，按产出候选的方案取——判据见
-/// docs/design/key-resolver-unification.md §4.4。整张表并不随目标方案走。
+/// 如五笔主方案 + z 引导临拼，`backtick = "aux_code"` 写在出厂 shuangpin.schema.toml 里；
+/// 按活跃方案取则永远进不去。辅助码是「编码类」动词，按产出候选的方案取（见
+/// docs/design/key-resolver-unification.md §4.4），整张表并不随目标方案走。
 #[test]
 fn temp_pinyin_enters_aux_by_target_schema_binding() {
     let dir = data_dir_with_codetable_active("tp_aux_bind");
@@ -727,10 +676,8 @@ fn temp_pinyin_enters_aux_by_target_schema_binding() {
     );
 }
 
-/// 字母键不参与目标方案的辅助码触发判定——辅助码态里字母恒是码元。
-///
-/// 与 `aux_code_key_role` 的第一道守卫同源：少了它，配过 `z = "aux_code"` 的用户
-/// 在临拼里打不出 z（`zi` / `zuo` / `zhang` 一个都出不来）。
+/// 字母键不参与目标方案的辅助码触发判定，与 `aux_code_key_role` 的第一道守卫同源；
+/// 否则配过 `z = "aux_code"` 的用户在临拼里打不出 z。
 #[test]
 fn temp_pinyin_letter_not_taken_as_aux_trigger() {
     let dir = data_dir_with_codetable_active("tp_aux_letter");
@@ -757,10 +704,7 @@ fn temp_pinyin_letter_not_taken_as_aux_trigger() {
     assert_eq!(st.temp_pinyin_buffer, "liz", "z 应累积进临拼缓冲");
 }
 
-/// 临拼态可进辅助码，并**记住来源**；筛选照常作用在临拼候选上。
-///
-/// 用户诉求原话：「临时拼音的其它功能应该尽量和拼音方案本身一致」。辅助码筛的正是
-/// 拼音候选，而临拼产出的就是拼音候选——此前被 `active.is_some()` 一刀切拒之门外。
+/// 临拼态可进辅助码，并记住来源；筛选照常作用在临拼候选上（临拼产出的就是拼音候选）。
 #[test]
 fn enters_from_temp_pinyin_and_filters() {
     let c = coord_with("from_temp");
@@ -785,10 +729,8 @@ fn enters_from_temp_pinyin_and_filters() {
     assert_eq!(texts, vec!["李", "樱"], "辅助码筛选应作用在临拼候选上");
 }
 
-/// 退出辅助码回到**临拼**，而不是掉进「什么模式都不在」。
-///
-/// 少了这条，Esc / 退格 / 触发键复按之后 `active` 会变成 `None`，而组合区里还留着
-/// `zli`、`temp_pinyin_buffer` 也还在——下一个字母会被当成新一轮五笔码。
+/// 退出辅助码回到临拼，而不是掉进「什么模式都不在」——否则组合区与 `temp_pinyin_buffer`
+/// 还在，下一个字母会被当成新一轮主方案的码。
 #[test]
 fn exits_back_to_temp_pinyin() {
     let c = coord_with("exit_temp");
@@ -814,12 +756,8 @@ fn exits_to_main_path_when_origin_is_none() {
     assert_eq!(st.preedit, "li");
 }
 
-/// 「部分消费 vs 完整消费」的判据必须按**来源缓冲**取。
-///
-/// 写死 `input_buffer` 的话，从临拼进来的会话恒判「完整消费」——「没时间」这类分步
-/// 组句在选第一个词时就把剩余拼音丢了，而且不会报错。本用例直接锁那个取值函数：
-/// 同一个 `State`（`input_buffer` 空、`temp_pinyin_buffer` 非空）下，两种来源必须
-/// 给出不同答案。
+/// 「部分消费 vs 完整消费」的判据必须按来源缓冲取。写死 `input_buffer` 的话，从临拼进来的
+/// 会话恒判完整消费，分步组句选第一个词就丢掉剩余拼音。同一个 `State` 下两种来源必须给出不同答案。
 #[test]
 fn source_buffer_follows_origin() {
     let c = coord_with("src_buf");
@@ -840,11 +778,8 @@ fn source_buffer_follows_origin() {
     );
 }
 
-/// 两张表的动词写法必须逐字一致：同一个功能在两处写法不同的话，用户把配置从一张表
-/// 挪到另一张就会静默失效。
-///
-/// ⚠️ 共键形态（`aux_code:page_next`）**只有 `session_actions` 有**，这不算写法分叉：
-/// `key_actions` 压根解析不出翻页键，那张表里也就不存在「与翻页共键」这回事。
+/// 两张表的动词写法必须逐字一致，否则配置从一张表挪到另一张就静默失效。共键形态
+/// （`aux_code:page_next`）只有 `session_actions` 有，不算分叉：`key_actions` 解析不出翻页键。
 #[test]
 fn aux_code_verb_spelling_matches_across_both_tables() {
     use wind_config::{AuxCodeShare, BoundAction, SessionAction};
@@ -875,10 +810,8 @@ fn aux_code_schema_override_enables_over_global_off() {
     assert_eq!(st.active, Some(ModeKind::AuxCode));
 }
 
-/// tri-state 覆盖方向二：全局开 + 方案显式关 → 仍进不去。
-///
-/// 只测方向一会漏掉「覆盖只实现了 `Some(true)` 分支」这种半截实现——那种写法
-/// 在方向一全绿、方向二静默失效。
+/// tri-state 覆盖方向二：全局开 + 方案显式关 → 仍进不去。只测方向一会漏掉
+/// 「覆盖只实现了 `Some(true)` 分支」的半截实现。
 #[test]
 fn aux_code_schema_override_disables_over_global_on() {
     let dir = data_dir_with_aux_enabled("schema_off", Some(false));
@@ -897,13 +830,10 @@ fn aux_code_schema_override_disables_over_global_on() {
 
 // ───────────────────────── 缺陷回归 ─────────────────────────
 
-/// 回归：**鼠标点击选词**必须与键盘选词走同一条 `commit_selected` 路径。
+/// 鼠标点击选词必须与键盘选词走同一条 `commit_selected` 路径。
 ///
-/// `select_candidate_at` 原以 `state.active.is_none()` 区分主输入路，辅助码
-/// （`active == Some(AuxCode)`）于是落进 overlay 分支走 `commit_candidate`——那条会
-/// 直接 `input_buffer.clear()`，于是分步组句在鼠标点第一个字时把剩余拼音一并丢掉，
-/// 而键盘选同一个候选却能继续组句；且 `state.aux_code` 不被清理，overlay 连同候选
-/// 快照残留（三件套「同生共死」的约定被打破）。
+/// `select_candidate_at` 若以 `state.active.is_none()` 区分主输入路，辅助码会落进 overlay 分支：
+/// 分步组句点第一个字就丢掉剩余拼音，且 `state.aux_code` 不被清理（三件套「同生共死」被打破）。
 #[test]
 fn mouse_click_commit_keeps_stepwise_conversion() {
     let c = coord_with("mouse_partial");
@@ -930,7 +860,7 @@ fn mouse_click_commit_keeps_stepwise_conversion() {
     );
 }
 
-/// 回归：鼠标点选**完整消费**的候选 → 退出辅助码且 overlay 必须清干净。
+/// 回归：鼠标点选完整消费的候选 → 退出辅助码且 overlay 必须清干净。
 #[test]
 fn mouse_click_full_commit_clears_overlay() {
     let c = coord_with("mouse_full");
@@ -947,12 +877,10 @@ fn mouse_click_full_commit_clears_overlay() {
     );
 }
 
-/// 回归：辅助码态下切英文，`commit_on_switch` 开启时必须上屏拼音原码。
+/// 辅助码态下切英文，`commit_on_switch` 开启时必须上屏拼音原码。
 ///
-/// ★ 辅助码是唯一**不清空 `input_buffer`** 的独占模式（它只筛候选，拼音码原封不动
-/// 留在主缓冲）。`take_input_on_mode_switch` 的独占分支原本假定「独占模式下
-/// input_buffer 必为空」，对辅助码不成立——匹配不到任何一臂就返回空串，用户待上屏的
-/// 拼音码被静默丢弃，而同样的操作在普通拼音态下会正常上屏。
+/// 辅助码是唯一不清空 `input_buffer` 的独占模式；`take_input_on_mode_switch` 的独占分支若假定
+/// 「独占模式下 input_buffer 必为空」，待上屏的拼音码会被静默丢弃。
 #[test]
 fn mode_switch_to_english_commits_pinyin_code() {
     let c = coord_with("switch_en");
@@ -967,14 +895,10 @@ fn mode_switch_to_english_commits_pinyin_code() {
     assert!(st.aux_code.is_none());
 }
 
-/// 回归：进辅助码不得改变候选窗的分页档位。
+/// 进辅助码不得改变候选窗的分页档位：`layout::intent_for` 的 AuxCode 臂返回 `None`
+/// （沿用主路径呈现），`per_page` 不能按 `active.is_some()` 切到扩展档。
 ///
-/// ★ `per_page` 原以 `active.is_some()` 决定是否走 `per_page_extended`——辅助码一进
-/// 就切档，候选窗在按下触发键的瞬间从 per_page 跳到扩展档。而 `layout::intent_for`
-/// 的 AuxCode 臂特意返回 `None`（＝沿用主路径呈现），同一意图两处判据相反。
-///
-/// ⚠️ 出厂 `per_page_extended = 0` 时两档取值相同，这个缺陷**不可见**——fixture 必须
-/// 显式配上扩展档，否则测试恒绿。
+/// 出厂 `per_page_extended = 0` 时两档相同、缺陷不可见，fixture 必须显式配上扩展档。
 #[test]
 fn aux_code_keeps_main_path_per_page() {
     let c = coord_with_data_cfg("per_page", data_dir_with_aux("per_page"), |cfg| {
@@ -1008,13 +932,10 @@ fn aux_code_keeps_main_path_per_page() {
     );
 }
 
-/// 回归：辅助码态下末页翻页不得触发「检索范围临时放宽」。
+/// 辅助码态下末页翻页不得触发「检索范围临时放宽」：放宽会经 `build_candidates` 重建整池候选，
+/// 把辅助码筛出的结果冲掉。
 ///
-/// ★ 放宽是智能档「同码位有常用字就滤掉生僻字」的补偿，辅助码按字形筛、不适用；
-/// 更要命的是放宽会走 `build_candidates` 重建整池候选，把辅助码筛出来的结果整个冲掉。
-///
-/// ⚠️ 判据只能取候选列表本身：放宽后若没有被滤候选会自行撤销，于是**两条路径的返回值
-/// 都是 false**——只断言返回值和 `scope_relaxed` 会假绿，看不出候选已被冲掉。
+/// 判据只能取候选列表本身：放宽后若无被滤候选会自行撤销，两条路径的返回值都是 false。
 #[test]
 fn aux_code_does_not_relax_scope_on_page_end() {
     let c = coord_with("relax");
@@ -1049,16 +970,11 @@ fn coord_with_share_key(tag: &str, enabled: Option<bool>) -> Arc<Coordinator> {
     })
 }
 
-/// ★★ 共键**先试辅助码、不先翻页**：首按 Tab 停在第一页，首选不会被翻走。
+/// 共键先试辅助码、不先翻页：首按 Tab 停在第一页，首选不会被翻走。
 ///
-/// 这正是「顺序即优先级」与「两个都做」的分野。若实现成「先翻页再进入」
-/// （社区 PR #74 的 `page_next_aux_code` 形态），用户按一下键就越过了最常用的那一屏。
-///
-/// ⚠️ 本用例盯的是**进入后停在第几页**这个契约，不是「有没有调用过 `page_next`」：
-/// 进入必经 `refresh_aux_code_candidates` → `reset_candidate_view`，页码在那里归零，
-/// 所以「先翻页但不保留页码」与「不翻页」在这里本就不可区分（实测过：只加 `page_next`
-/// 探针，本用例照绿）。反过来说，「先翻页」这个形态**必须**再补一道保存/恢复
-/// `current_page` 才成立——而那道补丁一加，本用例立刻变红（也实测过）。
+/// 盯的是「进入后停在第几页」这个契约：进入必经 `reset_candidate_view` 把页码归零，所以
+/// 「先翻页但不保留页码」与「不翻页」在这里不可区分；「先翻页」形态必须再补一道保存/恢复
+/// `current_page` 才成立，那时本用例会红。
 #[test]
 fn share_key_enters_aux_without_paging() {
     let c = coord_with_share_key("share_enter", Some(true));
@@ -1073,10 +989,8 @@ fn share_key_enters_aux_without_paging() {
     assert!(matches!(act, KeyAction::UpdateComposition { .. }));
 }
 
-/// 辅助码态内再按共键 = 翻页，**不退出**（专用触发键那条「再按一次退出」不适用于它）。
-///
-/// 走 `handle_aux_code_key` 而非直接调 `apply_session_action`：要连 `is_aux_code_trigger`
-/// 一起测——它若把共键也认成退出键，用户就永远翻不到第二页。
+/// 辅助码态内再按共键 = 翻页，不退出。走 `handle_aux_code_key` 以连 `is_aux_code_trigger`
+/// 一起测——它若把共键也认成退出键，就永远翻不到第二页。
 #[test]
 fn share_key_pages_inside_aux_mode() {
     let c = coord_with_share_key("share_page", Some(true));
@@ -1094,10 +1008,7 @@ fn share_key_pages_inside_aux_mode() {
     assert!(matches!(act, KeyAction::Consumed));
 }
 
-/// 辅助码未启用 ⇒ 门卫拒 ⇒ 共键退化成**纯翻页键**（而不是哑键）。
-///
-/// 出厂 `enabled = false`，所以这是绝大多数用户绑上这个动词后的第一手体验：
-/// 功能没开时它必须仍是个能用的翻页键。
+/// 辅助码未启用 ⇒ 门卫拒 ⇒ 共键退化成纯翻页键（而不是哑键）。出厂即未启用，这是多数用户的第一手体验。
 #[test]
 fn share_key_degrades_to_paging_when_aux_disabled() {
     let c = coord_with_share_key("share_off", Some(false));
@@ -1112,9 +1023,7 @@ fn share_key_degrades_to_paging_when_aux_disabled() {
 }
 
 /// 无候选（空闲）⇒ 两个成员都 `requires_candidates` ⇒ 整个动词放行，Tab 还给宿主。
-///
-/// 判据取「返回 None」：这是本仓「不吞键」的唯一表达，返回 `Consumed` 就意味着用户
-/// 在空闲时按 Tab 什么也不会发生。
+/// 判据取「返回 None」：这是「不吞键」的唯一表达。
 #[test]
 fn share_key_yields_when_no_candidates() {
     let c = coord_with_share_key("share_idle", Some(true));
@@ -1128,14 +1037,8 @@ fn share_key_yields_when_no_candidates() {
     assert_eq!(st.active, None);
 }
 
-/// 已在**临拼以外**的 overlay 模式里 ⇒ `enter_aux_code` 的守卫拒 ⇒ 只翻页。
-///
-/// `apply_session_action` 被五个 overlay 共用（`handle_candidate_nav` 转调），共键
-/// 在那些模式里必须是个安分的翻页键，不能把主候选夺过来筛。
-///
-/// ⚠️ 代表模式从 `TempPinyin` 换成 `TempEnglish`：临拼现在放行，共键在那里的语义
-/// 与主输入路一致（先试进入、进不去才翻页），由 `share_key_enters_aux_from_temp_pinyin`
-/// 单独锁。
+/// 已在临拼以外的 overlay 模式里 ⇒ `enter_aux_code` 的守卫拒 ⇒ 只翻页，不能把主候选夺过来筛。
+/// 代表模式取 `TempEnglish`；临拼的语义由 `share_key_enters_aux_from_temp_pinyin` 单独锁。
 #[test]
 fn share_key_only_pages_in_other_overlay_modes() {
     let c = coord_with_share_key("share_overlay", Some(true));
@@ -1150,10 +1053,7 @@ fn share_key_only_pages_in_other_overlay_modes() {
     assert!(matches!(act, KeyAction::Consumed));
 }
 
-/// 共键在**临拼**里与主输入路同语义：能进辅助码就进（进不去才翻页）。
-///
-/// 这是上一条的正面：放行集合改了之后，共键的处置必须跟着改，否则「临拼能进辅助码」
-/// 只对专用触发键成立、对共键不成立——同一个功能两个入口两种结果。
+/// 共键在临拼里与主输入路同语义：能进辅助码就进，进不去才翻页——否则同一功能两个入口两种结果。
 #[test]
 fn share_key_enters_aux_from_temp_pinyin() {
     let c = coord_with_share_key("share_temp", Some(true));
@@ -1175,21 +1075,12 @@ fn share_key_enters_aux_from_temp_pinyin() {
     );
 }
 
-/// ★★★ 专用触发键**只配在 `session_actions` 的符号键上**时，模式内再按必须正常退出，
-/// 且**绝不上屏**。
+/// 专用触发键只配在 `session_actions` 的符号键上时，模式内再按必须正常退出，且绝不上屏。
 ///
-/// 符号键一律 `printable = true`，而辅助码态下 `handle_candidate_nav` 取
-/// `include_printable = false` ⇒ 用同样取值去查这条绑定会**查不到**，键一路落到兜底臂
-/// 「有候选则上屏高亮候选并退出」——用户只是想退出，却把首选打了出去。
-/// 修法是 `aux_code_key_role` 改取 `include_printable = true`（辅助码的码元只有字母，
-/// 已在那里单独排除）。
-///
-/// ⚠️ 这是**既有缺陷**，不是共键引入的：此前一直被双拼出厂那份
-/// `[key_actions] backtick = "aux_code"` 兜住，所以本用例刻意换一个 fixture 方案
-/// **没有**在 `key_actions` 里绑过的符号键（`/`），否则测的就是 key_actions 那条路。
-///
-/// 判据取「候选与缓冲原封不动」而非 `KeyAction` 变体：兜底臂走 `commit_selected`，
-/// 它在部分消费时同样返回 `UpdateComposition`，按变体断言测不出来。
+/// 符号键一律 `printable = true`，按辅助码态的 `include_printable = false` 去查会查不到，键落到
+/// 兜底臂上屏首选；故 `aux_code_key_role` 取 `include_printable = true`（字母码元已单独排除）。
+/// fixture 刻意用没在 `key_actions` 里绑过的 `/`，否则测的是 key_actions 那条路。
+/// 判据取「候选与缓冲原封不动」：兜底臂部分消费时同样返回 `UpdateComposition`。
 #[test]
 fn solo_trigger_on_symbol_key_exits_without_commit() {
     let c = coord_with_data_cfg("solo_symbol", data_dir_with_aux("solo_symbol"), |cfg| {
@@ -1216,13 +1107,10 @@ fn solo_trigger_on_symbol_key_exits_without_commit() {
     assert!(matches!(act, KeyAction::UpdateComposition { .. }));
 }
 
-/// ★★ 同一个键两张表各有一份、且形态不同时，**退出判定必须跟随分派优先级**（会话表先）。
+/// 同一个键两张表各有一份、且形态不同时，退出判定必须跟随分派优先级（会话表先）。
 ///
-/// 这不是构造出来的边角：**双拼出厂就带着 `[key_actions] backtick = "aux_code"`**
-/// （本用例的 fixture 方案同样带），用户只要在 `session_actions` 里把反引号改配成共键
-/// 就会撞上。若 `is_aux_code_trigger` 写成「任一表命中即算触发键」，进入走会话表
-/// （共键生效）、退出却被 `key_actions` 那份认走 ⇒ 按一次进、再按一次出，第二页永远
-/// 到不了，而两处配置各自看上去都没错。
+/// 双拼出厂就带 `[key_actions] backtick = "aux_code"`，用户在 `session_actions` 把反引号改配成
+/// 共键即会撞上。若「任一表命中即算触发键」，进入走共键、退出被 key_actions 认走，第二页永远到不了。
 #[test]
 fn share_key_wins_over_key_actions_binding_on_same_key() {
     let c = coord_with_data_cfg(
@@ -1259,11 +1147,8 @@ fn share_key_wins_over_key_actions_binding_on_same_key() {
     assert!(matches!(act, KeyAction::Consumed));
 }
 
-/// 动词写法：`aux_code` / `aux_code:page_next` 与 `Display` 互逆；写错的参数落 `None`。
-///
-/// 参数写错**不静默降级成专用触发键**：`aux_code:page_prev` 若退回 `aux_code`，
-/// 用户看到的是「共键没生效」，与「功能坏了」同形；落 `None` 才会被
-/// `parse_checked` 在加载期告警。
+/// 动词写法：`aux_code` / `aux_code:page_next` 与 `Display` 互逆；写错的参数落 `None`，
+/// 由 `parse_checked` 在加载期告警，而不是静默降级成专用触发键。
 #[test]
 fn share_verb_parse_and_display_roundtrip() {
     use wind_config::{AuxCodeShare, SessionAction};
@@ -1290,10 +1175,8 @@ fn share_verb_parse_and_display_roundtrip() {
     assert_eq!(SessionAction::parse_checked("aux_code:page_prev"), None);
 }
 
-/// 自造码表方案（工=a/aaaa、攻=atyy、公=wcu），供 `schema:<id>` 引用。
-///
-/// ★ id 由调用方给且每条用例不同（含进程号）：反查索引的磁盘缓存按方案 id 落在进程外的
-/// 共享目录，并行用例若共用一个 id 会互相覆盖。
+/// 自造码表方案（工=a/aaaa、攻=atyy、公=wcu），供 `schema:<id>` 引用。id 由调用方给且每条
+/// 用例不同（含进程号）：反查索引的磁盘缓存按方案 id 落在共享目录，共用会互相覆盖。
 fn write_wbx(schemas: &std::path::Path, id: &str) {
     std::fs::create_dir_all(schemas.join(id)).unwrap();
     std::fs::write(
@@ -1462,7 +1345,7 @@ fn aux_lookup_now_mask_includes_user_layer() {
     }
 }
 
-/// ★ 系统层没就绪：不进入、不吞键——按键线程绝不现建反查索引。
+/// 系统层没就绪：不进入、不吞键——按键线程绝不现建反查索引。
 #[test]
 fn schema_source_not_ready_does_not_enter() {
     let id = wbx_id("cold");
@@ -1478,7 +1361,7 @@ fn schema_source_not_ready_does_not_enter() {
     wait_index_ready(&c, &id);
 }
 
-/// ★ 改了来源（override 层换 files）不切方案也要生效——此前缓存只在切方案时清。
+/// 改了来源（override 层换 files）不切方案也要生效——此前缓存只在切方案时清。
 #[test]
 fn source_change_takes_effect_without_schema_switch() {
     let id = wbx_id("ovr");
@@ -1520,7 +1403,7 @@ fn wait_index_ready(c: &Coordinator, id: &str) {
     }
 }
 
-/// ★ 会话中途方案来源的反查索引被清掉（改方案设置 / 词库启用集变更都会整表清）：
+/// 会话中途方案来源的反查索引被清掉（改方案设置 / 词库启用集变更都会整表清）：
 /// 本次原样放行、后台重建，而不是只拿用户层去比、把候选滤到几乎全空。
 #[test]
 fn schema_layer_lost_mid_session_passes_through_and_rebuilds() {
@@ -1546,7 +1429,7 @@ fn schema_layer_lost_mid_session_passes_through_and_rebuilds() {
     wait_index_ready(&c, &id);
 }
 
-/// ★ 启动预热覆盖辅助码引用的方案：否则每次启动后第一次按辅助码键都静默不进。
+/// 启动预热覆盖辅助码引用的方案：否则每次启动后第一次按辅助码键都静默不进。
 #[test]
 fn prewarm_indexes_covers_aux_schema_sources() {
     let id = wbx_id("warm");
@@ -1588,13 +1471,11 @@ fn adjacent_file_sources_collapse_into_one_layer() {
     );
 }
 
-/// ★ 全拼默认辅助码从 `aux_code/stroke.txt` 改为引用笔画码表方案（`schema:stroke`）后，
-/// 筛选结果必须**逐字一致**——两份数据由 `gen_aux_code` 同一次解析产出，这里用真实产物
-/// 对拍：同一组拼音候选、`hspnz` 上全部 1~3 码的辅助码输入，两种来源留下的候选相同。
+/// 全拼默认辅助码引用笔画码表方案（`schema:stroke`）与直接读 `aux_code/stroke.txt`，筛选结果必须
+/// 逐字一致：两份数据由 `gen_aux_code` 同一次解析产出，这里在 `hspnz` 全部 1~3 码上对拍。
 ///
-/// 数据取 `build_dev/data`（gen-data 产物，不入库），缺则跳过（全仓惯例）。方案文件取
-/// 仓库里入库的 `data/schemas/stroke.schema.toml`，只把 id 换成本进程唯一的（反查索引的
-/// 磁盘缓存按 id 落在共享目录，见 [`write_wbx`]）。
+/// 数据取 `build_dev/data`，缺则跳过（全仓惯例）；方案文件取入库的
+/// `data/schemas/stroke.schema.toml`，id 换成本进程唯一的（见 [`write_wbx`]）。
 #[test]
 fn stroke_schema_source_filters_like_stroke_txt() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");

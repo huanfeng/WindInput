@@ -121,7 +121,7 @@ fn test_number_template_mods_is_whitelist_not_parser() {
 
 #[test]
 fn test_number_template_mods_are_pairwise_distinct() {
-    // 回归：消费端按**相等**比较修饰位，前提是任意两项的位集合不相等。
+    // 回归：消费端按相等比较修饰位，前提是任意两项的位集合不相等。
     // （更强的性质——不存在子集关系——已不再要求：等值判据对子集免疫，
     //   这正是 `ctrl+alt+number` 能安全加进值域的原因。）
     let all = ["ctrl+number", "ctrl+shift+number", "ctrl+alt+number"];
@@ -190,10 +190,8 @@ fn session_actions(pairs: &[(&str, &str)]) -> std::collections::BTreeMap<String,
         .collect()
 }
 
-/// 清空四组键组配置，使 `effective_session_actions()` 只剩显式表。
-///
-/// 出厂默认里 `page_keys` / `highlight_keys` / `select_key_groups` **都非空**，
-/// 不清的话每个用例都会多出十来个折算来的键，断言「只该有这几个」必然失败。
+/// 清空四组键组配置，使 `effective_session_actions()` 只剩显式表。出厂这几组都非空，
+/// 不清的话每个用例都会多出折算来的键。
 fn only_explicit(cfg: &mut Config) {
     cfg.keys.page_keys.clear();
     cfg.keys.highlight_keys.clear();
@@ -201,11 +199,10 @@ fn only_explicit(cfg: &mut Config) {
     cfg.keys.select_char_keys.clear();
 }
 
-/// ★★★ 四组键组配置必须经 `effective_session_actions()` 进 TSF 转发表。
+/// 四组键组配置必须经 `effective_session_actions()` 进 TSF 转发表。
 ///
-/// 2026-08-11 回归守门：折算从 `normalize` 移到消费层视图后，本编译器若仍直接读
-/// `config.keys.session_actions`（只有用户显式配的那部分），出厂默认的翻页/选词键
-/// **一个都不会进转发表**——表现是升级后翻页键、次选键全部失效，而配置文件看着好好的。
+/// 折算在消费层视图里做；编译器若直接读 `config.keys.session_actions`（只有用户显式配的
+/// 部分），出厂翻页/选词键一个都进不了转发表，而配置文件看着好好的。
 #[test]
 fn key_group_config_reaches_forward_set_without_explicit_table() {
     let cfg = Config::default();
@@ -266,7 +263,7 @@ fn forward_only_bit_marks_page_and_select_keys_only() {
     ]);
     let compiled = Compiler::new(cfg).compile();
 
-    // ⚠ 判据不能用「action 为空」：pin/delete 候选的数字热键 action 同样是空串
+    // 判据不能用「action 为空」：pin/delete 候选的数字热键 action 同样是空串
     //（动作由服务端按 hash 自认），它们是 session 热键、不该带 FORWARD_ONLY。
     // 只有会话态键才是仅注册转发，故按 raw hash 精确点名。
     let forward_only_raw: Vec<u32> = vec![
@@ -313,13 +310,9 @@ fn forward_only_bit_marks_page_and_select_keys_only() {
 
 /// 修饰键作选词键时只进 key_up，绝不进 key_down。
 ///
-/// 回归点：曾与 `;'` 一起注册进 key_down，而 TSF 的 keydown 查表用的是「通用修饰位 +
-/// 笼统 VK_CONTROL」，两个维度都对不上这里登记的「具体位 + VK_LCONTROL」，于是这项配置
-/// 端到端从未生效过——且即便对上了也不能吃（纯修饰键 keydown 必须放行）。
-///
-/// ⚠️ 三期收编后 action 从 `select_candidate` 改为统一的 `session_action`。这是安全的：
-/// 该 action 名对 keyup 选词**没有功能作用**（`handle_select_key_up` 只按 VK 查偏移），
-/// 唯一读 action 的是 `is_toggle_mode_keycode`，而它只认 `toggle_mode`。
+/// TSF 的 keydown 查表用「通用修饰位 + 笼统 VK_CONTROL」，对不上这里登记的具体 VK；
+/// 何况纯修饰键 keydown 必须放行。action 用统一的 `session_action` 是安全的：keyup 选词
+/// 只按 VK 查偏移，唯一读 action 的 `is_toggle_mode_keycode` 只认 `toggle_mode`。
 #[test]
 fn select_modifier_group_registers_on_key_up_only() {
     let mut cfg = Config::default();
@@ -364,13 +357,11 @@ fn select_modifier_group_registers_on_key_up_only() {
     );
 }
 
-/// 用户诉求二：`capslock = "page_prev"`。CapsLock 只有 keyup 到得了服务端，故必须进
-/// `key_up` 表并带 SESSION 位——C++ 靠这个位区分「toggle 语义」（恒吃 keydown）与
-/// 「会话语义」（仅有会话时吃）。
+/// `capslock = "page_prev"`：CapsLock 只有 keyup 到得了服务端，故必须进 `key_up` 表并带
+/// SESSION 位——C++ 靠这个位区分「toggle 语义」（恒吃 keydown）与「会话语义」。
 ///
-/// ★★ 回归保护：action **不能**是 `toggle_mode`。`is_toggle_mode_keycode` 按 action
-/// 过滤，混用会让「只把 CapsLock 配成翻页键」的用户在空闲敲 CapsLock 时莫名切中英文。
-/// 这是第三次触碰该判据（前两次是 `select_key_groups` 与 `schema_bound`）。
+/// action 不能是 `toggle_mode`：`is_toggle_mode_keycode` 按 action 过滤，混用会让空闲时
+/// 敲 CapsLock 莫名切中英文。
 #[test]
 fn capslock_session_action_registers_on_key_up_with_session_policy() {
     let mut cfg = Config::default();
@@ -405,7 +396,7 @@ fn capslock_session_action_registers_on_key_up_with_session_policy() {
     );
 }
 
-/// 会话态的**功能键**走 key_down + FORWARD_ONLY（与旧 `page_keys` 的登记形态一致）。
+/// 会话态的功能键走 key_down + FORWARD_ONLY（与旧 `page_keys` 的登记形态一致）。
 /// 无会话时 C++ 靠 FORWARD_ONLY 闸门放行，键回落宿主的原语义（Tab 仍是制表符）。
 #[test]
 fn session_function_keys_register_on_key_down_forward_only() {
@@ -474,8 +465,8 @@ fn printable_select_group_stays_on_key_down() {
     );
 }
 
-/// 软键盘开关键住在**专用字段**，策略位与它此前在 `key_actions` 里那条逐位相同：
-/// 带 GLOBAL、**不带** CHINESE_ONLY——面板画的是键位→符号的映射，与中英文态无关，
+/// 软键盘开关键住在专用字段，策略位与它此前在 `key_actions` 里那条逐位相同：
+/// 带 GLOBAL、不带 CHINESE_ONLY——面板画的是键位→符号的映射，与中英文态无关，
 /// 带上那个位英文态就连开都开不出来。
 #[test]
 fn softkeyboard_field_carries_global_but_not_chinese_only() {
@@ -497,11 +488,10 @@ fn softkeyboard_field_carries_global_but_not_chinese_only() {
     );
 }
 
-/// ★★★ 本次修复的核心不变量：**出厂绑定关得掉**。
+/// 核心不变量：出厂绑定关得掉。
 ///
-/// 此前出厂值写在 `data/config.toml` 的 `keys.key_actions` 里，而那张表四层深合并、
-/// 只能新增/覆盖 ⇒ 用户在设置页删掉后每次 `load()` 都被灌回来，永远关不掉
-/// （v0.120.0 报障）。挪到标量字段之后，清空就是清空。
+/// 出厂值若写在 `keys.key_actions` 里，那张表四层深合并、只能新增/覆盖，用户删掉后每次
+/// `load()` 都被灌回来；放在标量字段里，清空就是清空。
 #[test]
 fn softkeyboard_field_cleared_disables_the_hotkey() {
     let mut cfg = Config::default();
@@ -513,11 +503,9 @@ fn softkeyboard_field_cleared_disables_the_hotkey() {
     );
 }
 
-/// `key_actions` 里的显式 `none`：压制**更低层**（L2 出厂 / L2.5 定制版）在同一张表
-/// 里写的绑定。`merge_value` 表达不了删除，禁用只能靠显式值承载——语义与单键、
-/// 修饰键两条通路的 `BoundAction::None` 逐条对应。
-///
-/// ⚠️ 第二条断言不是凑数：少了它，「整个 key_actions 循环被跳过」也会让第一条绿。
+/// `key_actions` 里的显式 `none` 压制更低层（L2 出厂 / L2.5 定制版）在同一张表里写的绑定。
+/// `merge_value` 表达不了删除，禁用只能靠显式值，语义与单键、修饰键两条通路的
+/// `BoundAction::None` 对应。第二条断言防「整个循环被跳过」也让第一条绿。
 #[test]
 fn explicit_none_keeps_a_combo_binding_out_of_the_table() {
     let mut cfg = Config::default();
@@ -621,7 +609,7 @@ fn bare_function_key_is_chinese_only_except_mode_switch_verbs() {
     );
 }
 
-/// 特殊模式直达热键写在 `keys.key_actions` 里（`special:<方案id>`），动词**原样**
+/// 特殊模式直达热键写在 `keys.key_actions` 里（`special:<方案id>`），动词原样
 /// 进表（分派端用 `BoundAction::parse` 认串），并带 CHINESE_ONLY | GLOBAL。
 #[test]
 fn special_mode_hotkey_compiles_with_global_policy() {
@@ -663,10 +651,7 @@ fn temp_pinyin_hotkey_compiles_with_global_policy() {
 }
 
 /// `keys.key_actions` 编出对应动词，且与方案直达热键同策略（不带 CHINESE_ONLY）。
-///
-/// policy 位对 `toggle_schema` 比对 `switch_schema` 更要命：带上它，切到英文方案后
-/// **回程那一下**就不响应了——功能恰好废掉一半，而"切过去"仍然好用，很容易被当成
-/// 「回程没实现」而不是「策略位配错」。
+/// 带上它，切到英文方案后回程那一下就不响应了，功能恰好废掉一半。
 #[test]
 fn key_actions_compile_toggle_schema_without_chinese_only_policy() {
     let mut cfg = Config::default();
@@ -687,10 +672,8 @@ fn key_actions_compile_toggle_schema_without_chinese_only_policy() {
     );
 }
 
-/// 不支持的动词与解析不了的键都被丢弃，不进热键表。
-///
-/// 守的是「静默失效」：写错的动词若混进表里，按下时分发端匹配不上，表现是「按了没反应」，
-/// 与热键没注册上完全同形，用户无从分辨自己拼错了还是功能坏了。
+/// 不支持的动词与解析不了的键都被丢弃，不进热键表；混进表里的话按下时分发端匹配不上，
+/// 与热键没注册上同形，用户无从分辨。
 #[test]
 fn key_actions_drop_unknown_verbs_and_unparsable_keys() {
     let mut cfg = Config::default();
@@ -711,16 +694,10 @@ fn key_actions_drop_unknown_verbs_and_unparsable_keys() {
     assert_eq!(compiled.key_down.len(), base, "三条非法项都不该进热键表");
 }
 
-/// `switch_schema:<id>`（单向）能编进 key_down 表，且**不带 CHINESE_ONLY**。
+/// `switch_schema:<id>`（单向）能编进 key_down 表，且不带 CHINESE_ONLY。
 ///
-/// 这个 policy 位是重点：带上它，切到英文方案后热键就不再响应，用户切得过去、切不
-/// 回来。特殊模式热键需要它（overlay 只在中文输入中途有意义），方案切换恰恰相反——
-/// 同一个位，两种机制下后果相反。
-///
-/// ⚠️ 本契约的测试**函数体一度整个丢失**：注释与 `#[test]` 还在，函数被后加的
-/// `key_actions_compile_toggle_schema_...` 顶替，两个 `#[test]` 落在同一个 fn 上。
-/// 编译器只报一句 `duplicated attribute` 警告，而读代码的人看到注释会以为这条契约
-/// 有守门——**「注释还在」是比「没有测试」更坏的状态**。
+/// 带上它，切到英文方案后热键就不再响应，切得过去切不回来。特殊模式热键需要这个位
+/// （overlay 只在中文输入中途有意义），方案切换恰恰相反。
 #[test]
 fn switch_schema_compiles_without_chinese_only_policy() {
     let mut cfg = Config::default();
@@ -757,11 +734,10 @@ fn switch_schema_compiles_without_chinese_only_policy() {
     );
 }
 
-/// 残留的 `keys.schema_hotkeys` **不再生效**，且不悄悄折算进 key_actions。
+/// 残留的 `keys.schema_hotkeys` 不再生效，且不悄悄折算进 key_actions。
 ///
-/// 兼容层已删除（用户拍板：不做向后兼容，换核心代码简洁）。但它必须**可见地**失效：
-/// 告警在 `normalize` 里发出，随后清空该表——留着会让后续任何「有没有配过」的判断
-/// 读到假信号。这里钉住「不生效」与「清空」两条，告警文本本身不断言（文案会改）。
+/// 兼容层已删除，但必须可见地失效：`normalize` 发告警后清空该表，留着会让「有没有配过」
+/// 的判断读到假信号。告警文本不断言（文案会改）。
 #[test]
 fn legacy_schema_hotkeys_are_dropped_not_migrated() {
     let mut cfg = Config::default();
@@ -788,9 +764,7 @@ fn legacy_schema_hotkeys_are_dropped_not_migrated() {
 }
 
 /// 动词 id 为空（`special:`）不产生条目；`temp_pinyin.hotkey` 默认空同理。
-///
-/// 「id 为空」原先是 `special_modes[]` 条目的一个真实陷阱（只写 schema 不写 id 的
-/// 条目会静默不注册热键）。身份收敛到方案 id 后它不可能为空，这里只剩防脏数据。
+/// 身份收敛到方案 id 后它不可能为空，这里只防脏数据。
 #[test]
 fn empty_or_idless_mode_hotkey_produces_no_entry() {
     let mut cfg = Config::default();
@@ -810,7 +784,7 @@ fn empty_or_idless_mode_hotkey_produces_no_entry() {
     );
 }
 
-/// 修饰键的 keyup hash 必须带**通用位 + 具体位**：C++ `GetCurrentModifiers()` 对
+/// 修饰键的 keyup hash 必须带通用位 + 具体位：C++ `GetCurrentModifiers()` 对
 /// 修饰键同时返回两者，只带一边会匹配不上（表现为「绑了没反应」）。
 /// 与 `compile_toggle_mode_key` 同格式——两者服务于同一条 TSF keyup 通路。
 #[test]
@@ -832,7 +806,7 @@ fn modifier_key_up_hash_matches_toggle_format() {
     assert_eq!(compile_modifier_key_up_hash(VK_CAPITAL), None);
 }
 
-/// `keys.key_actions` 按**键形态**分三条通路，不按动词。
+/// `keys.key_actions` 按键形态分三条通路，不按动词。
 #[test]
 fn key_action_routes_split_by_key_shape() {
     use KeyActionRoute::*;
@@ -848,11 +822,10 @@ fn key_action_routes_split_by_key_shape() {
     assert_eq!(route_of_key_action("不存在的键"), None);
 }
 
-/// ★★ 单个有字符的键**绝不能**进 key_down 热键表。
+/// 单个有字符的键绝不能进 key_down 热键表。
 ///
-/// `parse_hotkey("backtick")` 返回的是无修饰位的裸 VK（0xC0）。进表后 TSF 会把它
-/// 当热键转发并吞掉，于是 `` ` `` 这个符号在所有方案里都再也打不出来——而用户只是
-/// 想给它绑个功能。这条是本次收编最危险的一处，故单独立测。
+/// `parse_hotkey("backtick")` 返回无修饰位的裸 VK（0xC0），进表后 TSF 会当热键吞掉，
+/// `` ` `` 在所有方案里都再也打不出来。
 #[test]
 fn single_character_key_never_enters_keydown_hotkeys() {
     let mut cfg = Config::default();
@@ -869,7 +842,7 @@ fn single_character_key_never_enters_keydown_hotkeys() {
         .key_actions
         .insert("ctrl+shift+n".into(), "toggle_schema:wubi86".into());
     // 折算后的选词绑定（本测试直接构造 Compiler、不经 normalize，故显式写出）。
-    // 顺带覆盖一个真实场景：**同一个键 `;` 同时在两张表里**——无会话时是 mix 引导键，
+    // 顺带覆盖一个真实场景：同一个键 `;` 同时在两张表里——无会话时是 mix 引导键，
     // 有会话时是次选键。两张表按触发态分野，本就该能共存。
     cfg.keys.session_actions = session_actions(&[
         ("semicolon", "select_candidate:2"),
@@ -877,7 +850,7 @@ fn single_character_key_never_enters_keydown_hotkeys() {
     ]);
     let compiled = Compiler::new(cfg).compile();
 
-    // ★ 判据是「有没有产生**带这个动词的** key_down 条目」，不是「这个 VK 在不在
+    // 判据是「有没有产生带这个动词的 key_down 条目」，不是「这个 VK 在不在
     // key_down 里」——`;` / `'` 同时被会话态表以 FORWARD_ONLY 登记着，按 VK 判会把
     // 那条误当成本段的产物，测了个寂寞。
     for verb in ["temp_pinyin", "mix:quick_mix"] {
@@ -919,11 +892,9 @@ fn single_character_key_never_enters_keydown_hotkeys() {
     assert_eq!(up.action, "schema_bound");
 }
 
-/// 全局拦截热键的槽位上限护栏**必须真的能触发**，不能是一条恒假的不等式。
+/// 全局拦截热键的槽位上限护栏必须真的能触发，不能是一条恒假的不等式。
 ///
-/// ⚠️ 这条测试的存在理由是本仓踩过的一类：护栏写好了，而上游某个闸门让它的条件恒不
-/// 成立，于是它从来没报过——「没报警」被当成了「没问题」。所以这里两头都验：
-/// 出厂配置下不报（不是噪音），配满 overlay 组合键时报得出来、且点得出是哪几个。
+/// 两头都验：出厂配置下不报（不是噪音），配满 overlay 组合键时报得出来、且点得出是哪几个。
 #[test]
 fn global_hotkey_slot_guard_can_actually_fire() {
     // ① 出厂基线不该触发——否则它就是常驻噪音，很快会被无视。
@@ -961,11 +932,10 @@ fn global_hotkey_slot_guard_can_actually_fire() {
     );
 }
 
-/// 组合键的值域**就是** `BoundAction` 的全值域——这是 2026-09-18 合流的核心断言。
+/// 组合键的值域就是 `BoundAction` 的全值域。
 ///
-/// 合流前这里是一份逐条追加的六项白名单，组合键能绑的功能恒比单键少一大截；而组合键
-/// 这条通路在按键链上位次更早（英文模式分水岭之前）、不与输入争键，本该是限制最少的
-/// 一条。若今后有人为了修某个具体问题把某一族重新挡回去，本测试会红。
+/// 组合键通路在按键链上位次更早（英文模式分水岭之前）、不与输入争键，本该限制最少；
+/// 若有人为修某个具体问题把某一族重新挡回去，本测试会红。
 #[test]
 fn combo_keys_accept_the_whole_bound_action_domain() {
     let verbs = [
@@ -1018,11 +988,8 @@ fn combo_keys_accept_the_whole_bound_action_domain() {
     }
 }
 
-/// 策略位按动词分，且与固定字段那两段**逐条一致**：同一个功能经两条路进表却带不同的
-/// 位，表现是「在设置页配和在自定义按键里配，行为不一样」。
-///
-/// ⚠️ `toggle_mode` 那条是本次合流最实际的收获，也是最容易配错的一条：带上
-/// `CHINESE_ONLY` 就成了单程票——切到英文态后这个键 TSF 不再转发，再也切不回中文。
+/// 策略位按动词分，且与固定字段那两段逐条一致，否则同一功能在设置页与自定义按键里配
+/// 行为不同。`toggle_mode` 最容易配错：带上 `CHINESE_ONLY` 就成了单程票，切到英文后再也切不回。
 #[test]
 fn combo_key_policy_bits_split_by_verb() {
     // (动词, 期望 CHINESE_ONLY, 期望 GLOBAL)
@@ -1083,10 +1050,7 @@ fn combo_key_policy_bits_split_by_verb() {
 }
 
 /// 生僻字模式直达热键：`rare_char` 动词原样进表，策略位与 `special:` 一致
-/// （CHINESE_ONLY | GLOBAL）。
-///
-/// GLOBAL 那半不是可选的：少了它，QQNT / Tabby 这类 Chromium 宿主会用自己的同名
-/// 加速键把这个组合吃掉，用户只在部分程序里按不出来——最难归因的一类问题。
+/// （CHINESE_ONLY | GLOBAL）。少了 GLOBAL，Chromium 系宿主会用自己的同名加速键吃掉这个组合。
 #[test]
 fn rare_char_hotkey_compiles_with_global_policy() {
     let mut cfg = Config::default();
@@ -1109,7 +1073,7 @@ fn rare_char_hotkey_compiles_with_global_policy() {
     );
 }
 
-// ── 上屏注释 / 拼音（`input.alt_commit`，C2-6 / t138）──
+// ── 上屏注释 / 拼音（`input.alt_commit`）──
 
 fn alt_entries(compiled: &CompiledHotkeys) -> Vec<&HotkeyEntry> {
     compiled
@@ -1148,7 +1112,7 @@ fn alt_commit_comment_with_comments_off_registers_nothing() {
     );
 }
 
-/// 开启后 Alt+0..9 与 Alt+Space 共 11 个键进 key_down，**只带 SESSION 位**：
+/// 开启后 Alt+0..9 与 Alt+Space 共 11 个键进 key_down，只带 SESSION 位：
 /// 无会话 / 英文模式一律放行（TSF 两道闸门与 `should_handle_key` 都按这个位判），
 /// 候选可见期间才由 `_RegisterCandidateHotkeys` 抢占。action 为空＝仅转发，
 /// 语义在协调器的 `try_alt_commit` 里分派。
@@ -1178,7 +1142,7 @@ fn alt_commit_on_registers_eleven_session_keys() {
     }
 }
 
-/// 用户在 `keys.key_actions` 里已绑的 Alt 组合**让位**：本功能不登记那个键，
+/// 用户在 `keys.key_actions` 里已绑的 Alt 组合让位：本功能不登记那个键，
 /// 表里只剩用户那条（`.find()` 先到先得的同时，推给 TSF 的策略位也只有一份）。
 #[test]
 fn alt_commit_yields_to_user_combo_binding() {

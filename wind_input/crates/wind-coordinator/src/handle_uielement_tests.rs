@@ -49,10 +49,9 @@ fn drain(rx: &std::sync::mpsc::Receiver<UiCommand>) -> Vec<&'static str> {
         .collect()
 }
 
-/// 宿主接管绘制（host_draws）压住我们的候选窗：真 UI-less 宿主（Dota 2/SDL2 回
-/// pbShow=FALSE）声明自绘，我们再弹会两头画、且位置错（SDL 不报光标）。数据仍照喂。
-/// ⛔ 不管是不是独占全屏都压——独占判据逐键抖动，只靠它挡不干净（见 ui_suppressed_by_host
-/// 的注释：v3 只压独占导致 Dota 2 跳黑屏卡死）。
+/// 宿主接管绘制（host_draws）压住我们的候选窗：真 UI-less 宿主（Dota 2/SDL2 回 pbShow=FALSE）
+/// 声明自绘，我们再弹会两头画、且位置错（SDL 不报光标）。数据仍照喂。不管是不是独占全屏都压：
+/// 独占判据逐键抖动，只靠它挡不干净（见 `ui_suppressed_by_host`）。
 #[test]
 fn host_draws_suppresses_candidate_window() {
     let (c, rx) = coord();
@@ -97,14 +96,10 @@ fn compat_rule(c: &Coordinator, rule: wind_config::app_compat::AppCompatRule) {
     c.test_set_app_compat(wind_config::app_compat::AppCompat::from_rules(vec![rule]));
 }
 
-/// ★★★ 默认不因「读走候选串」收窗：**普通应用一定要看得见候选框**。
+/// 默认不因「读走候选串」收窗：普通应用一定要看得见候选框。
 ///
-/// 这是 2026-09-15 的反转所钉的那一条。反证样本（同一台靶机、同一轮实测）：
-/// Notepad / Illustrator / EverEdit 都把候选串整串读走（`GetString(0..4)`），却都不画
-/// 候选窗 —— 读取是这些宿主的常态，不是自绘的标志。误判成「宿主在画」的代价是两个框
-/// 一个都没有、完全不能用，故默认值必须站在「照弹我们的窗」这一侧。
-///
-/// 变异检验：把 `uielement_host_draws_by_inference` 末尾改回 `unwrap_or(true)` ⇒ 本条红。
+/// 记事本、Illustrator 等都把候选串整串读走却不画候选窗，读取是常态不是自绘的标志；误判的代价是
+/// 两个框一个都没有。把 `uielement_host_draws_by_inference` 末尾改回 `unwrap_or(true)` 本条即红。
 #[test]
 fn reading_our_candidates_does_not_by_itself_hide_the_window() {
     let (c, rx) = coord();
@@ -132,10 +127,8 @@ fn reading_our_candidates_does_not_by_itself_hide_the_window() {
 
 /// 反过来：compat 显式写 `= true` 的宿主，读走候选串就收掉我们的窗。
 ///
-/// 2026-09-11 新枫之谷实测形态：CUAS 的 IMM32 桥替宿主读走候选、由宿主/DefWindowProc
-/// 画出旧版候选窗，屏幕上两个框。宿主画的那个贴着它自己的输入框，位置比我们靠 caret
-/// 猜的准（全屏游戏根本给不出 caret），所以该退的是我们。出厂 compat.toml 给
-/// MapleStory.exe 配的就是这一行 —— opt-in 化之后它是保住那份修复的唯一通路。
+/// 如 CUAS 的 IMM32 桥替宿主读走候选、由宿主画出旧版候选窗（贴着它自己的输入框，比我们靠 caret
+/// 猜的准），该退的是我们。出厂 compat.toml 给 MapleStory.exe 配的就是这一行。
 #[test]
 fn a_host_opted_in_is_treated_as_drawing_them() {
     let (c, rx) = coord();
@@ -183,7 +176,7 @@ fn key_event(vk: u32) -> KeyEventData {
     }
 }
 
-/// 敲一个键，返回它的**出口**动作。必须走 `handle_key_event_policed`——占位后处理
+/// 敲一个键，返回它的出口动作。必须走 `handle_key_event_policed`——占位后处理
 /// 就挂在那个出口上，`handle_key_event` 一路看不到它。
 fn press(c: &Coordinator, vk: u32) -> KeyAction {
     c.handle_key_event_policed(&key_event(vk))
@@ -199,7 +192,7 @@ fn type_code(c: &Coordinator, code: &str) -> KeyAction {
 }
 
 /// 出口动作里的组合区文本。不是 `UpdateComposition` 就是构造出了问题，直接炸——
-/// 返回 `None` 再 `assert_ne!` 的话，形态变了会变成一条**永远成立**的断言。
+/// 返回 `None` 再 `assert_ne!` 的话，形态变了会变成一条永远成立的断言。
 fn composition_of(action: &KeyAction) -> &str {
     match action {
         KeyAction::UpdateComposition { text, .. } => text.as_str(),
@@ -207,11 +200,11 @@ fn composition_of(action: &KeyAction) -> &str {
     }
 }
 
-/// GH#175：非嵌入模式的占位字符按**焦点应用**的 compat 规则取——浏览器（规则配 zwsp）
-/// 出口是 ZWSP，别的应用仍是空格；push 侧按 pid 直查走的是同一张表、同一个入口。
+/// 非嵌入模式的占位字符按焦点应用的 compat 规则取——浏览器（规则配 zwsp）出口是 ZWSP，别的应用
+/// 仍是空格；push 侧按 pid 直查走的是同一张表、同一个入口。
 ///
-/// 断言落在按键**出口**（`handle_key_event_policed`），理由同下一条：判据返回什么不算数，
-/// 被出口读到才算数。变异检验：`Coordinator::composition_placeholder` 改回常量空格 ⇒ 红。
+/// 断言落在按键出口（`handle_key_event_policed`）：判据被出口读到才算数。
+/// 把 `Coordinator::composition_placeholder` 改回常量空格即红。
 #[test]
 fn placeholder_char_follows_the_focused_apps_compat_rule() {
     use wind_config::app_compat::{AppCompat, AppCompatRule, PlaceholderChar};
@@ -257,40 +250,19 @@ fn placeholder_char_follows_the_focused_apps_compat_rule() {
     );
 }
 
-/// ★★★ 候选窗被压住 ⇒ **强制嵌入编码**：非 app_inline 一律降级回 app_inline。
+/// 候选窗被压住 ⇒ 强制嵌入编码：非 app_inline 一律降级回 app_inline。
 ///
-/// # 修的是什么
+/// 非 app_inline 时真编码只交给候选窗、宿主组合区换成占位；而压制态下候选窗根本不下发，宿主自绘
+/// 的 `UiElementPage` 又不带编码串，编码两条路全断。占位只为「别和候选窗编码栏重复显示」，
+/// 压制态下这条理由不存在。断言落在出口 `handle_key_event_policed` 的组合区文本上，不是判据的布尔值；
+/// 开头「没有压制时照旧占位」是反向对照，否则判据恒 false 也全绿。
 ///
-/// 非 app_inline 时真编码只走 `UiCommand::UpdateCandidates::preedit` 交给候选窗，
-/// 宿主组合区里换成占位空格（`with_composition_placeholder`）。而上面几条用例正说明
-/// 候选窗在压制态**根本不下发**（`notify_ui_update` 发完 `HideCandidates` 就 return），
-/// 交给宿主自绘的 `UiElementPage` 又不带编码串 —— 于是 UI-less 游戏里编码两条路全断、
-/// 一个字都看不见。占位存在的唯一理由是「别和候选窗的编码栏重复显示」，压制态下那条
-/// 理由本就不存在，占位是纯粹的信息丢失。
+/// 本条不覆盖生产上的首键：`pbShow=FALSE` 与 `host_reads` 都晚于第一次候选出现，故本次激活第一次
+/// 组合的第一键组合区仍是占位，第二键起才是真编码。这是可接受的一帧（组合整串替换，不会被去重
+/// 跳过）；以 `TF_TMAE_UIELEMENTENABLEDONLY` 激活的宿主在 `ActivateEx` 就上报，没有这一帧。
 ///
-/// # 护栏为什么落在按键出口上
-///
-/// 判据函数返回什么不算数，**它被那个 if 读到**才算数：`preedit_uses_placeholder`
-/// 的唯一消费点是 `handle_key_event_policed` 出口那一步。故这里断言的是出口动作里的
-/// 组合区文本，不是判据的布尔值。
-///
-/// # 反向对照不可省
-///
-/// 开头那条「没有压制时照旧占位」是全组的对照：只测正向的话，判据整条恒 false
-/// （占位从此全局失效、连记事本都不占位了）也照样全绿。
-///
-/// # ⚠️ 本条**不覆盖**生产上的首键
-///
-/// 这里是「先压制、再打字」，而生产上的顺序常常是反的：`pbShow=FALSE` 在 `Show()` /
-/// `BeginUIElement` 才上报、`host_reads` 在宿主真读走候选串才上报，**两者都晚于第一次
-/// 候选出现**，也就是晚于首键的应答。所以 `candidate_top` + 这类宿主，本次激活的第一次
-/// 组合的**第一键**组合区仍是占位空格，第二键起才是真编码。不是数据损坏（组合整串替换，
-/// C++ 的去重比的是 text **和** caret，`" "/0` 与 `"ni"/2` 不相等，不会被跳过），是可
-/// 接受的一帧。以 `TF_TMAE_UIELEMENTENABLEDONLY` 激活的那一类宿主没有这一帧——它在
-/// `ActivateEx` 就知道，激活时即上报。
-///
-/// 变异检验：删掉 `preedit_in_app_effective` 里那个 `ui_suppressed_by_host` 早退
-/// ⇒ 三条正向全红；把该函数改成无条件回 `false`（即恒占位）⇒ 开头的对照红。
+/// 删掉 `preedit_in_app_effective` 里的 `ui_suppressed_by_host` 早退 ⇒ 正向全红；改成无条件回
+/// `false` ⇒ 开头的对照红。
 #[test]
 fn a_suppressed_host_gets_the_real_code_inline() {
     // 对照：同样 candidate_top、同样两键，只差没有任何压制来源。
@@ -356,7 +328,7 @@ fn a_suppressed_host_gets_the_real_code_inline() {
         );
     }
 
-    // 撤销压制即恢复用户配的显示方式：接管是**宿主**的属性，切回桌面应用不该还嵌着。
+    // 撤销压制即恢复用户配的显示方式：接管是宿主的属性，切回桌面应用不该还嵌着。
     let (c, _rx) = coord();
     *c.preedit_display.lock().unwrap() = PreeditDisplay::CandidateTop;
     focus_pid(&c, 42);
@@ -374,17 +346,13 @@ fn a_suppressed_host_gets_the_real_code_inline() {
     );
 }
 
-/// 反方向：宿主**显示不了**应用内预编辑（Linux 下不声明 Preedit 能力位的 XIM 客户端，
-/// WPS / QQ 实测）时，出厂 `app_inline` 也得把编码交给候选窗画——组合区给占位、候选窗
-/// 的 `preedit_host_owned` 为 false。否则 addon 只能把编码转交 Fcitx5 输入面板，由
-/// classicui 另起小窗、被我们的候选窗盖住。
+/// 反方向：宿主显示不了应用内预编辑（Linux 下不声明 Preedit 能力位的 XIM 客户端）时，出厂
+/// `app_inline` 也得把编码交给候选窗画——组合区给占位、`preedit_host_owned` 为 false。否则
+/// addon 只能把编码转交 Fcitx5 输入面板，由 classicui 另起小窗、被我们的候选窗盖住。
 ///
-/// 断言同时落在两条出口上（按键应答的组合区文本 + 下发候选窗的编码归属），理由同上：
-/// 判据被出口读到才算数。开头的对照（能力位在场时照旧嵌入）不可省——判据恒 false 时
-/// 只测正向也全绿。
-///
-/// 变异检验：删掉 `preedit_in_app_effective` 里 `host_no_inline_preedit` 那段 ⇒ 正向红；
-/// 把它改成无条件回 false ⇒ 开头对照红。
+/// 断言同时落在两条出口上（组合区文本 + 编码归属），开头对照（能力位在场时照旧嵌入）不可省。
+/// 删掉 `preedit_in_app_effective` 里 `host_no_inline_preedit` 那段 ⇒ 正向红；改成无条件回 false
+/// ⇒ 开头对照红。
 #[test]
 fn a_host_without_inline_preedit_gets_the_code_in_the_candidate_window() {
     let host_owned = |rx: &std::sync::mpsc::Receiver<UiCommand>| {
@@ -435,21 +403,15 @@ fn a_host_without_inline_preedit_gets_the_code_in_the_candidate_window() {
     );
 }
 
-/// ★ 顶码余码这条**出厂主路径**在压制态下也得把真编码交出去。
+/// 顶码余码这条出厂主路径在压制态下也得把真编码交出去。
 ///
-/// `top_commit_mode` 出厂是 `direct_commit`（`data/config.toml`），于是压制态下用户在游戏
-/// 里打满码长的那一下，走的是 `CommitThenDeferComposition` 而不是上面两条钉的
-/// `UpdateComposition` —— 护栏此前**一条都没踩过这条路**。而
-/// `with_composition_placeholder` 确实也会改写这个变体的 `deferred_composition`
-/// （`wind-bridge/src/handler.rs`，那一支正是为「skce 顶码后快打 h」那次真机事故补的），
-/// 所以它与压制态的交叉点是真实可达的用户可见行为：漏掉的话，顶码之后那一截余码编码
-/// 在游戏里是隐形的。
+/// `top_commit_mode` 出厂是 `direct_commit`，满码长那一下走 `CommitThenDeferComposition`；
+/// `with_composition_placeholder` 也会改写它的 `deferred_composition`（`wind-bridge/src/handler.rs`），
+/// 漏掉的话顶码之后的余码编码在游戏里是隐形的。
 ///
-/// ⚠️ 本条**复述**了出口那一步（判据 + 改写函数），没有走 `handle_key_event_policed`：
-/// 真顶码要求输入超过方案码长上限，而 lib 单测一律无词库（本模块所有用例都是，带词库会
-/// 让它们在没有 `build_dev/data` 的 worktree 里静默跳过而计数照绿）。于是分工是——
-/// 「出口里那个 if 还在不在」由 [`a_suppressed_host_gets_the_real_code_inline`] 钉（它走
-/// 真出口），本条钉「同一条规则对顶码变体同样成立」。两条合起来才完整，删任何一条都留缺口。
+/// 本条复述了出口那一步（判据 + 改写函数），没走 `handle_key_event_policed`：真顶码需要词库，
+/// 而本模块用例一律无词库。「出口里那个 if 还在」由 [`a_suppressed_host_gets_the_real_code_inline`] 钉，
+/// 本条钉「同一条规则对顶码变体同样成立」，两条缺一不可。
 #[test]
 fn the_top_code_remainder_also_reaches_the_host() {
     // `suppress` 之外两侧完全同构，返回的是余码组合最终的模样。
@@ -483,7 +445,7 @@ fn the_top_code_remainder_also_reaches_the_host() {
                 None,
             )
         };
-        // ↓ 这三行是 `handle_key_event_policed` 出口那一步的复述（见上面的 ⚠️）。
+        // ↓ 这三行是 `handle_key_event_policed` 出口那一步的复述（见上面的 ）。
         let out = if c.preedit_uses_placeholder() {
             action.with_composition_placeholder(c.composition_placeholder())
         } else {
@@ -519,21 +481,12 @@ fn the_top_code_remainder_also_reaches_the_host() {
     );
 }
 
-/// ⛔ **用户自己关掉候选窗**（`ui.candidate.hide_window`）不在强制嵌入之列。
+/// 用户自己关掉候选窗（`ui.candidate.hide_window`）不在强制嵌入之列。
 ///
-/// 在「信息丢失」这个维度上它与压制态**完全同构**：`notify_ui_update` 里那两条早退
-/// （用户开关那条、`ui_suppressed_by_host` 那条）动作逐字一样——`clear_hover` +
-/// `HideCandidates` + `reset_first_show` + `return`，`UpdateCandidates` 同样不下发，
-/// 非 app_inline 时组合区同样只剩一个空格。所以这个排除**靠的不是「后果不同」**，
-/// 而是用户表达了几次意图：压制态下他只做过一次选择（编码放候选窗顶部），是环境把它
-/// 推翻的，他从没同意过「编码可以看不见」；而 `hide_window` 是第二次显式选择，
-/// 「关掉候选窗 + 编码归候选窗」这个组合本身就定义了盲打语境——那里「编码也看不见」
-/// 不是丢失，是这个模式的定义。
-///
-/// 本条守的就是这个边界：谁将来「顺手补全」把 `hide_candidate_window` 也并进
-/// `ui_suppressed_by_host`，这里立刻红。对照 `wind-bridge` 那边
-/// `placeholder_keeps_literal_symbol_compositions` 守 `with_composition_placeholder` 的
-/// 变体边界——同一个道理，这条边界此前没人守。
+/// 后果上它与压制态同构，区别在用户意图：压制态是环境推翻了用户的选择；`hide_window` 是用户
+/// 显式选择，「关掉候选窗 + 编码归候选窗」本身就定义了盲打语境。谁将来把 `hide_candidate_window`
+/// 并进 `ui_suppressed_by_host`，这里立刻红（同理 `wind-bridge` 的
+/// `placeholder_keeps_literal_symbol_compositions` 守 `with_composition_placeholder` 的变体边界）。
 #[test]
 fn the_user_hiding_the_window_keeps_the_placeholder() {
     let mut cfg = Config::default();
@@ -575,10 +528,8 @@ fn the_user_hiding_the_window_keeps_the_placeholder() {
 }
 
 /// 摆一个混输「同一串码两种编码形态」的局面：高亮在候选 0（拼音来源）时编码显示音节拆分
-/// `sa'a'a`，移到候选 1（码表来源）时显示原始码 `saaa`。
-///
-/// 形态由 `effective_preedit_body` 纯读 `state` 算出（候选来源 + 三个 body 字段），**不碰
-/// 引擎也不碰词库**，所以这里手工摆盘是合法的，不是在绕过什么。
+/// `sa'a'a`，移到候选 1（码表来源）时显示原始码 `saaa`。形态由 `effective_preedit_body` 纯读
+/// `state` 算出，不碰引擎也不碰词库，所以手工摆盘是合法的。
 fn fill_split_forms(c: &Coordinator) {
     use wind_candidate::CandidateSource;
     let mut st = c.state.lock().unwrap();
@@ -611,28 +562,18 @@ fn fill_split_forms(c: &Coordinator) {
     assert_eq!(st.preedit, "sa'a'a", "前提：高亮在拼音候选上时是拆分形态");
 }
 
-/// ★★★ 压制态下**高亮跟随**也得把编码回传宿主——抽访问器那一步真正修掉的就是这条。
+/// 压制态下高亮跟随也得把编码回传宿主。
 ///
-/// 混输方案下 ↑↓ 在五笔↔拼音候选间移动会切换编码形态（原始码 `saaa` ↔ 音节拆分
-/// `sa'a'a`）。`apply_session_action` 里那条回传 `UpdateComposition` 的分支此前**只读配置
-/// 原值**：压制态 + `candidate_top` 下判成「编码归候选窗画」⇒ 不回传，而候选窗在压制态又
-/// 根本不下发 ⇒ 游戏聊天框里的编码停在旧形态。换成 `preedit_in_app_effective()` 才跟上。
+/// 混输下 ↑↓ 在码表↔拼音候选间移动会切换编码形态。`apply_session_action` 回传
+/// `UpdateComposition` 的分支须读 `preedit_in_app_effective()` 而非配置原值，否则压制态 +
+/// `candidate_top` 下不回传，组合区的编码停在旧形态。压制态开始往组合区写真编码后，所有写入点都得
+/// 跟着这条规则走。反向对照撤掉压制：那时不回传才是对的。
 ///
-/// ⚠ 这是**上一版改动造出来的**可见性，不是老 bug：改之前那一格组合区里恒是占位空格，
-/// 形态对不对都看不见。压制态一旦开始往组合区写真编码，所有写入点就都得跟着这条规则走
-/// ——这正是那个访问器存在的理由。
-///
-/// 反向对照是同一副牌、只把压制撤掉：那时**不回传才是对的**（编码本就归候选窗画）。
-///
-/// 变异检验：把 `apply_session_action` 里的 `preedit_in_app_effective()` 改回
-/// `preedit_display.lock()...in_app()` ⇒ 正向红、反向仍绿。
+/// 把它改回 `preedit_display.lock()...in_app()` ⇒ 正向红、反向仍绿。
 #[test]
 fn highlight_follow_reaches_the_host_when_suppressed() {
-    // ⚠️ 必须走 `press`（= 生产出口 `handle_key_event_policed`），不能图省事直接调
-    // `apply_session_action`：出口那步还会做 `with_composition_placeholder`，而本条与
-    // `a_suppressed_host_gets_the_real_code_inline` 守的是同一条规则的两半。绕过出口的话，
-    // 哪天有人动了 `preedit_uses_placeholder` 的判据，回传的 `"saaa"` 会在出口被拍成占位
-    // 空格，而这条测试照绿。
+    // 必须走 `press`（= 生产出口 `handle_key_event_policed`）：出口还会做 `with_composition_placeholder`，
+    // 绕过它的话 `preedit_uses_placeholder` 判据被改坏时回传的 `"saaa"` 会被拍成占位，而本条照绿。
     let down = |c: &Arc<Coordinator>| press(c, wind_keys::keymap::VK_DOWN);
 
     // 反向对照：candidate_top、没有压制 ⇒ 编码归候选窗，不该回传组合串。
@@ -668,19 +609,12 @@ fn highlight_follow_reaches_the_host_when_suppressed() {
     }
 }
 
-/// `host_drawn_candidates` 只管**推断**那条，管不着宿主的**声明**。
+/// `host_drawn_candidates` 只管推断那条，管不着宿主的声明。
 ///
-/// 本条的鉴别力**全在后半段**：宿主一旦声明接管（`pbShow=FALSE`），无论本字段写什么
-/// 都得收 —— 声明是事实，不是推断，不该被一个推断开关否决。
-///
-/// ⚠ 前半段（`Some(false)` ⇒ 照弹）**在本用例的构造下**鉴别力很弱：这里没有出厂层、
-/// 没有通配规则，`false` 与不写恰好同结果，那个 `None` 断言在 `get_rule` 整个失效时
-/// 照样成立。（`false` 与不写在一般情况下**并不同义** —— 它挡住出厂层继承、也压过
-/// `"*"` 通配，见 `AppCompatRule::host_drawn_candidates` 的字段文档；压过通配那条由
-/// `a_wildcard_rule_applies_everywhere_and_a_process_rule_wins` 钉着。）
-/// 真正钉 `= true` 生效的是
-/// `a_host_opted_in_is_treated_as_drawing_them`，钉查名落点的是
-/// `the_compat_rule_follows_the_key_source_pid`。
+/// 鉴别力全在后半段：宿主一旦声明接管（`pbShow=FALSE`），无论本字段写什么都得收。前半段
+/// （`Some(false)` ⇒ 照弹）在本构造下鉴别力很弱：没有出厂层与通配规则时 `false` 与不写同结果
+/// （一般情况下二者不同义，见 `AppCompatRule::host_drawn_candidates`）。`= true` 生效由
+/// `a_host_opted_in_is_treated_as_drawing_them` 钉，查名落点由 `the_compat_rule_follows_the_key_source_pid` 钉。
 #[test]
 fn compat_governs_the_inference_but_not_the_declaration() {
     let (c, rx) = coord();
@@ -705,7 +639,7 @@ fn compat_governs_the_inference_but_not_the_declaration() {
     }
     assert!(drain(&rx).contains(&"update"), "不启用推断时候选窗必须在");
 
-    // 但宿主**声明**接管时，本开关管不着：宿主明说了不要我们的 UI。
+    // 但宿主声明接管时，本开关管不着：宿主明说了不要我们的 UI。
     c.set_uielement_host_draws(42, true);
     assert_eq!(
         c.ui_suppressed_by_host(),
@@ -714,21 +648,14 @@ fn compat_governs_the_inference_but_not_the_declaration() {
     );
 }
 
-/// ★★★ compat 规则必须落在「靠按键来源才命中的宿主」上——而那正是游戏宿主的常态。
+/// compat 规则必须落在「靠按键来源才命中的宿主」上——那正是游戏宿主的常态。
 ///
-/// `focus_pid`（按键来源）与 `active_compat.pid`（焦点事件）在游戏上会分岔：游戏常常
-/// 没有可编辑 TSF 上下文、`focus_gained` 一次都不来，`active_compat` 停在上一个进程
-/// （既有测试 `key_source_pid_alone_matches_host_draws` 钉的就是这个）。
-/// 查覆盖时若另取一次 `active_compat.pid`，查到的是**上一个进程**的名字，游戏那条
-/// opt-in 规则静默失效 —— 新枫之谷又变回两个候选框。
+/// 游戏常常没有可编辑 TSF 上下文、`focus_gained` 不来，`active_compat` 停在上一个进程（见
+/// `key_source_pid_alone_matches_host_draws`）；查覆盖时若另取 `active_compat.pid`，opt-in 规则静默
+/// 失效。用 `Some(true)` 钉：`false` 与不写同义，断言 `None` 在查错进程时照样成立。
 ///
-/// ⚠ 用 `Some(true)` 而不是 `Some(false)` 来钉：opt-in 化之后 `false` 与不写同义，
-/// 断言 `None` 在「查名落到了 explorer.exe」时**照样成立**，测试会绿着失去鉴别力。
-///
-/// 变异检验：把 `uielement_host_draws_by_inference` 的查名换成 `active_process_name()`
-/// ⇒ 本条立刻红。（⛔ 调换 `current_pid_in` 两支的先后**不会**让本条红——这里读取账里
-/// 只有 42 一个 pid，`active_compat.pid=1` 压根不在集合里，两种顺序都落到 42。钉分支
-/// 先后的是 `the_key_source_pid_wins_when_both_pids_are_readers`，那条两个 pid 都在账里。）
+/// 把查名换成 `active_process_name()` 即红。调换 `current_pid_in` 两支先后不会让本条红（账里只有
+/// 一个 pid），那由 `the_key_source_pid_wins_when_both_pids_are_readers` 钉。
 #[test]
 fn the_compat_rule_follows_the_key_source_pid() {
     let (c, _rx) = coord();
@@ -754,12 +681,8 @@ fn the_compat_rule_follows_the_key_source_pid() {
     );
 }
 
-/// 两个 pid 都命中且进程名不同时，用的必须是 `focus_pid`（按键来源）那一个。
-///
-/// 这条顺序原本无关紧要（`current_pid_in` 只回 bool），H1 修复把它变成了**载荷**——
-/// 它现在决定拿谁的名字去查 compat。没有测试钉住的话，有人调换两个分支的先后
-/// 不会有任何一条变红，而后果是逃生口落到错误的进程上。
-/// 变异检验：把 `active_compat.pid` 那一支提到前面 ⇒ 本条立刻红。
+/// 两个 pid 都命中且进程名不同时，用的必须是 `focus_pid`（按键来源）那一个——`current_pid_in` 的
+/// 分支先后决定拿谁的名字查 compat。把 `active_compat.pid` 那一支提到前面即红。
 #[test]
 fn the_key_source_pid_wins_when_both_pids_are_readers() {
     let (c, _rx) = coord();
@@ -786,7 +709,7 @@ fn the_key_source_pid_wins_when_both_pids_are_readers() {
         "两个 pid 都命中时应取 focus_pid（按键来源）去查覆盖"
     );
 
-    // 反向对照：把规则改挂到 active_compat.pid 那个名字上就**不该**生效——
+    // 反向对照：把规则改挂到 active_compat.pid 那个名字上就不该生效——
     // 一正一反锁死方向，只有「查名用的是 focus_pid」能同时满足两条。
     compat_rule(
         &c,
@@ -803,10 +726,8 @@ fn the_key_source_pid_wins_when_both_pids_are_readers() {
     );
 }
 
-/// 通配规则 `process = "*"` 一行套到全局，而本进程自己的规则**优先于**通配。
-///
-/// ⚠ 两半都用「与默认相反」的那个值来钉：opt-in 之后默认是不收窗，若第一半仍写
-/// `Some(false)` 断言 `None`，那条通配就算完全没被读到也照样绿。
+/// 通配规则 `process = "*"` 一行套到全局，而本进程自己的规则优先于通配。两半都用「与默认相反」
+/// 的值来钉，否则通配完全没被读到也照样绿。
 #[test]
 fn a_wildcard_rule_applies_everywhere_and_a_process_rule_wins() {
     let (c, _rx) = coord();
@@ -844,7 +765,7 @@ fn a_wildcard_rule_applies_everywhere_and_a_process_rule_wins() {
     assert_eq!(c.ui_suppressed_by_host(), None, "本进程规则应压过通配");
 }
 
-/// 查不到进程名时按默认（**不**收窗）走，而通配规则**仍然管用**——受限/短命宿主
+/// 查不到进程名时按默认（不收窗）走，而通配规则仍然管用——受限/短命宿主
 /// 查不出名字，但「所有应用都收窗」这类需求仍要能一行套到它们头上。
 #[test]
 fn an_unnamed_process_still_honours_the_wildcard_rule() {
@@ -872,10 +793,8 @@ fn an_unnamed_process_still_honours_the_wildcard_rule() {
     );
 }
 
-/// 「声明接管」→「只是读过」的过渡不得把候选窗闪出来一帧。
-///
-/// DLL 报的是一整份 flags，两张账必须写完再统一刷 UI；拆成两次带副作用的写入时，
-/// 声明账先被清掉的那一瞬两张账都不命中，`notify_ui_update` 会发一帧 `UpdateCandidates`。
+/// 「声明接管」→「只是读过」的过渡不得把候选窗闪出来一帧：DLL 报的是一整份 flags，两张账必须
+/// 写完再统一刷 UI，拆成两次写入时中间那一瞬会发一帧 `UpdateCandidates`。
 #[test]
 fn the_draws_to_reads_transition_does_not_flash_the_window() {
     let (c, rx) = coord();
@@ -892,7 +811,7 @@ fn the_draws_to_reads_transition_does_not_flash_the_window() {
             ..Default::default()
         },
     );
-    // ⚠ 必须从「只有声明账」起步：若先报过一次 draws+reads，读取账里已经有这个 pid，
+    // 必须从「只有声明账」起步：若先报过一次 draws+reads，读取账里已经有这个 pid，
     // 拆开写也不会露出空窗，测试就成了永远绿的。可达路径是中间那次 0x5 上报丢了
     // （SendAsync 失败会留着 _uiElementStateSent 下次重报），core 直接收到 0x4。
     c.apply_uielement_state(42, true, false); // 只声明接管
@@ -934,7 +853,7 @@ fn the_reader_account_only_applies_to_the_process_being_typed_in() {
     assert_eq!(c.ui_suppressed_by_host(), Some("uielement_host_reads"));
 }
 
-/// 进程退出清账必须把**两张**账一起清：读取账留着，pid 复用后新宿主会一上来就被
+/// 进程退出清账必须把两张账一起清：读取账留着，pid 复用后新宿主会一上来就被
 /// 判成自绘，而它自己的 GetString 不一定会发生，没人来纠正。
 #[test]
 fn clearing_a_pid_clears_the_reader_account_too() {
@@ -977,8 +896,8 @@ fn exclusive_fullscreen_suppresses_but_covering_does_not() {
     assert_eq!(c.ui_suppressed_by_host(), Some("d3d_exclusive_fullscreen"));
 }
 
-/// 快照只带当页：条数=当页条数、page_size=每页数、selected=**页内**下标、current_page 恒 0；
-/// 末页不足一页只带剩下的；空列表不 panic。⛔ 勿改回整条列表（Dota 2 独占全屏读完即冻死）。
+/// 快照只带当页：条数=当页条数、page_size=每页数、selected=页内下标、current_page 恒 0；
+/// 末页不足一页只带剩下的；空列表不 panic。勿改回整条列表（Dota 2 独占全屏读完即冻死）。
 #[test]
 fn snapshot_is_current_page_only() {
     let (c, _rx) = coord();
@@ -1038,7 +957,7 @@ fn key_source_pid_alone_matches_host_draws() {
     );
 }
 
-/// 宿主操作：SetPage 走翻页原语；SetSelection 按**页内**下标落到当页；越界不动。
+/// 宿主操作：SetPage 走翻页原语；SetSelection 按页内下标落到当页；越界不动。
 #[test]
 fn actions_move_highlight_and_page() {
     let (c, rx) = coord();

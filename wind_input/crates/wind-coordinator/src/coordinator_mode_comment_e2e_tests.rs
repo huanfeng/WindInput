@@ -1,9 +1,8 @@
-//! 各作用范围的注释分配走到**发往 UI 的候选**上——`comment_template_for` 的单元测试
-//! 证明不了消费端接上了它（本仓反复出现的「半接线」欠账）。
+//! 各作用范围的注释分配走到发往 UI 的候选上——`comment_template_for` 的单元测试证明不了
+//! 消费端接上了它。
 //!
 //! 注释段在发送路径上算、不回写 `state.candidates`，故这里收 UI 通道断言。放在 crate 内
-//! 而非 tests/ 下，是因为要预置 caret 绕过首显闸门——headless 无宿主坐标，首帧会被
-//! `first_show` 闸门拦下不下发候选（见 `ready_coords_bypass_first_show_wait`）。
+//! 而非 tests/ 下，是因为要预置 caret 绕过首显闸门（见 `ready_coords_bypass_first_show_wait`）。
 use super::*;
 
 /// 造协调器并把坐标预置成「已就绪」，使候选能立即下发。
@@ -22,29 +21,15 @@ fn coord_with_ui_at(
     (c, rx)
 }
 
-/// ★★★ 会话位的**发送边沿**：按键返回时状态变了就得推一次。
+/// 会话位的发送边沿：按键返回时状态变了就得推一次。
 ///
-/// # 这条钉的是什么
+/// `STATUS_HOTKEY_SESSION` 的载荷是 level-triggered 的，但发送仍需要边沿，而四个热键模式的
+/// 进出路径都不碰状态通道。漏推时 DLL 乐观置的位会永久卡在 TRUE，此后 Backspace/Enter/Escape
+/// 一律被吃下转发而协调器无会话，「吃了再吐」丢键。
 ///
-/// `STATUS_HOTKEY_SESSION` 是 level-triggered 的 —— 那说的是**载荷**（每条状态响应
-/// 都带完整值、DLL 无条件镜像）。但**发送本身仍然需要一个边沿**，而四个热键模式的
-/// 进出路径一个都不推状态（只调 `notify_ui_update` / `notify_ui_hide` /
-/// `notify_toolbar`，三个都不碰状态通道）。
-///
-/// 漏掉这一步的后果（2026-09-15 审查抓到，出厂配置即可复现）：Ctrl+= → DLL 乐观置位
-/// → 协调器进加词回 `Consumed`（不推）→ 按 Esc → 协调器退出回 `ClearComposition`
-/// （不推）→ 而 DLL 侧的清位逻辑已被本轮删除 ⇒ **位永久卡在 TRUE** ⇒ 此后
-/// Backspace/Enter/Escape 一律吃下转发而协调器无会话 ⇒「吃了再吐」丢键。
-/// 那正是本轮要修的 C2，只是从软键盘支路搬到了加词主流程 —— 比原来更糟。
-///
-/// # 为什么观察 `last_pushed_hotkey_session`
-///
-/// headless 测试里没有真实 push 连接，观察不到「有没有发出去」。但这个缓存值是
-/// 推送的前置：按键返回后它必须等于当前 `build_status().hotkey_session`，不等就说明
-/// 边沿没触发。它同时钉住了两件事——RAII 有没有接线、边沿检测对不对。
-///
-/// 变异检验：删掉 `SoftKeyboardPushOnDrop::drop` 里那行
-/// `push_hotkey_session_if_changed()` ⇒ 本条立刻红。
+/// headless 下观察不到推送，故观察推送的前置 `last_pushed_hotkey_session`：按键返回后它必须
+/// 等于当前 `build_status().hotkey_session`，同时钉住 RAII 接线与边沿检测。删掉
+/// `SoftKeyboardPushOnDrop::drop` 里的 `push_hotkey_session_if_changed()` 本条即红。
 #[test]
 fn the_hotkey_session_flag_is_pushed_when_it_changes() {
     use crate::handle_softkeyboard::SoftKeyboardPushOnDrop;
@@ -94,17 +79,11 @@ fn the_hotkey_session_flag_is_pushed_when_it_changes() {
     }
     assert!(!cached(&c), "退出临拼后必须推");
 
-    // ── ★ 命中 key_down 热键 ⇒ **无条件**推，哪怕状态前后都没变 ──
+    // ── 命中 key_down 热键 ⇒ 无条件推，哪怕状态前后都没变 ──
     //
-    // C++ 在 WM_HOTKEY 上乐观置位且**不看动作**（它只有 (vk, keymod)），制造的是一个
-    // 协调器观察不到的 DLL 侧状态。比较法只看协调器自己变没变，够不着它 —— 于是
-    // 「置了位、而协调器前后都是 false」的热键落进缝里：不推 ⇒ DLL 停在 TRUE ⇒
-    // Enter/Esc/Backspace 全被吃下转发而协调器无会话，「吃了再吐」丢键。
-    // 出厂就有一个落在缝里：`open_add_word_dialog`（拉起设置端，既不改
-    // `add_word_active` 也不推状态）。它实际靠设置端窗口的焦点往返被顺带纠正 ——
-    // 那是**副作用不是机制**，设置端拉不起来就卡住。
-    //
-    // 变异检验：把 `push_hotkey_session_if_changed` 里的 `forced ||` 去掉 ⇒ 本段红。
+    // C++ 在 WM_HOTKEY 上乐观置位且不看动作，制造的是协调器观察不到的 DLL 侧状态；比较法够不着它。
+    // 出厂的 `open_add_word_dialog` 就既不改 `add_word_active` 也不推状态，只靠设置端窗口的焦点
+    // 往返顺带纠正——那是副作用不是机制。去掉 `push_hotkey_session_if_changed` 里的 `forced ||` 本段即红。
     {
         // 状态前后都是 false（模拟 open_add_word_dialog），但命中过热键。
         assert!(!c.build_status().hotkey_session, "前提：此刻不该有会话");
@@ -129,13 +108,10 @@ fn the_hotkey_session_flag_is_pushed_when_it_changes() {
         );
     }
 
-    // ── 不变量：**两条支路**走完，缓存都必须等于当前实际值 ──
+    // ── 不变量：两条支路走完，缓存都必须等于当前实际值 ──
     //
-    // `drop` 有两条出路：软键盘变了走 `after_softkeyboard_change`（内部自己推完整
-    // 状态、随后对齐缓存），否则走 `push_hotkey_session_if_changed`。前一条早期
-    // 写法是推完直接 `return`、不碰缓存 —— 值仍然是对的（推的是完整快照），但缓存
-    // 就此陈旧，下一次按键会据它白推一次 IPC，且字段文档「上一次推给 C++ 的取值」
-    // 名不副实。这里把两条出路一起钉住。
+    // `drop` 软键盘变了走 `after_softkeyboard_change`（推完整状态后对齐缓存），否则走
+    // `push_hotkey_session_if_changed`。前者若推完不对齐缓存，下一次按键会白推一次 IPC。
     for (name, sk_dirty) in [("常规支路", false), ("软键盘支路", true)] {
         c.state.lock().unwrap().add_word_active = true;
         c.softkeyboard_dirty
@@ -162,15 +138,11 @@ fn the_hotkey_session_flag_is_pushed_when_it_changes() {
     }
 }
 
-/// ★★★ `STATUS_HOTKEY_SESSION` 的判据：四个热键模式算会话，别的都不算。
+/// `STATUS_HOTKEY_SESSION` 的判据：四个热键模式算会话，别的都不算。
 ///
-/// C++ 侧 `_HasInputSession()` 无条件镜像这一位，所以判据漏一个模式 ⇒ 那个模式下
-/// Backspace/Enter/Escape 被判「无会话」透传给宿主；多算一个 ⇒ 那个状态下这三个键被
-/// 吃下转发而协调器无会话，「吃了再吐」丢键。两个方向都要钉。
-///
-/// ⚠️ 特别要钉住**软键盘不算** —— 前一版正是因为软键盘落进了 DLL 侧那个过宽的
-/// `WM_HOTKEY` id 段（`GlobalHotkeys()` 全集）才卡死的。判据搬到服务端之后，这里是
-/// 唯一能挡住同类错误的地方。
+/// C++ 侧 `_HasInputSession()` 无条件镜像这一位：漏一个模式，那个模式下 Backspace/Enter/Escape
+/// 透传给宿主；多算一个，这三个键被吃下转发而协调器无会话。特别钉住软键盘不算——
+/// 判据搬到服务端之后，这里是唯一能挡住同类错误的地方。
 #[test]
 fn hotkey_session_flag_covers_exactly_the_hotkey_modes() {
     let (c, _rx) = coord_with_ui(Config::default());
@@ -192,10 +164,7 @@ fn hotkey_session_flag_covers_exactly_the_hotkey_modes() {
     );
     c.state.lock().unwrap().input_buffer.clear();
 
-    // 五个模式逐个开、逐个关。
-    //
-    // 抽成别名是为了躲开 clippy::type_complexity；几个用例共用一个形状，
-    // 给它一个名字反而把这件事写明白了。
+    // 五个模式逐个开、逐个关。别名用来躲 clippy::type_complexity。
     type StateMutator = Box<dyn Fn(&mut State)>;
     let cases: [(&str, StateMutator); 5] = [
         ("加词", Box::new(|st: &mut State| st.add_word_active = true)),
@@ -236,7 +205,7 @@ fn hotkey_session_flag_covers_exactly_the_hotkey_modes() {
         );
     }
 
-    // ⛔ 软键盘**不算**热键模式会话。
+    // 软键盘不算热键模式会话。
     c.softkeyboard_active
         .store(true, std::sync::atomic::Ordering::Relaxed);
     let st = c.build_status();
@@ -260,7 +229,7 @@ fn hotkey_session_flag_covers_exactly_the_hotkey_modes() {
     c.state.lock().unwrap().active = None;
 }
 
-/// GH#175：加词（`add_word_via_composition = true`）由协调器自己发的占位跟随焦点应用的
+/// 加词（`add_word_via_composition = true`）由协调器自己发的占位跟随焦点应用的
 /// compat 规则——Edge（规则 zwsp）下是 ZWSP。变异检验：加词处改回常量空格 ⇒ 红。
 #[test]
 fn add_word_placeholder_follows_the_focused_apps_rule() {
@@ -282,38 +251,18 @@ fn add_word_placeholder_follows_the_focused_apps_rule() {
     }
 }
 
-/// ★★★ 占位 composition 的逐模式开关（`[input.caret]`），**在出厂配置下**逐条验。
+/// 占位 composition 的逐模式开关（`[input.caret]`），在出厂配置下逐条验。
 ///
-/// # 这个开关在管什么
+/// 直达热键进入加词/临拼/特殊/生僻字时组合区为空，发一个占位 composition 撑开 range 取坐标；
+/// 而占位建在当前 selection 上，用户选中着文字时会被替换掉。关掉即不发，坐标退到
+/// GUITHREADINFO/GetCaretPos 回退链。
 ///
-/// 加词/临拼/特殊/生僻字由**直达热键**进入时组合区为空（`key_code == 0` ⇒ 不写引导符），
-/// 却要立刻显示候选窗，于是发一个占位 composition 让 TSF 把 range 撑开、好取坐标。
-/// 而占位建在**当前 selection** 上 —— 用户选中着文字时会被它替换掉（t123：Ctrl+= 造词
-/// 吃掉编辑器里选中的文字）。关掉即不发，坐标退到 GUITHREADINFO/GetCaretPos 回退链。
+/// 必须用 `Config::default()`、不动 `preedit_display`：出厂是 `app_inline`，若改成别的值测，
+/// 会整条绕开出厂路径。去掉任一 `enter_*` 里的开关判断，对应那条即红。
 ///
-/// # ⚠ 为什么必须用出厂配置来测
-///
-/// 上一版把开关叠在 `preedit_uses_placeholder()` 上，而那个判据在 `app_inline` 下**恒为
-/// false** —— 出厂 `data/config.toml` 正是 `preedit_display = "app_inline"`。上一版两条
-/// 测试都先把它改成 `candidate_top`（还写着「否则基线判据就是 false，测不到开关」），
-/// 正好把出厂路径整条绕开：开关在出厂配置下完全惰性，而加词的占位空格被
-/// 「协调器不发 + 出口不补 + C++ 侧刚移除隐式补空格」三处同时放掉，谁都没红。
-///
-/// 所以这里**一律用 `Config::default()`**，不动 `preedit_display`。
-///
-/// 变异检验：把任一 `enter_*` 里的开关判断去掉 ⇒ 对应那条立刻红。
-///
-/// # TODO（结构，无正确性风险）
-///
-/// 本用例里断言具体值的那两处，钉的其实**不是开关**，而是「占位归谁造」这个契约：
-/// 加词开着那半钉「由协调器造」（`assert_eq!(text, COMPOSITION_PLACEHOLDER)`），
-/// `overlay_...` 那半钉「由 C++ 兜底补、协调器不许自己补」（断言 text 为空）。
-/// 它们住在一个名为「开关是否被读到」的用例里，将来有人整理开关测试时完全有理由
-/// 把它们当冗余删掉 —— 而那恰恰是唯一会红在 C1（占位来源被三处同时放掉）上的部分，
-/// 注释拦不住重构。根治是拆成不带开关的独立用例
-/// （`factory_add_word_sends_the_placeholder_itself` /
-/// `hotkey_entry_leaves_the_placeholder_to_the_dll`），那样即便四个开关将来整个下线
-/// （实测下来都该关、于是硬编码），契约仍有独立守卫。本轮改动面已不小，单列跟进。
+/// TODO：本用例里断言具体值的两处钉的是「占位归谁造」的契约（加词由协调器造，overlay 由 C++
+/// 兜底补），不是开关；应拆成独立用例（`factory_add_word_sends_the_placeholder_itself` /
+/// `hotkey_entry_leaves_the_placeholder_to_the_dll`），免得整理开关测试时被当冗余删掉。
 #[test]
 fn caret_switches_are_read_in_the_factory_config() {
     // 前提先钉死：出厂就是 app_inline。这条若变了，本测试的前提说明也要跟着改。
@@ -330,11 +279,8 @@ fn caret_switches_are_read_in_the_factory_config() {
         c.enter_add_word_mode(&mut st)
     };
 
-    // ★ 出厂加词是 **false**（2026-09-15 定，见 `CaretPlacementConfig::default`）：
-    // t123 报的就是 Ctrl+= 造词吃掉选中文字，而加词弹的是预览窗、对坐标精度的敏感度
-    // 低于候选列表，靶机实测回退链够用 ⇒ 这一项上「保住用户的字」赢过「坐标最准」。
-    // 前提钉在这里：有人改回 true 会红在本行，提示他重新审视上面那段取舍，而不是
-    // 默默让 t123 回来。
+    // 出厂加词是 false（见 `CaretPlacementConfig::default`）：加词弹的是预览窗，对坐标精度不敏感，
+    // 回退链够用，「保住用户选中的字」赢过「坐标最准」。改回 true 会红在本行。
     assert!(
         !Config::default().input.caret.add_word_via_composition,
         "出厂加词开关变了，请重新审视 t123 的取舍与本组测试的前提"
@@ -342,8 +288,8 @@ fn caret_switches_are_read_in_the_factory_config() {
 
     let (c, _rx) = coord_with_ui(Config::default());
     match enter_add_word(&c) {
-        // 出厂 false ⇒ **完全不碰 composition**。不能退而发空组合区：admin 2026-09-15
-        // 实测「只要对 composition 做操作，选中内容就会被清空（且与宿主有关）」。
+        // 出厂 false ⇒ 完全不碰 composition。不能退而发空组合区：对 composition
+        // 做任何操作都可能清空选中内容（与宿主有关）。
         KeyAction::Consumed => {}
         other => {
             panic!("出厂加词应不建任何组合区（否则仍会吃掉选中的文字），实际: {other:?}")
@@ -354,13 +300,8 @@ fn caret_switches_are_read_in_the_factory_config() {
     on.input.caret.add_word_via_composition = true;
     let (c_on, _rx) = coord_with_ui(on);
     match enter_add_word(&c_on) {
-        // 打开 ⇒ 必须发**非空**占位：空组合区在 WPS 等宿主上拿到退化矩形（height=0），
-        // 预览窗就没有坐标来源了。
-        //
-        // ⚠ 断言到**具体的值**而不只是「非空」：加词的 display 恒为空，占位是协调器
-        // 自己造出来的 —— 这一半钉的是「占位归谁造」这个契约，不只是开关。只断言
-        // 「非空」的话，「占位来源又漂回别处」就挡不住（它历史上在 C++ 侧、在出口
-        // 后处理里各待过一次，C1 就是这么来的）。
+        // 打开 ⇒ 必须发非空占位：空组合区在 WPS 等宿主上拿到退化矩形（height=0），预览窗没有坐标来源。
+        // 断言到具体的值：加词的 display 恒为空，占位由协调器自己造，这一半钉的是「占位归谁造」。
         KeyAction::UpdateComposition { text, .. } => assert_eq!(
             text,
             wind_bridge::handler::COMPOSITION_PLACEHOLDER,
@@ -370,17 +311,14 @@ fn caret_switches_are_read_in_the_factory_config() {
     }
 }
 
-/// 三个 overlay 模式（临拼 / 特殊 / 生僻字）的开关：**只对直达热键那条生效**。
+/// 三个 overlay 模式（临拼 / 特殊 / 生僻字）的开关只对直达热键那条生效。
 ///
-/// 直达热键传 `key_code = 0` ⇒ 不写引导符 ⇒ 组合区为空 ⇒ 建 composition 的唯一目的就是
-/// 撑开 range 取坐标，开关管的正是它。引导键（`\`、`z`）进入时组合区有真实内容，必须
-/// 建 composition 才显示得出来，开关不该也不能干预 —— 下半段钉的就是这条边界。
+/// 直达热键传 `key_code = 0`，组合区为空，建 composition 只为取坐标；引导键（`\`、`z`）进入时
+/// 组合区有真实内容，必须建 composition，开关不能干预——下半段钉这条边界。
 #[test]
 fn overlay_caret_switches_only_gate_the_hotkey_entry() {
-    // special / rare_char 共用一个形状：关掉开关 + 直达热键 ⇒ Consumed。
-    // 临拼的进入点签名不同（还要区分「有没有半成品可上屏」），单列在下面。
-    // 两个别名同样是为躲开 clippy::type_complexity：signature 一致正是本用例
-    // 能把 special / rare_char 并成一张表的前提。
+    // special / rare_char 共用一个形状：关掉开关 + 直达热键 ⇒ Consumed。临拼的进入点签名不同，
+    // 单列在下面。别名用来躲 clippy::type_complexity。
     type ConfigMutator = fn(&mut Config);
     type HotkeyProbe = fn(&Arc<Coordinator>) -> KeyAction;
     let cases: [(&str, ConfigMutator, HotkeyProbe); 2] = [
@@ -406,10 +344,8 @@ fn overlay_caret_switches_only_gate_the_hotkey_entry() {
 
     for (name, turn_off, enter) in cases {
         let (c_on, _rx) = coord_with_ui(Config::default());
-        // ⚠ 这一半连 text **为空**一起钉：这三个模式与加词不同，占位不在协调器造，
-        // 而是发一个空组合区、由 C++ 侧的兜底补空格（`TextService.cpp` 的
-        // `isPlaceholder` 分支）。若哪天有人在 Rust 侧也补一次，就成了双重占位
-        // （range 里两个空格），这一条会红。
+        // 这一半连 text 为空一起钉：这三个模式的占位不在协调器造，而是发空组合区、由 C++ 兜底补空格
+        // （`TextService.cpp` 的 `isPlaceholder` 分支）。Rust 侧再补一次就成了双重占位。
         match enter(&c_on) {
             KeyAction::UpdateComposition { text, .. } => assert!(
                 text.is_empty(),
@@ -431,12 +367,8 @@ fn overlay_caret_switches_only_gate_the_hotkey_entry() {
 
     // ── 临拼：调用点签名与上面两个不同，单列 ──
     //
-    // ⚠ 这一条是补上来的：`temp_pinyin_via_composition` 此前**零覆盖** —— 终审做过变异，
-    // 把 `temp_pinyin_entry_composition` 里的 `let on = ...config...` 换成 `let on = true;`
-    // ⇒ 728 套件一条都不红。而它恰恰是四个里最容易被误接的：调用点在
-    // `commit_and_enter_temp_pinyin` 的 `match committed` 里，两支待遇不同
-    // （`Some` 那支刻意不看开关），没有测试钉住的话，将来动那个函数很容易把 `None`
-    // 那支一并改掉而无人察觉。
+    // 调用点在 `commit_and_enter_temp_pinyin` 的 `match committed` 里，两支待遇不同
+    // （`Some` 那支刻意不看开关），改那个函数时很容易把 `None` 那支一并改掉。
     {
         let mut off = Config::default();
         off.input.caret.temp_pinyin_via_composition = false;
@@ -468,11 +400,10 @@ fn overlay_caret_switches_only_gate_the_hotkey_entry() {
         );
     }
 
-    // ── 边界三：有半成品可上屏时，临拼开关**不参与** ──
+    // ── 边界三：有半成品可上屏时，临拼开关不参与 ──
     //
-    // 直达热键的典型用法是打了一半再按，走的是 `Some(committed)` 那一支 ——
-    // 它本来就不插占位（prefix 为空 ⇒ `InsertText { new_composition: None }`），
-    // 与开关想避免的「为取坐标而插占位」不是一回事。这条边界此前只活在注释里。
+    // 走 `Some(committed)` 那一支本来就不插占位（`InsertText { new_composition: None }`），
+    // 与开关想避免的「为取坐标而插占位」不是一回事。
     {
         let mut off = Config::default();
         off.input.caret.temp_pinyin_via_composition = false;
@@ -481,12 +412,12 @@ fn overlay_caret_switches_only_gate_the_hotkey_entry() {
             let mut st = c.state.lock().unwrap();
             st.chinese_mode = true;
             // 「有半成品可上屏」= `committed_text` 非空（已确认的转换前缀），
-            // **不是** input_buffer 非空 —— `take_committed` 取的是前者。
+            // 不是 input_buffer 非空 —— `take_committed` 取的是前者。
             st.committed_text = "你好".to_string();
             st.candidates.clear(); // 无候选 ⇒ 直接回 committed_text
             c.commit_and_enter_temp_pinyin(&mut st, 0, "pinyin".to_string())
         };
-        // 断言到**具体类型**而不是「不是 Consumed」：顶字那支发的是
+        // 断言到具体类型而不是「不是 Consumed」：顶字那支发的是
         // `InsertText { new_composition: None }`（prefix 为空 ⇒ 不带新组合区）。
         // 只否定 Consumed 的话，哪天这支漂成别的 KeyAction 也照样绿。
         match act {
@@ -507,7 +438,7 @@ fn overlay_caret_switches_only_gate_the_hotkey_entry() {
         }
     }
 
-    // ── 边界一：引导键进入（display 非空）时，开关**不得**干预 ──
+    // ── 边界一：引导键进入（display 非空）时，开关不得干预 ──
     // 关掉开关，但用真实引导键 `z`（VK 0x5A）进入 ⇒ 组合区有内容，必须照常建。
     let mut off = Config::default();
     off.input.caret.rare_char_via_composition = false;
@@ -525,16 +456,11 @@ fn overlay_caret_switches_only_gate_the_hotkey_entry() {
         other => panic!("引导键进入 ⇒ 必须建 composition 显示引导符，实际: {other:?}"),
     }
 
-    // ── 边界二：★ 引导键**映射不出前缀字符**时，不得被当成直达热键吞掉 ──
+    // ── 边界二：引导键映射不出前缀字符时，不得被当成直达热键吞掉 ──
     //
-    // `vk_to_prefix_char_with_letters` 只认标点表和 A-Z，其余一律 `None`
-    // ⇒ `special_prefix` 为空 ⇒ `display` 为空。判据若用 `display.is_empty()`
-    // 当「直达热键」的代理，这里就会误判成热键进入并返回 `Consumed`，表现为
-    // **引导键被吞**：模式进了、候选窗弹了，组合区却没建、引导符不显示。
-    // 真判据是 `key_code == 0` 这个显式哨兵，本条钉的就是两者的分离。
-    //
-    // 变异检验：把 `hotkey_entry_composition` 的判据换回 `display.is_empty()`
-    // ⇒ 本条立刻红。
+    // `vk_to_prefix_char_with_letters` 只认标点表和 A-Z，其余 `None` ⇒ `display` 为空。判据若用
+    // `display.is_empty()` 代理「直达热键」，引导键就会被吞（模式进了、组合区却没建）。真判据是
+    // `key_code == 0` 这个显式哨兵。
     assert!(
         wind_keys::keymap::vk_to_prefix_char_with_letters(0x70).is_none(),
         "前提：VK_F1(0x70) 映射不出前缀字符，否则本用例选错了键"
@@ -604,9 +530,8 @@ fn with_temp_english(cfg: &mut Config) {
 
 /// 直接驱动候选下发：造一条候选、进指定模式，然后走真实的 `notify_ui_update`。
 ///
-/// 候选带 `comment`（`${code_hint}` 的取值源）——模板**必须含至少一个非空变量**，
-/// 否则「变量全空则整个模板输出空串」的隐式可选段规则会让纯字面量模板恒渲染成空，
-/// 三个用例会一起拿到 `Some("")`，看起来像「模板没生效」其实是测试自己写错了。
+/// 候选带 `comment`（`${code_hint}` 的取值源）：模板必须含至少一个非空变量，否则「变量全空则
+/// 整个模板输出空串」的规则会让纯字面量模板恒渲染成空。
 fn emit(c: &Arc<Coordinator>, active: Option<ModeKind>) {
     {
         let mut st = c.state.lock().unwrap();
@@ -625,7 +550,7 @@ fn emit(c: &Arc<Coordinator>, active: Option<ModeKind>) {
 /// 取最近一条 `UpdateCandidates` 里首候选的注释段。
 fn last_comment(rx: &std::sync::mpsc::Receiver<UiCommand>) -> Option<String> {
     let mut found = None;
-    // 排空取**最后**一条：一次刷新会发多条 UI 命令，取第一条会拿到上一轮残留。
+    // 排空取最后一条：一次刷新会发多条 UI 命令，取第一条会拿到上一轮残留。
     while let Ok(cmd) = rx.try_recv() {
         if let UiCommand::UpdateCandidates { candidates, .. } = cmd {
             found = candidates.first().map(|c| c.comment.as_str().to_string());
@@ -641,7 +566,7 @@ fn cfg_with_templates() -> Config {
     c
 }
 
-/// 上方注释条开关走到**发往 UI 的候选**上：开 ⇒ `comment_above` 拿到上段、`comment` 只剩下段；
+/// 上方注释条开关走到发往 UI 的候选上：开 ⇒ `comment_above` 拿到上段、`comment` 只剩下段；
 /// 关 ⇒ 不拆分，字面 `\n` 原样留在 `comment`，`comment_above` 为空。
 #[test]
 fn comment_above_switch_reaches_ui() {
@@ -700,9 +625,7 @@ fn mode_override_reaches_ui() {
 
 /// `TEXT_ROLES` 契约清单（设计 text-span-colors.md §3.1）里每个变量名都能被某个求值入口
 /// 求出值（空串也算）：候选上下文（`eval_var`）、气泡附加（`cand_eval`）、逐字上下文。
-///
-/// 判据落在「写进模板不会原样回显 `${…}`」上——那正是求值入口不认这个名字时的表现。
-/// 走真实的 `notify_ui_update`，气泡附加那几个变量只在它的闭包里，单测够不着。
+/// 判据是「写进模板不会原样回显 `${…}`」；走真实 `notify_ui_update`，气泡附加变量只在它的闭包里。
 #[test]
 fn every_text_role_is_evaluable_somewhere() {
     const PER_CHAR: &[&str] = &["char", "readings", "unicode"];
@@ -770,7 +693,7 @@ fn every_text_role_is_evaluable_somewhere() {
     assert!(comment.contains("${no_such_var}") && tooltip.contains("${no_such_var}"));
 }
 
-/// ★ `none` = 本模式不显示注释（与「跟随全局」是两回事），且这条语义要一路走到 UI。
+/// `none` = 本模式不显示注释（与「跟随全局」是两回事），且这条语义要一路走到 UI。
 #[test]
 fn empty_override_hides_comment_at_ui() {
     let mut cfg = cfg_with_templates();
@@ -806,9 +729,7 @@ fn leaving_mode_restores_global_template() {
     );
 }
 
-/// ★★★ 模式无意见 + 方案有意图 + 类型与全局都有值 ⇒ 方案层胜出；类型层排在全局之上。
-///
-/// 只测别的格子，把方案层或类型层整个删掉测试照样全绿。同一个用例顺带钉住优先级方向：
+/// 模式无意见 + 方案有意图 + 类型与全局都有值 ⇒ 方案层胜出；类型层排在全局之上。
 /// 进模式后必须变回模式级那份，否则就是把方案层错插在了模式层之上。
 #[test]
 fn schema_layer_reaches_ui_and_mode_wins_over_it() {
@@ -849,7 +770,7 @@ fn schema_layer_reaches_ui_and_mode_wins_over_it() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// ★ `none` 在**方案层**同样成立：本方案不显示注释，不是「跟随全局」。
+/// `none` 在方案层同样成立：本方案不显示注释，不是「跟随全局」。
 #[test]
 fn schema_empty_template_hides_comment() {
     let dir = data_dir_with_schema("empty", "zz_cmt2");
@@ -873,7 +794,7 @@ fn schema_empty_template_hides_comment() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// 方案没有分配（**绝大多数方案的常态**）时回落全局。
+/// 方案没有分配（绝大多数方案的常态）时回落全局。
 #[test]
 fn schema_without_templates_follows_global() {
     let dir = data_dir_with_schema("silent", "zz_cmt3");
@@ -965,9 +886,7 @@ fn comment_switch_off_overrides_all_three_layers() {
 }
 
 /// 悬停总开关关掉：候选不带气泡，且候选刷新不再调用 `word_codes_display`（计数断言）。
-///
-/// 要真实码表方案（`build_dev` 的 wubi86）：编码段的来源方案取活跃码表，没有码表就
-/// 一次也不会查，开着那一侧的计数也是 0，断言就成了恒绿。
+/// 要真实码表方案（`build_dev` 的 wubi86），否则一次也不会查，断言恒绿。
 #[test]
 fn tooltip_switch_off_skips_rendering_and_word_code_lookup() {
     let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data");
@@ -1007,7 +926,7 @@ fn tooltip_switch_off_skips_rendering_and_word_code_lookup() {
     assert_eq!(lookups, 0, "悬停关掉 ⇒ 不再调用 word_codes_display");
 }
 
-/// 出厂「释义」段走真实链路（论坛 t282）：挂两个注释库，经 `notify_ui_update` 下发的气泡
+/// 出厂「释义」段走真实链路：挂两个注释库，经 `notify_ui_update` 下发的气泡
 /// 里每个库的释义各占一行；查不到的候选没有这一段。
 #[test]
 fn default_tooltip_dict_all_section_lists_every_library() {

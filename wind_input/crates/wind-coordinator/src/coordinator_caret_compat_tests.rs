@@ -17,7 +17,7 @@ fn caret(y: i32, height: i32) -> CaretData {
     }
 }
 
-/// 组合起点锚定的 500px 校验必须**只在 caret 与组合起点同源时**生效。
+/// 组合起点锚定的 500px 校验必须只在 caret 与组合起点同源时生效。
 fn far_comp_start(source: i32) -> CaretData {
     // 桌面输入实测形态：caret (0,1388) 是 GUI 回退取到的任务栏残留光标，
     // compStart (473,217) 才是真实组合位置，两者 dy=1171 ≥500px。
@@ -45,7 +45,7 @@ fn lock_comp_start_with(source: i32) -> bool {
 #[test]
 fn non_tsf_caret_skips_composition_start_distance_check() {
     // caret 来自 GUI 回退时，它与组合起点根本不是一个语义域，距离比较无意义。
-    // 旧行为在此把**唯一正确**的组合起点当异常丢弃了（桌面输入定位到任务栏的直接原因）。
+    // 旧行为在此把唯一正确的组合起点当异常丢弃了（桌面输入定位到任务栏的直接原因）。
     assert!(
         lock_comp_start_with(wind_ipc::protocol::caret_source::GUI_CARET),
         "caret 为 GUI 回退源时应跳过距离校验、直接锁定组合起点"
@@ -55,8 +55,8 @@ fn non_tsf_caret_skips_composition_start_distance_check() {
 #[test]
 fn tsf_caret_still_rejects_far_composition_start() {
     // 反向对照：同样的距离，caret 若来自 TSF 域则 500px 保护仍须生效——同源却相差离谱，
-    // 那才是它本来要抓的坐标系不一致。**缺了这条，上面那个测试无法区分「按来源放行」
-    // 与「干脆不再校验」**，把保护删光也能让它变绿。
+    // 那才是它本来要抓的坐标系不一致。缺了这条，上面那个测试无法区分「按来源放行」
+    // 与「干脆不再校验」，把保护删光也能让它变绿。
     assert!(
         !lock_comp_start_with(wind_ipc::protocol::caret_source::TSF_SELECTION),
         "TSF 同源时超 500px 仍应判为坐标系不一致而丢弃"
@@ -65,10 +65,9 @@ fn tsf_caret_still_rejects_far_composition_start() {
 
 /// 宿主默认位置（`TSF_DEFAULT_POS`）同样跳过 500px 同源校验。
 ///
-/// 它出自 TSF context 却刻意判为**非** TSF 域（见 `caret_source::is_tsf` 的注释）。
-/// 本测试把那条判定钉在行为上：把 `TSF_DEFAULT_POS` 划进 TSF 域，这里就会走 500px
-/// 那一支而丢掉组合起点——与上面 `tsf_caret_still_rejects_far_composition_start` 恰好
-/// 互为反例，两条一起才能区分「按来源放行」与「干脆不再校验」。
+/// 它出自 TSF context 却刻意判为非 TSF 域（见 `caret_source::is_tsf`）。与
+/// `tsf_caret_still_rejects_far_composition_start` 互为反例，两条一起才能区分「按来源放行」
+/// 与「干脆不再校验」。
 #[test]
 fn tsf_default_pos_caret_skips_composition_start_distance_check() {
     assert!(
@@ -77,11 +76,9 @@ fn tsf_default_pos_caret_skips_composition_start_distance_check() {
     );
 }
 
-/// Illustrator 30.8 画布文字实测形态：宿主对本 context 报「这里没有插入点」，
-/// `GetTextExt` 恒返回 `(2559,1367,2560,1367)`——选区矩形 / 组合起点 / 组合矩形
-/// 三者同值，正是工作区（2560×1368）右下角最后一个像素。
-///
-/// `height` 由 DLL **合成**后上报（原值是 0），本参数用来把这一点单独测出来。
+/// Illustrator 画布文字的形态：宿主报「没有插入点」，选区矩形 / 组合起点 / 组合矩形三者同值，
+/// 落在工作区右下角最后一个像素（见 `docs/architecture/caret-position-host-compat-notes.md`
+/// 的「非 TSF 坐标来源」）。`height` 由 DLL 合成后上报，本参数用来把这一点单独测出来。
 fn illustrator_default_pos(height: i32) -> CaretData {
     CaretData {
         x: 2559,
@@ -101,22 +98,14 @@ fn composing_and_awaiting_first_show() -> Arc<Coordinator> {
     c
 }
 
-/// 宿主默认位置**不得**置 `caret_cache_verified`——否则下一次组合会闪一下。
+/// 宿主默认位置不得置 `caret_cache_verified`，否则下一次组合会先在旧位置闪一下。
 ///
-/// 该标志问的是「缓存对应当前插入点吗」，而这条来源按定义是「宿主不知道插入点在哪」。
-/// 置真 ⇒ 下次 `first_show_needs_long_wait` 判否 ⇒ fast 档只 arm 25ms ⇒ 兜底先拿组合前
-/// 那次 `gui_caret` 空闲上报首显，几十毫秒后默认位置才到、再 reshow。
+/// 该标志问的是「缓存对应当前插入点吗」，而这条来源按定义是「宿主不知道插入点在哪」；
+/// 置真会让下次首显走 25ms 短兜底，先拿组合前那次 `gui_caret` 首显再跳到默认位置。
+/// 组合前与组合期两个入口都能置位，`is_tsf` 判否只挡住了前者。
 ///
-/// ⚠ 本条与 `is_tsf` 判否**不是同一件事**：该来源有两个入口能置位本标志，组合前那处
-/// 靠 `is_tsf` 天然挡住，组合期这处原本无条件置位。**挡住一处不等于挡住了**——
-/// 2026-09-15 靶机实测的那一闪（36.368 显示 (1257,459)、36.394 跳到 (3839,2063)，
-/// 历时 26ms）正是从这第二个入口漏进去的。
-///
-/// ★★ `was_verified=true` 那两组是本测试的**核心**：只拦置真（`if ... { store(true) }`）
-/// 的单向写法在 `false` 起步时同样全绿，唯有从 `true` 起步才区分得开。而「先真后假」
-/// 正是本宿主的日常路径——面板输入给真插入点，切回画布就只剩默认位置。
-///
-/// 对照组用同一份坐标、只改 `source`，证明差别确实来自 source。
+/// `was_verified=true` 那两组是核心：只拦置真的单向写法在 `false` 起步时同样全绿，而
+/// 「先真后假」正是本宿主的日常路径。对照组同坐标只改 `source`。
 #[test]
 fn host_default_pos_must_not_verify_the_caret_cache() {
     let after = |source: i32, was_verified: bool| {
@@ -124,7 +113,7 @@ fn host_default_pos_must_not_verify_the_caret_cache() {
         c.state.lock().unwrap().input_buffer = "a".to_string(); // composing ⇒ 走组合期那条路
         c.caret_cache_verified
             .store(was_verified, std::sync::atomic::Ordering::Relaxed);
-        // ⚠ 另两个标志必须**预置成 true**，否则下面那两条断言是假的：它们的初值就是
+        // 另两个标志必须预置成 true，否则下面那两条断言是假的：它们的初值就是
         // false，`store(false)` 被跳过时结果一样，断言照样绿（变异检验实测过这一点）。
         c.caret_cache_is_idle_report
             .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -159,7 +148,7 @@ fn host_default_pos_must_not_verify_the_caret_cache() {
         "对照组：真插入点照常置真（否则本测试证明不了差别来自 source）"
     );
 
-    // 同段另两个标志**刻意保持无条件**，各自问的都不是「是不是插入点」。
+    // 同段另两个标志刻意保持无条件，各自问的都不是「是不是插入点」。
     // 没有这两条，后人把三者一起挪进条件里不会有任何测试变红，而后果是默认位置宿主上
     // `awaiting_first_authority_after_focus` 永久为真 ⇒ idle_anchor 逃生口永久锁死。
     let (_, idle_report, awaiting) = after(DEFAULT_POS, false);
@@ -173,10 +162,8 @@ fn host_default_pos_must_not_verify_the_caret_cache() {
     );
 }
 
-/// 宿主默认位置必须**当场**消费首显等待，而不是被丢弃后空等兜底到期。
-///
-/// 这是 D-3 那 600ms 空等的根：闸门 arm 了最长档，而到期时手里的还是同一个退化矩形
-/// ——没有任何东西可等。此前 DLL 把这一帧整条丢掉，服务端因此连「等不到」都不知道。
+/// 宿主默认位置必须当场消费首显等待，而不是被丢弃后空等兜底到期——到期时手里仍是
+/// 同一个退化矩形，没有任何东西可等。
 #[test]
 fn tsf_default_pos_consumes_pending_first_show_at_once() {
     let c = composing_and_awaiting_first_show();
@@ -211,12 +198,10 @@ fn tsf_default_pos_consumes_pending_first_show_at_once() {
     );
 }
 
-/// 高度 0 的帧照旧整条丢弃 —— 这正是 DLL 侧**必须合成一个高度**的理由。
+/// 高度 0 的帧照旧整条丢弃——这正是 DLL 侧必须合成一个高度的理由。
 ///
-/// 退化矩形原样上报（h=0）会被服务端吃掉，等于修了个寂寞。**两道闸门各自都能吃掉它**：
-/// `handle_caret_update` 入口的 `data.height == 0` 与 `caret_is_valid` 的 `height > 0`，
-/// 所以只放宽其中一道本测试不会变色——要两道一起放宽才变红。两道都在，正说明「h=0
-/// 上不去」不是某一处的偶然，改任何一处都别指望它能过。
+/// 两道闸门各自都能吃掉它：`handle_caret_update` 入口的 `data.height == 0` 与
+/// `caret_is_valid` 的 `height > 0`，只放宽其中一道本测试不会变色。
 #[test]
 fn a_zero_height_frame_is_dropped_even_for_tsf_default_pos() {
     let c = composing_and_awaiting_first_show();
@@ -302,11 +287,10 @@ fn still_waiting_after_probe(c: &Arc<Coordinator>, probe: CaretData) -> bool {
         st.input_buffer = "a".to_string();
     }
     *c.last_authoritative_caret.lock().unwrap() = (500, 300, true);
-    // 与生产代码同源：`last_authoritative_caret` 置 true 和 `caret_cache_verified` 置 true
-    // 是 `handle_caret_update` 里**同一行判据**下的两个动作，现实中不可能只有前者。
-    // 二者不复用同一个字段，是因为清位不同——前者从不清（跨焦点仍为 true），后者在焦点
-    // 到达/用户移动光标时清零。probe 判据需要的恰恰是后者（"基准可比"），拿前者判就会
-    // 在焦点切换后把另一个单元格的坐标当基准，必然误判成"已 reflow"。
+    // 与生产代码同源：`last_authoritative_caret` 与 `caret_cache_verified` 在
+    // `handle_caret_update` 里是同一判据下的两个动作。二者不合并是因为清位不同：前者跨焦点
+    // 仍为 true，后者在焦点到达/移动光标时清零；probe 判据要的是后者，拿前者判会在焦点切换后
+    // 把另一个单元格的坐标当基准。
     c.caret_cache_verified
         .store(true, std::sync::atomic::Ordering::Relaxed);
     *c.pending_first_show.lock().unwrap() = true;
@@ -342,10 +326,8 @@ fn coord_with_global(mode: &str) -> Arc<Coordinator> {
     Coordinator::new_headless(cfg, None)
 }
 
-/// per-app 未配时，生效档位必须跟着 `ui.candidate.first_show_mode` 走。
-///
-/// 这是「全局默认档可配」这件事**唯一**的接线点：漏接的表现是「设置改了完全没反应」，
-/// 而首显逻辑的错只表现为位置或时机不对，不会有任何报错，靠人眼很难归因到配置没读。
+/// per-app 未配时，生效档位必须跟着 `ui.candidate.first_show_mode` 走。这是全局默认档的
+/// 唯一接线点，漏接表现为「设置改了没反应」且无报错。
 #[test]
 fn unset_per_app_rule_follows_global_config() {
     use wind_config::app_compat::FirstShowMode;
@@ -438,12 +420,8 @@ fn caret_pending_still_extends_wait_mode_timeout() {
 
 // ── ui.status.show_on_focus：焦点气泡与坐标可信度闸门 ────────────────────────────
 
-/// 造一个开了 `show_on_focus` 的协调器，并**保留 UI 通道接收端**——「气泡有没有真的发出去」
-/// 只能从 `ui_tx` 上观察。用 debug 方法「按同样规则再算一遍」是假测试：决策函数写对但
-/// 生产路径没接上时，那种测试照样全绿。
-/// 宿主登记的配置改写在**从磁盘重载**之后仍然生效（移动端设置页每改一项就重载一次，
-/// 改写若只在构造时套一次，之后就悄悄回到桌面默认）。用一个盘上不可能出现的哨兵值，
-/// 不受本机用户配置影响；对照组证明「不登记就没有」。
+/// 宿主登记的配置改写在从磁盘重载之后仍然生效（移动端设置页每改一项就重载一次）。
+/// 用一个盘上不可能出现的哨兵值，不受本机用户配置影响；对照组证明「不登记就没有」。
 #[test]
 fn config_overlay_survives_reload() {
     fn sentinel(cfg: &mut Config) {
@@ -460,6 +438,8 @@ fn config_overlay_survives_reload() {
     assert_ne!(plain.rt().config.input.association.max_count, 4242);
 }
 
+/// 造一个开了 `show_on_focus` 的协调器，并保留 UI 通道接收端——「气泡有没有真的发出去」
+/// 只能从 `ui_tx` 上观察；用 debug 方法按同样规则再算一遍是假测试。
 fn coord_focus_tip(
     show_on_focus: bool,
     position_mode: &str,
@@ -510,7 +490,7 @@ fn focus_tip_shows_for_trusted_host_caret() {
 }
 
 /// 两个不同宿主的 client_token。用具名常量而非字面量，是因为下面「同宿主不重复弹」
-/// 那组用例的全部含义就在于**这两个值相不相等**，字面量会让它退化成看不出意图的魔数。
+/// 那组用例的全部含义就在于这两个值相不相等，字面量会让它退化成看不出意图的魔数。
 const TOKEN_A: u64 = 0x1111_0000_0001;
 const TOKEN_B: u64 = 0x2222_0000_0001;
 
@@ -536,7 +516,7 @@ fn focus_tip_skips_same_host_docmgr_switch() {
 }
 
 /// 反向对照：换了宿主必须照弹。
-/// **缺了这条，上一条用「弹过一次就再也不弹」的实现也能通过**——那会让切换应用时
+/// 缺了这条，上一条用「弹过一次就再也不弹」的实现也能通过——那会让切换应用时
 /// 气泡彻底消失，比重复弹更糟。
 #[test]
 fn focus_tip_shows_again_for_different_host() {
@@ -555,7 +535,7 @@ fn focus_tip_shows_again_for_different_host() {
 }
 
 /// 离开宿主（Thread 级失焦）后再回来，应当重新提示。
-/// ⚠ 只有 Thread 档清去重记录：CtxLost/DocChanged 是宿主内换 docMgr 的噪声，
+/// 只有 Thread 档清去重记录：CtxLost/DocChanged 是宿主内换 docMgr 的噪声，
 /// 若也清就等于按 docMgr 计数，Excel 下会退回「输入一次闪两下」。
 #[test]
 fn focus_tip_resets_after_leaving_host() {
@@ -586,7 +566,7 @@ fn focus_tip_resets_after_leaving_host() {
     assert!(got_status_tip(&rx), "离开宿主后再进入应重新提示");
 }
 
-/// follow_caret 下，坐标来自 GUI 回退时**不得**直接弹气泡——那正是用户反馈的
+/// follow_caret 下，坐标来自 GUI 回退时不得直接弹气泡——那正是用户反馈的
 /// 「还没输入时定位非常不准」：`OnSetFocus` 拿不到同步锁，回退链交出的是跨窗口的
 /// Win32 光标（Word 标题行实测偏差 814px）。应转为挂起等权威坐标。
 #[test]
@@ -607,9 +587,8 @@ fn focus_tip_defers_when_caret_source_is_not_tsf() {
 
 /// 上一条的续集：权威坐标到达后必须补显示，且挂起位清掉。
 ///
-/// ⚠ 消费点必须在 `handle_caret_update` 的 `composing` 闸门**之前**——焦点刚到达时用户
-/// 还没输入，`composing` 恒 false，放在闸门之后就是永远不执行且完全静默。本用例正是
-/// 钉住这个顺序：`input_buffer` 特意留空。
+/// 消费点必须在 `handle_caret_update` 的 `composing` 闸门之前——焦点刚到达时 `composing`
+/// 恒 false，放在闸门之后就永远不执行。`input_buffer` 特意留空来钉这个顺序。
 #[test]
 fn focus_tip_shows_when_authoritative_caret_arrives() {
     let (c, rx) = coord_focus_tip(true, "follow_caret");
@@ -634,7 +613,7 @@ fn focus_tip_shows_when_authoritative_caret_arrives() {
     );
 }
 
-/// 反向对照：非 TSF 域的坐标即便到达也**不得**解除挂起。
+/// 反向对照：非 TSF 域的坐标即便到达也不得解除挂起。
 /// 少了这条，上一条用「任何 caret_update 都补显示」的实现也能通过。
 #[test]
 fn focus_tip_stays_pending_for_non_tsf_caret_update() {
@@ -709,14 +688,10 @@ fn focus_tip_silent_when_disabled() {
     );
 }
 
-/// 焦点气泡必须绕过 `show_status` 的**文本**去重。
+/// 焦点气泡必须绕过 `show_status` 的文本去重：焦点切换正是「状态文本没变但仍要提示」的场景。
 ///
-/// 焦点切换正是「状态文本没变但仍要提示」的场景——走文本去重路径的话，连着切两个宿主
-/// 只有第一次会弹，而这恰恰是本功能最主要的使用场景，等于开关基本无效。
-///
-/// ⚠ 与 [`focus_tip_skips_same_host_docmgr_switch`] 的**宿主**去重是两回事，别混：
-/// 这里换的是宿主（TOKEN_A → TOKEN_B），本就该弹；那里是同一宿主内换 docMgr，不该弹。
-/// 本用例原先第二次也传同一 token，测到的其实是宿主去重引入前的旧语义。
+/// 与 [`focus_tip_skips_same_host_docmgr_switch`] 的宿主去重是两回事：这里换的是宿主
+/// （TOKEN_A → TOKEN_B），本就该弹；那里是同一宿主内换 docMgr，不该弹。
 #[test]
 fn focus_tip_bypasses_text_dedup() {
     let (c, rx) = coord_focus_tip(true, "follow_caret");
@@ -728,7 +703,7 @@ fn focus_tip_bypasses_text_dedup() {
     );
     c.show_focus_status_if_enabled(TOKEN_A);
     assert!(got_status_tip(&rx), "第一次焦点切换应显示");
-    // 状态一字未改，模拟切到**另一个宿主**的输入框
+    // 状态一字未改，模拟切到另一个宿主的输入框
     c.show_focus_status_if_enabled(TOKEN_B);
     assert!(
         got_status_tip(&rx),
@@ -736,7 +711,7 @@ fn focus_tip_bypasses_text_dedup() {
     );
 }
 
-/// 失焦要作废挂起中的焦点气泡，否则权威坐标晚到时会在**已经切走之后**才弹出来。
+/// 失焦要作废挂起中的焦点气泡，否则权威坐标晚到时会在已经切走之后才弹出来。
 #[test]
 fn hide_tip_cancels_pending_focus_tip() {
     let (c, rx) = coord_focus_tip(true, "follow_caret");
@@ -770,9 +745,8 @@ fn hide_tip_cancels_pending_focus_tip() {
 
 /// 焦点 caret 的 `height == 0`（宿主尚未 reflow 的退化矩形）不得进缓存。
 ///
-/// 这条守卫原先只在同步段的 `handle_focus_gained_caret` 里有，重型段
-/// `handle_focus_gained` 自己直写 `state.caret_*`——而**重型段必然晚于同步段执行**，
-/// 于是守卫被后到的直写整个抹掉。两处口径分裂既不报错也不 panic，只表现为定位偏一行。
+/// 重型段 `handle_focus_gained` 必然晚于同步段执行，它若自己直写 `state.caret_*`，
+/// 同步段的守卫就被整个抹掉，表现为定位偏一行。
 #[test]
 fn focus_caret_degenerate_rect_does_not_overwrite_cache() {
     let c = coord();
@@ -804,10 +778,8 @@ fn focus_caret_degenerate_rect_does_not_overwrite_cache() {
     );
 }
 
-/// 上一条只证明了守卫**存在于** `apply_focus_caret`，证明不了重型段真的路由过去。
-/// 这条走 `handle_focus_gained` 生产入口：它一旦退回自己直写 `state.caret_*`，本用例即红。
-///
-/// 顺带钉住 `caret_use_top` 也在重型段生效——那是同一次覆写抹掉的第二样东西。
+/// 上一条只证明守卫存在于 `apply_focus_caret`；这条走 `handle_focus_gained` 生产入口，
+/// 它一旦退回直写 `state.caret_*` 即红。顺带钉住 `caret_use_top` 也在重型段生效。
 #[test]
 fn handle_focus_gained_routes_caret_through_shared_guard() {
     let c = coord();
@@ -846,11 +818,9 @@ fn handle_focus_gained_routes_caret_through_shared_guard() {
 
 /// 焦点事件必须作废组合起点锚定。
 ///
-/// 锚定「同一组合只锁一次、之后不再更新」的前提是**起点不会移动**，而 focus_gained 意味着
-/// 换了 docMgr——Excel 输入时在「单元格」与「公式编辑栏」之间来回切，组合整体迁移（实测
-/// 从 (593,572) 到 (1457,959)），锚点若不作废，候选窗就钉死在旧 docMgr 上：协调器拿
-/// state.caret_* 判出 reshow，下发却用锁死的组合起点，日志表现为「reshow 说要重定位、
-/// UI 位置纹丝不动」。
+/// 锚定「同一组合只锁一次」的前提是起点不会移动，而 focus_gained 意味着换了 docMgr
+/// （如 Excel 在单元格与编辑栏之间切换，组合整体迁移）。不作废的话候选窗钉死在旧 docMgr 上，
+/// 日志表现为「reshow 说要重定位、UI 位置纹丝不动」。
 #[test]
 fn focus_gained_invalidates_composition_start_anchor() {
     let c = coord();
@@ -908,12 +878,10 @@ fn handle_focus_gained_applies_caret_use_top() {
     );
 }
 
-/// `handle_focus_gained` 内 `update_active_compat` 必须先于它自己那次 `apply_focus_caret`
-/// 调用跑完，否则本次焦点事件带来的第一份坐标会拿**上一个进程**的规则去变换——
-/// 2026-08-17 真机复现：切到配了 `caret_offset_y` 的应用后，第一次候选框/状态气泡位置
-/// 没有校正，之后的坐标更新才对，表现为「多屏下坐标还是有点偏」，一度被误判成 DPI
-/// 换算没生效。用 `pid_names` 预置该 pid 的名字（同 `update_active_compat_prefers_cached_name_over_process_lookup`
-/// 的手法），让 `handle_focus_gained` 内对新进程的规则查找无需真实 `OpenProcess` 也能命中。
+/// `handle_focus_gained` 内 `update_active_compat` 必须先于它自己那次 `apply_focus_caret`，
+/// 否则本次焦点事件的第一份坐标会拿上一个进程的规则（如 `caret_offset_y`）去变换。
+/// 用 `pid_names` 预置该 pid 的名字（同
+/// `update_active_compat_prefers_cached_name_over_process_lookup`），无需真实 `OpenProcess`。
 #[test]
 fn handle_focus_gained_applies_new_process_caret_offset_on_first_caret() {
     let c = coord();
@@ -1000,11 +968,9 @@ fn trusted_caret_keeps_short_fallback() {
     );
 }
 
-/// ★ 长等待不得被后续按键重置。闸门在候选窗显示前对**每一个字母**都会调 arm，若照常
-/// bump token 重新计时，用户多打几个字母就把这段等待反复推后 → 长兜底静默退化回短兜底、
-/// 错位照旧。Excel 建单元格上下文要 558ms，其间用户往往已敲了三五个字母。
-///
-/// 这是「兜底超时长于组合寿命 ⇒ 永不到期」那个死结的镜像，独立守一条测试。
+/// 长等待不得被后续按键重置。闸门对每个字母都会调 arm，若照常 bump token 重新计时，
+/// 宿主建上下文期间多打几个字母就让长兜底静默退化回短兜底。
+/// 这是「兜底超时长于组合寿命 ⇒ 永不到期」死结的镜像。
 #[test]
 fn long_fallback_survives_subsequent_keystrokes() {
     let c = fast_coord(false);
@@ -1034,14 +1000,12 @@ fn short_fallback_still_rearms_per_keystroke() {
     );
 }
 
-/// ★★★ 单向陷阱：`caret_cache_verified` 的清位有两个日常入口（切窗口、点击移光标），
-/// 置位却只有「组合期间收到权威 caret_update」这一个。而 fast 档下组合往往等不到权威
-/// 坐标（各宿主实测 53~73ms，fast 兜底 25ms），一旦被清就再也回不来，此后每个组合都
-/// arm 600ms 长兜底。2026-09-03 记事本快速 `d空格` 实测：组合寿命 19ms、兜底 600ms，
-/// 50 次输入 0 次首显；同日全量日志里长兜底占 65%——本该是逃生口，成了主路径。
+/// 单向陷阱：`caret_cache_verified` 的清位有两个日常入口（切窗口、点击移光标），置位却只有
+/// 「组合期间收到权威 caret_update」。fast 档下组合常等不到权威坐标，一旦被清就再也回不来，
+/// 此后每个组合都 arm 600ms 长兜底。
 ///
-/// 组合前宿主主动上报的空闲光标是同样够格的第二个置位来源：它是对当前插入点的直接
-/// 测量，且恰好就是本次组合的起点。
+/// 组合前宿主主动上报的空闲光标是同样够格的第二个置位来源：它直接测量当前插入点，
+/// 恰好就是本次组合的起点。
 #[test]
 fn idle_caret_report_clears_the_trust_gate() {
     let c = fast_coord(false);
@@ -1095,10 +1059,9 @@ fn drive_first_frame(c: &Arc<Coordinator>) {
     c.notify_ui_update(&st);
 }
 
-/// idle_anchor 逃生口：缓存是组合前的 TSF 空闲上报时不必等。兜底到期后用的就是这份
-/// 缓存，而 25ms 内等不到更好的（各宿主权威坐标 53~73ms），等待只是把首显推迟 25ms。
-/// 补的是 `coords_ready` 在连打时的死角——它依赖的组合起点每次上屏被 `reset_first_show`
-/// 清掉，重锁又要等那个等不到的权威坐标，于是 fast 档连打时两个逃生口全部失效。
+/// idle_anchor 逃生口：缓存是组合前的 TSF 空闲上报时不必等——兜底到期后用的就是它，
+/// 25ms 内也等不到更好的。补的是 `coords_ready` 在连打时的死角（组合起点每次上屏被
+/// `reset_first_show` 清掉，重锁又要等权威坐标）。
 #[test]
 fn fresh_idle_report_skips_the_wait() {
     let c = fast_coord(true);
@@ -1133,11 +1096,9 @@ fn verified_cache_alone_does_not_open_the_escape_hatch() {
     );
 }
 
-/// ★★★ 逃生口不得把信任门本来要堵的洞重新顶开。`focus_gained` 清 `caret_cache_verified`
-/// 正是为了「焦点后第一个字必须等权威坐标」（Excel 进单元格首字漂移）。空闲上报在组合
-/// **之间**可信，在焦点**刚到达**时最不可信——宿主还没 reflow，报的是上一处的位置。
-/// EverEdit 实测：焦点坐标 (2599,703)、空闲上报 (1949,527)、真实 (749,529)，三个互不相同，
-/// 拿空闲上报立即首显错 1200px；Excel 复现了档案里那个原始场景。
+/// 逃生口不得把信任门本来要堵的洞重新顶开。`focus_gained` 清 `caret_cache_verified` 是为了
+/// 「焦点后第一个字必须等权威坐标」；空闲上报在组合之间可信，在焦点刚到达时最不可信
+/// （宿主还没 reflow，报的是上一处的位置）。
 #[test]
 fn idle_report_right_after_focus_does_not_skip_the_wait() {
     let c = fast_coord(true);
@@ -1184,14 +1145,12 @@ fn drain_positions(rx: &std::sync::mpsc::Receiver<UiCommand>) -> Vec<(i32, i32)>
 
 /// 取最近一条 `UpdateCandidates` 下发的位置。
 fn last_pos(rx: &std::sync::mpsc::Receiver<UiCommand>) -> Option<(i32, i32)> {
-    // 排空取**最后**一条：一次刷新会发多条 UI 命令
+    // 排空取最后一条：一次刷新会发多条 UI 命令
     drain_positions(rx).last().copied()
 }
 
-/// ★★ 非坐标原因的重绘不得移动候选窗。`state.caret_x/y` 是缓存，会被 probe 的
-/// `absorb_probe_coords` 与被 settle 吸收掉的那帧权威坐标悄悄改写，而候选窗并不跟着动；
-/// 此后悬停 / 翻页 / 候选变化触发的重绘若去读缓存，就会把这段差额一次性补上——
-/// 表现为「鼠标一指候选窗，位置跳一个字符」（微信实测 483→496）。
+/// 非坐标原因的重绘不得移动候选窗。`state.caret_x/y` 会被 probe 与被 settle 吸收的那帧
+/// 悄悄改写，悬停 / 翻页 / 候选变化触发的重绘若读缓存，就会把这段差额一次性补上。
 #[test]
 fn non_positional_redraw_keeps_the_candidate_where_it_is() {
     let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
@@ -1225,10 +1184,9 @@ fn non_positional_redraw_keeps_the_candidate_where_it_is() {
     );
 }
 
-/// ★★ 组合起点常常在**首显之后**才由宿主报来（微信实测首显 03.980、38ms 后才锁定），
-/// 而 `notify_ui_update` 里 `cs.2` 那条分支一旦成立就接管位置。锚点若排在它后面，悬停
-/// 就会把候选窗从首显处挪到组合起点——**而 settle 上一步刚判定这段偏差不值得校正**，
-/// 等于让组合起点从侧面绕过 settle。上一条用例的 `cs.2` 全程为 false，覆盖不到这里。
+/// 组合起点常在首显之后才由宿主报来，而 `notify_ui_update` 里 `cs.2` 那条分支一旦成立就接管
+/// 位置。锚点若排在它后面，悬停会把候选窗挪到组合起点，等于绕过 settle 刚做的判定。
+/// 上一条用例的 `cs.2` 全程为 false，覆盖不到这里。
 #[test]
 fn late_composition_start_does_not_move_the_shown_candidate() {
     let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
@@ -1262,7 +1220,7 @@ fn late_composition_start_does_not_move_the_shown_candidate() {
     );
 }
 
-/// ★ 信任门否决 probe 做**显示决策**，但不否决它当**坐标来源**。此前这里直接 return，
+/// 信任门否决 probe 做显示决策，但不否决它当坐标来源。此前这里直接 return，
 /// 兜底到期时就只剩焦点切换前的旧缓存可用：Excel 实测 probe 连报三次正确的 (475,579)
 /// 全被丢弃，兜底拿 (1918,831) 首显，错 1443px，53ms 后才由 reshow 跳回来。
 #[test]
@@ -1282,12 +1240,8 @@ fn rejected_probe_still_refreshes_the_cache_for_fallback() {
     );
 }
 
-/// ★★★ 坐标校正的判据必须比「候选窗实际画在哪」，不能比坐标缓存——缓存会被 probe 抢先
-/// 刷成新值，此后比较恒得「没变化」，而候选窗还在千里之外，错位再也无法自愈。
-///
-/// Excel 进单元格实测：宿主先在**编辑栏**建编辑上下文，首显于 (326,314)；0.5s 后切到
-/// 单元格，probe 把缓存刷成 (1307,803)，60ms 后同值的权威坐标到达 ⇒ dx=0 判为微移 ⇒
-/// 候选窗永远留在编辑栏（用户截图即此）。
+/// 坐标校正的判据必须比「候选窗实际画在哪」，不能比坐标缓存：缓存会被 probe 抢先刷成新值，
+/// 此后比较恒得「没变化」，错位再也无法自愈（如 Excel 先在编辑栏建上下文、再切到单元格）。
 #[test]
 fn stale_shown_position_is_corrected_even_when_cache_already_moved() {
     let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
@@ -1329,11 +1283,10 @@ fn stale_shown_position_is_corrected_even_when_cache_already_moved() {
     );
 }
 
-/// ★★ `settle` 说的是「**这次**偏差不值得校正」，不是「以后也不值得」。被吸收的那一帧
-/// 坐标必须写进基准，否则下一帧与旧基准一比又是同样的偏差，而放宽容差已被 `swap` 消费
-/// 掉（tol 掉回 3px）⇒ 候选窗自己挪一格。微信实测「打第二三个字时移动」（483→496）。
+/// `settle` 说的是「这次偏差不值得校正」，不是「以后也不值得」。被吸收的那一帧坐标必须写进
+/// 基准，否则下一帧又是同样的偏差，而放宽容差已被 `swap` 消费掉，候选窗自己挪一格。
 ///
-/// 这条同时钉住 `caret_baseline` 与 `shown_anchor` 不可合并：合并后必失败。
+/// 同时钉住 `caret_baseline` 与 `shown_anchor` 不可合并：合并后必失败。
 #[test]
 fn absorbed_drift_does_not_accumulate_into_a_later_jump() {
     let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
@@ -1369,11 +1322,8 @@ fn absorbed_drift_does_not_accumulate_into_a_later_jump() {
     );
 }
 
-/// ★★ 空闲上报坐标就是组合起点（按键前的光标位置），idle_anchor 首显时必须抢先锁上。
-///
-/// 微信（Qt WebView）报的 compStart 恒等于**当前光标** x（实测逐帧 `compStart=(2241,783)`
-/// 与 `x=2241` 相等），于是「组合起点」随每个字母右移一格。首显用按键前坐标（对的），
-/// reshow 改用宿主那份偏右一格的 compStart ⇒ 打第二个字母时候选窗自己挪 12px。
+/// 空闲上报坐标就是组合起点（按键前的光标位置），idle_anchor 首显时必须抢先锁上。
+/// 微信报的 compStart 恒等于当前光标 x，随每个字母右移；不抢先锁，reshow 会让候选窗自己挪。
 #[test]
 fn idle_anchor_claims_the_composition_start() {
     let c = fast_coord(true);
@@ -1389,12 +1339,10 @@ fn idle_anchor_claims_the_composition_start() {
     );
 }
 
-/// ★★ 首帧校正的容差在水平与垂直上不对称，两个方向要处理的偏差成因不同。
+/// 首帧校正的容差在水平与垂直上不对称。
 ///
-/// 水平吸收的是「上屏文本宽度 ≠ 编码文本宽度」（五笔满码自动上屏后立刻开新组合，缓存是
-/// 4 个字母末尾、而上屏的汉字比它们窄，微信实测 20px），量级恒等于一个字符宽；垂直必须
-/// 分辨换行（偏差恰好一个行高），所以 ratio 必须 < 1.0。共用一个容差 ⇒ 垂直的约束把水平
-/// 也卡死，那 20px 每次自动上屏都要当着用户的面校正一次。
+/// 水平吸收「上屏文本宽度 ≠ 编码文本宽度」（量级一个字符宽）；垂直必须分辨换行（偏差恰好
+/// 一个行高），所以 ratio 必须 < 1.0。共用一个容差会让垂直的约束把水平也卡死。
 #[test]
 fn settle_tolerance_absorbs_one_char_width_but_still_follows_a_line_break() {
     let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
@@ -1425,7 +1373,7 @@ fn settle_tolerance_absorbs_one_char_width_but_still_follows_a_line_break() {
         "一个字符宽的水平偏差应被吸收——否则每次自动上屏都要当着用户的面校正一次"
     );
 
-    // 反向对照：同样量级的**垂直**偏差是换行，必须跟过去
+    // 反向对照：同样量级的垂直偏差是换行，必须跟过去
     let (c2, rx2) = Coordinator::new_headless_with_ui(Config::default(), None);
     set_mode(&c2, wind_config::app_compat::FirstShowMode::Instant);
     *c2.last_valid_caret.lock().unwrap() = (1684, 747, 20);
@@ -1453,14 +1401,11 @@ fn settle_tolerance_absorbs_one_char_width_but_still_follows_a_line_break() {
     );
 }
 
-/// ★★★ 行高退化的宿主上，settle 容差不得跟着塌缩。
+/// 行高退化的宿主上，settle 容差不得跟着塌缩。
 ///
-/// 微信等 WebView 的 `GetTextExt` 返回的 height 在 1↔20px 之间跳变。settle 容差是
-/// 「行高 × ratio」，只取当前帧 ⇒ `(1 × 0.8) as i32 == 0` ⇒ 容差落到下限 3px，**放宽
-/// 多少倍都没用（2 × 0 还是 0）**，于是一个字符宽的偏差必然触发校正——微信实测「每次
-/// 自动上屏后回退 20px」，日志里那一行写着 `≤3/3px`。
-///
-/// 行高是**宿主的属性**，不是单帧的属性。
+/// 微信等 WebView 的 height 在 1↔20px 之间跳变；只取当前帧时 `(1 × 0.8) as i32 == 0`，
+/// 容差落到下限 3px，放宽多少倍都没用，一个字符宽的偏差必然触发校正。
+/// 行高是宿主的属性，不是单帧的属性。
 #[test]
 fn settle_tolerance_survives_a_degenerate_caret_height() {
     let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
@@ -1499,12 +1444,10 @@ fn settle_tolerance_survives_a_degenerate_caret_height() {
     );
 }
 
-/// ★★★ 被 settle 吸收的偏差不得从组合起点那条路复活。
+/// 被 settle 吸收的偏差不得从组合起点那条路复活。
 ///
-/// settle 判定「这点偏差不值得移动候选窗」时，候选窗确实没动——但组合起点若在同一帧锁成
-/// 了新坐标，后续任何一次 reshow 都会把候选窗拉过去（reshow 时位置取 `cs`），那一跳只是
-/// **推迟到了下一个字母**。微信实测：首显 537、组合起点锁 517、settle 吸收 20px 让候选窗
-/// 留在 537，第 6 个 d 一触发 reshow 就跳到 517，用户看到的就是「第 6 个字回退」。
+/// 组合起点若在同一帧锁成了新坐标，后续任何一次 reshow 都会把候选窗拉过去（reshow 位置取
+/// `cs`），那一跳只是推迟到了下一个字母。
 #[test]
 fn absorbed_drift_does_not_come_back_through_the_composition_start() {
     let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
@@ -1543,14 +1486,11 @@ fn absorbed_drift_does_not_come_back_through_the_composition_start() {
     );
 }
 
-/// ★★★ 首显位置整个错掉时，组合起点必须能重锁——否则候选窗再也回不来。
+/// 首显位置整个错掉时，组合起点必须能重锁，否则候选窗再也回不来。
 ///
-/// 「组合起点本组合内不再更新」在首显位置本来就对时是必要的（挡住宿主那些随输入右移的
-/// compStart），但它是个**不可撤销的决定，建立在一个不保证正确的输入上**：陈旧的空闲上报
-/// （微信删除字符后不重新上报，实测差 537px）、上一个单元格的坐标（WPS 277px）、点击移光标
-/// 后滞后一拍的上报（EverEdit 447px）都会把它锁在错处，此后 reshow 判出多大的偏移都没用。
-///
-/// 判据是**量级**不是方向：字宽差异恒在一个行高上下，真实错位差一个数量级。
+/// 「组合起点本组合内不再更新」是建立在不保证正确的输入上的不可撤销决定：陈旧的空闲上报、
+/// 上一个单元格的坐标、滞后一拍的上报都会把它锁在错处。
+/// 判据是量级不是方向：字宽差异恒在一个行高上下，真实错位差一个数量级。
 #[test]
 fn a_grossly_wrong_first_show_can_relock_the_composition_start() {
     // QQ 修复是显式 per-app 帧对保护，未开启时大偏移逃生阀必须保持原行为：无论宿主
@@ -1601,13 +1541,11 @@ fn a_grossly_wrong_first_show_can_relock_the_composition_start() {
     }
 }
 
-/// ★★★ QQNT 的嵌入组合会在同一按键后依次上报两种 TSF 坐标：selection 暂时无效时，
-/// DLL 用稳定的组合起点降级成 caret（`TSF_COMPOSITION`）；紧接着 selection 恢复，caret
-/// 回到正在向右增长的当前插入点（`TSF_SELECTION`），而 reported compStart 始终没动。
+/// QQNT 的嵌入组合在同一按键后依次上报起点降级帧（`TSF_COMPOSITION`）与 selection 帧
+/// （`TSF_SELECTION`），而 reported compStart 始终没动。
 ///
-/// 长拼音令「当前插入点 - 组合起点」自然超过 3 个行高后，若大偏移逃生阀拿 caret 偏移
-/// 判断“组合起点是否锁错”，两种帧就会把锚点反复重锁成 `start → selection → start`，
-/// 候选窗随之左右闪烁。组合跨度不是起点错误；reported compStart 没动就必须继续钉住。
+/// 长拼音的组合跨度超过 3 个行高后，若逃生阀拿 caret 偏移判「起点锁错」，锚点会反复重锁、
+/// 候选窗左右闪烁。组合跨度不是起点错误；reported compStart 没动就必须继续钉住。
 #[test]
 fn long_qq_composition_does_not_oscillate_between_start_and_selection() {
     const START_X: i32 = 598;
@@ -1680,18 +1618,11 @@ fn long_qq_composition_does_not_oscillate_between_start_and_selection() {
     }
 }
 
-/// ★★★ `composition_start` 与「宿主报的组合起点」是两个量，判据只能问后者。
+/// `composition_start` 与「宿主报的组合起点」是两个量，判据只能问后者。
 ///
-/// QQ 实测（2026-09-05 09:51:12~15，输入 `yibanqing`）：组合开始**前**宿主报的是空输入框
-/// 的裸 caret `x=2268 y=1072 h=38`，组合一开始度量就变成 `y=1070 h=34`（基线上移 2px）。
-/// 首显走空闲缓存路径，把 `composition_start` 锁成了 (2266,1072)；而宿主此后每一帧如实
-/// 上报的 compStart 全程恒为 (2268,1070)，一次都没动过。
-///
-/// 两者差 (2,2)。若判据写成「`cs` 等于 reported compStart」，这 2px 就让整条保护失效：
-/// 打到第 9 个字母时 caret 走到 2378，相对锚点 110px 越过 `3 * 34 = 102` 的逃生阀阈值，
-/// 锚点被重锁到 2378（候选窗蹦到组合末尾），下一帧降级 caret 回到 2268 又反向重锁——
-/// 用户看到的就是「输入到最后一个字符时候选窗跳到末尾」。
-///
+/// QQ 组合开始前后度量会变（基线上移约 2px），首显走空闲缓存锁下的 `composition_start`
+/// 与宿主此后恒定上报的 compStart 差几个像素。判据若写成「`cs` 等于 reported compStart」，
+/// 这点差就让保护失效，长拼音末尾时锚点被重锁到组合末端。
 /// 正确的判据是问宿主自己前后是否改口，与我方锁了什么无关。
 #[test]
 fn qq_reported_start_wins_even_when_locked_anchor_differs_by_metrics() {
@@ -1772,16 +1703,11 @@ fn qq_reported_start_wins_even_when_locked_anchor_differs_by_metrics() {
     );
 }
 
-/// ★★★ 宿主**改口**时，重锁目标必须是它新报的起点，不是当前 caret。
+/// 宿主改口时，重锁目标必须是它新报的起点，不是当前 caret。
 ///
-/// QQ 实测（2026-09-05 10:35:38，长拼音打到输入框变高）：内容变长使整个输入区上移 68px，
-/// 宿主如实把组合起点从 (1832,1674) 改报成 (1832,1606)——**x 一点没动**，只是行位置变了。
-/// `composition_start_pair_guard` 的判据是「宿主前后两帧报同一个起点」，这次 y 变化让它
-/// 不成立，于是落进大偏移逃生阀的重锁分支；而该分支的默认目标是**当前 caret**（组合末端
-/// 2446），锚点因此被重锁到离真起点 614px 的地方。此后宿主一直如实报 (1832,1606)，guard
-/// 反过来把这个错锚点稳稳钉住——用户看到的是「打到很长时窗口挤到一边，删除也回不来」。
-///
-/// 对已声明如实上报的宿主，宿主手里就有正确答案，不该扔掉它去拿 caret 猜。
+/// 输入框变高时 QQ 如实改报 compStart（x 不变、y 随框移动），pair guard 不成立而落进逃生阀；
+/// 该分支默认目标是当前 caret（组合末端），重锁后 guard 反而把错锚点钉住。
+/// 对已声明如实上报的宿主，宿主手里就有正确答案，不该拿 caret 猜。
 #[test]
 fn a_trusted_host_changing_its_reported_start_relocks_to_that_start_not_the_caret() {
     const START_X: i32 = 1832;
@@ -1855,7 +1781,7 @@ fn a_trusted_host_changing_its_reported_start_relocks_to_that_start_not_the_care
     );
 }
 
-/// 同一条逃生阀，**没有** per-app 声明的宿主必须保持原行为：重锁到当前 caret。
+/// 同一条逃生阀，没有 per-app 声明的宿主必须保持原行为：重锁到当前 caret。
 ///
 /// 微信/WPS/EverEdit 报的 compStart 有陈旧、有坐标系混用的历史，信它等于关掉逃生阀。
 #[test]
@@ -1904,17 +1830,10 @@ fn an_untrusted_host_still_relocks_to_the_caret() {
     );
 }
 
-/// ★★★ 有组合矩形时，锚点取它的左下角——跨行自动落到**最后一行行首**。
+/// 有组合矩形时，锚点取它的左下角——跨行自动落到最后一行行首。
 ///
-/// 2026-09-05 三宿主真机（各自打到组合跨两行）：
-/// | 宿主 | compRect | caret | compStart |
-/// |---|---|---|---|
-/// | QQ | (1876,1072,1892,1146) | (1892,1146) | (1876,1106) |
-/// | 飞书 | (2678,1602,2692,1678) | (2692,1678) | (2678,1634) |
-/// | 记事本 | (1578,886,1898,1002) | (1898,1002) | (1578,960) |
-///
-/// 三家的 `compStart.y` 全部停在**上一行**（组合 range 折叠到起点的必然结果），
-/// 只有矩形的 `bottom` 跟到了当前行。候选窗「换行后回不去、删除也回不来」的根就在这里。
+/// QQ、飞书、记事本跨行后 `compStart.y` 都停在上一行，只有矩形的 `bottom` 跟到当前行
+/// （见 `docs/architecture/caret-position-host-compat-notes.md` 的「组合矩形的三种形态」）。
 #[test]
 fn composition_rect_anchors_to_the_last_line_start_across_hosts() {
     // (宿主, rect, caret, 旧 compStart)
@@ -1992,9 +1911,7 @@ fn composition_rect_anchors_to_the_last_line_start_across_hosts() {
 }
 
 /// 单行组合：矩形的左下角与组合起点等价，锚点不因逐字输入右移。
-///
-/// 这条守的是「矩形每帧更新」不会退化成「跟着 caret 跑」——矩形的 `left` 恒定
-/// （QQ 实测 526 帧全部 1876、记事本 482 帧全部 1578），只有 `right` 随输入增长。
+/// 守的是「矩形每帧更新」不会退化成「跟着 caret 跑」——矩形的 `left` 恒定，只有 `right` 增长。
 #[test]
 fn composition_rect_left_stays_put_while_typing_on_one_line() {
     const LEFT: i32 = 1876;
@@ -2051,24 +1968,11 @@ fn composition_rect_left_stays_put_while_typing_on_one_line() {
     );
 }
 
-/// 上一条的反面：宿主把 `left` 报错时，同组合同行内**不得**跟着它走。
+/// 上一条的反面：宿主把 `left` 报错时，同组合同行内不得跟着它走。
 ///
-/// 2026-09-17 靶机 192.168.5.30，Tabby（Electron 终端，组合层是 xterm.js）一次组合
-/// `w → wv → wvs → wvsr` 的原始帧：
-///
-/// | buf | compRect | w | left |
-/// |---|---|---|---|
-/// | `w` | (379,1174,393,1205) | 14 | 379 |
-/// | `wv` | (381,1174,405,1205) | 24 | **381** |
-/// | `wvs` | (384,1174,417,1205) | 33 | **384** |
-/// | `wvsr` | (390,1174,429,1205) | 39 | **390** |
-///
-/// 组合内容只增不减，起点按定义不动，这家却一路右移，四码推了 11px——用户报的
-/// 「输入到 2/3 码时候选窗抖动，几乎百分百」就是它。同一份日志里 Tabby 161 次重锁，
-/// 而 Chrome / VS Code / 记事本 **0 次**。
-///
-/// ★ 与上一条测试是**一对**：上一条守「left 稳定的宿主照常跟随」，本条守「left 不稳定
-/// 的宿主不跟」。两条都在，判据才被夹住——只留任一条，把判据写成恒真或恒假都能绿。
+/// Tabby（xterm.js）组合内容只增不减，`left` 却逐码右移，跟随就会让候选窗抖动（见
+/// `docs/architecture/caret-position-host-compat-notes.md` 的 H 类）。与上一条是一对：
+/// 只留任一条，把判据写成恒真或恒假都能绿。
 #[test]
 fn composition_rect_left_that_drifts_within_one_composition_is_pinned() {
     const TOP: i32 = 1174;
@@ -2150,16 +2054,11 @@ fn composition_rect_left_that_drifts_within_one_composition_is_pinned() {
     );
 }
 
-/// ★★ 锁定之后矩形仍是「每帧如实」——别的写入者改过 `cs`，下一帧矩形必须把它纠回来。
+/// 锁定之后矩形仍是「每帧如实」：别的写入者改过 `cs`，下一帧矩形必须把它纠回来。
 ///
-/// `composition_start` 在同一次组合里还有两个写入者，条件都是「本帧没有可信矩形」：
-/// `shown_anchor` 回灌（写进「候选窗画在哪」）与大偏移逃生阀（写进当前 caret ＝ 组合**末端**）。
-/// 两处的注释都写明自己敢这么做的前提是「矩形每帧如实到达，锁不错也就无需逃生」。
-///
-/// 若锁定分支只是「什么都不做」，那么全零矩形帧（组合 range 的 `GetTextExt` 回
-/// `TS_E_NOLAYOUT`）让逃生阀武装一次，`cs` 就被改成组合末端，**本行余下整段再也纠不回来**
-/// ——而改动前每帧无条件覆盖时下一帧矩形会自动自愈。所以锁存的是**值**：锁定分支把 `cs`
-/// 恢复成本轮锚点，那个前提重新成立。
+/// `composition_start` 在本组合里还有两个写入者（`shown_anchor` 回灌与大偏移逃生阀），
+/// 都以「矩形每帧如实到达」为前提。锁定分支若什么都不做，一帧全零矩形让逃生阀把 `cs` 改成
+/// 组合末端后，本行余下整段再也纠不回来；所以锁存的是值，锁定分支把 `cs` 恢复成本轮锚点。
 #[test]
 fn the_locked_rect_anchor_still_corrects_cs_after_another_writer_touched_it() {
     const TOP: i32 = 1174;
@@ -2206,7 +2105,7 @@ fn the_locked_rect_anchor_still_corrects_cs_after_another_writer_touched_it() {
 
     // 下一帧矩形照常到达（宿主报的 left 仍在漂移）
     c.handle_caret_update(&frame(384, 417));
-    // ⚠ 先取值再断言：`Mutex` 非重入，同一表达式里锁两次会挂住（见另一条测试的同款注释）
+    // 先取值再断言：`Mutex` 非重入，同一表达式里锁两次会挂住（见另一条测试的同款注释）
     let cs = *c.composition_start.lock().unwrap();
     assert_eq!(
         (cs.0, cs.1),
@@ -2215,12 +2114,10 @@ fn the_locked_rect_anchor_still_corrects_cs_after_another_writer_touched_it() {
     );
 }
 
-/// 组合结束后，矩形必须能**重新**给锚点——两把锁各清各的，漏清就钉死在上一组合。
+/// 组合结束后，矩形必须能重新给锚点——两把锁各清各的，漏清就钉死在上一组合。
 ///
-/// ⚠ 这条守的是 `locked_rect_anchor` 与 `composition_start.2` 是两个状态：后者由
-/// 路径 A（DLL 上报 compStart）持有，且新组合第一帧的 compStart 常是陈旧值——Tabby
-/// 实测路径 A 锁进上一组合末端 `453`，靠矩形修正成真起点 `442`（19:50:50.018 那帧）。
-/// 把矩形的锁并到 `cs.2` 上，这次修正就没了，候选窗错位 11px 且不自愈。
+/// `locked_rect_anchor` 与 `composition_start.2` 是两个状态：后者由 DLL 上报的 compStart
+/// 持有，新组合首帧常是陈旧值，要靠矩形修正。把两把锁合并，这次修正就没了。
 #[test]
 fn a_new_composition_lets_the_rect_anchor_again() {
     const TOP: i32 = 1174;
@@ -2276,7 +2173,7 @@ fn a_new_composition_lets_the_rect_anchor_again() {
         st.input_buffer = "x".into();
     }
     frame(&c, 442, 453);
-    // ⚠ 先取值再断言：`Mutex` 非重入，把两个 `lock()` 写进同一个表达式会死锁
+    // 先取值再断言：`Mutex` 非重入，把两个 `lock()` 写进同一个表达式会死锁
     // （guard 在表达式求值结束前不释放）——本测试初版就是这么挂住的。
     let cs = *c.composition_start.lock().unwrap();
     assert_eq!(
@@ -2286,10 +2183,9 @@ fn a_new_composition_lets_the_rect_anchor_again() {
     );
 }
 
-/// Word 按键期同步取坐标被 TS_E_SYNCHRONOUS 拒绝后，DLL 回退发出的 `gui_caret` 帧
-/// 是一个固定的陈旧位置（论坛 t377 日志：真插入点 (1488,541)，GUI 光标恒为 (1434,272)）。
-/// 本组合已收到过 TSF 域坐标后，这类帧只能是噪声：不得改写缓存、重锁组合起点、重显候选窗，
-/// 否则候选窗在两者之间上下来回跳约 270px。
+/// Word 按键期同步取坐标被拒后，DLL 回退发出的 `gui_caret` 帧是固定的陈旧位置。本组合已
+/// 收到过 TSF 域坐标后，这类帧只能是噪声：不得改写缓存、重锁组合起点、重显候选窗，
+/// 否则候选窗在两者之间上下来回跳。
 #[test]
 fn a_gui_caret_frame_cannot_relocate_a_composition_that_has_tsf_coordinates() {
     const TOP: i32 = 518;
@@ -2366,9 +2262,7 @@ fn a_gui_caret_frame_cannot_relocate_a_composition_that_has_tsf_coordinates() {
 }
 
 /// 只返回首行的宿主：`caret.y` 会大于 `rect.bottom` ⇒ 判定不可信 ⇒ 回退既有逻辑。
-///
-/// 目前实测三家宿主都返回真包围盒（`caret.y` 恒等于 `bottom`），但规范不保证，
-/// 实现也可能变。这条守的是「遇到那种宿主不会更糟」，而不是某个已知宿主的行为。
+/// 已知宿主都返回真包围盒，但规范不保证；这条守「遇到那种宿主不会更糟」。
 #[test]
 fn a_first_line_only_rect_is_distrusted_and_falls_back() {
     const LINE_H: i32 = 34;
@@ -2376,7 +2270,7 @@ fn a_first_line_only_rect_is_distrusted_and_falls_back() {
     let rect = (1876, 1072, 2400, 1106);
     let caret = (1892, 1146);
 
-    // ★ 起始锚点**刻意不等于**矩形左下角：否则「采信矩形」与「回退既有逻辑」
+    // 起始锚点刻意不等于矩形左下角：否则「采信矩形」与「回退既有逻辑」
     // 会产生同一个结果，测试区分不出两者，等于什么都没测。
     const START: (i32, i32) = (1500, 1106);
 
@@ -2421,24 +2315,12 @@ fn a_first_line_only_rect_is_distrusted_and_falls_back() {
     );
 }
 
-/// ★★★ 「插入点形态」的宿主必须整条回退——它们的矩形不是范围，是一个点。
+/// 「插入点形态」的宿主必须整条回退——它们的矩形不是范围，是一个点（宽 0~2px，`left`
+/// 恒等于 caret.x 并跟着插入点走：WPS 文字、WPS 表格、Word cached 帧）。
 ///
-/// 2026-09-05 实测三家，形态一致：矩形宽度只有光标那么宽，`left` 恒等于 caret.x，
-/// 并跟着插入点走。
-///
-/// | 宿主 | rect | w | caret.x |
-/// |---|---|---|---|
-/// | WPS 文字 | (1603,617,1605,651) | 2 | 1603 |
-/// | WPS 表格 et | (1809,961,1810,997) | 1 | 1809（2677 帧 w 恒为 1）|
-/// | Word cached 帧 | (1758,653,1758,697) | 0 | 1758 |
-///
-/// 判据取「组合起点必须在插入点**左边**」：组合已经有内容，起点与插入点之间就隔着
-/// 这些内容的宽度。对照真包围盒——组合最短时也隔着一个字符（QQ / 记事本首帧 w=16、
-/// Word 首帧 w=17）。
-///
-/// ⚠ 回退之后走既有锚点逻辑，那条路对这些宿主本就是调好的：WPS 文字靠「组合起点本
-/// 组合内不再更新」钉住候选窗，表格类每字换一次 docMgr、候选窗随之跟到新单元格。
-/// 矩形若每帧更新反而拆了前者的保护——WPS 出现的正是这个回归。
+/// 回退之后走既有锚点逻辑，那条路对这些宿主本就是调好的：WPS 文字靠「组合起点本组合内
+/// 不再更新」钉住，表格类每字换一次 docMgr、候选窗随之跟到新单元格。矩形若每帧更新反而
+/// 拆了前者的保护。
 #[test]
 fn an_insertion_point_shaped_rect_is_distrusted_for_every_host() {
     // (宿主, 矩形宽度, 起始 x, 行顶, 行底, 行高)
@@ -2500,11 +2382,8 @@ fn an_insertion_point_shaped_rect_is_distrusted_for_every_host() {
     }
 }
 
-/// Word 的真包围盒仍照常采信——上一条挡掉的只是它那些退化的 cached 帧。
-///
-/// Word 实测 selection 帧 rect=(1699,701,2710,792) w=1011 h=91（跨两行），
-/// caret=(2710,792)、compStart=(1699,745)：compStart 停在第一行，只有矩形的左下角
-/// (1699,792) 是第二行行首。
+/// Word 的真包围盒仍照常采信——上一条挡掉的只是它那些退化的 cached 帧。跨两行时
+/// compStart 停在第一行，只有矩形的左下角是第二行行首。
 #[test]
 fn word_real_bounding_box_is_still_trusted() {
     const LINE_H: i32 = 43;
@@ -2551,17 +2430,11 @@ fn word_real_bounding_box_is_still_trusted() {
     );
 }
 
-/// ★★★ 布局退化的整帧不可信——不只是它的矩形，连 caret 也不能拿去重锁。
+/// 布局退化的整帧不可信——不只是它的矩形，连 caret 也不能拿去重锁。
 ///
-/// Word 实测（2026-09-05 14:56，长组合跨行后继续输入）两种帧交替到达：
-///   src=1 selection rect=(1952,701,1985,841) w=33 caret=(1985,841) compStart=(1952,745)
-///   src=3 cached    rect=(1758,653,1758,697) w=0  caret=(1758,697) compStart=(1758,697)
-/// cached 帧的三个坐标全是另一处的陈旧值，与 selection 帧差 144px。矩形判据已经挡掉
-/// 了它的矩形，但**逃生阀仍会拿它的 caret 重锁**——两帧交替，锚点就在两处之间来回跳，
-/// 表现为候选窗抖动。
-///
-/// `left == right` 是「这一帧什么都没算出来」的标志：同一次 GetTextExt 没算出布局，
-/// 那么同帧的 caret / compStart 出自同一次查询，一并不可信。
+/// Word 的 selection 帧与 cached 帧（三个坐标全是另一处的陈旧值）交替到达时，逃生阀若拿
+/// cached 帧的 caret 重锁，锚点就在两处之间来回跳。`left == right` 表示这次 GetTextExt
+/// 没算出布局，同帧的 caret / compStart 一并不可信。
 #[test]
 fn a_degenerate_layout_frame_cannot_relock_via_the_escape_valve() {
     const LINE_H: i32 = 43;
@@ -2635,17 +2508,11 @@ fn a_degenerate_layout_frame_cannot_relock_via_the_escape_valve() {
     );
 }
 
-/// ★★★ 「起点跟着 caret 走」的宿主必须抑制逃生阀，否则锚点被一路推走且回不来。
+/// 「起点跟着 caret 走」的宿主必须抑制逃生阀，否则锚点被一路推走且回不来。
 ///
-/// WPS 实测（2026-09-05 14:56）compStart 每帧与 caret 同步递增，打字时 caret 持续
-/// 偏离已锁锚点，逃生阀反复重锁：
-///   14:56:31 (1830,861) → (1615,903)
-///   14:56:34 (1615,903) → (2591,861)
-/// 锚点从真实起点 1830 被推到 2591。等到删除时**逐字回退每步只有 15~30px**，永远够
-/// 不到 3 倍行高的阈值，锚点永久卡在 2591 —— 候选窗离组合区 868px（用户截图）。
-///
-/// ★ 与 QQ 退格问题同构：逃生阀只认单帧大跳，删除却是小步累积的。推过去容易，回来
-/// 不可能。对这类宿主它不是保护，是错位的制造者。
+/// WPS 的 compStart 每帧与 caret 同步递增，打字时逃生阀反复重锁把锚点推远；删除时逐字回退
+/// 每步只有十几像素，永远够不到 3 倍行高的阈值，锚点永久卡住。逃生阀只认单帧大跳，
+/// 删除却是小步累积的。
 #[test]
 fn an_insertion_point_host_keeps_its_first_anchor_through_typing_and_deleting() {
     const TOP: i32 = 827;
@@ -2724,14 +2591,10 @@ fn an_insertion_point_host_keeps_its_first_anchor_through_typing_and_deleting() 
     );
 }
 
-/// ★★★ 钉住的是**列**不是行：跨行时锚点的 y 要跟到 caret 所在行。
+/// 钉住的是列不是行：跨行时锚点的 y 要跟到 caret 所在行。
 ///
-/// WPS 实测（2026-09-05 21:11，调试浮窗截图）：组合跨两行时
-///   anchor=(1647,1140) 停在第一行、caret=(2472,1182) 已在第二行（差 42 = 一行高），
-/// 候选窗因此画在第一行下方、正好压住第二行。
-///
-/// 这类宿主给不出组合范围矩形，无从知道「最后一行的行首在哪」；但 caret.y 已经
-/// 说明了当前插入点在哪一行——沿用钉住的 x、只换 y，候选窗就落到正确的行上。
+/// 这类宿主给不出组合矩形，不知道最后一行的行首在哪；但 caret.y 说明了当前在哪一行，
+/// 沿用钉住的 x、只换 y，候选窗就落到正确的行上。
 #[test]
 fn a_pinned_anchor_follows_the_caret_row_across_a_wrap() {
     const PINNED_X: i32 = 1647;
@@ -2862,17 +2725,10 @@ fn row_following_is_per_app_too() {
     );
 }
 
-/// ★★★ 换行后 caret 落在 `rect.left` 上，不得据此把真范围误判成插入点。
+/// 换行后 caret 落在 `rect.left` 上，不得据此把真范围误判成插入点。
 ///
-/// Excel 实测（2026-09-05 21:50，调试浮窗截图，先换行再删除）：
-///   rect=(2524,797,2926,834) **w=402 的真包围盒**
-///   caret=(2524,834) 落在它的**左下角**——换行后插入点回到行首，恰好等于 rect.left
-///   anchor=(2915,834) ← 陈旧的 composition_start，候选窗停在右端、删除回不来
-///
-/// ⛔ 判据的前一版写成 `left >= caret.x`（想表达「组合起点必须在插入点左边」），
-/// 那个前提**只在单行成立**：一旦换行，caret 回到行首就恰好等于 left，判据自己把
-/// 自己否掉。改成看**宽度**——光标宽 0~2px、真包围盒最窄一个字符 16~17px，
-/// 中间隔着一个数量级。
+/// 「组合起点必须在插入点左边」（`left >= caret.x` 判插入点）只在单行成立：换行后 caret
+/// 回到行首恰好等于 left。所以判据看宽度——光标 0~2px，真包围盒最窄一个字符 16~17px。
 #[test]
 fn a_wrapped_caret_at_rect_left_is_still_a_real_bounding_box() {
     const LINE_H: i32 = 37;
@@ -2922,9 +2778,7 @@ fn a_wrapped_caret_at_rect_left_is_still_a_real_bounding_box() {
 }
 
 /// 宽度判据的两侧边界：光标宽度级别判为插入点，一个字符宽判为真范围。
-///
-/// 阈值取自实测的数量级差——光标 0~2px（Word cached 0 / WPS 表格 1 / WPS 文字 2），
-/// 真包围盒最窄 16~17px（QQ / 记事本 / Word 首帧）。两侧都留了 4 倍以上余量。
+/// 阈值两侧都留了 4 倍以上余量（光标 0~2px，真包围盒最窄 16~17px）。
 #[test]
 fn insertion_point_width_threshold_separates_the_two_populations() {
     const LINE_H: i32 = 34;
@@ -2935,10 +2789,8 @@ fn insertion_point_width_threshold_separates_the_two_populations() {
     for (w, should_trust) in cases {
         let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
         set_mode(&c, wind_config::app_compat::FirstShowMode::Instant);
-        // ⚠ 首显位置也要设在 9999：它同时决定 shown_anchor 与 caret_baseline。
-        // 若首显在 1876，下面那帧的 dx 就是 0，会走**微移路径**并把 shown_anchor
-        // 回灌进 cs——那样无论宽度判据怎么判，cs 都会变成 1876，测试测的就不是
-        // 宽度判据了（首版正是这么假绿的）。
+        // 首显位置也要设在 9999：它同时决定 shown_anchor 与 caret_baseline。若首显在 1876，
+        // 下面那帧 dx 为 0 会走微移路径并把 shown_anchor 回灌进 cs，测的就不是宽度判据了。
         *c.last_valid_caret.lock().unwrap() = (9999, BOTTOM, LINE_H);
         c.last_sane_caret_height
             .store(LINE_H, std::sync::atomic::Ordering::Relaxed);
@@ -2980,10 +2832,8 @@ fn insertion_point_width_threshold_separates_the_two_populations() {
     }
 }
 
-/// `composition_start_pair_guard` 必须是按宿主开启的窄保护，默认行为一字不差。
-///
-/// 同一组 QQ 坐标若没有 compat 证据，协调器无法知道“稳定 compStart”与“陈旧 compStart”
-/// 哪个是真的；此时必须保留已有 caret 大偏移逃生阀，不能让单宿主修复改变全局语义。
+/// `composition_start_pair_guard` 必须是按宿主开启的窄保护，默认行为一字不差：
+/// 没有 compat 证据时协调器分不清稳定与陈旧的 compStart，必须保留大偏移逃生阀。
 #[test]
 fn composition_start_pair_guard_is_per_app_and_off_by_default() {
     const START_X: i32 = 598;
@@ -3086,11 +2936,10 @@ fn composition_start_pair_guard_never_relocks_to_invalid_reported_start() {
     );
 }
 
-/// ★★ 行高「尚未观测到」与「被单帧退化值污染」是两种不同的失效方式，两者都不能让容差塌缩。
+/// 行高「尚未观测到」与「被单帧退化值污染」是两种失效方式，都不能让容差塌缩。
 ///
-/// 写入闸 `> 1` 只挡住了后者。若初值是 0，服务刚启动、还没收到任何非退化帧时，两个消费点
-/// 会同时落到下限 3px：settle 那边表现为「每次自动上屏后回退一个字宽」，重锁阈值那边表现为
-/// 「任何微移都重锁组合起点」——后者等于把组合起点的稳定性整个取消掉。
+/// 写入闸 `> 1` 只挡住了后者。初值若是 0，服务刚启动时 settle 与重锁阈值都会落到下限 3px：
+/// 前者每次自动上屏回退一个字宽，后者任何微移都重锁组合起点。
 #[test]
 fn line_height_has_a_conservative_floor_before_any_observation() {
     let c = coord();
@@ -3117,18 +2966,11 @@ fn line_height_has_a_conservative_floor_before_any_observation() {
     );
 }
 
-/// ⛔ **方向性守门：上屏不得清 `caret_cache_verified`。**
+/// 方向性守门：上屏不得清 `caret_cache_verified`。
 ///
-/// 动机看起来很对：上屏改变了插入点，缓存里那份是上屏前的（五笔满码自动上屏后立刻开新
-/// 组合时，缓存是 4 个字母末尾，而汉字比它们窄 20px），清掉「缓存可信」让首显改等权威
-/// 坐标正好治它。**试过，实测灾难。**
-///
-/// 代价是那个死结的第四次复发：**兜底超时长于组合寿命 ⇒ 被 `reset_first_show` 作废而
-/// 永不到期**。清了之后下一个组合走 600ms 长兜底，而长按 d 时每个组合只活 ~128ms ⇒
-/// 微信实测长按十几秒打出几十个字，候选窗位置只变了 4 次、一直停在几百像素之外。
-///
-/// ★ 该宿主上这个死结**无解**：权威坐标 190ms 才到，组合寿命 128ms——「等得到正确坐标」
-/// 与「在组合内显示出来」互斥。所以这不是「换个超时值」能解决的，是方向本身要否掉。
+/// 动机看似合理（上屏改变了插入点），但清了之后下一个组合走 600ms 长兜底，而长按时每个
+/// 组合只活一百多毫秒，被 `reset_first_show` 作废而永不到期，候选窗长时间停在旧位置。
+/// 权威坐标比组合寿命还晚到的宿主上这个死结无解，否掉的是方向而不是超时值。
 #[test]
 fn commit_must_not_invalidate_the_cache() {
     for guard in [false, true] {
@@ -3148,11 +2990,10 @@ fn commit_must_not_invalidate_the_cache() {
     }
 }
 
-/// ★★ 组合起点钉住位置后，同一个偏差不得反复触发校正。
+/// 组合起点钉住位置后，同一个偏差不得反复触发校正。
 ///
-/// 基准记的是「上一次被认可的**插入点**」，不是「候选窗画在哪」。若它跟着显示位置走，
-/// 而显示位置被组合起点钉住不动，基准与宿主报的插入点之间就有个恒定差值，于是每来一帧
-/// 都判定「要校正」——微信实测同一个 dx=14 连判十几次，每次都走一遍完整下发。
+/// 基准记的是「上一次被认可的插入点」，不是「候选窗画在哪」；跟着显示位置走的话，
+/// 基准与宿主插入点之间有恒定差值，每来一帧都判「要校正」。
 #[test]
 fn same_coordinate_reported_twice_reshows_only_once() {
     let (c, rx) = Coordinator::new_headless_with_ui(Config::default(), None);
@@ -3190,16 +3031,11 @@ fn same_coordinate_reported_twice_reshows_only_once() {
     );
 }
 
-/// ★★★ probe **可信**的宿主不得走 idle_anchor 抢跑，也不得抢锁组合起点。
+/// probe 可信的宿主不得走 idle_anchor 抢跑，也不得抢锁组合起点。
 ///
-/// 「组合前空闲上报可信」只在 probe 不可信的宿主上成立，不是普遍前提。EverEdit 与微信
-/// 恰好相反：它点击移光标后既不发 caret_update 也不发 selection_changed，缓存与 verified
-/// 都停在上一次 ⇒ 空闲上报**滞后一拍**；而它的 probe 在按键后 1ms 就给出了正确位置。
-/// 拿空闲上报抢跑 ⇒ 候选窗恒慢一拍（实测差 447px），且抢锁的组合起点会让随后正确判出
-/// 447px 的 reshow 也救不回来——位置纹丝不动。
-///
-/// probe 可信时等那 25ms 让 probe 说话即可：它是宿主在**本次组合**里现测的，而空闲上报
-/// 是按键**之前**的。
+/// 「组合前空闲上报可信」只在 probe 不可信的宿主上成立。EverEdit 点击移光标后不发任何
+/// 通知，空闲上报滞后一拍，而它的 probe 在按键后立即给出正确位置；抢跑会让候选窗恒慢一拍，
+/// 抢锁的组合起点还会让随后正确的 reshow 也救不回来。probe 可信时等那 25ms 即可。
 #[test]
 fn trusted_probe_host_waits_instead_of_using_the_idle_report() {
     let c = fast_coord(true); // 未配 stale_probe_guard ⇒ probe 可信
@@ -3216,7 +3052,7 @@ fn trusted_probe_host_waits_instead_of_using_the_idle_report() {
     );
 }
 
-/// ★★ 兜底 timer 到期这条路同样要抢锁。它先置 `show_authorized`，`is_first_frame` 已为
+/// 兜底 timer 到期这条路同样要抢锁。它先置 `show_authorized`，`is_first_frame` 已为
 /// false，判据若绑在 `is_first_frame` 上就整条漏掉——微信「焦点后第一个组合」走的正是
 /// 这条（idle_anchor 逃生口被焦点判据挡住），表现为第三个字好了、第二个字仍挪一格。
 #[test]
@@ -3233,7 +3069,7 @@ fn fallback_first_show_also_claims_the_composition_start() {
         *c.pending_first_show.lock().unwrap(),
         "焦点后第一个组合应进入等待，本用例才测得到兜底那条路"
     );
-    // ⚠ token 先 let 绑定再传：写成 fire(*c...lock().unwrap()) 会让临时 MutexGuard
+    // token 先 let 绑定再传：写成 fire(*c...lock().unwrap()) 会让临时 MutexGuard
     // 活到语句结束，而 fire 内部要再锁同一个 Mutex ⇒ 自死锁。
     let token = *c.pending_first_show_token.lock().unwrap();
     c.fire_pending_first_show(token);
@@ -3244,7 +3080,7 @@ fn fallback_first_show_also_claims_the_composition_start() {
     );
 }
 
-/// 反向：其余首显路径**不得**抢锁组合起点。兜底用的是旧缓存、instant 用的是上一轮遗留
+/// 反向：其余首显路径不得抢锁组合起点。兜底用的是旧缓存、instant 用的是上一轮遗留
 /// 坐标，本身就可能是错的；锁进组合起点会让后续 reshow 也救不回来（本组合内不再更新）。
 #[test]
 fn other_first_show_paths_do_not_claim_the_composition_start() {
@@ -3262,7 +3098,7 @@ fn other_first_show_paths_do_not_claim_the_composition_start() {
 fn long_fallback_shows_when_it_finally_expires() {
     let c = fast_coord(false);
     c.arm_pending_first_show();
-    // ⚠ token 必须先 let 绑定再传：写成 `fire(*c...lock().unwrap())` 会让临时 MutexGuard
+    // token 必须先 let 绑定再传：写成 `fire(*c...lock().unwrap())` 会让临时 MutexGuard
     // 活到整个语句结束（Rust 临时值生命周期），而 fire 内部要再锁同一个 Mutex ⇒ 自死锁。
     let token = *c.pending_first_show_token.lock().unwrap();
     c.fire_pending_first_show(token);
@@ -3311,7 +3147,7 @@ fn logged_timeout_matches_actual_arm() {
     );
 }
 
-/// 上屏 / 组合结束必须复位长等待标记——「这一轮已在长等待中」是**每轮独立**的事实，
+/// 上屏 / 组合结束必须复位长等待标记——「这一轮已在长等待中」是每轮独立的事实，
 /// 跨轮残留会让 `already_waiting` 的判据失去意义（当前因 `pending` 同时被复位而侥幸
 /// 不出错，但那是巧合不是设计）。
 #[test]
@@ -3530,20 +3366,13 @@ fn settle_tolerance_applies_only_after_provisional_first_show() {
     );
 }
 
-/// ★★★ `PRE_REFLOW` 探测**绝不作首显的位置来源**，哪怕它满足全部原判据。
+/// `PRE_REFLOW` 探测绝不作首显的位置来源，哪怕它满足全部原判据。
 ///
-/// （它**可以**当否决基准，那是相反方向的用法，见
-/// `a_probe_equal_to_this_rounds_pre_reflow_frame_must_not_drive_first_show`。）
-///
-/// 2026-08-01 的翻车现场：这条来源（组合刚启动时的异步取值，多数宿主内联执行 ⇒ 拿到
-/// reflow **前**的坐标）一度走普通 probe 通道，被判据采信提前首显，随后真权威坐标的
-/// 16px 偏差又被 settle 容差吞掉，**错位就此固定**——比不优化更稳定地错。
-///
-/// 2026-09-02 重新放开它，是因为连续快速上屏时它是唯一的位置来源（宿主的
-/// OnLayoutChange 被 debounce 压住，整段没有权威坐标，缓存差 456px）。但放开的是
-/// **用途**不是来源：只刷新缓存，不做决策。本测试钉死这条边界。
-///
-/// 下面的对照组用**同一份坐标**、只改 `source`，证明差别确实来自 source 而非别的条件。
+/// 它是组合刚启动时的异步取值，多数宿主内联执行拿到的是 reflow 前的坐标；拿它首显后，
+/// 真权威坐标的小偏差又会被 settle 吞掉，错位就此固定。它只刷新缓存（连续快速上屏时它是
+/// 唯一的位置来源），不做决策；可以当否决基准，见
+/// `a_probe_equal_to_this_rounds_pre_reflow_frame_must_not_drive_first_show`。
+/// 对照组同坐标只改 `source`。
 #[test]
 fn pre_reflow_probe_refreshes_cache_but_never_drives_first_show() {
     let arm = |source: i32| {
@@ -3586,15 +3415,11 @@ fn pre_reflow_probe_refreshes_cache_but_never_drives_first_show() {
     );
 }
 
-/// ★★ A2-42（t210）：兜底首显要画在 pre_reflow 帧报的**组合起点**，不能画在它的 caret。
+/// 兜底首显要画在 pre_reflow 帧报的组合起点，不能画在它的 caret。
 ///
-/// 2026-09-24 靶机记事本实录（fast 档，probe 可信，OnLayoutChange 在 25ms 内没来）：
-///   09.464  probe(pre_reflow) caret=1151 compStart=1139   ← 首字母已落进编辑区
-///   09.485  兜底到期 → 首显 anchor=caret pos=1151          ← 组合起点此时还没锁
-///   09.521  caret_update 带组合矩形 (1139..1151) → 起点锁 1139，settle 吸收（不 reshow）
-///   09.569  第 2 个字母 caret 右移 8px → reshow → anchor=composition_start pos=1139 ← 跳 12px
-/// 有矩形时 settle 不回灌 `shown_anchor`（矩形是真值），所以错的是首显那一刻的位置本身。
-/// pre_reflow 的 compStart 是按键前的插入点，重排不挪它；缓存里那份 caret 已经在它右边一格。
+/// pre_reflow 的 compStart 是按键前的插入点，重排不挪它；那时 caret 已在它右边一格。
+/// 有矩形时 settle 不回灌 `shown_anchor`（矩形是真值），首显若画在 caret，第 2 个字母
+/// reshow 到组合起点时就会跳一下。
 #[test]
 fn fallback_first_show_uses_the_pre_reflow_composition_start() {
     let run = |cs_in_probe: (i32, i32)| {
@@ -3651,24 +3476,11 @@ fn fallback_first_show_uses_the_pre_reflow_composition_start() {
     );
 }
 
-/// probe 与**本轮 `pre_reflow` 帧**逐位相同 ⇒ 宿主还没重排 ⇒ 不得提前首显。
+/// probe 与本轮 `pre_reflow` 帧逐位相同 ⇒ 宿主还没重排 ⇒ 不得提前首显。
 ///
-/// 2026-09-17 靶机 192.168.5.30，Tabby 终端行满回绕的原始帧（20:48:31.8xx）：
-///
-/// ```text
-/// 31.851  空闲上报 (378,1205)        ← 换行已完成，真实光标在行首
-/// 31.857  probe(pre_reflow) 1432     ← 行尾陈旧值，DLL 标了「重排前」
-/// 31.863  probe 1432 → 提前首显      ← 判据 1 的基准是上一轮权威 1401，1432≠1401 ⇒ 放行
-/// 31.863  首显 pos=(1413)
-/// 31.865  probe 369                  ← 真值，晚了 2ms
-/// 31.930  reshow dx=1044             ← 候选窗横穿屏幕
-/// ```
-///
-/// 换行让陈旧值与上一轮权威天然不等（行尾 vs 它左边一个字符宽），判据 1 在这里必然失效。
+/// 终端行满回绕时，陈旧的行尾值与上一轮权威天然不等，判据 1 必然放行，候选窗随后横穿屏幕。
 /// 判据 2 换了基准：同一轮里 DLL 已经声明过哪个坐标是重排前的。
-///
-/// ★ 对照组用**同一份坐标**、只改 `last_pre_reflow_probe` 有没有记过，证明差别来自这个
-/// 基准而不是别的条件。
+/// 对照组同坐标、只改 `last_pre_reflow_probe` 有没有记过。
 #[test]
 fn a_probe_equal_to_this_rounds_pre_reflow_frame_must_not_drive_first_show() {
     // 靶机原始值
@@ -3720,12 +3532,9 @@ fn a_probe_equal_to_this_rounds_pre_reflow_frame_must_not_drive_first_show() {
     );
 }
 
-/// 否决基准必须挡在**连打快路径之前**——「行满回绕」正是连打到行尾才发生的事件。
-///
-/// `fast_typing_window_ms` 出厂 100ms，终端连打的按键间隔 30~60ms 必然落进去，而快路径
-/// 不比对任何基准就采信首条采样。判据若排在它下游，等于挡不住自己的触发条件。
-/// 同一函数里 `stale_probe_guard` 就是为这个理由放在快路径之前的（并由
-/// `stale_probe_rejected_even_on_fast_typing_path` 钉住），本条是同一类否决判据。
+/// 否决基准必须挡在连打快路径之前——行满回绕正是连打到行尾才发生的事件，而快路径
+/// 不比对任何基准就采信首条采样。同 `stale_probe_guard` 的位置（见
+/// `stale_probe_rejected_even_on_fast_typing_path`）。
 #[test]
 fn the_pre_reflow_baseline_rejects_even_on_the_fast_typing_path() {
     const STALE: (i32, i32) = (1432, 1205);
@@ -3754,11 +3563,8 @@ fn the_pre_reflow_baseline_rejects_even_on_the_fast_typing_path() {
     );
 }
 
-/// 基准要记的是 pre_reflow 的**本帧原值**，与 `absorb_probe_coords` 收没收它无关。
-///
-/// 退化帧（`h<=0`）与 `stale_probe_guard` 宿主的 probe 都不进缓存，但它们同样能回答
-/// 「宿主还停在重排前吗」——而这两类恰恰是最需要否决基准的宿主。按 `absorbed` 过滤会让
-/// 它们一条基准都拿不到。
+/// 基准要记的是 pre_reflow 的本帧原值，与 `absorb_probe_coords` 收没收它无关：退化帧与
+/// `stale_probe_guard` 宿主的 probe 都不进缓存，却恰恰最需要否决基准。
 #[test]
 fn the_pre_reflow_baseline_is_recorded_even_when_the_frame_is_not_absorbed() {
     // stale_probe_guard 宿主：absorb_probe_coords 直接返回 false
@@ -3806,15 +3612,10 @@ fn the_pre_reflow_baseline_is_cleared_when_the_composition_ends() {
     );
 }
 
-/// ★★ 候选窗已显示时到达的 probe **不做显示决策，但坐标要收下**。
+/// 候选窗已显示时到达的 probe 不做显示决策，但坐标要收下。
 ///
-/// 真机现场（2026-09-02 记事本 + 五笔长按 d，typematic 32ms/键、4 码一组自动上屏）：
-/// 整段**没有一条权威 caret_update**（宿主 OnLayoutChange 的 50ms debounce 被连续输入
-/// 不断重置），TSF 侧 probe 却一直带着 x=1700~1760 到达、全被"已首显过"分支丢弃；
-/// 于是每轮新组合的 25ms 兜底都拿缓存里那份 992 首显 ⇒ 候选窗钉在原地、与真实光标
-/// 差 **834px**，直到松手后 82ms 权威坐标才到、猛跳一次。
-///
-/// 「不用于显示」不等于「可以扔掉」——它是那段时间里唯一的位置信息。
+/// 连续快速输入时宿主的 OnLayoutChange 会被 debounce 一直压住，整段没有权威坐标，probe 是
+/// 唯一的位置信息；丢掉它，每轮新组合的兜底都拿旧缓存首显，候选窗钉在原地。
 #[test]
 fn idle_probe_coords_are_absorbed_but_two_kinds_are_not() {
     let fresh = |caret_x: i32| {
@@ -3863,12 +3664,8 @@ fn idle_probe_coords_are_absorbed_but_two_kinds_are_not() {
 
 #[test]
 fn probe_ignored_unless_fast_mode() {
-    // `wait` 档的底线：退回该档的宿主必须拿到「等 reflow 权威坐标」的原行为，
-    // probe 一条都不许消费。
-    //
-    // ⚠ 2026-08-03 前本条靠 `coord()` 的默认档恰好是 `wait` 来表达，默认档改成
-    // `fast` 后那个前提失效，故改为显式设档。**测试若靠「默认值恰好是某值」间接
-    // 表达语义，默认值一变它就从"守住语义"退化成"守住巧合"。**
+    // `wait` 档的底线：退回该档的宿主必须拿到「等 reflow 权威坐标」的原行为，probe 一条都不许
+    // 消费。显式设档，不依赖默认档恰好是某值。
     let c = coord();
     set_mode(&c, wind_config::app_compat::FirstShowMode::Wait);
     assert!(
@@ -3877,13 +3674,10 @@ fn probe_ignored_unless_fast_mode() {
     );
 }
 
-/// ★ 首显有多条通路，信任门必须每条都接。本条守住 `caret_probe` 这条——它绕过闸门
-/// 直接首显，实测（2026-08-03 Excel）在闸门刚 arm 600ms 长兜底后 **6ms** 就用
-/// `(1299,535)` 抢先显示，而 200ms 后真坐标是 `(1344,744)` ⇒ 显示后跳一次。
+/// 首显有多条通路，信任门必须每条都接。本条守住 `caret_probe` 这条：它绕过闸门直接首显。
 ///
-/// 根因是 probe 的两条判据在坐标缓存失效时**都失去判断力**：判据 1 靠「≠ 上一轮权威
-/// 坐标」推断宿主已 reflow，而焦点切换后那个基准属于另一个单元格，probe 值当然不等于
-/// 它 ⇒ 判据恒成立；判据 2 的"上次按键间隔"跨了焦点，同样说明不了当前帧可信。
+/// 坐标缓存失效时 probe 的两条判据都失去判断力：判据 1 的基准（上一轮权威）属于另一个
+/// 单元格，恒不相等；判据 2 的按键间隔跨了焦点，同样说明不了当前帧可信。
 #[test]
 fn probe_defers_to_long_wait_when_cache_unverified() {
     let c = coord();
@@ -3943,12 +3737,9 @@ fn composition_probe_at(x: i32, y: i32, height: i32) -> CaretData {
     }
 }
 
-/// ★ Java 被动客户端（JTable 未进入编辑）：宿主不报位置，按键时 DLL 退到 GUI caret，
-/// 拿到的是窗口客户区原点 (0,54)；组合开始后 TSF 给出 Windows 输入编辑框的位置
-/// (473,217)——与上一轮权威相同（编辑框不随单元格动），被判「尚未 reflow」继续等。
-/// 兜底 timer 随即到期，若缓存还是 GUI caret，候选窗就先闪到屏幕左边再跳回
-/// （2026-10-04 靶机 Zulu 7u45 实测）。TSF 域的旧值再旧也比跨窗口的 GUI caret 可信，
-/// 所以这一帧要收进缓存给兜底用——但**仍不提前首显**，等待语义不变。
+/// Java 被动客户端（JTable 未进入编辑）：按键时 DLL 退到 GUI caret（窗口客户区原点），
+/// 组合开始后 TSF 给的编辑框位置等于上一轮权威而被判「尚未 reflow」。TSF 域的旧值比跨窗口
+/// 的 GUI caret 可信，这一帧要收进缓存给兜底用，否则候选窗先闪到屏幕左边；但仍不提前首显。
 #[test]
 fn probe_equal_to_last_auth_replaces_non_tsf_cache_for_fallback() {
     let c = coord_waiting_with_cache(wind_ipc::protocol::caret_source::GUI_CARET);
@@ -4018,11 +3809,8 @@ fn coord_with_idle_report() -> Arc<Coordinator> {
     c
 }
 
-/// ★★ 守住 per-app 语义：没配 `stale_probe_guard` 的宿主必须走原有判据，一字不差。
-///
-/// 这道判据只在「宿主组合期间上报陈旧 rect」时才对。WindTerm 恰恰相反——它的 probe
-/// 是重排后的**新**位置、而缓存已过时，此时拦下 probe 反而制造错位（实测误拦 6 次、
-/// 其中 2 次候选窗在错位置停 35ms 才跳回）。全局开启 = 拿这类宿主的回归换微信的修复。
+/// 守住 per-app 语义：没配 `stale_probe_guard` 的宿主必须走原有判据，一字不差。
+/// WindTerm 这类宿主的 probe 恰是重排后的新位置，全局开启会拦错。
 #[test]
 fn stale_probe_guard_is_per_app_and_off_by_default() {
     let c = coord_with_idle_report();
@@ -4035,15 +3823,11 @@ fn stale_probe_guard_is_per_app_and_off_by_default() {
     );
 }
 
-/// ★ 微信（Qt WebView）在 composition 期间报的 rect 仍是**上一次组合**的位置。实测
-/// （2026-09-02）用户上屏后打空格移动光标，宿主在按键前 3ms 上报真实插入点
-/// (745,1007)，而 probe 报 (609,989)——上一次组合上屏后的位置，差 136px。
-///
-/// 判据 1 对此完全没有判断力：正确答案 (745,1007) 和陈旧值 (609,989) **都** ≠ 基准
-/// (601,988)，它把两者一视同仁。所以这不是判据太松，是判据问错了问题。
+/// 微信在 composition 期间报的 rect 仍是上一次组合的位置，而按键前的空闲上报才是真实插入点。
+/// 判据 1 对此没有判断力：正确值与陈旧值都 ≠ 基准，它问错了问题。
 #[test]
 fn stale_probe_rejected_regardless_of_position_relation() {
-    // 四组都是真机现场的坐标，位置关系**互相矛盾**——正是它们逐个推翻了先前
+    // 四组都是真机现场的坐标，位置关系互相矛盾——正是它们逐个推翻了先前
     // 四版位置判据。现在判据不看位置，四组必须一律被拒。
     let cases: [(&str, CaretData); 4] = [
         // ① 空格移光标：陈旧值在缓存左边 136px（同行左移）
@@ -4095,7 +3879,7 @@ fn caret_update_during_composition_is_trusted_without_the_guard() {
     assert_eq!((st.caret_x, st.caret_y), (473, 224));
 }
 
-/// 判据的前提是**手上有宿主刚报的空闲坐标**。没有它时缓存本身也是旧的，
+/// 判据的前提是手上有宿主刚报的空闲坐标。没有它时缓存本身也是旧的，
 /// 没有更好的选择，probe 应照常参与——否则该宿主会退化成「永远等权威坐标」。
 #[test]
 fn stale_probe_guard_inactive_without_fresh_idle_report() {
@@ -4109,9 +3893,8 @@ fn stale_probe_guard_inactive_without_fresh_idle_report() {
     );
 }
 
-/// ★★ 首显有多条通路，否决类判据必须每条都接。连打快路径不比对任何基准就采信，
-/// 新判据若排在它之后，只要按键间隔落进 `fast_typing_window_ms` 就被整条绕过
-/// ——2026-08-03 信任门只接了兜底 timer、被 probe 从旁边绕过去，就是同一个形态。
+/// 首显有多条通路，否决类判据必须每条都接。连打快路径不比对任何基准就采信，
+/// 新判据若排在它之后，只要按键间隔落进 `fast_typing_window_ms` 就被整条绕过。
 #[test]
 fn stale_probe_rejected_even_on_fast_typing_path() {
     let c = coord_with_idle_report();
@@ -4166,11 +3949,8 @@ fn probe_releases_first_show_when_caret_moved() {
     );
 }
 
-/// 连打快路径必须由**相邻按键间隔**驱动，不能由「距上次按键多久」驱动。
-///
-/// 后者恒成立（试探坐标总在按键后 10ms 内到达），会让判据被完全绕过——本功能就这么
-/// 空跑过一轮。这条测试构造「间隔很大（慢速手打）」的局面：此时即使坐标等于上一轮权威
-/// （即宿主尚未 reflow），也必须继续等待，绝不能被快路径放行。
+/// 连打快路径必须由相邻按键间隔驱动，不能由「距上次按键多久」驱动——后者恒成立（试探坐标
+/// 总在按键后 10ms 内到达）。慢速手打时即使坐标等于上一轮权威也必须继续等待。
 #[test]
 fn slow_typing_does_not_take_fast_path() {
     let c = coord();
@@ -4294,10 +4074,9 @@ fn no_rule_keeps_bottom_coordinates() {
     assert_eq!(s.caret_height, 20);
 }
 
-/// 真机复现（2026-08-17）：服务重启时 alacritty.exe 早已在前台，管道重连只续发
-/// `caret_update`，从没有新的 `FOCUS_GAINED` 促发 `update_active_compat`——
-/// `caret_offset_*` 等 per-app 规则整个会话都停在默认值。`handle_client_connected`
-/// 应该在连接建立、确认该 pid 就是当前前台窗口时，就提前把规则字段解析好。
+/// 服务重启时宿主早已在前台，管道重连只续发 `caret_update`、没有新的 `FOCUS_GAINED`；
+/// `handle_client_connected` 须在确认该 pid 是前台窗口时提前解析 per-app 规则字段，
+/// 否则 `caret_offset_*` 等整个会话停在默认值。
 #[test]
 fn apply_connected_pid_compat_loads_rule_when_pid_is_foreground() {
     let c = coord();
@@ -4329,9 +4108,8 @@ fn apply_connected_pid_compat_loads_rule_when_pid_is_foreground() {
 
 /// `ignore_host_ime_switch` 的判据逐一钉死，开和关两个方向各走一遍。
 ///
-/// ★ Ctrl 按住放行是本功能唯一的逃生口：系统热键 Ctrl+Space 与宿主写 compartment
-/// 走**同一条**通路、载荷完全相同，若不放行，开了这条规则的应用里 Ctrl+Space 会彻底
-/// 失灵，而用户只会觉得「输入法坏了」，根本联想不到这个开关。
+/// Ctrl 按住放行是唯一的逃生口：系统热键 Ctrl+Space 与宿主写 compartment 走同一条通路、
+/// 载荷相同，不放行的话开了这条规则的应用里 Ctrl+Space 会彻底失灵。
 #[test]
 fn ignore_host_ime_switch_gates() {
     use wind_ipc::protocol::ModeSwitchSource as Src;
@@ -4350,7 +4128,7 @@ fn ignore_host_ime_switch_gates() {
     *c.app_compat.lock().unwrap() = wind_config::app_compat::AppCompat::from_rules(rules);
 
     // 宿主写 compartment、无伴随按键 ⇒ 拦。判据不看方向：开和关两个方向都拦
-    // （关：点按钮变英文；开：SSMS 焦点切换把英文态切成中文，GH#312），方向由
+    // （关：点按钮变英文；开：SSMS 焦点切换把英文态切成中文），方向由
     // tests/ignore_host_ime_switch.rs 经 handle_system_mode_switch 各走一遍。
     assert!(c.host_ime_switch_ignored(Src::CompartmentOpenClose, false));
     assert!(c.host_ime_switch_ignored(Src::CompartmentConversion, false));
@@ -4418,8 +4196,8 @@ fn ignore_host_ime_switch_per_app_overrides_global() {
     );
 }
 
-/// 拒绝之后必须**再异步推一次状态**（`CMD_STATE_PUSH`），不能只靠同步回包——理由见
-/// `handle_system_mode_switch` 那段 ★★★：只回包时 compartment 会停在宿主写的值上，
+/// 拒绝之后必须再异步推一次状态（`CMD_STATE_PUSH`），不能只靠同步回包——理由见
+/// `handle_system_mode_switch` 那段 ：只回包时 compartment 会停在宿主写的值上，
 /// Ctrl+Space 变哑。两个方向各验一次。
 #[test]
 fn ignore_host_ime_switch_rejection_pushes_state() {
@@ -4448,11 +4226,8 @@ fn ignore_host_ime_switch_rejection_pushes_state() {
     }
 }
 
-/// per-app 定位规则**整条**压过全局，坐标必须与定位方式同层取。
-///
-/// ★ 「模式取 per-app、坐标回落全局」是个看起来更宽容、实际更坏的实现：用户刚给这个
-/// 应用打开固定、还没拖过，候选窗会跳到全局那份为**别的**应用摆的坐标上，而他从未
-/// 为这个应用设过位置。`(0,0)` 让 UI 落默认锚点才是这一档的正确答案。
+/// per-app 定位规则整条压过全局，坐标必须与定位方式同层取：「模式取 per-app、坐标回落全局」
+/// 会让候选窗跳到为别的应用摆的坐标上。`(0,0)` 让 UI 落默认锚点才是这一档的正确答案。
 #[test]
 fn per_app_candidate_position_overrides_global_wholesale() {
     let c = coord();
@@ -4474,7 +4249,7 @@ fn per_app_candidate_position_overrides_global_wholesale() {
         "未配规则时跟随全局"
     );
 
-    // per-app：固定但还没拖过 ⇒ (0,0) 交给 UI 落默认锚点，**不得**借用全局坐标。
+    // per-app：固定但还没拖过 ⇒ (0,0) 交给 UI 落默认锚点，不得借用全局坐标。
     let mut rule = wind_config::app_compat::AppCompatRule {
         process: "x60_toolbox.exe".into(),
         candidate_position_mode: Some(wind_config::app_compat::CandidatePositionMode::Fixed),
@@ -4500,14 +4275,10 @@ fn per_app_candidate_position_overrides_global_wholesale() {
     assert!(!c.candidate_fixed_pos().0);
 }
 
-/// code review 发现（2026-08-17，未真机复现，逻辑推导）：连接建立不是真实的
-/// `FOCUS_GAINED`。对一个全新启动、TSF DLL 第一次加载、且此刻恰好已在前台的进程，
-/// 管道连接必然先于它有史以来第一条 `FOCUS_GAINED`（发不出消息就说明还没连上）。
-/// `apply_connected_pid_compat` 若像 `update_active_compat` 一样整体覆写
-/// `active_compat.pid`，会让随后真正到达的那条 `FOCUS_GAINED` 被 `crossed` 判据
-/// （`get_current_mode` / `handle_focus_gained`）误判成「同进程、未跨进程切入」，
-/// 吞掉 `initial_mode`/`initial_punct` 规则与首键竞态消除逻辑——本测试钉住
-/// `.pid`（此处默认值 0）必须原封不动。
+/// 连接建立不是真实的 `FOCUS_GAINED`：新进程的管道连接必然先于它第一条 `FOCUS_GAINED`。
+/// `apply_connected_pid_compat` 若整体覆写 `active_compat.pid`，随后真正的 `FOCUS_GAINED`
+/// 会被 `crossed` 判据误判成「未跨进程」，吞掉 `initial_mode`/`initial_punct` 与首键竞态
+/// 消除逻辑。本测试钉住 `.pid`（此处默认值 0）必须原封不动。
 #[test]
 fn apply_connected_pid_compat_does_not_claim_pid_identity() {
     let c = coord();
