@@ -838,7 +838,7 @@ fn remove_device_requires_confirm_and_refuses_self() {
 }
 
 #[test]
-fn removed_device_disappears_and_comes_back_when_it_publishes_again() {
+fn removed_device_comes_back_readable_after_its_next_round() {
     let remote = MemBackend::new();
     let mut a = Node::with(&remote, false, named("甲"));
     let mut b = Node::with(&remote, false, named("乙"));
@@ -857,16 +857,15 @@ fn removed_device_disappears_and_comes_back_when_it_publishes_again() {
     let l = devices(&mut a);
     assert_eq!(l.len(), 1, "{l:?}");
 
-    // 被移除的设备改了文件再同步：清单重新出现（info 要等下次刷新才写回，先读不出）
-    b.put("config.toml", "a = 2\n");
+    // 被移除的设备再同步一轮（无本地改动）：发现自己的 info 没了就补写，别人看到的是可读的原名
     b.sync();
     let l = devices(&mut a);
     let back = l
         .iter()
         .find(|d| d["id"] == b_id.as_str())
         .expect("重新出现");
-    assert_eq!(back["readable"], false);
-    assert_eq!(back["name"], "");
+    assert_eq!(back["readable"], true, "{back:?}");
+    assert_eq!(back["name"], "乙");
 }
 
 #[test]

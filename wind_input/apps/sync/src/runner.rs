@@ -510,7 +510,7 @@ impl Runner {
         ctx.allow_mass_delete = allow_mass;
         let echo_before = lock(&self.echo).clone();
         let want = local_info(&self.settings, now);
-        let write_info = info_stale(self.info_written.as_ref(), &want, true).then_some(want);
+        let info_stale_now = info_stale(self.info_written.as_ref(), &want, true);
         let mut state = self.state.clone();
         let failures_before = state.retry.failures;
         let (factory, settings, password) = (
@@ -534,9 +534,19 @@ impl Runner {
                     Err(m) => Err(m),
                     Ok(backend) => {
                         let r = sync_once(&*backend, &mut local, &mut state, &dek, &ctx);
-                        if let (Ok(rep), Some(info)) = (&r, write_info)
+                        // 本机 info 被其他设备「移除」后清单可能重新出现，info 却要等跨日才写回，
+                        // 期间别人看到的是「无法解密」：每轮 stat 一次，缺了就补写。
+                        let missing = || {
+                            matches!(
+                                backend.stat(&wind_sync::manifest::device_info_key(&state.device)),
+                                Ok(None)
+                            )
+                        };
+                        if let Ok(rep) = &r
                             && !rep.skipped
+                            && (info_stale_now || missing())
                         {
+                            let info = want;
                             match put_device_info(
                                 &*backend,
                                 &dek.devinfo_key(),
