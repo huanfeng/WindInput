@@ -30,8 +30,7 @@ struct Proc {
 
 impl Proc {
     fn start(settings: SyncSettings) -> Proc {
-        let dir =
-            tempfile::tempdir_in(std::env::var_os("TMPDIR").unwrap_or("/tmp".into())).unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let user = dir.path().join("user");
         std::fs::create_dir_all(&user).unwrap();
         let mut child = Command::new(env!("CARGO_BIN_EXE_wind_input_sync"))
@@ -181,7 +180,7 @@ fn stdin_eof_exits_cleanly() {
         .spawn()
         .unwrap();
     let mut stdin = child.stdin.take().unwrap();
-    let dir = tempfile::tempdir_in(std::env::var_os("TMPDIR").unwrap_or("/tmp".into())).unwrap();
+    let dir = tempfile::tempdir().unwrap();
     write_frame(
         &mut stdin,
         &ToSync::Hello {
@@ -214,7 +213,14 @@ fn two_processes_sync_over_webdav() {
     };
     // dufs 需要目录先存在
     let st = Command::new("curl")
-        .args(["-s", "-o", "/dev/null", "-X", "MKCOL", "-u"])
+        .args([
+            "-s",
+            "-o",
+            if cfg!(windows) { "NUL" } else { "/dev/null" },
+            "-X",
+            "MKCOL",
+            "-u",
+        ])
         .arg(format!("{}:{pass}", std::env::var("WD_USER").unwrap()))
         .arg(&sub)
         .env("NO_PROXY", "*")
@@ -267,11 +273,8 @@ fn two_processes_sync_over_webdav() {
     let reqs = b.requests.lock().unwrap().clone();
     assert_eq!(
         reqs,
-        vec![
-            "data.beginEdit pinyin/user.dict.yaml",
-            "data.endEdit pinyin/user.dict.yaml",
-            "config.reload"
-        ]
+        // 本地原先没有的词库文件不开编辑会话，写入后靠 dict.reload 纳入
+        vec!["config.reload", "dict.reload"]
     );
     assert!(a.shutdown().success());
     assert!(b.shutdown().success());

@@ -48,3 +48,25 @@ fn debug_does_not_leak() {
     let t = format!("{s:?}");
     assert!(!t.contains("TOPSECRET") && !t.contains("hunter2"));
 }
+
+#[cfg(windows)]
+#[test]
+fn dpapi_roundtrip_stores_no_plaintext_and_rejects_tampering() {
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("sync").join(FILE_NAME);
+    let st = default_store(d.path().join("sync").as_path());
+    let s = Secrets {
+        dek: Some("ZGVrLXBsYWludGV4dA==".into()),
+        password: Some("webdav-pass-123".into()),
+    };
+    s.save(st.as_ref()).unwrap();
+    assert_eq!(Secrets::load(st.as_ref()).unwrap(), s);
+    let raw = std::fs::read(&path).unwrap();
+    let hay = String::from_utf8_lossy(&raw);
+    assert!(!hay.contains("webdav-pass-123") && !hay.contains("ZGVrLXBsYWludGV4dA"));
+    let mut bad = raw.clone();
+    let n = bad.len();
+    bad[n - 1] ^= 0xff;
+    std::fs::write(&path, bad).unwrap();
+    assert!(Secrets::load(st.as_ref()).is_err());
+}

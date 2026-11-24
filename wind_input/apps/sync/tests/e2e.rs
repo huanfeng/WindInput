@@ -72,8 +72,7 @@ impl Node {
         on_demand: bool,
         timing: Timing,
     ) -> Node {
-        let dir =
-            tempfile::tempdir_in(std::env::var_os("TMPDIR").unwrap_or("/tmp".into())).unwrap();
+        let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("user")).unwrap();
         let core = Arc::new(FakeCore::default());
         let (tx, rx) = mpsc::channel();
