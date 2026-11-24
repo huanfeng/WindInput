@@ -1,0 +1,23 @@
+[package]
+name = "wind-sync"
+version.workspace = true
+edition.workspace = true
+
+# 数据同步的纯逻辑：后端 trait、加密、清单、裁决、合并、同步编排。
+# 不含网络、文件监听与异步运行时（设计 docs/design/data-sync.md）。
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+chacha20poly1305 = { workspace = true }
+argon2 = { workspace = true }
+sha2 = { workspace = true }
+hmac = { workspace = true }
+getrandom = { workspace = true }
+base64 = { workspace = true }
+data-encoding = { workspace = true }
+
+[lints]
+workspace = true
