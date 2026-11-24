@@ -51,7 +51,11 @@ impl Secrets {
     pub fn load(store: &dyn SecretStore) -> Result<Secrets, String> {
         match store.read().map_err(|e| format!("读取机密存储失败: {e}"))? {
             None => Ok(Secrets::default()),
-            Some(b) => serde_json::from_slice(&b).map_err(|e| format!("机密存储内容损坏: {e}")),
+            Some(mut b) => {
+                let r = serde_json::from_slice(&b).map_err(|e| format!("机密存储内容损坏: {e}"));
+                crate::fsutil::wipe(&mut b);
+                r
+            }
         }
     }
 
@@ -59,8 +63,10 @@ impl Secrets {
         if self.is_empty() {
             return store.delete().map_err(|e| format!("清除机密存储失败: {e}"));
         }
-        let b = serde_json::to_vec(self).map_err(|e| format!("序列化机密失败: {e}"))?;
-        store.write(&b).map_err(|e| format!("写机密存储失败: {e}"))
+        let mut b = serde_json::to_vec(self).map_err(|e| format!("序列化机密失败: {e}"))?;
+        let r = store.write(&b).map_err(|e| format!("写机密存储失败: {e}"));
+        crate::fsutil::wipe(&mut b);
+        r
     }
 }
 
@@ -69,8 +75,7 @@ fn write_atomic(path: &Path, bytes: &[u8], private: bool) -> io::Result<()> {
     use std::io::Write;
     let dir = path.parent().ok_or_else(|| io::Error::other("无父目录"))?;
     std::fs::create_dir_all(dir)?;
-    let tmp = path.with_extension("tmp");
-    let _ = std::fs::remove_file(&tmp);
+    let tmp = crate::fsutil::tmp_sibling(path, ".tmp");
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
@@ -81,10 +86,17 @@ fn write_atomic(path: &Path, bytes: &[u8], private: bool) -> io::Result<()> {
     #[cfg(not(unix))]
     let _ = private;
     let mut f = opts.open(&tmp)?;
-    f.write_all(bytes)?;
-    f.sync_all()?;
-    drop(f);
-    std::fs::rename(&tmp, path)
+    let r = f
+        .write_all(bytes)
+        .and_then(|()| f.sync_all())
+        .and_then(|()| {
+            drop(f);
+            std::fs::rename(&tmp, path)
+        });
+    if r.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    r
 }
 
 fn read_opt(path: &Path) -> io::Result<Option<Vec<u8>>> {
@@ -163,10 +175,15 @@ mod dpapi {
         }
     }
 
-    fn take(out: CRYPT_INTEGER_BLOB) -> Vec<u8> {
+    /// `wipe_source`：系统缓冲区装的是明文（解密结果）时，释放前先抹掉。
+    fn take(out: CRYPT_INTEGER_BLOB, wipe_source: bool) -> Vec<u8> {
         // SAFETY: 系统返回的缓冲区，长度由 cbData 给出；拷出后用 LocalFree 释放。
         unsafe {
-            let v = std::slice::from_raw_parts(out.pbData, out.cbData as usize).to_vec();
+            let src = std::slice::from_raw_parts_mut(out.pbData, out.cbData as usize);
+            let v = src.to_vec();
+            if wipe_source {
+                crate::fsutil::wipe(src);
+            }
             let _ = LocalFree(HLOCAL(out.pbData as _));
             v
         }
@@ -192,7 +209,7 @@ mod dpapi {
                 )
             }
             .map_err(|e| io::Error::other(format!("DPAPI 解密失败（换了用户或机器？）: {e}")))?;
-            Ok(Some(take(out)))
+            Ok(Some(take(out, true)))
         }
 
         fn write(&self, bytes: &[u8]) -> io::Result<()> {
@@ -211,7 +228,7 @@ mod dpapi {
                 )
             }
             .map_err(|e| io::Error::other(format!("DPAPI 加密失败: {e}")))?;
-            write_atomic(&self.path, &take(out), false)
+            write_atomic(&self.path, &take(out, false), false)
         }
 
         fn delete(&self) -> io::Result<()> {

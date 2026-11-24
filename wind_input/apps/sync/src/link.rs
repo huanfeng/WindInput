@@ -13,6 +13,9 @@ use wind_sync_ipc::{FromSync, write_frame};
 /// 向 core 发请求的超时。重载词库可能较慢，但不应无限等。
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// 请求超时的错误文案（调用方据此判断「core 可能仍会处理」）。
+pub const TIMEOUT_MSG: &str = "等待核心回应超时";
+
 pub trait CoreLink: Send + Sync {
     /// 发白名单请求并等 core 的回执。
     fn request(&self, method: &str, params: Value) -> Result<Value, String>;
@@ -79,7 +82,7 @@ impl CoreLink for PipeLink {
             Ok(r) => r,
             Err(_) => {
                 lock(&self.pending).remove(&id);
-                Err("等待核心回应超时".into())
+                Err(TIMEOUT_MSG.into())
             }
         }
     }

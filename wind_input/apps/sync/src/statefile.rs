@@ -33,10 +33,18 @@ pub fn save(state_dir: &Path, s: &SyncState) -> Result<(), String> {
     std::fs::create_dir_all(state_dir).map_err(|e| format!("创建同步状态目录失败: {e}"))?;
     let b = serde_json::to_vec(s).map_err(|e| format!("序列化同步状态失败: {e}"))?;
     let p = path(state_dir);
-    let tmp = p.with_extension("json.tmp");
-    std::fs::write(&tmp, b)
-        .and_then(|()| std::fs::rename(&tmp, &p))
-        .map_err(|e| format!("写同步状态失败: {e}"))
+    let tmp = crate::fsutil::tmp_sibling(&p, ".tmp");
+    let r = std::fs::File::create(&tmp)
+        .and_then(|mut f| {
+            use std::io::Write;
+            f.write_all(&b)?;
+            f.sync_all()
+        })
+        .and_then(|()| std::fs::rename(&tmp, &p));
+    if r.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    r.map_err(|e| format!("写同步状态失败: {e}"))
 }
 
 #[cfg(test)]

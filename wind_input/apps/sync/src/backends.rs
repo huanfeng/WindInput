@@ -6,7 +6,7 @@ use wind_sync_ipc::{Backend as Target, SyncSettings};
 
 use crate::errors::backend_error;
 
-pub trait BackendFactory: Send {
+pub trait BackendFactory: Send + Sync {
     /// `secret` 是 WebDAV 密码或 S3 secret access key。
     fn build(&self, settings: &SyncSettings, secret: &str) -> Result<Box<dyn Backend>, String>;
 }
@@ -49,5 +49,14 @@ impl BackendFactory for NetFactory {
                 Ok(Box::new(b))
             }
         }
+    }
+}
+
+/// 占位：`Runner::new` 把 `Config` 里的工厂搬走后留在原位。
+pub struct NoFactory;
+
+impl BackendFactory for NoFactory {
+    fn build(&self, _: &SyncSettings, _: &str) -> Result<Box<dyn Backend>, String> {
+        Err("内部错误：后端工厂已移交".into())
     }
 }

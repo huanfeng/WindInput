@@ -4,6 +4,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -43,6 +44,7 @@ fn timing() -> Timing {
         first_delay: Duration::from_secs(3600),
         debounce: Duration::from_millis(300),
         settings_delay: Duration::from_secs(3600),
+        retry_delay: Duration::from_millis(200),
     }
 }
 
@@ -254,15 +256,18 @@ fn two_devices_converge_with_core_requests() {
     assert_eq!(b.read("themes/t/theme.toml").as_deref(), Some("x = 1\n"));
     assert_eq!(
         b.core.methods(),
-        vec![
-            "data.beginEdit pinyin/user.dict.yaml",
-            "data.endEdit pinyin/user.dict.yaml",
-            "config.reload",
-            "theme.reloadFiles",
-        ]
+        // 本机没有这个词库文件：不开编辑会话，直接写，靠 dict.reload 纳入
+        vec!["config.reload", "theme.reloadFiles", "dict.reload"]
     );
     assert_eq!(
-        b.core.calls.lock().unwrap().last().unwrap().1,
+        b.core
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|c| c.0 == "theme.reloadFiles")
+            .unwrap()
+            .1,
         json!({"ids": ["t"]})
     );
 
@@ -310,13 +315,16 @@ fn begin_edit_refusal_blocks_the_batch_then_recovers() {
     a.put(UD, &format!("{DICT_HEAD}x\tX\t1\n"));
     a.sync();
     b.setup("p");
+    // 本机已有这个词库（内容不同，会走合并写入）：写入前要开编辑会话
+    let local_ud = format!("{DICT_HEAD}y\tY\t1\n");
+    b.put(UD, &local_ud);
 
     b.core.fail_on("data.beginEdit pinyin/user.dict.yaml");
     let s = b.sync();
     assert_eq!(s.phase, "error", "{s:?}");
     assert!(s.last_error.unwrap().contains("拒绝开始编辑"));
     assert!(b.read("config.toml").is_none(), "本批一个文件都不写");
-    assert!(b.read(UD).is_none());
+    assert_eq!(b.read(UD).as_deref(), Some(local_ud.as_str()));
 
     b.core.fail.lock().unwrap().clear();
     let s = b.sync();
@@ -525,4 +533,208 @@ fn file_changes_trigger_sync_after_debounce_and_echo_is_suppressed() {
     let b_runs = b.syncing_count();
     std::thread::sleep(Duration::from_millis(1200));
     assert_eq!(b.syncing_count(), b_runs, "回声应被抑制");
+}
+
+// ── 审查修复 ────────────────────────────────────────────
+
+fn send_settings(n: &Node, s: SyncSettings) {
+    n.tx.send(Input::Core(ToSync::Settings(s))).unwrap();
+}
+
+#[test]
+fn changing_backend_location_drops_saved_password_but_other_edits_keep_it() {
+    let remote = MemBackend::new();
+    let mut a = Node::new(&remote, false);
+    a.setup("p");
+    assert!(a.status().has_secret);
+
+    let mut s = settings();
+    s.interval_min = 30;
+    send_settings(&a, s.clone());
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(a.status().has_secret, "只改间隔不应清凭据");
+
+    for url in ["http://other.invalid/dav", "http://example.invalid/dav2"] {
+        a.cmd(Op::SetSecret, json!({"password": "pw"})).unwrap();
+        assert!(a.status().has_secret);
+        let mut moved = s.clone();
+        moved.backend = Some(Backend::Webdav {
+            url: url.into(),
+            user: "u".into(),
+        });
+        send_settings(&a, moved.clone());
+        a.wait_status("凭据被清", |st| !st.has_secret);
+        s = moved;
+    }
+    // 换账号同理
+    a.cmd(Op::SetSecret, json!({"password": "pw"})).unwrap();
+    let mut other_user = s.clone();
+    other_user.backend = Some(Backend::Webdav {
+        url: "http://example.invalid/dav2".into(),
+        user: "someone-else".into(),
+    });
+    send_settings(&a, other_user);
+    a.wait_status("凭据被清", |st| !st.has_secret);
+    assert!(a.status().joined, "密钥不受影响");
+}
+
+/// 让 b 在 beginEdit 处停住，造出「同步进行中」。返回 (进入标志, 放行标志)。
+fn block_begin_edit(core: &FakeCore) -> (Arc<AtomicBool>, Arc<AtomicBool>) {
+    let entered = Arc::new(AtomicBool::new(false));
+    let release = Arc::new(AtomicBool::new(false));
+    let (e, r) = (entered.clone(), release.clone());
+    *core.on_call.lock().unwrap() = Some(Box::new(move |m, _| {
+        if m == "data.beginEdit" {
+            e.store(true, Ordering::SeqCst);
+            while !r.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }));
+    (entered, release)
+}
+
+/// a 已把 UD 同步上去，b 加入且本地有内容不同的 UD（合并写入要开编辑会话）。
+fn pair_with_local_dict(remote: &MemBackend) -> (Node, Node) {
+    let mut a = Node::new(remote, false);
+    let mut b = Node::new(remote, false);
+    a.setup("p");
+    a.put(UD, &format!("{DICT_HEAD}x\tX\t1\n"));
+    a.sync();
+    b.setup("p");
+    b.put(UD, &format!("{DICT_HEAD}y\tY\t1\n"));
+    (a, b)
+}
+
+fn spin_until(what: &str, f: impl Fn() -> bool) {
+    let t = Instant::now();
+    while !f() {
+        assert!(t.elapsed() < WAIT, "等待超时：{what}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn state_changing_commands_are_refused_during_a_round_but_reads_work() {
+    let remote = MemBackend::new();
+    let (_a, mut b) = pair_with_local_dict(&remote);
+    let (entered, release) = block_begin_edit(&b.core);
+    b.tx.send(Input::Core(ToSync::Command {
+        id: 900,
+        op: Op::SyncNow,
+        args: Value::Null,
+    }))
+    .unwrap();
+    spin_until("进入 beginEdit", || entered.load(Ordering::SeqCst));
+
+    for (op, args) in [
+        (Op::SetPassphrase, json!({"passphrase": "new"})),
+        (Op::SetSecret, json!({"password": "x"})),
+        (Op::ImportKey, json!({"key": "k"})),
+        (Op::ResetRemote, json!({"confirm": true, "passphrase": "n"})),
+        (Op::ConfirmMassDelete, Value::Null),
+    ] {
+        let e = b.cmd(op, args).unwrap_err();
+        assert!(e.contains("正在同步"), "{op:?}: {e}");
+    }
+    assert!(b.cmd(Op::ExportKey, Value::Null).unwrap()["key"].is_string());
+    assert!(b.cmd(Op::SyncNow, Value::Null).is_ok());
+    assert_eq!(b.status().phase, "syncing");
+
+    release.store(true, Ordering::SeqCst);
+    // 本轮结束后排队的 sync_now 再跑一轮；最终回到 idle
+    spin_until("同步结束", || {
+        let st = b.status();
+        st.phase == "idle" && st.last_ok.is_some()
+    });
+    // 被拒的命令没有生效：口令仍是 p，密钥仍能导出
+    assert!(b.cmd(Op::ExportKey, Value::Null).is_ok());
+}
+
+#[test]
+fn shutdown_mid_round_ends_the_edit_session_and_writes_nothing() {
+    let remote = MemBackend::new();
+    let (_a, mut b) = pair_with_local_dict(&remote);
+    let before = b.read(UD).unwrap();
+    let (entered, release) = block_begin_edit(&b.core);
+    b.tx.send(Input::Core(ToSync::Command {
+        id: 901,
+        op: Op::SyncNow,
+        args: Value::Null,
+    }))
+    .unwrap();
+    spin_until("进入 beginEdit", || entered.load(Ordering::SeqCst));
+    b.tx.send(Input::Core(ToSync::Shutdown)).unwrap();
+    release.store(true, Ordering::SeqCst);
+    b.handle.take().unwrap().join().unwrap();
+
+    let m = b.core.methods();
+    assert!(
+        m.contains(&"data.endEdit pinyin/user.dict.yaml".to_string()),
+        "{m:?}"
+    );
+    assert_eq!(b.read(UD).unwrap(), before, "取消后不写文件");
+}
+
+#[test]
+fn user_opened_session_gives_a_hint_then_syncs_after_it_closes() {
+    let remote = MemBackend::new();
+    let (_a, mut b) = pair_with_local_dict(&remote);
+    let mine = b.read(UD).unwrap();
+    b.core
+        .user_sessions
+        .lock()
+        .unwrap()
+        .push("pinyin/user.dict.yaml".into());
+    let s = b.sync();
+    assert_eq!(s.phase, "error", "{s:?}");
+    assert!(s.last_error.unwrap().contains("正在被编辑"));
+    assert!(
+        !b.core
+            .methods()
+            .iter()
+            .any(|m| m.starts_with("data.beginEdit")),
+        "不碰用户的会话"
+    );
+    assert_eq!(b.read(UD).unwrap(), mine);
+
+    b.core.user_sessions.lock().unwrap().clear();
+    spin_until("会话关闭后同步成功", || {
+        let st = b.status();
+        st.phase == "idle" && st.last_ok.is_some()
+    });
+    assert!(b.read(UD).unwrap().contains('X'), "远端内容已合并进来");
+}
+
+#[test]
+fn mass_deletion_halts_with_readable_message_until_confirmed() {
+    let remote = MemBackend::new();
+    let mut a = Node::new(&remote, false);
+    a.setup("p");
+    for i in 0..25 {
+        a.put(&format!("schemas/s{i}.schema.toml"), "x = 1\n");
+    }
+    assert_eq!(a.sync().phase, "idle");
+    for i in 0..25 {
+        std::fs::remove_file(a.user().join(format!("schemas/s{i}.schema.toml"))).unwrap();
+    }
+    let s = a.sync();
+    assert_eq!(s.phase, "halted", "{s:?}");
+    let msg = s.last_error.unwrap();
+    assert!(
+        msg.contains("25/25") && msg.contains("看似被删除") && msg.contains("为防误删已暂停"),
+        "{msg}"
+    );
+
+    // 没有等待确认时调用会被拒
+    let mut c = Node::new(&remote, false);
+    assert!(c.cmd(Op::ConfirmMassDelete, Value::Null).is_err());
+
+    let n = a.statuses().len();
+    a.cmd(Op::ConfirmMassDelete, Value::Null).unwrap();
+    spin_until("确认后跑完一轮", || {
+        let st = a.statuses();
+        st[n..].iter().any(|s| s.phase == "syncing") && st.last().is_some_and(|s| s.phase == "idle")
+    });
+    assert_eq!(a.status().last_error, None);
 }

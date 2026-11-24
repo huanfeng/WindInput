@@ -1,9 +1,15 @@
 //! 同步进程的主循环：调度、命令处理、状态上报（设计 §3.2、§3.3、§7）。
 //!
-//! 单线程跑业务：同一时刻只有一轮同步或一条命令。输入（core 的帧、文件事件）都经一个 channel 进来；
+//! 主循环单线程处理命令与事件；一轮同步放到工作线程里跑，主循环在同步期间仍响应：
+//! 只读命令（导出密钥、测试连接）与 `sync_now` 照常处理，会改状态 / 机密的命令立即回
+//! 「正在同步」，不排队（排队的命令在 core 超时之后仍会执行，用户以为失败了其实生效）；
+//! `Shutdown` 置取消标志，工作线程在写入各步之间收手并释放编辑会话。
+//! 输入（core 的帧、文件事件、同步结束）都经一个 channel 进来；
 //! core 对本进程请求的回执由读线程直接交给 [`crate::link::PipeLink`]，不经这里——
 //! 同步进行中也要能收到回执，否则 `data.beginEdit` 会自己等死自己。
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -12,13 +18,13 @@ use serde_json::{Value, json};
 use wind_sync::crypto::{Dek, KdfParams, Meta, content_hash};
 use wind_sync::scope::{ScopeFlags, in_scope};
 use wind_sync::state::backoff_secs;
-use wind_sync::{Backend, SyncCtx, SyncError, SyncState, manifest, remote, sync_once};
-use wind_sync_ipc::{FromSync, Op, Scope, Status, SyncSettings, ToSync};
+use wind_sync::{Backend, SyncCtx, SyncError, SyncReport, SyncState, manifest, remote, sync_once};
+use wind_sync_ipc::{Backend as Target, FromSync, Op, Scope, Status, SyncSettings, ToSync};
 
 use crate::backends::BackendFactory;
 use crate::errors::{backend_error, crypto_error, sync_error};
 use crate::link::CoreLink;
-use crate::local::{Echo, FsLocal, lock};
+use crate::local::{Echo, FsLocal, RETRY_TAG, lock};
 use crate::log::{log, now_unix};
 use crate::secrets::{SecretStore, Secrets};
 use crate::statefile;
@@ -33,7 +39,36 @@ pub enum Input {
     Fs(String),
     /// stdin 关闭：core 已退出。
     Eof,
+    /// 工作线程跑完了一轮同步。
+    RoundDone(Box<Round>),
 }
+
+/// 一轮同步的结果（工作线程 → 主循环）。
+pub struct Round {
+    state: SyncState,
+    /// 外层 Err = 连后端都没建成（不计入退避状态）。
+    result: Result<Result<SyncReport, SyncError>, String>,
+    conflicts: Vec<String>,
+    now: u64,
+    /// 本轮开始前的回声表快照：本轮扫描之后，这些旧条目就可以清掉了。
+    echo_before: HashMap<String, String>,
+    failures_before: u32,
+}
+
+impl std::fmt::Debug for Round {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Round")
+    }
+}
+
+/// 同步中拒绝会改状态的命令时的提示。
+const BUSY_MSG: &str = "正在同步，请稍后再试";
+/// 大批量删除护栏停止时 `halted` / `last_error` 里的识别标记。
+const MASS_MARK: &str = "为防误删已暂停";
+/// 连续这么多次「稍后重试」类的轮次后，改按普通失败退避。
+const MAX_FREE_RETRIES: u32 = 5;
+/// `Shutdown` 后最多等工作线程收尾这么久。
+const SHUTDOWN_WAIT: Duration = Duration::from_millis(2500);
 
 #[derive(Debug, Clone, Copy)]
 pub struct Timing {
@@ -43,6 +78,8 @@ pub struct Timing {
     pub debounce: Duration,
     /// 设置 / 机密变更后到下一轮的等待。
     pub settings_delay: Duration,
+    /// 本轮因「文件在扫描后被改 / 正被用户编辑」放弃后，到下一轮的等待。
+    pub retry_delay: Duration,
 }
 
 impl Default for Timing {
@@ -51,6 +88,7 @@ impl Default for Timing {
             first_delay: Duration::from_secs(30),
             debounce: Duration::from_secs(10),
             settings_delay: Duration::from_secs(2),
+            retry_delay: Duration::from_secs(10),
         }
     }
 }
@@ -85,9 +123,16 @@ pub struct Runner {
     state: SyncState,
     echo: Echo,
     scope: SharedScope,
-    cached: Option<Box<dyn Backend>>,
+    factory: Arc<dyn BackendFactory>,
+    tx: Sender<Input>,
+    cancel: Arc<AtomicBool>,
     syncing: bool,
+    /// 同步进行中用户改了设置：本轮结束后再解除停止态。
+    clear_halt_after_round: bool,
     force_now: bool,
+    /// 用户确认了大批量删除：下一轮放行（只此一轮）。
+    allow_mass_once: bool,
+    free_retries: u32,
     debounce_until: Option<Instant>,
     periodic_at: Instant,
     conflicts: Vec<String>,
@@ -103,8 +148,47 @@ fn str_arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
     args.get(key).and_then(Value::as_str)
 }
 
+/// 存储位置（地址 / 桶 / 账号）是否变了。区域、前缀、寻址方式不算：凭据发往的还是同一处。
+fn backend_changed(old: Option<&Target>, new: Option<&Target>) -> bool {
+    match (old, new) {
+        (None, None) => false,
+        (Some(Target::Webdav { url: a, user: ua }), Some(Target::Webdav { url: b, user: ub })) => {
+            a.trim() != b.trim() || ua != ub
+        }
+        (
+            Some(Target::S3 {
+                endpoint: ea,
+                bucket: ba,
+                access_key_id: ka,
+                ..
+            }),
+            Some(Target::S3 {
+                endpoint: eb,
+                bucket: bb,
+                access_key_id: kb,
+                ..
+            }),
+        ) => ea.trim() != eb.trim() || ba.trim() != bb.trim() || ka != kb,
+        _ => true,
+    }
+}
+
+/// 把引擎的「检测到大批量删除：本次将删除 N 个…（已同步共 M 个）」改写成面向用户的说明。
+fn mass_deletion_message(raw: &str) -> String {
+    let nums: Vec<&str> = raw
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|s| !s.is_empty())
+        .collect();
+    match nums.as_slice() {
+        [n, m, ..] => {
+            format!("本机有 {n}/{m} 个文件看似被删除，{MASS_MARK}。确认无误请点「继续同步」")
+        }
+        _ => raw.to_string(),
+    }
+}
+
 impl Runner {
-    pub fn new(cfg: Config, tx: Sender<Input>) -> Runner {
+    pub fn new(mut cfg: Config, tx: Sender<Input>) -> Runner {
         let (secrets, secret_error) = match Secrets::load(&*cfg.secrets) {
             Ok(s) => (s, None),
             Err(e) => {
@@ -116,11 +200,15 @@ impl Runner {
         let settings = cfg.settings.clone();
         let scope = SharedScope::new(flags_of(&settings.scope));
         let watch = cfg.watch.then(|| {
-            watch::start(&cfg.userdata_dir, scope.clone(), tx)
+            watch::start(&cfg.userdata_dir, scope.clone(), tx.clone())
                 .map_err(|e| log!("{e}；仅靠定时同步"))
                 .ok()
         });
         let periodic_at = Instant::now() + cfg.timing.first_delay;
+        let factory: Arc<dyn BackendFactory> = Arc::from(std::mem::replace(
+            &mut cfg.factory,
+            Box::new(crate::backends::NoFactory),
+        ));
         Runner {
             cfg,
             settings,
@@ -129,9 +217,14 @@ impl Runner {
             state,
             echo: Arc::new(Mutex::new(Default::default())),
             scope,
-            cached: None,
+            factory,
+            tx,
+            cancel: Arc::new(AtomicBool::new(false)),
             syncing: false,
+            clear_halt_after_round: false,
             force_now: false,
+            allow_mass_once: false,
+            free_retries: 0,
             debounce_until: None,
             periodic_at,
             conflicts: Vec::new(),
@@ -213,7 +306,7 @@ impl Runner {
 
     /// 下一次要跑同步的时刻；不可调度返回 None。
     fn next_wake(&self, now: Instant) -> Option<Instant> {
-        if !self.runnable() {
+        if self.syncing || !self.runnable() {
             return None;
         }
         if self.force_now {
@@ -235,12 +328,15 @@ impl Runner {
             let now = Instant::now();
             let wake = self.next_wake(now);
             if wake.is_some_and(|w| w <= now) {
-                self.sync_round();
+                self.start_round();
                 continue;
             }
             let timeout = wake.map_or(Duration::from_secs(3600), |w| w - now);
             match rx.recv_timeout(timeout) {
-                Ok(Input::Core(ToSync::Shutdown)) | Ok(Input::Eof) => break,
+                Ok(Input::Core(ToSync::Shutdown)) | Ok(Input::Eof) => {
+                    self.wind_down(&rx);
+                    break;
+                }
                 Ok(i) => self.handle(i),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
@@ -250,8 +346,23 @@ impl Runner {
         log!("同步进程退出");
     }
 
+    /// 退出前：叫停进行中的一轮，等它释放编辑会话（等不到就不等了，core 会代为收尾）。
+    fn wind_down(&mut self, rx: &Receiver<Input>) {
+        self.cancel.store(true, Ordering::SeqCst);
+        let end = Instant::now() + SHUTDOWN_WAIT;
+        while self.syncing {
+            let left = end.saturating_duration_since(Instant::now());
+            match rx.recv_timeout(left) {
+                Ok(Input::RoundDone(r)) => self.finish_round(*r),
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+    }
+
     fn handle(&mut self, i: Input) {
         match i {
+            Input::RoundDone(r) => self.finish_round(*r),
             Input::Core(ToSync::Settings(s)) => self.on_settings(s),
             Input::Core(ToSync::Command { id, op, args }) => {
                 let r = self.command(op, &args);
@@ -268,11 +379,23 @@ impl Runner {
             return;
         }
         self.scope.set(flags_of(&s.scope));
+        // 存储位置变了，已存的密码不能再发往新地址（防凭据被转发到别处）
+        if backend_changed(self.settings.backend.as_ref(), s.backend.as_ref())
+            && self.secrets.password.take().is_some()
+        {
+            log!("存储后端已变更，已清除保存的存储凭据");
+            if let Err(e) = self.save_secrets() {
+                log!("{e}");
+            }
+        }
         self.settings = s;
-        self.cached = None;
         // 用户改了设置：解除停止态，稍后按新设置跑一轮
-        self.state.retry.clear_halt();
-        self.save_state();
+        if self.syncing {
+            self.clear_halt_after_round = true;
+        } else {
+            self.state.retry.clear_halt();
+            self.save_state();
+        }
         self.kick();
         self.report();
     }
@@ -313,71 +436,104 @@ impl Runner {
 
     // ── 同步 ───────────────────────────────────────────────
 
-    fn sync_round(&mut self) {
+    /// 起工作线程跑一轮；结果经 `Input::RoundDone` 回主循环。
+    fn start_round(&mut self) {
         let force = std::mem::take(&mut self.force_now);
+        let allow_mass = std::mem::take(&mut self.allow_mass_once);
         self.debounce_until = None;
+        let dek = match self.dek() {
+            Ok(d) => d,
+            Err(msg) => {
+                self.round_failed(&msg);
+                return;
+            }
+        };
         self.syncing = true;
         self.report();
-        let r = self.try_sync(force);
-        self.syncing = false;
-        let now = Instant::now();
-        match r {
-            Ok(skipped) => {
-                self.periodic_at = now + interval(&self.settings);
-                if skipped {
-                    log!("处于退避等待期，本轮跳过");
-                }
-            }
-            Err(msg) => {
-                log!("同步失败: {msg}");
-                // 重试按退避；停止态不排期（runnable 为假）
-                let backoff = Duration::from_secs(backoff_secs(self.state.retry.failures));
-                self.periodic_at = now + backoff.min(interval(&self.settings));
-            }
-        }
-        self.save_state();
-        self.report();
-    }
-
-    /// 取缓存的后端，没有就按当前设置与凭据构建。用完要放回 `self.cached`。
-    fn take_backend(&mut self) -> Result<Box<dyn Backend>, String> {
-        match self.cached.take() {
-            Some(b) => Ok(b),
-            None => {
-                let pw = self.secrets.password.clone().unwrap_or_default();
-                self.cfg.factory.build(&self.settings, &pw)
-            }
-        }
-    }
-
-    /// Ok(true) = 退避中跳过；Err = 用户可读的失败原因。
-    fn try_sync(&mut self, force: bool) -> Result<bool, String> {
-        let dek = self.dek()?;
         let now = now_unix();
         let scope = flags_of(&self.settings.scope);
+        let mut ctx = SyncCtx::new(scope, now);
+        ctx.force = force;
+        ctx.gc = true;
+        ctx.allow_mass_delete = allow_mass;
+        let echo_before = lock(&self.echo).clone();
+        let mut state = self.state.clone();
+        let failures_before = state.retry.failures;
+        let (factory, settings, password) = (
+            self.factory.clone(),
+            self.settings.clone(),
+            self.secrets.password.clone().unwrap_or_default(),
+        );
         let mut local = FsLocal::new(
             self.cfg.userdata_dir.clone(),
             scope,
             self.cfg.link.clone(),
             self.echo.clone(),
-        );
-        let mut ctx = SyncCtx::new(scope, now);
-        ctx.force = force;
-        ctx.gc = true;
-        let backend = self.take_backend()?;
-        let result = sync_once(&*backend, &mut local, &mut self.state, &dek, &ctx);
-        self.cached = Some(backend);
-        self.conflicts = local.conflict_files();
-        match result {
+        )
+        .with_cancel(self.cancel.clone());
+        let tx = self.tx.clone();
+        let spawned = std::thread::Builder::new()
+            .name("sync-round".into())
+            .spawn(move || {
+                let result = match factory.build(&settings, &password) {
+                    Err(m) => Err(m),
+                    Ok(backend) => Ok(sync_once(&*backend, &mut local, &mut state, &dek, &ctx)),
+                };
+                let round = Round {
+                    conflicts: local.conflict_files(),
+                    state,
+                    result,
+                    now,
+                    echo_before,
+                    failures_before,
+                };
+                let _ = tx.send(Input::RoundDone(Box::new(round)));
+            });
+        if let Err(e) = spawned {
+            self.syncing = false;
+            self.round_failed(&format!("无法启动同步线程: {e}"));
+        }
+    }
+
+    /// 没跑成的一轮（建后端失败等）：只记原因与下次时间，不动退避状态。
+    fn round_failed(&mut self, msg: &str) {
+        log!("同步失败: {msg}");
+        let backoff = Duration::from_secs(backoff_secs(self.state.retry.failures));
+        self.periodic_at = Instant::now() + backoff.min(interval(&self.settings));
+        self.state.retry.last_error = Some(msg.to_string());
+        self.save_state();
+        self.report();
+    }
+
+    fn finish_round(&mut self, r: Round) {
+        self.syncing = false;
+        self.state = r.state;
+        if std::mem::take(&mut self.clear_halt_after_round) {
+            self.state.retry.clear_halt();
+        }
+        self.conflicts = r.conflicts;
+        // 本轮扫描已完成：上一轮写下的回声记录用完，清掉（本轮重新写过的保留）
+        lock(&self.echo).retain(|k, v| r.echo_before.get(k) != Some(v));
+        let now = Instant::now();
+        let outcome = match r.result {
+            Err(msg) => {
+                self.round_failed(&msg);
+                return;
+            }
+            Ok(o) => o,
+        };
+        match outcome {
+            Ok(rep) if rep.skipped => {
+                log!("处于退避等待期，本轮跳过");
+                self.periodic_at = now + interval(&self.settings);
+            }
             Ok(rep) => {
-                if rep.skipped {
-                    return Ok(true);
-                }
                 for w in &rep.warnings {
                     log!("警告: {w}");
                 }
-                self.state.last_ok = Some(now);
+                self.state.last_ok = Some(r.now);
                 self.state.retry.last_error = None;
+                self.free_retries = 0;
                 log!(
                     "同步完成：上传 {}，下载 {}，合并 {}，冲突 {}",
                     rep.uploaded.len(),
@@ -385,18 +541,45 @@ impl Runner {
                     rep.merged.len(),
                     rep.conflicts.len()
                 );
-                Ok(false)
+                self.periodic_at = now + interval(&self.settings);
             }
-            Err(e) => {
-                let msg = sync_error(&e);
-                // 状态里存可读文案：重启后设置页直接展示
-                if self.state.retry.halted.is_some() && !matches!(e, SyncError::Halted(_)) {
-                    self.state.retry.halted = Some(msg.clone());
-                }
-                self.state.retry.last_error = Some(msg.clone());
-                Err(msg)
-            }
+            Err(e) => self.on_sync_error(e, r.failures_before, now),
         }
+        self.save_state();
+        self.report();
+    }
+
+    fn on_sync_error(&mut self, e: SyncError, failures_before: u32, now: Instant) {
+        // 稍后重试类：本批什么都没写，下一轮重新扫描即可，不算失败、不退避
+        if let SyncError::Local(m) = &e
+            && m.starts_with(RETRY_TAG)
+            && self.free_retries < MAX_FREE_RETRIES
+        {
+            self.free_retries += 1;
+            let msg = m.trim_start_matches(RETRY_TAG).to_string();
+            log!("本轮放弃，稍后重试: {msg}");
+            self.state.retry.failures = failures_before;
+            self.state.retry.next_at = 0;
+            self.state.retry.last_error = Some(msg);
+            self.periodic_at = now + self.cfg.timing.retry_delay;
+            return;
+        }
+        let msg = if e.is_mass_deletion() {
+            mass_deletion_message(&e.to_string())
+        } else {
+            sync_error(&e)
+        };
+        log!("同步失败: {msg}");
+        // 状态里存可读文案：重启后设置页直接展示
+        if self.state.retry.halted.is_some()
+            && (e.is_mass_deletion() || !matches!(e, SyncError::Halted(_)))
+        {
+            self.state.retry.halted = Some(msg.clone());
+        }
+        self.state.retry.last_error = Some(msg);
+        // 重试按退避；停止态不排期（runnable 为假）
+        let backoff = Duration::from_secs(backoff_secs(self.state.retry.failures));
+        self.periodic_at = now + backoff.min(interval(&self.settings));
     }
 
     fn dek(&self) -> Result<Dek, String> {
@@ -407,7 +590,19 @@ impl Runner {
     // ── 命令 ───────────────────────────────────────────────
 
     fn command(&mut self, op: Op, args: &Value) -> Result<Value, String> {
+        let mutating = matches!(
+            op,
+            Op::SetSecret
+                | Op::SetPassphrase
+                | Op::ImportKey
+                | Op::ResetRemote
+                | Op::ConfirmMassDelete
+        );
+        if self.syncing && mutating {
+            return Err(BUSY_MSG.into());
+        }
         match op {
+            Op::ConfirmMassDelete => self.cmd_confirm_mass_delete(),
             Op::SetSecret => self.cmd_set_secret(args),
             Op::TestConnection => self.cmd_test_connection(args),
             Op::SetPassphrase => self.cmd_set_passphrase(args),
@@ -421,7 +616,6 @@ impl Runner {
     /// 用户处理完问题（改凭据 / 口令 / 密钥）后：解除停止态、丢旧连接、稍后同步。
     fn after_user_fix(&mut self) {
         self.state.retry.clear_halt();
-        self.cached = None;
         self.save_state();
         self.kick();
     }
@@ -446,7 +640,7 @@ impl Runner {
             .map(str::to_string)
             .or_else(|| self.secrets.password.clone())
             .ok_or("尚未保存存储凭据（密码或访问密钥）")?;
-        self.cfg.factory.build(&self.settings, &pw)
+        self.factory.build(&self.settings, &pw)
     }
 
     fn read_meta(b: &dyn Backend) -> Result<Option<Meta>, String> {
@@ -546,9 +740,28 @@ impl Runner {
         if self.secrets.dek.is_none() {
             return Err("尚未设置同步口令或导入密钥".into());
         }
-        self.state.retry.clear_halt();
-        self.cached = None;
+        if self.syncing {
+            // 进行中的这一轮跑完后再来一轮
+            self.clear_halt_after_round = true;
+        } else {
+            self.state.retry.clear_halt();
+        }
         self.force_now = true;
+        Ok(json!({ "queued": true }))
+    }
+
+    /// 大批量删除护栏停止后，用户确认「这些删除是真的」：解除停止态，下一轮放行一次。
+    fn cmd_confirm_mass_delete(&mut self) -> Result<Value, String> {
+        let pending = self.state.retry.halted.as_deref().is_some_and(|h| {
+            h.contains(MASS_MARK) || h.starts_with(wind_sync::error::MASS_DELETION_PREFIX)
+        });
+        if !pending {
+            return Err("当前没有等待确认的大批量删除".into());
+        }
+        self.state.retry.clear_halt();
+        self.allow_mass_once = true;
+        self.force_now = true;
+        self.save_state();
         Ok(json!({ "queued": true }))
     }
 
@@ -571,5 +784,65 @@ impl Runner {
         self.after_user_fix();
         log!("远端已重置");
         Ok(json!({ "ok": true }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::secrets::{FileSecretStore, Secrets};
+    use crate::testing::{FakeCore, MemFactory};
+    use wind_sync::{KdfParams, MemBackend};
+
+    fn runner(dir: &std::path::Path) -> (Runner, Receiver<Input>) {
+        let state_dir = dir.join("state");
+        let store = FileSecretStore::new(state_dir.join(crate::secrets::FILE_NAME));
+        Secrets {
+            dek: Some(Dek::generate().to_base64()),
+            password: Some("pw".into()),
+        }
+        .save(&store)
+        .unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let cfg = Config {
+            userdata_dir: dir.join("user"),
+            secrets: Box::new(store),
+            state_dir,
+            settings: SyncSettings {
+                enabled: true,
+                backend: Some(Target::Webdav {
+                    url: "http://127.0.0.1/x".into(),
+                    user: "u".into(),
+                }),
+                ..Default::default()
+            },
+            link: Arc::new(FakeCore::default()),
+            factory: Box::new(MemFactory(MemBackend::new())),
+            timing: Timing::default(),
+            kdf: KdfParams::FAST_TEST,
+            watch: false,
+        };
+        (Runner::new(cfg, tx), rx)
+    }
+
+    /// 回声记录在下一轮扫描之后清掉，本轮重新写过的保留。
+    #[test]
+    fn echo_entries_from_earlier_rounds_are_dropped_after_the_next_scan() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("user")).unwrap();
+        let (mut r, rx) = runner(d.path());
+        lock(&r.echo).insert("config.toml".into(), "h1".into());
+        r.start_round();
+        let round = loop {
+            if let Input::RoundDone(x) = rx.recv_timeout(Duration::from_secs(10)).unwrap() {
+                break x;
+            }
+        };
+        // 工作线程里改写了的条目（模拟本轮写入）不得被清
+        lock(&r.echo).insert("themes/t/a.toml".into(), "h2".into());
+        r.finish_round(*round);
+        let e = lock(&r.echo);
+        assert!(!e.contains_key("config.toml"), "旧条目应被清: {e:?}");
+        assert_eq!(e.get("themes/t/a.toml").map(String::as_str), Some("h2"));
     }
 }
