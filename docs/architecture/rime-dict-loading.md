@@ -312,6 +312,27 @@ DictManager（每方案一个）→ CompositeDict
 缓存根：`%LOCALAPPDATA%\WindInput[Dev]\cache\{方案名}\`。
 `CACHE_DIR` 为 None 时**回退写到源文件旁**（安装目录可能只读）。
 
+**缓存命名空间是源文件在 `schemas/` 下的目录链**（`manager.rs::cache_path` →
+`wind_dict::cache_ns`），不是父目录名：词库可声明在 `schemas/<方案>/word/x.dict.yaml` 这种
+二级目录下，取父目录名会丢掉方案那一段而跨方案撞名。扁平结构下两种推导逐字节相同。
+旧布局（按父目录名）留下的孤儿产物**有意不清**：在 `cache_path` 里顺手删「按旧算法算出的
+路径」行不通——方案目录本身就叫 `word` 时那正是它的合法新路径，两个方案会互删缓存、永久重建；
+改成「布局版本标记 + 全量重建」又要让所有用户白建一次。受影响的只有用子目录的少数用户，
+卸载时缓存目录整体清掉，要立刻回收可走 `EngineManager::rebuild_all_caches`（CLI `schema rebuild`）。
+
+**反查索引常驻 / mmap 分界 `REVERSE_INDEX_RESIDENT_MAX = 3 MB`**：两条路查询行为完全相同，
+只影响性能。真实索引规模是离散几档（`wind-dict` 的 `reverse_index_bench`）：
+
+| 方案 | 词数 | 索引 | 重开耗时（常驻 / mmap） |
+|---|---|---|---|
+| wubi86（出厂） | 89081 | 2.3 MB | 1.06 ms / 9.37 ms |
+| pinyin（出厂） | 640842 | 23.0 MB | 7.65 ms / 9.08 ms |
+| feihuzj2（用户） | 2519693 | 88.2 MB | 29.3 ms / 9.73 ms |
+
+mmap 建映射开销近乎恒定 ~9 ms，小索引常驻更快；大索引常驻要多付私有内存，点查速度却相同
+（页缓存热后都是 ~0.25 µs/次）。3 MB 落在最低两档之间，两端都不敏感。按
+`config-design-rules.md` §R1（程序可判定的差异不加用户键）不做成配置项。
+
 **merged 由子表段归并生成（2026-10-14，S3/S4）**：旧做法是并行解析全部子表、HashMap 聚合、
 再把 65 万条 owned 元组交给 `WdatWriter`；现在每张子表先各自成段（`CachedDict::load_at_with`，
 改了哪张只重建哪张，串行建段以免两张大表的解析峰值叠加），再用各段的 `WdatReader::codes()`

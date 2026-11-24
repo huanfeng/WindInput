@@ -1,13 +1,9 @@
 //! 引擎管理器
 //!
-//! 与 Go 版本 `wind_input/internal/engine/manager.go` 对齐。
-//!
 //! 职责：
-//! - 预加载所有可用方案的词典与引擎（Pinyin / CodeTable）
+//! - 按需加载各方案的词典与引擎（Pinyin / CodeTable）
 //! - 持有当前活跃方案，支持运行时切换 / 循环切换
 //! - 将 `convert` 请求分发到当前引擎
-//!
-//! 词典加载逻辑从原 `wind_service::bridge_impl` 下沉至此，使引擎层自洽。
 
 use crate::codetable::CodeTableEngine;
 use crate::encoder;
@@ -28,23 +24,17 @@ use wind_config::Config;
 use wind_config::schema::{DictSpec, Schema, merge_toml};
 use wind_dict::cached::{CachedDict, ReverseIndex};
 
-// 方案定义已统一到 wind_config::schema::Schema（取代此前的私有 SchemaFile）。
-// 引擎只消费该共享类型；构建逻辑（build_engine）保持不变。
-
 /// 拼音族共享数据归属命名空间：所有拼音引擎方案（全拼/双拼）的用户词/临时词/词频
 /// 统一落此键空间（P2c）。区别于恰好同名的真实方案 id "pinyin"（如临时拼音默认目标）。
 pub const PINYIN_DATA_SCHEMA: &str = "pinyin";
 
 /// 内置英文方案 id（`data/schemas/english.schema.toml`）。
 ///
-/// 它有**两个入口**：作为 active 方案常驻，或被临时英文 overlay 引用——两者打的是同一份
-/// 词库，故用户数据（词频 / 候选调整）也归同一个桶，见 `Coordinator::effective_data_schema`。
-/// 融合英文候选（混输 / 快捷输入）同样引用它，但那些场景用户在写中文句子，只借词库不共享
-/// 上屏行为。
+/// 作为 active 方案与被临时英文 overlay 引用时打的是同一份词库，用户数据也归同一个桶
+/// （见 `Coordinator::effective_data_schema`）；混输 / 快捷输入融合英文候选时只借词库。
 ///
-/// 进程里**只建一份**：以上全部入口都经 [`EngineManager::shared_english_engine`] 取同一个
-/// `Arc`。此前混输在 `build_engine` 里内联另建一份，靶机实测白占 12.7 MB（英文引擎的词组
-/// 分词索引随用户词库规模增长，那台机器 18 万条）。
+/// 进程里只建一份：所有入口都经 [`EngineManager::shared_english_engine`] 取同一个 `Arc`，
+/// 别在 `build_engine` 里另建（词组分词索引随用户词库增长，重复一份内存很可观）。
 pub const ENGLISH_SCHEMA: &str = "english";
 
 /// 英文方案按屏蔽词多取候选的上限（见 `EngineManager::convert_unblocked`）：屏蔽集是用户一条条
@@ -68,22 +58,17 @@ pub enum FreqStrategy {
     Top,
     /// 逐次提升（默认）：count 优先，累积使用才爬升，抗误选。
     Step,
-    /// **位次减半**：候选每积累一次有效使用，目标位次除以 2，随半衰期回落
+    /// 位次减半：候选每积累一次有效使用，目标位次除以 2，随半衰期回落
     /// （`docs/design/freq-rerank-model.md`）。
     ///
-    /// 与 `Top`/`Step` 的本质差别：后两者是**布尔 used-first**——只要用过一次就整体跳到
-    /// 档内最前，策略只决定「已用过的那批内部怎么排」；`Position` 则让位次连续表达强弱，
-    /// 用得越多爬得越前，没有「用过 / 没用过」这道台阶。
-    ///
-    /// 适合**前缀匹配为主**的方案（英文尤其——它几乎所有候选都是前缀匹配），那里
-    /// 布尔闸门会让任何选过一次的词直接顶到最前，过于粗暴。
+    /// `Top`/`Step` 是布尔 used-first（用过一次就整体跳到档内最前）；`Position` 让位次连续
+    /// 表达强弱，适合前缀匹配为主的方案（英文），那里布尔闸门过于粗暴。
     Position,
 }
 
-/// 前缀补全参与词频位置提升的范围。判据是**语义单元数**
+/// 前缀补全参与词频位置提升的范围。判据是语义单元数
 /// （[`wind_candidate::semantic_units`]：汉字逐字计、西文词整体计 1），不是字符数——
-/// 英文候选 `hello` 有 5 个 char，按字符数会被「只提升单个」挡死，而英文所有候选都是
-/// 前缀匹配，那等于英文调频全灭。
+/// 按字符数，英文（几乎全是前缀匹配）会被「只提升单个」整体挡掉。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromotePrefix {
     /// 前缀补全一律不参与提升。
@@ -115,15 +100,12 @@ impl PromotePrefix {
 }
 
 /// 活跃方案的词频排序设置（apply_freq_rerank 用）。
-/// 按方案解析后缓存，避免每键读盘（frequency.md §8）。
-///
-/// ⚠️ **不再是 `Copy`**：免词频判据从一个 `BlockMask`（8 字节位集）换成了整个字符类
-/// registry，只能按 `Arc` 共享。克隆成本仍是一次引用计数，与原先的按位拷贝同量级。
+/// 按方案解析后缓存，避免每键读盘（frequency.md §8）。字符类 registry 按 `Arc` 共享，克隆廉价。
 #[derive(Debug, Clone)]
 pub struct FreqSettings {
     /// 词频维度主开关（全局 schema.{codetable,pinyin}.frequency.enabled）；关则完全不重排。
     pub enabled: bool,
-    /// 调频关闭时仍记录（`schema.*.frequency.record_always`）。**只放开写端**，读端一律
+    /// 调频关闭时仍记录（`schema.*.frequency.record_always`）。只放开写端，读端一律
     /// 只认 [`Self::enabled`]；写端判据走 [`Self::records`]，不要直接读本字段。
     pub record_always: bool,
     /// used-first 内的排序策略（全局 schema.codetable.frequency.strategy；仅码表用）。
@@ -137,13 +119,12 @@ pub struct FreqSettings {
     /// 英文候选记账码是否用输入码（`schema.english.frequency.code_scope == "input"`）。
     /// `false`（默认）= 用候选码，与拼音同侧。
     ///
-    /// ⚠️ 本项**按候选来源生效、不按当前方案**，故 `freq_settings` 的三个分支取的是
-    /// 同一个值——混输方案里混进来的英文候选同样要按英文的口径记账。
+    /// 本项按候选来源生效、不按当前方案，故 `freq_settings` 的三个分支取同一个值——
+    /// 混输里的英文候选同样按英文口径记账。
     pub english_code_by_input: bool,
     /// 字符类判定结构。免词频取其中开了 `no_freq` 的那些类（并集语义）。
     ///
-    /// ⚠️ 与 [`Self::english_code_by_input`] 同样**跨引擎共用一份**，三个分支取自
-    /// 分支之外算好的那一个——「emoji 不参与词频」在码表里成立、在拼音里不成立说不通。
+    /// 与 [`Self::english_code_by_input`] 一样跨引擎共用一份（「emoji 不参与词频」不该因引擎而异）。
     pub charsets: Arc<wind_candidate::CharsetRegistry>,
 }
 
@@ -156,34 +137,26 @@ impl Default for FreqSettings {
             protect: ProtectPolicy::NONE,
             promote_prefix: PromotePrefix::Single,
             english_code_by_input: false,
-            // 空 registry 的 `no_freq` 恒假，与原先的 `BlockMask::EMPTY` 同义。
+            // 空 registry 的 `no_freq` 恒假。
             charsets: Arc::default(),
         }
     }
 }
 
 impl FreqSettings {
-    /// 选中时要不要记账：调频开着，或用户要求「只记次数、不调序」（论坛 t278）。
+    /// 选中时要不要记账：调频开着，或用户要求「只记次数、不调序」。
     ///
     /// 写端（`record_selection_in`）用它，读端（重排 / 英文热词召回 / 联想打分）用
-    /// [`Self::enabled`]——两端的开关**刻意不同**，这正是 `record_always` 的全部语义。
+    /// [`Self::enabled`]——两端开关刻意不同，这正是 `record_always` 的语义。
     pub fn records(&self) -> bool {
         self.enabled || self.record_always
     }
 
-    /// 这条候选文本要不要**整个绕开词频**（既不记录、也不重排）。
+    /// 这条候选文本要不要整个绕开词频（既不记录、也不重排）。
     ///
-    /// # ★ 这个方法存在的唯一理由是「两端同源」
-    ///
-    /// 词频有写、读两个端点：`record_selection_in`（选中时记账）与 `apply_freq_rerank_in`
-    /// （每次按键重排）。它们**必须用同一个判据**，否则两种失效都完全静默：
-    ///
-    /// - 只跳过写端 ⇒ 用户库里既有的 emoji 词频记录照旧生效，开关看起来像没反应；
-    /// - 只跳过读端 ⇒ 记录还在继续累积，关掉开关后那些 emoji 会突然全部浮上来。
-    ///
-    /// 把判据挂在两端**都已经在读**的 [`FreqSettings`] 上，同源就由类型保证，而不是靠
-    /// 两处各写一遍 `if`、再靠注释提醒别人保持一致。同款教训见 `shadow_code_of`
-    /// （读端、写端、菜单灰显三处取码必须走同一个口）。
+    /// 写端 `record_selection_in` 与读端 `apply_freq_rerank_in` 必须用同一判据：只跳写端，
+    /// 既有记录照旧生效；只跳读端，记录继续累积、关开关后突然全部浮上来。挂在两端都在读的
+    /// [`FreqSettings`] 上即由类型保证同源。
     pub fn excluded_from_freq(&self, text: &str) -> bool {
         self.charsets.no_freq(text)
     }
@@ -191,12 +164,9 @@ impl FreqSettings {
 
 /// 「作为混输辅助的拼音」才有的收敛项。
 ///
-/// 存在的理由：有些拼音行为只在混输语境下需要收紧——混输的击键串**同时是码表码**，
-/// 把它整串当拼音解读会抢走码表候选的首位。这类判据不能从全局配置读（纯拼音方案不该
-/// 受影响），只能由调用方按语境注入，故设为 `build_engine` 的参数而非配置字段。
-///
-/// 字段承载具体取值，「是不是混输辅助」由 [`MixedRole`] 表达。此前这里是个裸
-/// `Option<bool>`（只有简拼开关），语境判据与取值挤在一个布尔里，加第二个收敛项时无处安放。
+/// 混输的击键串同时是码表码，整串当拼音解读会抢走码表首位，故有些拼音行为只在混输下收紧。
+/// 纯拼音方案不该受影响，所以由调用方按语境注入（`build_engine` 参数），不读全局配置。
+/// 「是不是混输辅助」由 [`MixedRole`] 表达，本结构只承载取值。
 #[derive(Clone, Copy)]
 struct MixPinyinOpts {
     /// `schema.mix.enable_pinyin_abbrev`：是否产出简拼候选。
@@ -205,9 +175,8 @@ struct MixPinyinOpts {
 
 /// 码表引擎的整句开关最终取值。
 ///
-/// 作为混输主引擎构建时取**混输方案自己**的声明，否则取本方案的。抽成纯函数是为了让
-/// 「混输不继承 primary_schema 的整句声明」这条语义可以直接单测——它埋在
-/// `build_engine` 里的话，要跑通整个引擎构建才验得到。
+/// 作为混输主引擎构建时取混输方案自己的声明，否则取本方案的。抽成纯函数以便单测
+/// 「混输不继承 primary_schema 的整句声明」。
 fn resolve_sentence_input(role: Option<MixedRole>, own: bool) -> bool {
     match role {
         Some(MixedRole::Primary { sentence_input, .. }) => sentence_input,
@@ -215,30 +184,12 @@ fn resolve_sentence_input(role: Option<MixedRole>, own: bool) -> bool {
     }
 }
 
-/// 逆切分开关的取值来源：独立方案用自己的声明，**混输主引擎一律关闭**。
+/// 逆切分开关的取值来源：独立方案用自己的声明，混输主引擎一律关闭。
 ///
-/// # 为什么混输下必须整体关掉（而不是像整句那样「取混输方案自己的声明」）
-///
-/// 逆切分候选的 `code` **就是整串输入** —— 这是它能被既有 `decide_auto_commit` 认作
-/// 「恰一个精确匹配」从而自动上屏的根据（见 `CodeTableEngine::decode_split`），不能改。
-/// 引擎侧为此刻意**不置** `is_exact_code`，想把它挡在 `cmp_exact_first` 的精确档之外。
-///
-/// 但混输的两个档位函数判的**不是** `is_exact_code`：
-///
-/// - `wind_candidate::source_tier`：`CodeTable if c.code == input => 0`
-/// - `mixed::engine::truncation_tier`：`CodeTable if c.code == ctx.codetable_exact => 0`
-///
-/// ⇒ 那个回避在混输链路上被整个绕过，切分候选照样落进**档 0**，无条件压过拼音精确候选
-/// （档 1）。真机后果：混输方案开了它，打任一五笔四码空码串（实测空码率 81%），首选会被
-/// 一条机械拼接的组合占住——而「不抢任何现有候选」正是本功能的立身之本。
-///
-/// 让它在混输下正确，需要先决定切分候选在混输档位体系里该占哪一档（档 2 码表前缀补全？
-/// 还是独立一档？），那是独立的一步，不在本轮。⇒ **本轮整体关闭**，与设计文档
-/// §5.6「混输下的档位归属本轮不做」保持自洽。
-///
-/// 判据只需要「是不是混输主」，故 `MixedRole::Primary` 不带 `split_input` 字段——留一个
-/// 不决定任何行为的开关字段，下一个读代码的人一定会以为它有用。「方案作者写了却不生效」
-/// 的告警直接读 `schema.engine.codetable.split_input`，在 `build_engine` 的混输分支里。
+/// 切分候选的 `code` 就是整串输入（自动上屏依赖这点），引擎靠不置 `is_exact_code` 避开
+/// 精确档；但混输的 `source_tier` / `truncation_tier` 按 `code == input` 判档，切分候选会
+/// 落进档 0 压过拼音精确候选。在混输档位体系里给它定档之前整体关闭（见
+/// docs/design/codetable-split-input.md §5.6）。「写了却不生效」的告警在 `build_engine` 的混输分支里。
 fn resolve_split_input(role: Option<MixedRole>, _own: bool) -> bool {
     match role {
         Some(MixedRole::Primary { .. }) => false,
@@ -247,28 +198,18 @@ fn resolve_split_input(role: Option<MixedRole>, _own: bool) -> bool {
 }
 
 /// 递归构建混输子引擎时，告诉被构建方「你在给谁当零件」。`None` = 独立方案。
-///
-/// 此前这个位置是裸的 `Option<MixPinyinOpts>`——`None`/`Some` 兼作「是不是混输辅助拼音」
-/// 的判据。主引擎那一侧也需要按语境收敛（见 [`Self::Primary`]）之后，那个二值判据就不够用了：
-/// 它表达不了「是混输的**主**引擎」这第三种情形。
 #[derive(Clone, Copy)]
 enum MixedRole {
     /// 混输主（码表）。
     ///
-    /// `sentence_input` 由**混输方案自己**的 `[engine.codetable]` 决定，**不继承
-    /// primary_schema 的取值**：`wubi86` 开了整句不代表 `wubi86_pinyin` 也该开——
-    /// 后者的超码长区间已经归拼音管（`MixedEngine::convert` 超码长直接走
-    /// `convert_overflow`，根本不经过主引擎），继承过来只会得到一个「配置开着却不生效」
-    /// 的状态，那是最难排查的一种。
+    /// `sentence_input` 由混输方案自己的 `[engine.codetable]` 决定，不继承 primary_schema：
+    /// 混输的超码长区间归拼音（`convert_overflow` 不经主引擎），继承过来只会「开着却不生效」。
     Primary { sentence_input: bool },
     /// 混输次（拼音），携带拼音侧的语境收敛。
     Secondary(MixPinyinOpts),
 }
 
 /// 一个待注册的码表词库层（[`EngineManager::load_codetable_layers`] 的产出）。
-///
-/// 此前是个 5 元组。具名后消费点 `l.default_weight` / `l.base_order` 自证，
-/// 不再靠位置对齐。
 struct CodetableLayer {
     name: String,
     dict: CachedDict,
@@ -279,19 +220,13 @@ struct CodetableLayer {
     default_weight: Option<i32>,
 }
 
-/// 方案级 `[weight_spec]` → [`wind_dict::WeightNorm`]，施加到本方案**全部**词库层。
+/// 方案级 `[weight_spec]` → [`wind_dict::WeightNorm`]，施加到本方案全部词库层。
 ///
 /// 未配置 → `None`（守约方案的常态，不做任何换算）。
 ///
-/// ## ⚠️ 必须是方案级、不可退回按库
-///
-/// 全方案共用一个映射函数，单调映射天然保序 ⇒ **库间相对关系原样保留**。
-/// 按库配过一版，实测有反转：扩展库单独归一化后其条目反超主库，而作者写的
-/// `base_order` 救不回来（`better()` 里 weight 在 base_order 之前）。
-/// 根因是**两个不同的映射函数之间没有保序保证**。见 `Schema::weight_spec`。
-///
-/// ⚠️ **配了但参数不自洽时告警而非静默跳过**：那会让方案作者以为「配了就生效了」，
-/// 而实际什么也没发生——本仓「配置就位、消费点不可达」那一类静默失效的同款形态。
+/// 必须是方案级、别改成按库：同一个单调映射保序，库间相对关系原样保留；不同库各用一个
+/// 映射则没有保序保证，扩展库条目可能反超主库（`base_order` 救不回来，`better()` 里 weight
+/// 在前）。见 `Schema::weight_spec`。参数不自洽时告警，不静默跳过。
 fn weight_norm_of(schema: &Schema) -> Option<wind_dict::WeightNorm> {
     let ws = schema.weight_spec.as_ref()?;
     let norm = wind_dict::WeightNorm::from_parts(ws.median, ws.max, &ws.mode, ws.target);
@@ -307,9 +242,7 @@ fn weight_norm_of(schema: &Schema) -> Option<wind_dict::WeightNorm> {
 
 /// overlay 方案注册表的一条（见 [`EngineManager::overlay_modes`]）。
 ///
-/// **实例身份 = 方案 id**。此前这是 `config.schema.special_modes` 的一个数组条目，
-/// 身份靠数组下标；那让「一个 key 一个控件」的设置页模型套不上，也让预置配置文件
-/// 写不进去（写出即冻结快照）。见 `docs/redesign/overlay-mode-config.md`。
+/// 实例身份 = 方案 id。见 `docs/redesign/overlay-mode-config.md`。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OverlayEntry {
     /// 被引用（即自身）的方案 id。
@@ -342,7 +275,7 @@ pub struct AuxCodeSettings {
     /// 词组长度上限（0 = 不限）。
     pub max_phrase_len: usize,
     /// 直接辅助码最终是否生效：`enabled` 生效、`direct` 经方案 tri-state 折叠为真，且方案
-    /// **是双拼**（`[engine] type = "pinyin"` + `[engine.pinyin] scheme = "shuangpin"`）。
+    /// 是双拼（`[engine] type = "pinyin"` + `[engine.pinyin] scheme = "shuangpin"`）。
     /// 全拼写了 `direct = true` 这里为 false 并告警一次（设计 §7）。
     pub direct: bool,
     /// 直接辅助码走连续辅助码（击键图 + 辅码表）：`direct` 为真且方案没写内部逃生口
@@ -351,7 +284,7 @@ pub struct AuxCodeSettings {
     /// 编码栏辅码分隔符（方案内部项 `[engine.aux_code] preedit_separator`，已校验）；`None` =
     /// [`crate::engine::AUX_PREEDIT_SEPARATOR`]。取值见 [`Self::preedit_separator`]。
     pub preedit_separator: Option<Arc<str>>,
-    /// 已解析的来源，顺序即优先级。**`enabled == false` 时恒空**（关闭即不解析）。
+    /// 已解析的来源，顺序即优先级。`enabled == false` 时恒空（关闭即不解析）。
     pub sources: Vec<AuxSource>,
 }
 
@@ -380,20 +313,15 @@ pub struct AuxCodeSourceOptions {
     pub files: Vec<(String, std::path::PathBuf)>,
 }
 
-/// 引擎管理器（懒加载：仅在需要时构建对应方案引擎，降低启动内存）
 /// 某个码位区间在词库里的命中情况，[`EngineManager::scan_chars_in_range`] 的产出。
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct RangeScan {
     /// 命中的字符，按码位升序、去重。
     pub chars: Vec<char>,
-    /// **受影响的词条数**（去重）：含有区间内任一字符的词条有多少条。
+    /// 受影响的词条数（去重）：含有区间内任一字符的词条有多少条。
     ///
-    /// ★ 与 `chars.len()` 是两个数量级的事，界面必须显示这个：虎码里全角逗号 `，` 只是
-    /// 1 个字符，却出现在 326 条词条里（词条内部的标点）。只报「1 个字符」，谁都会
-    /// 毫不犹豫地把它设为生僻，那 326 个词跟着一起判非常用。
-    ///
-    /// ⚠️ 刻意**不是**「各字符命中数之和」：一条词条里同时出现两个注音字符时，那种口径
-    /// 会把它数两遍，答出来的就不再是「会影响多少条词」。
+    /// 界面须显示这个而不只是 `chars.len()`：一个字符可能出现在数百条词条里，标为生僻会
+    /// 连带它们一起判非常用。刻意不是「各字符命中数之和」，否则一条词被数多遍。
     pub entries: usize,
     /// 累加期间的去重集合（`finish` 后转进 `chars`）。
     seen: std::collections::BTreeSet<char>,
@@ -405,13 +333,8 @@ impl RangeScan {
         let mut hit_this_entry = false;
         for ch in text.chars() {
             let c = ch as u32;
-            // ⛔ 空白与控制字符即便落在区间里也不收（`is_markable`）：`ASCII` 块整块可批量，
-            // 而词库里含空格的词条成百上千，不挡就会给空格登记一条覆盖——含空格的候选
-            // 从此全判非常用，设置页多出一行「看不出是什么也点不掉」的空白，导出还能写
-            // 进去、导入却被拒，往返都对不上。
-            //
-            // 挡在**扫描**这一层而不是写入前：预览与执行读的是同一份 `chars`，在这里滤掉
-            // 才能保证「预览说 N 个」与「实际写 N 个」始终一致。
+            // 空白与控制字符即便落在区间里也不收（`is_markable`），否则含空格的词条全判
+            // 非常用，且该覆盖导出能写、导入被拒。挡在扫描层，预览与执行读同一份 `chars` 才一致。
             if start <= c && c <= end && wind_candidate::is_markable(ch) {
                 self.seen.insert(ch);
                 hit_this_entry = true;
@@ -431,9 +354,8 @@ impl RangeScan {
 /// 混输取英文子引擎的通道：由 [`EngineManager::ensure_loaded`] 注入，回调进
 /// [`EngineManager::shared_english_engine`]。
 ///
-/// 给**回调**而不是直接给 `Arc`，是因为它必须懒——`schema.mix.enable_english` 关着时一次
-/// 都不该去建英文引擎。而 `build_engine` 是关联函数（没有 `&self`），够不着那份缓存，
-/// 只能由调用方注入。
+/// 给回调而不是 `Arc`：`schema.mix.enable_english` 关着时不该建英文引擎；`build_engine`
+/// 是关联函数，够不着那份缓存，只能由调用方注入。
 type EnglishProvider<'a> = &'a dyn Fn() -> Option<Arc<dyn Engine>>;
 
 /// 词语联想：临时词进「个人档」的使用次数门槛。新建即 count=1，达到 2 = 建出来之后又用过。
@@ -469,40 +391,34 @@ pub fn schema_reads_on_current_thread() -> u64 {
     SCHEMA_READS.with(|n| n.get())
 }
 
+/// 引擎管理器（懒加载：仅在需要时构建对应方案引擎，降低启动内存）。
 pub struct EngineManager {
     /// schema_id -> 引擎实例（懒加载，Arc 便于无锁 convert）+ 最后使用时刻
     engines: Mutex<HashMap<String, LoadedEngine>>,
     /// `engines` 的失效代次：凡「表里的引擎已按旧配置建成、不能再用」的失效口
-    /// （`invalidate_schema`、`reload_from_config`）都在**持 `engines` 锁**时 +1。
+    /// （`invalidate_schema`、`reload_from_config`）都在持 `engines` 锁时 +1。
     /// `ensure_loaded` 锁外构建前记代次、写回前（同一把锁下）比对，变了就丢掉重建——否则
     /// 「建到一半被失效」的旧引擎会被插回表里，一直用到下次失效。共享英文引擎缓存同理。
     /// 闲置淘汰不推进它：被摘的引擎配置没变，正在建的那份照样能用。
     ///
-    /// **全局一个代次是有意的取舍**：无关方案的失效也会让在建的构建重来一轮（白建一次），
-    /// 换来的是不必维护「谁依赖谁」的按方案代次（混输成员、共享英文都要跟着推）。失效是
-    /// 设置页操作级的低频事件，不会活锁——每多一轮都要求其间又发生一次失效。
+    /// 全局一个代次是有意的取舍：无关方案的失效也会让在建的构建白建一次，换来不必维护
+    /// 「谁依赖谁」的按方案代次。失效是低频事件，不会活锁。
     engines_gen: std::sync::atomic::AtomicU64,
     /// 淘汰时钟的零点（构造时刻）。
     clock_origin: std::time::Instant,
-    /// 淘汰时钟：距 `clock_origin` 的毫秒数，**只在淘汰拍子里推进**（[`Self::evict_idle`]）。
+    /// 淘汰时钟：距 `clock_origin` 的毫秒数，只在淘汰拍子里推进（[`Self::evict_idle`]）。
     ///
-    /// 取引擎时把它的当前读数记进 [`LoadedEngine::last_used`]——不直接读系统时钟，是为了让
-    /// 按键热路径上只多一次原子读写。代价是「最后使用」的精度只到一个拍子（生产 1 分钟），
-    /// 对 30 分钟的闲置判据无关紧要。
+    /// 取引擎时把读数记进 [`LoadedEngine::last_used`]，按键热路径上只多一次原子读写。
+    /// 代价是精度只到一个拍子（生产 1 分钟），对 30 分钟的闲置判据无关紧要。
     use_clock: std::sync::atomic::AtomicU64,
     /// 当前活跃方案 ID
     active: Mutex<String>,
-    /// 活跃方案的**变更代际**：每次 `active` 真正改变时 +1。
+    /// 活跃方案的变更代际：每次 `active` 真正改变时 +1。
     ///
-    /// 供上层判断「自我上次记录以来，活跃方案有没有被动过」——只比对 id 是做不到的，
-    /// 「切走又切回来」与「从未变过」在值上完全同形。当前消费者是协调器的方案往返键
-    /// （`toggle_schema`）：来源记录必须在期间发生任何切换时作废，否则会把用户送回
-    /// 几步之前的方案。
-    ///
-    /// 递增与 [`crate::active_hook::notify_active_changed`] **绑死在
-    /// [`Self::on_active_changed`] 里**，不是各赋值点自己加。理由是漏掉通知会让设置界面
-    /// 的方案显示不刷新（看得见、会被报），漏掉计数则只在往返键那个低频路径上出错
-    /// （看不见）——把易漏的接线搭在不易漏的接线上。
+    /// 只比对 id 分不清「切走又切回来」与「从未变过」；消费者是协调器的方案往返键
+    /// （`toggle_schema`），期间有任何切换就作废来源记录。递增与
+    /// [`crate::active_hook::notify_active_changed`] 绑在 [`Self::on_active_changed`] 里，
+    /// 不由各赋值点自己加：漏通知看得见，漏计数看不见，把后者搭在前者上。
     schema_generation: std::sync::atomic::AtomicU64,
     /// 可用方案列表（已过滤不支持的方案，用于循环切换）。
     /// Mutex 以支持配置热重载时原地更新（无需重建 EngineManager）。
@@ -518,41 +434,32 @@ pub struct EngineManager {
     mix: Mutex<wind_config::MixGlobal>,
     /// 全局英文配置（英文方案的行为与调频；全局唯一）。Mutex 以支持热重载。
     english: Mutex<wind_config::config::EnglishGlobal>,
-    /// 共享英文引擎缓存——「英文候选混入」与**混输的英文子引擎**取的是同一份。
+    /// 共享英文引擎缓存——「英文候选混入」与混输的英文子引擎取的是同一份。
     ///
-    /// `None` = 尚未尝试；`Some(None)` = 试过且不可用（英文词库缺失），**不再重试**。
-    /// ⚠️ 少了这层「记住失败」，`convert` 每一次按键都会重走一遍 `ensure_loaded` 构建、
-    /// 失败、`warn!` ——热路径上刷日志且白做功。
-    ///
-    /// **两处重置，缺一不可**：`reload_from_config`（配置变更，与其余镜像同批），以及
-    /// `invalidate_schema(ENGLISH_SCHEMA)`（扩展词库启停会把 `engines` 里那份换掉，这里
-    /// 不跟着清的话，混入与混输会一直握着刚被移出表的旧实例）。
+    /// `None` = 尚未尝试；`Some(None)` = 试过且不可用（英文词库缺失），不再重试——否则每键
+    /// 重走一遍构建、失败、`warn!`。两处重置缺一不可：`reload_from_config`，以及
+    /// `invalidate_schema(ENGLISH_SCHEMA)`（扩展词库启停会换掉 `engines` 里那份，不清就握着旧实例）。
     shared_english_engine: Mutex<Option<Option<Arc<dyn Engine>>>>,
     /// 全局临时拼音配置（码表方案下临时切拼音反查；全局唯一）。Mutex 以支持热重载。
     temp_pinyin: Mutex<wind_config::config::TempPinyinConfig>,
-    /// 临时英文配置镜像。**目前只为 `phrase_seg` 而存在**：词组分词索引要不要预热，取决于
-    /// 三个作用域（英文方案 / 临英 / 快捷输入英文）里有没有任何一个开着，而临英那份开关
-    /// 不在 `schema` 段里，`english` 镜像够不着它。与 `temp_pinyin` 同构地整份镜像而非
-    /// 只存一个 bool：下一个需要它的字段来了不必再改一次结构。
+    /// 临时英文配置镜像，目前只为 `phrase_seg`：词组分词索引要不要预热取决于英文方案 /
+    /// 临英 / 快捷输入英文三处开关，临英那份不在 `schema` 段里，`english` 镜像够不着。
     temp_english: Mutex<wind_config::config::TempEnglishConfig>,
     /// 全局 `input.reverse.lookup_disabled_dicts` 的镜像；只在 `new` 与 `reload_from_config` 写，
     /// `ensure_loaded` 读出交给 `build_engine` 决定挂不挂影子层（未启用扩展库，只给反查模式）。
     ///
-    /// ⚠️ `reload_from_config` 里必须写在 `engines.clear()` **之前**，否则末尾那次
+    /// `reload_from_config` 里必须写在 `engines.clear()` 之前，否则末尾那次
     /// `ensure_loaded` 会拿旧值建引擎；协调器侧 `engine_reload_needed` 也必须收这个键。
     reverse_lookup_disabled: std::sync::atomic::AtomicBool,
-    /// 不参与词频的字符区块（`schema.frequency.exclude_blocks` 的**解析结果**）。
-    ///
-    /// 存解析后的 [`wind_candidate::BlockMask`] 而不是原始 `Vec<String>`：解析要按名字线性
-    /// 查块表，而本项的消费点在按键热路径上。跟 `codetable`/`english` 那几份镜像一样由
-    /// `update_config` 刷新——**漏了那一步的症状是「设置页改了不生效、重启后才生效」**。
+    /// 字符类判定结构（免词频等），存解析结果，消费点在按键热路径上。跟 `codetable`/`english`
+    /// 镜像一样在配置重载时刷新，漏了就是「设置页改了不生效、重启后才生效」。
     charsets: Mutex<Arc<wind_candidate::CharsetRegistry>>,
     /// 词频排序设置缓存（schema_id -> FreqSettings；按需解析、避免每键读盘）
     freq_cache: Mutex<HashMap<String, FreqSettings>>,
-    /// 辅助码生效设置缓存（schema_id -> AuxCodeSettings），**只供逐键路径**
+    /// 辅助码生效设置缓存（schema_id -> AuxCodeSettings），只供逐键路径
     /// （[`EngineManager::aux_code_settings_cached`]，直接辅助码每个双拼按键都要问）。与
     /// `freq_cache` 同生命周期：`invalidate_schema`（方案覆盖层写入 / 删除 / 重建都走它）与
-    /// `reload_from_config` 时清。任一方案失效都**整表清**——`schema:` 来源会引用别的方案，
+    /// `reload_from_config` 时清。任一方案失效都整表清——`schema:` 来源会引用别的方案，
     /// 按 id 局部清会漏掉引用方。进入辅助码（`aux_code_settings_cached_of`）也走它。
     aux_settings_cache: Mutex<HashMap<String, AuxCodeSettings>>,
     /// `aux_settings_cache` 的失效代次：每次清表（持锁）+1。未命中时先记代次再算，回填前
@@ -560,26 +467,20 @@ pub struct EngineManager {
     aux_settings_gen: std::sync::atomic::AtomicU64,
     /// 码表设置缓存（(schema_id, 是否按混输解析) → 生效设置），供 [`EngineManager::codetable_settings`]。
     ///
-    /// **必须缓存**：单字过滤、建候选、短语自动上屏每键各取一次，每次 `read_schema` 混输方案
-    /// 再读主码表方案——不缓存就是每键 6 次读盘 + TOML 解析 + 扫词库目录。键里带「是否混输」：
-    /// 它取决于引擎加载了没有，加载前后解析结果不同，不能共用一条。失效同 `aux_settings_cache`：
-    /// 任一方案失效或配置重载都整表清（混输引用主码表方案，按 id 局部清会漏）。
+    /// 必须缓存：每键要取多次，每次都要读盘解析方案（混输再读主码表方案）。键里带「是否混输」：
+    /// 它取决于引擎加载了没有，前后解析结果不同。失效同 `aux_settings_cache`（整表清，
+    /// 混输引用主码表方案，按 id 局部清会漏）。
     codetable_settings_cache: Mutex<HashMap<(String, bool), wind_config::CodetableGlobal>>,
     /// `codetable_settings_cache` 的失效代次（同 `aux_settings_gen`）。
     codetable_settings_gen: std::sync::atomic::AtomicU64,
-    /// 方案引擎类型缓存（`schema_engine_type`）。**按 id 缓存，reload/invalidate 时清**，
-    /// 与 `freq_cache`/`name_cache` 同生命周期。
-    ///
-    /// 存在理由是性能：`read_schema` 每次都要 `fs::read_to_string` + `toml::from_str`，
-    /// 而 `apply_freq_rerank` 每次按键就要调 2 次（混输 5+ 次）——五笔单字母下与逐候选的
-    /// redb 查询叠加，造成可感知卡顿。缓存 `None` 同样有意义：方案文件不存在时反复尝试
-    /// 读盘，还会刷出成片的 `Schema file not found` 警告。
+    /// 方案引擎类型缓存（`schema_engine_type`）。按 id 缓存，reload/invalidate 时清，
+    /// 与 `freq_cache`/`name_cache` 同生命周期。按键路径每键调多次，不缓存会读盘卡顿；
+    /// 缓存 `None` 也有意义，避免方案文件不存在时反复读盘刷警告。
     schema_type_cache: Mutex<HashMap<String, Option<String>>>,
-    /// 方案定义缓存（schema_id → 合并 override 后的 `Schema`），供按键路径取**方案级标量字段**
-    /// （混输成员、拼音分隔符策略）。`read_schema` 每次都要读方案与 override 两个文件、解析
-    /// TOML、列发现目录并读各词库文件头，按键路径上一次也不能有。
+    /// 方案定义缓存（schema_id → 合并 override 后的 `Schema`），供按键路径取方案级标量字段
+    /// （混输成员、拼音分隔符策略），按键路径上不能有 `read_schema`。
     ///
-    /// ⚠️ 词库清单这类随词库目录变化的字段**不要**从这里取：缓存只随方案失效与配置重载清，
+    /// 词库清单这类随词库目录变化的字段不要从这里取：缓存只随方案失效与配置重载清，
     /// 不随词库目录变化清。失效同 `aux_settings_cache`（整表清 + 代次）。
     schema_def_cache: Mutex<HashMap<String, Option<Arc<Schema>>>>,
     /// `schema_def_cache` 的失效代次（同 `aux_settings_gen`）。
@@ -594,41 +495,26 @@ pub struct EngineManager {
     user_dicts_seen: Mutex<HashMap<String, Vec<(String, String)>>>,
     /// 方案级 `[key_actions]` 表缓存（schema_id → 表）。
     ///
-    /// **必须缓存**：消费点 `Coordinator::bound_action_for` 在按键热路径上，且进模式的两条
-    /// 通路各调一次。没有它就是每键读两个文件（方案 + override）、解析两份 TOML、再反序列化
-    /// 整个 `Schema`——`read_schema` 本身不带任何缓存。
-    ///
-    /// 与 `schema_type_cache` 等同批失效（`invalidate_schema`）。
-    ///
-    /// 值用 `Arc` 而非裸表：消费点在按键热路径上，返回 owned 表意味着**命中缓存也要
-    /// clone 一遍整张表**（含每个键名与动词的 `String` 分配）。缓存本身是为了省去读盘与
-    /// TOML 解析，clone 会把省下来的一部分又还回去。
+    /// 必须缓存：消费点 `Coordinator::bound_action_for` 在按键热路径上。值用 `Arc`，
+    /// 命中时不必 clone 整张表。与 `schema_type_cache` 等同批失效（`invalidate_schema`）。
     key_actions_cache: Mutex<HashMap<String, Arc<std::collections::BTreeMap<String, String>>>>,
     /// 方案级 `[session_actions]` 表缓存（schema_id → 表）。
     ///
-    /// 与 [`Self::key_actions_cache`] 同构、**同批失效**：两个失效点（`invalidate_schema`
+    /// 与 [`Self::key_actions_cache`] 同构、同批失效：两个失效点（`invalidate_schema`
     /// 按 id 移除、配置热重载整表清空）都要接，漏一处的表现是「设置页改了不生效」。
     session_actions_cache: Mutex<HashMap<String, Arc<std::collections::BTreeMap<String, String>>>>,
     /// 方案级行为覆盖缓存（schema_id → `[punct]` / `[candidate]` / `[phrases]` 三段快照）。
     ///
-    /// 三段合成**一个**缓存条目而不是各存各的：它们同源（一次 `read_schema`）、同批失效。
-    /// 分三个缓存等于同一个方案读三次盘、加三个失效点——上面两个表已经因为「同批失效
-    /// 要接两处」在注释里互相提醒过一次，不要把这个数量再翻倍。
-    ///
-    /// 与 [`Self::key_actions_cache`] 同批失效：`invalidate_schema` 按 id 移除、
-    /// 配置热重载整表清空，两处都要接。
+    /// 三段同源（一次 `read_schema`）、同批失效，故合成一个缓存条目。与
+    /// [`Self::key_actions_cache`] 同批失效：`invalidate_schema` 按 id 移除、配置热重载整表清空。
     behavior_cache: Mutex<HashMap<String, Arc<wind_config::SchemaBehavior>>>,
     /// 方案显示名与图标短称缓存（schema_id -> (schema.name 缺则回退 id, 截断后的 icon_label)）。
-    /// 两者出自同一次读方案文件，一并缓存、同批失效；按需读盘一次。
-    ///
-    /// 短称此前不缓存，每次 `schema_icon_label` 都读盘 + 整份解析方案文件：方案列表
-    /// （`schema_entries`）每项各一次，手机上每次弹键盘 / 换模式都要列一遍方案，装 5 个方案
-    /// 就是主线程上约 40ms（模拟器实测）。
+    /// 两者出自同一次读方案文件，一并缓存、同批失效；按需读盘一次（方案列表每项都要取，
+    /// 手机上每次弹键盘都会列一遍）。
     name_cache: Mutex<HashMap<String, (String, String)>>,
     /// overlay 方案注册表缓存（见 [`Self::overlay_modes`]）。
     ///
-    /// 与其它缓存不同，这是**整表**缓存而非 per-schema：它是一个集合，任何方案的
-    /// 安装/删除/`[overlay]` 段变更都会改变它的内容**与下标**，按 id 局部失效没有意义。
+    /// 整表缓存而非 per-schema：任何方案的安装/删除/`[overlay]` 段变更都会改变它，
     /// 故 `invalidate_schema` 里直接整表置 `None`。
     overlay_cache: Mutex<Option<Vec<OverlayEntry>>>,
     /// 方案 override 层目录（schema_overrides/{id}.toml）；读 schema 时深合并到基础方案之上。
@@ -653,10 +539,9 @@ pub struct EngineManager {
     /// 用户层后台重建写回之后的回调（协调器借它重刷当前这屏候选，见
     /// [`Self::set_user_text_built_hook`]）。
     user_text_built: std::sync::OnceLock<crate::text_codes::BuiltHook>,
-    /// 码表**单字全码**表缓存:方案 id → (汉字 → 全码)。供造词按 `[[encoder.rules]]` 组装
-    /// 词组编码(见 `encode_word`)。与 `reverse_index` 分开是刻意的——那份按「码长升序」排,
-    /// 服务悬停 `[编码]` 的打法列表展示;这份要的是「按权重挑全码」,两种排序需求互斥。
-    /// **只缓存一份**:造词恒对活跃方案(混输则其主码表)进行,切方案即弃,无需两份护栏。
+    /// 码表单字全码表缓存:方案 id → (汉字 → 全码)。供造词按 `[[encoder.rules]]` 组装
+    /// 词组编码(见 `encode_word`)。与 `reverse_index`(按码长升序)分开:这份按权重挑全码。
+    /// 只缓存一份:造词恒对活跃方案(混输则其主码表)进行,切方案即弃。
     single_char_codes: Mutex<Option<SingleCharCodeCache>>,
     /// 单字全码表的最后使用（[`Self::use_clock`] 读数），供闲置清扫（[`Self::evict_idle_caches`]）。
     single_char_used: std::sync::atomic::AtomicU64,
@@ -684,19 +569,11 @@ pub struct EngineManager {
     /// None = 当前活跃方案不是双拼；Some = 双拼布局的 finals 键集合。
     /// 活跃方案 id 变化时按需重建（惰性），避免每键读盘。
     shuangpin_finals_cache: Mutex<(String, Option<std::collections::HashSet<u8>>)>,
-    /// 双拼**反向表**缓存：(已缓存的活跃方案 id, Option<Arc<ShuangpinReverse>>)。
+    /// 双拼反向表缓存：(已缓存的活跃方案 id, Option<Arc<ShuangpinReverse>>)。
     /// None = 该方案不是双拼；Some = 音节 → 击键表，供 `${code_schema}` 出编码。
     ///
-    /// 与上面的 `shuangpin_finals_cache` **分开**而不是合并，理由是两者的重建成本差两个
-    /// 数量级（建反向表实测 ~310µs，解析一份布局远低于此），键控又各自独立——合并只会
-    /// 让便宜的那个被贵的拖着走。
-    ///
-    /// ⚠️ 别照搬「那份缓存的注释说临拼与主方案交替询问会来回刷」这条论据：
-    /// `pinyin_is_shuangpin` / `pinyin_is_shuangpin_of` 现已**全仓零调用方**，那个 thrash
-    /// 场景当前并不存在。真要给两份缓存的分合下结论，先把那条死路径清掉再谈。
-    ///
-    /// ⚠️ 两者失效条件**完全相同**（方案/布局可能变更），故统一走
-    /// [`Self::invalidate_shuangpin_caches`]，不要在别处单独清其中一个。
+    /// 与 `shuangpin_finals_cache` 分开：两者重建成本差两个数量级、键控各自独立。失效条件
+    /// 相同，统一走 [`Self::invalidate_shuangpin_caches`]，不要在别处单独清其中一个。
     shuangpin_reverse_cache: Mutex<(
         String,
         Option<Arc<crate::pinyin::shuangpin::ShuangpinReverse>>,
@@ -709,7 +586,7 @@ pub struct EngineManager {
     /// 调用。用来在锁外构建的窗口里确定性地插入一次失效。
     #[cfg(test)]
     before_publish_hook: Mutex<Option<BeforePublishHook>>,
-    /// 反查索引的每方案构建锁。与 `build_locks` **刻意分开**：索引构建（秒级、上百 MB）
+    /// 反查索引的每方案构建锁。与 `build_locks` 刻意分开：索引构建（秒级、上百 MB）
     /// 不该和引擎构建互相阻塞，两者的等待方也不同（前者是后台线程，后者是切换方案的用户）。
     /// 兼作「是否正在建」的判据（`try_lock` 失败即在建），供打字线路决定要不要再 spawn。
     index_build_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
@@ -717,12 +594,9 @@ pub struct EngineManager {
     aux_source_warned: Mutex<std::collections::HashSet<String>>,
     /// 反查索引被 build_guard 跳过（同一份输入已连续死在构建中）的方案。
     ///
-    /// 跳过时不写 `reverse_index` 缓存（空表会被当真结果用），于是「没就绪」一直成立；
-    /// 若不另记一笔，协调器每次重绘都会判「该预热」→ 起线程 → 再次 Skip → 通知重绘，
-    /// 无限循环（且每轮重读方案、打 error! 日志）。记在这里后预热/判在建直接短路。
-    ///
-    /// 与 `reverse_index` 同生命周期：凡清空那张表的地方（启用词库变更、方案失效、
-    /// 配置重载、「重建词库缓存」经 invalidate_schema）一并清空，即给一次重试机会。
+    /// 跳过时不写 `reverse_index` 缓存（空表会被当真结果用），不另记一笔的话协调器每次重绘
+    /// 都会「预热 → 再次跳过 → 通知重绘」无限循环；记在这里后预热/判在建直接短路。
+    /// 与 `reverse_index` 同生命周期：凡清空那张表的地方一并清空，即给一次重试机会。
     reverse_index_skipped: Mutex<std::collections::HashSet<String>>,
     /// 测试钩子：[`Self::build_reverse_index_for`] 被调用的次数（证明短路生效）。
     #[cfg(test)]
@@ -774,65 +648,16 @@ const COMBINED_CACHE_TAG: &str = "combined/v1";
 /// rime_pinyin 主表+import_tables 合并缓存（`merged.wdat`）的指纹 tag。
 const MERGED_CACHE_TAG: &str = "merged/v1";
 
-/// 反查索引「小到可以直接读进内存」的上限（3 MB）。
-///
-/// 超过它就 mmap——两条路的查询行为完全相同（同一份字节布局、同一套查找代码），
-/// 故这个值**只影响性能，不影响正确性**，取错了不会有人拿到错误的反查结果。
-///
-/// # 为什么是 3 MB
-///
-/// 真实索引规模是**离散的几档**，3 MB 落在最低两档之间的空档里，两端都不敏感
-/// （2026-08-24 实测，`wind-dict` 的 `reverse_index_bench`）：
-///
-/// | 方案 | 词数 | 索引 | 重开耗时（常驻 / mmap） |
-/// |---|---|---|---|
-/// | wubi86（出厂） | 89081 | **2.3 MB** | **1.06 ms** / 9.37 ms |
-/// | pinyin（出厂） | 640842 | 23.0 MB | 7.65 ms / 9.08 ms |
-/// | feihuzj2（用户） | 2519693 | 88.2 MB | 29.3 ms / **9.73 ms** |
-///
-/// 小索引常驻明显更快——2.3 MB 顺序读只要 1 ms，而 mmap 的建映射开销近乎恒定 ~9 ms，
-/// 在这个尺寸上纯属亏本。大索引则相反：常驻要多付 88 MB 私有内存，换来的**点查速度
-/// 完全相同**（两者都是 0.25 µs/次，页缓存热了之后 mmap 只是普通内存读）。
-///
-/// # 为什么不做成配置键
-///
-/// `docs/architecture/config-design-rules.md` §R1：「差异可由程序判定 → 走自动判定，
-/// 不加用户键」。索引大小是程序自己就知道的量，且两侧都正确——这个旋钮**只影响性能**。
-/// 后续若要给高级用户开口子，走独立的调试用配置文件，不进 `config.toml`
-/// （那会拖上 R6 五道闸门 + 文档站两页，为一个没人调得动的值）。
+/// 反查索引「小到可以直接读进内存」的上限（3 MB），超过就 mmap。两条路查询行为完全相同，
+/// 只影响性能。取值依据与不做成配置键的理由见 docs/architecture/rime-dict-loading.md 的「5.1 格式」。
 pub const REVERSE_INDEX_RESIDENT_MAX: usize = 3 * 1024 * 1024;
 
 /// 单字全码表缓存项：`(方案 id, 汉字 → 全码)`。见 `EngineManager::single_char_codes`。
 type SingleCharCodeCache = (String, Arc<HashMap<char, String>>);
 
-// merge_toml（schema ⊕ schema_overrides 的深合并，含 dictionaries 按 id 稀疏合并的例外）
-// 已上移至 wind_config::schema::merge_toml —— 方案包导出（wind-transfer）折叠 override 时
-// 必须与这里的引擎加载视图同源，故合并实现只允许存在一份。
+// schema ⊕ schema_overrides 的深合并在 wind_config::schema::merge_toml：方案包导出折叠
+// override 时必须与引擎加载视图同源，合并实现只允许存在一份。
 
-/// 源文件 → 缓存路径：`<cache>/<相对 schemas 的目录链>/<文件名干>.<ext>`。
-///
-/// 用**源文件在 schemas 下的目录链**做命名空间，避免跨方案同名冲突，并把一个方案的全部
-/// 缓存(主库/扩展/merged)归拢一处，便于整方案失效=删一目录。命名空间推导见
-/// [`wind_dict::cache_ns`]——那里也说明了为什么它必须保持「源路径的纯函数」。
-///
-/// ⚠️ **不是父目录名**。词库 `rel` 由方案声明、多深都收，`schemas/<方案>/word/x.dict.yaml`
-/// 这种二级目录下父目录名是 `word`，方案那一段会整个丢失(论坛 #115)。扁平结构下两种
-/// 推导结果逐字节相同，故存量缓存不受影响。
-///
-/// 文件名干剥掉 `.dict.yaml` 的 `.dict` 冗余中缀(`rime_frost.dict` → `rime_frost`)。
-/// 未设置缓存根时回退到源旁(保持旧行为，便于测试/无 LOCALAPPDATA 场景)。
-///
-/// # ⛔ 旧布局留下的孤儿**不清**（已决，勿再提）
-///
-/// 升级后，用了二级子目录的用户会在 `<cache>/<末级目录名>/` 下留一批再无人引用的产物。
-/// 试过在本函数里顺手删「按旧算法算出的那条路径」，**行不通**：方案目录本身就叫 `word`
-/// 时（`schemas/word/x.dict.yaml`），那条路径正是它的合法新路径，两个方案会开始互删
-/// 对方的缓存——一个比「多占点磁盘」严重得多的永久重建循环。局部信息不足以区分谁是孤儿，
-/// 而换成「缓存布局版本标记 + 全量重建」又要让**所有**用户白重建一次。
-///
-/// 结论是不值得为它写代码：受影响的只有用了子目录的少数用户，量也小，卸载时缓存目录整个
-/// 清掉；真要立刻回收还有既有的全量入口 [`EngineManager::rebuild_all_caches`]
-/// （CLI `schema rebuild`）。
 /// 当前进程匿名常驻内存（MB，RssAnon），只给构建打点用；非 Linux 返回 0。
 fn linux_rss_mb() -> u64 {
     #[cfg(target_os = "linux")]
@@ -851,6 +676,12 @@ fn linux_rss_mb() -> u64 {
     0
 }
 
+/// 源文件 → 缓存路径：`<cache>/<相对 schemas 的目录链>/<文件名干>.<ext>`。
+///
+/// 用源文件在 schemas 下的目录链（不是父目录名）做命名空间，避免跨方案同名冲突，并把一个
+/// 方案的全部缓存归拢一处，整方案失效 = 删一目录；推导见 [`wind_dict::cache_ns`]。文件名干
+/// 剥掉 `.dict.yaml` 的 `.dict` 中缀。未设置缓存根时回退到源旁（测试/无 LOCALAPPDATA）。
+/// 旧布局留下的孤儿有意不清，见 docs/architecture/rime-dict-loading.md 的「5.1 格式」。
 fn cache_path(source: &Path, ext: &str) -> std::path::PathBuf {
     if let Some(Some(dir)) = CACHE_DIR.get() {
         let stem = wind_dict::cache_ns::cache_stem(source);
@@ -938,7 +769,7 @@ const DEFAULT_DICT_DIR: &str = "ext";
 /// 把 `sibling` 接到 `rel` 所在目录下：`pinyin/rime_frost.dict.yaml` +
 /// `cn_dicts/corrections.dict.yaml` → `pinyin/cn_dicts/corrections.dict.yaml`。
 ///
-/// 统一用 `/` 拼：结果要当**稳定 id** 用（见 `Coordinator::auto_comment_id`），
+/// 统一用 `/` 拼：结果要当稳定 id 用（见 `Coordinator::auto_comment_id`），
 /// 两种分隔符混着写会让同一张表在不同写法下得到两个 id。
 fn join_rel_dir(rel: &str, sibling: &str) -> String {
     match rel.rsplit_once(['/', '\\']) {
@@ -950,7 +781,7 @@ fn join_rel_dir(rel: &str, sibling: &str) -> String {
 /// 一个被方案声明的词库文件。见 [`EngineManager::declared_dict_files`]。
 #[derive(Debug, Clone)]
 pub struct SchemaDictFile {
-    /// 方案文件里写的相对路径（如 `pinyin/rime_frost.dict.yaml`）。**稳定 id 的来源**。
+    /// 方案文件里写的相对路径（如 `pinyin/rime_frost.dict.yaml`），稳定 id 的来源。
     pub rel: String,
     /// 按层序解析后的绝对路径（用户 > custom > 安装）。
     pub path: std::path::PathBuf,
@@ -1125,7 +956,7 @@ impl EngineManager {
         self.sentence_input_enabled_of(&self.active_schema_id())
     }
 
-    /// **指定方案**是否开启整句输入。overlay 用这条，见 [`Self::engine_for`]。
+    /// 指定方案是否开启整句输入。overlay 用这条，见 [`Self::engine_for`]。
     pub fn sentence_input_enabled_of(&self, schema_id: &str) -> bool {
         self.engine_for(schema_id)
             .is_some_and(|e| e.sentence_input_enabled())
@@ -1138,16 +969,13 @@ impl EngineManager {
         self.pinyin_separator_mode_of(&self.active_schema_id())
     }
 
-    /// **指定方案**生效的分隔符模式：方案段 `[engine.pinyin].separator`（含
+    /// 指定方案生效的分隔符模式：方案段 `[engine.pinyin].separator`（含
     /// `schema_overrides` 深合并）折叠全局基线 `[schema.pinyin].separator`，
     /// 与 `[engine.aux_code].enabled` 同构的 tri-state（`None` = 跟随全局）。
     ///
-    /// ★ **为什么这一项必须能按方案分**：全拼与双拼的键位预算不同（见
-    /// `AuxCodeSpec::enabled` 的同款论证）——全拼的音节边界只能靠符号键表达，而双拼
-    /// 把韵母塞进字母键、符号键空闲，出厂就把反引号给了辅助码
-    /// （`shuangpin.schema.toml` 的 `backtick = "aux_code"`）。全局唯一的 `separator`
-    /// 表达不了「全拼用反引号作分隔符、双拼用反引号进辅助码」这个最自然的组合：
-    /// 一改全局，双拼的辅助码触发键就被夺走，且只剩一条 warn 日志。
+    /// 必须能按方案分：全拼与双拼的键位预算不同，双拼出厂把反引号给了辅助码
+    /// （`shuangpin.schema.toml` 的 `backtick = "aux_code"`），全局唯一的 `separator`
+    /// 一改就会夺走双拼的辅助码触发键。
     pub fn pinyin_separator_mode_of(&self, schema_id: &str) -> String {
         let global = self
             .pinyin
@@ -1168,18 +996,16 @@ impl EngineManager {
     /// 复用韵母键集缓存（Some 即双拼），与 `shuangpin_final_key` 同源、
     /// 方案切换/reload 自动失效。
     ///
-    /// ⚠️ 曾用于「双拼不支持手动分隔符」的协调器 gate，那个用法已撤销——双拼现在支持
-    /// 分隔符（`docs/design/shuangpin-separator.md`），拦它的改成方案出厂
-    /// `separator = "none"`。别再按「是不是双拼」去关某个拼音特性：拼音族的差异应当
-    /// 落在方案级配置上，靠引擎类型硬判会把用户显式配的东西也一并否掉。
+    /// 别按「是不是双拼」去关某个拼音特性：拼音族的差异应落在方案级配置上（如双拼出厂
+    /// `separator = "none"`，见 `docs/design/shuangpin-separator.md`），按引擎类型硬判会把
+    /// 用户显式配的东西一并否掉。
     pub fn pinyin_is_shuangpin(&self) -> bool {
         self.pinyin_is_shuangpin_of(&self.active_schema_id())
     }
 
-    /// **指定方案**是否为双拼。overlay 用这条，见 [`Self::engine_for`]。
+    /// 指定方案是否为双拼。overlay 用这条，见 [`Self::engine_for`]。
     ///
-    /// ⚠️ 缓存是**单槽**（key = 方案 id）：临拼与主方案交替询问会来回刷。代价是一次
-    /// `read_schema`，只发生在按下分隔符/符号键那一帧，不在逐键路径上（字母键不问它）。
+    /// 缓存是单槽（key = 方案 id）：交替询问不同方案会来回刷，每次代价一次 `read_schema`。
     pub fn pinyin_is_shuangpin_of(&self, schema_id: &str) -> bool {
         let id = schema_id.to_string();
         {
@@ -1200,30 +1026,18 @@ impl EngineManager {
         is_sp
     }
 
-    // 注：曾有 `shuangpin_final_key(key) -> bool`（对齐 Go IsShuangpinFinalKey），供协调器
-    // 在选词分支前避让双拼韵母键。**已删**——它只让键跳过选词，下游没人接住，键继续流向
-    // 模式引导键与标点流水线，微软/搜狗/紫光的 `;` = ing 照样打不出。现由码元字符集
-    // 单点仲裁：`PinyinEngine::input_chars` 从双拼布局推导，协调器的 `try_code_char_gate`
-    // 抢在选词/引导键/标点**全部三条**之前接管。本处缓存仍为 `pinyin_is_shuangpin` 服务。
+    // 双拼韵母占用符号键（如 `;` = ing）由码元字符集单点仲裁：`PinyinEngine::input_chars`
+    // 从布局推导，协调器 `try_code_char_gate` 抢在选词/引导键/标点之前接管，不在这里避让。
 
-    /// 指定方案**当前生效**的双拼布局 id（已合并 `schema_overrides/<id>.toml`）；
+    /// 指定方案当前生效的双拼布局 id（已合并 `schema_overrides/<id>.toml`）；
     /// 非双拼方案、或方案读不出来返回 `None`。方案没写 `layout` 时给缺省的
-    /// [`DEFAULT_SHUANGPIN_LAYOUT`]。
+    /// [`DEFAULT_SHUANGPIN_LAYOUT`]。设置页与韵母键集都走这里，保证显示与生效同源。
     ///
-    /// `build_shuangpin_finals` 与 `shuangpin_layout_of` 此前各抄了一遍这段决策，后者的
-    /// 文档注释还专门写下过那句担忧——「两处若分叉，设置页会显示一个和实际生效的不是
-    /// 同一个布局」。两者现已收口到这里。
+    /// 它不是唯一判据：`build_engine` 里的 `Layout::from_toml` 仍是第二份同构实现（带自己的
+    /// 失败回退全拼与 `warn!`），两边只共享缺省常量。
     ///
-    /// ⚠️ **引擎构建路径（`build_engine` 里那段 `Layout::from_toml`）仍是第二份同构实现**，
-    /// 本轮只统一了缺省常量（`DEFAULT_SHUANGPIN_LAYOUT`），没有统一分支逻辑——那段带着
-    /// 自己的 `warn!` 回退（布局加载失败就退回全拼），并入这里会把那条日志吞掉。
-    /// 常量同源之后剩余风险很低，但别把这里写成「唯一判据」，它不是。
-    ///
-    /// ★ **混输方案（`engine.type = "mixed"`）恒返回 `None`**，这是取舍不是遗漏：它只认
-    /// 顶层 `engine.pinyin.scheme`，而混输的拼音在 `engine.mixed.secondary_schema` 里。
-    /// 混输下用户敲的是「主码表码 + 拼音码」混合流，给出单一的双拼击键串会误导——
-    /// 那不是他在这个模式里实际要敲的东西。对照 `code_source_schema` 对 `Mixed` 有转发，
-    /// 是因为「这个词的码表编码是什么」与输入方式无关，而击键恰恰就是输入方式本身。
+    /// 混输方案恒返回 `None`，是取舍：混输下敲的是「主码表码 + 拼音码」混合流，给单一的
+    /// 双拼击键串会误导（`code_source_schema` 对 `Mixed` 转发，是因为码表编码与输入方式无关）。
     fn shuangpin_layout_id_of(&self, schema_id: &str) -> Option<String> {
         let data_dir = self.data_dir.as_deref()?;
         let schema = Self::read_schema(schema_id, Some(data_dir), self.override_dir.as_deref())?;
@@ -1264,11 +1078,8 @@ impl EngineManager {
         self.shuangpin_layout_id_of(schema_id).unwrap_or_default()
     }
 
-    /// 失效双拼布局的**全部**派生缓存（韵母键集 + 反向表）。
-    ///
-    /// 两者失效条件完全相同，分开清迟早会漏一个；而漏掉反向表的后果是切换布局后
-    /// 仍按旧表出编码——一个只在「改过布局的用户」身上出现、且看起来像「编码显示
-    /// 错了」的 bug。收在一处，漏不掉。
+    /// 失效双拼布局的全部派生缓存（韵母键集 + 反向表）。两者失效条件相同，收在一处，
+    /// 免得漏清反向表后切换布局仍按旧表出编码。
     fn invalidate_shuangpin_caches(&self) {
         *self
             .shuangpin_finals_cache
@@ -1280,7 +1091,7 @@ impl EngineManager {
             .unwrap_or_else(|e| e.into_inner()) = (String::new(), None);
     }
 
-    /// 双拼编码（`${shuangpin}`）用**哪个方案**的布局。回退链，与
+    /// 双拼编码（`${shuangpin}`）用哪个方案的布局。回退链，与
     /// [`Self::resolve_primary_codetable`] 同构（显式的优先，否则按 `available` 顺序找）：
     ///
     /// | 顺位 | 取谁 |
@@ -1290,13 +1101,9 @@ impl EngineManager {
     /// | 3 | `available` 里首个双拼方案 |
     /// | — | 都不是 ⇒ `None`（没装双拼方案，无从谈起） |
     ///
-    /// ★ **全拼方案下也给值，是刻意的。** 早先只认活跃方案，全拼下恒空，理由是「全拼的
-    /// 击键就是拼音本身，显示是冗余」—— 那句话对「本方案击键」成立，对「双拼编码」不成立。
-    /// GH#128 的原话是「有时忘记了还能看下」：正在用双拼打字的人刚敲完码不会忘，会忘并且
-    /// 想看一眼的，多半是**用全拼打字、正在往双拼迁移**的人。只认活跃方案的话，那批人
-    /// 装上新版什么也看不到，而他们恰恰是这个功能最主要的受众。
+    /// 全拼方案下也给值是刻意的：这个功能的主要受众是用全拼打字、正在往双拼迁移的人。
     ///
-    /// 读盘（`read_schema` × 最多 available 条），故**只在反向表缓存 miss 时走**，
+    /// 读盘（`read_schema` × 最多 available 条），故只在反向表缓存 miss 时走，
     /// 即切换方案后的第一次求值。
     fn shuangpin_hint_schema(&self) -> Option<String> {
         let active = self.active_schema_id();
@@ -1324,8 +1131,7 @@ impl EngineManager {
 
     /// 双拼反向表（惰性建 + 单槽缓存）；没有可用的双拼布局时返回 `None`。
     ///
-    /// 建表实测 ~310µs（release），只发生在切方案后的第一次求值；命中时只是一次
-    /// `HashMap` 查询加一次 `Arc` 克隆。
+    /// 建表只发生在切方案后的第一次求值；命中时只是一次比较加一次 `Arc` 克隆。
     fn shuangpin_reverse(&self) -> Option<Arc<crate::pinyin::shuangpin::ShuangpinReverse>> {
         let id = self.active_schema_id();
         {
@@ -1353,28 +1159,16 @@ impl EngineManager {
         table
     }
 
-    /// 候选的全拼 `code` + `boundary` → **当前活跃方案**的双拼击键串
+    /// 候选的全拼 `code` + `boundary` → 当前活跃方案的双拼击键串
     /// （`nihao` + `ni|hao` → 小鹤下 `nihc`）。供候选注释的 `${code_schema}`。
     ///
-    /// # 三种 `None`，都按「这一次不显示」处理
+    /// 三种 `None` 都按「这一次不显示」处理：
+    /// - 找不到任何双拼布局（回退链见 [`Self::shuangpin_hint_schema`]）；
+    /// - `boundary == 0`：模糊音命中与用户手输码的词条切分不可靠，猜错会显示错的编码；
+    ///   这道闸由 [`syllables_from_boundary`](crate::pinyin::mixed_abbrev::syllables_from_boundary) 把着；
+    /// - 任一音节不在反向表里（半截击键串是错的答案，见 `ShuangpinReverse::encode_all`）。
     ///
-    /// - **找不到任何双拼布局**（没装双拼方案）。见 [`Self::shuangpin_hint_schema`] 的回退链
-    ///   ——全拼方案下**不**恒空，它会回退到用户装着的双拼方案。
-    /// - **`boundary == 0`**：音节切分不可靠。模糊音变体命中与用户手输码的词条一律
-    ///   置 0（见 `pinyin/mod.rs` 那句「模糊变体命中一律 boundary=0（不设防）」），
-    ///   拿 DAG 去猜切分会偏向少音节（`xian` 猜成一个音节）。切错了显示出来的编码
-    ///   就是**错的**，用户照着敲得到别的字，所以宁可不显示。这道闸由
-    ///   [`syllables_from_boundary`](crate::pinyin::mixed_abbrev::syllables_from_boundary)
-    ///   自己把着（`boundary & 1 == 0` 即 `None`），不在这里重复判断。
-    /// - **任一音节不在反向表里**：见 `ShuangpinReverse::encode_all`——半截击键串是
-    ///   错的答案而不是不完整的答案。
-    ///
-    /// # 不读盘、不阻塞
-    ///
-    /// 这是按键处理链路（每次候选刷新 × 当前页 5~9 条），且调用方正持有 state 锁。
-    /// 反向表按活跃方案缓存。命中路径是一次 `active_schema_id()`（锁 + String 克隆）、
-    /// 一次 HashMap 查询、一次 Arc 克隆，无 IO；miss 时也只是解析一份布局 TOML 再建表，
-    /// 不像 `word_codes_in` 那样可能撞上秒级的词库反查索引构建。
+    /// 在按键链路上且调用方持有 state 锁：命中无 IO，miss 只解析一份布局 TOML 再建表。
     pub fn shuangpin_code_of(&self, code: &str, boundary: u64) -> Option<String> {
         let syllables = crate::pinyin::mixed_abbrev::syllables_from_boundary(code, boundary)?;
         self.shuangpin_code_of_syllables(&syllables)
@@ -1382,22 +1176,16 @@ impl EngineManager {
 
     /// 音节序列 → 活跃方案的双拼击键串；非双拼方案、或任一音节查不到返回 `None`。
     ///
-    /// [`Self::shuangpin_code_of`] 走候选自带的 `code`+`boundary`（词条真值）。本方法给
-    /// **没有候选身份**的路径用——剪贴板反查（cmdbar `dict.rev`）手上只有一段裸文本，
-    /// 音节得先由 [`Self::word_pinyin_syllables`] 按词推断（那条路会做多音字消歧，
-    /// 「行长」得 `hang zhang` 而不是逐字最常用读音的 `xing chang`）。
-    ///
-    /// 两条路径汇到同一张反向表，故 `${code_schema}` 在注释段与反查两个入口同义——
-    /// 用户在注释模板里学会的写法能原样用在 `dict.rev(format=…)` 里。
+    /// 给没有候选身份的路径用（剪贴板反查 cmdbar `dict.rev` 只有裸文本，音节由
+    /// [`Self::word_pinyin_syllables`] 按词消歧推断）。与 [`Self::shuangpin_code_of`] 汇到同一张
+    /// 反向表，故 `${code_schema}` 在注释与反查两个入口同义。
     pub fn shuangpin_code_of_syllables(&self, syllables: &[&str]) -> Option<String> {
         self.shuangpin_reverse()?.encode_all(syllables)
     }
 
-    /// 拼音方案编码提示:返回主码表中 `text` 实际对应的编码(多码取最长者=全码,简码可能
-    /// 被一级简码等占用),不存在返回空。对齐 Go `manager_convert.go` 的
-    /// ApplyCodeHintsToCandidates——用主码表**反向索引**取实际码,而非按字生成码再校验
-    /// (后者生成码常与码表实际码不一致,导致全被拒)。
-    /// **返回 `None` 表示反查索引尚未就绪**，不是「查不到」——见 [`Self::word_codes_in`]
+    /// 拼音方案编码提示:返回主码表中 `text` 实际对应的编码,不存在返回空。用反向索引取
+    /// 实际码,不按字生成码(生成码常与码表实际码不一致)。
+    /// 返回 `None` 表示反查索引尚未就绪，不是「查不到」——见 [`Self::word_codes_in`]
     /// 的三态说明。展示类调用方 `unwrap_or_default()` 即可。
     /// 含用户层：同长时系统码优先，用户码只在词库没有该长度的码时才出（见 `TextCodeView::hint_code`）。
     pub fn codetable_reverse_hint(&self, text: &str) -> Option<String> {
@@ -1416,24 +1204,13 @@ impl EngineManager {
         Some(v.hint_code(text).map(str::to_string).unwrap_or_default())
     }
 
-    /// 用**主拼音方案**为词推断带空格的音节码（`行长` → `hang zhang`），供候选注释的注音
+    /// 用主拼音方案为词推断带空格的音节码（`行长` → `hang zhang`），供候选注释的注音
     /// 消歧；方案不可加载或推不出返回空。
     ///
-    /// # 为什么必须走 [`Self::generate_word_pinyin`] 而不是逐字取读音
-    ///
-    /// 逐字取最常用读音在**词组上系统性出错**：「行长」得 `xíng cháng`（两个字都错）、
-    /// 「银行」得 `yín xíng`。而 `generate_word_pinyin` 是真消歧——枚举每字读音的笛卡尔积、
-    /// 取第一个**能在拼音词典里查回该词**的组合，词典查不回的组合直接被排除。
-    ///
-    /// # 谁需要它
-    ///
-    /// **拼音来源候选不需要**（它们自带 `code` + `boundary`，那是词条真值，比推断更可靠）。
-    /// 需要它的是**码表/短语等非拼音来源候选**——五笔方案下候选的 `boundary` 恒为 0、
-    /// `code` 是形码，此前只能退到逐字首音。而五笔用户恰恰是「注音」这个功能最主要的受众
-    /// （打得出但不会读），把消歧漏在这条路径上等于功能对主力场景失效。
-    ///
-    /// 成本：每次候选刷新 × 当前页 5~9 条，且仅在模板含 `${pinyin}` 时求值；`generate_word_pinyin`
-    /// 自带 `MAX_READING_COMBOS`(64) 组合数护栏，超限即放弃推断。
+    /// 必须走 [`Self::generate_word_pinyin`]（枚举读音组合、取能在词典里查回该词的那个），
+    /// 逐字取最常用读音在词组上系统性出错。服务对象是码表/短语等非拼音来源候选（拼音候选
+    /// 自带 `code` + `boundary`，更可靠）。仅在模板含 `${pinyin}` 时求值，组合数有
+    /// `MAX_READING_COMBOS` 护栏。
     pub fn word_pinyin_syllables(&self, text: &str) -> String {
         let target = {
             let p = self
@@ -1476,26 +1253,19 @@ impl EngineManager {
         }
     }
 
-    /// 查 `schema_id` 方案词库中 `text` 的**全部**实际编码,按码长升序以 `/` 连接
+    /// 查 `schema_id` 方案词库中 `text` 的全部实际编码,按码长升序以 `/` 连接
     /// (如 `a/ab/abc`,供悬停 [编码] 段);方案 id 为空或词不在词库返回空——
     /// 不按取码规则生成,生成码常与词库实际码不一致。
-    /// # 三态返回（**别把后两者混为一谈**）
     ///
-    /// - `None` —— **反查索引尚未就绪**（正在后台构建，或还没人触发构建）。
+    /// 三态返回：
+    /// - `None` —— 反查索引尚未就绪（正在后台构建，或还没人触发构建）。
     /// - `Some("")` —— 索引已就绪，但这个词不在词库里。
     /// - `Some(codes)` —— 就绪且查到。
     ///
-    /// 分开这两者是**正确性要求**，不是洁癖：加词去重（`handle_addword`）拿它判断
-    /// 「系统词库里已经有这个码+词了吗」。若把「没就绪」当成「查不到」，去重判据直接失效
-    /// ⇒ 往临时层写入一条系统词库已有的重复条目 ⇒ 候选出现重复项，且该条目会计入
-    /// 提升计数、可能被**永久固化**进用户词库。这是一次真实的 wrong-action 风险，
-    /// 而非「这一屏少显示点东西」。
+    /// 前两者不能混为一谈：加词去重（`handle_addword`）靠它判断系统词库里有没有，把「没就绪」
+    /// 当「查不到」会写入重复条目并可能被固化进用户词库。展示类调用方 `unwrap_or_default()` 即可。
     ///
-    /// 展示类调用方（悬停 [编码] 段、候选注释）`unwrap_or_default()` 即可 —— 这一次
-    /// 不显示编码，下一次索引好了自然就有了。
-    ///
-    /// **本方法绝不阻塞**。索引没就绪时调用方应后台预热（协调器的
-    /// `ensure_reverse_index_async`）并本次放弃，而不是就地等。
+    /// 绝不阻塞。索引没就绪时调用方应后台预热（`ensure_reverse_index_async`）并本次放弃。
     pub fn word_codes_in(&self, schema_id: &str, text: &str) -> Option<String> {
         if schema_id.is_empty() {
             return Some(String::new()); // 没指定方案＝确定无从查起，不是「没就绪」
@@ -1508,7 +1278,7 @@ impl EngineManager {
         )
     }
 
-    /// 「按词查编码」统一入口：系统层 + 用户层的一次快照，**不阻塞**。
+    /// 「按词查编码」统一入口：系统层 + 用户层的一次快照，不阻塞。
     ///
     /// 用户层过期或缺失时，本次照用旧的（或没有），另起后台重建；系统层没就绪就是 `None`，
     /// 由调用方决定要不要派后台构建（打字链路用 `Coordinator::spawn_index_warm`）。
@@ -1530,7 +1300,7 @@ impl EngineManager {
         crate::text_codes::TextCodeView { system, user }
     }
 
-    /// 阻塞地把两层都建好（预热线程 / 测试用，**不可进按键链路**）。返回是否真的建了东西。
+    /// 阻塞地把两层都建好（预热线程 / 测试用，不可进按键链路）。返回是否真的建了东西。
     pub fn prewarm_text_codes(&self, schema_id: &str) -> bool {
         if schema_id.is_empty() {
             return false;
@@ -1621,7 +1391,7 @@ impl EngineManager {
 
     /// 展示用的「这个词怎么打」：系统层 + 用户层，`/` 连接、码长升序。
     ///
-    /// 三态同 [`Self::word_codes_in`]：`None` = 系统层还没就绪。与它的区别只在**含用户层**——
+    /// 三态同 [`Self::word_codes_in`]：`None` = 系统层还没就绪。与它的区别只在含用户层——
     /// 加词去重要的是「系统词库里有没有」，那条口径刻意不变，仍用 `word_codes_in`。
     pub fn word_codes_display(&self, schema_id: &str, text: &str) -> Option<String> {
         if schema_id.is_empty() {
@@ -1634,23 +1404,11 @@ impl EngineManager {
         Some(v.codes_of(text).join("/"))
     }
 
-    /// **词语联想的词源方案**：从哪本词库里捞「以上文为前缀的更长的词」。
+    /// 词语联想的词源方案：从哪本词库里捞「以上文为前缀的更长的词」。
     ///
-    /// # 混输必须解析到成员方案
-    ///
-    /// 混输方案**自己没有词库**（它引用两个成员），拿它的 id 去建反查索引会得到一张空表
-    /// ——词语联想一条也出不来，且**完全静默**。真机实测（2026-08-16）活跃方案
-    /// `wubi86_pinyin` 取到 0 条，而它的主码表成员 `wubi86` 取到正常结果。
-    ///
-    /// 这正是本仓反复出现的那个形状：功能在开发者的测试方案上好好的，在用户实际用的
-    /// 方案上是死的。
-    ///
-    /// # 为什么不复用 `code_source_schema`
-    ///
-    /// 那个函数回答的是「编码提示该显示哪本码表的码」，其**拼音分支返回全局主码表**
-    /// ——对编码提示是对的（拼音候选要显示对应的五笔码），对词语联想却完全错位：
-    /// 用户在纯拼音方案下打字，联想词却从五笔码表里捞。两个问题只是碰巧在码表方案上
-    /// 答案相同。
+    /// 混输必须解析到主码表成员：混输方案自己没有词库，拿它的 id 建反查索引得到空表，
+    /// 联想静默失效。不复用 `code_source_schema`：它的拼音分支返回全局主码表，对编码提示
+    /// 对、对联想错（纯拼音方案下会从五笔码表里捞词）。
     pub fn assoc_word_schema(&self) -> String {
         let active = self.active_schema_id();
         match self.active_engine().map(|e| e.engine_type()) {
@@ -1661,31 +1419,24 @@ impl EngineManager {
         }
     }
 
-    /// **词语联想**取数：以 `prefix` 开头、且严格更长的词，分档合并、档内按使用重排后
-    /// 取前 `limit` 条。返回 (整词, 档内排序分)，**顺序即最终顺序**（跨档分数量纲不同，
+    /// 词语联想取数：以 `prefix` 开头、且严格更长的词，分档合并、档内按使用重排后
+    /// 取前 `limit` 条。返回 (整词, 档内排序分)，顺序即最终顺序（跨档分数量纲不同，
     /// 调用方不得再按分数重排）。
     ///
-    /// # 分档（论坛 t185）
+    /// 分档（同文本按档序先到先得）：
+    /// 0. 用户词，排最前；
+    /// 1. 常用临时词（`count ≥` [`ASSOC_TEMP_MIN_COUNT`]，建出来之后又用过），属个人档；
+    /// 2. 系统词（`schema_id` 词库的反查索引）；
+    /// 3. 其余临时词——只补位（自动造词的噪声词新建即 count=1）。
     ///
-    /// 0. **用户词**——「我的词汇」，排最前；
-    /// 1. **常用临时词**（`count ≥` [`ASSOC_TEMP_MIN_COUNT`]）——建出来之后用户**又用过**，
-    ///    与用户词同属个人档、排其后；
-    /// 2. **系统词**（`schema_id` 词库的反查索引）；
-    /// 3. **其余临时词**——只补位。自动造词的噪声词新建即 count=1，用户不再选它就停在这里。
-    ///
-    /// 同文本先到先得（按档序）。
-    ///
-    /// # 档内排序：静态序 + 选词次数（方案 A）
-    ///
-    /// 档内键 = (`p` 降序, 静态名次)。`p` 取 FREQ 表里该词被**正常打字选中**的记录
+    /// 档内键 = (`p` 降序, 静态名次)。`p` 取 FREQ 表里该词被正常打字选中的记录
     /// （码表 = 输入码，拼音 = 候选码；码取自用户词 / 临时词记录与反查索引，同词多码合并：
     /// 次数求和、最近取大），打分沿用拼音那套 [`FreqProfile::pinyin_score`]
     /// （`log2(count+1)` × 半衰期衰减）。每档先取 `limit ×` [`ASSOC_POOL_FACTOR`] 条作池子，
     /// 让静态名次靠后但常用的词有机会浮上来。
     ///
-    /// FREQ 查询是**一次读事务的批量点查**（几十个 key），在按键路径上。
-    ///
-    /// 两份索引都**不在按键线程上构建**：没就绪就这一层这次不出。
+    /// FREQ 查询是一次读事务的批量点查（几十个 key），在按键路径上。
+    /// 两份索引都不在按键线程上构建：没就绪就这一层这次不出。
     pub fn assoc_prefix_words(
         &self,
         schema_id: &str,
@@ -1700,7 +1451,7 @@ impl EngineManager {
         let user_idx = self.store.as_ref().and_then(|store| {
             crate::user_assoc::get_or_refresh(&self.user_assoc, store, &data_schema)
         });
-        // 索引没就绪就这次不联想系统词（**不阻塞按键线程**）。
+        // 索引没就绪就这次不联想系统词（不阻塞按键线程）。
         let sys_idx = self.reverse_index_if_ready(schema_id);
 
         // (档, 静态名次, 词, 查 FREQ 用的码)
@@ -1753,11 +1504,9 @@ impl EngineManager {
             }
         }
 
-        // 选词次数只在调频开着时参与排序：`record_always`（只记不调）攒下的次数不得在这里
-        // 悄悄改联想顺序。此前不查开关也没出事，只因关调频时写端不记、库里没数据。
-        //
-        // ⚠️ 开关按**活跃方案**取，不按 `schema_id`：混输下后者是主码表（`assoc_word_schema`），
-        // 而写端与主候选重排读的是混输自己的折叠值（方案级覆盖可以与主码表不同）。
+        // 选词次数只在调频开着时参与排序：`record_always`（只记不调）攒下的次数不得改联想顺序。
+        // 开关按活跃方案取，不按 `schema_id`：混输下后者是主码表，而写端与主候选重排读的是
+        // 混输自己的折叠值。
         let scores = if self.freq_settings_for(&self.active_schema_id()).enabled {
             self.assoc_freq_scores(&data_schema, &items)
         } else {
@@ -1778,10 +1527,10 @@ impl EngineManager {
             .collect()
     }
 
-    /// 词语联想里这个词**还在不在**（用户词 / 临时词 / 系统词任一有它）。
+    /// 词语联想里这个词还在不在（用户词 / 临时词 / 系统词任一有它）。
     ///
     /// 供联想历史（History）读端过滤：历史表只记「上文 → 词」，删词时不级联清理，
-    /// 靠这里把已删掉的词挡在外面。两份索引**任一没就绪就放行**（判不了宁可照出，
+    /// 靠这里把已删掉的词挡在外面。两份索引任一没就绪就放行（判不了宁可照出，
     /// 不能把正常的历史全吞掉）；用户词索引可能略旧（后台重建中），删词后最多多出一轮。
     pub fn assoc_word_known(&self, schema_id: &str, text: &str) -> bool {
         let user = self.store.as_ref().and_then(|store| {
@@ -1845,7 +1594,7 @@ impl EngineManager {
             .collect()
     }
 
-    /// 阻塞地建好词语联想的用户词文本索引（预热线程 / 测试用，**不可进按键链路**）。
+    /// 阻塞地建好词语联想的用户词文本索引（预热线程 / 测试用，不可进按键链路）。
     /// 无 store 或已是最新时返回 false。
     pub fn prewarm_user_assoc(&self, schema_id: &str) -> bool {
         match &self.store {
@@ -1856,11 +1605,10 @@ impl EngineManager {
         }
     }
 
-    /// 已建好的反查索引；**没有就返回 `None`，绝不现建**。
+    /// 已建好的反查索引；没有就返回 `None`，绝不现建。
     ///
     /// 供打字链路上的展示类消费方（候选注释 `${code}`、悬停 [编码] 段、词语联想）使用：
-    /// 它们宁可这一次不显示编码，也不能让按键处理停下来等一次秒级构建
-    /// ——TSF→服务是**同步 IPC**，那一停就是整机卡顿（真机实测 29.5 秒）。
+    /// TSF→服务是同步 IPC，在这里等一次秒级构建就是整机卡顿。
     pub fn reverse_index_if_ready(&self, schema_id: &str) -> Option<Arc<ReverseIndex>> {
         self.reverse_index
             .lock()
@@ -1869,18 +1617,16 @@ impl EngineManager {
             .cloned()
     }
 
-    /// 取 `schema_id` 的反查索引,缺则全量构建并缓存（**会阻塞秒级**）。
+    /// 取 `schema_id` 的反查索引,缺则全量构建并缓存（会阻塞秒级）。
     ///
-    /// 内存护栏:只保留「本次请求方 + 主码表 + 在用集合」（见 [`Self::reverse_index_pins`]）——
-    /// 原先只留请求方与主码表两份，联想方案、辅助码引用的方案会与它们互相顶掉、反复秒级重建；
-    /// 方案切换的残留索引随下次构建清退。
+    /// 内存护栏:只保留「本次请求方 + 主码表 + 在用集合」（见 [`Self::reverse_index_pins`]），
+    /// 在用的方案不会互相顶掉反复重建；方案切换的残留索引随下次构建清退。
     ///
-    /// ⚠️ **只该在两种场合调用**：后台预热线程，或用户主动发起、本就预期要等的操作
-    /// （如加词去重校验——那里返回空表会导致**重复加词**，是正确性问题，不能降级）。
-    /// 打字链路一律用 [`Self::reverse_index_if_ready`]。
+    /// 只该在后台预热线程，或用户主动发起、本就预期要等的操作里调用（如加词去重校验——
+    /// 那里返回空表会导致重复加词，不能降级）。打字链路一律用 [`Self::reverse_index_if_ready`]。
     ///
     /// 返回 `None` ＝ 本次构建被 build_guard 跳过（见 [`Self::build_reverse_index_for`]）。
-    /// 此时**不写缓存**：否则一张空表会被当成真结果一直用到进程结束。
+    /// 此时不写缓存：否则一张空表会被当成真结果一直用到进程结束。
     ///
     /// 走 `index_build_locks` 单飞：并发调用只有一个真在建，其余等它建完后复查即返回。
     fn reverse_index_for(&self, schema_id: &str) -> Option<Arc<ReverseIndex>> {
@@ -1894,8 +1640,8 @@ impl EngineManager {
         if let Some(m) = self.reverse_index_if_ready(schema_id) {
             return Some(m);
         }
-        // ★ 构建**不能握 `reverse_index` 锁**：这是一次秒级、且要分配上百 MB 的操作，
-        //   握着它等于让查别的方案的线程一起排队。只握本方案自己的构建锁。
+        // 构建不能握 `reverse_index` 锁（秒级、上百 MB），否则查别的方案的线程一起排队。
+        // 只握本方案自己的构建锁。
         let lock = self.index_build_lock_for(schema_id);
         let _build = lock.lock().unwrap_or_else(|e| e.into_inner());
         // 抢到锁后复查：等待期间可能已被另一线程建好。
@@ -1920,16 +1666,15 @@ impl EngineManager {
         Some(m)
     }
 
-    /// 辅助码**当下可能用到**的方案来源（`schema:<id>`），去重、保序：活跃方案的
+    /// 辅助码当下可能用到的方案来源（`schema:<id>`），去重、保序：活跃方案的
     /// `[engine.aux_code]` ∪ 临拼目标方案的（五笔下从临拼进辅助码时，码表配在拼音方案里）。
     /// 辅助码关闭时对应方案的来源恒空（见 [`Self::aux_code_settings_of`]）。
     ///
     /// 供反查索引的内存护栏钉住它们、以及启动 / 切方案 / 改配置后的后台预热——两处用同一份
     /// 集合，否则「预热了却被护栏顶掉」或「钉住了却没人预热」。
     ///
-    /// 临拼目标**不走** [`Self::temp_pinyin_target`]：那个函数会 `ensure_loaded` 目标方案
-    /// （可能是秒级的拼音库加载），而本函数在切方案 / 保存设置的路径上也会被调。这里只要
-    /// 目标方案的 id 去读它的方案文件，不需要它的引擎。
+    /// 临拼目标不走 [`Self::temp_pinyin_target`]：那个函数会 `ensure_loaded` 目标方案
+    /// （可能秒级），而本函数在切方案 / 保存设置的路径上也会被调；这里只要 id。
     pub fn aux_code_schemas_in_use(&self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         let mut push_from = |schema_id: &str| {
@@ -1967,9 +1712,7 @@ impl EngineManager {
 
     /// 后台预热反查索引：把「首次使用时才建」提前到预热线程。
     ///
-    /// 该索引原本是懒构建——第一次按键触发候选注释/悬停时才建，而它对大词库是秒级操作，
-    /// 恰好落在打字的同步链路上。预热线程本就在启动后 1.5 秒跑，把这件事挪进去，
-    /// 绝大多数用户就再也碰不到它。
+    /// 大词库下构建是秒级的，不能落在打字的同步链路上。
     ///
     /// 幂等；返回是否真的得到了索引（供调用方计时/记日志、决定要不要通知重绘）。
     /// 被 build_guard 跳过时返回 `false`，此后直到缓存失效都不再尝试
@@ -2008,10 +1751,8 @@ impl EngineManager {
             .contains(schema_id)
     }
 
-    /// 该方案的反查索引是否**正在后台构建**。
-    ///
-    /// 打字线路据此决定「要不要再起一个后台构建线程」——没有它，索引没建好期间的
-    /// 每一次按键都会 spawn 一个新线程去建同一份东西。
+    /// 该方案的反查索引是否正在后台构建。打字线路据此决定要不要再起一个后台构建线程，
+    /// 免得索引没建好期间每次按键都 spawn 一个。
     pub fn is_building_reverse_index(&self, schema_id: &str) -> bool {
         !schema_id.is_empty()
             && self.reverse_index_if_ready(schema_id).is_none()
@@ -2019,7 +1760,7 @@ impl EngineManager {
     }
 
     /// 已加载引擎的影子层（未启用扩展词库）；引擎未加载、或没挂影子层（开关关 / 方案无扩展库）
-    /// 时 `None`。**只看已加载的**、不触发构建——调用方在按键线程上也可能走到这里。
+    /// 时 `None`。只看已加载的、不触发构建——调用方在按键线程上也可能走到这里。
     fn loaded_disabled_dict_engine(&self, schema_id: &str) -> Option<Arc<dyn Engine>> {
         self.engines
             .lock()
@@ -2045,7 +1786,7 @@ impl EngineManager {
             .collect()
     }
 
-    /// 阻塞地把 `schema_id` 已加载引擎的影子层建好（预热线程 / 测试用，**不可进按键链路**）。
+    /// 阻塞地把 `schema_id` 已加载引擎的影子层建好（预热线程 / 测试用，不可进按键链路）。
     /// 返回是否真的建了；引擎未加载、没挂影子层或已建好时返回 false。
     pub fn prewarm_disabled_dicts(&self, schema_id: &str) -> bool {
         self.loaded_disabled_dict_engine(schema_id)
@@ -2055,14 +1796,12 @@ impl EngineManager {
 
     /// 后台预热 `schema_id` 已加载引擎的影子层（未启用扩展词库，reverse-mode spec §4.2）。
     ///
-    /// 影子层是懒加载的：没有这一步，首次反查模式查询会在**按键线程**上（持协调器 state 锁）
-    /// 逐库 mmap、缺缓存时还要现建 wdat——扩展库大时整机顿住。这里把那次加载挪到后台线程。
+    /// 影子层是懒加载的：没有这一步，首次反查模式查询会在按键线程上（持协调器 state 锁）
+    /// 逐库 mmap、缺缓存时还要现建 wdat。
     ///
-    /// - **零开销前提**：开关（`input.reverse.lookup_disabled_dicts`）关或方案没有扩展库时引擎根本不挂影子层，这里一查即返回、不起线程；
-    ///   只看**已加载**的引擎，不触发构建（调用点可能在按键线程上）。
-    /// - **去重**：已建好或正有线程在建（`needs_warm` 用 `try_lock` 判）就不再起。
-    /// - **与按键线程串行**：加载持影子层内部那把锁。按键线程若撞上正在进行的预热就等它建完、
-    ///   直接复用——最坏情形等同没有预热；预热失败的库照旧 `warn!` 跳过，线程不 panic。
+    /// - 开关关或方案没有扩展库时引擎不挂影子层，一查即返回；只看已加载的引擎，不触发构建。
+    /// - 已建好或正有线程在建（`needs_warm` 用 `try_lock` 判）就不再起。
+    /// - 加载持影子层内部的锁，按键线程撞上进行中的预热就等它建完复用。
     ///
     /// 调用点：活跃方案引擎（重）建好时（`ensure_loaded`）、活跃方案变更时（`on_active_changed`）、
     /// 热禁用扩展库之后（`set_dict_enabled_live`）。
@@ -2096,7 +1835,7 @@ impl EngineManager {
             .and_then(|e| e.disabled_dict_layers().map(|d| d.load_count()))
     }
 
-    /// 单字全码表是否已就绪。它与反查索引同为**惰性全量构建**（同一批词库、同一量级），
+    /// 单字全码表是否已就绪。它与反查索引同为惰性全量构建（同一批词库、同一量级），
     /// 因此同样不能在按键线程上现建。只缓存一份，故判据是「缓存的就是这个方案」。
     pub fn single_char_codes_ready(&self, schema_id: &str) -> bool {
         matches!(
@@ -2128,30 +1867,12 @@ impl EngineManager {
 
     /// 反查索引缓存路径：`<cache>/<方案键>/<方案键>.wridx`。
     ///
-    /// # 为什么键是方案 id 而不是主词库路径
+    /// 整条路径（目录与文件名）只由方案 id 决定，不从主词库路径推：索引内容取决于方案启用的
+    /// 整组词库，而共用主库的方案很常见（出厂 `shuangpin` 与 `pinyin`）；且调用点手里的主库
+    /// 路径是缓存里的 `.wdat`，没有 `schemas` 段，推出来的命名空间会退化成父目录名。
     ///
-    /// 索引内容取决于该方案启用的**整组**词库，而「两个方案共用同一个主库、各挂不同扩展」
-    /// 是常态（出厂的 `shuangpin` 与 `pinyin` 就共用 `pinyin/rime_frost.dict.yaml`）。
-    /// `combined.wdat` 当年正是按主库命名的，其代码注释里就写着这挡不住「两个方案指向同一个
-    /// combined」——那会让两个方案反复顶掉对方的缓存。
-    ///
-    /// # ⚠️ 目录也必须由 id 决定，不能从主词库路径推
-    ///
-    /// 文件名一直是方案 id，**目录**却曾经沿用 `cache_path(first_dict, ..)` 算出的命名空间。
-    /// 那是错的：调用点手里的 `first_dict` 是 [`wind_dict::cached::CachedDict::source_file`]，
-    /// 即已经落在缓存里的 `.wdat`。那条路径里**没有 `schemas` 段**，
-    /// [`wind_dict::cache_ns::schema_namespace`] 于是走回退分支取父目录名——方案把主库放在
-    /// `schemas/ime_wubi86/Default/` 下时，索引就落成了 `<cache>/Default/ime_wubi86.wridx`
-    /// （论坛 t120）。两个方案各把主库放进自己的 `Default/` 时，它们的索引还会一起挤进那个
-    /// 与任何方案都不对应的 `<cache>/Default/`。
-    ///
-    /// 改成整条路径只由 id 决定后，它与任何源路径都无关，上面两条同时消解。出厂的扁平方案
-    /// （主库在 `schemas/<id>/` 下）算出来的路径与旧实现逐字节一致，存量索引不失效；
-    /// 共用主库的 `shuangpin` 会换一次目录（`<cache>/pinyin/` → `<cache>/shuangpin/`），
-    /// 重建一次。旧路径下的孤儿不清，理由同 [`cache_path`] 的那节。
-    ///
-    /// **无缓存根时返回 `None` = 本次不落盘**。刻意不像 `cache_path` 那样回退到「源文件旁」
-    /// ——词库源常在只读的安装目录，而反查索引是个上百 MB 的产物，落错地方比不落更糟。
+    /// 无缓存根时返回 `None` = 本次不落盘，不像 `cache_path` 回退到源文件旁（安装目录常只读，
+    /// 索引又是上百 MB 的产物）。
     fn reverse_index_cache_path(schema_id: &str) -> Option<std::path::PathBuf> {
         let dir = CACHE_DIR.get()?.as_ref()?;
         Self::reverse_index_cache_path_in(dir, schema_id)
@@ -2169,10 +1890,8 @@ impl EngineManager {
 
     /// 单字全码表缓存路径：`<cache>/<方案键>/<方案键>.wscc`。
     ///
-    /// 与 [`reverse_index_cache_path`](Self::reverse_index_cache_path) 同键同目录——两者
-    /// 同源于该方案启用的整组词库，一起生、一起废，分开放只会让清理缓存时漏掉一个。
-    /// 「为什么键是方案 id 而不是主词库路径」「无缓存根就不落盘」两条理由也逐字相同，
-    /// 见那里。
+    /// 与 [`reverse_index_cache_path`](Self::reverse_index_cache_path) 同键同目录、理由相同：
+    /// 两者同源于该方案启用的整组词库，一起生、一起废。
     fn single_char_codes_cache_path(schema_id: &str) -> Option<std::path::PathBuf> {
         let dir = CACHE_DIR.get()?.as_ref()?;
         Self::single_char_codes_cache_path_in(dir, schema_id)
@@ -2190,23 +1909,18 @@ impl EngineManager {
     /// 英文词组分词索引（`.wphr`）的落盘目录：`<cache>/<方案键>/`，文件名由索引自己按
     /// 启用词库集合的指纹取（`phrase-<指纹>.wphr`，见 [`crate::english_phrase::LazyPhraseIndex`]）。
     ///
-    /// 与 [`reverse_index_cache_path`](Self::reverse_index_cache_path) 同目录、同键：同源于该方案
-    /// 的整组词库，一起生、一起废。**无缓存根时 `None` = 不落盘**，理由也同那里——词库源常在
-    /// 只读的安装目录，不该把十几 MB 的派生产物落到源旁。
+    /// 与 [`reverse_index_cache_path`](Self::reverse_index_cache_path) 同目录、同键、同理由；
+    /// 无缓存根时 `None` = 不落盘。
     fn english_phrase_cache_dir(schema_id: &str) -> Option<std::path::PathBuf> {
         let dir = CACHE_DIR.get()?.as_ref()?;
         Some(dir.join(Self::schema_cache_key(schema_id)?))
     }
 
-    /// 方案 id → 可安全当**目录名和文件名**用的键；id 为空时 `None`。
+    /// 方案 id → 可安全当目录名和文件名用的键；id 为空时 `None`。
     ///
-    /// 只保留 ASCII 字母/数字/`-`/`_`，其余一律换成 `_`。转义**真的发生**时再附一段 id 的
-    /// 短哈希：不然「五笔」与「拼音」会双双转义成同一串下划线，而目录现在也由这个键决定，
-    /// 两个方案会互相顶掉对方的索引（旧实现里目录另有来源，这条碰撞被目录挡住了一半）。
-    /// ASCII id 不触发哈希，路径与旧实现逐字节一致。
-    ///
-    /// 哈希用自带的 FNV-1a 而不是 `DefaultHasher`：后者的输出**不保证跨 Rust 版本稳定**，
-    /// 而这串字符会进路径——`cache_fp` 里用它只影响「是否重建一次」，这里却会留下孤儿目录。
+    /// 只保留 ASCII 字母/数字/`-`/`_`，其余换成 `_`；转义真的发生时再附 id 的短哈希，否则
+    /// 「五笔」与「拼音」会转成同一串下划线、互相顶掉缓存。ASCII id 不触发哈希。哈希用自带
+    /// FNV-1a 而不是 `DefaultHasher`：后者不保证跨 Rust 版本稳定，而这串字符会进路径。
     fn schema_cache_key(schema_id: &str) -> Option<String> {
         let safe: String = schema_id
             .chars()
@@ -2234,9 +1948,8 @@ impl EngineManager {
 
     /// 各词库缓存产物的摘要列表，用作 `.wridx` 的二级指纹源（顺序即语义）。
     ///
-    /// 任一词库处于内存模式（`source_file() == None`，即它的 wdat 写失败了）就返回 `None`
-    /// ——那意味着这份词库**没有稳定的磁盘产物**，以它为源的索引不该落盘：下次启动
-    /// 无从校验，只会复用一份来历不明的缓存。
+    /// 任一词库处于内存模式（`source_file() == None`，wdat 写失败）就返回 `None`：没有稳定
+    /// 的磁盘产物，以它为源的索引不该落盘，否则下次启动无从校验。
     fn reverse_index_source_digests(dicts: &[CachedDict]) -> Option<Vec<String>> {
         dicts
             .iter()
@@ -2250,36 +1963,14 @@ impl EngineManager {
             .collect()
     }
 
-    /// 按方案全量构建反查索引(汉字/词 → 全部编码,码长升序)。失败返回空表。
+    /// 扫全部已启用方案的启用词库，收出落在 `[start, end]` 码位区间内的字符。
     ///
-    /// # 为什么要落盘成 `.wridx`
+    /// 供「按类型批量设常用/生僻」圈定范围。只收词库里真实出现过的字符，不按整个 Unicode 块
+    /// 展开（否则是一堆读端永远查不到的死记录）。返回的条目数界面必须显示，见 [`RangeScan::entries`]。
     ///
-    /// 索引在大词库上是**长尾灾难**：feihuzj2 方案 251 万词 → 95.4 MB 常驻，且同时缓存多份。
-    /// 落盘后由 [`ReverseIndex::open`] 决定常驻还是 mmap（阈值
-    /// [`REVERSE_INDEX_RESIDENT_MAX`]），大索引的字节因此完全不进程私有内存。
-    ///
-    /// **落盘与 mmap 是一件事的两面**：不持久化的话每次启动仍要全量重建（峰值一点没降），
-    /// 还平白多写一次上百 MB 磁盘——严格比不做更差。所以这里的指纹校验不是优化，是前提。
-    ///
-    /// 指纹走「二级」通道（[`wind_dict::cache_fp::cache_digest`]）：源是各词库的 `.wdat`
-    /// **摘要**而非 yaml 内容。照一级指纹读满 250 MB yaml 才能回答「缓存还能不能用」，
-    /// 会把复用命中这条本该零成本的路径变成每次启动的固定开销。
-    /// 扫某方案的全部**启用**词库，收出落在 `[start, end]` 码位区间内的字符。
-    ///
-    /// 供「按类型批量设常用/生僻」圈定范围。只收**词库里真实出现过**的字符，不按整个
-    /// Unicode 块展开——「带圈 CJK 字母及月份」有 256 个码位而虎码一个都没编，全展开就是
-    /// 一堆读端永远查不到的死记录，还会把设置页的列表撑长。
-    ///
-    /// ★ 返回的条目数不是装饰，界面**必须**显示它：全角逗号 `，` 只是 1 个字符，却出现在
-    /// 326 条词条里（词条内部的标点）。只显示「1 个字符」，谁都会毫不犹豫地一键设为生僻，
-    /// 那 326 个词跟着一起判非常用。字符数与影响面在这里差了两个数量级。
-    ///
-    /// ⚠️ O(全表)，只在用户手动点菜单时调用，**绝不能进按键链路**（同 `for_each_entry`）。
-    /// 走 `load_dicts_individually` 而不是已加载的引擎：与反查索引构建同一条路径，不必为此
-    /// 给 `Engine` trait 加一个九成实现都用不上的方法。
-    /// ⚠️ 扫的是**全部已启用方案**，不是当前活跃方案：常用字覆盖是全局作用域（键就是一个
-    /// 字，不带方案），扫描若绑定活跃方案，用户在五笔下就设不了只出现在虎码里的注音符号
-    /// ——而他看到的候选正是从那个方案来的。作用域一致比省这点扫描时间重要。
+    /// 扫全部方案而非活跃方案：常用字覆盖是全局作用域（键就是一个字，不带方案）。
+    /// O(全表)，只在用户手动点菜单时调用，绝不能进按键链路。走 `load_dicts_individually`，
+    /// 与反查索引构建同一条路径。
     pub fn scan_chars_in_range(&self, start: u32, end: u32) -> RangeScan {
         let mut scan = RangeScan::default();
         if start > end {
@@ -2290,12 +1981,8 @@ impl EngineManager {
         };
         let t0 = std::time::Instant::now();
         let schemas_dir = data_dir.join("schemas");
-        // 多个方案常共用同一份词库（五笔与五笔拼音），按源文件去重，否则 `entries`
-        // 会把同一条词条数好几遍，报给用户的影响面就虚高了。
-        //
-        // ⚠️ 已知限制：`CachedDict::Memory`（mmap 失败时的回退形态）没有源文件，去重对它
-        // 失效，跨方案共用时 `entries` 会偏高。刻意不为此另造一个键——这个数是给用户估
-        // 影响面用的，**偏高比偏低安全**，而 Memory 形态本身已是异常路径。
+        // 多个方案常共用同一份词库，按源文件去重，否则 `entries` 虚高。`CachedDict::Memory`
+        // 没有源文件、去重对它失效，`entries` 会偏高；估影响面偏高比偏低安全，且那是异常路径。
         let mut seen_files = std::collections::HashSet::new();
         for schema_id in self.available_schemas() {
             let Some(schema) =
@@ -2315,8 +2002,7 @@ impl EngineManager {
             }
         }
         scan.finish();
-        // 耗时留痕：这是全表遍历，是本功能唯一的重活。用户觉得「点了要等一下」时，
-        // 这行日志能直接回答「等的是扫描还是别的」，不必再去猜。
+        // 全表遍历是本功能唯一的重活，留耗时便于排查「点了要等一下」。
         info!(
             "扫描码位区间 U+{:04X}-{:04X}: {} 个字符 / {} 条词条，{} 份词库，耗时 {:?}",
             start,
@@ -2329,8 +2015,15 @@ impl EngineManager {
         scan
     }
 
+    /// 按方案全量构建反查索引(汉字/词 → 全部编码,码长升序)。读不到方案/词库时返回空表。
+    ///
+    /// 落盘成 `.wridx` 后由 [`ReverseIndex::open`] 决定常驻还是 mmap（阈值
+    /// [`REVERSE_INDEX_RESIDENT_MAX`]），大索引字节不进进程私有内存；不持久化则每次启动仍要
+    /// 全量重建，故指纹校验是前提。指纹走二级通道（各词库 `.wdat` 摘要，
+    /// [`wind_dict::cache_fp::cache_digest`]），复用命中不必读满 yaml。
+    ///
     /// 返回 `None` 仅当构建被 build_guard 跳过（同一份输入已连续死在构建中）：
-    /// 这**不是**「查无此词」，调用方不得把它当空表缓存或使用。
+    /// 这不是「查无此词」，调用方不得把它当空表缓存或使用。
     fn build_reverse_index_for(&self, schema_id: &str) -> Option<ReverseIndex> {
         #[cfg(test)]
         self.reverse_index_build_calls
@@ -2354,8 +2047,7 @@ impl EngineManager {
         // 顺手清掉旧版留下的合并缓存（本方案已不再需要它）。
         Self::purge_legacy_combined(&schema, &schemas);
 
-        // 索引落盘与否只看缓存根：「某本词库处于内存模式」这一守卫由下面的 digests 兜住，
-        // 它查的是**全部**词库，比这里曾经只看首本词库的 `source_file()` 严格。
+        // 索引落盘与否只看缓存根；「某本词库处于内存模式」由下面的 digests 兜住（查全部词库）。
         let cache = Self::reverse_index_cache_path(schema_id);
         let digests = Self::reverse_index_source_digests(&dicts);
 
@@ -2379,14 +2071,13 @@ impl EngineManager {
                     );
                     return Some(idx);
                 }
-                // 指纹说新鲜但打不开＝文件被截断/损坏。落到下面重建即可，但要留痕：
-                // 静默重建会让「每次启动都慢」这类故障失去唯一的外部线索。
+                // 指纹说新鲜但打不开＝文件被截断/损坏。重建，但要留痕（「每次启动都慢」的线索）。
                 Err(e) => warn!("反查索引缓存 {} 打不开（{e}），重建", c.display()),
             }
         }
 
-        // ② 重建。峰值远高于成品（251 万词的方案估 400~500 MB），登记尝试以便连续死在
-        //    这里时下次跳过（见 build_guard）。无缓存路径时无处记录，照旧直接建。
+        // ② 重建。峰值远高于成品，登记尝试以便连续死在这里时下次跳过（见 build_guard）。
+        //    无缓存路径时无处记录，照旧直接建。
         let attempt = match (cache.as_deref(), digests.as_deref()) {
             (Some(c), Some(dg)) => match wind_dict::build_guard::begin(
                 c,
@@ -2407,7 +2098,7 @@ impl EngineManager {
             a.finish();
         }
 
-        // ③ 落盘后**从盘上重新打开**——这一步才真正把索引字节移出进程私有内存。
+        // ③ 落盘后从盘上重新打开——这一步才真正把索引字节移出进程私有内存。
         //    任一环失败都只是退回「常驻内存」这个旧行为，不影响正确性。
         if let (Some(c), Some(dg)) = (cache.as_deref(), digests.as_deref()) {
             match wind_dict::reverseidx::write_wridx(c, &image) {
@@ -2516,8 +2207,7 @@ impl EngineManager {
                     );
                     return m;
                 }
-                // 指纹说新鲜但读不出＝文件被截断/损坏。重建即可，但要留痕：静默重建会让
-                // 「每次启动都慢」这类故障失去唯一的外部线索。同反查索引那条。
+                // 指纹说新鲜但读不出＝文件被截断/损坏。重建，但要留痕（同反查索引那条）。
                 Err(e) => warn!("单字全码表缓存 {} 读不出（{e}），重建", c.display()),
             }
         }
@@ -2527,9 +2217,8 @@ impl EngineManager {
         let idx = wind_dict::cached::build_single_char_full_codes_from(&dicts, cap);
         let built = t0.elapsed();
 
-        // ③ 落盘。**不像反查索引那样「写完再从盘打开」**——那一步是为了把上百 MB 的索引
-        //    字节移出进程私有内存（mmap），而这张表是 MB 以内的常驻 HashMap，重新读一遍
-        //    只会白花一次解析时间，拿到的还是等价的东西。写失败也只是下次启动再建一遍。
+        // ③ 落盘。不像反查索引那样写完再从盘打开：这张表是 MB 以内的常驻 HashMap，重读
+        //    只白花解析时间。写失败也只是下次启动再建一遍。
         if let (Some(c), Some(dg)) = (cache.as_deref(), digests.as_deref()) {
             match wind_dict::charcodes::write(c, &wind_dict::charcodes::serialize(&idx)) {
                 Ok(()) => wind_dict::cache_fp::write_derived_cache_fp(
@@ -2555,14 +2244,10 @@ impl EngineManager {
         idx
     }
 
-    /// `.wscc` 的指纹源：各词库摘要（同 `.wridx`）**再加上 `max_code_length`**。
+    /// `.wscc` 的指纹源：各词库摘要（同 `.wridx`）再加上 `max_code_length`。
     ///
-    /// ⚠️ 这一项是两张表的唯一分歧，也是不能直接复用
-    /// [`reverse_index_source_digests`](Self::reverse_index_source_digests) 的原因：
-    /// 反查索引记录的是词库里**实际存在**的编码，与 cap 无关；单字全码表却要用 cap 当闸
-    /// 筛掉超长码（`build_single_char_full_codes_from`）。用户在设置页改了 cap 而词库一字未动时，
-    /// 只哈希词库的指纹仍判「新鲜」，于是那份按旧 cap 筛出来的表被永久复用——
-    /// 表现是改了码长设置却毫无变化，而且重装也不好使（缓存还在）。
+    /// 单字全码表用 cap 当闸筛掉超长码，反查索引与 cap 无关；漏了 cap，改码长设置而词库
+    /// 未动时会永久复用按旧 cap 筛出的表。
     fn single_char_codes_source_digests(dicts: &[CachedDict], cap: usize) -> Option<Vec<String>> {
         let mut dg = Self::reverse_index_source_digests(dicts)?;
         dg.push(format!("cap|{cap}"));
@@ -2571,25 +2256,20 @@ impl EngineManager {
 
     /// 按方案的 `[[encoder.rules]]` 为词计算码表词组编码（造词/加词统一入口）。
     ///
-    /// 单字全码取自**该方案的码表词库**——码源与词库同源是刚性要求：造词的唯一目的是
-    /// 「造出来的词以后能打出来」，用与词库解耦的静态资源（如拆字表）出码，用户换了词库
-    /// 或加了扩展库就可能造出打不出的码。
+    /// 单字全码取自该方案的码表词库：码源必须与词库同源，造出来的词才打得出来（拆字表之类
+    /// 的静态资源在用户换词库后可能造出打不出的码）。
     ///
-    /// 文本口径见 [`encoder::encode_text`]：**单字**直取全码、不进词组公式；**非汉字跳过**
-    /// （GH#171，姓名+手机号只按姓名取码）；取不到码的**汉字**仍整词失败，错误里带上是哪个字
-    /// （见 [`encoder::EncodeError`]）。
-    ///
-    /// 与 [`Self::encode_words`] 同口径：设置页出码 / 导入词表走复数版、输入法内加词走本函数，
-    /// 口径一旦漂移，用户就会在一个界面拿到码、在另一个界面被告知「当前方案取不出编码」。
+    /// 文本口径见 [`encoder::encode_text`]：单字直取全码、不进词组公式；非汉字跳过
+    /// （姓名+手机号只按姓名取码）；取不到码的汉字仍整词失败（见 [`encoder::EncodeError`]）。
+    /// 与 [`Self::encode_words`]（设置页 / 导入用）必须同口径。
     pub fn encode_word(&self, schema_id: &str, word: &str) -> Result<String, encoder::EncodeError> {
         self.encode_word_with_hints(schema_id, word, &[])
     }
 
-    /// 同 [`Self::encode_word`]，但优先按**用户实际打的码**取位（GH#181，自动造词用）。
+    /// 同 [`Self::encode_word`]，但优先按用户实际打的码取位（自动造词用）。
     ///
     /// `hints` 是「字 → 用户上屏它时选中的那条码」。单字全码表对多读音/多拆法的字只能按权重
-    /// 挑一条（小鹤音形「嘞」挑到 `le…`，用户打的是 `lw`），按它造出的草稿码与用户回打的码
-    /// 对不上，永远召不回。有提示的字经 [`encoder::pick_hinted_code`] 在该字的全部码（反查
+    /// 挑一条，与用户打的码可能对不上，造出的词就召不回。有提示的字经 [`encoder::pick_hinted_code`] 在该字的全部码（反查
     /// 索引）里挑以提示开头、不超码长上限、且够公式取位的一条；挑不出（提示不是本方案的码，
     /// 或反查索引没就绪）回退全码表。无提示的字行为与 [`Self::encode_word`] 完全一致。
     pub fn encode_word_with_hints(
@@ -2608,7 +2288,7 @@ impl EngineManager {
             .map_or(0, |s| s.engine.codetable.max_code_length);
         let spec = schema.and_then(|s| s.encoder).unwrap_or_default();
         let codes = self.single_char_full_codes(schema_id);
-        // 反查索引只在真有提示时才取（**不阻塞**：没就绪就当没有提示）。
+        // 反查索引只在真有提示时才取（不阻塞：没就绪就当没有提示）。
         let index = if hints.is_empty() {
             None
         } else {
@@ -2631,13 +2311,10 @@ impl EngineManager {
         })
     }
 
-    /// 批量版 [`Self::encode_word`]：规则完全一致，但**方案只读一次**。
+    /// 批量版 [`Self::encode_word`]：规则完全一致，但方案只读一次（`read_schema` 没有缓存，
+    /// 逐词调在万级词表上就是万次文件解析）。
     ///
-    /// 分出这个入口不是锦上添花：`read_schema` 没有缓存，每次调用都要读盘、解析 TOML、
-    /// 合并 override 层。逐词调 `encode_word` 在万级词表上就退化成万次文件解析，
-    /// 而单字全码表（`single_char_full_codes`）本身是带缓存的，真正的热点只有前者。
-    ///
-    /// 返回与 `words` **同序等长**；取不到码的位置为空串——调用方靠下标把码配回词，
+    /// 返回与 `words` 同序等长；取不到码的位置为空串——调用方靠下标把码配回词，
     /// 跳过失败项会让其后所有词错位配到别人的码上。
     /// 文本口径（单字直取、非汉字跳过）与单条版同一个 [`encoder::encode_text`]。
     pub fn encode_words(&self, schema_id: &str, words: &[&str]) -> Vec<String> {
@@ -2697,26 +2374,16 @@ impl EngineManager {
 
     /// 解析活跃方案 id，并处理「`schema.active` 指向被定制版 hide 掉的方案」。
     ///
-    /// 原版用户升级到定制版**必然**碰上：他 `%APPDATA%` 里的 `schema.active` 还是 `wubi86`，
-    /// 而定制版把 `wubi86` 删了。不处理的话 [`Self::read_schema`] 对它返回 `None` ⇒
-    /// 活跃引擎构建不出来 ⇒ 输入法一个字都打不出，且只有一行「Schema file not found」。
+    /// 原版用户升级到定制版时，`schema.active` 可能指向已被删的方案，不处理就一个字都打不出。
     ///
-    /// ★ **降级只在内存里发生，绝不改写用户配置。** `data_custom` 是可以被卸载的
-    /// （定制包换回原版、用户装回官方版），把 `schema.active` 改写成定制版的方案会让用户
-    /// 回到原版后丢掉自己的选择；这也与契约 3「程序永不写 `data_custom`」同源——减法是
-    /// 定制层的主张，不该在用户层留下痕迹。
+    /// 降级只在内存里发生，绝不改写用户配置：定制层可被卸载，改写会让用户回到原版后丢掉
+    /// 自己的选择（同契约 3「程序永不写 `data_custom`」）。
     ///
-    /// 降级候选的次序：先 `schema.available`（用户自己启用过的，按他配的顺序），再各层
-    /// `schemas/` 目录（按层序 `user > custom > data`，见 [`Self::scan_layer_schema_ids`]），
-    /// 去重后**按 [`Self::active_fallback_rank`] 稳定排序**取第一个。都没有则原样返回
-    /// （此时盘上确实没有可用方案，让上游照旧报「方案文件不存在」，别把「定制版删空了」
-    /// 伪装成别的故障）。
-    ///
-    /// ⚠️ **不能只过一遍「受支持」就取第一个**——那是这段代码的第一版，实测落点是
-    /// `english`：候选表当时按字典序排（`'e' < 'h'`），英文方案抢在定制版自带的 `huma`
-    /// 前面。现象是五笔用户装上虎码定制版、首启工具栏显「英」，一个汉字都打不出。
-    /// 而 `build_dev/data` 里**一个方案都没标 `[schema] hidden`**（英文方案也没标），
-    /// 所以「加一道 `hidden` 过滤」挡不住它——判据必须是排序 + 类型，不是 `hidden`。
+    /// 候选次序：先 `schema.available`（用户配的顺序），再各层 `schemas/` 目录（层序
+    /// `user > custom > data`，见 [`Self::scan_layer_schema_ids`]），去重后按
+    /// [`Self::active_fallback_rank`] 稳定排序取第一个。都没有则原样返回，让上游照旧报
+    /// 「方案文件不存在」。判据必须是排序 + 类型，不能只看「受支持」或 `hidden`（英文方案
+    /// 没标 hidden，会抢到首位）。
     fn resolve_active_schema_id(
         config: &Config,
         data_dir: Option<&Path>,
@@ -2737,7 +2404,7 @@ impl EngineManager {
                 cands.push(id);
             }
         }
-        // 先算好每个候选的档位（`None` = 不能当活跃方案），再**稳定**排序：同档位内
+        // 先算好每个候选的档位（`None` = 不能当活跃方案），再稳定排序：同档位内
         // 上面那个「available 顺序 → 层序」原样保留，不被排序打乱。
         let mut ranked: Vec<(u8, String)> = cands
             .into_iter()
@@ -2767,14 +2434,9 @@ impl EngineManager {
 
     /// 降级落点必须出现在 `available` 里（构造与 `reload_from_config` 共用）。
     ///
-    /// 不补的话有个很实在的后果：单方案用户（`schema.available = ["wubi86"]`）碰上定制版
-    /// 把 `wubi86` 删了，`retain` 的两条判据——「等于活跃方案」（活跃方案已降级成别的 id）
-    /// 与「受支持」（被 hide 的读不出来）——**双双落空**，`available` 变成空表。
-    /// 空表意味着方案菜单空白、循环切换键按下去毫无反应，用户只能进设置页手动选。
-    ///
-    /// 只在**确实降级过**（`fallback != cfg_active`）时补：不然会把「用户的 active 本来就
-    /// 不在 available 里」这个既有的合法状态一并改掉，而 `cycle_schema` 专门处理过它
-    /// （「当前方案不在 available 时从头开始」）。
+    /// 不补的话单方案用户碰上定制版删掉该方案时，`retain` 的两条判据双双落空，`available`
+    /// 变成空表（方案菜单空白、循环切换无反应）。只在确实降级过（`fallback != cfg_active`）
+    /// 时补：「active 本来就不在 available 里」是合法状态，`cycle_schema` 专门处理过它。
     fn ensure_fallback_listed(available: &mut Vec<String>, cfg_active: &str, fallback: &str) {
         if fallback != cfg_active && !available.iter().any(|s| s == fallback) {
             // 插到表头：它就是此刻的活跃方案。
@@ -2782,15 +2444,11 @@ impl EngineManager {
         }
     }
 
-    /// 一个方案作为**降级落点**的档位：`None` = 不能当活跃方案，`Some(r)` 越小越优先。
+    /// 一个方案作为降级落点的档位：`None` = 不能当活跃方案，`Some(r)` 越小越优先。
     ///
-    /// 三条判据，缺一条都出过或会出真实故障：
-    ///
-    /// 1. 读得出来且 `is_supported()`——基本可用性（`read_schema` 已顺带拦掉被 hide 的）；
-    /// 2. **排除 `[overlay]` 方案**：那是「特殊模式」（快符等），语义是引导键瞬态进入、
-    ///    上屏即退出，几十条的小符号表当常驻活跃方案等于打不了字；
-    /// 3. **english 排到最后**：它是给临时英文 / 混输英文候选懒加载用的方案，本身不出汉字。
-    ///    排最后而不是直接排除——万一盘上真的只剩它，有个能打英文的输入法仍好过没有。
+    /// 1. 读得出来且 `is_supported()`（`read_schema` 已顺带拦掉被 hide 的）；
+    /// 2. 排除 `[overlay]` 方案：那是引导键瞬态进入的特殊模式，当常驻活跃方案等于打不了字；
+    /// 3. english 排到最后而不是排除：盘上只剩它时，能打英文仍好过没有。
     fn active_fallback_rank(
         schema_id: &str,
         data_dir: Option<&Path>,
@@ -2840,7 +2498,6 @@ impl EngineManager {
         )
     }
 
-    /// 确保指定方案引擎已加载；返回是否可用
     /// 某方案引擎是否已加载（已就绪，切换即时无构建）。
     pub fn is_loaded(&self, schema_id: &str) -> bool {
         self.engines
@@ -2872,9 +2529,8 @@ impl EngineManager {
 
     /// 已加载就把「最后使用」记成当前淘汰时钟并返回 true；未加载返回 false。
     ///
-    /// 记录与查表在**同一把 `engines` 锁**下：淘汰拍子也是持这把锁读「最后使用」再摘，
-    /// 故「取引擎的人刚确认它在表里、淘汰随即把它摘掉」不会发生——要么淘汰在前（这里
-    /// 看到未加载、去重建），要么记录在前（淘汰看到它刚用过）。
+    /// 记录与查表在同一把 `engines` 锁下（淘汰也持这把锁读「最后使用」再摘），故不会出现
+    /// 「刚确认在表里、随即被摘」。
     fn touch_loaded(&self, schema_id: &str) -> bool {
         let g = self.engines.lock().unwrap_or_else(|e| e.into_inner());
         match g.get(schema_id) {
@@ -2894,7 +2550,7 @@ impl EngineManager {
         self.use_clock.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// 已加载引擎（**不触发构建、不记使用**）。
+    /// 已加载引擎（不触发构建、不记使用）。
     fn loaded_engine(&self, schema_id: &str) -> Option<Arc<dyn Engine>> {
         self.engines
             .lock()
@@ -2916,16 +2572,14 @@ impl EngineManager {
         v
     }
 
-    /// 方案常驻策略（`schema.keep_all_loaded = false`）下**不摘**的方案：
+    /// 方案常驻策略（`schema.keep_all_loaded = false`）下不摘的方案：
     ///
     /// - 当前方案；
     /// - 临拼目标（开关开着、当前方案适用时；按 id 判，不触发加载）；
-    /// - `english`——临英候选开着，或共享英文引擎已被取走（英文混入 / 混输的英文子引擎握着
-    ///   同一个 `Arc`：这时从表里摘掉一分内存也省不下，下次 `ensure_loaded("english")`
-    ///   反倒会再建一份）。
+    /// - `english`——临英候选开着，或共享英文引擎已被取走（别人握着同一个 `Arc`，摘了省不下
+    ///   内存，下次还会再建一份）。
     ///
-    /// 混输的成员**不保护**：混输在 `build_engine` 里自建成员子引擎，用不到表里那份独立
-    /// 引擎，保护它只是多留一份没人用的副本。
+    /// 混输的成员不保护：混输在 `build_engine` 里自建成员子引擎，用不到表里那份。
     ///
     /// 启动常驻集合与闲置淘汰的保护名单是同一份，两处判据不会漂移。
     /// 正在构建的方案还不在 `engines` 表里，天然不会被摘。
@@ -2972,7 +2626,7 @@ impl EngineManager {
     /// 「`idle` 以上没用过、且不在 [`Self::residency_protected`] 里」的引擎从表里摘掉，
     /// 返回被摘的方案 id。`idle = 0` 即「保护名单外的一律摘」（运行期把常驻关掉时用）。
     ///
-    /// 只摘引擎与**只属于它**的派生索引（[`Self::forget_unloaded`]），不动方案配置缓存：
+    /// 只摘引擎与只属于它的派生索引（[`Self::forget_unloaded`]），不动方案配置缓存：
     /// 配置没变，再切回来时按原样重建即可（派生缓存文件仍新鲜 ⇒ 只是 mmap + 建外壳）。
     pub fn evict_idle(&self, idle: std::time::Duration) -> Vec<String> {
         let now = self.advance_use_clock();
@@ -3019,14 +2673,8 @@ impl EngineManager {
     /// 懒建缓存的闲置清扫（`docs/design/memory-footprint.md` §7；协调器清扫拍子调，与方案
     /// 常驻策略无关、恒生效）：先推进淘汰时钟，再释放 `idle` 以上没用过的
     ///
-    /// - 单字全码表。释放后各消费方下次用到时就地重建（`.wscc` 新鲜时只是读一次盘，毫秒级；
-    ///   过期才全量重建），不丢活：
-    ///   - 自动造词的草稿落库（协调器 `resolve_phrase_schemas`，后台线程）：反查索引就绪时
-    ///     同步建回来再落库；反查索引也没就绪才照旧整批放弃并派后台预热；
-    ///   - 快捷加词取码（按键线程）与设置页 `dict.encodeWords` / `dict.encode`（RPC 线程）：
-    ///     经 [`Self::encode_word`] / [`Self::encode_words`] 在调用线程上同步建回来。
-    /// - 按词查编码用户层的槽（悬停 [编码]、`${code_rev}`）。释放后下一次查询**本次没有用户层**
-    ///   （只出系统层的码），同时起后台重建，建好后下一次查询就有。
+    /// - 单字全码表。各消费方下次用到时就地重建（`.wscc` 新鲜时只是读一次盘），不丢活。
+    /// - 按词查编码用户层的槽。释放后下一次查询没有用户层（只出系统层的码），同时起后台重建。
     ///
     /// 「最后使用」与引擎同一套打法：取用处一次原子写 / 已持锁时顺手写时钟读数。
     /// 返回释放了的项（`single_char:<方案>` / `user_text:<数据方案>`），供日志与测试。
@@ -3064,13 +2712,11 @@ impl EngineManager {
         released
     }
 
-    /// 引擎被摘后，清掉**只属于它**的派生索引。
+    /// 引擎被摘后，清掉只属于它的派生索引。
     ///
-    /// 与 [`Self::invalidate_schema`] 不同，这里不清全部反查索引 / 单字全码表：摘引擎不改变
-    /// 任何方案的定义，别的方案的索引照样有效。被摘方案自己的反查索引 / 单字全码表也要先过一遍
-    /// 「在用」判据——主码表、编码来源、联想 / 辅助码在用的方案（同 `reverse_index_for` 的
-    /// 护栏）的索引不随引擎走：拼音方案的编码提示查的就是主码表的反查索引，与主码表的引擎
-    /// 在不在内存无关。
+    /// 摘引擎不改变方案定义，别的方案的索引照样有效（与 [`Self::invalidate_schema`] 不同）。
+    /// 被摘方案自己的索引也要先过「在用」判据（同 `reverse_index_for` 的护栏）：例如拼音方案的
+    /// 编码提示查的是主码表的反查索引，与主码表引擎在不在内存无关。
     fn forget_unloaded(&self, schema_id: &str) {
         let primary = self.primary_codetable_id();
         let mut in_use = self.reverse_index_pins();
@@ -3095,7 +2741,7 @@ impl EngineManager {
         if in_use_kept {
             return;
         }
-        // 按词查编码用户层（S4 审查 L7）：槽按**数据方案**分（拼音类方案共用 `pinyin` 一份），
+        // 按词查编码用户层：槽按数据方案分（拼音类方案共用 `pinyin` 一份），
         // 还有已加载引擎或在用方案落在同一数据方案上就留着。
         let data = self.data_schema_id(schema_id);
         let shared = {
@@ -3152,13 +2798,11 @@ impl EngineManager {
             .is_some()
     }
 
-    /// 校验某方案的派生缓存（`.wdat` 等，指纹不符或缺失即重建），**建完不留引擎**
+    /// 校验某方案的派生缓存（`.wdat` 等，指纹不符或缺失即重建），建完不留引擎
     /// （除非它在 [`Self::residency_protected`] 里）。阻塞，只可在后台线程里调。
     ///
-    /// 走与切换完全相同的 `ensure_loaded` 构建路径，而不是另抽一个「只确保缓存」的入口：
-    /// 缓存的种类、路径、指纹判据都长在 `build_engine` 那几条分支里（码表逐库、拼音
-    /// merged / unigram、英文词组索引……），另写一份必然漂移，漂了的表现是「启动校验过了、
-    /// 切换时照样同步重建」。代价是多建一次引擎外壳——缓存新鲜时就是 mmap + 外壳，立即释放。
+    /// 走与切换相同的 `ensure_loaded` 构建路径，不另抽「只确保缓存」的入口：缓存种类与指纹
+    /// 判据都长在 `build_engine` 分支里，另写一份必然漂移。代价是多建一次引擎外壳。
     ///
     /// 已加载的方案直接返回 true（它的缓存在加载时已校验过）。返回是否构建成功。
     pub fn refresh_schema_cache(&self, schema_id: &str) -> bool {
@@ -3227,8 +2871,7 @@ impl EngineManager {
     /// 取引擎的公共入口：已加载就记一笔「用过」（闲置淘汰的判据），否则构建。
     ///
     /// 取引擎的路径（`engine_for` / `convert_with*` / `enumerate_with` / …）都先过这里，
-    /// 故「最后使用」只在这一处打。快路径上相对原来的 `is_loaded` 只多一次原子读 +
-    /// 一次原子写（[`Self::touch_loaded`]），不读系统时钟、不多拿锁。
+    /// 故「最后使用」只在这一处打（[`Self::touch_loaded`]，不读系统时钟、不多拿锁）。
     fn ensure_loaded(&self, schema_id: &str) -> bool {
         if self.touch_loaded(schema_id) {
             return true;
@@ -3266,8 +2909,8 @@ impl EngineManager {
                 .unwrap_or_else(|e| e.into_inner())
                 .clone();
             let misread = self.misread_for_engines();
-            // 词组分词（t42）：英文方案读 `schema.english.phrase_seg`，临英与快捷输入英文共读
-            // `input.temp_english.phrase_seg`（A2-3b），两份开关相或。引擎只需知道「要不要具备
+            // 词组分词：英文方案读 `schema.english.phrase_seg`，临英与快捷输入英文共读
+            // `input.temp_english.phrase_seg`，两份开关相或。引擎只需知道「要不要具备
             // 这个能力」——按作用域把关是协调器的事，见 `build_engine` 的参数说明。
             let phrase_seg_anywhere = self
                 .english
@@ -3283,20 +2926,13 @@ impl EngineManager {
             let lookup_disabled_dicts = self
                 .reverse_lookup_disabled
                 .load(std::sync::atomic::Ordering::Relaxed);
-            // 混输分支据此取**共享**英文引擎而不是另建一份。闭包在 `build_engine` 内部求值，
-            // 故 `enable_english` 关着时英文引擎一次都不会被建出来。
+            // 混输分支据此取共享英文引擎而不是另建一份；闭包在 `build_engine` 内部求值，
+            // `enable_english` 关着时英文引擎不会被建出来。
             //
-            // ⚠️ 构建英文方案**自己**时必须传 `None`：英文方案不能把自己当成自己的英文子引擎。
-            // `read_schema` 合并 override 走的是无白名单的 `merge_toml`，所以 `english.toml` 里
-            // 写一句 `[engine] type = "mixed"` 就能把英文方案变成混输，于是
-            // `shared_english_engine` → `ensure_loaded("english")` → 持 `build_locks["english"]`
-            // → mixed 分支回调 → `shared_english_engine` → `ensure_loaded("english")`
-            // → **同一线程再取同一把 `Mutex`**。`std::sync::Mutex` 不可重入，整条打字线路就此
-            // 挂死，只能杀进程。传 `None` 后退化为「这个畸形的混输拿不到英文子引擎」——少一路
-            // 候选，但活着。
+            // 构建英文方案自己时必须传 `None`：override 可把英文方案改成混输，回调会在同一线程
+            // 再取 `build_locks["english"]`，`std::sync::Mutex` 不可重入，打字线路就此挂死。
+            // 闭包先绑定再取引用，写成 `Some(&|| …)` 是临时值，活不到调用点。
             //
-            // 闭包**先绑定再取引用**：写成 `Some(&|| …)` 的话它是个临时值，在 `if` 表达式结束
-            // 时就被丢掉，借用活不到 `build_engine` 的调用点。
             // 先记指纹再建：建的过程中文件被改，下次 `dict.reload` 照样能发现
             let user_dicts_fp = self.user_dicts_fingerprints(schema_id);
             let borrow_shared_english = || self.shared_english_engine();
@@ -3369,12 +3005,10 @@ impl EngineManager {
         self.engine_for(&self.active_schema_id())
     }
 
-    /// 取**指定方案**的引擎（必要时懒加载）。
+    /// 取指定方案的引擎（必要时懒加载）。
     ///
     /// overlay 模式（临拼/特殊模式）的判据必须走这条：`active_engine` 问的是主方案，
-    /// 而临拼在五笔方案下引用的是拼音方案——拿五笔的引擎类型去判「要不要支持音节
-    /// 分隔符 / 哪些符号是码元」，答案恒为否，且**静默**（同类现场见 handle_temp.rs
-    /// 里 `base_sort_ignores_weight_of` 那条注释）。
+    /// 临拼在五笔方案下引用的是拼音方案，拿五笔的引擎类型去判会静默得出错误答案。
     fn engine_for(&self, schema_id: &str) -> Option<Arc<dyn Engine>> {
         if schema_id.is_empty() {
             return None;
@@ -3396,7 +3030,7 @@ impl EngineManager {
         self.is_pinyin_of(&self.active_schema_id())
     }
 
-    /// **指定方案**的引擎是否为拼音类型。overlay（临拼）用这条，见 [`Self::engine_for`]。
+    /// 指定方案的引擎是否为拼音类型。overlay（临拼）用这条，见 [`Self::engine_for`]。
     pub fn is_pinyin_of(&self, schema_id: &str) -> bool {
         self.engine_for(schema_id)
             .map(|e| e.engine_type() == EngineType::Pinyin)
@@ -3430,7 +3064,7 @@ impl EngineManager {
             .unwrap_or_default()
     }
 
-    /// 当前活跃引擎是否为**纯码表**类型（混输 `Mixed` 不算——其拼音半边恒前缀匹配，
+    /// 当前活跃引擎是否为纯码表类型（混输 `Mixed` 不算——其拼音半边恒前缀匹配，
     /// 精确匹配语义只对纯码表方案自洽；供协调器判定短语是否随「精确匹配模式」抑制前缀枚举）。
     pub fn is_codetable(&self) -> bool {
         self.active_engine()
@@ -3441,7 +3075,7 @@ impl EngineManager {
     /// 活跃引擎的码元字符集（`[engine.codetable].input_chars` / `.leading_chars`）。
     ///
     /// 未加载引擎、或引擎无「码元」概念（拼音等，`Engine::input_chars` 返回 `None`）时，
-    /// 回落内置默认 `a-z`——**绝不回落空集**，那会让该方案一个字也打不出来。
+    /// 回落内置默认 `a-z`——绝不回落空集，那会让该方案一个字也打不出来。
     /// 对协调器而言「无码元集概念」与「默认码元集」行为相同，故此处合并为一个返回值。
     ///
     /// 混输取主码表子引擎的集合（见 `MixedEngine::input_chars`）。
@@ -3449,21 +3083,17 @@ impl EngineManager {
         self.input_chars_of(&self.active_schema_id())
     }
 
-    /// **指定方案**的码元字符集。语义同 [`Self::active_input_chars`]（含「绝不回落空集」）。
+    /// 指定方案的码元字符集。语义同 [`Self::active_input_chars`]（含「绝不回落空集」）。
     ///
-    /// 双拼布局把韵母塞进符号键（微软/搜狗/紫光的 `;` = ing）时，这张集合是唯一的仲裁者。
-    /// overlay 必须按自己引用的方案取——临拼在五笔方案下取 `active` 会拿到五笔的码元集，
-    /// 于是双拼韵母符号键在临拼里一个也打不出来。
+    /// 双拼布局把韵母塞进符号键（如 `;` = ing）时，这张集合是唯一的仲裁者。overlay 必须按
+    /// 自己引用的方案取，否则临拼在五笔下拿到五笔的码元集。
     pub fn input_chars_of(&self, schema_id: &str) -> wind_config::CodeCharSet {
         self.engine_for(schema_id)
             .and_then(|e| e.input_chars().cloned())
             .unwrap_or_else(wind_config::CodeCharSet::default_alpha)
     }
 
-    /// 该字符在活跃方案下是否为**码元**（可进输入缓冲）。
-    ///
-    /// 与 [`Self::active_input_chars`] 的区别：本方法不克隆整张位图。它在按键热路径上
-    /// 每键调用，而 `active_engine()` 本身已含一次 `String` 分配，不该再叠一次拷贝。
+    /// 该字符在活跃方案下是否为码元（可进输入缓冲）。按键热路径上每键调用，故不克隆整张位图。
     pub fn active_is_code_char(&self, ch: char) -> bool {
         match self.active_engine().as_ref().and_then(|e| e.input_chars()) {
             Some(cs) => cs.contains(ch),
@@ -3471,7 +3101,7 @@ impl EngineManager {
         }
     }
 
-    /// 该字符在活跃方案下是否可作**首码**（缓冲为空时起头）。
+    /// 该字符在活跃方案下是否可作首码（缓冲为空时起头）。
     ///
     /// 典型用途：数字是码元（打得出 `Win10`）但不是首码——空缓冲下的数字键仍须是
     /// 选词/透传，否则用户既选不了「第 1 个候选」也拿不回原生数字输入。
@@ -3485,7 +3115,7 @@ impl EngineManager {
     /// 活跃方案的通配键（关闭 / 非码表 / 键非法时 `None`；混输取主码表的）。
     ///
     /// 与 [`Self::active_input_chars`] 同一归属理由：方案级引擎固定参数挂在引擎上，方案切换
-    /// 自然跟着换。协调器**只从这里取**，不读 `codetable_settings()`——那份每次调用都重新折叠，
+    /// 自然跟着换。协调器只从这里取，不读 `codetable_settings()`——那份每次调用都重新折叠，
     /// 且非法键的告警只该在构建期出一次。
     pub fn active_wildcard_key(&self) -> Option<char> {
         self.active_engine().and_then(|e| e.wildcard_key())
@@ -3516,7 +3146,7 @@ impl EngineManager {
     }
 
     /// 活跃方案的通配码长（[`Engine::wildcard_code_length`]；混输取主码表的）。
-    /// 协调器判「满码后通配键按字面」只从这里取，**不**用活跃引擎的 [`Engine::max_code_length`]
+    /// 协调器判「满码后通配键按字面」只从这里取，不用活跃引擎的 [`Engine::max_code_length`]
     /// ——混输那个值刻意为 0。
     pub fn active_wildcard_code_length(&self) -> usize {
         self.active_engine()
@@ -3530,7 +3160,7 @@ impl EngineManager {
             .is_some_and(|e| e.wildcard_mixes_pinyin())
     }
 
-    /// 通配转换（透传活跃引擎）。**不**叠英文混入：通配是查码，不是打英文。
+    /// 通配转换（透传活跃引擎）。不叠英文混入：通配是查码，不是打英文。
     pub fn convert_wildcard(
         &self,
         input: &str,
@@ -3541,11 +3171,10 @@ impl EngineManager {
             .convert_wildcard(input, pattern, max_candidates)
     }
 
-    /// 同 [`Self::active_is_code_char`]，但取**指定方案**（overlay 用，见 [`Self::engine_for`]）。
+    /// 同 [`Self::active_is_code_char`]，但取指定方案（overlay 用，见 [`Self::engine_for`]）。
     ///
-    /// ⚠️ 拼音引擎的码元集**完全由双拼布局推导**（`PinyinEngine::input_chars`）：全拼恒
-    /// `None` ⇒ 回落默认 `a-z` ⇒ 非字母恒 false。故调用点新增的非字母分支，在全拼与
-    /// 纯字母双拼布局下**恒不进入**——这是它「零回归」的全部依据。
+    /// 拼音引擎的码元集完全由双拼布局推导（`PinyinEngine::input_chars`）：全拼恒 `None` ⇒
+    /// 回落 `a-z`，故调用点的非字母分支在全拼与纯字母双拼布局下恒不进入。
     pub fn is_code_char_of(&self, schema_id: &str, ch: char) -> bool {
         match self
             .engine_for(schema_id)
@@ -3557,7 +3186,7 @@ impl EngineManager {
         }
     }
 
-    /// 同 [`Self::active_is_leading_char`]，但取**指定方案**。首码/全集之分见那边的文档。
+    /// 同 [`Self::active_is_leading_char`]，但取指定方案。首码/全集之分见那边的文档。
     pub fn is_leading_char_of(&self, schema_id: &str, ch: char) -> bool {
         match self
             .engine_for(schema_id)
@@ -3577,11 +3206,8 @@ impl EngineManager {
             .unwrap_or(false)
     }
 
-    /// **指定方案**的基础排序是否忽略权重（`base_sort = "natural"`）。
-    ///
-    /// 与 [`Self::active_base_sort_ignores_weight`] 的区别在于取哪个方案的配置：overlay 类模式
-    /// （临时拼音、快捷输入等）跑的是**另一个方案**的引擎，而活跃方案往往是码表——拿五笔的
-    /// `base_sort` 去排拼音候选是错的。这类路径必须用本方法按目标方案取。
+    /// 指定方案的基础排序是否忽略权重（`base_sort = "natural"`）。overlay 类模式（临时拼音、
+    /// 快捷输入等）跑的是另一个方案的引擎，必须按目标方案取，不能用活跃方案的。
     pub fn base_sort_ignores_weight_of(&self, schema_id: &str) -> bool {
         if !self.ensure_loaded(schema_id) {
             return false;
@@ -3596,12 +3222,9 @@ impl EngineManager {
 
     /// 可用方案列表（快照拷贝）。
     ///
-    /// **双保险**：这里再滤一遍定制版 `[schemas] hide`。主拦截在 [`Self::read_schema`]，
-    /// 但 `self.available` 有一条不经 `read_schema` 的入口——构造与
-    /// [`Self::reload_from_config`] 的 `retain` 会**无条件保留活跃方案**（`sid == &active`），
-    /// 而活跃方案恰恰是最可能被 hide 的那个（原版用户升级到定制版）。滤在读取侧而不是
-    /// 各写入点，是因为这是所有消费者（循环切换、菜单、设置页、`installed_schemas` 的种子）
-    /// 的唯一出口，加一处即全覆盖。
+    /// 这里再滤一遍定制版 `[schemas] hide`（主拦截在 [`Self::read_schema`]）：构造与
+    /// [`Self::reload_from_config`] 的 `retain` 会无条件保留活跃方案，而它恰是最可能被 hide
+    /// 的。滤在读取侧，因为这是所有消费者的唯一出口。
     pub fn available_schemas(&self) -> Vec<String> {
         self.available
             .lock()
@@ -3612,7 +3235,7 @@ impl EngineManager {
             .collect()
     }
 
-    /// 所有已安装且受支持的方案列表（目录扫描），**含隐藏方案**。
+    /// 所有已安装且受支持的方案列表（目录扫描），含隐藏方案。
     ///
     /// 扫描 `data_dir/schemas/*.schema.toml`，对每个文件取去掉 `.schema.toml` 后缀的 id，
     /// 按 `is_supported()` 过滤掉不支持的方案，再并入当前 `available`（保证已启用方案即使
@@ -3620,15 +3243,11 @@ impl EngineManager {
     ///
     /// `data_dir` 为 None 时（纯测试）回退到 `available_schemas()`。
     ///
-    /// **隐藏方案（`[schema].hidden`）也在返回值里**——那是「设置页列表要不要显示」的
-    /// 呈现层判断，不属于「装了哪些方案」。此处曾把它过滤掉，于是另外两个消费者静默
-    /// 拿到了子集：`rebuild_all_caches` 漏掉隐藏方案的缓存不失效，`delete_package` 的
-    /// keep 列表漏掉它们、删方案时可能连带删掉隐藏方案还在引用的共享资源。
-    /// 需要按 hidden 过滤的地方自己调 [`Self::schema_is_hidden`]。
+    /// 隐藏方案（`[schema].hidden`）也在返回值里：那是呈现层判断，`rebuild_all_caches` 与
+    /// `delete_package` 的 keep 列表都需要全集。需要按 hidden 过滤的地方自己调
+    /// [`Self::schema_is_hidden`]。
     ///
-    /// **不影响** `available_schemas()`（循环切换用，只认用户启用列表）。
-    ///
-    /// **被定制版 `[schemas] hide` 删掉的方案不在返回值里**——那不是「显示不显示」，
+    /// 被定制版 `[schemas] hide` 删掉的方案不在返回值里——那不是「显示不显示」，
     /// 而是「装没装」，与 `[schema].hidden` 是两个正交的轴（见 [`Config::custom_hides_schema`]）。
     pub fn installed_schemas(&self) -> Vec<String> {
         let Some(data_dir) = self.data_dir.as_deref() else {
@@ -3651,22 +3270,16 @@ impl EngineManager {
         ids
     }
 
-    /// **overlay 方案注册表**：所有带 `[overlay]` 段的已安装方案，按 id 字典序。
+    /// overlay 方案注册表：所有带 `[overlay]` 段的已安装方案，按 id 字典序。
     ///
-    /// 这是「有哪些特殊模式」的**唯一真相源**，取代了原先的 `config.schema.special_modes`
-    /// 数组。`ModeKind::Special(u8)` / `State.special_id` 的下标即本表下标。
+    /// 「有哪些特殊模式」的唯一真相源，`ModeKind::Special(u8)` / `State.special_id` 的下标即
+    /// 本表下标。枚举源是 [`Self::installed_schemas`] 而不是 `available`：overlay 方案不进
+    /// `schema.available`。（`all_key_action_keys` 仍只遍历 `available`，要收 overlay 方案的
+    /// `[key_actions]` 时那里也得换源。）
     ///
-    /// ★ **枚举源是 [`Self::installed_schemas`] 而不是 `available`**：overlay 方案
-    /// `hidden = true`、不进 `schema.available`（不参与循环切换），只由 overlay 触发懒加载。
-    /// 用 `available` 会得到一张恒空的表。⚠️ `all_key_action_keys` 至今仍只遍历
-    /// `available`——将来若要收 overlay 方案自己的 `[key_actions]`，那里也得换源。
-    ///
-    /// ★ 走静态 `read_schema`（含 `schema_overrides/{id}.toml` 的 `merge_toml` 深合并），
-    /// 故用户在设置页对 `[overlay]` 的覆盖**自动生效**，无需额外接线；方案也不必被加载。
-    ///
-    /// ★ **下标稳定性**：按 id 排序意味着安装一个新 overlay 方案会改变其后方案的下标。
-    /// 这不比原先的 config 数组序差（热重载删条目同样错位，`layout.rs` 已在处理越界回落），
-    /// 且 overlay 是瞬态的（上屏即退出）。整表随 [`Self::invalidate_schema`] 失效。
+    /// 走 `read_schema`（含 override 深合并），设置页对 `[overlay]` 的覆盖自动生效。安装新
+    /// overlay 方案会改变其后方案的下标，可接受（overlay 是瞬态的，`layout.rs` 处理越界回落）。
+    /// 整表随 [`Self::invalidate_schema`] 失效。
     pub fn overlay_modes(&self) -> Vec<OverlayEntry> {
         if let Some(v) = self
             .overlay_cache
@@ -3688,9 +3301,7 @@ impl EngineManager {
                 } else {
                     s.schema.name
                 };
-                // 与 `schema_icon_label` 走**同一个函数**而不只是"同口径"：这两处从前各写
-                // 了一份 `.chars().next()`，靠注释声明彼此一致，编译器不管——改一处漏一处的
-                // 表现是"方案切换显 `Wb`、进特殊模式显 `符`"，且没有测试会发现。
+                // 与 `schema_icon_label` 走同一个函数，免得两处截断口径漂移。
                 let icon_label = wind_config::icon_label_trunc(&s.schema.icon_label);
                 Some(OverlayEntry {
                     schema_id: id,
@@ -3709,16 +3320,9 @@ impl EngineManager {
 
     /// 按方案 id 定位 overlay 注册表下标（供 `special:<id>` / `enter_special:<id>` 分发）。
     ///
-    /// ★ 未命中时若该 id 是被定制版 `[schemas] hide` 掉的，补一次 WARN。
-    /// 别的引用路径（mix 成员、`schema.active`）都会把 id 喂给 [`Self::read_schema`]、
-    /// 由那里告警，**唯独特殊模式不会**：注册表建自 [`Self::installed_schemas`]，
-    /// 而目录扫描侧已把被 hide 的 id 滤掉（降噪，见 `scan_layer_schema_ids`），
-    /// 于是这里查不到、分发点零日志。
-    ///
-    /// **行为本身不用改，这里只补日志。** 分发点（`handle_lifecycle.rs` / `handle_mode.rs`
-    /// 的 `BoundAction::Special`）拿到 `None` 后返回 `None`，调用方**不吞键、落普通输入**
-    /// ——引导键通常是 `;` `/` 这类符号，用户按下去就正常出符号。那已经是应有的降级
-    /// （见调用点注释：「配了个不可用的目标就等于把这个键废掉」），缺的只是一行能归因的日志。
+    /// 未命中时若该 id 是被定制版 `[schemas] hide` 掉的，补一次 WARN：别的引用路径会经
+    /// [`Self::read_schema`] 告警，唯独这里（注册表来自已滤掉 hide 的目录扫描）不会。
+    /// 行为不变：分发点拿到 `None` 不吞键、落普通输入。
     pub fn overlay_index_of(&self, schema_id: &str) -> Option<u8> {
         let idx = self
             .overlay_modes()
@@ -3734,7 +3338,7 @@ impl EngineManager {
     /// 枚举可选的双拼布局：按层序（`user > custom > data`）合并扫描各层的
     /// `schemas/shuangpin/*.toml`，靠前的层同名（按文件名 stem）覆盖靠后的层。
     ///
-    /// 返回 `(id, 显示名)`：**id 取文件名 stem**（与加载路径 `{layout}.toml` 一致，
+    /// 返回 `(id, 显示名)`：id 取文件名 stem（与加载路径 `{layout}.toml` 一致，
     /// 保证"能选=能加载"），显示名取布局 `[meta].name`；解析失败（如缺 `[finals]`）
     /// 的布局跳过并告警。供设置页"双拼布局"下拉动态取值，取代前端硬编码清单。
     ///
@@ -3778,9 +3382,8 @@ impl EngineManager {
                 };
                 let id = stem.to_string();
                 if let Some((winner_layer, winner)) = seen.get(&id) {
-                    // 靠前的层已收录：本条是被遮蔽的同名布局。打点必须放在**被遮蔽方**
-                    // ——只有扫到这里才确证「不止一层有同名」，命中那一刻还不知道后面的层
-                    // 有没有；但日志里给的层名与路径要是**胜出**的那份，故一并记住。
+                    // 靠前的层已收录：本条是被遮蔽的同名布局。只有扫到被遮蔽方才确证有覆盖，
+                    // 日志里给的是胜出那份的层名与路径。
                     Config::log_layer_override(
                         winner_layer,
                         "shuangpin",
@@ -3863,7 +3466,7 @@ impl EngineManager {
     }
 
     /// 指定方案的图标短称（`schema.icon_label` 截断到 [`wind_config::ICON_LABEL_MAX_WIDTH`]）；
-    /// 未配置返回空串。用于状态气泡/工具栏 short 模式（对齐 Go GetSchemaDisplayInfo 的 iconLabel）。
+    /// 未配置返回空串。用于状态气泡/工具栏 short 模式。
     ///
     /// 截断口径见 [`wind_config::icon_label_trunc`]——上限由渲染宽度与 C++ 侧缓冲共同决定，
     /// 与"是不是方案"无关，故与非中文态标签（`[ui.labels]`）共用同一个函数。
@@ -3980,7 +3583,7 @@ impl EngineManager {
         )
     }
 
-    /// 仅写入某方案 override 层（原子 tmp+rename），**不**使引擎缓存失效。
+    /// 仅写入某方案 override 层（原子 tmp+rename），不使引擎缓存失效。
     /// 供「持久化 + 对已加载引擎 live 生效」的场景（如扩展词库热插拔）使用。
     pub fn persist_schema_override(
         &self,
@@ -4011,17 +3614,12 @@ impl EngineManager {
         Ok(())
     }
 
-    /// 已加载的**混输**方案里，以 `schema_id` 为成员（primary / secondary / english）的那些。
+    /// 已加载的混输方案里，以 `schema_id` 为成员（primary / secondary / english）的那些。
     ///
-    /// 码表 / 拼音成员子引擎在 `build_engine` 里内联构造、从不入 `engines` 表，所以同一份
-    /// 词库在进程里可能有两个副本：独立方案一份、混输方案内部一份（用户 `available` 同时含
-    /// `wubi86` 与 `wubi86_pinyin` 时预热会把两份都建出来）。凡是「对已加载引擎做点什么」的
-    /// 运行时操作都得把后者也算上，否则命中的是没人在用的那份、还报告成功。
-    ///
-    /// english 特殊，两点：它不写在方案文件里，由全局 `schema.mix.enable_english` 决定要不要
-    /// 建，故这里对所有混输方案一律返回、由调用方按转发结果处置；而且它**已不是副本**——
-    /// 混输持有的就是 `engines["english"]` 那个 `Arc`（见 [`EnglishProvider`]），对它转发
-    /// `set_dict_enabled` 与对独立方案那次是同一个实例上的同一件事。
+    /// 码表 / 拼音成员子引擎在 `build_engine` 里内联构造、不入 `engines` 表，同一份词库可能
+    /// 有独立方案与混输内部两个副本。「对已加载引擎做点什么」的运行时操作都得把后者算上，
+    /// 否则命中的是没人在用的那份。english 由全局 `schema.mix.enable_english` 决定建不建，
+    /// 故对所有混输一律返回；它不是副本，混输持有的就是共享的那个 `Arc`（见 [`EnglishProvider`]）。
     fn loaded_mixed_dependents(&self, schema_id: &str) -> Vec<(String, Arc<dyn Engine>)> {
         let loaded: Vec<(String, Arc<dyn Engine>)> = self
             .engines
@@ -4048,7 +3646,7 @@ impl EngineManager {
             .collect()
     }
 
-    /// 混输方案沿 primary / secondary **传递**可达的全部成员（不含自身）；非混输为空。
+    /// 混输方案沿 primary / secondary 传递可达的全部成员（不含自身）；非混输为空。
     /// 已访问集合防环（成环的方案建不起来，但这里读的是方案文件，环照样会出现）。
     fn mixed_members_closure(&self, schema_id: &str) -> Vec<String> {
         let Some(data_dir) = self.data_dir.as_deref() else {
@@ -4068,26 +3666,18 @@ impl EngineManager {
         seen
     }
 
-    /// 运行时启停某方案的扩展词库。**禁用与启用不对称**（t107 之后）：
+    /// 运行时启停某方案的扩展词库。禁用与启用不对称：
     ///
-    /// - **禁用**：对已加载引擎即时**摘掉**那一层（`Engine::set_dict_enabled`），无需重建。
-    ///   摘层同时释放该词库的 `CachedDict` —— 这是让 Windows 下被 mmap 的 wdat 能被删除的
-    ///   唯一途径，也是禁用必须摘层而非翻标志位的原因。
-    /// - **启用**：未启用的词库压根没加载（`load_codetable_layers` 惰性加载），无从即时恢复，
-    ///   一律失效整个方案、下次使用时重建。代价是启用大词库有一次可感知的延迟。
+    /// - 禁用：对已加载引擎即时摘掉那一层（`Engine::set_dict_enabled`），无需重建。摘层同时
+    ///   释放该词库的 `CachedDict`，这是 Windows 下被 mmap 的 wdat 能被删除的唯一途径。
+    /// - 启用：未启用的词库没加载（惰性加载），一律失效整个方案、下次使用时重建。
     ///
     /// 拼音族不支持热翻，两个方向都走失效重建。未加载的方案此处不做事（下次构建生效）。
-    /// 启用集变化会影响反查索引/编码提示（基于启用词库合并），故一并失效之使下次重算。
-    /// 返回是否对已加载引擎生效（热翻或已失效待重建，二者都无需重启）。
-    /// **注意**：调用方须先 [`persist_schema_override`] 持久化，否则重启/重建后状态丢失。
+    /// 反查索引/单字全码表基于启用词库合并，一并失效。恒返回 true（每条路都无需重启即可生效）。
+    /// 调用方须先 [`persist_schema_override`] 持久化，否则重启/重建后状态丢失。
     ///
-    /// # 必须扇出到把它当成员的混输方案
-    ///
-    /// 只翻 `engines[schema_id]` 那一个实例的话，五笔拼音混输下切 wubi86 的扩展库：命中的是
-    /// 独立的 wubi86 引擎（返回 true、CLI 还打印「已即时生效」），真正在服务的 `MixedEngine`
-    /// 里那份 primary 一直是老标志位；切走再切回也不重建（缓存命中），只有重启或任何触发
-    /// `reload_from_config` 的动作才生效——真机表现为「关了没反应，顺手改别的设置又好了」。
-    /// 转发不到的依赖方案（成员子引擎不认这个 dict）直接失效，下次使用按已落盘的 override 重建。
+    /// 必须扇出到把它当成员的混输方案：只翻独立方案那个实例，真正在服务的 `MixedEngine` 里那份
+    /// 不变，表现为「关了没反应，顺手改别的设置又好了」。转发不到的依赖方直接失效待重建。
     pub fn set_dict_enabled_live(&self, schema_id: &str, dict_id: &str, enabled: bool) -> bool {
         // 禁用方向只对已加载引擎摘层，摸不到正在锁外构建的那份（它可能已按旧 override 读到
         // 这个库开着）：推进代次让它写回前作废重建（见 `engines_gen`）。启用方向走
@@ -4102,23 +3692,13 @@ impl EngineManager {
         // 只失效混输不失效独立方案的话，同一个拼音扩展库在混输里下次输入就生效、
         // 在独立拼音方案里却要重启，两个方案表现不一致。
         if enabled {
-            // ★ **启用一律失效重建，且必须扇出到每一个 mixed 依赖方。**
+            // 启用一律失效重建，且扇出到每一个 mixed 依赖方，不看 `set_dict_enabled` 的返回值
+            // （启用方向恒 false）。否则叠上下面禁用路径的 english 豁免，英文扩展库的启用在混输里
+            // 永远不生效：混输捧着的是构造时拿到的那个 `Arc`。没建 english 子引擎时这趟失效多余，
+            // 但多余只是一次重建。
             //
-            // 惰性加载之后，未启用的库根本没建层，`set_dict_enabled` 在启用方向恒回 false
-            // —— 没有「热恢复」这条路可走。于是**不能**再拿返回值去路由：下面禁用路径那道
-            // `schema_id != ENGLISH_SCHEMA` 豁免（前提是「转发不到是常态」）会与这个恒 false
-            // 叠加，让英文扩展库（`en_ext`，出厂启用、设置页可点）的启用在混输里**永远**
-            // 不失效 —— 独立 english 方案下次用会重建、正常，而已经建好的混输引擎里捧着的
-            // 仍是**构造时拿到的那个** `Arc`：英文引擎现在虽是共享的，`invalidate_schema`
-            // 换掉的也只是 `engines` 表里的登记，换不动已有的引用。
-            // 表现就是本函数上面注释写的「关了没反应，顺手改别的设置又好了」。
-            //
-            // 对「mixed 里根本没建 english 子引擎」（`enable_english` 关着）的情形，这一趟
-            // 失效是多余的 —— 但多余只是一次重建，而漏掉是功能不生效，两者不对等。
-            //
-            // 依赖方**先取后失效**：`invalidate_schema(schema_id)` 自带扇出，会顺手把混输从
-            // `engines` 摘掉，之后再问 `loaded_mixed_dependents` 恒为空——这段循环就成了死代码，
-            // 日志不打、混输自己按 id 缓存的那几项也不再清。先取出来，完整失效照旧走一遍。
+            // 依赖方先取后失效：`invalidate_schema(schema_id)` 自带扇出会把混输从 `engines` 摘掉，
+            // 之后再问就恒为空。
             let dependents: Vec<String> = self
                 .loaded_mixed_dependents(schema_id)
                 .into_iter()
@@ -4138,12 +3718,8 @@ impl EngineManager {
             );
             self.invalidate_schema(schema_id);
         }
-        // 引擎不在表里也算数（故本函数**恒返回 true**，见函数末尾）：那意味着「从未加载」，
-        // 或者「刚被本批次前一次调用失效掉」—— 后者是常态，设置页一次勾选多个扩展库会
-        // 逐个调进来，启用走的是失效待重建那条路，于是第二个 id 进来时引擎已经没了。
-        // 两种情况结局相同：下次构建按已落盘的 override 生效，同样无需重启。
-        // 若这里回 false，批量启用时除第一个以外全部报「没生效」，而实际全都会生效
-        // —— 调用方（`web_schema_*` 的 `live` 字段）据此给用户的提示就是反的。
+        // 引擎不在表里也算数：「从未加载」或「刚被本批次前一次调用失效掉」（设置页批量勾选时
+        // 是常态），都是下次构建按已落盘的 override 生效。回 false 会让批量启用误报「没生效」。
         // 禁用方向才走转发：承载该库的那个子引擎摘层即释放，其余子引擎因
         // `own_extra_dicts` 不含这个 id 而明确回 false，不会冒充「我处理了」。
         for (mixed_id, e) in self.loaded_mixed_dependents(schema_id) {
@@ -4175,8 +3751,7 @@ impl EngineManager {
         if !enabled {
             self.warm_disabled_dicts_async(&self.active_schema_id());
         }
-        // 恒 true：上面每条路都以「无需重启即可生效」收尾。保留返回值是为了兼容既有调用方
-        // （web 的 `live` 字段），也给将来真出现「必须重启」的分支留个位置。
+        // 恒 true：上面每条路都无需重启即可生效。保留返回值给调用方（web 的 `live` 字段）。
         true
     }
 
@@ -4366,12 +3941,9 @@ impl EngineManager {
             self.engines_gen
                 .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
             g.remove(schema_id);
-            // 英文方案被换掉时，共享英文引擎缓存也必须作废——混入与混输都从那里取，不清的话
-            // 它们会一直握着刚被移出 `engines` 的旧实例（`en_ext` 的启用就走这条路）。
-            //
-            // 必须与推进代次**同在这把锁里**（锁序 engines → 缓存）：放锁后再清的话，正等着
-            // `engines` 锁写回的混输比对失败、立刻按新代次重来，会从还没清的缓存里取到旧实例，
-            // 带着新代次写回成功。
+            // 英文方案被换掉时，共享英文引擎缓存也必须作废，否则混入与混输一直握着旧实例。
+            // 必须与推进代次同在这把锁里（锁序 engines → 缓存）：放锁后再清，正等着写回的混输
+            // 会按新代次重来、从还没清的缓存里取到旧实例并写回成功。
             if schema_id == ENGLISH_SCHEMA {
                 *self
                     .shared_english_engine
@@ -4381,34 +3953,16 @@ impl EngineManager {
         }
         #[cfg(test)]
         self.run_before_publish_hook("@after_engines_bump");
-        // ★ 扇出到把它当成员的混输方案。
+        // 扇出到把它当成员的混输方案：混输在构建时就接过了成员子引擎的 `Arc`，从表里摘掉
+        // 成员换不动它，不扇出则混输继续服务旧子引擎（且旧英文引擎被吊着、共享缓存又建一份）。
+        // 凡失效必扇出，故放在这里而不是各调用方。
         //
-        // 从 `engines` 表里摘掉一条，**换不动已经建好的引擎手里那个 `Arc`**：混输在
-        // `build_engine` 时就把成员子引擎接了过去，此后与表里登记的是谁再无关系。
-        // 不扇出的后果有两重，实测 `EngineManager::with_store_override` 下
-        // `write_schema_override("english", …)` 之后 `is_loaded("english") == false` 而
-        // `is_loaded("wubi86_pinyin") == true`：
-        // - **功能**：改了成员方案的配置，混输里仍在服务旧子引擎——就是下面
-        //   `set_dict_enabled_live` 注释里那句「关了没反应，顺手改别的设置又好了」。
-        // - **内存**：旧英文引擎被混输吊着不放，`shared_english_engine` 下次又建一份，
-        //   进程里回到两份 12.7 MB（靶机 18 万条英文词时的实测值），共享引擎省下的原样吐回去。
+        // 只摘 `engines` 条目、不递归走整个 `invalidate_schema`：混输自身配置没变，派生缓存
+        // 仍有效，且递归在「混输套混输」下绕不出来。取 id 时就丢掉 `Arc`，让旧引擎尽早释放。
         //
-        // 此前这个扇出只写在 `set_dict_enabled_live` 一处，于是
-        // `write_schema_override` / `delete_schema_override` / `rebuild_all_caches`
-        // 三条路全漏着。下沉到这里，凡失效必扇出。
-        //
-        // **只摘 `engines` 条目、不递归走整个 `invalidate_schema`**：混输自身的配置并没有
-        // 变，它的 freq / behavior / name 等派生缓存仍然有效；而且递归在「混输把另一个混输
-        // 当 primary」这种配置下绕不出来。需要连带清那些缓存的调用方自己再走一趟完整失效。
-        //
-        // 取 id 时就把 `Arc` 丢掉（`map(|(id, _)| id)`）：留在 `Vec` 里会把旧引擎的释放
-        // 推迟到本函数返回，而这里正是要让它尽早落地。
-        //
-        // english 那一支额外看 `enable_english`：`loaded_mixed_dependents` 对 english **一律**
-        // 返回全部混输（它原是给「转发 set_dict_enabled」设计的，转发不到只是空操作），拿来做
-        // 摘除就过宽了——开关关着时混输手里根本没有英文子引擎，每次保存英文方案 override
-        // 都会白白重建所有混输（秒级）。`mix` 只在 `reload_from_config` 里与 `engines.clear()`
-        // 一起更新，所以这里读到的值就是在世混输构建时用的那个。
+        // english 那一支额外看 `enable_english`：`loaded_mixed_dependents` 对 english 一律返回
+        // 全部混输，开关关着时混输手里根本没有英文子引擎，摘了只是白白重建。`mix` 只在
+        // `reload_from_config` 里与 `engines.clear()` 一起更新，读到的就是在世混输构建时的值。
         let english_unused_by_mixed = schema_id == ENGLISH_SCHEMA
             && !self
                 .mix
@@ -4458,7 +4012,7 @@ impl EngineManager {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(schema_id);
-        // overlay 注册表是**集合**：装/删方案或改 [overlay] 段都会改变它的内容与下标，
+        // overlay 注册表是集合：装/删方案或改 [overlay] 段都会改变它的内容与下标，
         // 按 id 局部失效没有意义，整表置 None 由下次 overlay_modes() 重建。
         *self.overlay_cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
         // 主码表(及其词库/override)可能变更:失效反查索引,下次按新内容重建。
@@ -4499,10 +4053,9 @@ impl EngineManager {
         (removed, failed)
     }
 
-    /// 切换到指定方案；成功返回 true（必要时懒加载）
-    /// 活跃方案变更的统一收尾：记一代 + 通知上层。**所有改 `active` 的地方都要调它**。
+    /// 活跃方案变更的统一收尾：记一代 + 通知上层。所有改 `active` 的地方都要调它。
     ///
-    /// 必须在**释放 active 锁之后**调用——回调是上层代码（RPC 广播），不应在持锁期间执行。
+    /// 必须在释放 active 锁之后调用——回调是上层代码（RPC 广播），不应在持锁期间执行。
     fn on_active_changed(&self, id: &str) {
         self.schema_generation
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -4513,12 +4066,13 @@ impl EngineManager {
 
     /// 活跃方案的变更代际，见 [`Self::schema_generation`] 字段说明。
     ///
-    /// 用法是「记下当时的值，之后比对是否仍相等」，**不要**对差值或绝对值做判断。
+    /// 用法是「记下当时的值，之后比对是否仍相等」，不要对差值或绝对值做判断。
     pub fn schema_generation(&self) -> u64 {
         self.schema_generation
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// 切换到指定方案（必要时懒加载）；真的切换了返回 true，已是该方案或加载失败返回 false。
     pub fn switch_schema(&self, schema_id: &str) -> bool {
         if !self.ensure_loaded(schema_id) {
             return false;
@@ -4630,8 +4184,7 @@ impl EngineManager {
             config.input.reverse.lookup_disabled_dicts,
             std::sync::atomic::Ordering::Relaxed,
         );
-        // 字符类：**重新装配**而不是照搬字符串——镜像存的是解析结果。漏掉这一行的
-        // 症状是设置页改了不生效、重启后才生效（`freq_cache` 在下面被清，会拿着旧的重建）。
+        // 字符类：镜像存的是解析结果，要重新装配；漏掉则设置页改了要重启才生效。
         *self.charsets.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(Self::build_charsets(
             config,
             self.data_dir.as_deref(),
@@ -4663,10 +4216,9 @@ impl EngineManager {
             self.engines_gen
                 .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
             g.clear();
-            // 连同**共享英文引擎缓存**一起重置：开关从关到开时，缓存里躺着的可能是上次
-            // 「未尝试」之外的 `Some(None)`（词库当时缺失）。不重置的话用户补上词库、重载配置后
-            // 仍然不生效，症状是「设置页改了不生效、重启后才生效」——与上面几份镜像同一类坑。
-            // 与推进代次同在这把锁里，理由见 `invalidate_schema` 同一处。
+            // 连同共享英文引擎缓存一起重置：里面可能躺着上次的 `Some(None)`（词库当时缺失），
+            // 不重置则补上词库、重载配置后仍不生效。与推进代次同在这把锁里，理由见
+            // `invalidate_schema` 同一处。
             *self
                 .shared_english_engine
                 .lock()
@@ -4715,19 +4267,13 @@ impl EngineManager {
         let available = self.available_schemas();
         let n = available.len();
         let current = self.active_schema_id();
-        // 判据是「有没有别的方案可去」，不是「列表里有几个」。
-        //
-        // 原写法 `n <= 1 → None` 隐含假设「当前方案一定在 available 里」——那时 n == 1
-        // 确实意味着无处可去。直达热键能切到**未启用**方案之后（如英文），n == 1 反而
-        // 常常意味着「有一个地方可以回」，照旧返回 None 会让用户卡在英文方案里出不来。
+        // 判据是「有没有别的方案可去」，不是「列表里有几个」：直达热键能切到未启用方案
+        // （如英文），此时 n == 1 意味着有一个地方可以回。
         if !available.iter().any(|s| s != &current) {
             return None;
         }
-        // 起点：当前方案的下一个；**当前方案不在 available 时从头开始**。
-        //
-        // 原写法是 `position(..).unwrap_or(0)` 再从 +1 起步，那样「不在列表」会被当成
-        // 「在第 0 个」，于是恰好跳过 available[0]。以前 active 恒在 available 里、这条
-        // 兜底几乎不触发；直达热键能切到未启用方案之后（如英文），它就成了常规路径。
+        // 起点：当前方案的下一个；当前方案不在 available 时从头开始（别当成第 0 个，
+        // 那会跳过 available[0]）。
         let start = match available.iter().position(|s| s == &current) {
             Some(i) => i + 1,
             None => 0,
@@ -4768,7 +4314,7 @@ impl EngineManager {
 
     /// `engine.convert`，英文方案（`english`）再滤掉「屏蔽这个词」的词库词。
     ///
-    /// 英文引擎是**共享**实例：拼音 / 码表 / 混输里混入的英文也用它（`shared_english_engine`
+    /// 英文引擎是共享实例：拼音 / 码表 / 混输里混入的英文也用它（`shared_english_engine`
     /// 直调，不经这里），而那些混入的英文按宿主方案各自隐藏、不读英文屏蔽集（设计 §8 第 11 条），
     /// 故屏蔽集不推进引擎，只在按英文方案取候选（英文方案主路、临英、快捷输入英文成员）时在这里滤。
     /// 多取「可能出现在这次结果里」的屏蔽词条数再滤、截回 `max_candidates`，空出的名额由后面的词
@@ -4807,9 +4353,9 @@ impl EngineManager {
 
     /// 转换输入为候选（分发到当前引擎），必要时混入英文候选。
     ///
-    /// 英文混入接在**这一层**而不是各引擎内部：本管理器同时是 `convert` /
-    /// `recheck_auto_commit` / `handle_top_code` 三条通路的收口点，一处接线即覆盖拼音、
-    /// 码表及以后任何新引擎。详见 [`crate::english_merge`] 模块文档。
+    /// 英文混入接在这一层而不是各引擎内部：本管理器同时是 `convert` /
+    /// `recheck_auto_commit` / `handle_top_code` 三条通路的收口点。新引擎类型要在
+    /// [`Self::english_merge_cfg_for`] 里明确取哪份配置。详见 [`crate::english_merge`] 模块文档。
     pub fn convert(&self, input: &str, max_candidates: usize) -> ConvertResult {
         self.convert_active(input, max_candidates, None)
     }
@@ -4852,14 +4398,9 @@ impl EngineManager {
         });
         timer.mark("engine");
         if let Some((eng, cfg)) = self.english_merge_ctx(&engine) {
-            // ★ 判据**只有一个**：中文侧有没有候选。它本身就完整表达了「用户在打中文
-            // 还是在打英文」，不必再叠「有没有精确命中」——叠了会在「无精确→有精确」
-            // 的那一键上切换模式、候选数骤变（真机现场：`gith`/`githu` 各 5 条，
-            // 打完 `github` 反而塌缩成 1 条）。
-            //
-            // 有中文候选 ⇒ 只收精确（前缀词是噪音，`hen` 不该带出 Henderson/Hendrix）；
-            // 无中文候选 ⇒ 给前缀补全（此时用户显然在打英文，补全正是他要的），
-            // 精确那条由英文引擎自己排在最前。
+            // 判据只有一个：中文侧有没有候选。不叠「有没有精确命中」，否则在「无精确→有精确」
+            // 那一键上候选数骤变。有中文候选 ⇒ 只收精确（前缀词是噪音）；无中文候选 ⇒ 给前缀
+            // 补全，精确那条由英文引擎自己排在最前。
             //
             // 例外是可选的前缀补全：`complete_min_length`（够长就补；拼音另要求整串不是完整
             // 拼音）。判据与条数上限都在 `english_merge::select`；双拼已在
@@ -4869,12 +4410,9 @@ impl EngineManager {
             // 通路①（满码自动上屏 / 满码空码清空）的英文守护，两级判据见
             // `english_merge::vetoes_commit`（与通路②③、混输同口径）。
             //
-            // ★ 前缀级不能只看列表：默认配置下 `gith` 的精确命中还不存在、列表里没有英文，满码
-            // 就在第 4 键把中文顶上屏，`github` 永远敲不完。`AGENTS.md` 要求的「对方确有候选」
-            // 由前缀命中兑现：拦下后用户继续敲，完整单词必然露面。
-            //
-            // `should_clear` 一并否决：满码无码表匹配时清空缓冲会把用户正在打的英文词
-            // 一起抹掉，与顶掉它是同一种伤害。只在确有可否决的动作时才多查一次英文。
+            // 前缀级不能只看列表：`gith` 时列表里还没有英文，满码就会把中文顶上屏，`github`
+            // 永远敲不完；拦下后继续敲，完整单词必然露面。`should_clear` 一并否决（清空同样
+            // 抹掉正在打的英文词）。只在确有可否决的动作时才多查一次英文。
             if (r.should_commit || r.should_clear)
                 && crate::english_merge::vetoes_commit(eng.as_ref(), input, &english, &cfg)
             {
@@ -4895,7 +4433,7 @@ impl EngineManager {
 
     /// 取「英文候选混入」的引擎与配置；关闭 / 不适用 / 词库缺失时 `None`。
     ///
-    /// ⚠️ **混输与英文方案自身被排除**：混输有自带的英文混入
+    /// 混输与英文方案自身被排除：混输有自带的英文混入
     /// （`schema.mix.enable_english`，带三方档位仲裁），再叠一层会混两遍、档位与配额双重
     /// 失真；英文方案本身就在出英文候选。
     fn english_merge_ctx(
@@ -4918,25 +4456,15 @@ impl EngineManager {
         self.english_merge_cfg_for(&self.active_schema_id(), active)
     }
 
-    /// 取本次转换该用哪份英文混入配置——**按引擎类型分流，两份互不共享取值**。
+    /// 取本次转换该用哪份英文混入配置——按引擎类型分流，码表与拼音两份互不共享取值
+    /// （两者是否需要英文是独立的事，见 `wind_config::CodetableEnglishMerge`）。
     ///
-    /// 「码表方案要不要捎带英文」与「拼音方案要不要」是两件独立的事（见
-    /// `wind_config::CodetableEnglishMerge` 的文档）：五笔常打命令行、变量名，开着有用；
-    /// 全拼的英文词与拼音串大面积重叠（`hen`/`men`/`she` 都既是音节又是英文词），
-    /// 用户可能宁可不开。一个总开关只会逼人在「两个都开」和「两个都关」之间二选一。
+    /// 码表侧走 [`Self::codetable_settings_of`]（按指定方案折叠了 `[engine.codetable.english_merge]`），
+    /// 不读全局镜像，否则方案里写的覆盖没人读。拼音侧暂无方案级覆盖，直读全局镜像；将来补上
+    /// 时这里要跟着换。
     ///
-    /// ⚠️ 码表侧走 [`Self::codetable_settings_of`] 而**不是**读全局镜像：那个函数按
-    /// **指定方案**折叠了方案级 `[engine.codetable.english_merge]`。直接读镜像的话，用户在
-    /// 方案里写的覆盖没人读——`CodetableGlobal::resolved` 的注释里记着同款教训（「光在这里
-    /// 折叠、freq_settings 仍读全局镜像的话，方案文件里写了也没人读」）。
-    ///
-    /// ⚠️ 拼音侧**暂无方案级覆盖**：`PinyinGlobalConfig` 没有 `resolved()`、`PinyinSpec` 也
-    /// 没有对应字段，整套机制在拼音侧尚不存在。故这里直读全局镜像；将来补上方案级时，
-    /// 这一行要跟着换成 resolved 版本，否则表现就是「方案里写了不生效」。
-    ///
-    /// 按方案而非活跃方案取值：供 overlay/特殊模式的自动上屏复评使用
-    /// （[`Self::recheck_auto_commit_for`]）——特殊模式引用的方案往往不是活跃方案，
-    /// [`Self::english_merge_cfg`] 固定按活跃方案取，会拿错方案的配置。
+    /// 按方案而非活跃方案取值：overlay/特殊模式的自动上屏复评（[`Self::recheck_auto_commit_for`]）
+    /// 引用的方案往往不是活跃方案。
     fn english_merge_cfg_for(
         &self,
         schema_id: &str,
@@ -4985,13 +4513,11 @@ impl EngineManager {
             // 再叠一层会混两遍、档位与配额双重失真；英文方案本身就在出英文候选。
             EngineType::Mixed | EngineType::English => None,
         }
-        // ★ 刻意**不写** `_ => None` 通配分支：配置拆成按引擎两份之后，「新增一个引擎类型」
-        // 就必须在这里明确它用哪一份（或不参与）。留通配的话新引擎会静默不支持英文混入，
-        // 而这正是本模块最初"一处接线覆盖以后任何新引擎"那句承诺失效的地方——拆分之后
-        // 它已经不成立，改由编译器来提醒。
+        // 刻意不写 `_ => None` 通配分支：新增引擎类型必须在这里明确用哪份配置（或不参与），
+        // 由编译器提醒，而不是静默不支持英文混入。
     }
 
-    /// 进程里那**唯一**一份英文词库引擎（懒加载一次，失败也记住，见
+    /// 进程里那唯一一份英文词库引擎（懒加载一次，失败也记住，见
     /// [`Self::shared_english_engine`] 字段文档）。
     ///
     /// 两类调用方：英文候选混入（[`Self::english_merge_ctx`]）与混输的英文子引擎
@@ -5006,17 +4532,12 @@ impl EngineManager {
                 return v.clone();
             }
         }
-        // **锁外**构建：`ensure_loaded` 自带 single-flight，且会去读盘建词库（秒级）。
-        // 持着本缓存锁做这件事会把并发的按键线路一并堵住。
+        // 锁外构建：`ensure_loaded` 自带 single-flight 且可能秒级，持本缓存锁会堵住按键线路。
+        // 混输构建期回调进来时外层持的是混输方案的 build_lock，与 `"english"` 那把不是同一把。
         //
-        // 混输构建期回调进来时，外层正持着**那个混输方案**的 build_lock；这里取的是
-        // `"english"` 自己那一把（`build_locks` 按 schema_id 分表），不是同一把锁。
-        //
-        // 取前记 `engines_gen`、写回前比对：其间 `invalidate_schema("english")` /
-        // `reload_from_config` 清掉的缓存不能被这份旧实例盖回去。变了就只交给本次调用方、
-        // 不进缓存——下次取会重新走 `ensure_loaded`。混输构建拿到它也无妨：它记的代次在失效
-        // 之前，写回比对必失败、整份重来；重来那一轮读缓存时，失效口已在推进代次的同一段
-        // `engines` 锁里把缓存清掉，读不到旧实例。
+        // 取前记 `engines_gen`、写回前比对：其间失效清掉的缓存不能被旧实例盖回去，变了就只交给
+        // 本次调用方、不进缓存。混输构建拿到它也无妨：它自己的写回比对必失败、整份重来，
+        // 而失效口已在同一段 `engines` 锁里清掉了缓存。
         let generation = self.engines_gen.load(std::sync::atomic::Ordering::Acquire);
         let built = if self.ensure_loaded(ENGLISH_SCHEMA) {
             self.loaded_engine(ENGLISH_SCHEMA)
@@ -5035,9 +4556,8 @@ impl EngineManager {
         built
     }
 
-    /// 存在英文候选时是否否决上屏（活跃方案版本）。**三条通路共用这一个判据**（`AGENTS.md`：
-    /// 任何否决开关必须三处都接，漏一处该开关对那条路径就等于完全失效，且日志与设置页均
-    /// 无痕迹）；overlay/特殊模式的第四条通路见 [`Self::english_vetoes_commit_for`]。
+    /// 存在英文候选时是否否决上屏（活跃方案版本）。三条通路共用这一个判据（`AGENTS.md`：
+    /// 任何否决开关必须三处都接）；overlay/特殊模式的第四条通路见 [`Self::english_vetoes_commit_for`]。
     fn english_vetoes_commit(&self, active: &Arc<dyn Engine>, input: &str) -> bool {
         self.english_vetoes_commit_for(&self.active_schema_id(), active, input)
     }
@@ -5127,10 +4647,10 @@ impl EngineManager {
         self.active_engine().map(|e| e.engine_type())
     }
 
-    /// 指定方案**已加载引擎**的类型（内存查，无 IO）。未加载返回 None。
+    /// 指定方案已加载引擎的类型（内存查，无 IO）。未加载返回 None。
     ///
     /// 与 [`schema_engine_type`](Self::schema_engine_type) 的区别是后者每次都
-    /// **读文件 + 解析 TOML**，不可放进逐键路径；本函数只查已加载引擎表。
+    /// 读文件 + 解析 TOML，不可放进逐键路径；本函数只查已加载引擎表。
     /// 供 overlay 类模式（临拼等）按目标方案类型分流取数策略。
     pub fn loaded_engine_type(&self, schema_id: &str) -> Option<EngineType> {
         self.engines
@@ -5150,8 +4670,7 @@ impl EngineManager {
     pub fn handle_top_code(&self, input: &str) -> Option<(String, String)> {
         let engine = self.active_engine()?;
         let r = engine.handle_top_code(input)?;
-        // 通路③：顶码。协调器让顶码**先于候选刷新**执行，故这条漏接的话，
-        // `block_commit` 对超码长输入就等于完全失效——而它在满码路径上还工作正常。
+        // 通路③：顶码。协调器让顶码先于候选刷新执行，漏接则 `block_commit` 对超码长输入失效。
         if self.english_vetoes_commit(&engine, input) {
             return None;
         }
@@ -5169,24 +4688,15 @@ impl EngineManager {
         self.recheck_auto_commit_for(&self.active_schema_id(), input, candidates)
     }
 
-    /// [`Self::recheck_auto_commit`] 的 overlay/特殊模式版本：按**指定方案**取引擎而非
-    /// `active_engine()`（后者问的是主方案）。活跃方案版本即 `recheck_auto_commit_for(&
-    /// active_schema_id(), ..)`——两者共用同一份逻辑，不会各判各的（`engine_for` 在
-    /// `schema_id == active_schema_id()` 时与 `active_engine()` 等价）。
+    /// [`Self::recheck_auto_commit`] 的 overlay/特殊模式版本：按指定方案取引擎而非
+    /// `active_engine()`（后者问的是主方案）；活跃方案版本即本函数传活跃方案 id。
     ///
-    /// 回归背景（论坛 #211）：快符等特殊模式引用的方案（如 wubi86）往往不是主方案（如
-    /// 拼音），`update_special_candidates` 靠这条補齐与主路径 `handle_candidate.rs` 对称的
-    /// 「shadow 之后回头复核唯一性」——引擎首轮意向（`convert_with_opts`）判在 shadow 生效
-    /// **之前**的候选上：用户在设置页把某个码位的内置词条替换成自定义词条（新增用户词 +
-    /// shadow 隐藏旧词条），改码瞬间码位下变成两条精确候选、引擎判「不唯一」拒绝自动上屏；
-    /// shadow 生效后其实只剩一条，若无人回头复评，这个「不唯一」的否决会永久生效——用户看
-    /// 到的候选窗明明只有一条，却上不了屏。
+    /// `update_special_candidates` 靠它补齐与主路径对称的「shadow 之后回头复核唯一性」：引擎
+    /// 首轮意向判在 shadow 生效之前的候选上，用户用自定义词条替换内置词条后会误判「不唯一」，
+    /// 无人复评就永远上不了屏。
     ///
-    /// ⚠️ 英文否决（`english_vetoes_commit_for`）**必须接**：它按 `input` 原串查独立的英文
-    /// 引擎，与「候选列表里有没有英文候选」无关，overlay 方案照样可能命中（比如快符引用的
-    /// 码表方案自己开了 `[engine.codetable.english_merge].block_commit`）。三条通路的否决
-    /// 铁律（见 `english_vetoes_commit` 的文档）在此不因为是第四条通路就例外，否则会是
-    /// 「这个开关对快符完全不生效」的静默失效——`AGENTS.md` 明确记载过两次同类回归。
+    /// 英文否决（`english_vetoes_commit_for`）必须接：它按 `input` 原串查英文引擎，overlay
+    /// 引用的码表方案同样可能开了 `block_commit`。
     pub fn recheck_auto_commit_for(
         &self,
         schema_id: &str,
@@ -5212,7 +4722,7 @@ impl EngineManager {
     /// 临时拼音目标方案 id 的纯解析（不含可加载性门控，供单测）：
     /// 关闭 / 当前方案不适用 → None；否则取 primary_pinyin，空则全拼 "pinyin"。
     ///
-    /// 方案适用范围**仅码表/混输**：拼音方案本身就在打拼音，再叠一层无意义，且会吞掉引导符
+    /// 方案适用范围仅码表/混输：拼音方案本身就在打拼音，再叠一层无意义，且会吞掉引导符
     /// （如 `）本该有的标点输出。混输保留——其拼音子方案由方案自身决定，未必等于主拼音方案，
     /// 「混输走全拼 + 临时拼音走双拼」是有效用法。
     fn resolve_temp_pinyin_target(
@@ -5240,7 +4750,7 @@ impl EngineManager {
     /// （空=全拼 "pinyin"），且仅码表/混输方案适用（见 resolve_temp_pinyin_target）。
     /// 启用、适用且目标方案可加载时返回 Some(target)，否则 None。
     ///
-    /// **所有临时拼音进入点的公共门卫**（引导键 / 字母触发 / 直达热键 / 顶屏进模式 /
+    /// 所有临时拼音进入点的公共门卫（引导键 / 字母触发 / 直达热键 / 顶屏进模式 /
     /// z-fallback 均先问它），故适用范围判据必须落在这里，放任一调用点都会漏网。
     pub fn temp_pinyin_target(&self) -> Option<String> {
         let enabled = self
@@ -5262,28 +4772,21 @@ impl EngineManager {
         }
     }
 
-    /// 活跃方案的**有效**码表行为配置：全局 `schema.codetable` 经该方案 `.schema.toml` 的
-    /// `[engine.codetable]`（内联 + `schema_overrides` 合并后）行为字段折叠。供 coordinator 读
-    /// punct_commit / z_key_repeat 等行为字段（取代旧的直接读 schema 字段）。
-    /// 当前方案的**按键功能表**（`[key_actions]`，方案文件内联 + `schema_overrides` 已合并）。
+    /// 当前方案的按键功能表（`[key_actions]`，方案文件内联 + `schema_overrides` 已合并）。
     ///
-    /// 与 [`Self::codetable_settings`] 不同，**混输方案不下钻到 primary_schema**：按键功能是
-    /// 「用户在这个方案里按这个键想干什么」，属于方案自身的交互属性，不像码表行为那样是
-    /// 「这张码表怎么工作」。混输方案想配就在自己的文件里配。
+    /// 与 [`Self::codetable_settings`] 不同，混输方案不下钻到 primary_schema：按键功能属于
+    /// 方案自身的交互属性，混输方案想配就在自己的文件里配。
     ///
-    /// 读不到方案（文件缺失/解析失败）时返回空表 = 不覆盖任何键，各键照常走全局链。
-    /// 返回 `Arc`：本表在按键热路径上被查，`Arc::clone` 只加一次引用计数，而返回 owned
-    /// 表要复制整张表连同每个 `String`。调用方按 `&*` / `.iter()` 用即可。
+    /// 读不到方案时返回空表 = 不覆盖任何键，各键照常走全局链。返回 `Arc`，热路径上不复制整张表。
     pub fn active_key_actions(&self) -> Arc<std::collections::BTreeMap<String, String>> {
         self.key_actions_of(&self.active_schema_id())
     }
 
-    /// 同 [`Self::active_key_actions`]，但取**指定方案**。
+    /// 同 [`Self::active_key_actions`]，但取指定方案。
     ///
-    /// ⚠️ **只服务「编码类」动词的查询**（见 docs/design/key-resolver-unification.md §4.4）。
-    /// 整张表并不随 overlay 的目标方案走——`special:*` / `temp_pinyin` 那类是「从这个输入
-    /// 环境去哪」，恒属主方案；只有解释「用户敲的码」的动词（辅助码触发键、码元、分隔符）
-    /// 才该按产出候选的方案取。拿它做通用分派会让拼音方案对快符之类的存在负责。
+    /// 只服务「编码类」动词的查询（辅助码触发键、码元、分隔符，见
+    /// docs/design/key-resolver-unification.md §4.4）；`special:*` / `temp_pinyin` 这类恒属主方案，
+    /// 别拿它做通用分派。
     pub fn key_actions_of(
         &self,
         schema_id: &str,
@@ -5309,7 +4812,7 @@ impl EngineManager {
         table
     }
 
-    /// 当前方案的**会话态按键表**（`[session_actions]`，方案文件内联 + `schema_overrides`
+    /// 当前方案的会话态按键表（`[session_actions]`，方案文件内联 + `schema_overrides`
     /// 已合并）。
     ///
     /// 与 [`Self::active_key_actions`] 的取表规则逐条相同（不下钻 primary_schema、读不到
@@ -5430,15 +4933,11 @@ impl EngineManager {
         self.engines_gen.load(std::sync::atomic::Ordering::Acquire)
     }
 
-    /// 当前方案的**行为覆盖三段**（`[punct]` / `[candidate]` / `[phrases]`，方案文件内联 +
+    /// 当前方案的行为覆盖三段（`[punct]` / `[candidate]` / `[phrases]`，方案文件内联 +
     /// `schema_overrides` 已合并）。
     ///
-    /// 与 [`Self::active_key_actions`] 的取表规则逐条相同：
-    /// - **混输方案不下钻 `primary_schema`**——这三段都是「用户在这个方案里想要什么」，
-    ///   属于方案自身的交互属性，不像码表行为那样是「这张码表怎么工作」。混输方案想配
-    ///   就在自己文件里配；
-    /// - 读不到方案（文件缺失 / 解析失败）时返回 default = 一段都不覆盖；
-    /// - 返回 `Arc`：`[phrases]` 含两个 `Vec<String>`，而消费点在候选构建热路径上。
+    /// 取表规则同 [`Self::active_key_actions`]：混输方案不下钻 `primary_schema`；读不到方案时
+    /// 返回 default（一段都不覆盖）；返回 `Arc`（消费点在候选构建热路径上）。
     ///
     /// 见 `docs/design/schema-scoped-behavior.md` §6.5。
     pub fn active_behavior(&self) -> Arc<wind_config::SchemaBehavior> {
@@ -5447,8 +4946,8 @@ impl EngineManager {
 
     /// 指定方案的行为覆盖三段。
     ///
-    /// 独立于 [`Self::active_behavior`] 暴露，是因为短语作用域的归属方案**不一定是
-    /// active**——临时英文归 `english` 桶而主方案常是五笔/混输（见
+    /// 独立于 [`Self::active_behavior`] 暴露，是因为短语作用域的归属方案不一定是
+    /// active——临时英文归 `english` 桶而主方案常是五笔/混输（见
     /// `effective_data_schema`）。按 active 取值会给临英套上主方案的短语开关。
     pub fn behavior_for(&self, schema_id: &str) -> Arc<wind_config::SchemaBehavior> {
         if let Some(cached) = self
@@ -5475,21 +4974,10 @@ impl EngineManager {
         spec
     }
 
-    /// **所有**可用方案的 `[key_actions]` 里出现过的键名（并集，去重）。
-    ///
-    /// 用途只有一个：算出「需要让 TSF 转发 keyup 的修饰键」。转发集必须是并集而非
-    /// 活跃方案的那一份——`CompiledHotkeys` 在启动时编译一次并随 activation 推给 C++，
-    /// 若按活跃方案裁剪，切方案后 C++ 手里就是旧表，修饰键要等下次焦点切换才生效
-    /// （表现为「刚切完方案这个键不灵，点一下别的窗口又灵了」）。
-    ///
-    /// 取并集的代价是方案 A 配的 `rshift` 在方案 B 里也被转发。无害：keydown 侧纯修饰键
-    /// 一律放行不吃（`KeyEventSink.cpp::_IsPureModifierKey`），到了服务端
-    /// `bound_action_for` 按**活跃**方案查表落空即不动作。
-    ///
     /// 指定方案的码元字符集（按 id，非活跃方案也能查）。
     ///
-    /// 与引擎构建走**同一个构造器**，不另写一份解析：区间语法（`a-x/`）、`leading_chars`
-    /// 为空时等于全集、非法时回落全集——这些规则只该有一处。
+    /// 与引擎构建走同一个构造器，区间语法、`leading_chars` 为空等于全集、非法回落全集这些
+    /// 规则只有一处。
     ///
     /// 读不到方案时返回 `None`（而非默认 `a-z`）：调用方多半是要「据此提示用户」，
     /// 拿默认值去提示等于凭空报一个不存在的事实。
@@ -5507,12 +4995,12 @@ impl EngineManager {
         ))
     }
 
-    /// [`Self::schema_code_char_set`] 加上该方案开着的**符号**通配键，**一次**读方案文件。
+    /// [`Self::schema_code_char_set`] 加上该方案开着的符号通配键，一次读方案文件。
     ///
-    /// 供协调器算「空闲时可作首码的符号」：符号通配键也能作首码（论坛 t302），须同码元首码
-    /// 一样从 DLL 透传标点集里扣掉。同为纯配置读、不建引擎，理由见 `schema_code_char_set`。
+    /// 供协调器算「空闲时可作首码的符号」：符号通配键也能作首码，须同码元首码一样从 DLL
+    /// 透传标点集里扣掉。纯配置读、不建引擎。
     ///
-    /// 通配键只算**纯码表**方案：混输首位恒字面（扣了也收不到），拼音 / 英文方案虽会经折叠
+    /// 通配键只算纯码表方案：混输首位恒字面（扣了也收不到），拼音 / 英文方案虽会经折叠
     /// 继承全局 `wildcard` 开关，但根本不消费它——算进来只会让别的方案下这个符号被白吃。
     /// 非法键不在此告警（建引擎时 `wildcard_char` 已告警过一次）。
     pub fn schema_lead_inputs(
@@ -5547,13 +5035,11 @@ impl EngineManager {
         Some((charset, wildcard))
     }
 
-    /// **所有已安装**方案（含 overlay）的 `[key_actions]` 里出现过的键名（并集）。
+    /// 所有已安装方案（含 overlay）的 `[key_actions]` 里出现过的键名（并集）。
     ///
-    /// 与 [`Self::all_key_action_keys`] 只差枚举源，但那一差是**语义性**的：
-    /// 那个回答「要不要把这个键的 keyup 转发过来」，overlay 方案的 `[key_actions]`
-    /// 查不到消费点，用 `available` 足矣；本函数回答「**谁占了这个键**」，供从「该透传的
-    /// 标点集合」里减去——减数漏一个就是「某方案的引导键被透传掉、那个模式再也进不去」，
-    /// 且不报错。减数必须取更大的那个集合，与 `schema_leading_code_chars` 的枚举源一致。
+    /// 与 [`Self::all_key_action_keys`] 只差枚举源：那个回答「要不要转发 keyup」，用
+    /// `available` 足矣；本函数回答「谁占了这个键」，供从透传标点集里减去，减数漏一个就是
+    /// 某方案的引导键被透传、那个模式再也进不去，故必须取更大的集合。
     pub fn installed_key_action_keys(&self) -> std::collections::BTreeSet<String> {
         let mut keys = std::collections::BTreeSet::new();
         for id in self.installed_schemas() {
@@ -5566,29 +5052,29 @@ impl EngineManager {
         keys
     }
 
-    /// 不走 `key_actions_cache`：该缓存按活跃方案 id 存单份，而这里要的是跨方案的并集。
+    /// 所有可用方案的 `[key_actions]` 里出现过的键名（并集，去重）。
+    ///
+    /// 用于算「需要让 TSF 转发 keyup 的修饰键」。必须是并集：`CompiledHotkeys` 编译一次随
+    /// activation 推给 C++，按活跃方案裁剪的话切方案后 C++ 手里是旧表。代价是方案 A 配的键在
+    /// 方案 B 里也被转发，无害（纯修饰键 keydown 一律放行，服务端按活跃方案查表落空即不动作）。
+    ///
+    /// 不走 `key_actions_cache`：该缓存按方案 id 存，而这里要的是跨方案的并集。
     pub fn all_key_action_keys(&self) -> std::collections::BTreeSet<String> {
         self.all_action_keys().0
     }
 
-    /// **所有**可用方案的 `[session_actions]` 里出现过的键名（并集，去重）。
+    /// 所有可用方案的 `[session_actions]` 里出现过的键名（并集，去重）。转发集必须是并集，
+    /// 理由同 [`Self::all_key_action_keys`]。
     ///
-    /// 与 [`Self::all_key_action_keys`] 同一个用途与同一条理由：转发集必须是并集而非活跃
-    /// 方案那一份，否则切方案后 C++ 手里是旧表，要等下次焦点切换才生效。
-    ///
-    /// ⚠️ **本表的并集代价与 key_actions 那张不同**：那张最终只取纯修饰键
-    /// （`schema_bound_modifier_vks` 的 `filter_map`），keyup 侧多转发无害；而本表支持
-    /// 减号、方括号、分号等**可打印符号键**，它们带 `FORWARD_ONLY` 进 keydown 表。
-    /// 无会话时必须放行给下游按标点处理，否则表现是**丢键**，且只在没绑该键的方案下复现。
+    /// 并集代价与 key_actions 那张不同：本表含可打印符号键，它们带 `FORWARD_ONLY` 进 keydown
+    /// 表，无会话时必须放行给下游按标点处理，否则在没绑该键的方案下丢键。
     pub fn all_session_action_keys(&self) -> std::collections::BTreeSet<String> {
         self.all_action_keys().1
     }
 
     /// 两张表的键名并集，一次遍历同时收齐。
     ///
-    /// 合并而不是各写一遍：两者都要 `read_schema` 扫全部可用方案（含 override 深合并），
-    /// 分开调用就是把同一批文件读两遍。调用点都在配置生效期（构造 / 热重载），不是热路径，
-    /// 但没有理由白读一遍。
+    /// 两者都要 `read_schema` 扫全部可用方案，合并免得同一批文件读两遍。
     fn all_action_keys(
         &self,
     ) -> (
@@ -5607,11 +5093,8 @@ impl EngineManager {
                 Self::read_schema(&id, self.data_dir.as_deref(), self.override_dir.as_deref())
             {
                 keys.extend(s.key_actions.into_keys());
-                // ⚠️ 会话态侧**滤掉显式 `none`**，`key_actions` 侧不滤：两者的消费者对
-                // 「被禁用的键」敏感度不同。本集合要据此决定装不装 CapsLock 全局钩子——
-                // 方案写了 `capslock = "none"` 却照装，就是白担一个全局钩子的风险。
-                // 而 key_actions 那份最终只取纯修饰键进 keyup 转发集，多转发一个不动作的
-                // 键宿主无感，滤它反而要多解析一遍动词。
+                // 会话态侧滤掉显式 `none`，`key_actions` 侧不滤：本集合要据此决定装不装
+                // CapsLock 全局钩子，写了 none 就不该装；key_actions 那份多转发一个键宿主无感。
                 //
                 // 按方案独立判定：方案 A 绑了、方案 B 写 none，并集仍含该键（A 要用）。
                 session.extend(
@@ -5625,6 +5108,8 @@ impl EngineManager {
         (keys, session)
     }
 
+    /// 活跃方案的有效码表行为配置：全局 `schema.codetable` 经该方案 `[engine.codetable]`
+    /// （内联 + `schema_overrides` 合并后）折叠。供协调器读 punct_commit / z_key_repeat 等行为字段。
     pub fn codetable_settings(&self) -> wind_config::CodetableGlobal {
         self.codetable_settings_of(&self.active_schema_id())
     }
@@ -5638,11 +5123,8 @@ impl EngineManager {
         self.with_codetable_settings_of(&self.active_schema_id(), f)
     }
 
-    /// [`Self::codetable_settings`] 的按方案版本：供 overlay/特殊模式取**指定方案**的码表
-    /// 全局设置，而不是当前活跃方案的——`codetable_settings()` 内部固定读
-    /// `active_schema_id()`，特殊模式引用的方案往往不是活跃方案，同类坑见 `engine_for`
-    /// 的注释。用 `loaded_engine_type(schema_id)` 而非 `current_engine_type()` 判混输，
-    /// 理由同上：后者也是问活跃方案。
+    /// [`Self::codetable_settings`] 的按方案版本：供 overlay/特殊模式取指定方案的设置
+    /// （见 `engine_for`）。判混输也按 `loaded_engine_type(schema_id)`，不问活跃方案。
     fn codetable_settings_of(&self, schema_id: &str) -> wind_config::CodetableGlobal {
         self.with_codetable_settings_of(schema_id, Clone::clone)
     }
@@ -5776,17 +5258,13 @@ impl EngineManager {
         )
     }
 
-    /// **当前方案**的词频衰减参数：英文方案取英文段，其余取码表段。
-    ///
+    /// 当前方案的词频衰减参数：英文方案取英文段，其余取码表段。
     /// 拼音走 [`Self::pinyin_freq_profile`]，不经这里（消费点按引擎类型分派）。
-    ///
-    /// 存在的理由是消费端只有一个调用点，却要服务两套配置：调用方拿不到「当前是哪类
-    /// 方案」以外的信息，把选择留在那里就会变成消费点各判一次、迟早漏一处。
     pub fn active_freq_profile(&self) -> wind_store::freq::FreqProfile {
         self.freq_profile_for(&self.active_schema_id())
     }
 
-    /// **指定方案**的词频衰减参数。与 [`Self::freq_settings_for`] 同一套分流，
+    /// 指定方案的词频衰减参数。与 [`Self::freq_settings_for`] 同一套分流，
     /// 两者必须一起改——一个按方案取 strategy、另一个仍按 active 取 half_life 的话，
     /// 特殊方案会用自己的策略配上主方案的衰减速度。
     pub fn freq_profile_for(&self, schema_id: &str) -> wind_store::freq::FreqProfile {
@@ -5829,17 +5307,11 @@ impl EngineManager {
         }
     }
 
-    /// 码表/混输的词频衰减参数。**与拼音完全独立，不读拼音段任何字段。**
+    /// 码表/混输的词频衰减参数。与拼音完全独立，不读拼音段任何字段：设置页上是两个独立控件，
+    /// 一个控件一个值，别做「码表为 0 时回落拼音」的回落链。`base_scale`/`recency_peak` 取 store
+    /// 默认（位置提升模型不读它们）。
     ///
-    /// 曾做成「码表段为 0 时回落拼音段」，已否决：那让两套配置藕断丝连——用户在设置页把
-    /// 码表半衰期留在 0，改拼音的却发现码表跟着变，而设置页上那是两个独立控件。**一个控件
-    /// 一个值**，回落链只在配置层不可见时才是便利，一旦两端都有 GUI 就变成了陷阱。
-    ///
-    /// `base_scale`/`recency_peak` 取 store 默认而非拼音配置值：它们是**打分模型**的系数，
-    /// 位置提升模型不读（见 `FreqProfile::pinyin_score` 的死链说明），取哪个值都一样，
-    /// 取默认才符合「不读拼音段」这条界线。
-    ///
-    /// ⚠️ 仅 `strategy = "position"` 时被消费；`top`/`step` 直接比 `count`/`last_used`。
+    /// 仅 `strategy = "position"` 时被消费；`top`/`step` 直接比 `count`/`last_used`。
     pub fn codetable_freq_profile(&self) -> wind_store::freq::FreqProfile {
         let ct = self
             .codetable
@@ -5859,15 +5331,11 @@ impl EngineManager {
         if own > 0.0 { own } else { inherited }
     }
 
-    /// 某方案**当前生效**的码表配置（基线 + 方案覆盖折叠后的全实值）。
+    /// 某方案当前生效的码表配置（基线 + 方案覆盖折叠后的全实值）。
     ///
-    /// 存在的理由是设置页需要一个「起点快照」：方案文件里的行为字段是 `Option`，
-    /// 未设置时序列化成 `null`，UI 拿到 null 无法显示成开关——它得知道「不设置的话
-    /// 实际是什么」。基线本身又分两种（普通方案跟随全局、特殊方案跟随内置默认，见
-    /// [`Self::codetable_baseline`]），UI 侧算不出来，只能由此处给。
-    ///
-    /// 与 `resolve_codetable` 的区别只是取全局镜像的方式：那个是关联函数（供 `build_engine`
-    /// 在持有配置副本时调用），这个从 `self` 取当前镜像。
+    /// 设置页需要它作起点快照：方案里的行为字段是 `Option`，UI 得知道「不设置的话实际是什么」，
+    /// 而基线分普通/特殊两种（见 [`Self::codetable_baseline`]），UI 侧算不出来。
+    /// 与 `resolve_codetable` 只差取全局镜像的方式（那个是关联函数，供 `build_engine` 用）。
     pub fn effective_codetable(&self, schema_id: &str) -> wind_config::CodetableGlobal {
         let global = self
             .codetable
@@ -5882,16 +5350,10 @@ impl EngineManager {
         )
     }
 
-    /// 某方案**不含 override 层**的码表配置：全局基线 ⊕ 方案文件内联，折叠后的全实值。
+    /// 某方案不含 override 层的码表配置：全局基线 ⊕ 方案文件内联，折叠后的全实值。
     ///
-    /// 这是设置页三态控件的「跟随值」——用户把某一项的覆盖取消掉之后，它会回到这个值。
-    /// 与 [`Self::effective_codetable`] 只差一个 `override_dir`：那个含用户覆盖（＝当前
-    /// 实际在跑的值），这个不含（＝取消覆盖后会变成的值）。两者都要给设置页，因为
-    /// **已覆盖的项**在两份里取值不同，而 UI 要同时显示「现在是什么」和「取消后是什么」。
-    ///
-    /// ⚠️ 别想着让 UI 拿 `effective` 减去 override 自己算：折叠的基线分普通/特殊两种
-    /// （见 [`Self::codetable_baseline`]），UI 侧算不出来——这正是 `effective_codetable`
-    /// 当初存在的理由，同一条在这里再次成立。
+    /// 设置页三态控件的「跟随值」（取消覆盖后会变成的值）；[`Self::effective_codetable`] 是
+    /// 当前实际在跑的值。UI 自己算不出来，理由同那里。
     pub fn followed_codetable(&self, schema_id: &str) -> wind_config::CodetableGlobal {
         let global = self
             .codetable
@@ -5915,24 +5377,11 @@ impl EngineManager {
         base.resolved(schema.as_ref().map(|s| &s.engine.codetable))
     }
 
-    /// 折叠方案行为时用哪份基线：普通方案用全局 `schema.codetable`，**overlay 方案用内置默认值**。
+    /// 折叠方案行为时用哪份基线：普通方案用全局 `schema.codetable`，overlay 方案用内置默认值。
     ///
-    /// overlay 方案（快符、生僻字表这类）与主码表的性质完全不同——它们是几十条的小符号表，
-    /// 而全局基线是按五笔这种数万条的全码表调的。继承的后果是用户改五笔的「精确匹配」，
-    /// 快符跟着变，且改的人根本意识不到自己动了另一个表。
-    ///
-    /// ★ **判据是 `[overlay]` 段存在，不是 `[schema].hidden`**。两者正交，回答的是不同问题：
-    /// `hidden` 管「列不列进方案切换列表」，与该折叠哪份基线无关；上面那条理由讲的是
-    /// 「它被**叠加使用**、是张小符号表」——那正是 `[overlay]` 声明的事。
-    ///
-    /// ⚠️ 曾用 `hidden`，理由是「是否被 `special_modes` 引用在这一层拿不到」。该理由随
-    /// `special_modes` 数组解散而失效：`[overlay]` 就在 `Schema` 里，本函数已持有它。
-    /// 当时另一条理由「英文方案虽然也 hidden」更是早已过时——english 自 `8d3351bf`
-    /// 「英文改为可切换方案」起就不是 hidden 了，且它在 `build_engine` 里走独立 english
-    /// 分支、用 `CommitOptions::default()` 提前 return，根本到不了这里。
-    ///
-    /// 换判据后，「hidden 但非 overlay 的码表方案」（如只作 mix 成员用的隐藏小码表）
-    /// 改为跟随全局——它被当普通候选来源使用，跟随全局本就更合理。
+    /// overlay 方案（快符等）是几十条的小符号表，全局基线是按数万条的全码表调的；继承的话
+    /// 用户改五笔的设置，快符会不知不觉跟着变。判据是 `[overlay]` 段存在，不是
+    /// `[schema].hidden`（那只管列不列进切换列表；hidden 但非 overlay 的码表方案跟随全局）。
     fn codetable_baseline(
         schema: Option<&Schema>,
         global: &wind_config::CodetableGlobal,
@@ -5946,18 +5395,12 @@ impl EngineManager {
 
     /// 特殊方案的折叠基线。
     ///
-    /// **不是 `CodetableGlobal::default()`**——那是结构体零值，大量集成测试以
-    /// `Config::default()` 构造并依赖它（顶码/标点上屏都关着），拿它当特殊方案基线会让
-    /// 快符默认不顶码、标点不上屏、精确匹配下不补全，而这些恰是用户预期存在的行为。
-    /// 两个概念共用一处定义，改哪边都会伤到另一边。
+    /// 不是 `CodetableGlobal::default()`：那是结构体零值，大量测试依赖它（顶码/标点上屏都关），
+    /// 两个概念别共用一处定义。
     ///
-    /// 取值：与 `data/config.toml` 的出厂值一致，**除 z 的两项**——`z_key_repeat`（重复上屏）
-    /// 与 `z_key_action`（借 z 作引导键）对小符号表都没有意义：`z` 在那里多半是个正经编码，
-    /// 抢走它就等于让该编码永远打不出来。两项都显式写出而非靠 `..Default::default()` 兜底，
-    /// 与本函数「与出厂值不同的项逐条列明」的写法一致。
-    ///
-    /// 「不继承全局」的意义是**用户改了全局之后特殊方案不跟着变**，而不是让它们的出厂
-    /// 表现与普通方案不同。
+    /// 取值与 `data/config.toml` 出厂值一致，除 z 的两项（`z_key_repeat` / `z_key_action`）：
+    /// `z` 在小符号表里多半是正经编码，不能被抢走。「不继承全局」的意义是用户改了全局后特殊
+    /// 方案不跟着变，不是让出厂表现不同。
     fn special_schema_baseline() -> wind_config::CodetableGlobal {
         wind_config::CodetableGlobal {
             top_code_commit: true,
@@ -5970,7 +5413,7 @@ impl EngineManager {
     }
 
     /// 拆字配置（`[engine.chaizi]`：db/font 路径 + DWrite 家族名）。来源方案与编码段
-    /// 同源（`code_source_schema`）：码表方案只用**自己的**拆字配置——没配置就没有拆字，
+    /// 同源（`code_source_schema`）：码表方案只用自己的拆字配置——没配置就没有拆字，
     /// 不回落主码表（看其它方案的拆字对本方案无意义）；拼音回落全局主码表、混输取其
     /// 主码表成员。无配置返回 None。路径相对 `schemas/`（用户目录优先）。
     pub fn chaizi_spec(&self) -> Option<wind_config::schema::ChaiziSpec> {
@@ -6005,11 +5448,9 @@ impl EngineManager {
     /// 活跃方案的辅助码生效设置：全局基线 `[schema.pinyin.aux_code]` 折叠方案段
     /// `[engine.aux_code]`（含 `schema_overrides` 深合并后的结果）。
     ///
-    /// **一次 `read_schema` 出全部三个值**。此前 `files` 与 `max_phrase_len` 是两个各自
-    /// `read_schema` 的函数，进入辅助码时一次按键要读盘 + 解析 TOML 四遍（base + override
-    /// 各两轮），而这发生在按键线程上。
+    /// 一次 `read_schema` 出全部值（按键线程上不能多次读盘）。
     ///
-    /// 与拆字不同：辅助码过滤的对象是**拼音候选**，触发时活跃方案即拼音方案本身，
+    /// 与拆字不同：辅助码过滤的对象是拼音候选，触发时活跃方案即拼音方案本身，
     /// 故取 `active_schema_id()`（而非 `code_source_schema()`——那是码表字形反查的归属）。
     ///
     /// `files` 逐条解析，`schemas/` 基准、用户目录优先——与 `read_schema` 同源
@@ -6018,11 +5459,11 @@ impl EngineManager {
         self.aux_code_settings_of(&self.active_schema_id())
     }
 
-    /// 同 [`Self::aux_code_settings`]，但走缓存：**逐键路径专用**（直接辅助码每个双拼按键都要
+    /// 同 [`Self::aux_code_settings`]，但走缓存：逐键路径专用（直接辅助码每个双拼按键都要
     /// 问一次，未开的用户也一样）。不带缓存的那个每次读盘 + 解析 TOML + 探测来源文件。
     ///
-    /// 失效点见 `aux_settings_cache`：设置页写方案覆盖层、重载配置都会清；**绕过这些入口直接改
-    /// 磁盘文件**（手改 `schema_overrides`）要等下一次重载才生效，与 `freq_settings_for` 同口径。
+    /// 失效点见 `aux_settings_cache`：设置页写方案覆盖层、重载配置都会清；绕过这些入口直接改
+    /// 磁盘文件（手改 `schema_overrides`）要等下一次重载才生效，与 `freq_settings_for` 同口径。
     pub fn aux_code_settings_cached(&self) -> AuxCodeSettings {
         self.aux_code_settings_cached_of(&self.active_schema_id())
     }
@@ -6178,7 +5619,7 @@ impl EngineManager {
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     }
 
-    /// 同 [`Self::aux_code_settings`]，但取**指定方案**。
+    /// 同 [`Self::aux_code_settings`]，但取指定方案。
     ///
     /// 辅助码可以从临拼进入，而临拼在五笔方案下引用的是拼音方案——码表配在那个方案的
     /// `[engine.aux_code].files` 里。按活跃方案取的话 `files` 恒空，门卫静默拒绝进入。
@@ -6272,10 +5713,8 @@ impl EngineManager {
         }
     }
 
-    /// 「辅助码来源条目无效」这条告警是否**头一次**报（按 方案 + 条目 记）。
-    ///
-    /// 不节流的话每按一次辅助码键、每建一次反查索引（护栏要算在用集合）都打一条，
-    /// 而这是一次性的配置错误，报一次足够定位。改了配置后条目文本变了，自然会再报。
+    /// 「辅助码来源条目无效」这条告警是否头一次报（按 方案 + 条目 记）。这是一次性的配置
+    /// 错误，不节流就每按一次辅助码键都打一条；改了配置后条目文本变了，自然会再报。
     fn first_aux_source_warn(&self, schema_id: &str, entry: &str) -> bool {
         self.aux_source_warned
             .lock()
@@ -6309,9 +5748,9 @@ impl EngineManager {
         self.freq_settings_for(&self.active_schema_id())
     }
 
-    /// **指定方案**的词频排序设置（frequency.md §3/§8）。按引擎类型分：
+    /// 指定方案的词频排序设置（frequency.md §3/§8）。按引擎类型分：
     /// 英文取 `schema.english.frequency`，拼音取 `schema.pinyin.frequency`，
-    /// 其余取**该方案折叠后的**码表调频段（全局基线 + 方案 `[engine.codetable.frequency]`）。
+    /// 其余取该方案折叠后的码表调频段（全局基线 + 方案 `[engine.codetable.frequency]`）。
     ///
     /// 取 `schema_id` 而非恒用 active：特殊模式是 overlay，`active` 仍是主方案，而它引用的
     /// 方案有自己的词库与调频诉求（快符表要稳定顺序、生僻字表要学习），照 active 取会让
@@ -6326,15 +5765,13 @@ impl EngineManager {
                 return s.clone();
             }
         }
-        // 英文记账口径**按候选来源生效、不按当前方案**——混输方案里混进来的英文候选
-        // 同样读它。故在分流之外先取一次，三个分支共用同一个值；只在英文分支里读的话，
-        // 混输下的英文候选会静默回到默认口径。
+        // 英文记账口径按候选来源生效、不按当前方案（混输里的英文候选同样读它），故在分流
+        // 之外取一次、三个分支共用。
         let english_code_by_input = {
             let en = self.english.lock().unwrap_or_else(|e| e.into_inner());
             en.frequency.code_scope == "input"
         };
-        // 同上：跨引擎共用一个值，故在分支之外取一次。只在某个分支里读的话，别的引擎下
-        // 这条规则会静默失效——而那正是 `english_code_by_input` 当初踩过的坑。
+        // 同上：跨引擎共用一个值。
         let charsets = Arc::clone(&self.charsets.lock().unwrap_or_else(|e| e.into_inner()));
         let engine_type = self.schema_engine_type(&id);
         let settings = match engine_type.as_deref() {
@@ -6366,9 +5803,8 @@ impl EngineManager {
                 }
             }
             _ => {
-                // **按方案折叠后的**调频段，不是全局镜像：基线（普通方案=全局、特殊方案=
+                // 按方案折叠后的调频段，不是全局镜像：基线（普通方案=全局、特殊方案=
                 // 内置默认）叠加该方案 `[engine.codetable.frequency]` 的稀疏覆盖。
-                // 此前这里直接读 `self.codetable.lock()`，于是方案文件里写了调频也无人读。
                 let global = self
                     .codetable
                     .lock()
@@ -6382,8 +5818,7 @@ impl EngineManager {
                 );
                 FreqSettings {
                     // 码表默认 `all`：其前缀补全已由 `freq_tier` 分到独立档位、跨不到精确档
-                    // 之前，无需再按语义单元收窄；且这与 `Top`/`Step` 的历史行为一致（那两者
-                    // 对前缀补全从无限制），避免升级后存量用户的调频突然变窄。
+                    // 之前，无需再按语义单元收窄。
                     promote_prefix: PromotePrefix::parse(&ct.frequency.promote_prefix),
                     english_code_by_input,
                     charsets: Arc::clone(&charsets),
@@ -6410,12 +5845,8 @@ impl EngineManager {
 
     /// 装配字符类 registry：出厂两层目录 + store 里的用户层 + 两个外部引用。
     ///
-    /// # ★ 全进程只装配这一份
-    ///
-    /// `input.rare_char.include_blocks`（生僻字模式准入）在这里就一并吃进去，尽管它的
-    /// 消费点在 coordinator——那边通过 [`Self::charsets`] 取同一份。两处各装配一份的
-    /// 话，同一个 key 可能在免词频和生僻准入下解析出不同的类（用户层新增/删除一个类的
-    /// 瞬间尤其如此），而这种不一致没有任何报错。
+    /// 全进程只装配这一份：生僻字模式准入（`input.rare_char.include_blocks`）也在这里吃进去，
+    /// coordinator 经 [`Self::charsets`] 取同一份，免得免词频与生僻准入对同一个 key 解析出不同的类。
     ///
     /// `store` 为 `None`（无持久化的 headless）时用户层为空——与其它用户数据一致：
     /// 没有 store 就没有用户层，不另找目录兜底。
@@ -6448,17 +5879,11 @@ impl EngineManager {
         )
     }
 
-    /// **只**重装字符类 registry，不动引擎缓存。
+    /// 只重装字符类 registry，不动引擎缓存。
     ///
-    /// # ⚠️ 为什么必须独立于 `reload_from_config`
-    ///
-    /// 那个方法只在 **schema_dirty** 时被调用（改了才热重建引擎，避免每次保存都丢词典
-    /// 缓存）。而 `input.rare_char.include_blocks` 在 **input 段**，改它根本不会把
-    /// schema 标脏——registry 只在那里更新的话，用户改完生僻字模式的纳入区块**毫无
-    /// 反应，要切一次方案或重启才生效**。
-    ///
-    /// 这正是本仓反复出现的「运行时镜像态没回灌」那类缺陷：改动落进了配置，却没落进
-    /// 由它派生的运行时结构。⇒ 每个无条件重建 `ConfigBundle` 的地方都要调本方法。
+    /// 必须独立于 `reload_from_config`：那个只在 schema 段变脏时调用，而
+    /// `input.rare_char.include_blocks` 在 input 段，改它不会触发。每个无条件重建
+    /// `ConfigBundle` 的地方都要调本方法。
     pub fn rebuild_charsets(&self, config: &wind_config::Config) {
         *self.charsets.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(Self::build_charsets(
             config,
@@ -6469,7 +5894,7 @@ impl EngineManager {
 
     /// 出厂两层（data + custom）的字符类合并结果——编辑视图与 diff 的基准。
     ///
-    /// ★ 与装配用的是同一个 `load_factory`：基准若另算一份，diff 出来的「用户新增」
+    /// 与装配用的是同一个 `load_factory`：基准若另算一份，diff 出来的「用户新增」
     /// 可能是定制层本来就有的，用户「恢复默认」就把定制层一并丢了。
     pub fn charset_factory(
         &self,
@@ -6482,22 +5907,20 @@ impl EngineManager {
 
     /// 直接换掉字符类 registry。
     ///
-    /// 生产上由 [`Self::rebuild_charsets`] 从配置装配；本方法留给**测试夹具**与将来
+    /// 生产上由 [`Self::rebuild_charsets`] 从配置装配；本方法留给测试夹具与将来
     /// 「设置页改完 charsets/ 立即热载」那条路径——它们手里已经有现成的 registry，
     /// 不必再走一遍目录扫描。
     pub fn set_charsets(&self, reg: Arc<wind_candidate::CharsetRegistry>) {
         *self.charsets.lock().unwrap_or_else(|e| e.into_inner()) = reg;
     }
 
-    /// 用户配置目录里还留着**已不再被读取**的旧落点时提醒一句。
+    /// 用户配置目录里还留着已不再被读取的旧落点时提醒一句（文件还在、程序不读，不提醒就是
+    /// 静默失效）：
     ///
-    /// | 旧落点 | 何时失效 | 现在在哪 |
-    /// |---|---|---|
-    /// | `schemas/common_chars.txt` | 2026-09-04 | `charsets/common_han.yaml` 的列表体 |
-    /// | `charsets/*.yaml` | 2026-09-05 | `data/charsets/*.yaml`（设置页「新建分类…」对话框里加载） |
-    ///
-    /// ⚠️ 两者都是**静默失效**：文件还在、程序不读、也不报错。用户看到的是「我明明改了
-    /// 字表，判定却还是自带那套」。提醒不能省。第二条没写迁移：那个落点从未发布。
+    /// | 旧落点 | 现在在哪 |
+    /// |---|---|
+    /// | `schemas/common_chars.txt` | `charsets/common_han.yaml` 的列表体 |
+    /// | `charsets/*.yaml` | `data/charsets/*.yaml`（设置页「新建分类…」对话框里加载） |
     fn warn_stale_charset_files() {
         let Some(dir) = wind_config::Config::user_config_dir() else {
             return;
@@ -6535,14 +5958,10 @@ impl EngineManager {
         }
     }
 
-    /// 用指定方案引擎转换（不改变当前活跃方案，必要时懒加载）。
-    /// 用于临时拼音：码表模式下临时借用拼音引擎反查。
     /// 同 [`Self::convert_with`]，但把 [`ConvertOptions`] 交给引擎。
     ///
-    /// 目前唯一的调用方是生僻字模式：它要在**截断之前**筛掉常用字，否则配额会被常用字
-    /// 占满（详见 `ConvertOptions::admit`）。拼音引擎认这个选项，其余引擎的默认实现转发
-    /// 到 `convert` 而忽略它——那不是遗漏：调用方在拿到结果后仍有一道最终过滤，
-    /// 下推只是让**够不够**与**快不快**这两件事变好。
+    /// 生僻字模式用它在截断之前筛掉常用字（`ConvertOptions::admit`）。不认这个选项的引擎
+    /// 转发到 `convert`，调用方拿到结果后仍有一道最终过滤，下推只为够数与快。
     pub fn convert_with_opts(
         &self,
         schema_id: &str,
@@ -6568,6 +5987,8 @@ impl EngineManager {
         }
     }
 
+    /// 用指定方案引擎转换（不改变当前活跃方案，必要时懒加载）。
+    /// 用于临时拼音等 overlay：码表模式下临时借用拼音引擎。
     pub fn convert_with(
         &self,
         schema_id: &str,
@@ -6604,7 +6025,7 @@ impl EngineManager {
         engine.map(|e| e.enumerate(limit)).unwrap_or_default()
     }
 
-    /// 指定方案「进入即展示」浏览态的**呈现上限**（`Engine::browse_display_limit`）。
+    /// 指定方案「进入即展示」浏览态的呈现上限（`Engine::browse_display_limit`）。
     /// 内存查已加载引擎表，无 IO（区别于 `effective_codetable`，那个每次都读 TOML）。
     /// 未加载 / 无浏览语义返回 None = 不限。
     pub fn browse_display_limit_of(&self, schema_id: &str) -> Option<usize> {
@@ -6617,7 +6038,7 @@ impl EngineManager {
 
     /// 反查 `(code, text)` 在该方案词典里的音节边界；方案未加载/非拼音/查不到均返回 0。
     ///
-    /// **不做推断**（区别于 `generate_word_pinyin`）：拿现成的码点查取真值。
+    /// 不做推断（区别于 `generate_word_pinyin`）：拿现成的码点查取真值。
     /// 供词频列表显示音节格式——词频表本身不带 boundary。
     pub fn syllable_boundary_of(&self, schema_id: &str, code: &str, text: &str) -> u64 {
         if !self.ensure_loaded(schema_id) {
@@ -6627,11 +6048,10 @@ impl EngineManager {
         engine.map_or(0, |e| e.syllable_boundary_of(code, text))
     }
 
-    /// 用指定方案的引擎为词语生成**带空格的全拼音节码**（造词反推、多音字消歧）。
-    /// 方案非拼音类、未能加载或无法生成时返回 None（**含非汉字的词必落此路**，逐字兜底
-    /// 取不到读音）。调用方可回退 `wind_reverse::ReverseLookup::gen_pinyin`——注意那条路
-    /// **同样产出带空格的音节码**（每字一音节），故落库前一样要 `split_spaced_code` 拆成
-    /// 扁平 key，不可当扁平码直传（曾因此把 `"ni hao"` 写成 key，词彻底打不出来）。
+    /// 用指定方案的引擎为词语生成带空格的全拼音节码（造词反推、多音字消歧）。
+    /// 方案非拼音类、未能加载或无法生成时返回 None（含非汉字的词必落此路）。调用方可回退
+    /// `wind_reverse::ReverseLookup::gen_pinyin`——那条路同样产出带空格的音节码，落库前一样要
+    /// `split_spaced_code` 拆成扁平 key，不可当扁平码直传。
     pub fn generate_word_pinyin(&self, schema_id: &str, text: &str) -> Option<String> {
         if !self.ensure_loaded(schema_id) {
             return None;
@@ -6643,10 +6063,10 @@ impl EngineManager {
     /// 批量求解 `(code, text)` 的音节边界，兼作拼音词条合法性判据（导入闸口用）。
     ///
     /// 引擎句柄只取一次——导入动辄上万行，逐行 `ensure_loaded` + 加锁不可接受
-    /// （同 [`Self::generate_words_pinyin`] 的理由）。返回与 `pairs` **同序等长**。
+    /// （同 [`Self::generate_words_pinyin`] 的理由）。返回与 `pairs` 同序等长。
     ///
-    /// ⚠️ 方案未加载 / 非拼音方案 → 整批 [`BoundaryResolution::NoInfo`]，即
-    /// **「合法但无边界」而非「非法」**。码表词库导入正是走这条路，判成非法会全军覆没。
+    /// 方案未加载 / 非拼音方案 → 整批 [`BoundaryResolution::NoInfo`]，即「合法但无边界」
+    /// 而非「非法」：码表词库导入正是走这条路。
     pub fn resolve_boundaries(
         &self,
         schema_id: &str,
@@ -6668,7 +6088,7 @@ impl EngineManager {
     /// 批量版 [`Self::generate_word_pinyin`]：引擎句柄只取一次（`ensure_loaded` +
     /// 一次 `engines` 加锁），其余与逐个调用等价。
     ///
-    /// 返回与 `texts` **同序等长**；生成不出的位置为 None，由调用方决定回退还是留空。
+    /// 返回与 `texts` 同序等长；生成不出的位置为 None，由调用方决定回退还是留空。
     pub fn generate_words_pinyin(&self, schema_id: &str, texts: &[&str]) -> Vec<Option<String>> {
         if !self.ensure_loaded(schema_id) {
             return vec![None; texts.len()];
@@ -6683,13 +6103,10 @@ impl EngineManager {
             .collect()
     }
 
-    /// 「被定制版 hide 掉的方案仍被引用」的告警，**每个 id 每进程只打一次**。
+    /// 「被定制版 hide 掉的方案仍被引用」的告警，每个 id 每进程只打一次。
     ///
-    /// 节流的理由：[`Self::read_schema`] 在热路径上（每次候选/切模式/取按键表都可能过），
-    /// 无节流会把日志刷爆到没人看。而这条信息本身是**定制者的一次性配置错误**——
-    /// mix `members` / `special_modes` / `schema.active` 指向了被 hide 的方案，
-    /// 消费端会静默跳过该成员，一次 WARN 足够定位。提前报出来归 P3 的
-    /// `wind_input config check --custom`，那才是定制者该看见它的地方。
+    /// [`Self::read_schema`] 在热路径上，不节流会刷爆日志；这是定制者的一次性配置错误
+    /// （mix 成员 / 特殊模式 / `schema.active` 指向了被 hide 的方案），一次 WARN 足够定位。
     fn warn_hidden_schema_once(schema_id: &str) {
         static WARNED: std::sync::OnceLock<Mutex<std::collections::HashSet<String>>> =
             std::sync::OnceLock::new();
@@ -6707,21 +6124,14 @@ impl EngineManager {
         }
     }
 
-    /// 扫描**全部资源层**（user / custom / data）的 `schemas/` 目录，收集
-    /// `*.schema.toml` 的 id。
+    /// 扫描全部资源层（user / custom / data）的 `schemas/` 目录，收集 `*.schema.toml` 的 id。
     ///
-    /// ★ **返回值按层序**（`user > custom > data`，层内按文件名序），同名 id 只留**首次
-    /// 出现**的那一层。这不是可有可无的整齐：[`Self::resolve_active_schema_id`] 拿它挑
-    /// 降级目标，而「定制者自带的方案」才是他意图中的替代品，必须排在出厂方案前面。
+    /// 返回值按层序（`user > custom > data`，层内按文件名序），同名 id 只留首次出现的那一层。
+    /// 别改成整体 `sort()`：[`Self::resolve_active_schema_id`] 拿它挑降级目标，定制者自带的
+    /// 方案必须排在出厂方案前面。
     ///
-    /// ⚠️ 这里曾是 `ids.sort()`，注释写「扫描顺序无关紧要，各层都贡献 id」——那句话对
-    /// [`Self::installed_schemas`] 成立（它自己再排一次），对「挑一个降级目标」**不成立**。
-    /// 实测后果：五笔用户装上虎码定制版，降级落点是 `english`（`'e' < 'h'`，字典序把英文
-    /// 方案排在了虎码前面），首启一个汉字都打不出。别再改回 `sort()`。
-    ///
-    /// **已剔除被定制版 hide 的 id**（不是靠下游 `read_schema` 返回 None 兜底）：那样每个
-    /// 被删的方案都会在这里触发一次 `warn_hidden_schema_once`，把「定制者配错了」的告警
-    /// 变成「定制版正常工作」的噪音。未按 `is_supported()` 过滤——那要读文件，由调用方按需做。
+    /// 已剔除被定制版 hide 的 id，免得下游 `read_schema` 把正常的定制当配置错误告警。
+    /// 未按 `is_supported()` 过滤——那要读文件，由调用方按需做。
     fn scan_layer_schema_ids(data_dir: &Path) -> Vec<String> {
         // 合并扫描各层：用户目录可新增第三方方案、定制层可自带方案（read_schema 走
         // resolve_schema_file，本就按同一层序，故都能被读出）。
@@ -6766,13 +6176,11 @@ impl EngineManager {
 
     /// 按层序（`user > custom > data`）解析一个 schemas 相对文件路径，靠前的层胜出。
     ///
-    /// 这是**方案文件的唯一入口**：`read_schema` 的 `{id}.schema.toml` 与双拼布局的
+    /// 方案文件的唯一入口：`read_schema` 的 `{id}.schema.toml` 与双拼布局的
     /// `shuangpin/{id}.toml` 都走这里。
     ///
-    /// ⚠️ **不能换成 `Config::resolve_schema_resource`**，两者契约不同：那个返回
-    /// `Option`（各层都没有 ⇒ None），本函数返回 `PathBuf`，**各层都没有时返回 data 层
-    /// 的路径**，由调用方 `exists()` 判定后报「方案文件不存在」。换过去会改变「找不到时
-    /// 返回什么」，把「缺文件」变成上游一路 `?` 掉的静默 None。
+    /// 不能换成 `Config::resolve_schema_resource`：那个各层都没有时返回 None，本函数返回
+    /// data 层的路径，由调用方 `exists()` 判定后报「方案文件不存在」，换过去缺文件就静默了。
     fn resolve_schema_file(rel: &str, data_dir: &Path) -> std::path::PathBuf {
         let layers = Config::resource_layers_named_with(Some(data_dir));
         for (i, layer) in layers.iter().enumerate() {
@@ -6780,7 +6188,7 @@ impl EngineManager {
             if !p.is_file() {
                 continue;
             }
-            // 遮蔽判定看**全部**后续层：用户层盖住 custom 层同样是「覆盖自带数据」。
+            // 遮蔽判定看全部后续层：用户层盖住 custom 层同样是「覆盖自带数据」。
             let shadowed = layers[i + 1..]
                 .iter()
                 .any(|b| b.path.join("schemas").join(rel).is_file());
@@ -6793,13 +6201,9 @@ impl EngineManager {
     /// 读取并解析 schema 文件（仅 TOML）。用户目录优先（见 resolve_schema_file）；
     /// 若 `override_dir/{id}.toml` 存在则深合并到基础方案之上（设置页 override 层 L3）。
     ///
-    /// ★ **定制版减法（`custom.toml` 的 `[schemas] hide`）的主拦截点就在这里。**
-    /// 釜底抽薪：方案文件读不出来 ⇒ [`Self::schema_supported`]、[`Self::build_engine`]、
-    /// mix members 的 `ensure_schema` 门卫、`overlay_modes`（特殊模式）全部自动失效，
-    /// 不必逐处补过滤——逐处补的写法漏一处就是「我明明把五笔删了，它还能从某个入口冒出来」。
-    ///
-    /// 与 `[schema].hidden` 正交，**不复用** [`Self::schema_hidden`] 那条路径：
-    /// 见 [`Config::custom_hides_schema`] 的两条 ★。
+    /// 定制版减法（`custom.toml` 的 `[schemas] hide`）的主拦截点在这里：方案文件读不出来，
+    /// 下游各入口（[`Self::schema_supported`]、[`Self::build_engine`]、混输成员、`overlay_modes`）
+    /// 自动失效，不必逐处补过滤。与 `[schema].hidden` 正交，见 [`Config::custom_hides_schema`]。
     fn read_schema(
         schema_id: &str,
         data_dir: Option<&Path>,
@@ -6835,7 +6239,7 @@ impl EngineManager {
                 return None;
             }
         };
-        // 发现目录里的词库登记为扩展库。必须在合并 override **之前**：override 的词库项只按 id
+        // 发现目录里的词库登记为扩展库。必须在合并 override 之前：override 的词库项只按 id
         // 匹配方案里已有的库（`merge_dict_overrides`），晚注入的库用户翻的开关永远对不上号。
         Self::inject_dir_dicts(
             &mut base,
@@ -6855,9 +6259,8 @@ impl EngineManager {
         if let Some(dir) = user_text_dir {
             Self::inject_user_dicts(&mut base, schema_id, dir);
         }
-        // 字段级容错（`tolerant_de`）的回落是**静默**的：它只让那一个字段回落，不再触发
-        // 下面的段级降级。清空→反序列化→取走，把这些回落也收进 `degraded_items`，
-        // 否则用户的处境仍是「我写的这项没反应，也没人告诉我」。
+        // 字段级容错（`tolerant_de`）的回落是静默的，不触发段级降级。清空→反序列化→取走，
+        // 把这些回落也收进 `degraded_items` 告知用户。
         wind_config::tolerant_de::clear_fallbacks();
         let misplaced = misplaced_dict_font_keys(&base);
         let mut schema = match Schema::from_toml_value(base.clone()) {
@@ -6876,12 +6279,9 @@ impl EngineManager {
                 }
                 Some(s)
             }
-            // ⚠️ 这里**不能**直接 `None`。整份 `try_into` 是一次性的：`[candidate]` 里一个
-            // `text_orientation = ""` 就让整个方案读不出来，而 `read_schema` 的 `None` 会
-            // 让方案名/类型/引擎构建等约 30 个调用点一起归零——用户看到的是「这个方案完全
-            // 没反应，也不报错」。2026-09-04 实际发生过。改走段级降级：有毒的段回落出厂
-            // 默认值，方案的其余部分照常工作，降级清单挂在 `Schema::degraded_items`
-            // 上交给协调器 toast。
+            // 不能直接 `None`：一个坏字段就让整个方案读不出来，几十个调用点一起归零且不报错。
+            // 走段级降级：有毒的段回落出厂默认值，其余照常，降级清单挂在
+            // `Schema::degraded_items` 上交给协调器 toast。
             Err(root_err) => Self::salvage_schema(schema_id, base, &root_err),
         }?;
         if !misplaced.is_empty() {
@@ -6936,7 +6336,7 @@ impl EngineManager {
         match Schema::from_toml_value(value) {
             Ok(mut s) => {
                 for (path, err) in &bad {
-                    // WARN 而非 INFO：这是**异常**不是正常降级，压成 INFO 会掩盖真实的
+                    // WARN 而非 INFO：这是异常不是正常降级，压成 INFO 会掩盖真实的
                     // 值域收缩（改了枚举取值却没写迁移，会在这里悄悄「自愈」成出厂值）。
                     warn!(
                         "方案 {schema_id} 的 [{path}] 解析失败，已回落出厂默认值\
@@ -7037,12 +6437,9 @@ impl EngineManager {
         correction: &Arc<crate::pinyin::correction::CorrectionRules>,
         // `misread`：误读表，`None` = 不召回不标（见 `EngineManager::misread_for_engines`）。
         misread: Option<&Arc<crate::pinyin::misread::MisreadTable>>,
-        // `phrase_seg_anywhere`：三个作用域（英文方案 / 临英 / 快捷输入英文）里是否
-        // **有任何一个**开着词组分词。不按作用域分别开关，是因为英文引擎实例是三者
-        // **共用**的（进程里只有 `engines["english"]` 这一个实例，见 [`EnglishProvider`]）
-        // ——`seg_sep` 挂在引擎上根本分不开作用域。真正的闸门在协调器：`'` 进不了缓冲，
-        // `convert` 的 `input.contains(sep)`
-        // 就早退，分词路径恒不触发。本参数只决定「引擎要不要具备这个能力、要不要预热索引」。
+        // `phrase_seg_anywhere`：英文方案 / 临英 / 快捷输入英文里是否有任何一个开着词组分词。
+        // 英文引擎实例是三者共用的，分不开作用域；真正的闸门在协调器（`'` 进不了缓冲，分词
+        // 路径不触发）。本参数只决定引擎要不要具备这个能力、要不要预热索引。
         phrase_seg_anywhere: bool,
         // `lookup_disabled_dicts`：全局 `input.reverse.lookup_disabled_dicts`（经
         // `EngineManager::reverse_lookup_disabled` 镜像传入）。开 ⇒ 码表引擎挂影子层（未启用扩展库，
@@ -7098,17 +6495,15 @@ impl EngineManager {
                 phrase_seg_anywhere,
                 lookup_disabled_dicts,
                 Some(MixedRole::Primary {
-                    // 取**混输方案自己**声明的值，不继承 primary_schema 的（见 MixedRole::Primary）；
-                    // 且只在整句**真能触发**（没配拼音子引擎）时才传真——整句开着会让满码上屏 /
+                    // 取混输方案自己声明的值，不继承 primary_schema 的（见 MixedRole::Primary）；
+                    // 且只在整句真能触发（没配拼音子引擎）时才传真——整句开着会让满码上屏 /
                     // 满码空码清空 / 顶码让位，一个不触发的整句不该白白关掉它们。
                     sentence_input: schema.engine.codetable.sentence_input
                         && m.secondary_schema.is_empty(),
                 }),
                 english_provider,
             )?;
-            // 「声明了整句、却配着拼音子引擎」是个不会生效的组合：超码长区间归拼音
-            // （`MixedEngine::convert` 直接走 `convert_overflow`，不经主引擎），而整句的
-            // 门槛正是超码长。明说一句，别让人对着一个没反应的配置项干瞪眼。
+            // 「声明了整句、却配着拼音子引擎」不会生效（超码长区间归拼音），告警一句。
             if schema.engine.codetable.sentence_input && !m.secondary_schema.is_empty() {
                 warn!(
                     "混输方案 {} 声明了 [engine.codetable] sentence_input，但它配有拼音子引擎 \
@@ -7117,9 +6512,7 @@ impl EngineManager {
                     schema_id, m.secondary_schema
                 );
             }
-            // 逆切分在混输下是**整体关闭**的（见 `resolve_split_input` 的长注释：切分候选的
-            // code 是整串，会落进混输档位的档 0、压过拼音精确候选）。方案作者写了却不生效，
-            // 必须说一句 —— 「配置开着却没反应」是本仓点过名的最难排查的状态。
+            // 逆切分在混输下整体关闭（见 `resolve_split_input`），写了却不生效要告警。
             if schema.engine.codetable.split_input {
                 warn!(
                     "混输方案 {} 声明了 [engine.codetable] split_input，但逆切分在混输下尚未接线\
@@ -7128,7 +6521,7 @@ impl EngineManager {
                     schema_id
                 );
             }
-            // secondary（拼音）是**唯一**注入 [`MixPinyinOpts`] 的地方：这些收敛只约束
+            // secondary（拼音）是唯一注入 [`MixPinyinOpts`] 的地方：这些收敛只约束
             // 「作为混输辅助的拼音」，纯拼音方案走 build_engine 时仍传 None（行为不变）。
             let secondary = if m.secondary_schema.is_empty() {
                 None
@@ -7159,13 +6552,9 @@ impl EngineManager {
                 2
             };
             let block_on_pinyin = mix_cfg.auto_commit_block_on_pinyin;
-            // 英文候选（schema.mix.enable_english）：开启时经 `english_provider` 取那份
-            // **共享**的英文引擎（词库缺失则 None，静默退化为无英文）。
-            //
-            // ⚠️ 此前这里是 `Self::build_engine("english", ...)`，于是混输自带一份、
-            // `engines["english"]` 一份，同样的词库与词组索引在进程里躺两遍。靶机
-            // （18 万条英文词组）上表现为启动日志里两条「后台预热完成」、多占 12.7 MB。
-            // 开关热切换经 reload_from_config 的 engines.clear() 重建混输引擎自然生效。
+            // 英文候选（schema.mix.enable_english）：开启时经 `english_provider` 取共享的英文
+            // 引擎（词库缺失则 None，退化为无英文），别在这里另建一份。开关热切换经
+            // reload_from_config 的 engines.clear() 重建混输引擎生效。
             let english = if mix_cfg.enable_english {
                 english_provider.and_then(|f| f())
             } else {
@@ -7215,17 +6604,11 @@ impl EngineManager {
                 return None;
             }
             let dm = wind_dict::DictManager::new();
-            // 用户词层：英文用户词（专有名词、缩写、项目内部词汇——词库里不会有的那些）。
-            // 归属 `schema_id`（即 "english"），与 `data_schema_id` 对英文的返回值一致；
-            // 读写不同源的话，加进去的词永远查不出来。
-            //
-            // 临时词层：英文自动造词（`[schema.english.auto_learn]`，2026-10-07 起）的暂存区——
-            // 上屏了词库里没有的原文就记一条，攒够次数晋升用户词库。挂法同码表分支。
-            // ⚠️ 这是**共享**英文引擎：临英与快捷输入 / 混输里的英文成员同样看得到临时词
-            // （拼音 / 码表混英文的上屏否决 `english_merge::has_any` 刻意不算临时词）。
-            // 开关从没开过时这张表是空的；开过再关，已造的临时词仍在、仍可选用。
-            //
-            // 注册顺序 User → Temp → System 与码表分支一致（用户词在前）。
+            // 用户词层归属 `schema_id`（即 "english"），须与 `data_schema_id` 对英文的返回值
+            // 一致，否则加进去的词查不出来。临时词层是英文自动造词
+            // （`[schema.english.auto_learn]`）的暂存区；这是共享引擎，临英与混输里的英文成员
+            // 同样看得到临时词（`english_merge::has_any` 的上屏否决刻意不算临时词）。
+            // 注册顺序 User → Temp → System 与码表分支一致。
             if let Some(store) = &store {
                 // 用户词托底到名次权重之上：系统词按词频名次赋了权，权重为 0（导入的词表
                 // 没有权重列）或手填小值的用户词不托底就会沉到常用系统词之后。
@@ -7258,7 +6641,7 @@ impl EngineManager {
             // 全 false：无自动上屏 / 顶码 / 编码提示，纯前缀查词。
             let commit_opts = crate::codetable::CommitOptions::default();
             info!("Built english engine {}", schema_id);
-            // 词组分词（t42）：三个作用域任一开着就给引擎装上这个能力，分词符固定 `'`
+            // 词组分词：三个作用域任一开着就给引擎装上这个能力，分词符固定 `'`
             // （不可配的理由见 `EnglishGlobal::phrase_seg`）。全关时传 None，
             // `convert` 逐字节退回原路径、索引一次都不建。
             let seg = phrase_seg_anywhere.then_some(crate::english_phrase::PHRASE_SEPARATOR);
@@ -7287,12 +6670,7 @@ impl EngineManager {
                     return None;
                 }
             };
-            // （unigram 语言模型的加载已移除：它是 cn_dicts 的一份副本，词图打分改用词条
-            // 自身的词典权重，见 `pinyin::lattice::score_node_inner`。配置键与 unigram.txt/
-            // wdb 产物已一并清理；老用户机器上残留的 wdb 由缓存目录清理逻辑扫走。）
-            //
-            // 从全局拼音配置构建引擎配置和模糊音（Task 1.4：修 fuzzy 从未生效 bug）。
-            // enabled 作总开关：未启用时所有模糊标志归零（与 Go 行为一致）。
+            // 从全局拼音配置构建引擎配置和模糊音。enabled 作总开关：未启用时所有模糊标志归零。
             let pg = pinyin_cfg;
             // 双拼不启用换位纠错（规则是全拼字母层的），纠错置空。
             let shuangpin = schema
@@ -7316,21 +6694,14 @@ impl EngineManager {
                 // 纯拼音方案看 `[schema.pinyin.abbrev] enabled`；混输看 `mix.enable_pinyin_abbrev`，
                 // 两者取与——混输用户关掉全局简拼，混输里的拼音也不该还出简拼。
                 enable_abbrev: pg.abbrev.enabled && mix_secondary.map(|o| o.abbrev).unwrap_or(true),
-                // 残码整句只在**非混输**下启用，理由见 `PinyinConfig::enable_partial_final`。
-                // ⚠️ 判据是「是不是混输辅助」本身，不是 `abbrev` 的取值——两个开关恰好都
-                // 「混输时关掉」，但语义正交，串用会在其中一个被单独调整时静默错配。
+                // 残码整句只在非混输下启用，理由见 `PinyinConfig::enable_partial_final`。
+                // 判据是「是不是混输辅助」本身，不是 `abbrev` 的取值（两者语义正交）。
                 enable_partial_final: mix_secondary.is_none(),
-                // 用户词进整句词图（S2）。全局项，混输的拼音子引擎同样适用：
-                // 那一侧的拼音候选也来自同一个 `PinyinEngine`，没有单独关掉的理由。
+                // 用户词进整句词图。全局项，混输的拼音子引擎同样适用。
                 sentence_uses_user_words: pg.sentence_uses_user_words,
-                // 整句 N-best（露几条 / 算几条）。规整（夹界、算的不少于露的）在引擎侧
-                // `Config::sentence_counts` 里做，这里只做一件事：**混输的拼音子引擎钉成 1/1**。
-                //
-                // N-best 是拼音方案的验证工具，协调器会在 count>1 时把整句块摆到候选最前
-                // （`place_sentence_block`）。混输下那等于让拼音整句越过码表精确候选 ——
-                // 打五笔的人一旦开了这项，满屏首位全是拼音组句。混输的拼音本就在降档层里
-                // 竞争（见 `MixedEngine` 的分档加权），整句块不该有跳档的特权。
-                // 判据与上面 `enable_partial_final` 同为「是不是混输辅助」。
+                // 整句 N-best（露几条 / 算几条），规整在引擎侧 `Config::sentence_counts`。
+                // 混输的拼音子引擎钉成 1/1：count>1 时协调器把整句块摆到最前
+                // （`place_sentence_block`），混输下会让拼音整句越过码表精确候选。
                 sentence_count: if mix_secondary.is_some() {
                     1
                 } else {
@@ -7342,32 +6713,20 @@ impl EngineManager {
                     pg.sentence_max_count
                 },
                 abbrev_fallback: Default::default(),
-                // ⚠️ 补全这两项**不按 `mix_pinyin` 分流**，与上面三项刻意不同：它们约束的是
-                // 「引擎敢预测多少你没打的音节」，这个偏好与「当前是不是混输」无关，是用户
-                // 对候选面的统一取舍。分流会让同一个设置在两种方案下表现不一致。
-                // 守门测试：`mixed_completion_config`。
+                // 补全这两项刻意不按混输分流：「引擎敢预测多少没打的音节」是用户对候选面的
+                // 统一取舍。见 `mixed_completion_config`。
                 completion_min_syllables: pg.completion.min_syllables,
                 completion_max_extra_syllables: pg.completion.max_extra_syllables,
-                // 全拼降级输入（双拼下多人共用）。**混输强制关闭**，理由同上面的
-                // `enable_partial_final`：混输的击键串同时是码表码，再挂一条全拼流是过度
-                // 解读。何况混输接双拼这个组合本身就不成立（`MixedEngine::pinyin_may_continue`
-                // 的「前提：混输不接双拼」），此处不必也不该为它留口子。
-                //
-                // 非双拼方案下本项即便为 true 也不生效——引擎侧判据是它与 `shuangpin.is_some()`
-                // 取与（见 `PinyinConfig::allow_full_pinyin`）。
+                // 全拼降级输入（双拼下多人共用）。混输强制关闭：击键串同时是码表码，且混输
+                // 本就不接双拼（`MixedEngine::pinyin_may_continue`）。非双拼方案下本项不生效
+                // （见 `PinyinConfig::allow_full_pinyin`）。
                 allow_full_pinyin: pg.shuangpin.allow_full_pinyin && mix_secondary.is_none(),
             };
             let mut engine = PinyinEngine::new(pcfg, dict).with_fuzzy(fuzzy.clone());
-            // 上下文语言模型：开关（`enabled`）开着，且 **weight 与 model 都得显式配置**才启用——
-            // `weight != 0` 且 `model` 非空（见 `PinyinGrammar::active`）。开关关、weight 为 0、model 为空，任一成立都**根本不读文件**，
-            // 既省内存，也让「没配就等于没这功能」在字节层面成立。
-            //
-            // ★ 为什么模型名也要参与判据：默认模型名一度是 `zh-hans-bgw.gram`，
-            // 于是「只把 weight 调成非 0」就会静默启用它——而该模型实测在 192 条
-            // 整句评测上是 **−4**（见设计文档 §8）。现在默认空串，用户必须两个字段
-            // 都写过一遍才会生效，不存在「不知道自己开了什么」。
-            //
-            // 模型数据不随安装包分发，缺失时降级为关闭而非报错（见设计文档 §5）。
+            // 上下文语言模型：开关开着，且 weight 与 model 都显式配置才启用（见
+            // `PinyinGrammar::active`），否则根本不读文件。模型名默认空串，免得只改 weight 就
+            // 静默启用一个评测上是负收益的模型（docs/design/language-model-integration.md §8）。
+            // 模型数据不随安装包分发，缺失时降级为关闭而非报错（同文档 §5）。
             if pinyin_cfg.grammar.active() {
                 let gram_path = schemas
                     .join("pinyin")
@@ -7396,8 +6755,7 @@ impl EngineManager {
             // 双拼方案：按 layout 加载布局并注入 ShuangpinConverter
             if shuangpin {
                 let layout_id = if schema.engine.pinyin.shuangpin.layout.is_empty() {
-                    // 与 `shuangpin_layout_id_of` 同源；硬编码过一次，分叉了就是
-                    // 「引擎按 A 布局打字、设置页显示 B 布局」。
+                    // 与 `shuangpin_layout_id_of` 同源，否则引擎与设置页显示的布局会分叉。
                     DEFAULT_SHUANGPIN_LAYOUT.to_string()
                 } else {
                     schema.engine.pinyin.shuangpin.layout.clone()
@@ -7441,7 +6799,7 @@ impl EngineManager {
             // 上屏策略：基线 + 该方案 [engine.codetable] 行为折叠。
             // schema 已在 read_schema 合并了 schema_overrides，此处直接取其 engine.codetable。
             // 基线按方案性质选（特殊方案用内置默认、不继承全局），见 codetable_baseline。
-            // ⚠️ 与 resolve_codetable 是**两个平行的折叠点**，基线判据必须一致——
+            // 与 resolve_codetable 是两个平行的折叠点，基线判据必须一致——
             // 一处改了另一处没改，会得到「引擎按 A 行为构建、协调器按 B 行为决策」。
             let eff = Self::codetable_baseline(Some(&schema), codetable_cfg)
                 .resolved(Some(&schema.engine.codetable));
@@ -7458,7 +6816,7 @@ impl EngineManager {
                 // 整句：方案级引擎固定参数（同 max_code_length / base_sort），不走
                 // `eff` 的行为折叠——它是「这张码表能不能整句」，不是用户偏好。
                 //
-                // 作为混输主引擎构建时**改取混输方案自己的声明**，理由见 `MixedRole::Primary`。
+                // 作为混输主引擎构建时改取混输方案自己的声明，理由见 `MixedRole::Primary`。
                 sentence_input: resolve_sentence_input(
                     mixed_role,
                     schema.engine.codetable.sentence_input,
@@ -7470,11 +6828,9 @@ impl EngineManager {
                 // 逆切分：同为方案级引擎固定参数。切点有效性与「与整句同开」的告警在
                 // `CodeTableEngine::new` 里（那里才同时握着 max_code_length 与两个开关）。
                 //
-                // ⚠️ `split_input` 之后的三个旋钮取的是**本次构建的这份 schema**，混输下那就是
-                // `primary_schema` 的值而非混输方案自己的 —— 之所以不必像 `split_input`
-                // 那样经 `MixedRole` 收敛，是因为混输下 `split_input` 已恒为 false，
-                // 三个旋钮读到什么都不会被用到。⚠️ 将来若给混输接上逆切分，**这三行必须
-                // 一并收敛**，否则会得到「混输方案里写的档位静默失效、却继承了主码表的」。
+                // 后三个旋钮取的是本次构建的 schema（混输下即 `primary_schema` 的值）；混输下
+                // `split_input` 恒 false 故无影响。将来给混输接上逆切分，这三行必须一并经
+                // `MixedRole` 收敛。
                 split_input: resolve_split_input(mixed_role, schema.engine.codetable.split_input),
                 split_front_candidates: schema.engine.codetable.split_front_candidates,
                 split_trigger: crate::codetable::SplitTrigger::parse(
@@ -7490,9 +6846,8 @@ impl EngineManager {
                 // 反查模式通配键：不看主开关，非法回落 z（spec §3.2）。
                 reverse_key: Some(eff.reverse_wildcard_char()),
             };
-            // 码表引擎经 DictManager(CompositeDict) 查询。系统词库不再合并成单个 combined，
-            // 而是主库 + 每个扩展（含禁用）各自一个 System 层，查询期由 composite 合并去重。
-            // 开关扩展只需翻该层 enabled 标志即时生效，无需重熔大词库。
+            // 码表引擎经 DictManager(CompositeDict) 查询：主库 + 每个启用的扩展各自一个 System 层，
+            // 查询期由 composite 合并去重。禁用扩展可即时摘层，启用要重建（见 `set_dict_enabled_live`）。
             let layers = Self::load_codetable_layers(&schema, &schemas);
             if layers.is_empty() {
                 warn!("No usable codetable dictionary for schema {}", schema_id);
@@ -7509,15 +6864,9 @@ impl EngineManager {
                     store.clone(),
                     schema_id,
                 )));
-                // 自动造词的**草稿层**（`docs/design/auto-phrase-draft-layer.md`）。
-                //
-                // ⚠️ 只在开关打开时挂：关着的用户不该为一个用不到的功能在每次精确查询上
-                // 多付一次 redb 读。这与 `prewarm_indexes` 只在造词开启时才预热单字全码表
-                // 是同一条判据。
-                //
-                // ⚠️ TTL 在**注册时**固定。改配置需要重建引擎——方案切换与配置重载本来就会
-                // 重建，故不另设通路；真要做成热更新，得给层一个共享的原子值，
-                // 为一个内部字段不值得。
+                // 自动造词的草稿层（`docs/design/auto-phrase-draft-layer.md`）。只在开关打开时挂，
+                // 关着的用户不为它在每次精确查询上多付一次 redb 读。TTL 在注册时固定，改配置
+                // 靠重建引擎生效（方案切换与配置重载本就会重建）。
                 if codetable_cfg.auto_phrase.enabled {
                     dm.register_layer(Box::new(wind_store::StoreDraftLayer::new(
                         store.clone(),
@@ -7568,7 +6917,7 @@ impl EngineManager {
             {
                 engine = engine.with_disabled_dicts(d);
             }
-            // 逆切分的两段由引擎自己查，协调器的候选调整够不着，须另行注入（论坛 t231）。
+            // 逆切分的两段由引擎自己查，协调器的候选调整够不着，须另行注入。
             // 归属 id 取方案自身：码表的 `data_schema_id` 就是自身 id（只有拼音族折叠），
             // 混输下 `split_input` 恒为 false（见 `resolve_split_input`），不会注入。
             if commit_opts.split_input
@@ -7585,35 +6934,20 @@ impl EngineManager {
         }
     }
 
-    /// 码表方案：把主词库 + 每个扩展词库（含**当前禁用**的）各自加载为独立 system 层。
-    /// 返回 `(层名, CachedDict, 初始enabled)`：主库 → `codetable-system`(恒启用)；扩展 →
-    /// `codetable-extra-<id>`(enabled=is_enabled())。**不再合并 combined.wdat**——查询期由
-    /// CompositeDict 合并去重，开关扩展只需翻该层 enabled 标志，无需重熔大词库（对齐 Go 的
-    /// 每库独立缓存 + 查询期合并）。主库优先返回（层序最靠前 → 等权重时排前）。
     /// 词库文件路径解析：按层序 `user > custom > data` 逐层，回退 schemas_dir（data 层，
-    /// 与 read_schema 同语义）。
+    /// 与 read_schema 同语义）。词库路径解析的唯一入口，别在调用方另写一份。
     ///
-    /// 同时支持 **wdat-only 词库**——用户可只投放编译好的 `xxx.wdat` 而不带
-    /// `xxx.dict.yaml`（对齐 Go 的 wdb-only 分发）。yaml 在**各层**都不存在时，改按同名
-    /// wdat 再探一轮**相同顺序**，命中则返回该目录下的 yaml 路径：文件本身不存在，但
-    /// `CachedDict::load_at_with` 会据此推导同目录的 wdat 并直接 mmap。
-    ///
-    /// 为什么必须按 wdat 再探而不能只靠兜底：兜底恒指向安装目录（通常是只读的
-    /// Program Files），而用户投放的 wdat 一般在用户目录，只探 yaml 会把路径定位到错误
-    /// 的目录上。Go 版为此专门引入了 `wdbOnlyHint` 参数，这里靠单点解析一并解决。
-    ///
-    /// 本函数取代了此前 `load_codetable_layers` 与 `load_dictionary` 里两份逐字相同的
-    /// 闭包——「两处各写一份」正是 R6 那条陈旧路径的成因。
+    /// 同时支持 wdat-only 词库（用户只投放编译好的 `xxx.wdat`）：yaml 在各层都不存在时按同名
+    /// wdat 同序再探，命中则返回该目录下的 yaml 路径，`CachedDict::load_at_with` 会据此推导同目录
+    /// 的 wdat。不能只靠兜底：兜底恒指向安装目录，而用户投放的 wdat 一般在用户目录。
     fn resolve_dict_file(rel: &str, schemas_dir: &Path) -> std::path::PathBuf {
         Self::resolve_dict_file_in(rel, &Self::dict_layers(schemas_dir))
     }
 
-    /// 词库解析的层序，元素是**各层的 schemas 级目录**，末位必须是 data 层。
+    /// 词库解析的层序，元素是各层的 schemas 级目录，末位必须是 data 层。
     ///
-    /// ⚠️ data 层直接取调用方传进来的 `schemas_dir`（便携版/测试会传自定义路径），
-    /// **不从它 `parent()` 反推数据根**再交给 `resource_layers_named_with`——那是把「层的
-    /// 兄弟关系」埋进一个反推里，本仓已在这类隐式契约上栽过。user/custom 两层与 data
-    /// 目录参数无关（分别来自 `%APPDATA%` 与安装根下的清单），故取 `None` 那一支。
+    /// data 层直接取调用方传进来的 `schemas_dir`（便携版/测试会传自定义路径），不从它
+    /// `parent()` 反推数据根；user/custom 两层与 data 目录参数无关，故取 `None` 那一支。
     fn dict_layers(schemas_dir: &Path) -> Vec<wind_config::ResourceLayer> {
         let mut layers: Vec<wind_config::ResourceLayer> = Config::resource_layers_named_with(None)
             .into_iter()
@@ -7627,13 +6961,10 @@ impl EngineManager {
     }
 
     /// [`Self::resolve_dict_file`] 的纯函数内核：层序显式传入（元素为 schemas 级目录、
-    /// 靠前者优先、**末位是 data 层兼兜底**），便于测试多层组合。
+    /// 靠前者优先、末位是 data 层兼兜底），便于测试多层组合。
     ///
-    /// ★ **两趟，不是一趟。** 第 1 趟在各层找 `.yaml`，全都没有才进第 2 趟在各层找
-    /// 「有同名 `.wdat` 兄弟」的。改成一趟逐层「yaml 或 wdat 谁先命中算谁」会**反转语义**：
-    /// 用户层只投了 `.wdat`、data 层有 `.yaml` 时，正确结果是 **data 层的 yaml 胜出**
-    /// （yaml 整体优先于 wdat），一趟写法却会让用户的 wdat 抢走。加了 custom 层之后这类
-    /// 组合只会更多——定制者只投 `.wdat`（预编译词库的产物）是很自然的做法。
+    /// 两趟，不是一趟：第 1 趟各层找 `.yaml`，全都没有才第 2 趟找有同名 `.wdat` 的。yaml 整体
+    /// 优先于 wdat——用户层只投了 `.wdat`、data 层有 `.yaml` 时 data 层的 yaml 胜出。
     fn resolve_dict_file_in(
         rel: &str,
         layers: &[wind_config::ResourceLayer],
@@ -7681,7 +7012,7 @@ impl EngineManager {
         fallback
     }
 
-    /// 方案**声明过**的扩展词库 id（含未启用的；主库不在内，它没有 `codetable-extra-` 层）。
+    /// 方案声明过的扩展词库 id（含未启用的；主库不在内，它没有 `codetable-extra-` 层）。
     ///
     /// 供 `CodeTableEngine::set_dict_enabled` 分辨「这个 id 是不是我的」。必须包含未启用的
     /// —— 惰性加载后它们没有层，但禁用它们同样属于「本方案的事、且目标已达成」。
@@ -7695,7 +7026,7 @@ impl EngineManager {
     }
 
     /// 码表方案的选库口径：可用 = path 非空；主库 = 首个 `default`，无则首个可用库；其余可用库
-    /// **全是扩展库**（不看 `is_enabled`）。无可用库 ⇒ `None`。
+    /// 全是扩展库（不看 `is_enabled`）。无可用库 ⇒ `None`。
     ///
     /// [`Self::load_codetable_layers`] 与 [`Self::disabled_extra_sources`] 共用这一处：两边一旦
     /// 漂移，就会出现「某库既不在主层也不在影子层」或「主库进了影子层」。
@@ -7713,13 +7044,13 @@ impl EngineManager {
         Some((main, usable))
     }
 
-    /// 影子层（reverse-mode spec §4.2）的来源：本方案**全部**扩展库（主库除外，含已启用的——
+    /// 影子层（reverse-mode spec §4.2）的来源：本方案全部扩展库（主库除外，含已启用的——
     /// 它们随时可能被热禁用而进影子集合）。哪些真正进影子集合由
     /// `DisabledDictLayers` 按「声明 − 本次实际挂进主 dm 的」在查询时算，见
     /// [`Self::disabled_dict_layers`]。用户词库 / 临时词库不在 `[[dictionaries]]` 里，天然不在内。
     ///
     /// `load` 闭包与 `load_codetable_layers` 同一条读盘路径（`resolve_dict_file` + `cache_path` +
-    /// `CachedDict::load_at_with`），**只返回 `Result`、不 panic**：失败由影子层 `warn!` 后跳过该库
+    /// `CachedDict::load_at_with`），只返回 `Result`、不 panic：失败由影子层 `warn!` 后跳过该库
     /// （spec §4.3）。它可能 mmap 或首建 wdat，大扩展库上是秒级读盘，故由后台线程预热
     /// （[`Self::warm_disabled_dicts_async`]），不留给首次反查模式查询的按键线程；预热没赶上时
     /// 按键线程等它建完或自己现建，之后复用，直到失效重建。开关关着时影子层不挂，从不调用。
@@ -7747,7 +7078,7 @@ impl EngineManager {
     }
 
     /// 组装影子层：来源见 [`Self::disabled_extra_sources`]，启用集 = 本次 `load_codetable_layers`
-    /// **实际挂上**的扩展库 id（不是 `is_enabled()`：用户覆盖启用的已挂上、不进影子；启用但加载
+    /// 实际挂上的扩展库 id（不是 `is_enabled()`：用户覆盖启用的已挂上、不进影子；启用但加载
     /// 失败的算未挂，影子层会再试一次、再失败也只 warn）。主库恒不在来源里。
     /// 无扩展库 ⇒ `None`，不挂：没有可查的未启用库，就不该为它付任何构造或预热开销。
     /// 开关（全局 `input.reverse.lookup_disabled_dicts`，影子层只给反查模式读）由调用方判。
@@ -7770,7 +7101,7 @@ impl EngineManager {
     /// 码表类词库（含英文）读盘的统一入口：英文词库额外叠英文词频名次表
     /// （[`ENGLISH_FREQ_RANKS`]，见 `wind_dict::freq_rank`）。
     ///
-    /// ⚠️ 读英文词库的每一处都要走这里：名次表参与 wdat 指纹，有的带有的不带，同一槽位就
+    /// 读英文词库的每一处都要走这里：名次表参与 wdat 指纹，有的带有的不带，同一槽位就
     /// 有两种指纹、两份缓存来回重建。名次表经 `resolve_dict_file` 定位，用户目录可整体替换。
     fn load_table_dict(
         full: &Path,
@@ -7786,6 +7117,8 @@ impl EngineManager {
         }
     }
 
+    /// 码表方案：主词库 + 每个启用的扩展词库各自加载为独立 system 层（主库 `codetable-system`
+    /// 恒启用且排首位，扩展 `codetable-extra-<id>`），查询期由 CompositeDict 合并去重。
     fn load_codetable_layers(schema: &Schema, schemas_dir: &Path) -> Vec<CodetableLayer> {
         let resolve =
             |rel: &str| -> std::path::PathBuf { Self::resolve_dict_file(rel, schemas_dir) };
@@ -7822,13 +7155,8 @@ impl EngineManager {
             }
             None => return Vec::new(),
         }
-        // 扩展库：**只加载启用的**（t107）。
-        //
-        // 此前是「含禁用的全部加载常驻，供运行时热插拔」—— 热插拔确实快（只翻个标志位，
-        // 不必重熔大词库），但代价是禁用的库照样读盘、照样在 cache 里建出 wdat、照样被
-        // mmap 占着，于是用户「关掉了这个码表」之后既看不见它、又删不掉它的缓存文件。
-        // 现在改为惰性：禁用的库不读、不建缓存、不映射；用户启用它时
-        // `set_dict_enabled` 返回 false → 方案失效 → 下次使用重建，那一趟才去加载。
+        // 扩展库只加载启用的：禁用的库不读、不建缓存、不映射（否则用户关掉后删不掉它的缓存
+        // 文件）。启用时方案失效、下次使用重建才去加载（见 `set_dict_enabled_live`）。
         for e in extras {
             let enabled = e.is_enabled();
             if !enabled {
@@ -7858,13 +7186,11 @@ impl EngineManager {
         out
     }
 
-    /// 方案实际参与构建的词库列表：启用的全部；**一个都没启用时兜底取首个**
+    /// 方案实际参与构建的词库列表：启用的全部；一个都没启用时兜底取首个
     /// （否则整方案无候选，比"少一个扩展库"糟糕得多）。
     ///
-    /// 抽成单一函数是刚性要求：[`Self::load_dictionary`]（拼音引擎用）与
-    /// [`Self::load_dicts_individually`]（两个索引构建方用）**必须选出同一批库**。
-    /// 两处各写一份必然漂移，症状是「候选里有的词，悬停却查不到编码」——错位无声、
-    /// 且没有任何测试会失败。
+    /// [`Self::load_dictionary`]（拼音引擎用）与 [`Self::load_dicts_individually`]（索引构建用）
+    /// 必须选出同一批库，否则「候选里有的词，悬停却查不到编码」。
     fn enabled_dict_specs(schema: &Schema) -> Vec<&DictSpec> {
         let enabled: Vec<&DictSpec> = schema
             .dictionaries
@@ -7882,21 +7208,12 @@ impl EngineManager {
             .collect()
     }
 
-    /// 按方案加载**全部启用词库，各自独立**——不合并、不产出中间文件。
+    /// 按方案加载全部启用词库，各自独立——不合并、不产出中间文件。
     ///
-    /// # 为什么两个索引构建方要走这里而不是 [`Self::load_dictionary`]
-    ///
-    /// 反查索引与单字全码表都只需要「全部条目」，而 `load_dictionary` 的多库分支为此
-    /// 先合成一个 `combined.wdat`：feihuzj2 方案上那是 **230MB 文件 + 30 秒构建**，
-    /// 而两条路径产出的索引**逐位相同**（等价性论证与测试见
-    /// [`wind_dict::cached::build_reverse_index_from`]）。直接逐库读只要 1.85 秒。
-    ///
-    /// 词库选取规则与 `load_dictionary` 保持一致（启用优先、全禁用时兜底取首个），
-    /// **两处必须同源**：不一致会让「候选里有的词，悬停却查不到编码」这类错位出现，
-    /// 且极难归因。
-    ///
-    /// 各库经 [`wind_dict::reader_pool`] 按路径共享 mmap，活跃引擎通常已持有同一批
-    /// reader，故这里几乎零成本：不重新解析、不新增映射。
+    /// 反查索引与单字全码表只需要全部条目，走这里而不是 [`Self::load_dictionary`]：后者多库时
+    /// 要先合成大 `combined.wdat`，而两条路径产出的索引逐位相同（见
+    /// [`wind_dict::cached::build_reverse_index_from`]）。选库规则经 [`Self::enabled_dict_specs`]
+    /// 与 `load_dictionary` 同源。各库经 [`wind_dict::reader_pool`] 按路径共享 mmap，几乎零成本。
     fn load_dicts_individually(schema: &Schema, schemas_dir: &Path) -> Vec<CachedDict> {
         Self::enabled_dict_specs(schema)
             .iter()
@@ -7921,33 +7238,18 @@ impl EngineManager {
         }
     }
 
-    /// 全部**已启用方案**声明的**已启用词库**文件，按 `rel` 去重。
+    /// 全部已启用方案声明的已启用词库文件，按 `rel` 去重。
     ///
-    /// 上层（协调器）拿它去判断「哪些词库自带 `comment` 列」，进而自动派生注释源。本方法
-    /// 刻意**不做那个判断** —— 「一个文件算不算注释源」是 `wind-reverse` 的语义域，放在这里
-    /// 就得让 wind-engine 依赖 wind-reverse，为一个它自己用不上的判据。
+    /// 协调器拿它判断哪些词库自带 `comment` 列、派生注释源；那个判断属于 `wind-reverse`，
+    /// 刻意不在这里做。
     ///
-    /// # 为什么按 `rel` 分组、`schemas` 取并集
+    /// 按 `rel` 分组、`schemas` 取并集：注释源按解析后路径去重挂载（`Coordinator::sync_comment_dicts`），
+    /// 按 (方案, 词库) 各出一条的话第二条的方案 id 会被丢掉。`rel` 在用户/安装目录间不变，
+    /// 适合当稳定 id。
     ///
-    /// 一份词库常被多个方案共用（五笔与五笔拼音同指一个 `.dict.yaml`）。注释源的挂载是按
-    /// **解析后路径**去重的（见 `Coordinator::sync_comment_dicts`），同一文件只会挂一次；
-    /// 若这里按 (方案, 词库) 各出一条，那第二条注定被丢弃，而它带的方案 id 会一起丢 ——
-    /// 表现是「五笔下有注释，五笔拼音下没有」。并集在源头就避免了这件事。
-    ///
-    /// 分组键取 `rel` 而非绝对路径：`rel` 是方案文件里写的那个串，用户目录/安装目录换来
-    /// 换去它都不变，适合给上层当稳定 id；而同一个 `rel` 解析出的绝对路径本就唯一。
-    ///
-    /// # ★ `import_tables` 的子表要各自成条
-    ///
-    /// rime 的主表常常只是一张**清单**：朗月拼音的 `rime_frost.dict.yaml` 通篇只有
-    /// `import_tables:`，一行正文都没有，而带 `comment` 列的 `cn_dicts/corrections`
-    /// （错音错字提示）就藏在那份清单里。只看方案声明的那一层，等于把这个生态里**最常见**
-    /// 的带注释形态整个漏掉。故按 `import_tables` 逐层展开，子表与主表平级各成一条。
-    ///
-    /// 子表路径相对**主表所在目录**且不带 `.dict.yaml`（rime 的约定），`seen` 防环。
-    ///
-    /// ⚠️ 扫的是**全部已启用方案**而非活跃方案：注释源的挂载集合刻意不随方案抖动
-    /// （切方案只影响查询期的白名单求值），与 `scan_chars_in_range` 同一取舍。
+    /// `import_tables` 的子表各自成条：rime 主表常只是一张清单（带 `comment` 列的子表藏在里面）。
+    /// 子表路径相对主表所在目录且不带 `.dict.yaml`，`seen` 防环。扫全部已启用方案而非活跃
+    /// 方案：注释源的挂载集合刻意不随方案抖动。
     pub fn declared_dict_files(&self) -> Vec<SchemaDictFile> {
         let Some(data_dir) = self.data_dir.as_deref() else {
             return Vec::new();
@@ -7971,7 +7273,7 @@ impl EngineManager {
                     let full = Self::resolve_dict_file(&rel, &schemas_dir);
                     let (name, imports) = Self::read_dict_head(&full);
                     for imp in imports {
-                        // rime 的 `import_tables` 相对**主表所在目录**，且不带 `.dict.yaml`。
+                        // rime 的 `import_tables` 相对主表所在目录，且不带 `.dict.yaml`。
                         queue.push((
                             join_rel_dir(&rel, &format!("{imp}.dict.yaml")),
                             String::new(),
@@ -8008,7 +7310,7 @@ impl EngineManager {
     ///
     /// 跳过两类文件：
     /// - 方案已手写声明的（同 path）——手写的有 label / base_order 等设计，优先；
-    /// - 已被某个已声明词库的 `import_tables` 引用、**且确实会被它加载**的——它本就是那张
+    /// - 已被某个已声明词库的 `import_tables` 引用、且确实会被它加载的——它本就是那张
     ///   主表的一部分，再登记一次就是同一批词加载两遍。用户拿上游完整的 `rime_frost.dict.yaml`
     ///   连同 `cn_dicts_cell/` 一起放进用户目录时正是这样。「确实会加载」由 `head` 负责判定
     ///   （生产用 [`Self::dict_head_resolved`]）。
@@ -8180,7 +7482,7 @@ impl EngineManager {
 
     /// 码表 / 拼音 / 英文方案（`[engine] type = "codetable" | "pinyin" | "english"`）没写
     /// `dictionary_dirs` 键时，补一个兜底发现目录 `<主词库所在目录>/ext`，类型同主词库。出厂与
-    /// 第三方方案不改文件就能放扩展词库（英文专业术语库，论坛 t306）。混输不兜底：它没有自己的词库。
+    /// 第三方方案不改文件就能放扩展词库。混输不兜底：它没有自己的词库。
     ///
     /// 补进方案本身而不是只在扫描时用：`schema.getConfig` 也就带上它，设置端的「打开扩展词库
     /// 目录」按钮不用另外推算。写了 `dictionary_dirs = []` 即显式关掉兜底。主词库在 `schemas/`
@@ -8232,12 +7534,10 @@ impl EngineManager {
         );
     }
 
-    /// [`Self::read_dict_head`]，但 `import_tables` 只留**真能在主表目录找到文件**的那些。
+    /// [`Self::read_dict_head`]，但 `import_tables` 只留真能在主表目录找到文件的那些。
     ///
-    /// 给发现目录的「已被主表引用就跳过」用：子表只按主表**所在目录**拼路径、不走分层
-    /// （`rime_source_paths`），所以安装目录里的主表写着 `cn_dicts_cell/idiom`、而文件只在
-    /// 用户目录时，它其实**不会**被主表加载。只看清单就跳过，这张库就两头落空——主表没加载、
-    /// 扩展词库列表里也不出现（未经 S1 裁剪的旧主表正是这样，评测时撞见）。
+    /// 给发现目录的「已被主表引用就跳过」用：子表只按主表所在目录拼路径、不走分层
+    /// （`rime_source_paths`），文件只在别的层时主表并不会加载它，只看清单就跳过会两头落空。
     #[cfg(test)]
     fn dict_head_resolved(path: &Path) -> (String, Vec<String>) {
         let h = Self::dict_head_resolved_full(path);
@@ -8259,9 +7559,7 @@ impl EngineManager {
     /// 读一个 `.dict.yaml` 的 YAML 头 → [`DictHead`]（`name` / `group` / `import_tables`）。
     ///
     /// 只读到独占一行的 `...`（正文起点）或 [`DICT_HEAD_SCAN_LIMIT`] 为止 —— 主词库正文
-    /// 动辄几百 MB，而本函数是**每次启动对每张表都要跑一遍**的。
-    ///
-    /// 几个字段一起取是因为**它们来自同一次读**：分成两个函数就要把同一个文件头读两遍。
+    /// 动辄几百 MB，而本函数每次启动对每张表都要跑一遍。几个字段来自同一次读。
     fn read_dict_head_full(path: &Path) -> DictHead {
         use std::io::BufRead;
         let Ok(f) = std::fs::File::open(path) else {
@@ -8318,17 +7616,10 @@ impl EngineManager {
         (h.name, h.imports)
     }
 
-    /// 清理本方案遗留的 `combined.wdat` —— 改用逐库构建之前那个中间产物
-    /// （feihuzj2 方案上是 **230MB**，且此后再不会有人读它）。
+    /// 清理本方案遗留的 `combined.wdat`（非拼音方案已无消费方，大方案上可达数百 MB）。
     ///
-    /// 只对**确定不再需要它**的方案动手：非拼音方案的 live 引擎走 `load_codetable_layers`
-    /// 的每库独立层，两个索引构建方已改走 [`Self::load_dicts_individually`]，于是
-    /// combined 再无消费方。拼音方案的多库分支仍可能需要它（见 [`Self::load_dictionary`]），
-    /// 一律不动 —— 判据取 [`Schema::is_pinyin`] 而非自己比字符串，因为它还正确处理了
-    /// `engine.type` 缺省、要靠默认词库类型反推的那种方案。
-    ///
-    /// 删不掉就算了（正被别的进程映射、或无权限）：这只是块浪费的磁盘，不是正确性问题，
-    /// 下次再来一遍即可。
+    /// 拼音方案的多库分支仍可能需要它（见 [`Self::load_dictionary`]），一律不动；判据取
+    /// [`Schema::is_pinyin`]，它正确处理了 `engine.type` 缺省的方案。删不掉就算了，下次再试。
     fn purge_legacy_combined(schema: &Schema, schemas_dir: &Path) {
         if schema.is_pinyin() {
             return;
@@ -8365,14 +7656,12 @@ impl EngineManager {
     /// - 拼音（rime_pinyin）：单库经 import_tables 合并（load_rime_pinyin_dict）。
     /// - 多库 → `.combined.wdat`。
     ///
-    /// ⚠️ **现存唯一的多库消费方是拼音引擎**（`PinyinEngine` 只持有一个 `CachedDict`）。
-    /// 启用的库**全是** rime_pinyin 时（主库 + 发现目录里开启的细胞词库正是如此），每个库
-    /// 各自走单库合并、各有各的缓存，组成 [`CachedDict::Layered`] 交给引擎：开关一张扩展库
-    /// 只是多挂或少挂一层，主库几十 MB 的合并缓存不重建。只有拼音方案混挂了别的类型才落到
-    /// `combined.wdat`——那条路径按 `search_prefix` 枚举后重写，**丢音节边界与简拼**。
+    /// 现存唯一的多库消费方是拼音引擎（`PinyinEngine` 只持有一个 `CachedDict`）。启用的库
+    /// 全是 rime_pinyin 时，每个库各自走单库合并、组成 [`CachedDict::Layered`]：开关一张扩展库
+    /// 只是多挂或少挂一层，主库的合并缓存不重建。只有混挂了别的类型才落到 `combined.wdat`，
+    /// 那条路径按 `search_prefix` 枚举后重写，丢音节边界与简拼。
     ///
-    /// 码表/英文的 live 查询走 `load_codetable_layers` 的每库独立层；两个索引构建方
-    /// 已改走 [`Self::load_dicts_individually`]，不再经过这里。
+    /// 码表/英文的 live 查询走 `load_codetable_layers`；索引构建走 [`Self::load_dicts_individually`]。
     fn load_dictionary(schema: &Schema, schemas_dir: &Path) -> Option<CachedDict> {
         // 收集 enabled 词库（保持 schema 顺序：主库在前，扩展库在后）。
         // 与索引构建方共用同一份选取逻辑，见 enabled_dict_specs 的说明。
@@ -8508,12 +7797,8 @@ impl EngineManager {
             let loaded = if dict_type == "rime_pinyin" {
                 Self::load_rime_pinyin_dict(p)
             } else {
-                // 必须用与 load_codetable_layers 相同的缓存路径。此前这里是
-                // `CachedDict::load(p)`，它把缓存落在**源文件旁**（yaml.with_extension），
-                // 而源在只读的安装目录：写入必然拒绝访问 → 退化成内存模式 → 每次都要重解析
-                // 整份 yaml。实测按键触发反查索引时同步卡 452ms（88526 条重新解析），
-                // 且这三个库的 wdat 早已在 reader 池里。改用 cache_path 后指纹命中即复用
-                // 池中 mmap，零解析。
+                // 必须用与 load_codetable_layers 相同的缓存路径：源在只读安装目录，落在源旁
+                // 会退化成内存模式、每次重解析；走 cache_path 则指纹命中即复用池中 mmap。
                 CachedDict::load_at(p, &cache_path(p, "wdat")).ok()
             };
             match loaded {
@@ -8524,7 +7809,7 @@ impl EngineManager {
                         let e = agg.entry(code).or_default();
                         if let Some(slot) = e.iter_mut().find(|(t, _)| t == &text) {
                             if weight > slot.1 {
-                                slot.1 = weight; // 继承后续库中同词更高权重（对齐 Go composite）
+                                slot.1 = weight; // 继承后续库中同词更高权重
                             }
                         } else {
                             e.push((text, weight));
@@ -8591,20 +7876,16 @@ impl EngineManager {
         }
     }
 
-    /// 某个词库源实际参与构建的**全部**文件：主表本身，外加 `rime_pinyin` 的
-    /// `import_tables` 子表（子表不存在则跳过）。非 rime_pinyin 只有主表。
+    /// 某个词库源实际参与构建的全部文件：主表本身，外加 `rime_pinyin` 的 `import_tables`
+    /// 子表（子表不存在则跳过）。非 rime_pinyin 只有主表。
     ///
-    /// 抽出来是因为它有两个消费方（merged 与 combined 两层缓存），而此前只有前者展开了
-    /// 子表 —— 于是改子表时内层 merged 正确重建、外层 combined 指纹却纹丝不动，
-    /// 继续喂陈旧数据给反查索引。**指纹漏掉任一真实输入，就是一条静默陈旧路径。**
+    /// merged 与 combined 两层缓存的指纹都用它：指纹漏掉任一真实输入，就是一条静默陈旧路径。
     fn rime_source_paths(dict_path: &Path, dict_type: &str) -> Vec<std::path::PathBuf> {
         let mut out = vec![dict_path.to_path_buf()];
         if dict_type != "rime_pinyin" {
             return out;
         }
-        // 以下三条降级都会让 import_tables 整批读不到，只剩主表（rime 主表往往只有头部
-        // 元数据、正文寥寥）→ 拼音几乎无候选。必须留下痕迹，否则症状是「拼音突然打不出字」
-        // 而日志一片干净。
+        // 以下三条降级都会让 import_tables 整批读不到、拼音几乎无候选，必须留下日志。
         let content = match std::fs::read_to_string(dict_path) {
             Ok(c) => c,
             Err(e) => {
@@ -8615,7 +7896,7 @@ impl EngineManager {
                 return out;
             }
         };
-        // 已知局限（沿用自改动前）：这里是**朴素子串**搜索，而非 codetable.rs 的
+        // 已知局限：这里是朴素子串搜索，而非 codetable.rs 的
         // `rime_body_offset` 那种行精确匹配。若头部某个值里含字面量 `...`，会被提前截断。
         // 现存词库无一命中；要收紧须把行精确的分隔行定位提升为 wind-dict 的公开 API。
         let yaml_section = if let Some(start) = content.find("---") {
@@ -8661,22 +7942,12 @@ impl EngineManager {
         out
     }
 
-    /// 加载 rime_pinyin 词典（合并 import_tables 子词典到 .merged.wdat）
-    /// 给开启整句的码表引擎指明**词频来源目录**（见 `codetable::sentence::SentenceFreq`）。
+    /// 给开启整句的码表引擎指明词频来源目录（见 `codetable::sentence::SentenceFreq`）。
     ///
-    /// 词库走约定路径 `pinyin/rime_frost.dict.yaml`（= 内置拼音方案的主词库），而不是去读
-    /// 拼音方案的 schema：整句要的只是「一份带真实词频的中文词表」，与用户把拼音方案配成
-    /// 什么样无关；读 schema 反而会让码表方案的行为随另一个方案的配置漂移。
-    ///
-    /// ⚠️ 只交路径、**不在这里同步加载**：构建期加载会让两类用不上它的场景白付代价——
-    /// 混输主引擎（整句永远调不到）、以及压根没开整句的方案。加载还可能现场构建
-    /// `merged.wdat`（数秒），同步做就直接体现为「切到五笔卡住」。
-    ///
-    /// 但**懒到按键线程上同样不行**：实测首次解码要 ~660 ms（见 `sentence::LazyTables`），
-    /// 恰好落在用户敲下第 5 个码那一刻。故这里在交完路径后立刻 `prewarm_sentence()`，
-    /// 把两张表推给后台线程——开了整句才付、且不占按键线程。
-    ///
-    /// 语法模型同理：只交路径与权重，模型文件在预热线程里打开（权重 0 时根本不打开）。
+    /// 词库走约定路径 `pinyin/rime_frost.dict.yaml`，不读拼音方案的 schema，免得码表行为随
+    /// 另一个方案的配置漂移。只交路径、不在构建期同步加载（可能现场建 `merged.wdat`，切方案
+    /// 会卡）；也不能懒到按键线程（首次解码数百毫秒），故交完路径立刻 `prewarm_sentence()`
+    /// 推给后台线程。语法模型同理（权重 0 时根本不打开）。
     fn attach_sentence_freq(
         engine: CodeTableEngine,
         sentence_on: bool,
@@ -8703,22 +7974,19 @@ impl EngineManager {
 
     /// 加载整句词频用的拼音词库。由 `codetable::sentence` 的懒加载在首次解码时调用。
     pub(crate) fn load_sentence_freq_dict(schemas_dir: &Path) -> Option<CachedDict> {
-        // 走 resolve_dict_file 而不是直接 join：这份词库同样可能被 custom / user 层替换，
-        // 直接拼 data 层路径的话「定制版换了拼音词库」对整句词频不生效——而现象只是
-        // 排序略有不同，没有任何日志，几乎不可能被归因。
+        // 走 resolve_dict_file 而不是直接 join：这份词库同样可能被 custom / user 层替换。
         let path = Self::resolve_dict_file("pinyin/rime_frost.dict.yaml", schemas_dir);
         let d = Self::load_rime_pinyin_dict(&path)?;
         info!("码表整句：已接入拼音词库作为词频来源 {}", path.display());
         Some(d)
     }
 
-    /// 一张 import_tables 子表的**归并输入段**：内容寻址缓存（改了哪张只重建哪张）。
+    /// 一张 import_tables 子表的归并输入段：内容寻址缓存（改了哪张只重建哪张）。
     /// 返回 `(段, 若写在临时目录则其路径)`：落不了盘时写到临时目录当一次性段，调用方归并完
     /// 即删；连临时目录都写不了就放弃这张表（记 warn）。
     ///
-    /// 与旧路径（逐表 `parse_rime_entries_parallel`）保持同一取舍：源 yaml 不存在就跳过——
-    /// 不走 wdat-only 旁文件，否则那份 `.wdat` 不在 merged 的指纹里，更新后 merged 不会失效；
-    /// 空表也跳过（旧路径解析出 0 条等于没有这张表）。
+    /// 源 yaml 不存在就跳过，不走 wdat-only 旁文件（那份 `.wdat` 不在 merged 的指纹里，更新后
+    /// merged 不会失效）；空表也跳过。
     fn load_merge_segment(
         p: &Path,
     ) -> Option<(
@@ -8773,6 +8041,7 @@ impl EngineManager {
         }
     }
 
+    /// 加载 rime_pinyin 词典（主表 + import_tables 子表归并到内容寻址的 `merged.wdat`）。
     fn load_rime_pinyin_dict(dict_path: &Path) -> Option<CachedDict> {
         // wdat-only：拼音是独立于 CachedDict::load_at_with 的第二条链路（要读 yaml 头展开
         // import_tables 再并行解析正文），源缺失时那两步全废，故须在此单独拦截。
@@ -8800,27 +8069,21 @@ impl EngineManager {
                 }
             };
         }
-        // merged.wdat 写到可写缓存目录（与 unigram 一致）。安装目录（如 Program Files）
-        // 通常只读，若写在源旁会失败 → 回退仅主词典(rime header 数十条) → 拼音无候选。
+        // merged.wdat 写到可写缓存目录：安装目录通常只读，写在源旁会失败、拼音无候选。
         let merged_slot = cache_path(dict_path, "merged.wdat");
-        // 收集全部源（主表 + import_tables 子表）。指纹/缓存校验需覆盖全部源，
-        // 故须先于 fresh 判定算出（仅解析头部 yaml，开销极低）。
-        // 与 combined 层共用 rime_source_paths——两处各写一份正是 R6 那条陈旧路径的成因。
-        // 按缓存文件 single-flight。这里是该缺陷最典型的现场：pinyin / shuangpin /
-        // 混输的 secondary 子引擎三者的 schema 都指向 pinyin/rime_frost.dict.yaml，
-        // cache_path 又按源文件在 schemas 下的目录链做命名空间，最终是同一个 merged.wdat。
+        // 按缓存文件 single-flight（不是按方案）：pinyin / shuangpin / 混输的拼音子引擎都指向
+        // 同一个 merged.wdat。全部源（主表 + 子表）经 rime_source_paths 收集，与 combined 层共用。
         let build_lock = wind_dict::reader_pool::file_lock(&merged_slot);
         let _build_guard = build_lock.lock().unwrap_or_else(|e| e.into_inner());
 
         let sub_paths = Self::rime_source_paths(dict_path, "rime_pinyin");
         let src_refs: Vec<&Path> = sub_paths.iter().map(|p| p.as_path()).collect();
-        // 复核快照要在算指纹**之前**取：否则「算完指纹、取快照之前」被改写的源，前后快照
+        // 复核快照要在算指纹之前取：否则「算完指纹、取快照之前」被改写的源，前后快照
         // 一致而指纹却对应旧内容。
         let stamps_before = wind_dict::cache_fp::stamps_of(&src_refs);
 
-        // 内容寻址：槽位 + **全部源**的指纹 → 实际文件名。主表或任一子表内容变化、源清单
-        // 增删都会换出另一个文件名，旧 merged 自然不会被复用（避免「子表改了却仍用旧
-        // merged」的静默陈旧）。文件在，就是它。
+        // 内容寻址：槽位 + 全部源的指纹 → 实际文件名。任一源内容或源清单变化都换出另一个
+        // 文件名，旧 merged 自然不会被复用。文件在，就是它。
         let content =
             wind_dict::cache_fp::resolve_slot_fp(&merged_slot, &src_refs, MERGED_CACHE_TAG).map(
                 |fp| {
@@ -8847,8 +8110,8 @@ impl EngineManager {
             }
         }
 
-        // 下面这段是构建峰值所在（65 万条实测 ~420 MB），内存不足时分配失败直接 abort、
-        // 不可捕获（见 build_guard）。登记一次尝试：若连续死在这里，下次启动跳过而非再死。
+        // 下面这段是构建峰值所在，内存不足时分配失败直接 abort、不可捕获（见 build_guard）。
+        // 登记一次尝试：若连续死在这里，下次启动跳过而非再死。
         if content.is_none() {
             warn!(
                 "拼音词库 {} 的源无法计算指纹（有源文件读取失败），本次 merged 只写临时目录",
@@ -8869,10 +8132,9 @@ impl EngineManager {
             }
         };
 
-        // ① 各子表各自的段（S4）：走 `load_at_with` 的内容寻址缓存，改一张子表只重建那一张。
-        //    **串行**建段：表间并行只把两张大表的解析峰值叠在一起（实测 7 表并行首建峰值
-        //    498 MB，高于旧路径的 430 MB）。段只做归并输入，不挂查询层。落不了盘（缓存目录
-        //    不可写 ⇒ 内存模式）的子表写到临时目录当一次性段，归并完即删。
+        // ① 各子表各自的段：走 `load_at_with` 的内容寻址缓存，改一张子表只重建那一张。
+        //    串行建段：并行会把大表的解析峰值叠在一起。段只做归并输入，不挂查询层。落不了盘
+        //    的子表写到临时目录当一次性段，归并完即删。
         let t_segs = std::time::Instant::now();
         let mut temp_segments: Vec<std::path::PathBuf> = Vec::new();
         let readers: Vec<std::sync::Arc<wind_dict::datformat::WdatReader>> = sub_paths
@@ -8895,14 +8157,13 @@ impl EngineManager {
             "merged: sub-table segments ready"
         );
 
-        // ② k 路归并 → 流式写入器（S3）。各段的 `codes()` 游标按字节序递增；同 code 的候选按
-        //    子表顺序拼接后按权重稳定降序、order 取序号——与从前「HashMap 聚合 + 排序」逐字节
-        //    等价（`merge_from_segments_matches_aggregate_build` 锁定）。跨表同 (text, code)
-        //    不去重，沿用旧语义。
+        // ② k 路归并 → 流式写入器。各段的 `codes()` 游标按字节序递增；同 code 的候选按子表
+        //    顺序拼接后按权重稳定降序、order 取序号（`merge_from_segments_matches_aggregate_build`
+        //    锁定输出）。跨表同 (text, code) 不去重。
         let mut cursors: Vec<_> = readers.iter().map(|r| r.codes().peekable()).collect();
         let mut sw = wind_dict::datformat::WdatStreamWriter::new();
-        // 简拼候选 `(简拼字节区间, code 序号, 权重)`：按 (简拼, 权重降序, code) 排后去重，
-        // 等价于旧的 `agg_ab[ab][code] = max(weight)` 再按 (权重降序, code 升序) 排。
+        // 简拼候选 `(简拼字节区间, code 序号, 权重)`：同 (简拼, code) 取最大权重，
+        // 再按 (权重降序, code 升序) 排。
         let mut ab_buf: Vec<u8> = Vec::new();
         let mut ab_items: Vec<(u32, u16, u32, i32)> = Vec::new();
         let mut merged: Vec<(&str, i32, u64)> = Vec::new();
@@ -8925,7 +8186,7 @@ impl EngineManager {
             let code_idx = sw.key_count() as u32;
             for (_, w, b) in &merged {
                 if b.count_ones() >= 2 {
-                    // 边界位是**字节**位置，但首字母要取整个 char（旧解析器 `chars().next()`）：
+                    // 边界位是字节位置，但首字母要取整个 char：
                     // 音节以 ê / ü 之类非 ASCII 开头时只取一个字节会拼出非法 UTF-8。
                     let off = ab_buf.len() as u32;
                     for pos in 0..min_code.len().min(64) {
@@ -8939,8 +8200,8 @@ impl EngineManager {
                     let n = (ab_buf.len() as u32 - off) as u16;
                     ab_items.push((off, n, code_idx, *w));
                 } else if *b == 0 && min_code.len() >= 64 {
-                    // 音节起点 ≥64 的码整体没有边界位图（`syllable_boundary_mask`），这里推不出
-                    // 简拼；旧解析器按音节数 ≥2 仍会生成。≥13 个音节的词组实际极少，记数即可。
+                    // 音节起点 ≥64 的码没有边界位图（`syllable_boundary_mask`），推不出简拼；
+                    // 这类超长词组极少，记数即可。
                     long_codes_without_abbrev += 1;
                 }
             }
@@ -8960,7 +8221,7 @@ impl EngineManager {
                 long_codes_without_abbrev
             );
         }
-        // 与旧路径一致：一条都没有（全部子表缺失或为空）就不落盘，返回 None
+        // 一条都没有（全部子表缺失或为空）就不落盘，返回 None
         if total_entries == 0 {
             attempt.finish();
             drop(readers);
@@ -9047,10 +8308,8 @@ impl EngineManager {
                 if is_fallback {
                     warn!("Failed to write merged cache {}: {}", target.display(), e);
                 } else {
-                    // 正式缓存写不进去是**降级的起点**，不能只记 warn 就滑过去。
-                    // 注意不要归因于「文件被 mmap 占用」——实测 Windows 上 rename 覆盖正被
-                    // 映射的文件是会成功的（见 reader_pool 的回归测试）。真实原因通常是缓存
-                    // 目录不可写、磁盘空间不足或路径权限。
+                    // 正式缓存写不进去是降级的起点，记 error。别归因于「文件被 mmap 占用」：
+                    // Windows 上 rename 覆盖正被映射的文件会成功（见 reader_pool 的回归测试）。
                     error!(
                         "写入 merged 缓存失败 {}: {}。常见原因是缓存目录不可写、磁盘空间不足\
                          或权限受限。接下来会退到临时目录副本。",
@@ -9069,9 +8328,7 @@ impl EngineManager {
             match wind_dict::reader_pool::open_wdat(target) {
                 Ok(reader) => {
                     if is_fallback {
-                        // 功能可用，所以此前只是 info/warn——但这是一次静默降级，代价实在：
-                        // 副本路径与正式缓存不同，reader 池无从合并（同一份词库映射两次），
-                        // 且指纹只写正式路径，下次启动会原样再走一遍。
+                        // 功能可用但这是降级：副本无法与正式缓存共享映射，且下次启动会原样再走一遍。
                         error!(
                             "拼音词库已降级为临时目录副本: {} ({} keys)。功能可用，但该副本\
                              无法与正式缓存共享映射（同一份词库被映射两次），且指纹只写正式\
@@ -9098,19 +8355,16 @@ impl EngineManager {
 
 /// 反查索引的保留判据：本次请求的、主码表、以及当前在用集合里的（联想方案、辅助码引用的方案）。
 ///
-/// 原先只留「本次 + 主码表」两份：辅助码引用五笔、联想用拼音时，三者会互相顶掉、反复秒级重建。
+/// 在用的都要留，否则辅助码引用的方案、联想方案与主码表会互相顶掉、反复秒级重建。
 fn reverse_index_keeps(k: &str, requested: &str, primary: &str, pins: &[String]) -> bool {
     k == requested || k == primary || pins.iter().any(|p| p == k)
 }
 
 /// `[[dictionaries]]` 条目里写了 `font_path` / `font_family` 的，逐项返回描述。
 ///
-/// 这两个键**从来不是** `DictSpec` 的字段，serde 按未知键静默丢弃——可它们长得太像
-/// 真的了：`[engine.chaizi]` 下有同名键（那是拆字字根字体，另一回事），方案作者便把
-/// 方案字体照这个样子写进词库段，字体一路不生效、日志一个字都没有（Toli 蒙古文方案就是
-/// 这样交付的）。方案字体的正路是 `[candidate] font_family`（设置页「方案设置」的候选字体）。
-/// 收进 `degraded_items` 走现成的
-/// toast 通路，而不是给 `DictSpec` 加两个没人读的字段。
+/// 这两个键不是 `DictSpec` 的字段，serde 会静默丢弃；但 `[engine.chaizi]` 有同名键，方案作者
+/// 容易照样写进词库段。方案字体的正路是 `[candidate] font_family`。收进 `degraded_items`
+/// 走现成的 toast 通路，不给 `DictSpec` 加两个没人读的字段。
 fn misplaced_dict_font_keys(schema: &toml::Value) -> Vec<String> {
     let Some(dicts) = schema.get("dictionaries").and_then(|d| d.as_array()) else {
         return Vec::new();
