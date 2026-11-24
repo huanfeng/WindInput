@@ -14,7 +14,8 @@ use windows::Win32::Security::*;
 use windows::Win32::Storage::FileSystem::*;
 use windows::Win32::System::Pipes::*;
 use windows::Win32::System::Threading::{
-    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+    GetCurrentProcess, GetCurrentThread, OpenProcess, OpenProcessToken, OpenThreadToken,
+    PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
 use wind_ipc::rpc::MAX_MESSAGE_SIZE;
@@ -233,22 +234,42 @@ fn token_is_trusted(client: HANDLE, own: HANDLE) -> bool {
     unsafe { EqualSid(cu.User.Sid, ou.User.Sid).is_ok() }
 }
 
-/// 管道对端进程是否可信（见 [`token_is_trusted`]）。任何一步取不到信息都按不可信处理。
-fn peer_is_trusted(pipe: HANDLE) -> bool {
+/// 经模拟管道客户端取它的令牌。须在读过一帧之后调用（之前模拟会失败）。
+/// 对端以 Anonymous 级别连接时取不到，返回 None。
+fn token_by_impersonation(pipe: HANDLE) -> Option<HANDLE> {
+    unsafe {
+        ImpersonateNamedPipeClient(pipe).ok()?;
+        let mut tok = HANDLE::default();
+        let ok = OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, true, &mut tok).is_ok();
+        // 还原失败时线程会带着别人的身份继续跑，不能容忍。
+        if RevertToSelf().is_err() {
+            std::process::abort();
+        }
+        ok.then_some(tok)
+    }
+}
+
+/// 按进程号打开对端令牌。对端已提权而本进程未提权时会被拒。
+fn token_by_process(pipe: HANDLE) -> Option<HANDLE> {
     unsafe {
         let mut pid = 0u32;
         if GetNamedPipeClientProcessId(pipe, &mut pid).is_err() || pid == 0 {
-            return false;
+            return None;
         }
-        let Ok(proc) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
-            return false;
-        };
-        let mut client = HANDLE::default();
-        let ok = OpenProcessToken(proc, TOKEN_QUERY, &mut client).is_ok();
+        let proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut tok = HANDLE::default();
+        let ok = OpenProcessToken(proc, TOKEN_QUERY, &mut tok).is_ok();
         let _ = CloseHandle(proc);
-        if !ok {
-            return false;
-        }
+        ok.then_some(tok)
+    }
+}
+
+/// 管道对端是否可信（见 [`token_is_trusted`]）。任何一步取不到信息都按不可信处理。
+fn peer_is_trusted(pipe: HANDLE) -> bool {
+    let Some(client) = token_by_impersonation(pipe).or_else(|| token_by_process(pipe)) else {
+        return false;
+    };
+    unsafe {
         let mut own = HANDLE::default();
         let trusted = OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut own).is_ok()
             && token_is_trusted(client, own);
@@ -262,8 +283,9 @@ fn peer_is_trusted(pipe: HANDLE) -> bool {
 
 fn handle_ctrl_client(pipe: PipeHandle, state: Arc<DispatchState>) {
     let handle = pipe.0;
-    let trusted = peer_is_trusted(handle);
+    let mut trusted = None;
     while let Some(frame) = read_frame(handle) {
+        let trusted = *trusted.get_or_insert_with(|| peer_is_trusted(handle));
         let resp = handle_frame(&state, &frame, trusted);
         if resp.is_empty() {
             continue;
