@@ -161,10 +161,12 @@
   ★ 两条路径的产出**都保留**（不同 `consumed_length` 层）：`nihaom` 既给整句「你好」
   (consumed=5，选它则 `m` 留缓冲续输)、也给残码整句 (consumed=6)。**改成「用残码整句替换
   step 2 结果」会破坏分步上屏。**
-  ★ 门槛 `syllables.len() >= 2`（同 step 2）：`nim` 这类 1 音节 + 残码不走，那种输入的正解是
-  词库补全（你们/你没），残码整句「你吗」只会挤掉它。同 fcitx5 `partialLongWordLimit` 的精神。
-  双拼跳过（`query` 是转换后全拼、与击键不同域），分隔符跳过（`completed` 由音节 join 得出，
-  与 `query` 字节位不同源）。
+  ★ 门槛：已完成 ≥ 2 个音节时立即插入；**1 音节 + 残码**（`zaim`/`nim`）先存进
+  `short_sentence_pending`、不进候选，到 step 6.5c 才按 `COMPLETION_WEAK_CEILING` 定夺 ——
+  立即插入会让 `wom`→「我吗」、`nim`→「你吗」挤进第 2 位，而正解「在吗」(w=0) 与这类噪音的
+  分野要等 step 4 跑完、看补全侧最强者有多弱才看得出（见下文「拼音常量的取值依据」）。
+  分隔符跳过（`completed` 由音节 join 得出，与 `query` 字节位不同源）；双拼不跳过（旧图在转换后
+  全拼上重切、消费数回映射回击键，击键图开关打开时改走击键图）。
 - **整句让位于「用完残码的补全」**（step 6.5b）：残码存在时，整句只解释 `completed`、**把用户
   已按下的残码丢掉**，却靠 `SENTENCE_WEIGHT_BASE`(3e7) 无条件置顶 —— 实测 2/3/4/6 音节一律
   如此（`nihaom`→你好 而非 你好吗、`zhongguor`→中国 而非 中国人）。判据复刻 librime
@@ -185,6 +187,55 @@
   这正是用户报的「候选长度来回跳动」：有残码时冷僻长词靠豁免登顶、无残码时整句 3e7 登顶，
   两套依据逐键切换。⚠️ 该常量**不是** `COMPLETION_NEAR_SYLLABLES`（后者只管用户词长词上浮，
   两者一度共用一个 2，改动时连带打断 `qingfengshu`→「清风输入法」）。
+- **截断保底**（`truncate_with_quotas`）：简拼候选（`is_abbrev`，`cmp_match_layers` 第二键、几乎沉底）
+  与换位纠错候选各留保底席位，只补不挤空；补进来的追加在尾部、不保证有序，依赖调用方重排
+  （主输入与临拼走 `candidate_display_order`；不重排的特殊模式 / overlay 用
+  `ConvertOptions::no_abbrev_quota` 关掉简拼配额）。混输主路径给子引擎传满值 `max_candidates`，
+  配额照常生效，随后混输还有自己的 `truncate_with_pinyin_quota`。
+
+#### 拼音常量的取值依据
+
+`pinyin/mod.rs` 里阈值/系数的标定结论（真实词库实测），代码注释只留一句「依据见此」。
+
+- **`ABBREV_QUOTA_DIVISOR`=10（简拼截断保底）**：`is_abbrev` 是 `cmp_match_layers` 第二键，简拼候选
+  只靠「总数没超过 `max_candidates`」存活。`shengrikl` 关模糊音时 121 条、「生日快乐」第 121 位；
+  开 `sh_s + en_eng` 后总数 337、它落到第 337 位被 300 截断丢掉。改层级键会污染正常输入的候选面，
+  故用配额。混输侧的 `PINYIN_QUOTA_DIVISOR` 取 5 是因为它护整个拼音块、要抢的席位多。
+- **`FUZZY_WEIGHT_SCALE`=0.5**：曾用一次性 ×0.01（为让「四」守住 `si` 首位，同音字词频可差 80 倍），
+  既比参考实现严 50 倍、又不按模糊处数累计。`is_fuzzy` 更早曾是层级首键，`si` 的「是」落第 231 位、
+  `zong` 的「中」落第 158 位，生产截断线下等于未实现。
+- **`COMPLETION_UNCONDITIONAL_FLOAT_SYLLABLES`=1**：旧值 2 时 `beijingd`→北京大学(w=2010)、
+  `jisuanjik`→计算机科学(w=1609) 收到 1 后改走门槛，照样上浮、位次不变；而 2 让 w=18 的
+  「中华人民」在 `zhonghuar` 登顶。
+- **`COMPLETION_NEAR_PROMOTE_LIMIT`=8**：`meiy` 一个残码补出 58 条 distance=1 的词，单字「没」被压到
+  第 59 位；限 8 条后升到第 9 位。候选窗每页 5~9 条。
+- **`COMPLETION_FAR_WEIGHT_FLOOR`=100**：合理项最低「中国人民解放军」w=252（`zhongguorenm`，距离 +4）、
+  「你好吗」w=166（距离 +1）；噪音项（`zhonghuarenmingongheg` 下的「中华人民共和国XXX法」）最高 w=60。
+- **`SENTENCE_YIELD_WEIGHT_FLOOR`=50（折后）**：缺它时 `zhonghuar` 首选变成 w=0 的「种花人」。
+  让位：你好吗 166 / 中国人民 605 / 中华人民共和国 3113；不让位：计算机课 41 / 种花人 0。
+- **`COMPLETION_WEAK_CEILING`=2500**（`completed_syls == 1` 全样本，grammar 开/关一致）：
+  补全侧最强 819（`zaim` 再买，正解「在吗」w=0）应输给整句；6363（`xiex`）、11131（`nih`）、
+  20624（`shih`）及 31281~237059（zhid/zenm/nim/shenm/meig/haiy/tam/wom/meiy/yinw）应补全赢。
+  819 与 6363 间有 7.8 倍空隙，2500 两侧各留约 3 倍。否决过的判据：整句一律豁免（`beijingd`→背景的、
+  `zhongguorenm`→中国人吗 翻上首位）；有无同名词条 / 词条 w 是否为 0（「在吗」「你和」都是 w=0，
+  分不开）；整句/补全倍数（开万象模型 w=0.5 后「在吗」从 61.3× 掉到 14.0×，被自己的闸门拦掉）。
+- **`SENTENCE_KEEP_MAX_COMPLETED_SYLS`=1**：放到 2 时 `beijingd` 的「北京的」1738、`zhongguorenm` 的
+  「中国人民」605 都低于 2500，错解翻上首位；`duibuq` 的「对不起」3984 不受影响。
+- **`ABBREV_INDEX_LIMIT`=64（纯简拼与混合简拼共用）**：纯简拼曾单独取 10，真实词库 `bcx` 下有 48 条，
+  「拜城县」(w=1，第 48 条) 在 `bcx` 下永不产生、在 `baicx` 下却是第 77 位。延迟实测（`build_dev/data`、
+  release、六个声母模糊组全开）最坏 `zhy` 551µs / `lll` 246µs；合成词库（每键塞满码）下 `lll` 4.99ms。
+- **`MIXED_SENTENCE_MIN_LOGP_PER_CHAR`=-8.0**：D 类受控对比（常用词口径，n=1000）——不设闸门 / -8.0 整句
+  top-1 都是 12.10%、首词命中 0%；-6.5 为 10.30% / 0.50%；-5.0 为 1.10% / 3.30%（砍掉 91% 正确整句）。
+  `nhaoma` 原出「你会熬吗」（每字 -11.01），闸掉后「你好吗」上位；用户真会打的组合每字在 -3.7 ~ -4.8。
+  调 `ABBREV_NODE_PENALTY`（1.2/2.5/4.0）治不了。语法模型（万象 weight=0.5，32 样本，
+  `tests/grammar_axis_shift.rs`）平移最小 -5.15、中位 +1.60、最大 +10.95，无样本因此跌破 -8.0：
+  打分 `weight × (ln 频次 − 8.34)`，命中搭配加分、未命中扣分，被扣分的整句关 grammar 时就在 -10 ~ -14。
+- **`AbbrevFallbackConfig::cuts`=2**：D 类实测取 2 → 首词召回 40.30% / 首词命中 2.30%；取 8 → 14.60% / 0.00%。
+- **`MAX_FULL_PINYIN_SUBPHRASE`=4**：无此限时 `zaijian` 下 `zai` 一级 20+ 条同音单字吃光
+  `MAX_FULL_PINYIN_RECALL`，「再见」没被召回。
+- **混合整句（step 2b）标 `is_abbrev`**：不标时落在全拼层、整层压过简拼候选（`zhge` 把 zh 读成 z|h 组出
+  「之后个」w=3263，压过「这个」w=555006）。标上后真实词库界面层：短简拼 5063 条首选命中 68.48% → 85.50%，
+  pinyin_eval D 类 1000 条逐条零差异。
 
 ### 4.3 混输引擎（`mixed/engine.rs`）——**截断优先级档**
 
