@@ -138,6 +138,25 @@ fn rerun_after_crash_does_not_reuse_lamport() {
     assert_eq!(d[1].local.text("themes/x.json").unwrap(), "v2");
 }
 
+#[test]
+fn crash_rerun_with_idle_observer_keeps_lamport_monotonic() {
+    let (b, mut d) = setup(2);
+    d[0].local.set("themes/x.json", "v1");
+    let snapshot = d[0].state.clone();
+    d[0].ok(&b);
+    d[1].ok(&b); // Z 拉取，无本地改动
+    // 抹掉 Z 的清单：只剩 A 自己的清单记录着已用过的 lamport
+    for k in b.keys("windinput-sync/v1/devices/dev1/") {
+        b.delete(&k).unwrap();
+    }
+    d[0].state = snapshot;
+    d[0].local.set("themes/x.json", "v2");
+    d[0].ok(&b);
+    assert!(d[0].state.files["themes/x.json"].lamport >= 2);
+    d[1].ok(&b);
+    assert_eq!(d[1].local.text("themes/x.json").unwrap(), "v2");
+}
+
 // ───────── 3. 并发首次初始化 ─────────
 
 /// 我方 put meta 之后，另一台设备紧接着覆盖它。

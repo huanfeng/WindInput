@@ -259,6 +259,19 @@ fn run(
         .unwrap_or(0)
         .max(state.lamport);
 
+    // 本设备自己最新的远端清单：上次写出后、状态库提交前崩溃时，lamport 以它为下限。
+    if let Some(g) = own_gens.iter().copied().max()
+        && let Some(raw) = backend.get(&manifest::manifest_key(&me, g))?
+    {
+        match Manifest::decode(dek, &me, g, &raw) {
+            Ok(m) => {
+                let top = m.files.values().map(|e| e.lamport).max().unwrap_or(0);
+                lamport = lamport.max(m.lamport).max(top);
+            }
+            Err(e) => rep.warnings.push(format!("本设备清单 {g} 无法读取: {e}")),
+        }
+    }
+
     // 3. 裁决
     let refs: Vec<&Manifest> = remotes.iter().collect();
     let plan = decide(&PlanInput {
