@@ -12,6 +12,7 @@ const STALE = '即将关闭';
 const STATUS_LABELS = [
   { name: '状态: 待反馈', color: 'fbca04', description: '需要提交者补充信息或验证修复', waiting: true },
   { name: '状态: 无法重现', color: 'fef2c0', description: '按现有描述无法复现，需要提交者补充环境信息', waiting: true },
+  { name: '状态: 已确认', color: '0e8a16', description: '问题已确认，待修复', exempt: true },
   { name: '状态: 已计划', color: '1d76db', description: '会做：含开发中、已修复待发布与远期计划', exempt: true },
   { name: '状态: 暂无计划', color: 'bfdadc', description: '方向认可，但近期不安排，保留开启留档', exempt: true },
 ];

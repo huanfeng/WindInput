@@ -56,7 +56,7 @@ test('提醒后维护者又补话，从新回复重新计时', () => {
 });
 
 test('豁免状态不参与', () => {
-  for (const l of ['状态: 已计划', '状态: 暂无计划']) {
+  for (const l of ['状态: 已确认', '状态: 已计划', '状态: 暂无计划']) {
     assert.equal(decide(issue([l]), [byOwner(60)], NOW), 'none', l);
   }
 });
