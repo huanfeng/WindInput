@@ -2728,6 +2728,7 @@ dependencies = [
  "wind-rpc",
  "wind-store",
  "wind-supervise",
+ "wind-sync-ipc",
  "wind-theme",
  "wind-ui",
  "wind-webdata",

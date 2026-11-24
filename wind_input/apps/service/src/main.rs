@@ -30,6 +30,7 @@ mod log_rotate;
 mod phrase_cli;
 mod restart_cli;
 mod schema_cli;
+mod sync;
 mod theme_cli;
 mod ui_cli;
 // 仅 Windows：它的动作全是写 HKLM 的 TSF 登记项（`wind_coordinator::tsf_profile_name`
@@ -453,6 +454,9 @@ fn main() {
     );
     let extensions_for_rpc = extensions.clone();
     let extensions_for_exit = extensions.clone();
+    // 数据同步：设置启用且同步进程已安装时拉起 `wind_input_sync`（见 sync.rs）。
+    let sync_host = sync::SyncHost::start();
+    let sync_for_exit = sync_host.clone();
     coordinator.set_extensions_config_hook(Box::new(move |c| extensions.apply_config(c)));
     deferred.set_ready(coordinator);
 
@@ -489,14 +493,41 @@ fn main() {
     let core_rpc: Arc<dyn wind_rpc::CoreRpc> = Arc::new(RpcCore {
         coord: coord_for_web,
         extensions: extensions_for_rpc,
+        sync: sync_host.clone(),
     });
-    match wind_rpc::RpcServer::new(core_rpc, variant, pipe_suffix) {
+    match wind_rpc::RpcServer::new(core_rpc.clone(), variant, pipe_suffix) {
         Ok(rpc_server) => {
             // 活跃方案变更 → RPC 事件广播。EngineManager 位于 wind-rpc 之下，无法直接
             // 持有 EventSink，故在此接线——这里是唯一同时看得见两者的地方。接上后，
             // 快捷键/托盘/RPC 任一路径切方案，设置界面都能收到通知（此前只有候选窗的
             // push 通道收得到，而那条载荷里没有方案 id）。
             let sink = rpc_server.event_sink();
+            // 同步进程的状态广播与受限请求：请求走与设置端同一个分发器，
+            // 这样 config.changed / compat.changed 等事件照常发出。
+            match wind_rpc::DispatchState::with_events(core_rpc, variant, sink.clone()) {
+                Ok(state) => sync_host.set_hooks(
+                    Box::new({
+                        let sink = sink.clone();
+                        move |v| sink.broadcast("sync.statusChanged", v)
+                    }),
+                    Box::new(move |method, params| {
+                        let resp = wind_rpc::dispatch(
+                            &state,
+                            wind_ipc::rpc::Request {
+                                version: 1,
+                                id: 0,
+                                method: method.to_string(),
+                                params: params.clone(),
+                            },
+                        );
+                        match resp.error {
+                            Some(e) => Err(e),
+                            None => Ok(resp.result.unwrap_or(serde_json::Value::Null)),
+                        }
+                    }),
+                ),
+                Err(e) => error!("同步进程的请求分发器初始化失败: {e}"),
+            }
             // 右键菜单改兼容规则不经 RPC：写成功后在此广播，设置端的「应用兼容」页据此刷新。
             // 经 `compat.*` RPC 的写入由 dispatch 自己广播，钩子只覆盖菜单路径，不会重复。
             wind_config::change_hook::set_compat_change_hook(std::sync::Arc::new({
@@ -597,6 +628,7 @@ fn main() {
         if RESTART.load(Ordering::SeqCst) {
             info!("Restart requested, relaunching service...");
             extensions_for_exit.stop();
+            sync_for_exit.stop();
             coord_for_exit.flush_user_data_before_exit();
             drop(_singleton_guard);
             relaunch_self();
@@ -612,6 +644,7 @@ fn main() {
         Ok(()) => {
             info!("Restart requested, relaunching service...");
             extensions_for_exit.stop();
+            sync_for_exit.stop();
             coord_for_exit.flush_user_data_before_exit();
             // 先释放单例 Named Mutex（关闭句柄），让新实例可获取所有权，避免竞争
             drop(_singleton_guard);
@@ -630,6 +663,7 @@ fn main() {
 struct RpcCore {
     coord: Arc<wind_coordinator::Coordinator>,
     extensions: Arc<extensions::Extensions>,
+    sync: Arc<sync::SyncHost>,
 }
 
 impl wind_rpc::CoreRpc for RpcCore {
@@ -649,6 +683,7 @@ impl wind_rpc::CoreRpc for RpcCore {
     ) -> anyhow::Result<serde_json::Value> {
         match method {
             "extensions.inventory" => Ok(self.extensions.inventory()),
+            m if m.starts_with("sync.") => self.sync.rpc(m, params),
             _ => self.coord.web_data_rpc(method, params),
         }
     }

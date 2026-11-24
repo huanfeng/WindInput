@@ -30,6 +30,7 @@ wind-theme = { path = "../../crates/wind-theme" }
 wind-rpc = { path = "../../crates/wind-rpc" }
 wind-hook = { path = "../../crates/wind-hook" }
 wind-supervise = { path = "../../crates/wind-supervise" }
+wind-sync-ipc = { path = "../../crates/wind-sync-ipc" }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
