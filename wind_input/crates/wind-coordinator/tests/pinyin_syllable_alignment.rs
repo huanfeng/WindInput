@@ -1,42 +1,13 @@
-//! 前缀补全的**音节边界对齐**：合法音节输入下，补全只能从下一个音节开始。
+//! 前缀补全的音节边界对齐：合法音节输入下，补全只能从下一个音节开始。
 //!
-//! ## 报障与根因（2026-09-04）
+//! wdat key 是扁平码，前缀匹配发生在字符域，`shen` 会召回 `sheng` 的字（绕过模糊音开关
+//! 白送 `en→eng`，还按 top-k 挤掉本音节低频字）。判据位取 `completed_len`（已成音节的字节长度）：
+//! 不成音节的输入（`fe`）`completed_len == 0` 全放行，残码（`shenm`）落在残码之前、补全照常。
+//! 背景与已接受的代价见 docs/architecture/candidate-sorting-rules.md 的「词库层前缀判据」。
 //!
-//! 用户报「`[schema.pinyin.fuzzy] en_eng = false` 时打 `shen` 仍出 `sheng` 的字」。
-//!
-//! 根因不在模糊音，在**扁平码前缀匹配**：wdat 的 key 是 `nihao` 而非 `ni hao`（带空格的
-//! key 会让 `niha` 无法前缀匹配，而逐键前缀匹配是「边打边出候选」的命脉），于是前缀匹配
-//! 发生在**字符**域 —— `shen` 是 `sheng` 的字符前缀。而当时唯一的过滤器
-//! `prefix_syllable_keep` 只数**音节个数**，`sheng` 和 `shen` 都是 1 音节，它分不开。
-//!
-//! 修复前实测（真实词库，出厂配置）：
-//!
-//! | 输入 | 候选总数 | 跨音节条目 | 最早位次 |
-//! |---|---|---|---|
-//! | `fen` | 56 | 27（全是 `feng`） | 第 30 位 |
-//! | `shen` | 68 | 12（全是 `sheng`） | 第 49 位 |
-//! | `ni` | 92 | 26（nin/ning/niu/nie/nian/niang/niao） | 第 35 位 |
-//!
-//! 危害有两重：多出不该有的，以及按 top-k **挤掉**本音节的低频字（`sheng` 的「生」
-//! w=8631 高过 `shen` 的「深」w=5042）。波及面远超 en/eng 一组，`an/ang`、`in/ing`、
-//! `ian/iang`、`uan/uang`、`a→ai/an/ao`、`e→ei/en/er`、`o→ou/ong` 全部同病。
-//!
-//! ## ★ 判据不是「关掉前缀匹配」，是「按 completed_len 对齐」
-//!
-//! 用户给出的参照行为（其他全拼输入法）：`fe` 不是合法拼音 ⇒ 用前缀匹配；打到 `fen`
-//! 其本身是合法音节 ⇒ 按音节处理，不含 `feng`。
-//!
-//! 这两种形态由**同一个判据**覆盖，无需分支：判据位取 `completed_len`（输入中已构成
-//! 完整音节那一段的字节长度），`fe` 切不出音节 ⇒ `completed_len == 0` ⇒ 位 0 恒是音节
-//! 起点 ⇒ 全放行。残码（`shenm`）同理落在残码**之前**，补全照常。
-//!
-//! ## 与相邻两个文件的分工（三者任一调整都不该动另两个）
-//!
-//! | 文件 | 管什么 |
-//! |---|---|
-//! | 本文件 | **哪个音节**：补全是否停在音节边界上 |
-//! | `pinyin_completion_recall_gate` | **几个音节**：超音节候选进不进候选列表 |
-//! | `pinyin_completion_syllable_tier` | **谁在前**：召回之后的显示次序 |
+//! 与相邻两个文件分工（任一调整都不该动另两个）：本文件管「哪个音节」（补全是否停在音节边界）；
+//! `pinyin_completion_recall_gate` 管「几个音节」（超音节候选进不进列表）；
+//! `pinyin_completion_syllable_tier` 管「谁在前」（召回之后的显示次序）。
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -57,26 +28,19 @@ fn has_pinyin() -> bool {
 
 /// [`texts_of_code`] 要开的那个文件。
 ///
-/// ⚠️ 它和 [`has_pinyin`] 查的**不是一回事**：那个是协调器要的方案源（`cn_dicts/*.yaml`），
-/// 这个是 `import_tables` 合并出来的**产物**。测试进程里 `EngineManager` 的 `CACHE_DIR`
-/// 从未初始化，`cache_path` 于是回落到 `source.with_extension()`，产物才落在源文件旁边
-/// （装机后它在可写缓存目录里，不在 schemas 下——别照抄这个路径去别处用）。
-///
-/// 两者会分家：dev 数据树只要缺掉 `rime_frost.dict.yaml` 的任一 `import_tables` 成员
-/// （本机实测缺 `cn_dicts_cell/*` 与 `GB18030-2022`），合并就不产出，而源 yaml 俱在。
+/// 它与 [`has_pinyin`] 查的不是一回事：那个是方案源（`cn_dicts/*.yaml`），这个是
+/// `import_tables` 合并出的产物。测试进程未初始化 `CACHE_DIR`，产物才落在源文件旁边
+/// （装机后在可写缓存目录，别照抄这个路径）。缺任一 `import_tables` 成员时合并不产出而源仍在。
 fn merged_dict_path() -> PathBuf {
     data_dir().join("schemas/pinyin/rime_frost.dict.merged.wdat")
 }
 
 /// 音节归属探针的数据是否就绪。
 ///
-/// ⚠️ 2026-09-14 修正：3 条用 [`texts_of_code`] 的测试原先只查 [`has_pinyin`]，于是在
-/// 「源在、合并产物不在」的机器上守卫放行、测试在 `expect("打开真实拼音词库")` 处炸，
-/// 表现为 3 条恒定失败——混在全量结果里，和真回归难以区分（2026-09-13 就因此误报过一次
-/// 「全绿」）。判据必须落在**真正要打开的那个文件**上。
+/// 判据必须落在真正要打开的合并产物上；只查 [`has_pinyin`] 会在「源在、产物不在」时放行，
+/// 测试在打开词库处炸。
 ///
-/// ⛔ 不要改成「打不开就回空集」：`cross_syllable_hits` 会因此恒回空，三条断言全部无条件
-/// 通过——那是把红灯换成假绿，比失败更糟。
+/// 不要改成「打不开就回空集」：`cross_syllable_hits` 会恒回空，断言全部假绿。
 fn has_syllable_probe() -> bool {
     merged_dict_path().exists()
 }
@@ -114,9 +78,8 @@ fn candidates_for(input: &str) -> Vec<String> {
 
 /// 某个精确码下的全部汉字，用来判定候选的**真实音节归属**。
 ///
-/// ⚠️ **不能只按「出现在更长音节的码下」判定**：多音字（「溺」ni/niao 两读）在两个码下
-/// 都存在，那样会把合法候选误报成缺陷。首版探针就是这么误报的（`ni` 的最早跨音节位次
-/// 被算成第 11 位，剔除多音字后实为第 35 位）。故调用方一律先排除本音节码下的字。
+/// 不能只按「出现在更长音节的码下」判定：多音字（「溺」ni/niao）会被误报成缺陷，
+/// 故调用方一律先排除本音节码下的字。
 fn texts_of_code(code: &str) -> HashSet<String> {
     let p = merged_dict_path();
     let r = wind_dict::datformat::WdatReader::open(&p).expect("打开真实拼音词库");
@@ -178,10 +141,9 @@ fn legal_syllable_excludes_longer_syllable_candidates() {
     }
 }
 
-/// ★ 输入**不成音节**时前缀匹配必须照旧全开 —— 这是判据的退化通道，不是漏网。
+/// 输入不成音节时前缀匹配必须照旧全开（判据的退化通道，不是漏网）。
 ///
-/// `fe` 不是合法拼音，用户显然还没打完，此时唯一能做的就是按字符前缀猜。若这条也被
-/// 收紧，`fe`/`zh`/`m` 这类输入会直接零候选。
+/// 若这条也被收紧，`fe`/`zh`/`m` 这类输入会直接零候选。
 #[test]
 fn illegal_syllable_still_prefix_matches() {
     if !has_pinyin() {
@@ -205,11 +167,10 @@ fn illegal_syllable_still_prefix_matches() {
     );
 }
 
-/// ★★ 关掉模糊音挡住 `feng`，**开**了就必须放回来。
+/// 关掉模糊音挡住 `feng`，开了就必须放回来。
 ///
-/// 这条守的是「谁该提供 en→eng 等价」这个职责划分：它属于模糊音层（带
-/// `fuzzy_penalized` 惩罚、有独立匹配层级），而不该由扁平码前缀匹配无条件白送。
-/// 少了这条断言，把前缀匹配收紧成「模糊音也出不来」同样能让上面几条变绿。
+/// en→eng 等价归模糊音层（带 `fuzzy_penalized` 惩罚），不该由前缀匹配白送。少了这条，
+/// 把前缀匹配收紧成「模糊音也出不来」同样能让上面几条变绿。
 #[test]
 fn fuzzy_layer_still_provides_eng_when_enabled() {
     if !has_pinyin() {
@@ -238,19 +199,11 @@ fn fuzzy_layer_still_provides_eng_when_enabled() {
 
 /// 残码补全不受影响：判据位落在残码**之前**（`shenm` 取 `shen` 的长度 4）。
 ///
-/// 这几个定点是残码上浮机制存在的理由（见 `pinyin_completion.rs`），若边界判据错用了
-/// 击键长度而非 `completed_len`，它们会集体消失。
+/// 若边界判据错用击键长度而非 `completed_len`，这些残码补全（见 `pinyin_completion.rs`）
+/// 会集体消失。
 ///
-/// ## ★ 为什么没有配一条「残码位也要拦住跨音节」的反向用例
-///
-/// 因为那件事**在结构上不可能发生**，写出来会是一条恒绿、抓不住任何回归的假测试
-/// （初版真写了一条 `shenm` 不出「生命」，在**修改前的基线上同样是绿的**才发现）。
-///
-/// 原因：`shengming` 的第 4 个字符是 `g`、`shenm` 的是 `m`，它压根不是前缀。推而广之
-/// —— 能延长当前音节的字符（`n`/`g`/韵母）一旦跟在后面，`Dag::maximum_match` 就会把它
-/// 并进来切成更长的完整音节（`fen` + `g` 直接切成 `feng`），于是它**不再是残码**。
-/// 所以「残码 + 跨越已完成音节」这两个条件互斥，判据在残码位恒放行是结构性的，
-/// 不是特意开的口子。
+/// 不配「残码位也要拦住跨音节」的反向用例：能延长当前音节的字符会被 `Dag::maximum_match`
+/// 并进音节，「残码」与「跨越已完成音节」结构上互斥，那样的用例恒绿。
 #[test]
 fn trailing_partial_completion_intact() {
     if !has_pinyin() {

@@ -1,14 +1,10 @@
-//! 自动造词写进词库的**编码**必须是规范的词条码，不是候选的匹配用码。
+//! 自动造词写进词库的编码必须是规范的词条码，不是候选的匹配用码。
 //!
-//! 现场：开模糊音(sh_s + en_eng)打 `senrikl`，分步选「生日」「快乐」上屏后，
-//! 临时词库里躺着 `senrikuaile → 生日快乐` —— 前半 `senri` 是用户敲的模糊原码、
-//! 后半 `kuaile` 是词典全拼码，两段分处两个域。这条码**用任何方式都打不出来**：
-//! `senrikl` 不行、`shengrikuaile` 也不行，只有一字不差敲 `senrikuaile` 才行。
+//! 开模糊音分步选词时，候选码是用户敲的模糊原码与词典码的拼接（如 `senrikuaile`），
+//! 写进库后用任何打法都打不出来。`committed_segs` 存的匹配用码另有三个用途
+//! （`consumed_length` 判据、preedit 跟随、词频记账），不能为造词改掉，故另取规范码。
 //!
-//! 根子是 `committed_segs` 存的是候选的匹配用码，而那个码上绑着三个别的用途
-//! （`consumed_length` 的 `starts_with` 判据、preedit 跟随、词频记账），不能为造词改掉。
-//!
-//! ⚠️ 依赖 `build_dev/data` 真实词库；缺失时**静默跳过**（判据是耗时 0.00s）。
+//! 依赖 `build_dev/data` 真实词库；缺失时静默跳过（判据是耗时 0.00s）。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -67,7 +63,7 @@ fn pick(coord: &Coordinator, want: &str) -> Option<String> {
     None
 }
 
-/// 分步组出的词，写库用的码须是**各段规范词条码**的拼接。
+/// 分步组出的词，写库用的码须是各段规范词条码的拼接。
 #[test]
 fn learned_code_uses_dict_code_not_typed_code() {
     if !has_dict() {
@@ -111,22 +107,13 @@ fn learned_code_uses_dict_code_not_typed_code() {
     assert_ne!(*boundary, 0, "规范码的 boundary 须为真值，简拼索引依赖它");
 }
 
-/// **真正的验收**：造出来的词，用户下次得真能打出来。
+/// 验收：造出来的词，用户下次得真能用全拼 `shengrikuaile` 与简拼 `srkl` 打出来。
 ///
-/// ⚠️ **必须用系统词库里没有的词**。第一版拿「生日快乐」测，结果是个假护栏：
-/// `shengrikuaile` 在系统词库里本就有这个词，`can_type` 恒真 —— 造词码写成什么样
-/// 它都绿（实测：把造词改回用候选 `code`，这条照样过）。
-/// 改用「圣日快乐」：`senri` 的候选里有「圣日」（同音字），而这个**词**系统词库没有，
-/// 所以打 `shengrikuaile` 能出它，只可能来自刚造的那条临时词。
+/// 必须用系统词库里没有的词：「生日快乐」系统库本就有，`can_type` 恒真、假护栏。
+/// 「圣日快乐」只可能来自刚造的临时词。
 ///
-/// 两种打法都要通：
-/// - 全拼 `shengrikuaile`：直接命中规范码；
-/// - 简拼 `srkl`：规范码在简拼路径上同样召得回。
-///
-/// ⚠️ 简拼这条**不守 boundary**，别把它当 boundary 的护栏：boundary=0 时词进
-/// `abbrev_index::group_of` 的兜底组，引擎侧仍会用 DAG 对 `code` 现切声母串召回
-/// （实测：变异「码取规范码但 boundary 退回候选那份」下本条仍绿）。
-/// boundary 真值由上一条测试的 `assert_ne!(boundary, 0)` 守着 —— 那条在同一个变异下会红。
+/// 简拼这条不守 boundary（boundary=0 时引擎仍会用 DAG 现切声母串召回），boundary 真值由
+/// 上一条测试的 `assert_ne!(boundary, 0)` 守。
 #[test]
 fn learned_word_is_actually_typeable() {
     if !has_dict() {
@@ -139,7 +126,7 @@ fn learned_word_is_actually_typeable() {
     let coord = Coordinator::new_headless_with_store(cfg(), Some(&data_dir()), Arc::clone(&store));
     coord.prewarm_indexes();
 
-    // 造一个系统词库里没有的词（见上方 ⚠️）。
+    // 造一个系统词库里没有的词（理由见上方文档）。
     for ch in "senrikl".chars() {
         coord.handle_key_event_policed(&key((ch.to_ascii_uppercase() as u32) & 0xFF));
     }
@@ -192,12 +179,10 @@ fn type_and_find(coord: &Coordinator, input: &str, want: &str) -> bool {
     found
 }
 
-/// 论坛 t215 / A2-44 的原始路径：开 c=ch，**用翘舌打法**分步组出「菜就多练」，
-/// 下次仍用翘舌打法得能直接打出来。
+/// 开 c=ch，用翘舌打法分步组出「菜就多练」，下次仍用翘舌打法得能直接打出来。
 ///
-/// 造词写库用的是规范码 `caijiuduolian`（上面两条守的就是这个），而此前 step 6
-/// 只拿用户敲的 `chaijiuduolian` 去查 store —— 于是用户原话里「多打几遍加入词库，
-/// 还是不能通过翘舌打出」：学进去的词只有平舌打法认。
+/// 造词写的是规范码 `caijiuduolian`；step 6 若只拿所打码 `chaijiuduolian` 查 store，
+/// 学进去的词就只有平舌打法认。
 #[test]
 fn word_learned_by_fuzzy_typing_is_retypeable_by_fuzzy_typing() {
     if !has_dict() {
@@ -269,13 +254,10 @@ fn temp_records(store: &Store, text: &str) -> Vec<(String, u64)> {
         .collect()
 }
 
-/// 模糊**整句**一次上屏（单段整句造词）：写库码须为规范码，不是所打码。
+/// 模糊整句一次上屏（单段整句造词）：写库码须为规范码，不是所打码。
 ///
-/// 整句候选的 `code` 是所打码 `chaijiuduolian`；此前不带 `learn_code`，
-/// `learn_phrase_on_commit` 便把它原样写进临时库 —— 下次同样打法**零罚精确命中**这条
-/// 非规范记录，平舌打法反而打不出。改后写的是 `caijiuduolian`，翘舌打法只能经模糊召回它。
-///
-/// 这条走的是**系统词**模糊节点（`build` 的模糊分支），与 S2 开关无关。
+/// 整句候选的 `code` 是所打码 `chaijiuduolian`，原样写库会让平舌打法反而打不出。
+/// 这条走系统词模糊节点（`build` 的模糊分支），与 S2 开关无关。
 #[test]
 fn fuzzy_sentence_commit_learns_canonical_code() {
     if !has_dict() {
@@ -337,11 +319,10 @@ fn s2_fuzzy_sentence_commit_learns_canonical_code() {
     );
 }
 
-/// 模糊打法选中**临时词**，也要推进它的晋升计数（6b）。
+/// 模糊打法选中临时词，也要推进它的晋升计数（6b）。
 ///
-/// 模糊召回的候选 `code` 是所打码（`chaijiuduolian`），记录码在 `meta.store_code`
-/// （`caijiuduolian`）。6b 曾拿 `code` 去点查临时库 ⇒ 永远查不到 ⇒ 选多少次都不涨，
-/// 模糊打法下这个词永远晋升不了。
+/// 模糊召回的候选 `code` 是所打码，记录码在 `meta.store_code`；拿 `code` 点查临时库会永远
+/// 查不到，这个词就永远晋升不了。
 #[test]
 fn fuzzy_pick_of_temp_word_advances_its_count() {
     if !has_dict() {
@@ -381,11 +362,10 @@ fn fuzzy_pick_of_temp_word_advances_its_count() {
     );
 }
 
-/// 模糊整句**重复上屏**：每次只计一次。
+/// 模糊整句重复上屏：每次只计一次。
 ///
-/// 第二次上屏时整句候选同文并入了临时词「才就多练 / caijiuduolian」：造词路径按规范码
-/// `+1`，6b 若再按记录码点查命中又 `+1`。「刚造词就跳过」的守卫比的必须是 6b **命中的码**
-/// （规范码），拿所打码比会漏判 —— 计数变 3。
+/// 第二次上屏时整句候选同文并入了临时词，造词路径与 6b 会各 `+1`。「刚造词就跳过」的守卫
+/// 须比 6b 命中的码（规范码），拿所打码比会漏判、计数变 3。
 #[test]
 fn fuzzy_sentence_repeat_commit_counts_once() {
     if !has_dict() {
@@ -417,7 +397,7 @@ fn fuzzy_sentence_repeat_commit_counts_once() {
     }
 }
 
-/// S2（整句组词使用用户词）：**单个用户词**组成的整句上屏，不得往临时层再复制一份，
+/// S2（整句组词使用用户词）：单个用户词组成的整句上屏，不得往临时层再复制一份，
 /// 候选页也不得出现同文重复——精确与模糊（c=ch）两种打法都一样。
 ///
 /// 设计约定：用户词进整句只影响排序，不产生新词；多词整句（「有盖伦吗」）才照常作为新词
@@ -463,11 +443,10 @@ fn s2_single_user_word_sentence_does_not_duplicate() {
     }
 }
 
-/// ②b 混合整句一次上屏：造词码是**完整全拼 + 规范边界**，不是「简拼字母 + 全拼」的击键
-/// 混合码（`bzdnihao` 这种码几乎打不出来，只会在临时层堆积）。简拼段的节点带回查出的
-/// 词条码（`LatticeNode::canon`）；出厂配置（模糊关）即生效。
+/// ②b 混合整句一次上屏：造词码是完整全拼 + 规范边界，不是击键混合码（`bzdnihao` 几乎
+/// 打不出来，只会在临时层堆积）。简拼段节点带回词条码（`LatticeNode::canon`）。
 ///
-/// 落库后两种打法都够得着：全拼码点查命中，简拼索引按规范边界建出 `bzdnh`。
+/// 落库后全拼码点查命中，简拼索引按规范边界建出 `bzdnh`。
 #[test]
 fn mixed_abbrev_sentence_commit_learns_full_pinyin() {
     if !has_dict() {
@@ -507,11 +486,10 @@ fn mixed_abbrev_sentence_commit_learns_full_pinyin() {
 }
 
 /// ②b 混合整句与用户库里的同文词合并后上屏：造词码是完整全拼，`learn_phrase_on_commit`
-/// 按（码, 词）查到用户库已有这条，**不再写临时层**。
+/// 按（码, 词）查到用户库已有这条，不再写临时层。
 ///
-/// 此前造词码是击键混合码 `bzdnihao`，查重按它查不到用户库那条 `buzhidaonihao`，于是每上屏
-/// 一次就在临时层多一条打不出来的 `bzdnihao → 不知道你好`（实测，简拼节点 canon 置 None 即复现；
-/// 同 `s2_single_user_word_sentence_does_not_duplicate` 的约定）。
+/// 造词码若是击键混合码，查重查不到用户库的 `buzhidaonihao`，每上屏一次就多一条打不出来的
+/// 临时词（约定同 `s2_single_user_word_sentence_does_not_duplicate`）。
 #[test]
 fn mixed_abbrev_sentence_does_not_duplicate_user_word() {
     if !has_dict() {
@@ -542,7 +520,7 @@ fn mixed_abbrev_sentence_does_not_duplicate_user_word() {
     );
 }
 
-/// ②b 里的**用户简拼节点**（S2 开，临时层「拜城县」）：`bcxrmzf` 选整句「拜城县人民政府」上屏，
+/// ②b 里的用户简拼节点（S2 开，临时层「拜城县」）：`bcxrmzf` 选整句「拜城县人民政府」上屏，
 /// 造词码是完整全拼——拜城县段取临时记录自己的规范码，人民政府段取系统词条码。
 #[test]
 fn user_abbrev_node_sentence_commit_learns_full_pinyin() {
@@ -583,8 +561,7 @@ fn user_abbrev_node_sentence_commit_learns_full_pinyin() {
 /// 自动晋升校验（`maybe_promote_temp`）端到端：临时层预置 `count = promote_count − 1` 的记录，
 /// 打 `bzdnihao` 选整句「不知道你好」一次，把计数推到阈值。
 ///
-/// - 旧版 ②b 写下的击键混合码 `bzdnihao`（边界按击键逐字母：b|z|d|ni|hao）经 6b 推进到阈值，
-///   **不晋升**，留在临时层；
+/// - 旧版写下的击键混合码 `bzdnihao`（边界 b|z|d|ni|hao）经 6b 推进到阈值，不晋升；
 /// - 对照：规范码 `buzhidaonihao` 同样条件下（经造词推进到阈值）正常晋升。
 #[test]
 fn legacy_mixed_code_is_not_auto_promoted() {

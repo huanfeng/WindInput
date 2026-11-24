@@ -1,15 +1,10 @@
 //! 英文方案「上屏后自动补空格」（`schema.english.commit_space`）端到端测试。
 //!
-//! 该配置项曾经**四层就位、零处生效**：结构体 / schema 注册 / config.toml / 设置页 GUI
-//! 全有，消费点却只接在 `commit_candidate` 上——而英文引擎恒 `should_commit = false`、
-//! 自动上屏又只认码表来源，那三个调用点在英文方案下**一个都走不到**。开关打开毫无反应。
+//! 英文上屏有多条通路：`commit_selected`（六类选中触发汇于一处）、空格上屏原码、IPC 强制提交
+//! 补空格；回车上屏原码、标点顶屏刻意不补。断言重心是逐条通路各自补没补，少测一条，重构时
+//! 就可能把某条通路悄悄改回不生效。
 //!
-//! 所以本文件的断言重心不是「补了空格」，而是**逐条通路各自补没补**：真正的英文上屏出口
-//! 是 `commit_selected`（六类触发汇于一处）与「空格上屏原码」，而回车上屏原码、标点顶屏
-//! 刻意不补。少测一条，下一次重构就可能把某条通路悄悄改回不生效。
-//!
-//! ⚠️ 词典缺失时整族静默跳过（判据是**耗时 0.00s**，不是通过条数）——见
-//! `build_dev/data` 相关记录。worktree 中需自备 `build_dev` 链接。
+//! 词典缺失时整族静默跳过（判据是耗时 0.00s）。worktree 中需自备 `build_dev` 链接。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -28,7 +23,7 @@ fn data_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data")
 }
 
-/// 英文方案就绪判据：方案定义与**词库**都要在（词库由构建 assemble 注入，不进 git）。
+/// 英文方案就绪判据：方案定义与词库都要在（词库由构建 assemble 注入，不进 git）。
 fn has_english_schema() -> bool {
     let d = data_dir();
     d.join("schemas/english.schema.toml").exists() && d.join("schemas/english").is_dir()
@@ -85,8 +80,7 @@ fn commit_text(action: &KeyAction) -> String {
 
 /// 空格选中首选 → 上屏「首选 + 空格」。
 ///
-/// 断言的是**相对关系**（首选文本 + 一个空格）而非硬编码 `"hello "`：词库内容与排序会随
-/// 版本变，绑死具体单词只会让测试在无关改动上误报。
+/// 断言相对关系（首选文本 + 一个空格）而非硬编码 `"hello "`，免得词库排序变动误报。
 #[test]
 fn space_select_appends_space() {
     if !has_english_schema() {
@@ -103,20 +97,12 @@ fn space_select_appends_space() {
     assert_eq!(text, format!("{top} "), "空格选首选后应补一个空格");
 }
 
-/// 首字母大写时**选中首选**上屏，同样要补空格（t122）。
+/// 首字母大写时选中首选上屏，同样要补空格。
 ///
-/// 与 `space_select_appends_space` 只差一个 Shift，断言同形。**这条才是 t122 的复现。**
-///
-/// 它落在 `english_appends_space` 上（有候选 → 选中上屏）。此刻的首选是
-/// `english_head_candidates` 用「所打原码」直接构造的原文候选（`source` 为 `None`，
-/// 词库里字面相同的那条已在上游被精确去重吃掉），于是第一分支不命中；第二分支比
-/// `text == input`，`input` 若传成全小写的 `state.input_buffer` 就永不相等 —— 两头落空。
-///
-/// 触发开关是 `raw_candidate`（默认开）而**不是** `case_follow_input`：
-/// `raw_candidate = false` 时首选是词库候选、`source == English`，第一分支直接命中。
-///
-/// 反向验证（2026-09-14 实跑）：把调用点的 `cased_or_buffer(...)` 换回 `&state.input_buffer`，
-/// 本测试即变红（其余 12 条不动）。
+/// 此时首选是 `english_head_candidates` 构造的原文候选（`source` 为 `None`），
+/// `english_appends_space` 只能靠 `text == input` 命中；调用点的 `input` 须是保留大小写的
+/// `cased_or_buffer(...)`，传全小写的 `state.input_buffer` 就永不相等。触发开关是
+/// `raw_candidate`（默认开），不是 `case_follow_input`。
 #[test]
 fn space_select_appends_space_when_capitalized() {
     if !has_english_schema() {
@@ -136,7 +122,7 @@ fn space_select_appends_space_when_capitalized() {
     assert_eq!(text, format!("{top} "), "首字母大写选首选后应补一个空格");
 }
 
-/// 选中**大小写变形**候选上屏，同样要补空格（GH#152）。
+/// 选中大小写变形候选上屏，同样要补空格。
 ///
 /// 变形（`case_variants`，英文方案出厂关）与原文同属 `english_head_candidates` 构造的头部
 /// 候选，`source` 为 `None`；判据第二分支只认「与原码逐字节相等」，于是原文补、变形不补。
@@ -168,7 +154,7 @@ fn case_variant_select_appends_space() {
 
 /// CapsLock 全大写档下选首选（原文头部候选被整列套形成全大写）同样补空格。
 ///
-/// 档位投影作用于**含头部候选**的整列：原文 `qzxv` 显示为 `QZXV`、`source` 仍为 `None`，
+/// 档位投影作用于含头部候选的整列：原文 `qzxv` 显示为 `QZXV`、`source` 仍为 `None`，
 /// 走的是与变形候选同一条判据。钉住它，免得有人以为档位候选恒是词库来源。
 #[test]
 fn capslock_upper_tier_select_appends_space() {
@@ -188,10 +174,7 @@ fn capslock_upper_tier_select_appends_space() {
     assert_eq!(text, "QZXV ", "全大写档选首选后应补一个空格");
 }
 
-/// 反向对照：开关关闭时**不得**补空格。
-///
-/// 没有这一条，「恒补空格」的实现也能让上面那条通过——本项的缺陷史正是「判据看着对、
-/// 实际恒不生效」，反向对照是唯一能同时排除「恒开」与「恒关」的断言。
+/// 反向对照：开关关闭时不得补空格。没有它，「恒补空格」的实现也能让上面几条通过。
 #[test]
 fn space_select_no_space_when_disabled() {
     if !has_english_schema() {
@@ -208,8 +191,7 @@ fn space_select_no_space_when_disabled() {
 
 /// 数字键选词同样补空格——锁住「所有选中方式一律补」的拍板结论。
 ///
-/// 空格与数字键在 `commit_selected` 内部汇于同一分支，但那是**当前**的实现事实；本条
-/// 存在的意义是：日后若有人按触发键分流，这条会立刻失败而不是静默漂移。
+/// 空格与数字键目前在 `commit_selected` 内汇于同一分支；日后按触发键分流时这条会失败。
 #[test]
 fn number_key_select_appends_space() {
     if !has_english_schema() {
@@ -250,14 +232,11 @@ fn mouse_select_appends_space() {
     );
 }
 
-/// 打词库里没有的词，**空格**上屏原码 → 也补空格（用户拍板：与选中候选一致）。
+/// 打词库里没有的词，空格上屏原码 → 也补空格（与选中候选一致）。
 ///
-/// 这条走的是与选词完全不同的出口（`VK_SPACE` 空码分支），判据也不同——那里没有候选可依，
-/// 用的是方案口径 `english_space_enabled`。
-///
-/// ⚠️ **必须显式关掉 `raw_candidate`**：它默认开，会把所打原文作为首候选钉进列表，于是
-/// 「无候选」这个前提不再成立、本条要测的兜底出口根本走不到（走的是选中首候选那条）。
-/// 有原文候选时的对应行为另见 `tests/english_head_candidates.rs`。
+/// 走 `VK_SPACE` 空码分支，没有候选可依，判据是方案口径 `english_space_enabled`。
+/// 必须显式关掉 `raw_candidate`：否则原文作为首候选在列表里，走不到这条兜底出口
+/// （有原文候选时见 `tests/english_head_candidates.rs`）。
 #[test]
 fn raw_code_space_commit_appends_space() {
     if !has_english_schema() {
@@ -281,14 +260,11 @@ fn raw_code_space_commit_appends_space() {
     assert_eq!(text, format!("{nonsense} "), "空格上屏原码后应补一个空格");
 }
 
-/// 首字母大写时，「空格上屏原码」的**空码兜底分支**照样补空格。
+/// 首字母大写时，「空格上屏原码」的空码兜底分支照样补空格。
 ///
-/// ⚠️ **这条不是 t122 的复现**（复现见 `space_select_appends_space_when_capitalized`）。
-/// 它走的是 `message_handler` 里那条无候选兜底路径，判据只有一句 `english_space_enabled_in`
-/// ——不过候选级判据，所以缺陷期它就是绿的。留着是为了钉住「这条通路对大小写不敏感」，
-/// 免得日后有人把候选级判据一并塞进这里。
-///
-/// 我最初误把它当成 t122 的复现，它一绿就差点据此判定「根因不是大写」。记在这里。
+/// 这条不经候选级判据（`message_handler` 的无候选兜底只看 `english_space_enabled_in`），
+/// 选中路径的大写场景见 `space_select_appends_space_when_capitalized`。钉住这条通路对大小写
+/// 不敏感，免得有人把候选级判据塞进来。
 #[test]
 fn raw_code_space_commit_appends_space_when_capitalized() {
     if !has_english_schema() {
@@ -312,10 +288,9 @@ fn raw_code_space_commit_appends_space_when_capitalized() {
     assert_eq!(text, "Qwxzjv ", "首字母大写的原码上屏后应补一个空格");
 }
 
-/// 回车上屏原码 **不补**空格——刻意的不对称，不是漏接。
+/// 回车上屏原码不补空格：刻意的不对称，不是漏接。
 ///
-/// 回车分支与空格空码分支在源码里**逐行同形**，唯一差别就是这个。锁住它，免得日后有人
-/// 「统一两块重复代码」时把不对称一并抹平。
+/// 回车分支与空格空码分支逐行同形，合并重复代码时别把这个差别抹平。
 #[test]
 fn raw_code_enter_commit_does_not_append_space() {
     if !has_english_schema() {
@@ -338,11 +313,10 @@ fn raw_code_enter_commit_does_not_append_space() {
     assert_eq!(text, nonsense, "回车上屏原码不得补空格（终结性动作）");
 }
 
-/// **非英文方案下不得补空格**——即使开关是开的。
+/// 非英文方案下不得补空格，即使开关是开的。
 ///
-/// 这是整组里最关键的一条：`english_appends_space` 的两个条件（候选来源是英文、当前方案
-/// 是英文方案）查的**不是同一件事**，而后者极易被当成冗余判断删掉。删掉后临时英文、混输、
-/// 快捷输入里插一个英文词都会莫名多出空格，且英文方案自身的测试一条都跑不到。
+/// `english_appends_space` 的两个条件（候选来源是英文、当前方案是英文方案）不是一回事，后者
+/// 易被当冗余删掉；删掉后临时英文、混输、快捷输入里的英文词都会多出空格。
 #[test]
 fn non_english_schema_never_appends_space() {
     if !has_english_schema() {
@@ -362,8 +336,8 @@ fn non_english_schema_never_appends_space() {
 
 /// IPC 强制提交通路（DLL 侧 TSF 排水 / 顶码延迟提交）同样补空格。
 ///
-/// 这是一条**独立于按键路径**的上屏通路：只改 `commit_selected` 会得到「键盘空格补了、
-/// 排水路径没补」的间歇性不一致——正是本仓多次栽过的「上屏有多条通路，开关必须处处接」。
+/// 这条通路独立于按键路径：只改 `commit_selected` 会得到「键盘空格补了、排水路径没补」的
+/// 间歇性不一致。
 #[test]
 fn commit_request_space_appends_space() {
     if !has_english_schema() {
@@ -405,15 +379,10 @@ fn commit_request_enter_does_not_append_space() {
     assert_eq!(res.text, nonsense, "IPC 回车提交不得补空格");
 }
 
-/// 补的空格**不得**进入词频记账键。
+/// 补的空格不得进入词频记账键。
 ///
-/// 记账写入端若把 `"hello "` 写进 FREQ 表，读取端按候选文本 `"hello"` 查将永远查不中——
-/// 用户选了词却毫无变化，且写入本身成功、任何常规测试都不会失败（本仓已有三处这样的
-/// 孤儿键漏网史）。判据是「选过一次后该词升到首位」：记账键一旦带上尾空格，读取端查不中，
-/// 位置纹丝不动。
-///
-/// ⚠️ **必须用 `new_headless_with_store`**：`new_headless` 的 store 是 `None`，词频无处可写、
-/// 读取端也无从查起——用它写这条测试，断言失败与否和尾空格毫无关系。
+/// 记账键带尾空格时写入成功、读取端按 `"hello"` 永远查不中（孤儿键）。判据是「选过一次后
+/// 该词升到首位」。必须用 `new_headless_with_store`：`new_headless` 的 store 是 `None`。
 #[test]
 fn appended_space_does_not_pollute_freq_key() {
     if !has_english_schema() {
@@ -438,10 +407,8 @@ fn appended_space_does_not_pollute_freq_key() {
     let text = commit_text(&coord.handle_key_event(&key_event(VK_3, EVENT_KEY_DOWN)));
     assert_eq!(text, format!("{second} "), "选中时应补空格");
 
-    // 再打一次同样的码：记账键若干净，该词应升到**词库段**首位。
-    //
-    // ⚠️ 断言落在 `after[1]` 而不是 `after[0]`——首位恒是原文，调频只在词库段内部生效
-    // （原文与变形被 `split_off(dict_start)` 挡在重排之外，见设计文档 §5.2）。
+    // 记账键若干净，该词应升到词库段首位，即 `after[1]`：首位恒是原文，原文与变形被
+    // `split_off(dict_start)` 挡在重排之外。
     type_word(&coord, "hel");
     let after = coord.debug_page_texts();
     assert_eq!(

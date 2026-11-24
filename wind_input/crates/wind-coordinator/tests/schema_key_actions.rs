@@ -1,8 +1,7 @@
 //! 方案级 `[key_actions]` 的端到端分派测试。
 //!
-//! 用 `new_headless_with_override` 指定**临时** override 目录——`new_headless` 会让
-//! `EngineManager` 取真实用户目录，测试写进去要污染用户配置，这个缺口曾让方案级
-//! `[key_actions]` 的分派 bug 直接漏到真机上。
+//! 用 `new_headless_with_override` 指定临时 override 目录：`new_headless` 会让
+//! `EngineManager` 取真实用户目录，测试写进去会污染用户配置。
 
 use std::path::PathBuf;
 use wind_bridge::handler::{KeyAction, KeyEventData, MessageHandler};
@@ -32,12 +31,10 @@ fn make_override(tag: &str, schema_id: &str, body: &str) -> PathBuf {
     dir
 }
 
-/// 造一个**自带 `zz` 开头编码**的临时方案数据目录。
+/// 造一个自带 `zz` 开头编码的临时方案数据目录。
 ///
-/// 为什么不能用 build_dev/data 的 wubi86：真机上 `has_code_prefix("z")` 恒真是靠
-/// `system.phrases.toml` 那 37 条 `zz*` 标点短语，而短语层要经 redb 建立，测试里
-/// `store` 是 None、短语层为空 → z 成了死码，首键直接进模式，**根本走不到夺取路径**。
-/// 这里改用码表自带 `zz` 编码来复现「z 是活码前缀」，与真机同构。
+/// 真机上 z 是活码前缀靠的是 `system.phrases.toml` 的 `zz*` 标点短语，而测试里 `store` 是
+/// None、短语层为空，z 会成死码、走不到夺取路径。这里用码表自带 `zz` 编码复现同构场景。
 fn make_data_dir_with_z_code(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("wind_ka_data_{tag}"));
     let _ = std::fs::remove_dir_all(&dir);
@@ -94,7 +91,7 @@ const VK_Z: u32 = 0x5A;
 
 /// `none`：本方案禁用该键的全局引导，既不进模式、也不回落全局 `trigger_keys`。
 ///
-/// 现场：`;` 是 `quick_mix` 的全局触发键。方案里写 `semicolon = "none"` 后，空码按 `;`
+/// `;` 是 `quick_mix` 的全局触发键。方案里写 `semicolon = "none"` 后，空码按 `;`
 /// 必须落普通输入（后续由标点流水线出分号），而不是进快捷输入。
 #[test]
 fn schema_none_blocks_global_trigger_key() {
@@ -136,11 +133,10 @@ fn without_none_semicolon_still_enters_mix() {
     let _ = std::fs::remove_dir_all(&ov);
 }
 
-/// `z_key_repeat` 只压得住**有夺取回路**的目标。
+/// `z_key_repeat` 只压得住有夺取回路的目标。
 ///
-/// `temp_pinyin` 有 `try_z_fallback`：首键让位给 repeat 后，继续打字母仍会被夺取进临拼，
-/// 两个功能共存。而 special / mix / 临英只支持首键进入——让位一次就是这个方案里再也进不去，
-/// 尤其快符那种 `show_all_on_enter` 的模式，全部价值就在首键那一下。
+/// `temp_pinyin` 有 `try_z_fallback`，首键让位给 repeat 后仍能被夺取进临拼；special 等只支持
+/// 首键进入，让位一次就再也进不去。
 ///
 /// 本用例先真上屏一次（喂出 repeat 历史），再按 z：绑 special 时必须照进不误。
 #[test]
@@ -163,7 +159,7 @@ fn z_repeat_does_not_steal_targets_without_rescue_path() {
     coord.handle_key_event(&key(0x20)); // 空格上屏
 
     coord.handle_key_event(&key(VK_Z));
-    // ⚠️ 判据必须是「进没进模式」，不能看 KeyAction 的形状——让位后 z 落普通输入、
+    // 判据必须是「进没进模式」，不能看 KeyAction 的形状——让位后 z 落普通输入、
     // buffer 变 "z"，返回的同样是 UpdateComposition，两种结局在那一层完全同形。
     assert_eq!(
         coord.debug_active_mode(),
@@ -173,7 +169,7 @@ fn z_repeat_does_not_steal_targets_without_rescue_path() {
     let _ = std::fs::remove_dir_all(&ov);
 }
 
-/// 反向对照：绑 `temp_pinyin` 时 repeat **仍然**优先（它有 z-fallback 补救）。
+/// 反向对照：绑 `temp_pinyin` 时 repeat 仍然优先（它有 z-fallback 补救）。
 ///
 /// 没有这条，上面那个用例在「repeat 整个失效」时也会绿。
 #[test]
@@ -203,8 +199,8 @@ fn z_repeat_still_wins_for_temp_pinyin() {
 
 /// z 夺取回路推广到 mix：首键让位（保住 `zz*` 系统短语），下一键破前缀时夺取进快捷输入。
 ///
-/// 本项目 `system.phrases.toml` 出厂带 37 条 `zz*` 标点短语，`has_code_prefix("z")` 恒真，
-/// 故首键 z **必然**被活码判据让位。不补这条夺取回路，`z = "mix:…"` 配了也永不生效。
+/// 出厂 `system.phrases.toml` 的 `zz*` 标点短语让 z 恒为活码、首键必然让位；
+/// 不补这条夺取回路，`z = "mix:…"` 配了也永不生效。
 #[test]
 fn z_fallback_hijacks_into_mix() {
     let dd = make_data_dir_with_z_code("zmix");
@@ -229,10 +225,8 @@ fn z_fallback_hijacks_into_mix() {
     let _ = std::fs::remove_dir_all(&dd);
 }
 
-/// ★ 对照组：`zz` 仍走活码路径，**不**夺取——出厂那 37 条 `zz*` 标点短语必须照打。
-///
-/// 没有这一条，上面那个用例即便在「z 无条件夺取」的错误实现下也会绿，而那种实现会把
-/// 所有用户的系统短语废掉。
+/// 对照组：`zz` 仍走活码路径、不夺取，出厂 `zz*` 标点短语必须照打。
+/// 没有它，「z 无条件夺取」的错误实现也能让上一条绿。
 #[test]
 fn z_fallback_keeps_zz_system_phrases() {
     let dd = make_data_dir_with_z_code("zz");
@@ -273,9 +267,9 @@ fn z_fallback_into_mix_can_rewind() {
     let _ = std::fs::remove_dir_all(&dd);
 }
 
-/// 方案表里的 `z` 必须**压过**全局 `schema.codetable.z_key_action`。
+/// 方案表里的 `z` 必须压过全局 `schema.codetable.z_key_action`。
 ///
-/// 现场：全局配 `z_key_action = "temp_pinyin"`，方案表配 `z = "temp_english"`。
+/// 全局配 `z_key_action = "temp_pinyin"`，方案表配 `z = "temp_english"`。
 /// 按 z 应进临时英文——进了临拼就说明方案表没被优先。
 #[test]
 fn schema_table_overrides_global_z_key_action() {
@@ -336,20 +330,11 @@ fn chinese_of(act: &KeyAction) -> Option<bool> {
     }
 }
 
-/// ★★ 英文半角态下按键功能表**跳过方案级层**，只认全局配置。
+/// 英文半角态下按键功能表跳过方案级层，只认全局配置。
 ///
-/// 复现用户报障（2026-08-30）：拼音方案里方案级配 `lshift = toggle_mode`，全局配
-/// `lshift = switch_schema:wubi86`。
-///
-/// - 中文态按左 Shift → 方案级命中 → 进系统英文（**方案不变**）
-/// - 系统英文态再按 → 跳过方案级 → 全局命中 → 切到五笔（`switch_schema_by_id` 自带
-///   中文态归位）
-///
-/// 修复前第二次按仍命中方案级的 `toggle_mode`，只把 `chinese_mode` 翻回来 ⇒ 用户看到
-/// 「切回了原方案」（方案其实从未变过）。
-///
-/// 判据取**活跃方案**：`toggle_mode` 与 `switch_schema` 都会让 `chinese_mode` 回到 true，
-/// 只看中英文态两者同形、测不出来。
+/// 拼音方案级 `lshift = toggle_mode`、全局 `lshift = switch_schema:wubi86`：中文态按左 Shift
+/// 命中方案级进英文；英文态再按跳过方案级、命中全局切到五笔。
+/// 判据取活跃方案：两种动作都会让 `chinese_mode` 回到 true，只看中英文态测不出来。
 #[test]
 fn english_mode_skips_schema_layer_for_modifier_bindings() {
     if !has_schemas() {
@@ -393,7 +378,7 @@ fn english_mode_skips_schema_layer_for_modifier_bindings() {
     let _ = std::fs::remove_dir_all(&ov);
 }
 
-/// 反向对照：**中文态**下方案级层照常优先，全局那条不得抢走。
+/// 反向对照：中文态下方案级层照常优先，全局那条不得抢走。
 ///
 /// 与上一条共用同一份配置，只差不进英文态。少了它，把分层判据写反（中文态跳过方案级）
 /// 同样能让上一条变绿。
@@ -421,18 +406,10 @@ fn chinese_mode_still_prefers_schema_layer() {
     let _ = std::fs::remove_dir_all(&ov);
 }
 
-/// 方案级**单向** `switch_schema`：切过去就完事，再按**不回程**。
+/// 方案级单向 `switch_schema`：切过去就完事，再按不回程（回程可由别的键负责）。
 ///
-/// 2026-08-30 放开——此前 `bound_key_decision` 对方案级单向整条让位并 warn，理由是
-/// 「单向切走后目标方案没有这条绑定，这个键就再也按不动了」。但那描述的是**这把键**
-/// 按不动，而回程完全可以由别的键负责（真实配法：右 Shift 单向去英文方案、左 Shift 管
-/// 中英文态）。禁令把「可能的困扰」升成了「绝对禁止」，挡掉了合法配法。
-///
-/// ★★ 第二次按的断言取 `KeyAction::Consumed`，这是本用例的**要害**：
-/// `Config::default()` 的 `toggle_mode_keys` 出厂就含 `rshift`，若目标方案里该键返回
-/// `None` 落回全局链，就会被 `is_toggle_mode_keycode` 接住去**切中英文**——用户配的是
-/// 「切方案」却切了中英文，比没反应难查得多，正是当初那条禁令担心的后果。
-/// 断言「仍在 pinyin」测不出这个（切中英文同样不改方案），必须断言键被吞掉。
+/// 第二次按须断言 `KeyAction::Consumed`：出厂 `toggle_mode_keys` 含 `rshift`，键若落回全局链
+/// 会被 `is_toggle_mode_keycode` 接住去切中英文。只断言「仍在 pinyin」测不出这个。
 #[test]
 fn schema_level_switch_schema_is_one_way() {
     if !has_schemas() {
@@ -479,11 +456,10 @@ fn schema_level_switch_schema_is_one_way() {
 }
 
 /// 全局 `switch_schema` 不受放开影响：在目标方案里仍命中全局表走 `Act` 分支（幂等归位），
-/// 而**不是**被单向送达记录吞掉。
+/// 而不是被单向送达记录吞掉。
 ///
-/// 两条路的处置不同是刻意的：全局绑定在所有方案下都在作用域内，「再按一次」该走它自己的
-/// 幂等语义（把中英态/CapsLock 归位到能用这个方案打字）；方案级绑定在目标方案里根本不
-/// 存在，才需要送达记录兜底。
+/// 处置不同是刻意的：全局绑定在所有方案下都在作用域内，再按走幂等归位；方案级绑定在目标
+/// 方案里不存在，才需要送达记录兜底。
 #[test]
 fn global_switch_schema_unaffected_by_one_way_arrival() {
     if !has_schemas() {
@@ -509,13 +485,8 @@ fn global_switch_schema_unaffected_by_one_way_arrival() {
 
 /// C 类 `toggle_schema` 的往返：五笔按右 Shift 去拼音，再按回五笔。
 ///
-/// ★ 回程**不要求目标方案配对称的绑定**——本例 pinyin 的 override 里没有任何
-/// `key_actions`，回程仍然成立。
-///
-/// ⚠️ 这条曾被写成「方案级只收 `toggle_schema`、不收单向 `switch_schema` 的理由」。
-/// **2026-08-30 起方案级单向已放开**（回程可以由别的键负责，禁令挡掉了合法配法），
-/// 单向在目标方案里的处置改为**吞键**，见 `schema_level_switch_schema_is_one_way`。
-/// 本用例只管 `toggle_schema` 自己的往返语义，不再兼职论证那条禁令。
+/// 回程不要求目标方案配对称的绑定：本例 pinyin 的 override 里没有任何 `key_actions`。
+/// 单向 `switch_schema` 的处置见 `schema_level_switch_schema_is_one_way`。
 #[test]
 fn toggle_schema_on_modifier_round_trips() {
     if !has_schemas() {
@@ -543,7 +514,7 @@ fn toggle_schema_on_modifier_round_trips() {
 /// 修饰键的绑定必须进 `key_up` 转发集，否则 TSF 压根不发这个 keyup ——
 /// 绑定在配置里躺着但永远不触发，是「配了不生效」里最难查的一种。
 ///
-/// 断言的是**推给 C++ 的白名单**，不是内部结构：这是可达性的唯一来源。
+/// 断言的是推给 C++ 的白名单，不是内部结构：这是可达性的唯一来源。
 #[test]
 fn modifier_binding_enters_key_up_forward_set() {
     if !has_schemas() {
@@ -564,7 +535,7 @@ fn modifier_binding_enters_key_up_forward_set() {
     let _ = std::fs::remove_dir_all(&ov);
 }
 
-/// 转发集取**所有方案的并集**：即便当前活跃的是 pinyin，wubi86 里绑的 rshift
+/// 转发集取所有方案的并集：即便当前活跃的是 pinyin，wubi86 里绑的 rshift
 /// 也要在集合里。按活跃方案裁剪就得在每次切方案后重推白名单，漏一次的表现是
 /// 「刚切完方案这个键不灵、点下别的窗口又灵了」。
 #[test]
@@ -585,7 +556,7 @@ fn key_up_forward_set_is_union_across_schemas() {
         hashes.iter().any(|h| (h & 0xFFFF) == VK_RSHIFT),
         "别的方案绑的修饰键也要在转发集里，实际: {hashes:?}"
     );
-    // 但**不动作**：活跃方案没绑，keyup 落回全局链。
+    // 但不动作：活跃方案没绑，keyup 落回全局链。
     assert_eq!(coord.active_schema_id(), "pinyin");
     coord.handle_key_event(&key_up(VK_RSHIFT));
     assert_eq!(
@@ -596,7 +567,7 @@ fn key_up_forward_set_is_union_across_schemas() {
     let _ = std::fs::remove_dir_all(&ov);
 }
 
-/// `toggle_schema` 绑在**有字符的键**上不生效（core 侧忽略 + warn）。
+/// `toggle_schema` 绑在有字符的键上不生效（core 侧忽略 + warn）。
 ///
 /// 不是遗漏：它必须在英文模式下也按得动（否则切到英文方案就回不来），而有字符的键
 /// 走的 keydown 链在英文模式分水岭之后。设置页对这个组合给行内提示。
@@ -621,10 +592,10 @@ fn toggle_schema_ignored_on_character_key() {
     let _ = std::fs::remove_dir_all(&ov);
 }
 
-/// ★ 回程记录**用掉即失效**：连按三次是「去 → 回 → 再去」，不是在两边反复横跳时
+/// 回程记录用掉即失效：连按三次是「去 → 回 → 再去」，不是在两边反复横跳时
 /// 拿陈旧记录乱送。
 ///
-/// 第三次按下时活跃方案已回到 wubi86，该方案里 rshift **有**绑定，故走的是正常去程；
+/// 第三次按下时活跃方案已回到 wubi86，该方案里 rshift 有绑定，故走的是正常去程；
 /// 若回程记录没被 take 掉，这一次会被当成回程处理。
 #[test]
 fn return_authorization_is_consumed_once() {
@@ -652,16 +623,11 @@ fn return_authorization_is_consumed_once() {
     let _ = std::fs::remove_dir_all(&ov);
 }
 
-/// ★ 用户报障场景：**去程之后用别的方式切了英文状态，再按不该弹回来源**。
+/// 去程之后用别的方式切了中英文状态，再按不该弹回来源。
 ///
-/// 原实现的回程判据只有 `schema_generation`，而切中英文不动代际 ⇒ 记录照旧"有效" ⇒
-/// 「从五笔一键切到英文方案，又切了英文状态，再按却切回五笔」。现在落点快照把
-/// `chinese_mode` 也算进去：落点被扰动 ⇒ 这把键退回本义「去目标」，重新落地一次；
-/// **来源保留**，所以第四次按仍然回得去。
-///
-/// 本例同时压在 `BoundKeyDecision::NotBound` 那条路上（pinyin 没配 rshift），即
-/// 「方案级绑定 + 目标方案没配同键」的临时授权路径——它曾有一份只看代际的独立回程
-/// 实现，判据分叉后同一个 bug 只在这种配法下复现。
+/// 切中英文不动 `schema_generation`，故落点快照要把 `chinese_mode` 也算进去：落点被扰动则
+/// 这把键退回「去目标」重新落地，来源保留，第四次按仍回得去。本例同时压在
+/// `BoundKeyDecision::NotBound` 的临时授权路径上（pinyin 没配 rshift），两条路径须共用判据。
 ///
 /// 扰动用左 Shift：`default_toggle_mode_keys` 出厂即 `["lshift", "rshift"]`，故它落回
 /// 全局链就是中英切换，不需要额外配置。
@@ -703,15 +669,10 @@ fn disturbed_landing_relands_instead_of_returning() {
     let _ = std::fs::remove_dir_all(&ov);
 }
 
-/// 期间用别的方式切过方案（代际已变）⇒ 来源作废，按键**完全无操作**，且不复活。
+/// 期间用别的方式切过方案（代际已变）⇒ 来源作废，按键完全无操作，且不复活。
 ///
-/// 不顺手做「归位」是用户拍板的取舍：此时没有任何依据说明用户想去哪，随便挑一个会把
-/// 往返键变成随机跳转键。第二次按验的是记录确实被 take 掉了——留着的话，下一次代际
-/// 恰好对上时会把人送回几步之前的方案。
-///
-/// 这里用**全局** `keys.key_actions`（而非方案级 override）：全局条目在所有方案下都
-/// 查得到（`bound_action_with_source` 的三个来源），两次按都走 `Act` 分支，能干净地
-/// 断言"无操作"。方案级配法下授权本身就不成立，键会落回全局链另作它用，那是另一回事。
+/// 不做归位：此时无从判断用户想去哪，随便挑会把往返键变成随机跳转键。第二次按验记录确实
+/// 被 take 掉。用全局 `keys.key_actions`：两次按都走 `Act` 分支，能干净断言「无操作」。
 #[test]
 fn origin_dropped_after_schema_changed_by_other_means() {
     if !has_schemas() {
@@ -753,7 +714,7 @@ fn origin_dropped_after_schema_changed_by_other_means() {
 
 // ──────────────── 五期：A 类状态切换 ────────────────
 
-/// A 类绑在**有字符键**上：中文态按下即切换标点，不需要修饰键。
+/// A 类绑在有字符键上：中文态按下即切换标点，不需要修饰键。
 ///
 /// 与 C 类刻意不同——`toggle_punct` 本就只在中文态有意义（全局那份也带
 /// CHINESE_ONLY），不存在「切过去回不来」的问题，故 keydown 路径可用。
@@ -779,7 +740,7 @@ fn dispatch_action_on_character_key_toggles_punct() {
     let _ = std::fs::remove_dir_all(&ov);
 }
 
-/// ★ A 类里「用来离开英文态」的那几个（`toggle_mode` / `switch_engine`）**限修饰键**。
+/// A 类里「用来离开英文态」的那几个（`toggle_mode` / `switch_engine`）限修饰键。
 ///
 /// 绑在有字符的键上是单程票：那条 keydown 链在英文模式分水岭之后，切到英文态就
 /// 再也按不动了。core 侧忽略并 warn，判据见 `BoundAction::requires_modifier_key`。
@@ -804,7 +765,7 @@ fn toggle_mode_ignored_on_character_key() {
     let _ = std::fs::remove_dir_all(&ov);
 }
 
-/// 同一个动作绑到**修饰键**上则生效，且能来回切——这正是「限修饰键」要保住的能力。
+/// 同一个动作绑到修饰键上则生效，且能来回切——这正是「限修饰键」要保住的能力。
 #[test]
 fn toggle_mode_works_on_modifier_key() {
     if !has_schemas() {
@@ -850,12 +811,10 @@ fn dispatch_action_yields_while_typing() {
     let _ = std::fs::remove_dir_all(&ov);
 }
 
-/// ★ z 夺取进 mix 后，**数字要能进缓冲**，而不是被当成选词键。
+/// z 夺取进 mix 后，数字要能进缓冲，而不是被当成选词键。
 ///
-/// 现场：`z = "mix:quick_mix"` 时按 `z1+2`。z 恒是活码（zz* 编码）故首键让位，
-/// 第二键才触发夺取——而 `try_z_fallback` 原先只挂在字母臂上，数字在缓冲非空时
-/// 走「数字选词」臂、根本到不了夺取判定。表现是「z 进快捷输入后算不了数」，
-/// 而同一个 mix 用 `;` 进就正常（`;` 首键直接进模式，之后所有键都归 mix）。
+/// `z = "mix:quick_mix"` 时按 `z1+2`：z 是活码、首键让位，第二键才夺取；`try_z_fallback`
+/// 须同样挂在数字臂上，否则数字走「数字选词」臂、到不了夺取判定。
 #[test]
 fn z_fallback_hijacks_into_mix_on_digit() {
     let dd = make_data_dir_with_z_code("zmixdigit");
@@ -874,11 +833,9 @@ fn z_fallback_hijacks_into_mix_on_digit() {
     let _ = std::fs::remove_dir_all(&dd);
 }
 
-/// z 夺取进 mix 后，**算式符号要归 mix 处理**（`z1+2` 应得到 `1+2` 的计算）。
+/// z 夺取进 mix 后，算式符号要归 mix 处理（`z1+2` 应得到 `1+2` 的计算）。
 ///
-/// 这才是用户实际会打的形态。符号**自己**触发夺取（`z` 直接接 `-`）刻意不做：
-/// `-` / `=` 默认是翻页键（`page_keys = [..., "minus_equal"]`），在更上游就被消费，
-/// 为了一个罕见入口去动翻页键不划算。进了模式之后符号本就归 mix 管，不受此限。
+/// 符号自己触发夺取（`z` 直接接 `-`）刻意不做：`-`/`=` 默认是翻页键，在更上游被消费。
 #[test]
 fn z_fallback_mix_accepts_operators_after_hijack() {
     let dd = make_data_dir_with_z_code("zmixcalc");
@@ -920,10 +877,8 @@ fn inserted_text(act: &KeyAction) -> Option<&str> {
     }
 }
 
-/// ★ 缓冲沿活码长到 `zzbd`、候选已列出后，数字是**选词键**，不能被 z 夺取吃成 mix 残余码。
-///
-/// 现场：`z = "mix:quick_mix"`，打 `zzbd` 出标点分组后按数字选不了——`zzbd2` 破前缀，
-/// 夺取把 `2` 连同 `zbd` 塞进快捷输入缓冲。与快捷输入的 `free_input` 无关（还没进模式）。
+/// 缓冲沿活码长到 `zzbd`、候选已列出后，数字是选词键，不能被 z 夺取吃成 mix 残余码
+/// （`zzbd2` 破前缀，夺取会把 `2` 连同 `zbd` 塞进快捷输入缓冲）。
 #[test]
 fn z_fallback_keeps_digit_select_when_candidates_listed() {
     let dd = make_data_dir_with_zz_group("zzgroupdigit");
@@ -997,7 +952,7 @@ fn z_fallback_keeps_punct_top_commit_when_candidates_listed() {
     let _ = std::fs::remove_dir_all(&dd);
 }
 
-/// ★ 临拼的残余码只可能是拼音字母，故数字**不该**夺取——`z1` 里的 1 仍是选词键。
+/// 临拼的残余码只可能是拼音字母，故数字不该夺取——`z1` 里的 1 仍是选词键。
 /// 判据按目标模式的「残余码语义」分，与设计文档 §4.2 那张表同源。
 #[test]
 fn z_fallback_does_not_hijack_digits_for_temp_pinyin() {
@@ -1020,8 +975,8 @@ fn z_fallback_does_not_hijack_digits_for_temp_pinyin() {
 
 /// 出厂 `system.phrases.toml` 那批 `zz*` 标点短语的最小复刻（码长均 ≥2）。
 ///
-/// 真机上正是它们让 `has_code_prefix("z")` 为真。headless 测试的 `store` 是 `None`、
-/// 短语层恒空，不显式装载的话下面这些用例测的全是「z 是死码」那条分支——与真机分叉。
+/// 真机上正是它们让 z 成活码；headless 的 `store` 是 `None`、短语层恒空，不显式装载就只测到
+/// 「z 是死码」那条分支。
 fn seed(code: &str, text: &str) -> wind_phrase::PhraseSeed {
     wind_phrase::PhraseSeed {
         code: code.into(),
@@ -1037,15 +992,11 @@ fn zz_system_phrases() -> Vec<wind_phrase::PhraseSeed> {
     vec![seed("zzbd", "、"), seed("zzsz", "…")]
 }
 
-/// ★★ `input.phrase.min_prefix` 对**绑了动作的字母同样有效**——反馈不能拿短语顶上。
+/// `input.phrase.min_prefix` 对绑了动作的字母同样有效，让位帧的反馈不能拿短语顶上。
 ///
-/// 真机上 `zz*` 是 `1 标点 2 数字 3 字母 4 偏旁` 这样的 `$SS` 分组导航条目。曾为了填补
-/// 「让位空帧」把绑定字母的枚举门槛降到 1，结果按 z 就弹出整屏分组，等于把 `zz` 那一级的
-/// 导航提前了一整级，用户设的 `min_prefix` 形同虚设（2026-08-09 用户反馈推翻）。
-///
-/// ★ 教训：`has_code_prefix`（存在性，问「z 是不是活码」）与 `build_candidates`
-/// （显示策略，问「现在显示什么」）**回答的不是同一个问题**，不该被强行对齐到任一边。
-/// 让位那一帧的反馈另有来源，见 `bound_letter_yield_frame_shows_repeat`。
+/// 把绑定字母的枚举门槛降到 1 会让按 z 就弹出整屏 `$SS` 分组导航。`has_code_prefix`（z 是不是
+/// 活码）与 `build_candidates`（现在显示什么）回答的不是同一个问题，别强行对齐。
+/// 让位帧的反馈见 `bound_letter_yield_frame_shows_repeat`。
 #[test]
 fn min_prefix_respected_on_bound_letter() {
     if !has_schemas() {
@@ -1072,7 +1023,7 @@ fn min_prefix_respected_on_bound_letter() {
 
 /// 对照：没绑动作的字母同样受 `min_prefix` 约束。
 ///
-/// 与上一条合起来说明「绑不绑动作，短语门槛都一视同仁」——曾经的破例已彻底移除。
+/// 与上一条合起来说明「绑不绑动作，短语门槛都一视同仁」。
 #[test]
 fn min_prefix_respected_on_unbound_letter() {
     if !has_schemas() {
@@ -1096,18 +1047,11 @@ fn min_prefix_respected_on_unbound_letter() {
     let _ = std::fs::remove_dir_all(&ov);
 }
 
-/// ★★ 让位那一帧的反馈＝**重复上屏**，且资格来自**目标 mix 的 members**。
+/// 让位那一帧的反馈＝重复上屏，且资格来自目标 mix 的 members。
 ///
-/// 用户拍板的优先级（2026-08-09）：「只显示重复上屏，如果没有重复的，应该显示快捷模式的
-/// 提示」。本用例锁第一条。
-///
-/// 关键点是**不开 `z_key_repeat` 也该有**：内置 quick_mix 的 members 含
-/// `quick_input.repeat`，而走让位路径的引导键永远到不了 mix 的空缓冲帧（夺取路径的
-/// `mix_buffer` 恒等于残余码，至少一个字符），那个成员对这类配置本来形同虚设——用户报的
-/// 「z 进的快捷输入没有重复输入功能」正是它。
-///
-/// 上屏内容用 `zzbd` 打出的「、」，而不是随便敲两个字母：后者出什么字取决于码表，
-/// 断言只能写成「非空」，那在 repeat 整个失效时也会绿。
+/// 优先级：先显示重复上屏，没有才显示快捷模式提示；本用例锁前者。不开 `z_key_repeat` 也该有：
+/// 走让位路径的引导键到不了 mix 的空缓冲帧，members 里的 `quick_input.repeat` 只能在这一帧生效。
+/// 上屏内容用 `zzbd` 打出的「、」，结果确定，断言才不必退化成「非空」。
 #[test]
 fn bound_letter_yield_frame_shows_repeat() {
     if !has_schemas() {
@@ -1118,7 +1062,7 @@ fn bound_letter_yield_frame_shows_repeat() {
     let coord = Coordinator::new_headless_with_override(cfg, Some(&data_dir()), Some(ov.clone()));
     coord.debug_install_phrases(zz_system_phrases());
 
-    // 先用 `zzbd` 上屏一个**确定**的内容。
+    // 先用 `zzbd` 上屏一个确定的内容。
     for vk in [VK_Z, VK_Z, 'B' as u32, 'D' as u32] {
         coord.handle_key_event(&key(vk));
     }
@@ -1134,8 +1078,7 @@ fn bound_letter_yield_frame_shows_repeat() {
     let _ = std::fs::remove_dir_all(&ov);
 }
 
-/// ★★ z 的三条路必须**同时**走得通——这正是用户说的「临拼不冲突」的完整形态，
-/// 现在临英与 mix 也补齐了：
+/// z 的三条路必须同时走得通（临拼、临英、mix 目标同理）：
 ///
 /// | 打法 | 归属 | 机制 |
 /// |---|---|---|
@@ -1143,7 +1086,7 @@ fn bound_letter_yield_frame_shows_repeat() {
 /// | `zzbd` | 系统标点短语 | 正常码表输入，精确命中 |
 /// | `z1` / `zri` | 目标模式 | `try_z_fallback` 破前缀夺取 |
 ///
-/// 三条各测一遍。任何一条断掉都说明这次改动把某一路挤掉了。
+/// 三条各测一遍，任何一条断掉都说明某一路被挤掉了。
 #[test]
 fn z_three_paths_coexist() {
     if !has_schemas() {
@@ -1185,7 +1128,7 @@ fn z_three_paths_coexist() {
 
 /// 精确码短语不受 `min_prefix` 约束（`lookup` 无门槛），故码就是 `z` 的短语必须照常让位。
 ///
-/// 把修复的边界钉死：改的是**前缀枚举**那一条，不是把短语判据整个放宽。
+/// 把修复的边界钉死：改的是前缀枚举那一条，不是把短语判据整个放宽。
 #[test]
 fn exact_code_phrase_still_yields_regardless_of_min_prefix() {
     if !has_schemas() {
@@ -1205,10 +1148,10 @@ fn exact_code_phrase_still_yields_regardless_of_min_prefix() {
     let _ = std::fs::remove_dir_all(&ov);
 }
 
-/// ★ 隐式的 repeat 来源（mix members）**只填空帧，不抢首选**。
+/// 隐式的 repeat 来源（mix members）只填空帧，不抢首选。
 ///
-/// 绑了动作的字母**恰恰可能是活码**——那正是它让位的原因。此时那一帧有真候选，若把重复
-/// 上屏插到顶上，用户按空格上屏的就是上次内容而不是自己刚打的字。
+/// 绑了动作的字母可能是活码（这正是它让位的原因），那一帧有真候选，重复上屏插到顶上会让
+/// 空格上屏上次内容。
 ///
 /// 用 `zt` 方案（码表自带 `zzbd`→甲 / `zzsz`→乙）：z 是活码前缀，按 z 有真候选。
 /// 与 `bound_letter_yield_frame_shows_repeat`（wubi86 的 z 是死码、帧为空）构成受控对比,
@@ -1242,7 +1185,7 @@ fn implicit_repeat_does_not_outrank_real_candidates() {
     let _ = std::fs::remove_dir_all(&dd);
 }
 
-/// 没绑动作、也没开 `z_key_repeat` 的字母，那一帧**不该**凭空多出重复候选。
+/// 没绑动作、也没开 `z_key_repeat` 的字母，那一帧不该凭空多出重复候选。
 ///
 /// 反向守卫：`leading_letter_repeat_text` 的资格判定若写漏（比如只看「单字母」不看绑定），
 /// 每个死码字母按下去都会冒出上次上屏的内容。
@@ -1273,8 +1216,8 @@ fn unbound_letter_gets_no_repeat_candidate() {
 
 /// 拼音方案绑字母引导键：只在空缓冲进模式，组码中间的同一个字母照常是编码。
 ///
-/// 现场：全拼里 `u` 不能起头，用户在拼音方案级表配 `u = "mix:quick_mix"`。非码表引擎对字母
-/// 绑定不做合理性判断（用户自己的配置）；`nv` / `lv` 里的 `v` 是组码中间，不能被夺。
+/// 全拼里 `u`/`v` 不能起头，可在拼音方案级表绑成引导键；非码表引擎对字母绑定不做合理性判断。
+/// `nv` / `lv` 里的 `v` 是组码中间，不能被夺。
 /// 断言用 `debug_active_mode`：不进模式时 `u` 也会开出组合区，只看动作类型分不出来。
 #[test]
 fn pinyin_letter_lead_enters_only_on_empty_buffer() {

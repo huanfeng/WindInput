@@ -1,10 +1,7 @@
-//! 协调器输入流程端到端测试
+//! 协调器输入流程端到端测试：五笔/拼音基本输入、方案切换、中英切换。
 //!
-//! 覆盖基础功能目标：五笔/拼音基本输入流程 + 方案切换 + 中英切换。
-//! 使用 `Coordinator::new_headless`（不启动 Win32 UI 线程），通过模拟按键事件
-//! 断言返回的 `KeyAction`，验证整条"字母累积 → 候选 → 选词上屏"链路。
-//!
-//! 词典缺失时自动跳过（无数据 CI 环境）。
+//! 用 `Coordinator::new_headless`（不启动 Win32 UI 线程）模拟按键，断言返回的 `KeyAction`，
+//! 覆盖「字母累积 → 候选 → 选词上屏」整条链路。词典缺失时自动跳过（无数据 CI 环境）。
 
 use std::path::PathBuf;
 use wind_bridge::handler::{KeyAction, KeyEventData, MessageHandler};
@@ -15,8 +12,7 @@ use wind_webdata::WebDataRpc;
 
 fn data_dir() -> PathBuf {
     // 三级：crates/wind-coordinator → crates → wind_input → 仓库根（build_dev 在仓库根）。
-    // 曾误写成两级，解析到 wind_input/build_dev/data —— 该目录不存在，于是下面的
-    // exists() 判假、整个测试族静默走「跳过」分支通过。**判据是耗时 0.00s**。
+    // 层级写错时 exists() 判假，整个测试族静默走「跳过」分支通过（耗时 0.00s 即征兆）。
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data")
 }
 
@@ -31,19 +27,16 @@ fn has_schemas() -> bool {
 
 /// 让指定方案获得 `[overlay]` 段（= 成为 overlay 方案），返回可传给构造函数的 override 目录。
 ///
-/// 特殊模式的实例集合已是「带 `[overlay]` 段的已安装方案」，不再是 `schema.special_modes`
-/// 数组。测试不能往真实 `data/schemas` 写文件，故走 override 层——`read_schema` 的
-/// `merge_toml` 会把它合并进方案，效果等同方案自带该段，真实词库分毫不动。
+/// 测试不能往真实 `data/schemas` 写文件，故走 override 层：`read_schema` 的 `merge_toml`
+/// 会把它合并进方案，效果等同方案自带该段。
 fn overlay_override_dir(tag: &str, schemas: &[(&str, bool)]) -> PathBuf {
     overlay_override_dir_with_codetable(tag, schemas, "")
 }
 
 /// 同 [`overlay_override_dir`]，但额外给每个方案写一段 `[engine.codetable]` 覆盖。
 ///
-/// ★ **overlay 方案不继承全局 `schema.codetable`**（`EngineManager::codetable_baseline`
-/// 按 `[overlay]` 段存在与否分流，取内置基线）。所以想让它按某个码表行为跑，必须写在
-/// **方案自己名下**——拨 `cfg.schema.codetable.*` 对它完全无效，而那样写出来的测试
-/// 会以「行为没生效」的形态失败，很容易被误读成功能坏了。
+/// overlay 方案不继承全局 `schema.codetable`（`EngineManager::codetable_baseline` 取内置基线），
+/// 码表行为必须写在方案自己名下；拨 `cfg.schema.codetable.*` 对它无效，测试会以「行为没生效」失败。
 fn overlay_override_dir_with_codetable(
     tag: &str,
     schemas: &[(&str, bool)],
@@ -69,8 +62,7 @@ fn overlay_override_dir_with_codetable(
 
 /// 把某个键绑成「进入该 overlay 方案」。
 ///
-/// 引导键的落点是 `keys.key_actions`（五c 收编），`special:<id>` 里的 `<id>` 现在
-/// 就是**方案 id**——实例即方案，不再有指向别处的实例别名。
+/// 引导键落在 `keys.key_actions`，`special:<id>` 里的 `<id>` 就是方案 id。
 fn bind_special(cfg: &mut Config, key: &str, schema_id: &str) {
     cfg.keys
         .key_actions
@@ -146,9 +138,8 @@ fn test_wubi_basic_input_and_commit() {
         KeyAction::InsertText { text, .. } => {
             assert!(!text.is_empty(), "上屏文本应非空");
             // 同 test_mixed_wubi_exact_priority：`aaaa` 是 gen_dict `[protected_codes]`
-            // 保护码，组内次序由上游给定（上游把键名汉字「工」放首位，补权时代则是
-            // 「恭恭敬敬」在前）。本用例要钉的是「空格上屏首选」这条通路，具体是哪条
-            // 五笔词条属实现细节，写死会在词库重新生成的前后各红一次。
+            // 保护码，组内次序由上游给定。本用例只钉「空格上屏首选」这条通路，
+            // 具体是哪条词条属实现细节，写死会随词库重新生成而红。
             assert!(
                 matches!(text.as_str(), "工" | "恭恭敬敬"),
                 "空格应上屏五笔首选（aaaa 的五笔候选为 工/恭恭敬敬），实际: {}",
@@ -288,13 +279,10 @@ fn test_candidate_action_hotkey_modifier_exact_match() {
         return;
     }
     use wind_ipc::protocol::{MOD_ALT, MOD_CTRL, MOD_LCTRL, MOD_SHIFT};
-    // 回归：候选热键的修饰位按**相等**判，不按包含判。
-    //
-    // 旧判据是 `"ctrl+number" if has_ctrl && !has_shift`（完全不看 Alt）⇒ 出厂配置
-    // （pin=ctrl+number）下按 Ctrl+Alt+2 会命中 pin 那条臂、把第 2 个候选静默置顶，
-    // 而 TSF 侧同时把这个键交还宿主 ⇒ 宿主快捷键与置顶同时发生，用户完全看不出原因。
-    // 每条用例都要重新起一段组合：不命中候选热键的 Ctrl/Alt 组合会落到「清空组合并隐藏
-    // 候选窗」那条兜底臂（`ClearCompositionThenPassThrough`），把缓冲清空。
+    // 候选热键的修饰位按相等判，不按包含判：否则出厂（pin=ctrl+number）下 Ctrl+Alt+2
+    // 会把第 2 个候选静默置顶，同时 TSF 把键交还宿主，两件事一起发生。
+    // 每条用例重新起一段组合：未命中候选热键的 Ctrl/Alt 组合会落到
+    // `ClearCompositionThenPassThrough`，把缓冲清空。
     let fresh = || {
         let c = Coordinator::new_headless(config_with("wubi86"), Some(&data_dir()));
         for ch in ['a', 'a', 'a', 'a'] {
@@ -305,7 +293,7 @@ fn test_candidate_action_hotkey_modifier_exact_match() {
 
     // ① 多一个 Alt ⇒ 与 pin(ctrl+number) / delete(ctrl+shift+number) 都不相等。
     //    正确结局是落到兜底臂 `ClearCompositionThenPassThrough`（组合清掉，键交还宿主），
-    //    **不是** `Consumed`（那才是「被候选热键认领了」）。
+    //    不是 `Consumed`（那才是「被候选热键认领了」）。
     let coord = fresh();
     let ctrl_alt =
         coord.handle_key_event(&key_event_mods(0x32, EVENT_KEY_DOWN, MOD_CTRL | MOD_ALT));
@@ -328,9 +316,9 @@ fn test_candidate_action_hotkey_modifier_exact_match() {
         all_three
     );
 
-    // ③ 左右具体位（TSF 的 `GetCurrentModifiers` 恒附带，见 BinaryProtocol.h）**不参与比较**。
+    // ③ 左右具体位（TSF 的 `GetCurrentModifiers` 恒附带，见 BinaryProtocol.h）不参与比较。
     //    漏掉这条掩码的话等值判据会一个都匹配不上——把功能整个判死，失效方向与 ①② 相反，
-    //    而 ①② 全绿。**两个方向各要有一条用例**。
+    //    而 ①② 全绿。两个方向各要有一条用例。
     let coord = fresh();
     let with_specific =
         coord.handle_key_event(&key_event_mods(0x32, EVENT_KEY_DOWN, MOD_CTRL | MOD_LCTRL));
@@ -465,7 +453,7 @@ fn test_numpad_direct_outputs_digit() {
     if !has_schemas() {
         return;
     }
-    // 默认 numpad_behavior 为空 → direct：不把该键解释为选词，但**已打的码不丢**——
+    // 默认 numpad_behavior 为空 → direct：不把该键解释为选词，但已打的码不丢——
     // 顶屏当前高亮候选后接着输出小键盘数字（旧契约为「丢弃编码只输出数字」，已废止：
     // 丢掉用户已打的码是数据丢失，且与主键盘标点键的既有行为不一致）。
     let coord = Coordinator::new_headless(config_with("wubi86"), Some(&data_dir()));
@@ -483,9 +471,8 @@ fn test_numpad_direct_outputs_digit() {
         other => panic!("direct 小键盘应 InsertText，实际: {:?}", other),
     }
 
-    // 空组合（半角）时无候选可顶：透传，由宿主自己出字——与主键盘数字同一语义。
-    // 曾经是「我们 InsertText 出这个数字」，在 Chrome 类宿主里双重上屏（论坛 t285），
-    // 完整理由见 `test_numpad_direct_idle_passthrough`。
+    // 空组合（半角）时无候选可顶：透传，由宿主自己出字——与主键盘数字同一语义；
+    // 由我们 InsertText 会在 Chrome 类宿主里双重上屏，见 `test_numpad_direct_idle_passthrough`。
     let coord = Coordinator::new_headless(config_with("wubi86"), Some(&data_dir()));
     let act = coord.handle_key_event(&key_event(0x65, EVENT_KEY_DOWN));
     assert!(
@@ -495,15 +482,11 @@ fn test_numpad_direct_outputs_digit() {
     );
 }
 
-/// 论坛 t285：中文模式空闲（无组合、无候选）+ 半角时，小键盘数字与运算符必须透传。
+/// 中文模式空闲（无组合、无候选）+ 半角时，小键盘数字与运算符必须透传。
 ///
-/// C++ 的 OnTestKeyDown 对这批键（ClassifyInputKey 归 Number）在无会话时**不吃**，而
-/// OnKeyDown 在中文模式下仍会把 Number 转发给服务端。Chrome 类宿主（Twitter / VK 的 PIN
-/// 框）无视 test 的「不吃」照调 OnKeyDown：宿主自己出一次、我们 InsertText 再出一次 ⇒
-/// 双重上屏。主键盘数字同场景回 PassThrough，所以从来没这个问题。
-///
-/// 全角态不在此列：C++ 的 `chinese_fullwidth_number` 分支此时会吃键，服务端必须出字
-/// （由 `test_numpad_half_width_direct` 等守着）。
+/// C++ 的 OnKeyDown 在中文模式下仍会把 Number 转发给服务端，而 Chrome 类宿主无视 test 的
+/// 「不吃」照调 OnKeyDown：服务端若出字就会与宿主自己的输出叠成双重上屏。
+/// 全角态不在此列（C++ 会吃键，服务端须出字，由 `test_numpad_half_width_direct` 等守着）。
 #[test]
 fn test_numpad_direct_idle_passthrough() {
     if !has_schemas() {
@@ -578,8 +561,8 @@ fn test_numpad_follow_main_empty_passthrough() {
     );
 }
 
-/// t285 的 follow_main 版：运算符归一成主键盘标点后曾落进标点臂出「。」，而 C++ Test 对小键盘
-/// Number 类空闲半角放行 ⇒ Chrome 类宿主出「.」+「。」。空闲半角须与 direct 一样透传。
+/// 上一条的 follow_main 版：运算符归一成主键盘标点后不得落进标点臂出「。」——C++ Test 对小键盘
+/// Number 类空闲半角放行，Chrome 类宿主会出「.」+「。」。空闲半角须与 direct 一样透传。
 #[test]
 fn test_numpad_follow_main_idle_operators_passthrough() {
     if !has_schemas() {
@@ -694,8 +677,7 @@ fn test_numpad_half_width_english_mode() {
     if !has_schemas() {
         return;
     }
-    // 英文模式全角走 handle_english_full_width → convert_punct，同样受管辖
-    // （用户拍板：中英两种模式都生效）。
+    // 英文模式全角走 handle_english_full_width → convert_punct，同样受管辖（中英两种模式都生效）。
     let off = coord_full_width("direct", false, false);
     assert_eq!(
         action_text(&off.handle_key_event(&key_event(0x65, EVENT_KEY_DOWN))).unwrap_or_default(),
@@ -716,7 +698,7 @@ fn test_numpad_half_width_leaves_main_keyboard_alone() {
     if !has_schemas() {
         return;
     }
-    // ★ 守 `State::numpad_origin` 的**无条件重写**：只在为真时置位的话，先按一次小键盘
+    // 守 `State::numpad_origin` 的无条件重写：只在为真时置位的话，先按一次小键盘
     // 会把来源标记留给后面的主键盘按键，表现为「主键盘数字也跟着出半角」。
     let coord = coord_full_width("direct", true, true);
     assert_eq!(
@@ -790,7 +772,7 @@ fn test_z_letter_trigger_temp_pinyin() {
     }
 }
 
-/// `z_key_action` 未配时：znihao 走正常五笔，不进临拼（回归保护——不误触发）。
+/// `z_key_action` 未配时：znihao 走正常五笔，不进临拼（不误触发）。
 #[test]
 fn test_z_not_trigger_stays_normal() {
     if !has_schemas() {
@@ -811,8 +793,8 @@ fn test_z_not_trigger_stays_normal() {
 
 /// `z_key_action = "mix:<id>"`：z 进融合模式。
 ///
-/// 判据取候选内容而非组合区文本——普通输入按 z 后组合区同样是 "z"（五笔码），两者在
-/// 屏幕上完全同形。内置 quick_mix 的成员含拼音，故 `zni` 应出「你」；五笔下 `zni` 不会。
+/// 判据取候选而非组合区文本（普通输入按 z 后组合区同样是 "z"）。
+/// 内置 quick_mix 成员含拼音，故 `zni` 应出「你」；五笔下不会。
 #[test]
 fn test_z_key_action_enters_mix() {
     if !has_schemas() {
@@ -836,11 +818,10 @@ fn test_z_key_action_enters_mix() {
     );
 }
 
-/// z 引导进模式后空缓冲回车：**原样吐回 `z`**，与符号引导键（`;` 吐回 `;`）同语义。
+/// z 引导进模式后空缓冲回车：原样吐回 `z`，与符号引导键（`;` 吐回 `;`）同语义。
 ///
-/// 字母引导键旧实现下 `mix_prefix` 恒为空（`vk_to_prefix_char` 不认字母），于是这里只能
-/// 清空退出——用户按下的键凭空消失。前缀改用 `vk_to_prefix_char_with_letters` 后两类
-/// 引导键的回车语义才对齐。
+/// 前缀须经 `vk_to_prefix_char_with_letters` 取得；只认符号的版本对字母返回空，
+/// 引导键会凭空消失。
 #[test]
 fn test_z_key_action_mix_empty_enter_echoes_guide_key() {
     if !has_schemas() {
@@ -901,12 +882,10 @@ fn test_z_key_action_enters_special() {
     );
 }
 
-/// `z_key_action = "rare_char"`：z 进生僻字模式（用当前方案的编码，只出生僻字）（GH#146）。
+/// `z_key_action = "rare_char"`：z 进生僻字模式（用当前方案的编码，只出生僻字）。
 ///
-/// ★ 必须装上 `zz*` 系统短语再测：headless 的 store 为 `None`、短语层恒空，不装的话 z 是
-/// 死码、首键直接进模式——而真机出厂有几十条 `zz*`，首键 z **恒让位**，进模式只能靠
-/// `try_z_fallback` 破前缀夺取。夺取回路曾不接生僻字，于是设置页选了这一项也永远进不去。
-///
+/// 必须装上 `zz*` 系统短语再测：headless 的短语层恒空，z 会成死码、首键直接进模式；
+/// 真机上首键 z 恒让位，进模式只能靠 `try_z_fallback` 破前缀夺取，这条回路要接上生僻字。
 /// 三段：首键让位 → 第二键破前缀夺取 → 候选只留生僻字（普通五笔 `gg` 首选是「五」）。
 #[test]
 fn test_z_key_action_enters_rare_char() {
@@ -969,7 +948,7 @@ fn test_z_key_action_rare_char_backspace_rewinds() {
     );
 }
 
-/// 真机出厂 `system.phrases.toml` 的 `zz*` 标点短语的最小替身（见上方两条测试）。
+/// 出厂 `system.phrases.toml` 的 `zz*` 标点短语的最小替身（见上方两条测试）。
 fn zz_system_phrases() -> Vec<wind_phrase::PhraseSeed> {
     let seed = |code: &str, text: &str| wind_phrase::PhraseSeed {
         code: code.into(),
@@ -982,10 +961,9 @@ fn zz_system_phrases() -> Vec<wind_phrase::PhraseSeed> {
     vec![seed("zzbd", "、"), seed("zzsz", "…")]
 }
 
-/// `z_key_action` 指向不存在的目标：**不得吞键**，z 落普通输入作正常码。
+/// `z_key_action` 指向不存在的目标：不得吞键，z 落普通输入作正常码。
 ///
-/// 吞键的后果是把 z 这个编码键废掉，且用户从现象上完全看不出原因——配错一个 id
-/// 就再也打不出 z 开头的编码。门卫没过一律返回 None，见 `enter_bound_action`。
+/// 吞键会让 z 开头的编码全部打不出且无从察觉；门卫没过一律返回 None，见 `enter_bound_action`。
 #[test]
 fn test_z_key_action_unknown_target_falls_through() {
     if !has_schemas() {
@@ -1012,13 +990,10 @@ fn test_z_key_action_unknown_target_falls_through() {
     );
 }
 
-/// 字母引导键进临拼后回车放弃：上屏的原码**必须带上引导字母**（`zhang` 而非 `hang`）。
+/// 字母引导键进临拼后回车放弃：上屏的原码必须带上引导字母（`zhang` 而非 `hang`）。
 ///
-/// 符号引导键（`` ` ``）不带——它在码表里不产出编码，按它只可能是为了开模式。字母不同：
-/// z 在码表里是合法编码字符，用户按下时它既可能是开关也可能是码。回车放弃临拼的语义正是
-/// 「别猜了，把我打的原样给我」，此时吞掉 z 就是猜错了还不还。
-///
-/// 对照组见 `test_temp_pinyin_nonempty_enter_commit_still_outputs_code`（符号引导仍不带）。
+/// 符号引导键不产出编码，可以不带；z 在码表里是合法编码字符，回车放弃即「把我打的原样给我」，
+/// 吞掉 z 就丢了用户输入。对照组见 `test_temp_pinyin_nonempty_enter_commit_still_outputs_code`。
 #[test]
 fn test_temp_pinyin_letter_guide_enter_keeps_guide_letter() {
     if !has_schemas() {
@@ -1051,11 +1026,10 @@ fn test_temp_pinyin_letter_guide_enter_keeps_guide_letter() {
     }
 }
 
-/// 字母引导键进临拼后**切中英文**放弃：同样带上引导字母（与回车同进同出）。
+/// 字母引导键进临拼后切中英文放弃：同样带上引导字母（与回车同进同出）。
 ///
-/// 「上屏原码」在临拼有三个同源出口——回车、切中英文、mix 回车——判据收在
-/// `Coordinator::guide_to_return`。只改回车会立刻造出「回车带 z、Shift 切英文不带」的
-/// 不一致，而 `take_input_on_mode_switch` 的注释还写着「与各自回车上屏一致」。
+/// 回车、切中英文、mix 回车三个出口的判据收在 `Coordinator::guide_to_return`，
+/// 只改一处会造出「回车带 z、Shift 切英文不带」的不一致。
 #[test]
 fn test_temp_pinyin_letter_guide_mode_switch_keeps_guide_letter() {
     if !has_schemas() {
@@ -1079,14 +1053,10 @@ fn test_temp_pinyin_letter_guide_mode_switch_keeps_guide_letter() {
     );
 }
 
-/// z-fallback 夺取后退格：应回到**夺取前那一帧**（`z` + repeat 候选），一次到位。
+/// z-fallback 夺取后退格：应一次回到夺取前那一帧（`z` + repeat 候选）。
 ///
-/// 曾退到 `zx`——即 `input_buffer + 触发夺取的那一键`。而夺取的前提恰恰是
-/// `has_code_prefix("zx") == false`，所以那个落点**必然无候选**：判据说「这里没东西」，
-/// 回退目标偏要退到那里。用户看到的是「第一下退格只让候选窗消失、编码还在」，得再按一次。
-///
-/// 且 `zx` 这一帧用户从未见过——按下 x 的同一帧就被夺取进临拼了。回退目标必须是用户
-/// 实际见过的某一帧，否则无论内部账目多自洽，读起来都像卡了一下。
+/// 不能退到 `zx`（`input_buffer` + 触发夺取的键）：夺取的前提就是 `zx` 无前缀，那一帧必然
+/// 无候选，且用户从未见过它，表现为第一下退格只让候选窗消失。
 #[test]
 fn test_z_fallback_backspace_returns_to_hijack_origin() {
     if !has_schemas() {
@@ -1128,11 +1098,9 @@ fn test_z_fallback_backspace_returns_to_hijack_origin() {
     );
 }
 
-/// 临拼模式下切中英文：应遵循 keys.commit_on_switch —— 开启（默认）时把拼音原码上屏，
-/// 而非无条件清空（回归保护：此前 take_input_on_mode_switch 独占分支对临拼恒返回空串）。
+/// 临拼模式下切中英文遵循 keys.commit_on_switch：开启（默认）时把拼音原码上屏，而非无条件清空。
 ///
-/// 用**符号**引导键（`` ` ``）以隔离关切：本测试只管 commit_on_switch 这个开关本身。
-/// 字母引导键会把引导字母一并归还（`znihao` 而非 `nihao`），那是另一条语义，
+/// 用符号引导键（`` ` ``）隔离关切；字母引导键会把引导字母一并归还，
 /// 由 `test_temp_pinyin_letter_guide_mode_switch_keeps_guide_letter` 单独锁。
 #[test]
 fn test_temp_pinyin_commit_on_mode_switch() {
@@ -1240,13 +1208,13 @@ fn test_prefix_only_no_commit_on_switch_when_disabled() {
     );
 }
 
-/// 断言某次分隔符键返回的动作**未**把 `'` 压入组合区。
+/// 断言某次分隔符键返回的动作未把 `'` 压入组合区。
 fn separator_not_inserted(act: &KeyAction) -> bool {
     !matches!(act, KeyAction::UpdateComposition { text, .. } if text.contains('\''))
 }
 
 /// Task 8 / Fix Round 1：`auto` 真语义——默认选键组（`semicolon_quote` 含 `'`=VK_OEM_7）下，
-/// `'` 保留三选键功能、**不**作分隔符；改由反引号(`, VK_OEM_3=0xC0)作硬边界压入缓冲。
+/// `'` 保留三选键功能、不作分隔符；改由反引号(`, VK_OEM_3=0xC0)作硬边界压入缓冲。
 #[test]
 fn separator_auto_avoids_quote_when_it_is_select_key() {
     if !has_schemas() {
@@ -1291,7 +1259,7 @@ fn separator_auto_avoids_quote_when_it_is_select_key() {
     );
 }
 
-/// Fix Round 1：`auto` 下若 `'` **不**在选键组（此处 `comma_period`）→ `'` 空闲、作分隔符；
+/// Fix Round 1：`auto` 下若 `'` 不在选键组（此处 `comma_period`）→ `'` 空闲、作分隔符；
 /// 反引号则不作分隔符。
 #[test]
 fn separator_auto_uses_quote_when_not_select_key() {
@@ -1349,15 +1317,10 @@ fn separator_explicit_quote_overrides_select_key() {
 
 /// 双拼在 `auto` 下不占用任何分隔符键——引号/反引号均不作分隔符。
 ///
-/// ⚠️ **同一个现象，判据已经换过一次**。原先是「双拼一律禁用」（键位判定里按引擎类型
-/// 早退）；引擎侧支持分隔符后（`docs/design/shuangpin-separator.md`）改由 `auto` 的
-/// 空闲判定拦住：双拼下 `'` 被选词键占、反引号被方案的 `[key_actions]` 占给辅助码，
-/// 两个都不空闲 ⇒ auto 不启用。
-///
-/// ⇒ 本用例守的是**「auto 会避让已占用的键」**，不再是「双拼这条路走不通」。
-/// 显式配 `quote` 仍然生效，那条由
-/// [`separator_works_for_shuangpin_when_explicitly_enabled`] 守——两条必须并存：
-/// 少了后者，把判据改回按引擎类型早退，这条照样绿。
+/// 双拼下 `'` 被选词键占、反引号被方案 `[key_actions]` 占给辅助码，auto 的空闲判定避让二者。
+/// 本用例守的是「auto 会避让已占用的键」；显式配 `quote` 仍生效，由
+/// [`separator_works_for_shuangpin_when_explicitly_enabled`] 守。两条必须并存：
+/// 少了后者，把判据改成按引擎类型早退这条照样绿。
 #[test]
 fn separator_off_by_default_for_shuangpin() {
     let d = data_dir();
@@ -1397,10 +1360,8 @@ fn separator_off_by_default_for_shuangpin() {
 
 /// 移动端 `auto` 在两个键都被占时夺取 `'`，桌面不动。
 ///
-/// 双拼 `'` 是三选键、反引号归辅助码：桌面 `auto` 不得动选词键（见上一条
-/// [`separator_off_by_default_for_shuangpin`]，要断词显式写 `quote`）；手机是触屏，选词键
-/// 没人按，而「分词」键需要一个出路，所以移动端夺取 `'`（它作三选键只是数字 3 的别名）。
-/// 档位由构造时的 `InputProfile` 决定，主机上直接构造移动档位即可。
+/// 双拼 `'` 是三选键：桌面 `auto` 不得动选词键；手机触屏没人按选词键而分词键需要出路，
+/// 故移动端夺取 `'`。档位由构造时的 `InputProfile` 决定。
 #[test]
 fn separator_auto_takes_quote_on_mobile_only() {
     let d = data_dir();
@@ -1480,13 +1441,9 @@ fn separator_char_is_none_when_disabled() {
 
 /// 双拼显式配 `separator = "quote"` 后，`'` 作分隔符压入缓冲。
 ///
-/// 这是「引擎侧支持 + 键位判定放行」两件事在协调器这一层的会合点。
-/// ⚠️ 与上一条互为正反：只留上一条的话，把 `pinyin_ok` 改回对双拼早退它照样绿
-///（出厂本来就是 none），放行有没有真的发生根本测不出来。
-///
-/// ⚠️ **必须覆盖在方案层**：`separator` 方案级优先、全局只作回落，而
-/// `shuangpin.schema.toml` 出厂就写了 `none`——改 `cfg.schema.pinyin.separator`
-/// 会被它盖掉，测试变成恒绿的假用例。
+/// 与上一条互为正反：只留上一条，把 `pinyin_ok` 改回对双拼早退照样绿。
+/// 必须覆盖在方案层：`separator` 方案级优先，而 `shuangpin.schema.toml` 出厂写了 `none`，
+/// 改 `cfg.schema.pinyin.separator` 会被盖掉，测试恒绿。
 #[test]
 fn separator_works_for_shuangpin_when_explicitly_enabled() {
     let d = data_dir();
@@ -1518,15 +1475,11 @@ fn separator_works_for_shuangpin_when_explicitly_enabled() {
     );
 }
 
-/// 回归：**临时拼音**里手动分隔符必须与主输入路同样生效。
+/// 临时拼音里手动分隔符必须与主输入路同样生效，不能把第一个字直接上屏。
 ///
-/// 缺陷形态（用户报障）：纯五笔方案 + `z_key_action = "temp_pinyin"`，在临拼里按分隔符键
-/// **直接把第一个字上屏了**。两层根因叠加：
-/// ① `handle_temp_pinyin_key` 根本没有分隔符臂 ⇒ 键落到 `_` 兜底的「其它键：有候选则上屏
-///    高亮候选」（主路径的分隔符臂在 `message_handler.rs`，而临拼在那之前就 early return 了）；
-/// ② 即便补上臂，`manual_separator_key` 问的是**活跃**引擎（五笔=码表）⇒ 判据恒 false。
-///
-/// 故本测试必须用**码表主方案 + 临拼**这个组合：在纯拼音方案下跑，根因②测不出来。
+/// 两处要同时成立：`handle_temp_pinyin_key` 有分隔符臂（否则落到「有候选则上屏」兜底），
+/// 且 `manual_separator_key` 问的是临拼引擎而非活跃引擎。故必须用码表主方案 + 临拼，
+/// 纯拼音方案下测不出后者。
 #[test]
 fn separator_works_in_temp_pinyin_over_codetable_schema() {
     if !has_schemas() {
@@ -1565,11 +1518,9 @@ fn separator_works_in_temp_pinyin_over_codetable_schema() {
     );
 }
 
-/// 回归：临拼下分隔符键**不得**再走「其它键 → 上屏高亮候选」那条兜底。
+/// 临拼下分隔符键不得走「其它键 → 上屏高亮候选」兜底。
 ///
-/// 与上一条互为正反面：上一条锁「插进去了」，这一条锁「没把字打出去」。判据取
-/// **KeyAction 不是上屏类**——只看组合区文本的话，上屏那一帧同样会返回组合区更新
-/// （分段上屏保留剩余拼音），恒绿。
+/// 与上一条互为正反。判据取 KeyAction 不是上屏类：分段上屏同样会返回组合区更新，只看组合区恒绿。
 #[test]
 fn separator_in_temp_pinyin_does_not_commit_candidate() {
     if !has_schemas() {
@@ -1594,8 +1545,7 @@ fn separator_in_temp_pinyin_does_not_commit_candidate() {
 
 /// 造一个「临拼目标 = 微软双拼（`;` 是韵母 ing）」的环境：wubi86 主方案 + z 引导，
 /// primary_pinyin 指向 shuangpin，并用 override 把布局换成 mspy。
-///
-/// 出厂 shuangpin 用的是小鹤（韵母全在字母键上），测不出符号韵母键这条路。
+/// 出厂 shuangpin 是小鹤（韵母全在字母键上），测不出符号韵母键这条路。
 fn coord_with_mspy_temp_pinyin(tag: &str) -> Option<std::sync::Arc<Coordinator>> {
     let d = data_dir();
     if !has_schemas() || !d.join("schemas/shuangpin/mspy.toml").exists() {
@@ -1620,16 +1570,11 @@ fn coord_with_mspy_temp_pinyin(tag: &str) -> Option<std::sync::Arc<Coordinator>>
     ))
 }
 
-/// 回归：临拼下**双拼布局的符号韵母键**必须能进缓冲。
+/// 临拼下双拼布局的符号韵母键必须能进缓冲。
 ///
-/// 缺陷形态：主输入路的码元闸门 `try_code_char_gate` 位于 `message_handler.rs` 那句
-/// `Some(ModeKind::TempPinyin) => return handle_temp_pinyin_key(..)` 之后，临拼走不到；
-/// 而临拼的字母臂只认 `VK_A..=VK_Z` ⇒ 微软/搜狗/紫光双拼的 `;`(=ing) 落到兜底臂被
-/// `select_key_offset` 认成次选键，**把第 2 个候选打了出去**，`ying` 一族音节在临拼里
-/// 完全不可达。
-///
-/// 与分隔符那两条是同一个形状（overlay 是主路径的平行实现），故判据同样按 overlay
-/// 方案取（`is_code_char_of`），不是按活跃的五笔方案。
+/// 主路的码元闸门 `try_code_char_gate` 在临拼 early return 之后，临拼须有自己的码元臂；
+/// 否则微软/搜狗/紫光双拼的 `;`(=ing) 被当成次选键打出第 2 个候选，`ying` 一族不可达。
+/// 判据按 overlay 方案取（`is_code_char_of`），不是按活跃的五笔方案。
 #[test]
 fn temp_pinyin_accepts_shuangpin_symbol_final_key() {
     let Some(coord) = coord_with_mspy_temp_pinyin("final") else {
@@ -1663,11 +1608,10 @@ fn temp_pinyin_accepts_shuangpin_symbol_final_key() {
     );
 }
 
-/// 反向对照：**全拼**临拼下 `;` 仍是次选键，不得被新的码元臂夺走。
+/// 反向对照：全拼临拼下 `;` 仍是次选键，不得被码元臂夺走。
 ///
-/// 这条锁住新臂的零回归依据——拼音引擎的码元集完全由双拼布局推导，全拼恒 `None`
-/// ⇒ 回落默认 `a-z` ⇒ 非字母恒 false。若哪天有人把回落改成「空集」或「全放行」，
-/// 这条会红，而上面那条仍绿。
+/// 全拼的码元集为 `None` ⇒ 回落默认 `a-z` ⇒ 非字母恒 false。若把回落改成「空集」或
+/// 「全放行」，这条会红而上一条仍绿。
 #[test]
 fn temp_pinyin_full_pinyin_keeps_semicolon_as_select_key() {
     if !has_schemas() {
@@ -1708,12 +1652,8 @@ fn override_with_separator(tag: &str, mode: &str) -> std::path::PathBuf {
 
 /// 方案级 `[engine.pinyin].separator` 关掉分隔符，压过全局 `auto`。
 ///
-/// 这一项做成方案级可覆盖，是因为**键位预算按方案分**：双拼出厂把反引号给了辅助码
-/// （`shuangpin.schema.toml` 的 `[key_actions]`），而全拼的音节边界只能靠符号键表达。
-/// 全局唯一的 `separator` 表达不了这个组合——一改全局，另一个方案的键就被静默夺走。
-///
-/// 反向对照是既有的 `separator_auto_avoids_quote_when_it_is_select_key`：同样的按键、
-/// 无 override 时反引号**会**插入分隔符。
+/// 键位预算按方案分（双拼把反引号给了辅助码，全拼要靠符号键断音节），全局唯一的值表达不了；
+/// 反向对照 `separator_auto_avoids_quote_when_it_is_select_key`：无 override 时反引号会插入分隔符。
 #[test]
 fn separator_schema_override_none_disables_it() {
     if !has_schemas() {
@@ -1733,11 +1673,10 @@ fn separator_schema_override_none_disables_it() {
     );
 }
 
-/// 方案级 `separator = "quote"` 把分隔符**改到** `'` 上（全局仍是 auto）。
+/// 方案级 `separator = "quote"` 把分隔符改到 `'` 上（全局仍是 auto）。
 ///
-/// 与上一条互补：那条只证明「方案值能关掉功能」，可能被一个「读不到就当 none」的
-/// 错误实现假绿；这条要求方案值被真正读出来并按它选键——`'` 出厂是三选键，只有
-/// 显式模式才夺得走。
+/// 与上一条互补：上一条可能被「读不到就当 none」的实现假绿；这条要求方案值真被读出并据此选键
+/// （`'` 出厂是三选键，只有显式模式才夺得走）。
 #[test]
 fn separator_schema_override_selects_quote_key() {
     if !has_schemas() {
@@ -1758,9 +1697,9 @@ fn separator_schema_override_selects_quote_key() {
     );
 }
 
-/// C1 回归：全拼手动分隔符 `xi'an` 选「西安」应**全消费**上屏、组合区清空无残留。
-/// 修复前引擎按剥除 `'` 的 query 算 consumed_length，协调器却按含 `'` 缓冲切片 → 误判 partial、
-/// 残留尾字符 "n"（组合区变「西安n」）。修复后 consumed_length 回映射到含 `'` 的原始输入空间。
+/// 全拼手动分隔符 `xi'an` 选「西安」应全消费上屏、组合区清空无残留。
+/// consumed_length 须回映射到含 `'` 的原始输入空间，否则协调器按含 `'` 的缓冲切片会误判 partial、
+/// 残留 "n"（组合区变「西安n」）。
 #[test]
 fn separator_full_commit_consumes_all() {
     if !has_schemas() {
@@ -1801,7 +1740,7 @@ fn separator_full_commit_consumes_all() {
     );
 }
 
-/// C1 回归：`xi'an` 两步分段——先选「西」组合区剩 "an"（`'` 随已消费段吃掉，非 "'an"），
+/// `xi'an` 两步分段：先选「西」组合区剩 "an"（`'` 随已消费段吃掉，非 "'an"），
 /// 再选「安」整体上屏「西安」并清空。
 #[test]
 fn separator_two_step_segmentation() {
@@ -1845,11 +1784,10 @@ fn separator_two_step_segmentation() {
     assert_eq!(coord.debug_candidate_count(), 0, "两步选完组合区应清空");
 }
 
-/// C1 回归（鼠标版）：点选分段候选须与数字键同为分步提交——先点「西」组合区留活剩 "an"、
-/// 候选续查出「安」，再点「安」整体上屏「西安」。
+/// 鼠标点选分段候选须与数字键同为分步提交：先点「西」组合区留剩 "an"、候选续查出「安」，
+/// 再点「安」整体上屏「西安」。
 ///
-/// 曾因 `mouse_select` 独走 `commit_candidate`（无条件清缓冲、不看 consumed_length）而：
-/// 剩余码被丢弃、候选窗直接消失，且第二步只上屏「安」丢掉已确认的「西」段。
+/// `mouse_select` 若直接 `commit_candidate`，会丢剩余码、关候选窗，第二步还丢掉已确认的「西」。
 #[test]
 fn mouse_select_two_step_segmentation() {
     if !has_schemas() {
@@ -1907,10 +1845,8 @@ fn mouse_select_two_step_segmentation() {
     assert_eq!(coord.debug_candidate_count(), 0, "两步点选完组合区应清空");
 }
 
-/// 临时拼音里鼠标点子短语：与数字键同为**分步转换**（组合区留活剩余拼音），再点剩余
-/// 那段才整体上屏。
-///
-/// 曾走 overlay 通用分支 `commit_candidate`：整串上屏所点的那个字、剩余拼音直接丢弃。
+/// 临时拼音里鼠标点子短语：与数字键同为分步转换（组合区留剩余拼音），再点剩余那段才整体上屏。
+/// 走 overlay 通用的 `commit_candidate` 会整串上屏所点的字、丢掉剩余拼音。
 #[test]
 fn mouse_select_temp_pinyin_is_stepwise() {
     if !has_schemas() {
@@ -2041,7 +1977,7 @@ fn test_toggle_schema_returns_to_origin() {
     );
 }
 
-/// 已在目标方案且无来源记录（刚启动就按）：**不动作**。
+/// 已在目标方案且无来源记录（刚启动就按）：不动作。
 ///
 /// 守的是「往返键退化成随机跳转键」：此时没有任何依据说明用户想去哪，切走比不动更糟。
 #[test]
@@ -2063,13 +1999,10 @@ fn test_toggle_schema_without_origin_is_noop() {
     );
 }
 
-/// 期间用**别的方式**切了方案，来源作废。
+/// 期间用别的方式切了方案，来源作废。
 ///
-/// 构造：往返进 pinyin（记下 origin=wubi86）→ 用菜单循环两次绕回 pinyin → 再按往返键。
-/// 来源若没被清，这一按会把用户送回几步之前的 wubi86；清了则是 no-op。
-///
-/// ★ 循环两次而非一次是必须的：只循环一次时 current(wubi86) != target(pinyin)，
-/// 会走"切过去"分支，清没清来源的结果完全相同，用例区分不出来。
+/// 构造：往返进 pinyin（origin=wubi86）→ 菜单循环两次绕回 pinyin → 再按往返键；来源没清
+/// 就会被送回 wubi86。必须循环两次：只循环一次时 current != target，走「切过去」分支，区分不出。
 #[test]
 fn test_toggle_schema_origin_invalidated_by_other_switch() {
     if !has_schemas() {
@@ -2094,12 +2027,10 @@ fn test_toggle_schema_origin_invalidated_by_other_switch() {
     );
 }
 
-/// 来源失效必须覆盖**绕过 `finish_user_schema_switch` 的切换路径**。
+/// 来源失效必须覆盖绕过 `finish_user_schema_switch` 的切换路径。
 ///
-/// 设置页的 `schema.setActive` RPC 不走那个"统一收尾"——它只同步拆字/注释库便返回。
-/// 切方案在协调器侧共五条路径，只有两条走 finish，所以「在 finish 里清来源」只能清一半。
-/// 本用例走的正是没被 finish 覆盖的那条：来源改由 `schema_generation` 代际校验失效后，
-/// 它才成立。
+/// 设置页的 `schema.setActive` RPC 不走 finish，「在 finish 里清来源」只能覆盖部分路径；
+/// 本用例走的正是这条，靠 `schema_generation` 代际校验让来源失效。
 #[test]
 fn test_toggle_schema_origin_invalidated_via_path_bypassing_finish() {
     if !has_schemas() {
@@ -2408,15 +2339,10 @@ fn test_temp_pinyin_backtick_trigger_and_commit() {
     assert_eq!(action_text(&act).unwrap(), "a", "退出临时拼音后五笔应正常");
 }
 
-/// 回归：`` ` `` 与 z **同绑** `temp_pinyin` 时，用 `` ` `` 进临拼后按 z 必须累积拼音。
+/// `` ` `` 与 z 同绑 `temp_pinyin` 时，用 `` ` `` 进临拼后按 z 必须累积拼音。
 ///
-/// 缺陷形态：「进入键二次按下」那条分支的判据只问得出「这个键是不是**某个**临拼引导键」
-/// （临拼是全局单例、没有 special / mix 那样的实例 id），产出却取 `temp_pinyin_prefix`
-/// ——进入时按的那个键。两者不同源，于是按 z 被判成二次按下、上屏了进入键的 `·`，
-/// z 开头的拼音（zi / zuo / zhang）一个都打不出来。
-///
-/// 判据取「候选含 张」而非组合区文本：组合区 `` `z `` 在「z 入了拼音缓冲」与别的形态下
-/// 可能同形，只有真跑到拼音引擎才出得来汉字。
+/// 「进入键二次按下」的判据须与产出（`temp_pinyin_prefix`，即进入时按的键）同源；否则 z 被
+/// 判成二次按下、上屏 `·`，z 开头的拼音全打不出。判据取「候选含 张」：组合区文本可能同形。
 #[test]
 fn test_temp_pinyin_other_trigger_key_letter_accumulates_pinyin() {
     if !has_schemas() {
@@ -2457,7 +2383,7 @@ fn test_temp_pinyin_other_trigger_key_letter_accumulates_pinyin() {
     );
 }
 
-/// 反向对照：同一份「两个键同绑临拼」的配置下，按**进入用的那个键**照旧上屏中文标点并退出。
+/// 反向对照：同一份「两个键同绑临拼」的配置下，按进入用的那个键照旧上屏中文标点并退出。
 /// 少了这条，上面那个测试把整条「二次按下」分支删掉也照样绿。
 #[test]
 fn test_temp_pinyin_own_trigger_key_still_commits_punct() {
@@ -2557,8 +2483,8 @@ fn test_temp_pinyin_not_triggered_in_pinyin_mode() {
 }
 
 /// 组合意外终止（鼠标点击移光标 / 焦点切换 / 宿主强制 EndComposition）必须整体复位
-/// overlay 模式，不能只清 input_buffer——临拼/快捷的缓冲与前缀不在 input_buffer 里。
-/// 真机现象（回归）：` 进临拼后点鼠标移光标，再按 d 组合区显示 `d（模式残留）。
+/// overlay 模式，不能只清 input_buffer——临拼/快捷的缓冲与前缀不在 input_buffer 里，
+/// 否则 ` 进临拼后点鼠标再按 d，组合区会显示 `d。
 #[test]
 fn test_composition_terminated_resets_overlay_modes() {
     if !has_schemas() {
@@ -2598,7 +2524,7 @@ fn press_vk(coord: &Coordinator, vk: u32, shift: bool) -> KeyAction {
     coord.handle_key_event(&ev)
 }
 
-/// 按**字符**敲键：按美式主键盘布局还原成 `(vk, shift)`。只覆盖测试用到的 ASCII 子集，
+/// 按字符敲键：按美式主键盘布局还原成 `(vk, shift)`。只覆盖测试用到的 ASCII 子集，
 /// 未覆盖的字符直接 panic —— 与其静默按错键位产出一个看不懂的断言失败，不如当场报出来。
 fn press_char(coord: &Coordinator, c: char) -> KeyAction {
     let (vk, shift) = match c {
@@ -2635,7 +2561,7 @@ fn press_str(coord: &Coordinator, s: &str) -> KeyAction {
 }
 
 /// 快捷输入模式下切中英文：与临拼一致，遵循 keys.commit_on_switch —— 开启（默认）时把
-/// 剩余原码上屏（前缀 ; 不输出），而非无条件清空（回归保护：独占分支曾对 mix 恒返回空串）。
+/// 剩余原码上屏（前缀 ; 不输出），而非无条件清空。
 #[test]
 fn test_quick_input_commit_on_mode_switch() {
     if !has_schemas() {
@@ -2699,7 +2625,7 @@ fn test_quick_input_calc() {
     let last = press_vk(&coord, 0x33, false);
     assert_eq!(action_text(&last).unwrap(), ";1+2*3", "组合区应为 ;1+2*3");
 
-    // 首选是**结果**（用算式形态的是少数），等式次之，随后是结果的金额读法
+    // 首选是结果（用算式形态的是少数），等式次之，随后是结果的金额读法
     let texts = coord.debug_page_texts();
     assert_eq!(texts[0], "7", "计算首选应为结果，实际: {:?}", texts);
     assert_eq!(texts[1], "1+2*3=7", "等式形态应为次选，实际: {:?}", texts);
@@ -2734,10 +2660,9 @@ fn test_quick_input_power_operator() {
     assert_eq!(texts[1], "2+3^2=11", "实际: {:?}", texts);
 }
 
-/// 协调器层的归属判据：**一个点归数字、两个点归日期**，两组互斥（见 `has_second_dot`）。
+/// 协调器层的归属判据：一个点归数字、两个点归日期，两组互斥（见 `has_second_dot`）。
 ///
-/// 逐键走完整链路而非直调 `wind_quick_input`：判据依赖「裁剪前的缓冲」，而缓冲是协调器
-/// 攒的——单元测试直接传字符串验不出「协调器有没有原样把点交下去」。
+/// 逐键走完整链路而非直调 `wind_quick_input`：判据依赖协调器攒的「裁剪前的缓冲」。
 #[test]
 fn test_quick_input_date_requires_second_dot() {
     if !has_schemas() {
@@ -2769,7 +2694,7 @@ fn test_quick_input_date_requires_second_dot() {
         "2026.3. 应给出年月候选（第三段为空不得让候选全空），实际: {:?}",
         after
     );
-    // 反向：同一步**收掉**金额。尾点被 `trim_pending_tail` 裁掉后 `2026.3` 又是合法
+    // 反向：同一步收掉金额。尾点被 `trim_pending_tail` 裁掉后 `2026.3` 又是合法
     // 小数，判据若看裁剪后的串，这里会两组同屏。
     let all = coord.debug_all_candidate_texts();
     assert!(
@@ -2812,12 +2737,10 @@ fn test_quick_input_repeat_last_commit() {
     }
 }
 
-/// ★ 快捷输入的编码栏拆分**不受成员顺序影响**。
+/// 快捷输入的编码栏拆分不受成员顺序影响。
 ///
-/// 组合区形态该由「谁真的给得出分段」决定，而成员顺序管的是候选优先级。判据曾写成
-/// 「第一个 `preedit_display` 非空的真实方案」——码表/英文引擎的 `preedit_display` 恒等于
-/// 原始输入，于是用户只要把一个码表方案（真实案例是快符 `kf`）排在 `$primary_pinyin`
-/// 之前，拼音的拆分串就永远轮不上，表现为「快捷输入里完全没有拆分显示」。
+/// 组合区形态由「谁真的给得出分段」决定：码表/英文引擎的 `preedit_display` 恒等于原始输入，
+/// 若按「第一个非空的成员」取，码表方案排在 `$primary_pinyin` 之前时拼音的拆分永远轮不上。
 #[test]
 fn mix_preedit_split_survives_codetable_member_first() {
     if !has_schemas() {
@@ -2891,10 +2814,8 @@ fn test_quick_input_member_removal_disables_source() {
 
 // ─────────────────── 自由输入（free_input）───────────────────
 //
-// 判据：一个字符若不在**当前透镜的合法字符集**内，它不可能是编码，只能是字面内容 →
-// 转 Free 透镜，此后一切可打印键字面入缓冲。判据是缓冲的纯函数，没有切换键。
-// 正向用例覆盖四种进入路径（大写字母 / 文本透镜里的符号 / 首字符符号 / 数字透镜里的大写），
-// 反向对照锁住 `free_input = off` 与「合法缓冲不受影响」两条底线。
+// 字符不在当前透镜的合法字符集内就只能是字面内容 → 转 Free 透镜，此后可打印键字面入缓冲；
+// 判据是缓冲的纯函数，没有切换键。反向对照锁住 `free_input = off` 与「合法缓冲不受影响」。
 
 /// 进入路径①：首字符大写字母。任何 member 的查询都在小写域，大写恒越界。
 #[test]
@@ -2947,7 +2868,7 @@ fn quick_input_free_symbol_upgrades_text_lens() {
     }
 }
 
-/// 进入路径③：首字符就是非表达式符号（`<`）。此前 `<` 会开数字透镜、后续字母被当选词键吞掉。
+/// 进入路径③：首字符就是非表达式符号（`<`），不得开数字透镜、把后续字母当选词键吞掉。
 #[test]
 fn quick_input_free_non_expr_first_char_enters_literal() {
     if !has_schemas() {
@@ -2967,12 +2888,10 @@ fn quick_input_free_non_expr_first_char_enters_literal() {
     }
 }
 
-/// 进入路径⑤：首字符 `.` —— **表达式字符集内**却一条候选也换不来的符号。
+/// 进入路径⑤：首字符 `.`——在表达式字符集内，却一条候选也换不来。
 ///
-/// A2-23 / t157：用户想在快捷输入里打 `.txt`，组合区永远停在 `.`。链条是
-/// `.` 开数字透镜 → 字母在③被无条件当选词键吃掉 → 越界字符进不了缓冲 →
-/// `auto` 的越界判据永远等不到它。`.` 与 `<`（进入路径③）的区别正在于它**是**
-/// 表达式字符，缓冲自身永不越界，只能靠「候选为空 ⇒ 选词键不是功能键」这条解开。
+/// 例如在快捷输入里打 `.txt`：`.` 开数字透镜，缓冲自身永不越界，只能靠「候选为空 ⇒ 选词键
+/// 不是功能键」让字母入缓冲，否则组合区永远停在 `.`。
 #[test]
 fn quick_input_free_dot_prefix_types_file_extension() {
     if !has_schemas() {
@@ -3001,8 +2920,7 @@ fn quick_input_free_dot_prefix_types_file_extension() {
 }
 
 /// 同上的小写对照：`.5` 也换不来候选（`is_decimal_number` 要求首字节是数字），
-/// 于是 `.5gb` 现在与 `12.5GB`（进入路径④）走同一条路。修复前只有大写打得出，
-/// 这个大小写不对称本身就是③漏判的证据。
+/// 于是 `.5gb` 与 `12.5GB`（进入路径④）走同一条路，大小写对称。
 #[test]
 fn quick_input_free_dot_decimal_takes_lowercase_unit() {
     if !has_schemas() {
@@ -3016,10 +2934,9 @@ fn quick_input_free_dot_decimal_takes_lowercase_unit() {
     assert_eq!(action_text(&last).unwrap(), ";.5gb");
 }
 
-/// ★反向对照：候选**非空**时字母仍是数字透镜的选词键。
+/// 反向对照：候选非空时字母仍是数字透镜的选词键。
 ///
-/// 这是本次修复的边界——判据是「一条都没有」而不是「第 off 条不存在」，否则瞄歪的
-/// 选词会变成字面输入。`1+2` 有六条候选，`a` 必须照旧选走首选。
+/// 判据是「一条都没有」而不是「第 off 条不存在」；`1+2` 有六条候选，`a` 必须照旧选走首选。
 #[test]
 fn quick_input_numeric_lens_letter_still_selects_when_candidates_exist() {
     if !has_schemas() {
@@ -3038,12 +2955,10 @@ fn quick_input_numeric_lens_letter_still_selects_when_candidates_exist() {
     }
 }
 
-/// ★反向对照（锁「一条都没有」而非「第 off 条不存在」）：候选非空时，**越界序号的
-/// 选词键仍被吃掉**，不得改作字面输入。
+/// 反向对照：候选非空时，越界序号的选词键仍被吃掉，不得改作字面输入。
 ///
-/// 这一条是本次判据取舍的唯一护栏——换成按 off 判存在性时，本测试会红而上面那条
-/// `letter_still_selects` 仍绿（它按的是存在的首选）。瞄歪的选词若变成字面，
-/// `;nihao` 误按一下就会连人带缓冲掉进 `Free`，整段转换作废。
+/// 换成按 off 判存在性时这条会红而 `letter_still_selects` 仍绿。瞄歪的选词若变成字面，
+/// `;nihao` 误按一下就会掉进 `Free`，整段转换作废。
 #[test]
 fn quick_input_numeric_lens_out_of_range_select_key_is_still_eaten() {
     if !has_schemas() {
@@ -3067,10 +2982,9 @@ fn quick_input_numeric_lens_out_of_range_select_key_is_still_eaten() {
     }
 }
 
-/// 同一条判据在**文本透镜**上的形态：候选为空时数字键也不再是选词键。
+/// 同一条判据在文本透镜上的形态：候选为空时数字键也不再是选词键。
 ///
-/// 只留内置来源的 mix 里，字母开头的缓冲（`a`）没有任何成员认领，候选恒空 —— 此前
-/// 数字键在这里是彻头彻尾的死键，按下去连个响都没有。
+/// 只留内置来源的 mix 里字母开头的缓冲（`a`）候选恒空，否则数字键在这里是死键。
 #[test]
 fn quick_input_free_text_lens_digit_is_literal_on_empty_candidates() {
     if !has_schemas() {
@@ -3097,7 +3011,6 @@ fn quick_input_free_text_lens_digit_is_literal_on_empty_candidates() {
 }
 
 /// 同一条判据在 `free_input = off` 下同样成立：空候选 + 文本透镜的数字键归字面。
-/// （此前 off 档下它被选词臂吃掉，维护者定为 off 也纳入第二条判据。）
 #[test]
 fn quick_input_off_digit_is_literal_on_empty_candidates() {
     if !has_schemas() {
@@ -3118,12 +3031,10 @@ fn quick_input_off_digit_is_literal_on_empty_candidates() {
     }
 }
 
-/// ★钉住一个**自觉的例外**：`takes_select_keys = false` 时 `;` `'` 在零候选下仍是死键。
+/// 钉住一个刻意的例外：`takes_select_keys = false` 时 `;` `'` 在零候选下仍是死键。
 ///
-/// ③ 的守卫立论是「一条候选都没有，这个键不可能在表达选词意图」，按同一句话 ④ 也该让开。
-/// 这里刻意不让：`takes_select_keys = false` 是用户明写的「这两个键归选词」，空候选下改作
-/// 字面等于推翻该配置。取舍可以再议，但**不能悄悄漂移**——没有这条，把 ④ 改成跟 ③ 一样
-/// 加守卫，全部测试照样绿。
+/// 该配置是用户明写的「这两个键归选词」，空候选下改作字面等于推翻它。取舍可再议，但不能悄悄
+/// 漂移：没有这条，把 ④ 改成跟 ③ 一样加守卫，全部测试照样绿。
 #[test]
 fn quick_input_select_keys_stay_dead_when_not_taken() {
     if !has_schemas() {
@@ -3149,12 +3060,10 @@ fn quick_input_select_keys_stay_dead_when_not_taken() {
     }
 }
 
-/// ★钉住本次改动**唯一一处「原本保护用户的死键」被去掉**的地方。
+/// 已知代价：没有表达式类成员的 mix（纯拼音 + 英文），空缓冲下数字键字面入缓冲并进 `Free`。
 ///
-/// 没有表达式类成员的 mix（纯拼音 + 英文），空缓冲下数字键走文本透镜的选词臂 —— 而此刻
-/// 候选也是空的，于是现在它字面入缓冲并把会话带进 `Free`。改前这一键无声无息。
-/// 接受这个代价的理由：那种 mix 的任何成员都接不下数字，按⑤的判据它本就该是字面；
-/// 退格一下即回。写成测试是为了让下一个人**看见**这个行为，而不是当缺陷再修一遍。
+/// 接受是因为那种 mix 的成员都接不下数字，按⑤的判据它本就该是字面，退格即回。
+/// 写成测试是让这个行为可见，别当缺陷再修一遍。
 #[test]
 fn quick_input_text_only_mix_first_digit_is_literal() {
     if !has_schemas() {
@@ -3221,10 +3130,10 @@ fn quick_input_off_empty_candidates_keeps_uppercase() {
     assert_eq!(action_text(&act).unwrap(), ";.X");
 }
 
-/// 零候选就地收字面时按**光标处**插入，不是追加到末尾（auto / off 各一）。
+/// 零候选就地收字面时按光标处插入，不是追加到末尾（auto / off 各一）。
 ///
-/// auto 档的 `;.xlsx` 在第一个字母后就进了 Free，后续字母走 Free 的字面臂；真正走零候选
-/// 那条路的是光标落在仍属数字透镜的缓冲中间——`.5` 换不来候选，左移一格打 `x`。
+/// auto 档的 `;.xlsx` 首个字母后就进了 Free；真正走零候选那条路的是光标落在仍属数字透镜的
+/// 缓冲中间——`.5` 换不来候选，左移一格打 `x`。
 #[test]
 fn quick_input_empty_candidates_literal_inserts_at_cursor() {
     use wind_config::config::FreeInputMode;
@@ -3256,7 +3165,7 @@ fn quick_input_empty_candidates_literal_inserts_at_cursor() {
     }
 }
 
-/// ★反向对照：`off` 档下数字透镜有候选时，越界序号的选词键仍被吃掉、不污染缓冲。
+/// 反向对照：`off` 档下数字透镜有候选时，越界序号的选词键仍被吃掉、不污染缓冲。
 #[test]
 fn quick_input_off_out_of_range_select_key_is_still_eaten() {
     if !has_schemas() {
@@ -3300,7 +3209,7 @@ fn quick_input_free_uppercase_upgrades_numeric_lens() {
     }
 }
 
-/// `-` 在**文本**透镜让位字面输入（否则 `all-in-one` 的连字符会被 `minus_equal` 键组
+/// `-` 在文本透镜让位字面输入（否则 `all-in-one` 的连字符会被 `minus_equal` 键组
 /// 吃成翻页）。翻页职责转给 PageUp/PageDown。
 #[test]
 fn quick_input_free_hyphen_is_literal_in_text_lens() {
@@ -3317,7 +3226,7 @@ fn quick_input_free_hyphen_is_literal_in_text_lens() {
     }
 }
 
-/// ★反向对照：`-` 在**数字**透镜仍是减法运算符（它在表达式字符集内，不越界）。
+/// 反向对照：`-` 在数字透镜仍是减法运算符（它在表达式字符集内，不越界）。
 /// 同一个键在两个透镜里归属不同，这正是「越界判据按透镜分」而非全局字符集的理由。
 #[test]
 fn quick_input_free_hyphen_still_operator_in_numeric_lens() {
@@ -3331,7 +3240,7 @@ fn quick_input_free_hyphen_still_operator_in_numeric_lens() {
     assert_eq!(texts[0], "-4", "1-5 应作减法求值，实际: {:?}", texts);
 }
 
-/// ★反向对照：括号是表达式字符，`(1+2)*3` 不该被误判成自由输入。
+/// 反向对照：括号是表达式字符，`(1+2)*3` 不该被误判成自由输入。
 #[test]
 fn quick_input_free_parens_still_calc() {
     if !has_schemas() {
@@ -3344,7 +3253,7 @@ fn quick_input_free_parens_still_calc() {
     assert_eq!(texts[0], "9", "括号算式应照常求值，实际: {:?}", texts);
 }
 
-/// ★反向对照：文本透镜里数字键仍是选词键（它是功能键，不参与越界判定）。
+/// 反向对照：文本透镜里数字键仍是选词键（它是功能键，不参与越界判定）。
 #[test]
 fn quick_input_free_digits_still_select_in_text_lens() {
     if !has_schemas() {
@@ -3368,11 +3277,10 @@ fn quick_input_free_digits_still_select_in_text_lens() {
     }
 }
 
-/// **行为变更的正反两面**：同一串按键在 `auto` 下变字面、在 `off` 下维持顶屏出中文标点。
+/// 正反两面：同一串按键在 `auto` 下变字面、在 `off` 下维持顶屏出中文标点。
 ///
-/// 这是本次改动影响面最大的一条 —— `;nihao,` 不再出「你好，」。用户拍板如此
-/// （快捷输入是为特殊内容而进的模式，要标点可以先按空格上屏再打），此处把两种取值
-/// 各自锁住，避免日后有人只看到一半就"顺手修好"。
+/// `auto` 下 `;nihao,` 不出「你好，」是有意的（快捷输入为特殊内容而设，要标点先空格上屏）；
+/// 两种取值各自锁住，免得有人只看到一半就「顺手修好」。
 #[test]
 fn quick_input_free_comma_literal_vs_off_top_commits() {
     if !has_schemas() {
@@ -3411,7 +3319,7 @@ fn quick_input_free_comma_literal_vs_off_top_commits() {
     }
 }
 
-/// ★反向对照：`off` 下 `-` 仍是翻页键，不得字面入缓冲。
+/// 反向对照：`off` 下 `-` 仍是翻页键，不得字面入缓冲。
 #[test]
 fn quick_input_free_off_keeps_minus_as_page_key() {
     if !has_schemas() {
@@ -3444,7 +3352,7 @@ fn quick_input_free_off_keeps_minus_as_page_key() {
     }
 }
 
-/// Ctrl 组合守卫：`Ctrl+E` 不该被当成字面 `e` 插进缓冲（此前 mix 没有这道守卫）。
+/// Ctrl 组合守卫：mix 下 `Ctrl+E` 不该被当成字面 `e` 插进缓冲。
 #[test]
 fn quick_input_ctrl_combo_does_not_insert_literal() {
     if !has_schemas() {
@@ -3464,11 +3372,9 @@ fn quick_input_ctrl_combo_does_not_insert_literal() {
     }
 }
 
-/// 带 `'` 的英文：`rock'n'roll`。`'` 是默认的第 3 候选键，不夺取就走不到字面输入那一步。
+/// 带 `'` 的英文：`rock'n'roll`。`'` 是默认的第 3 候选键，不夺取就走不到字面输入。
 ///
-/// 修复前实测：`;rock` 按 `'` 选走第 3 候选「日欧」，而它 `consumed_length=2` 还会触发
-/// 分步确认——`ro` 被吃掉转成汉字、缓冲只剩 `ck`，组合区变成 `;日欧c'k`
-/// （末尾那个 `'` 是拼音引擎的**音节分隔显示**，不是用户打的）。整串输入被打散。
+/// 不夺取时 `'` 会选走第 3 候选，其 `consumed_length=2` 还会触发分步确认，把整串打散。
 #[test]
 fn quick_input_free_apostrophe_word() {
     if !has_schemas() {
@@ -3488,7 +3394,7 @@ fn quick_input_free_apostrophe_word() {
     }
 }
 
-/// 分号同理（`for(;;)`）。注意首字符 `(` 已经把透镜带进 Free，此处锁的是**缓冲非空时**
+/// 分号同理（`for(;;)`）。注意首字符 `(` 已经把透镜带进 Free，此处锁的是缓冲非空时
 /// 的分号不再被当选词键；空缓冲按分号仍是「上屏符号并退出」（引导键二次按下），不受影响。
 #[test]
 fn quick_input_free_semicolon_in_buffer() {
@@ -3505,10 +3411,9 @@ fn quick_input_free_semicolon_in_buffer() {
     }
 }
 
-/// `Shift+数字` 是 `!@#$%^&*(` 九个符号，**从来不是选词键**。
+/// `Shift+数字` 是 `!@#$%^&*(` 九个符号，从来不是选词键。
 ///
-/// 第③步的数字选词键此前没判 shift（第④步一直有），于是 `;for(` 里的 `(`（=Shift+9）
-/// 被当成「选第 9 个候选」吃掉。自由输入上线前这些符号本就走不进缓冲，故一直没暴露。
+/// 第③步的数字选词键须判 shift，否则 `;for(` 里的 `(`（=Shift+9）被当成「选第 9 个候选」吃掉。
 #[test]
 fn quick_input_shift_digit_is_symbol_not_select_key() {
     if !has_schemas() {
@@ -3531,7 +3436,7 @@ fn quick_input_shift_digit_is_symbol_not_select_key() {
     );
 }
 
-/// ★反向对照：`free_input_takes_select_keys = false` 时 `'` 仍是第 3 候选键。
+/// 反向对照：`free_input_takes_select_keys = false` 时 `'` 仍是第 3 候选键。
 /// 缺了这条，「夺取」就可能被实现成无条件生效而无人察觉。
 #[test]
 fn quick_input_select_keys_kept_when_not_taken() {
@@ -3547,7 +3452,7 @@ fn quick_input_select_keys_kept_when_not_taken() {
     assert!(texts.len() >= 3, "需要至少 3 个候选才能验证第 3 候选键");
     let third = texts[2].clone();
     let act = press_vk(&coord, 0xDE, false); // '
-    // 第 3 候选若是部分匹配会走分步确认（组合区保留），否则整体上屏；两种都说明它**被选中了**，
+    // 第 3 候选若是部分匹配会走分步确认（组合区保留），否则整体上屏；两种都说明它被选中了，
     // 而不是作字面入缓冲——故判据是「组合区/上屏文本里出现了第 3 候选的文本」。
     let out = action_text(&act).unwrap_or_default();
     assert!(
@@ -3563,13 +3468,11 @@ fn quick_input_select_keys_kept_when_not_taken() {
     );
 }
 
-/// ★★ 用户报「已把自由输入设为 `off`，`;` / `'` 仍不能选第 2/3 候选」——本测试是该报告的
-/// 判据：`off` 下 `free_on = false`，第④步的夺取条件（`free_on && takes`）整体不成立，
-/// 二三候选键必须**原样保留**。
+/// `free_input = off` 下第④步的夺取条件（`free_on && takes`）整体不成立，`;` / `'` 必须
+/// 原样作二三候选键。
 ///
-/// 与 `quick_input_select_keys_kept_when_not_taken` 刻意分开：那条关的是 `takes` 子开关
-/// （`free_input` 仍是 `auto`），本条关的是 `free_input` 总开关。两个开关各有各的短路点，
-/// 只测一个的话另一个若被写成「无条件夺取」不会被察觉。
+/// 与 `quick_input_select_keys_kept_when_not_taken`（关 `takes` 子开关）刻意分开：两个开关
+/// 各有短路点，只测一个的话另一个被写成「无条件夺取」不会被察觉。
 #[test]
 fn quick_input_off_keeps_select_keys() {
     if !has_schemas() {
@@ -3600,7 +3503,7 @@ fn quick_input_off_keeps_select_keys() {
     );
 }
 
-/// 同上，测 `;`（第 2 候选键）。**必须与 `'` 分开测**：`;` 同时是本 mix 的引导键，
+/// 同上，测 `;`（第 2 候选键）。必须与 `'` 分开测：`;` 同时是本 mix 的引导键，
 /// 它在第④步之前还要过一道「进入键二次按下 → 上屏符号并退出」的判定（`handle_mode.rs`），
 /// 那道判定只要求缓冲空，若哪天守卫写漏，`'` 绿着而 `;` 是红的。
 #[test]
@@ -3626,15 +3529,11 @@ fn quick_input_off_keeps_semicolon_as_second_select_key() {
     );
 }
 
-/// ★★★ **数字透镜**下的二三候选键——用户报「数字输入模式下 `;` / `'` 选不了候选，
-/// 把自由输入设成 `off` 也没用」的回归锁。
+/// 数字透镜下 `;` / `'` 必须能选二三候选（`free_input = off` 时）。
 ///
-/// 根因不在夺取判据，而在第①步的口径：`mix_numeric_input_char` 收的是「一切非字母可打印
-/// 字符」，比本透镜 `accepts` 的 `is_expr_char` 宽得多，`;` `'` 被当表达式字符吞进缓冲并
-/// `return`，第④步成了不可达代码 —— `free_on` 的判定在④，救不回来。
-///
-/// 与文本透镜那两条（`quick_input_off_keeps_*`）**必须分开测**：它们走的是①的不同臂，
-/// 文本臂只收字母、天然让开，全绿也说明不了数字臂的死活。
+/// 关键在第①步的口径：`mix_numeric_input_char` 若收「一切非字母可打印字符」（比 `accepts`
+/// 的 `is_expr_char` 宽），`;` `'` 会被吞进缓冲并 `return`，第④步的 `free_on` 判定不可达。
+/// 与文本透镜那两条（`quick_input_off_keeps_*`）必须分开测：它们走①的不同臂。
 #[test]
 fn quick_input_numeric_lens_off_keeps_select_keys() {
     if !has_schemas() {
@@ -3692,10 +3591,9 @@ fn quick_input_numeric_lens_off_keeps_quote_as_third_select_key() {
     );
 }
 
-/// ★★ **反向对照，缺了它这次改造就等于「无条件让开」而无人察觉**：出厂默认
-/// （`auto` + `takes = true`）下，数字透镜的 `;` 仍必须字面入缓冲。
+/// 反向对照：出厂默认（`auto` + `takes = true`）下，数字透镜的 `;` 仍必须字面入缓冲。
 ///
-/// 让①让开是有条件的——夺取生效时本臂不让，行为逐字节不变。
+/// ①只在夺取不生效时让开；缺了这条，改成「无条件让开」无人察觉。
 #[test]
 fn quick_input_numeric_lens_auto_still_takes_select_keys() {
     if !has_schemas() {
@@ -3713,10 +3611,9 @@ fn quick_input_numeric_lens_auto_still_takes_select_keys() {
     );
 }
 
-/// `free_input_takes_select_keys = false` 在**数字透镜**下同样要生效。
+/// `free_input_takes_select_keys = false` 在数字透镜下同样要生效。
 ///
-/// 这条修好的是一个连带缺陷：该开关此前只在文本透镜有效，数字透镜下 `;` `'` 在①就被吞了，
-/// 关掉夺取也没用 —— 开关的声明语义（「保住 `;`/`'` 的选词手感」）只兑现了一半。
+/// 否则 `;` `'` 在①就被吞，开关「保住 `;`/`'` 的选词手感」只兑现了文本透镜那一半。
 #[test]
 fn quick_input_numeric_lens_respects_takes_select_keys_off() {
     if !has_schemas() {
@@ -3740,14 +3637,11 @@ fn quick_input_numeric_lens_respects_takes_select_keys_off() {
     );
 }
 
-/// ★反向对照：数字键**不在**夺取范围——它是文本透镜唯一的选词通路。
+/// 反向对照：数字键不在 `takes_select_keys` 的夺取范围——它是文本透镜唯一的选词通路。
 ///
-/// ⚠️ 锁的是「不在 `takes_select_keys` 的夺取范围内」这一条，**不是**「数字键在任何情况下
-/// 都是选词键」。0.122 起候选为空时它照样让位字面（见
-/// `free_text_lens_digit_is_literal_on_empty_candidates`），两者各管一头。名字为此改过一次。
-///
-/// 已知缺口也随之收窄：`;utf8` 里的 `8` 仍会选词——但**前提是 `utf` 在本 mix 下确实有候选**；
-/// 查不到任何候选的字母前缀，后面那个数字现在直接就是字面，不必再绕大写字母。
+/// 不是「数字键在任何情况下都是选词键」：候选为空时它照样让位字面（见
+/// `free_text_lens_digit_is_literal_on_empty_candidates`）。已知缺口：`;utf8` 里的 `8`
+/// 在 `utf` 有候选时仍会选词。
 #[test]
 fn quick_input_digit_select_keys_are_not_in_the_takes_scope() {
     if !has_schemas() {
@@ -3769,17 +3663,12 @@ fn quick_input_digit_select_keys_are_not_in_the_takes_scope() {
     }
 }
 
-/// Ctrl 守卫的**模式处理器全覆盖**：五个独占模式（mix / 临拼 / 临英 / 特殊 / URL）都必须
-/// 把 Ctrl 组合当成宿主快捷键，而不是普通输入。
+/// Ctrl 守卫要覆盖全部独占模式处理器（mix / 临拼 / 临英 / 特殊 / URL）：Ctrl 组合是宿主快捷键，
+/// 不是普通输入。
 ///
-/// 盘查依据是「枚举 `match state.active` 的全部分支，逐个问它接了吗」——只 grep `MOD_CTRL`
-/// 会得出「已经实现了」的错误结论：全仓唯一一处命中在**临拼的字母臂**（`handle_temp.rs`），
-/// 而临拼自己的数字臂/标点臂、以及 mix / 临英 / 特殊 / URL 四个模式全都没有。
-/// 已接线的调用点无法告诉你漏了谁。
-///
-/// ⚠️ 本测试只覆盖 mix / 临拼 / 临英三个能在 headless 里稳定构造的模式；特殊模式需要
-/// 配置码表方案、URL 模式需要 `input.url.prefixes` 命中，二者的守卫接线与这三个同构
-/// （同一个 `overlay_ctrl_alt_guard`），但**未被本测试覆盖**。
+/// 盘查要枚举 `match state.active` 的全部分支，只 grep `MOD_CTRL` 看不出漏了谁。
+/// 本测试只覆盖 headless 能稳定构造的 mix / 临拼 / 临英；特殊与 URL 模式接的是同一个
+/// `overlay_ctrl_alt_guard`，但未被本测试覆盖。
 #[test]
 fn overlay_modes_treat_ctrl_combo_as_host_shortcut() {
     if !has_schemas() {
@@ -3791,7 +3680,7 @@ fn overlay_modes_treat_ctrl_combo_as_host_shortcut() {
         ev
     };
     // 三个模式共用一个 Coordinator：引擎 reader / LRU 跨实例共享且带配额语义，一个测试里
-    // 建多个 Coordinator 会与并行跑的其它测试争用，导致**无关测试**偶发红。
+    // 建多个 Coordinator 会与并行跑的其它测试争用，导致无关测试偶发红。
     let mut cfg = config_with("wubi86");
     cfg.input.temp_pinyin.enabled = true;
     cfg.schema.codetable.z_key_action = "temp_pinyin".into();
@@ -3820,7 +3709,7 @@ fn overlay_modes_treat_ctrl_combo_as_host_shortcut() {
         "临拼下 Ctrl 组合应放弃整段组合"
     );
 
-    // ③ 临时英文（Shift+字母进入）。此前只有字母臂判了 Ctrl，此处锁住入口处的统一守卫。
+    // ③ 临时英文（Shift+字母进入）：Ctrl 守卫在入口处统一生效，不只是字母臂。
     press_vk(&coord, 0x48, true); // Shift+H
     press_str(&coord, "el");
     assert!(
@@ -3832,7 +3721,7 @@ fn overlay_modes_treat_ctrl_combo_as_host_shortcut() {
     );
 }
 
-/// 空缓冲时 Ctrl 组合应**透传**给宿主，而不是被模式吞掉。
+/// 空缓冲时 Ctrl 组合应透传给宿主，而不是被模式吞掉。
 #[test]
 fn overlay_ctrl_combo_passes_through_on_empty_buffer() {
     if !has_schemas() {
@@ -3869,9 +3758,8 @@ fn quick_input_free_always_allows_trigger_key_as_literal() {
 
 /// 格式表必须随 `data/` 部署，且部署的就是出厂表。
 ///
-/// 缺文件时 `FormatTable::load` 会**静默回落内置默认表**——候选照常、日志只有一条 warn，
-/// 但用户拿不到那份可拷贝的样板文件，「自定义」这个特性等于不存在。打包漏文件是这类
-/// 数据文件的典型故障（`data/` 是整目录复制，新增文件本不该漏，但没有测试就没人知道）。
+/// 缺文件时 `FormatTable::load` 静默回落内置默认表（只有一条 warn），用户拿不到可拷贝的样板，
+/// 「自定义」等于不存在。
 #[test]
 fn test_quick_format_table_is_deployed() {
     if !has_schemas() {
@@ -3913,11 +3801,10 @@ fn quick_coord(store_tag: &str) -> (std::sync::Arc<Coordinator>, std::path::Path
     (coord, p)
 }
 
-/// ★ 右键调序对**这一类的所有输入**生效，而不是只对当下这一个日期。
+/// 右键调序对这一类的所有输入生效，而不是只对当下这一个日期。
 ///
-/// 这是格式调整与候选调整（shadow）最本质的区别：shadow 的键是 `(方案, 输入码)`，
-/// 若把格式调整存进去，用户调完换个日期就失效——症状是「当时有效、隔天失效」，
-/// 间歇性发作且日志干净。本用例正是为钉住这条边界而写。
+/// 这是格式调整与候选调整（shadow）的区别：shadow 的键是 `(方案, 输入码)`，存进去的话
+/// 换个日期就失效。
 #[test]
 fn test_quick_format_move_top_applies_to_other_inputs() {
     if !has_schemas() {
@@ -3942,7 +3829,7 @@ fn test_quick_format_move_top_applies_to_other_inputs() {
         "调序应当场生效（不必重启），实际: {after:?}"
     );
 
-    // ★ 换一个完全不同的日期：调整仍在
+    // 换一个完全不同的日期：调整仍在
     coord.handle_key_event(&key_event(0x1B, EVENT_KEY_DOWN)); // Esc 退出
     quick_type(&coord, "2025.12.25");
     let other = coord.debug_page_texts();
@@ -4202,12 +4089,9 @@ fn test_quick_input_empty_enter_clear_behavior_discards() {
 
 // ───── enter_behavior=clear 在各模式的「非空缓冲」路径同样生效 ─────
 //
-// 回归保护：此前四个模式 handler 的回车分支都把 enter_behavior 判断写在
-// `if buffer.is_empty()` **内部**，于是「打了码再按回车」走非空缓冲路径无条件上屏原码，
-// 配置只对「什么都没打就回车」生效。指纹＝空缓冲时配置生效、打了码就失效。
-//
-// 每个测试都必须先断言「确实进了模式」：触发键若没生效，按键会落到主输入路径，
-// 而主输入路径的 clear 同样返回 ClearComposition —— 不验进入就是假绿。
+// 各模式 handler 的回车分支不能只在 `if buffer.is_empty()` 内判 enter_behavior，
+// 否则打了码再回车仍上屏原码。每个测试都必须先断言「确实进了模式」：主输入路径的 clear
+// 同样返回 ClearComposition，不验进入就是假绿。
 
 /// 临时拼音打了码再回车：clear 应整段放弃，不上屏拼音原码。
 #[test]
@@ -4343,11 +4227,10 @@ fn test_special_mode_nonempty_enter_clear_discards() {
     }
 }
 
-/// 临时英文**豁免** clear：打了内容再回车仍须上屏。
+/// 临时英文豁免 clear：打了内容再回车仍须上屏。
 ///
-/// 临英缓冲装的是英文原文而非「编码」，且 `space_as_input` 开启后空格被占作输入字符、
-/// 上屏职责整个压在回车上 —— clear 若管辖非空缓冲，本模式一个上屏通路都不剩。
-/// 故临英的 clear 只管空缓冲（见下一个测试），非空缓冲无条件上屏。
+/// 临英缓冲是英文原文而非编码，且 `space_as_input` 开启后上屏只剩回车一条通路；
+/// 故临英的 clear 只管空缓冲（见下一个测试）。
 #[test]
 fn test_temp_english_nonempty_enter_clear_still_commits() {
     if !has_schemas() {
@@ -4375,7 +4258,7 @@ fn test_temp_english_nonempty_enter_clear_still_commits() {
     }
 }
 
-/// 临英 clear 的**保留边界**：空缓冲（只按了触发键）回车仍按 clear 放弃，不回显触发键字符。
+/// 临英 clear 的保留边界：空缓冲（只按了触发键）回车仍按 clear 放弃，不回显触发键字符。
 /// 没有它，「豁免」会被误实现成「临英完全不读 enter_behavior」而无人察觉。
 #[test]
 fn test_temp_english_empty_enter_clear_discards_prefix() {
@@ -4393,8 +4276,8 @@ fn test_temp_english_empty_enter_clear_discards_prefix() {
     }
 }
 
-/// 用户实报场景：`space_as_input` + `enter_behavior=clear` 叠加曾使临英**没有任何上屏通路**
-/// —— 空格让位给输入字符，回车又被 clear 拿走，打进去的英文只能靠 Esc 丢弃。
+/// `space_as_input` + `enter_behavior=clear` 叠加时临英仍须有上屏通路——空格让位给输入字符，
+/// 回车若也被 clear 拿走，打进去的英文只能靠 Esc 丢弃。
 #[test]
 fn test_temp_english_space_as_input_enter_clear_still_commits() {
     if !has_schemas() {
@@ -4430,13 +4313,10 @@ fn test_temp_english_space_as_input_enter_clear_still_commits() {
     }
 }
 
-/// 字母写进 mix 的 `trigger_keys` **不生效**——该键落普通输入，作正常码字母。
+/// 字母写进 mix 的 `trigger_keys` 不生效——该键落普通输入，作正常码字母。
 ///
-/// 反证测试：本仓曾支持任意 a-z 作 special/mix 引导键（`key_name_to_vk_with_letters`），
-/// 但那条路没有三重身份裁决，字母一配就无条件抢键——而字母天然是编码键，被抢走就意味着
-/// 该字母在本方案里永远打不出编码。字母的特殊能力已收归方案级 `z_key_action`（只管 z、
-/// 经裁决链）。这里锁住「全局 trigger_keys 只认符号」这条边界，防止哪天为省事又把
-/// `key_name_to_vk_with_letters` 接回来。
+/// 全局 `trigger_keys` 只认符号：字母引导没有三重身份裁决，一配就无条件抢键，该字母从此打不出编码。
+/// 字母的特殊能力归方案级 `z_key_action`（只管 z、经裁决链）。别把 `key_name_to_vk_with_letters` 接回来。
 #[test]
 fn test_mix_letter_trigger_key_is_ignored() {
     if !has_schemas() {
@@ -4611,7 +4491,7 @@ fn test_s2t_one_to_many_variant_expansion() {
         "「出」之后应紧跟 1对多变体「齣」，实际: {:?}",
         display
     );
-    // 变体候选**内部 text 保持简体**（词频/匹配域不被繁体污染）。
+    // 变体候选内部 text 保持简体（词频/匹配域不被繁体污染）。
     assert_eq!(internal[p], "出");
     assert_eq!(internal[p + 1], "出", "变体候选内部 text 应仍是简体「出」");
     // 选中变体（页内第 p+2 项，数字键 1-based）→ 上屏「齣」而非默认转换的「出」。
@@ -4695,7 +4575,7 @@ fn test_dynamic_paging_expands_candidates() {
     if !has_schemas() {
         return;
     }
-    // 单字母前缀通常有大量候选：旧实现固定封顶 50，新实现按前缀加载全部（≥初始上限再分级扩展）
+    // 单字母前缀通常有大量候选：按前缀加载全部（≥初始上限再分级扩展），不固定封顶 50
     let coord = Coordinator::new_headless(config_with("wubi86"), Some(&data_dir()));
     press_letter(&coord, 'a');
     let initial = coord.debug_candidate_count();
@@ -4787,14 +4667,8 @@ fn test_temp_english_digits_and_punct() {
 
 /// 临英候选排布：`原文 → 大小写变形 → 词库候选（跟随输入大小写）`。
 ///
-/// ⚠️ **本测试的结论在 2026-09-09 被有意推翻了一半**。它原名
-/// `..._and_dict_keeps_original_case`，钉的是 `ed4eb88b` 删掉 `adapt_en_case` 后的行为
-/// ——词库候选不套输入形态。用户重新裁定要跟随（`input.temp_english.case_follow_input`，
-/// 默认开），故词库段现在是 `Help` 而不再是 `help`。
-///
-/// 新旧规则的差别是本次能重做的理由，别把它读成回归：旧实现**整串套形**（不管词库原文
-/// 长什么样），新实现是**逐位投影且单向**——只覆盖用户按了 Shift 的那几位，词库自带的
-/// 大写一律保留（本测试的 `Helen` 就是这条的证据）。详见
+/// 跟随由 `input.temp_english.case_follow_input`（默认开）控制，是逐位投影且单向：只覆盖用户
+/// 按了 Shift 的那几位，词库自带的大写保留（`Helen` 即证据）。详见
 /// `docs/design/schema-scoped-behavior.md` §5.7 与 `tests/english_case_follow.rs`。
 #[test]
 fn test_temp_english_case_variants_and_dict_follows_input_case() {
@@ -4855,8 +4729,7 @@ fn test_temp_english_case_variants_from_lowercase_entry() {
 
 /// `case_variants = false`：不再生成大小写变形候选，原文之后直接是词库候选。
 ///
-/// 与上面两个测试互为正反面——它们钉住「开着时变形恒在前三位」，这条钉住「关掉即消失」。
-/// 只有开态测试的话，开关没接上（读了配置但没用）照样全绿。
+/// 与上面两个开态测试互为正反面：只有开态测试的话，开关没接上照样全绿。
 #[test]
 fn test_temp_english_case_variants_disabled() {
     if !has_schemas() {
@@ -4914,12 +4787,10 @@ fn test_temp_english_allow_symbols_digits_go_to_buffer() {
     assert_eq!(action_text(&act).unwrap(), "Hel2-", "符号应入缓冲");
 }
 
-/// 数字兜底：白名单**不含数字**，但缓冲已含符号（`C++`）时数字仍直接入缓冲。
+/// 数字兜底：白名单不含数字，但缓冲已含符号（`C++`）时数字仍直接入缓冲。
 ///
-/// 回归点：原判据是 `state.candidates.len() > 1`，本意「有候选可选才选词」，但取值口径不对
-/// ——首候选恒是原文，`case_variants` 又对含符号串照样产出变形（`C++` → `c++`），于是
-/// `len > 1` 恒真，按 `1` 直接上屏 `C++` 并退出临英，`C++11` 根本打不出来。
-/// 判据改到缓冲上（含非字母字符 = 纯文本累积态），与白名单是否含数字无关。
+/// 判据看缓冲（含非字母字符 = 纯文本累积态），不能看 `candidates.len() > 1`：首候选恒是原文、
+/// `C++` 还有变形 `c++`，该条件恒真，按 `1` 会直接上屏，`C++11` 打不出来。
 #[test]
 fn test_temp_english_digits_go_to_buffer_after_symbol_even_if_not_listed() {
     if !has_schemas() {
@@ -4945,10 +4816,9 @@ fn test_temp_english_digits_go_to_buffer_after_symbol_even_if_not_listed() {
     );
 }
 
-/// 白名单**之外**的符号维持旧语义：上屏高亮候选 + 转换后标点 → 退出临英。
+/// 白名单之外的符号：上屏高亮候选 + 转换后标点 → 退出临英。
 ///
-/// 这条通路是「打完英文顺手按句号上屏」的唯一实现。旧实现下 allow_symbols 一开它整体消失
-/// （任何符号都只入缓冲）；改造后只有列入的字符被摘出去，其余照旧。
+/// 这是「打完英文顺手按句号上屏」的唯一通路；allow_symbols 只摘出列入的字符。
 #[test]
 fn test_temp_english_unlisted_punct_keeps_commit_and_exit() {
     if !has_schemas() {
@@ -4991,8 +4861,8 @@ fn test_temp_english_digits_still_select_when_symbols_disallowed() {
 }
 
 /// 二三候选键（默认 `;` `'`）在临英下应选中对应候选。
-/// 回归点：临英曾是唯一没接 `select_key_offset` 的模式处理器，`;` 一路落到标点臂被判成
-/// 「上屏高亮候选 + 标点」，用户按次选键实得**首候选被直接上屏**。
+/// 临英须接 `select_key_offset`，否则 `;` 落到标点臂被判成「上屏高亮候选 + 标点」，
+/// 按次选键实得首候选上屏。
 #[test]
 fn test_temp_english_select_keys_pick_candidates() {
     if !has_schemas() {
@@ -5016,10 +4886,8 @@ fn test_temp_english_select_keys_pick_candidates() {
         other => panic!("`;` 应选第 2 候选并上屏，实际: {:?}", other),
     }
 
-    // 三选键 `'` → 第 3 候选（全大写变形）。复用同一 Coordinator 重新进临英——
-    // 上屏后临英已退出，重打即可。刻意不新建实例：引擎 reader / LRU 跨实例共享且带
-    // 配额语义（见 mmap 共享 reader 的设计），一个测试建多个实例会与并行跑的其他
-    // 测试争用，实测会让无关测试偶发失败。
+    // 三选键 `'` → 第 3 候选（全大写变形）。上屏后临英已退出，复用同一 Coordinator 重进即可。
+    // 刻意不新建实例：引擎 reader / LRU 跨实例共享且带配额语义，多建实例会与并行测试争用。
     press_shift_letter(&coord, 'h');
     press_letter(&coord, 'e');
     press_letter(&coord, 'l');
@@ -5029,8 +4897,8 @@ fn test_temp_english_select_keys_pick_candidates() {
     }
 }
 
-/// 对照组一：`;` **被列入白名单**时让位于字符输入——列入的字符语义是「入缓冲而非上屏退出
-/// **或选词**」，与数字臂同构，不能被选词接线破坏。
+/// 对照组一：`;` 被列入白名单时让位于字符输入——列入的字符语义是「入缓冲而非上屏退出
+/// 或选词」，与数字臂同构，不能被选词接线破坏。
 #[test]
 fn test_temp_english_select_keys_yield_to_input_when_listed() {
     if !has_schemas() {
@@ -5056,11 +4924,10 @@ fn test_temp_english_select_keys_yield_to_input_when_listed() {
     );
 }
 
-/// 对照组一之反向：总开关开着、但 `;` **不在**白名单里时它仍是选词键。
+/// 对照组一之反向：总开关开着、但 `;` 不在白名单里时它仍是选词键。
 ///
-/// 这是本次「bool → 白名单」改造的核心收益，也是唯一能证明改造真的落地的方向：
-/// 旧实现下 allow_symbols 一开，`;` 无条件让位，本断言必红。缺了这条反向对照，
-/// 上面那条测试在旧实现下同样是绿的（旧实现让位得更狠），等于什么都没锁住。
+/// 这是白名单语义唯一能被证明的方向：若 allow_symbols 一开 `;` 就无条件让位，上一条照样绿，
+/// 只有这条会红。
 #[test]
 fn test_temp_english_select_keys_still_select_when_not_listed() {
     if !has_schemas() {
@@ -5117,10 +4984,8 @@ fn test_temp_english_select_key_overflow_falls_back_to_punct() {
 
 // ── 修饰键作二三候选键（select_key_groups = "lrshift" / "lrctrl"）──────────────
 //
-// 这组键与可打印选词键（`;` `'`）走**完全不同的物理通路**：纯修饰键的 keydown 不能吃
-// （宿主要看得见修饰键，否则 AutoCAD 正交模式失效并卡顿），所以 TSF 只在判定为「轻敲」
-// 后转发一个 keyup 过来，选词判定挂在 keyup 上。keydown 侧的一切（`!shift` 守卫、
-// Ctrl/Alt 组合清空闸门）都与它无关，也正因如此，这条路必须由 keyup 事件单独钉住。
+// 纯修饰键的 keydown 不能吃（宿主要看得见修饰键，否则 AutoCAD 正交模式失效），TSF 判定为
+// 「轻敲」后才转发 keyup，选词挂在 keyup 上。keydown 侧的守卫与它无关，故须由 keyup 事件单独钉住。
 
 /// 左 Ctrl 轻敲（keyup）→ 选第 2 候选；右 Ctrl → 选第 3 候选。
 #[test]
@@ -5152,7 +5017,7 @@ fn modifier_select_key_up_picks_candidate() {
     }
 }
 
-/// 同一个键既是切换键又是选词键时的裁决：**有候选选词**，且不得顺带切走中英文。
+/// 同一个键既是切换键又是选词键时的裁决：有候选选词，且不得顺带切走中英文。
 #[test]
 fn modifier_select_key_up_wins_over_toggle_when_candidates() {
     if !has_schemas() {
@@ -5172,7 +5037,7 @@ fn modifier_select_key_up_wins_over_toggle_when_candidates() {
     assert!(coord.is_chinese_mode(), "选词不得顺带切走中英文");
 }
 
-/// 同上配置但**无候选**（空闲）：回落到中英文切换。
+/// 同上配置但无候选（空闲）：回落到中英文切换。
 #[test]
 fn modifier_select_key_up_falls_back_to_toggle_when_idle() {
     if !has_schemas() {
@@ -5186,8 +5051,8 @@ fn modifier_select_key_up_falls_back_to_toggle_when_idle() {
     assert!(!coord.is_chinese_mode(), "空闲时左 Ctrl 应切到英文");
 }
 
-/// 只把 Ctrl 配成选词键（切换键仍是 Shift）：空闲时敲 Ctrl **不得**切中英文。
-/// 回归点：`is_toggle_mode_keycode` 若只看「key_up 白名单里有没有这个 key_code」，
+/// 只把 Ctrl 配成选词键（切换键仍是 Shift）：空闲时敲 Ctrl 不得切中英文。
+/// `is_toggle_mode_keycode` 若只看「key_up 白名单里有没有这个 key_code」，
 /// 选词用的 Ctrl 登记同样在那张表里，就会被误当切换键。
 #[test]
 fn modifier_select_key_alone_does_not_toggle() {
@@ -5230,7 +5095,7 @@ fn modifier_select_key_up_swallowed_on_overflow() {
 }
 
 /// space_as_input 开：空格被占作输入字符，回车接过「上屏高亮候选」的职责。
-/// 回归点：该配置下空格不再选词，`allow_symbols` 再开则数字键也让位，若回车仍固定上屏原文，
+/// 该配置下空格不再选词，`allow_symbols` 再开则数字键也让位，若回车仍固定上屏原文，
 /// 就一个选词键都不剩、候选窗形同虚设。
 #[test]
 fn test_temp_english_space_as_input_enter_commits_highlighted() {
@@ -5254,7 +5119,7 @@ fn test_temp_english_space_as_input_enter_commits_highlighted() {
     }
 }
 
-/// 同上配置但**未导航**：高亮停在首候选（=用户原文），故回车仍上屏原文——
+/// 同上配置但未导航：高亮停在首候选（=用户原文），故回车仍上屏原文——
 /// 对「回车上屏原文」的既有直觉向下兼容，只有主动导航过才会上屏别的候选。
 #[test]
 fn test_temp_english_space_as_input_enter_without_nav_commits_original() {
@@ -5305,7 +5170,7 @@ fn test_temp_english_space_as_input_multiword_enter() {
     }
 }
 
-/// 对照组：space_as_input 关（默认）时回车仍固定上屏原文，**即使已导航到别的候选**——
+/// 对照组：space_as_input 关（默认）时回车仍固定上屏原文，即使已导航到别的候选——
 /// 此时空格才是选词键，回车的「放弃候选、要我打的原文」语义必须保住。
 #[test]
 fn test_temp_english_enter_commits_original_when_space_selects() {
@@ -5331,8 +5196,7 @@ fn test_temp_english_numpad_direct_inputs() {
     if !has_schemas() {
         return;
     }
-    // 小键盘数字在临英下曾被静默吃掉（只认主键盘 0x30-0x39，小键盘 0x60-0x69 落标点臂
-    // → punct_char 判 None → Consumed）。
+    // 小键盘数字在临英下须与主键盘同样处理（0x60-0x69 若落标点臂会被 punct_char 判 None 吞掉）。
     let coord = Coordinator::new_headless(config_with("wubi86"), Some(&data_dir()));
     press_shift_letter(&coord, 'v'); // V
     press_letter(&coord, 'e');
@@ -5349,7 +5213,7 @@ fn test_temp_english_numpad_direct_inputs() {
     assert_eq!(action_text(&last).unwrap(), "Ver2.-", "小键盘符号应入缓冲");
 }
 
-/// follow_main：入口归一化 → 小键盘键在**所有模式**下与主键盘同键完全一致。
+/// follow_main：入口归一化 → 小键盘键在所有模式下与主键盘同键完全一致。
 /// 归一化是唯一实现手段，故本测试即是「所有模式一致」的守护。
 #[test]
 fn test_numpad_follow_main_matches_mainboard_all_modes() {
@@ -5407,8 +5271,7 @@ fn test_numpad_follow_main_matches_mainboard_all_modes() {
 }
 
 /// 数字键 0 选当前页第 10 个候选（主键盘 / 小键盘 follow_main 一致）。
-/// 主键盘 0 此前落兜底流水线只输出 '0'，不选第 10——「0 = 第10候选」是通行约定，
-/// 也是 follow_main 下 Numpad0「和主键盘一样」的前提。
+/// 「0 = 第10候选」是通行约定，也是 follow_main 下 Numpad0「和主键盘一样」的前提。
 #[test]
 fn test_number_zero_selects_tenth_candidate() {
     if !has_schemas() {
@@ -5498,24 +5361,17 @@ fn config_mixed() -> Config {
 
 /// 混输打 `xu`：拼音精确候选「需」必须进首页，不得被码表 `xu*` 的前缀补全整体压后。
 ///
-/// **真机现场**（本测试即其回归）：首选是码表精确全码「弱」（`xu` 是二简码，权重 9950+1e7），
-/// 而拼音的「需」（`code==xu` 精确匹配、该音节最高频字 6999）被 `xu*` 的码表前缀补全整体压住。
-/// 短路本改动实测「需」落在**第 98 位**（报告者 `per_page=5` ⇒ 正是其所报的第 20 页）；候选前 12 条
-/// 全是五笔：`["弱","缮","绊","弹","缯","缔","绞","缣","缢","弱点","弹幕","弹性"]`。
-/// 词库侧规模：主库 130 条加 extra 4 条，按 `text` 去重后 124 条 `xu*` 前缀补全。
-/// 根因是混输的档位系统只承认码表那一半「精确 vs 前缀」：码表精确 `+1e7`、码表前缀补全
-/// `+PARTIAL_MATCH_BOOST`(500K)，而拼音**不分精确与补全**统一 `÷PINYIN_TIER_SCALE`(100)。
-///
-/// ⚠️ `new_headless` 的 `store` 为 `None` ⇒ `freq_rerank` 不参与（其触发前提要求有词频记录），
-/// 故本测试测的是纯 `candidate_display_order` 的效果 —— 正是文档「验证匹配层类改动必须关自动
-/// 调频」要求的隔离条件。`freq_tier` 侧的同款档位另由 wind-engine 的单测覆盖。
+/// `xu` 是五笔二简码，码表精确 `+1e7`、前缀补全 `+PARTIAL_MATCH_BOOST`；拼音若不分精确与补全
+/// 统一 `÷PINYIN_TIER_SCALE`，「需」会落到第一百位左右。
+/// `new_headless` 的 store 为 `None`，`freq_rerank` 不参与，测的是纯 `candidate_display_order`；
+/// `freq_tier` 的同款档位由 wind-engine 单测覆盖。
 #[test]
 fn mixed_xu_pinyin_exact_reaches_first_page() {
     if !has_schemas() {
         eprintln!("跳过：缺少 schema");
         return;
     }
-    // 贴合真机配置：filter_mode=general（只保留常用字）——提档判据 is_common 与该模式同口径。
+    // 贴合出厂常见配置：filter_mode=general（只保留常用字）——提档判据 is_common 与该模式同口径。
     let mut cfg = config_mixed();
     cfg.input.filter_mode = "general".into();
     let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
@@ -5523,14 +5379,14 @@ fn mixed_xu_pinyin_exact_reaches_first_page() {
     press_letter(&coord, 'u');
     let texts = coord.debug_all_candidate_texts();
 
-    // 前置一：码表精确全码仍稳居首位（本改动**不得**动摇「码表精确 > 拼音」这条硬约束）。
+    // 前置一：码表精确全码仍稳居首位（本改动不得动摇「码表精确 > 拼音」这条硬约束）。
     assert_eq!(
         texts.first().map(String::as_str),
         Some("弱"),
         "码表精确全码「弱」必须仍是首选，实际: {:?}",
         &texts[..texts.len().min(10)]
     );
-    // 前置二：确认码表前缀补全候选**确实在场** —— 否则本测试退化成「没有竞争者的假绿」。
+    // 前置二：确认码表前缀补全候选确实在场 —— 否则本测试退化成「没有竞争者的假绿」。
     assert!(
         texts
             .iter()
@@ -5553,19 +5409,11 @@ fn mixed_xu_pinyin_exact_reaches_first_page() {
     );
 }
 
-/// 混输打 `aaw`（本意是 `aawt`→「工作」）：拼音的**部分匹配整句**不得抢走首位。
+/// 混输打 `aaw`（本意 `aawt`→「工作」）：拼音的部分匹配整句（「啊啊」）不得抢走首位。
 ///
-/// 真机现象：`aaw` 时首选变成拼音「啊啊」，把 `a`+`a` 拆成两个音节。
-///
-/// ★ 这是「拼音精确档」判据的边界：五笔 `aaw` **无精确全码**（候选全是 `aawt` 工作 / `aawf`
-/// 工会 一类前缀补全），所以没有 `is_exact_code=true` 的候选占着首位 —— 一旦拼音被误判进精确
-/// 档，它就直接是首选。而「啊啊」正是那个误判：
-/// - 它是 Viterbi 整句（词条 `啊啊 a a`），`code` 取 `completed`="aa"、`consumed_length=2`，
-///   只解释了 3 键中的 2 键，`w` 是残码；
-/// - 但 `is_partial` **是 false** —— 整句走 `insert(0)` 不经 `push_hit` 闭包，且同文合并时
-///   `mod.rs` 还会主动 `existing.is_partial = false`（其语义是「这不是子短语」，不是「消费了整串」）。
-///
-/// 故判据不能拿 `!is_partial` 代替「消费整串」，必须直接问 `consumed_length`。
+/// 五笔 `aaw` 无精确全码，拼音一旦被误判进精确档就直接是首选。「啊啊」只消费了 2 键，但
+/// `is_partial` 是 false（整句不经 `push_hit`，同文合并也会置 false，其语义是「不是子短语」）。
+/// 故「消费整串」必须直接问 `consumed_length`，不能拿 `!is_partial` 代替。
 #[test]
 fn mixed_aaw_partial_sentence_does_not_preempt_codetable() {
     if !has_schemas() {
@@ -5593,7 +5441,7 @@ fn mixed_aaw_partial_sentence_does_not_preempt_codetable() {
     );
 }
 
-/// 反向锁：**纯拼音**方案不受本改动影响（拼音精确档只在混输生效）。
+/// 反向锁：纯拼音方案不受本改动影响（拼音精确档只在混输生效）。
 /// 纯拼音下全体候选同为 `Pinyin` 来源，若那个层级键误在此生效，会退化成「is_common 优先」，
 /// 把含生僻字的多字词硬降到全部常用单字之后。此处以「打 `xu` 首选仍是最高频字」把住基线。
 #[test]
@@ -5629,10 +5477,8 @@ fn test_mixed_wubi_exact_priority() {
     }
     let texts = coord.debug_page_texts();
     assert!(!texts.is_empty(), "混输应有候选");
-    // 本用例要钉的是**来源**：五笔精确码压过拼音候选。具体是哪条五笔词条属实现细节，
-    // 不可硬编码——`aaaa` 是 gen_dict `[protected_codes]` 保护码，组内次序由上游给定
-    // （上游把键名汉字「工」放首位，补权时代则是「恭恭敬敬」在前）。写死任一具体值都会
-    // 在词库重新生成的前后各红一次，而「拼音候选跑到首位」这个真正要防的回归照样能被抓住。
+    // 本用例钉的是来源：五笔精确码压过拼音候选。`aaaa` 是 gen_dict `[protected_codes]`
+    // 保护码，组内次序由上游给定，写死具体词条会随词库重新生成而红。
     assert!(
         matches!(texts[0].as_str(), "工" | "恭恭敬敬"),
         "五笔精确匹配应排首位（aaaa 的五笔候选为 工/恭恭敬敬），实际: {:?}",
@@ -5658,15 +5504,11 @@ fn test_mixed_pinyin_supplement() {
     );
 }
 
-/// ★ 混输**超码长**回捞的码表前缀候选只解释得了前 N 码，选中时必须只消费那 N 码。
+/// 混输超码长回捞的码表前缀候选只解释得了前 N 码，选中时必须只消费那 N 码。
 ///
-/// `yijg` 是五笔全码「就是」，再打一个 `a` 即超码长（五笔 4 码封顶）。引擎的
-/// `codetable_owns_overflow` 把「就是」回捞到首位（拼音的 `jg` 不成音节，主张不了这串），
-/// 此时它的 `code` 只覆盖 `yijg` —— 选中后 `a` 必须留在缓冲里继续参与输入。
-///
-/// 修复前码表候选 `consumed_length` 恒 0 ⇒ 协调器 `commit_selected` 的
-/// `partial = consumed > 0 && consumed < total` 恒为 false ⇒ 走「消费整串」分支整体上屏，
-/// 尾码 `a` 凭空消失。同一条链路上 `github` 打出的是更刺眼的版本（首选「不算」+ 吃掉 `ub`）。
+/// `yijg` 是五笔全码「就是」，再打 `a` 即超码长；`codetable_owns_overflow` 把「就是」回捞到首位，
+/// 其 `code` 只覆盖 `yijg`，选中后 `a` 须留在缓冲。码表候选的 `consumed_length` 若为 0，
+/// `commit_selected` 会走「消费整串」分支，尾码凭空消失。
 #[test]
 fn test_mixed_overflow_prefix_candidate_consumes_only_prefix() {
     if !has_schemas() {
@@ -5695,16 +5537,12 @@ fn test_mixed_overflow_prefix_candidate_consumes_only_prefix() {
     }
 }
 
-/// ★ 真机回归（用户报告）：混输 + 英文词库下打 `github`，首候选变成五笔词「不算」，
-/// 空格上屏还把尾码 `ub` 一并吃掉。
+/// 混输 + 英文词库下打 `github`：首候选不得是五笔词「不算」，空格上屏不得吃掉尾码 `ub`。
 ///
-/// 成因是超码长归属判据只问了「拼音主张不主张」：`github` 前 4 码 `gith` 在五笔主库确是精确
-/// 全码「不算」，而 `gi` 不成音节 ⇒ 拼音交不出候选，于是归属判给码表，码表精确 `+1e7` 把英文
-/// 精确档 `+500K` 整层压掉。判据补上「英文主张不主张」后归属回到英文。
-///
-/// 配置取用户的真实场景：`enable_english` + `auto_commit_block_on_english` 都开（后者不开的话
-/// 第 5 键 `githu` 就被顶码顶走了，那是另一条通路，见 `mixed_overflow_codetable_claim.rs` 的
-/// `topcode_on_english_word_is_still_governed_by_the_english_guard`）。
+/// `gith` 是五笔精确全码、`gi` 不成音节，超码长归属判据若只问拼音就会判给码表，码表精确档
+/// 压掉英文；须同时问「英文主张不主张」。两开关都开：不开 `auto_commit_block_on_english` 的话
+/// `githu` 被顶码顶走，那条通路见 `mixed_overflow_codetable_claim.rs` 的
+/// `topcode_on_english_word_is_still_governed_by_the_english_guard`。
 #[test]
 fn test_mixed_english_word_keeps_overflow_ownership() {
     if !has_schemas() {
@@ -5730,15 +5568,11 @@ fn test_mixed_english_word_keeps_overflow_ownership() {
     );
 }
 
-/// ★ 真机回归（用户报告的原始配置：**英文词库关着**，即出厂默认）：打 `github` 首候选是五笔词
-/// 「不算」，空格上屏还把整个缓冲吃掉。
+/// 英文词库关着（出厂默认）时打 `github`：不得首选「不算」并吃掉整个缓冲。
 ///
-/// 此时英文引擎不在场，前三条归属判据全部放行（`gith` 是精确全码、`gi` 不成音节 ⇒ 拼音主张
-/// 不了、英文缺席），全靠第四条「拼音须交得出候选」兜住：`github` 拼音一条候选都出不来，
-/// 说明它连开头都不在中文语境里，码表没有依据主张它。候选保持为空，空格直接上屏原码。
-///
-/// 对照 `test_mixed_overflow_prefix_candidate_consumes_only_prefix`：`yijga` 的拼音出得来「以」，
-/// 码表照常主张 —— 两条用例只差「拼音交不交得出候选」这一个变量。
+/// 前三条归属判据全放行，靠第四条「拼音须交得出候选」兜住：拼音一条都出不来，码表没有依据主张它，
+/// 候选保持为空，空格上屏原码。对照 `test_mixed_overflow_prefix_candidate_consumes_only_prefix`：
+/// 两条只差「拼音交不交得出候选」这一个变量。
 #[test]
 fn test_mixed_non_chinese_overflow_falls_back_to_raw_code() {
     if !has_schemas() {
@@ -5792,10 +5626,8 @@ fn test_candidate_op_move_top_and_delete() {
         return;
     }
     use wind_ui_types::CandidateOp;
-    // candidate_op 的置顶/删除经 self.store 持久化 Shadow 规则，故需注入真实 store
-    // （new_headless 的 store=None 会让 pin/delete 变空操作）。
-    // 用码表方案（非拼音）：拼音普通候选禁调位（见 handle_candidate.rs 的
-    // "拼音普通候选禁调位" 分支——无稳定位置语义，pin 与衰减软置前冲突），MoveTop 恒为空操作。
+    // 置顶/删除经 self.store 持久化 Shadow 规则，须注入真实 store（store=None 时为空操作）。
+    // 用码表方案：拼音普通候选禁调位（见 handle_candidate.rs），MoveTop 恒为空操作。
     let store_path = std::env::temp_dir().join("wind_candidate_op_test.redb");
     let _ = std::fs::remove_file(&store_path);
     let store = std::sync::Arc::new(wind_store::Store::open(&store_path).unwrap());
@@ -5827,18 +5659,12 @@ fn test_candidate_op_move_top_and_delete() {
     }
 }
 
-/// 用户词与临时词**同文同码**时，右键删除必须把两张表都删掉。
+/// 用户词与临时词同文同码时，右键删除必须把两张表都删掉。
 ///
-/// 这是「删了等于没删」的一条真实来路：`add_user_word` 不清临时表，于是「先被自动学过、
-/// 后来又手动加词」的词在 `user_words` 和 `temp_words` 各留一条。删除若只处理其中一张，
-/// 剩下那张继续供出同一条候选，屏幕表现与没删一模一样。
-///
-/// 引擎侧合并分支会把两条并成一条候选（两个标记都置），删除据标记逐表处理。
-///
-/// ⚠️ 判据必须落在 **store 记录**上，不能用「候选消失」：真机词库下整句层会把同样的文本
-/// 重新合成出来，那样删对了候选照样在。真机根因（临时词被合并盖成用户词标记）的守门测试
-/// 在引擎侧 `merged_store_candidate_keeps_source_flags`——本仓精简词库的整句层拼不出那条
-/// 同文候选，合并分支在这里根本走不到。
+/// `add_user_word` 不清临时表，同一词可能在 `user_words` 和 `temp_words` 各留一条；引擎合并成
+/// 一条候选（两个标记都置），删除据标记逐表处理，只删一张则候选照旧。
+/// 判据落在 store 记录上而非「候选消失」：真机词库的整句层会重新合成同文。合并时保留来源标记
+/// 由引擎侧 `merged_store_candidate_keeps_source_flags` 守。
 #[test]
 fn test_delete_word_candidate_removes_both_user_and_temp_records() {
     if !has_schemas() {
@@ -5928,9 +5754,7 @@ fn test_web_schema_get_config_and_encode_real() {
     assert!(cfg.get("schema").is_some(), "应含 schema 段");
     assert!(cfg.get("engine").is_some(), "应含 engine 段");
     // dict.encode：拼音方案出拼音码；dict.genPinyin 同源。
-    //
-    // 契约是**带空格的音节码**（`ni hao`），让设置页用户看清拼音词库的音节格式。
-    // 原断言只有 `is_string()`，契约从扁平码改成空格码时它照样绿——弱断言等于没有断言。
+    // 契约是带空格的音节码（`ni hao`），只断言 `is_string()` 拦不住改成扁平码。
     let code = coord
         .web_data_rpc(
             "dict.encode",
@@ -6175,8 +5999,8 @@ fn test_web_override_summary_counts_each_schema_once() {
 
 #[test]
 fn test_stats_recorded_through_deferred_policed() {
-    // 回归：生产链路是 bridge → DeferredHandler → Coordinator，bridge 调 handle_key_event_policed。
-    // 若 DeferredHandler 不转发 policed，则 Coordinator 的统计埋点被跳过、上屏计数恒为 0。
+    // 生产链路是 bridge → DeferredHandler → Coordinator，bridge 调 handle_key_event_policed。
+    // DeferredHandler 若不转发 policed，统计埋点被跳过、上屏计数恒为 0。
     // 本测试经 DeferredHandler 走完整 policed 链路，断言 store 真实记录了上屏中文字数。
     if !has_schemas() {
         return;
@@ -6383,9 +6207,8 @@ fn test_special_trigger_with_candidates_commits_and_enters() {
     if !has_schemas() {
         return;
     }
-    // 特殊模式引导键在「有候选」时应与 mix/临拼一致：顶屏高亮候选 + 进模式
-    // （此前只有空缓冲入口，有候选时 \ 落标点流程上屏 、）。默认 direct_commit：
-    // 真提交候选、引导符新组合延迟到 keyup 才开。
+    // 特殊模式引导键在「有候选」时应与 mix/临拼一致：顶屏高亮候选 + 进模式，
+    // 而不是落标点流程上屏 、。默认 direct_commit：真提交候选、引导符新组合延迟到 keyup 才开。
     let mut cfg = config_with("wubi86");
     let ov = overlay_override_dir(
         "test_special_trigger_with_candidates_com",
@@ -6468,8 +6291,7 @@ fn test_fullwidth_space_on_empty_buffer() {
         return;
     }
     // 全角态空缓冲按空格 → 上屏全角空格 U+3000（对齐设置端展示基线与微软拼音行为）。
-    // 回归：空格键先于标点流水线被 VK_SPACE 分支截获，空缓冲曾恒 PassThrough 半角空格，
-    // 全角转换（fullwidth.rs 已支持 ' '→U+3000）与自定义映射「空格」行均够不着。
+    // 空格键先于标点流水线被 VK_SPACE 分支截获，该分支须自己做全角转换与自定义映射「空格」行。
     let mut cfg = config_with("pinyin");
     cfg.input.default.full_width = true;
     let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
@@ -6490,7 +6312,7 @@ fn test_fullwidth_space_on_empty_buffer() {
     );
 }
 
-/// t337：中文半角空缓冲空格按自定义映射出字；DLL 据列掩码吃下的空格，产物是半角也要出字。
+/// 中文半角空缓冲空格按自定义映射出字；DLL 据列掩码吃下的空格，产物是半角也要出字。
 #[test]
 fn test_custom_mapped_space_on_empty_buffer() {
     if !has_schemas() {
@@ -6518,9 +6340,9 @@ fn test_select_char_brackets_group() {
     if !has_schemas() {
         return;
     }
-    // 回归：select_char_index 曾误用选词键组解析（select_key_vks 不识别 brackets），
-    // 致配置 brackets 后 `[`/`]` 直接走标点流水线上屏【】。brackets 仅存在于
-    // select_char_vks，须用它解析。`[`(VK_OEM_4=0xDB) 取第 1 字，`]`(VK_OEM_6=0xDD) 取第 2 字。
+    // select_char_index 须用 select_char_vks 解析（brackets 只存在于那里，选词键组的
+    // select_key_vks 不识别），否则 `[`/`]` 走标点流水线上屏【】。
+    // `[`(VK_OEM_4=0xDB) 取第 1 字，`]`(VK_OEM_6=0xDD) 取第 2 字。
     let mut cfg = config_with("pinyin");
     cfg.keys.select_char_keys = vec!["brackets".into()];
     let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
@@ -6559,7 +6381,7 @@ fn test_select_char_disabled_by_default() {
     if !has_schemas() {
         return;
     }
-    // 默认 select_char_keys 为空 → `,` 不作以词定字，走正常标点流水线（零回归）。
+    // 默认 select_char_keys 为空 → `,` 不作以词定字，走正常标点流水线。
     let coord = Coordinator::new_headless(config_with("pinyin"), Some(&data_dir()));
     for c in "nihao".chars() {
         press_letter(&coord, c);
@@ -6582,14 +6404,9 @@ fn test_select_char_disabled_by_default() {
 
 #[test]
 fn temp_word_promotes_after_threshold_selections() {
-    // 验证 6a 造词路径晋升闭环：
-    // - get_temp_word 点查 API 正确反映 count
-    // - count >= promote_count → promote_temp_word 晋升入用户词库
-    // - 晋升后临时层删除（get_temp_word → None），用户层新增
-    // - promote_count=0 禁用语义：永不晋升（零回归保证）
-    //
-    // 注：6b 整词选中路径需要引擎把临时层词条作为普通候选返回；
-    // 无头 harness 中引擎与 store 临时层未直接联通，该路径由
+    // 造词路径晋升闭环：get_temp_word 反映 count；count >= promote_count 时晋升入用户词库、
+    // 临时层删除；promote_count=0 永不晋升。
+    // 整词选中路径需要引擎把临时层词条作候选返回，headless 下不联通，由
     // handle_addword.rs 内 learn_phrase_on_commit 单元测试覆盖。
     use std::sync::Arc;
 
@@ -6908,12 +6725,8 @@ fn top_code_direct_commit_returns_commit_then_defer() {
 
 // 顶码前缓冲 skce 注入短语/命令作首选，用于验证顶码上屏对短语(cmdbar)类型生效。
 //
-// ⚠️ 短语权重 3000 是**必需的**，不是随手写的大数：五笔 `skce` 是「可能」(w=2301) 的全码，
-// 二者同属精确档（`is_exact_code` 均为 true），先后由权重裁决。此处曾写 100，靠
-// `PHRASE_WEIGHT_BASE`(40M) 兜着才排首；该常量删除后短语立刻输给「可能」，本 helper 的
-// 三个测试同时失败——这正是删 40M 的预期效果，故是**调权重**而非改断言。
-//
-// 取 3000 不取 2302：留出余量，词库下次按词频重排后 2301 会变。仍在约定值域 0~10000 内。
+// 短语权重 3000 是必需的：五笔 `skce` 是「可能」(w=2301) 的全码，二者同属精确档，先后由权重裁决。
+// 取 3000 而非 2302 是给词库词频变动留余量，仍在约定值域 0~10000 内。
 fn coord_with_skce_phrase(
     phrase_text: &str,
     mode: wind_config::TopCommitMode,
@@ -6931,18 +6744,11 @@ fn coord_with_skce_phrase(
     Coordinator::new_headless_with_store(cfg, Some(&data_dir()), store)
 }
 
-/// 精确码短语与码表精确候选**同属精确档、先后完全由权重裁决**——`PHRASE_WEIGHT_BASE`(40M)
-/// 删除后这一步比较才第一次真正生效。
+/// 精确码短语与码表精确候选同属精确档，先后完全由权重裁决。
 ///
-/// 现场：五笔 `skce` 既是系统词「可能」(w=2301) 的全码，也可作短语码。40M 在时短语恒赢，
-/// 这个比较等于从未执行过（本仓混输六个权重加成也是这样，拆掉后一批从未跑过的比较第一次
-/// 生效，而当时全套测试一条没红）。
-///
-/// ⚠️ **两个方向都测**。只断言「高权重短语排首」证明不了裁决者是权重——40M 时代同样是那个
-/// 结果，测试会一路绿到底。低权重方向失败才说明比较真的发生了。
-///
-/// 层次上刻意放在用户入口（打 s-k-c-e 看候选），而非排序函数的单元测试：引擎/排序全绿
-/// 不等于打得出，二者要各有一份。
+/// 五笔 `skce` 既是「可能」(w=2301) 的全码，也作短语码。两个方向都测：只断言「高权重短语排首」
+/// 证明不了裁决者是权重，低权重方向输了才说明比较真的发生了。
+/// 放在用户入口（打 s-k-c-e 看候选）而非排序单测：排序全绿不等于打得出。
 #[test]
 fn phrase_and_codetable_exact_compete_by_weight() {
     if !has_schemas() {
@@ -7026,10 +6832,9 @@ fn top_code_phrase_code_no_codetable_char_still_commits() {
     if !has_schemas() {
         return;
     }
-    // 用户真机场景：短语专属码 date（五笔码表无字）敲满码后再敲字符应顶短语 + 余码续打。
-    // 引擎 handle_top_code 原 `first()?` 在 prefix 无字时短路 None → 顶码不触发（datea 累积）；
-    // 修复后返回 Some(("", 余码))，coordinator 用短语显示首选顶码。用内置 date 日期短语验证
-    // （系统短语须真 store 才同步，见 test_phrase_date_expansion）。
+    // 短语专属码 date（五笔码表无字）敲满码后再敲字符，应顶短语 + 余码续打。
+    // handle_top_code 在 prefix 无字时须返回 Some(("", 余码))，协调器用短语首选顶码。
+    // 系统短语须真 store 才同步，见 test_phrase_date_expansion。
     let store_path = std::env::temp_dir().join("wind_top_code_datecode.redb");
     let _ = std::fs::remove_file(&store_path);
     let store = std::sync::Arc::new(wind_store::Store::open(&store_path).unwrap());
@@ -7069,9 +6874,8 @@ fn phrase_auto_commit_unique_exact_no_longer() {
         return;
     }
     // 开启「全码唯一自动上屏」时，唯一精确码短语（无更长后继）应自动上屏。
-    // 引擎 decide_auto_commit 只认码表候选（短语 code 空、且在引擎 convert 后追加），故短语原不进
-    // 判据；phrase_auto_commit 补齐。注入短语码 kkkkx（五笔码表 4 码封顶，5 码处必无码表候选，
-    // 短语成唯一候选）；kkkk 处有多个码表候选（非唯一）→ 第 4 键不会提前自动上屏。
+    // decide_auto_commit 只认码表候选，短语由 phrase_auto_commit 补齐。短语码 kkkkx：
+    // 五笔 4 码封顶，5 码处必无码表候选；kkkk 处有多个码表候选，第 4 键不会提前上屏。
     let store_path = std::env::temp_dir().join("wind_phrase_autocommit.redb");
     let _ = std::fs::remove_file(&store_path);
     let store = std::sync::Arc::new(wind_store::Store::open(&store_path).unwrap());
@@ -7095,17 +6899,11 @@ fn phrase_auto_commit_unique_exact_no_longer() {
     let _ = std::fs::remove_file(&store_path);
 }
 
-/// **码长超过方案满码长的短语不得被顶码劫走**（回归：5 码短语落在 4 码五笔方案里）。
+/// 码长超过方案满码长的短语不得被顶码劫走（5 码短语落在 4 码五笔方案里）。
 ///
-/// 上一个测试用 `Config::default()`，其 `top_code_commit` 结构体零值是 `false`——而出厂
-/// toml 里是 `true`（`config.rs` 的 `[schema.codetable] top_code_commit = true`）。于是它
-/// 验证的自动上屏路径**在真机默认配置下压根走不到**：顶码排在 `update_candidates` 之前
-/// 且命中即 return。本测试把开关拨到出厂值，堵上那个盲区。
-///
-/// 修复前实测：`CommitThenDeferComposition { commit_text: "串口", deferred_composition: "x" }`
-/// ——`kkkk` 的码表首选被顶上屏、余码 `x` 落回缓冲，`kkkkx` 这条短语永远打不出来。
-/// 真机现场是 5 码短语 `zzsfz`：`zzsf` 在码表无字，顶上屏的正是该短语自身的前缀候选，
-/// 于是「词条上屏了，但多出一个 z」。
+/// 上一个测试用 `Config::default()`，其 `top_code_commit` 零值是 `false`，而出厂 toml 是 `true`；
+/// 顶码排在 `update_candidates` 之前且命中即 return，故须拨到出厂值才覆盖默认路径。
+/// 不过闸时 `kkkk` 的码表首选被顶上屏、余码 `x` 落回缓冲，`kkkkx` 永远打不出来。
 #[test]
 fn top_code_yields_to_overlong_phrase() {
     if !has_schemas() {
@@ -7122,7 +6920,7 @@ fn top_code_yields_to_overlong_phrase() {
     for ch in ['k', 'k', 'k', 'k'] {
         press_letter(&coord, ch);
     }
-    // 第 5 键 'x'：短语侧有精确码 kkkkx → 否决顶码 → 落到自动上屏，且**不得留余码**。
+    // 第 5 键 'x'：短语侧有精确码 kkkkx → 否决顶码 → 落到自动上屏，且不得留余码。
     match coord.handle_key_event(&key_event(0x58, EVENT_KEY_DOWN)) {
         KeyAction::InsertText { text, .. } => {
             assert_eq!(text, "唯一测试短语", "应整体上屏短语，而非顶码劫持");
@@ -7132,9 +6930,8 @@ fn top_code_yields_to_overlong_phrase() {
     let _ = std::fs::remove_file(&store_path);
 }
 
-/// 对照组：同码长的**码表用户词**本就不受影响（引擎 `has_full_input_match` 查得到它）。
-/// 配它是为了钉死「差异来自存放位置（短语库 vs 码表词库），不是码长本身」——
-/// 真机反馈正是「`zzsfz` 不行、`abcde` 没问题」，两者恰好分居两处。
+/// 对照组：同码长的码表用户词本就不受影响（引擎 `has_full_input_match` 查得到它）。
+/// 钉死「差异来自存放位置（短语库 vs 码表词库），不是码长本身」。
 #[test]
 fn top_code_never_hijacked_overlong_user_word() {
     if !has_schemas() {
@@ -7162,14 +6959,10 @@ fn top_code_never_hijacked_overlong_user_word() {
     let _ = std::fs::remove_file(&store_path);
 }
 
-/// **短语的上屏文本必须保留真换行**——`Candidate::text` 就是上屏内容，不得在装配期改写。
+/// 短语的上屏文本必须保留真换行：`Candidate::text` 就是上屏内容，不得在装配期改写。
 ///
-/// 回归背景：短语候选装配曾调 `clamp_candidate_display` 做「一行化」（换行/制表→空格），
-/// 而用户词候选**不走这一步**。于是同一条含换行的内容，用户词能上屏换行、短语上屏成空格；
-/// 候选窗里也看不到 ↵，因为 text 里的换行早在装配期就没了。
-///
-/// 一行化是**显示层**关注点（杜绝多行候选撑破候选窗），现由渲染层 `visible_whitespace`
-/// 承担（换行→↵、制表→⇥，只投影不改数据）。数据层不得再有同类改写。
+/// 一行化是显示层关注点，由渲染层 `visible_whitespace` 承担（换行→↵、制表→⇥，只投影不改数据）；
+/// 数据层再有同类改写，短语与用户词的上屏结果就会不一致。
 #[test]
 fn phrase_commit_keeps_real_newline() {
     if !has_schemas() {
@@ -7233,10 +7026,9 @@ fn phrase_auto_commit_effect_command_executes() {
     let _ = std::fs::remove_file(&store_path);
 }
 
-/// 精确匹配模式（`single_code_input`）+ 空码补全（`single_code_complete`）下，短语前缀
-/// 补全**只出首选一条**——与码表引擎同分支「从更长编码取首个候选」的规格一致。
+/// 精确匹配模式（`single_code_input`）+ 空码补全（`single_code_complete`）下，短语前缀补全
+/// 只出首选一条——与码表引擎「从更长编码取首个候选」的规格一致。
 ///
-/// 回归：原 `allow_prefix` 在补全分支放行整串前缀命中，致空码补全冒出多条「后续」。
 /// 注入同前缀 zzq 的三条短语（码 zzqa/zzqb/zzqc，五笔无 zzq 精确字 → 触发补全分支）。
 fn coord_with_prefix_phrases(complete: bool) -> std::sync::Arc<Coordinator> {
     let store_path =
@@ -7295,15 +7087,11 @@ fn exact_mode_without_complete_suppresses_phrase_prefix() {
     );
 }
 
-/// 精确匹配空码补全的判据须落在**最终显示列表**上，而非某一层的局部视野。
+/// 精确匹配空码补全的判据须落在最终显示列表上，而非某一层的局部视野。
 ///
-/// 回归：码表引擎在协调器注入短语**之前**按自己那半边判空，于是 `aab`（五笔全库无精确字、
-/// 主库有 aabx 后继）无条件被补上一条更长编码候选；随后精确码短语 aab 再进来 → 屏幕上短语
-/// 旁边多出一条与输入无关的「后续」。反向同源：引擎抢先把列表填非空，又会让短语侧的补全
-/// 枚举误判「已有候选」而放弃，该补的短语反倒不补。
-///
-/// `aab` 的选取依据：六个 wubi86 词库均无 code=="aab" 的精确项，主库有 4 条 aab? 后继——
-/// 即「码表侧必然想补、且补得出来」，是这个 bug 的最小复现条件。
+/// 码表引擎若在短语注入前按自己那半边判空，`aab` 会被补上一条无关的「后续」挤在短语旁；反之
+/// 引擎抢先填非空，短语侧又会误判「已有候选」而不补。
+/// `aab`：六个 wubi86 词库均无精确项、主库有 4 条 aab? 后继，即码表侧必然想补且补得出来。
 fn coord_exact_completion(with_phrase: bool) -> std::sync::Arc<Coordinator> {
     let store_path =
         std::env::temp_dir().join(format!("wind_exact_completion_{}.redb", with_phrase as u8));
@@ -7343,7 +7131,7 @@ fn exact_mode_completion_fires_without_phrase() {
         return;
     }
     // 对照组：同一编码在无短语时仍应补上一条码表后续。证明上一个测试里「没有多余候选」
-    // 来自补全**让位**，而不是补全整体被改坏了。
+    // 来自补全让位，而不是补全整体被改坏了。
     let coord = coord_exact_completion(false);
     for ch in ['a', 'a', 'b'] {
         press_letter(&coord, ch);
@@ -7357,13 +7145,10 @@ fn exact_mode_completion_fires_without_phrase() {
     );
 }
 
-/// 短语自动上屏须过 `auto_commit_min_len` 闸（与码表「满码唯一自动上屏」同规格）。
+/// 短语自动上屏须过 `auto_commit_min_len` 闸（与码表「满码唯一自动上屏」同规格），
+/// 否则短码短语（如 4 码方案里 3 码的 $CC 命令）会绕过「满码」语义直接上屏/执行。
 ///
-/// 回归：`phrase_auto_commit` 原只判「唯一 + 无更长后继」、不设最短码长，致短码短语
-/// （如 3 码 `ocd` 的 $CC 命令在 4 码方案里）绕过「满码」语义直接上屏/执行。
-///
-/// 复用 kkkkx（5 码，五笔 4 码封顶 → 必无更长后继）隔离出 min_len 单一变量：
-/// 显式设 6 → 5 < 6 应被拦；设 5 → 恰好达标应放行（边界为 >=）。
+/// 复用 kkkkx（5 码，必无更长后继）隔离 min_len：设 6 应被拦；设 5 恰好达标应放行（边界为 >=）。
 fn coord_with_phrase_min_len(min_len: usize, tag: &str) -> std::sync::Arc<Coordinator> {
     let store_path = std::env::temp_dir().join(format!("wind_phrase_minlen_{tag}.redb"));
     let _ = std::fs::remove_file(&store_path);
@@ -7419,11 +7204,9 @@ fn phrase_auto_commit_at_min_len_boundary() {
     }
 }
 
-// 码表用户词库值内嵌 $CC 命令（用户真机场景 bccc=$CC(...)）自动上屏测试基建：
-// 注入 5 码用户词 kkkkx（五笔 4 码封顶，5 码处必无码表候选 → 唯一 + 无更长后继，
-// 与短语侧同构造）。原三重漏判：引擎意向 commit_text=原始 $CC 源 vs 展开后候选
-// text=display 标签 → 复核不匹配被否决；recheck 因意向已 Some 不跑；phrase_auto_commit
-// 只认 is_phrase。修复=复核按 phrase_template 补匹配 + 首选命令分流(command_auto_outcome)。
+// 码表用户词库值内嵌 $CC 命令（如 bccc=$CC(...)）自动上屏的测试基建：注入 5 码用户词 kkkkx
+// （唯一 + 无更长后继，与短语侧同构造）。要点：复核须按 phrase_template 匹配（意向是 $CC 源、
+// 候选 text 是展开后的标签），首选命令经 command_auto_outcome 分流。
 fn coord_with_dict_command(template: &str, tag: &str) -> std::sync::Arc<Coordinator> {
     let store_path = std::env::temp_dir().join(format!("wind_dict_autocmd_{tag}.redb"));
     let _ = std::fs::remove_file(&store_path);
@@ -7491,7 +7274,7 @@ fn special_mode_effect_command_auto_commit_executes() {
         .add_user_word("wubi86", "kkkkx", r#"$CC("《》", ask("x"))"#, 0, 0)
         .unwrap();
     let mut cfg = config_with("wubi86");
-    // ★ 自动上屏写在方案名下：overlay 方案不继承全局 `schema.codetable`。
+    // 自动上屏写在方案名下：overlay 方案不继承全局 `schema.codetable`。
     let ov = overlay_override_dir_with_codetable(
         "special_mode_effect_command_auto_commit_",
         &[("wubi86", false)],
@@ -7520,12 +7303,10 @@ fn special_mode_effect_command_auto_commit_executes() {
     let _ = std::fs::remove_file(&store_path);
 }
 
-/// 回归论坛 #211：快符改码（新增用户词 + shadow 隐藏旧词条）后自动上屏应恢复。
+/// 快符改码（新增用户词 + shadow 隐藏旧词条）后自动上屏应恢复。
 ///
-/// 复现改码瞬间的两阶段：① 码位下新旧两条精确候选并存 → 歧义、不应自动上屏；
-/// ② shadow 隐藏旧候选后只剩一条 → 应恢复自动上屏。此前 `update_special_candidates`
-/// 的自动上屏判定只看 `convert_with_opts` 在 shadow 生效**之前**算出的意向，shadow 删除
-/// 的效果对这一判定永远不可见——候选窗看着只剩一条，却上不了屏。
+/// 两阶段：① 码位下新旧两条精确候选并存 → 歧义、不应自动上屏；② shadow 隐藏旧候选后只剩一条
+/// → 应自动上屏。`update_special_candidates` 的判定须看 shadow 生效之后的候选。
 #[test]
 fn special_mode_auto_commit_recovers_after_shadow_resolves_ambiguity() {
     if !has_schemas() {
@@ -7545,7 +7326,7 @@ fn special_mode_auto_commit_recovers_after_shadow_resolves_ambiguity() {
         .add_user_word("wubi86", "zzzzq", "乙", 100, 0)
         .unwrap();
     let mut cfg = config_with("pinyin");
-    // ★ 自动上屏写在方案名下：overlay 方案不继承全局 schema.codetable。
+    // 自动上屏写在方案名下：overlay 方案不继承全局 schema.codetable。
     let ov = overlay_override_dir_with_codetable(
         "special_mode_auto_commit_recovers_after_s",
         &[("wubi86", false)],
@@ -7610,12 +7391,10 @@ fn special_mode_exact_completion_shows_longer_code() {
     if !has_schemas() {
         return;
     }
-    // 需求回归：特殊模式（引用 wubi86）在精确匹配模式 + 空码补全下，输入 `aab` 无精确候选，
-    // 但主库有 `aab?` 更长后继 → 引擎备下 completion_hint（备货不 push）。此前特殊模式只消费
-    // result.candidates、丢弃 completion_hint → 屏幕全空；修复后应采纳这条更长编码首选，与主码表
-    // 方案一致。single_code_input/single_code_complete 配在全局 schema.codetable、方案未覆盖 →
-    // tri-state 回落全局（manager.rs resolved），故特殊模式独立引擎也拿到这两个开关。
-    // `aab` 复用 project_phrase_candidate_commit §三 的回归码（六库均无精确 aab、主库有 4 条 aab? 后继）。
+    // 特殊模式（引用 wubi86）在精确匹配 + 空码补全下输入 `aab`：无精确候选、主库有 `aab?` 后继，
+    // 须采纳引擎备下的 completion_hint，与主码表方案一致，而非屏幕全空。
+    // 两个开关配在全局 schema.codetable、方案未覆盖 → tri-state 回落全局，特殊模式独立引擎也拿得到。
+    // `aab` 的选取同 project_phrase_candidate_commit。
     let store_path = std::env::temp_dir().join("wind_special_exact_completion.redb");
     let _ = std::fs::remove_file(&store_path);
     let store = std::sync::Arc::new(wind_store::Store::open(&store_path).unwrap());
@@ -7702,7 +7481,7 @@ fn special_mode_show_all_respects_single_code_input() {
         let _ = std::fs::remove_file(&store_path);
         let store = std::sync::Arc::new(wind_store::Store::open(&store_path).unwrap());
         let mut cfg = config_with("wubi86");
-        // ★ 写在**方案自己名下**，不是全局：overlay 方案不继承全局 `schema.codetable`。
+        // 写在方案自己名下，不是全局：overlay 方案不继承全局 `schema.codetable`。
         let ov = overlay_override_dir_with_codetable(
             "special_mode_show_all_respects_single_co",
             &[("wubi86", true)],
@@ -7732,11 +7511,9 @@ fn clear_on_empty_max_keeps_phrase_candidate() {
     if !has_schemas() {
         return;
     }
-    // 回归：满码空码清空（clear_on_empty_max）开启 + 短语专属码（码表无字，如 zzbd）时，
-    // should_clear 由码表引擎在**追加短语之前**算出 true（仅看码表空候选），但协调器随后追加了
-    // 精确码短语候选 → 不应清空缓冲。原 bug：`None if should_clear => Clear` 未复查叠加短语后的
-    // 最终候选，把短语列表连同缓冲一并误清（handle_candidate.rs）。
-    // 复用 kkkkx（五笔码表 4 码封顶，5 码处必无码表候选 → is_empty 且满码 → should_clear 成立）。
+    // 满码空码清空（clear_on_empty_max）+ 短语专属码（码表无字）时，should_clear 由码表引擎在
+    // 追加短语之前算出 true；协调器须按叠加短语后的最终候选复查，不得连短语带缓冲一并清掉。
+    // 复用 kkkkx（5 码处必无码表候选 → is_empty 且满码 → should_clear 成立）。
     let store_path = std::env::temp_dir().join("wind_phrase_clear_empty.redb");
     let _ = std::fs::remove_file(&store_path);
     let store = std::sync::Arc::new(wind_store::Store::open(&store_path).unwrap());
@@ -7830,7 +7607,7 @@ fn auto_pair_jump_out_key_moves_cursor_right() {
     );
 }
 
-/// 中英文切换**不清**配对栈：切走再切回后 Tab 仍能跳出。
+/// 中英文切换不清配对栈：切走再切回后 Tab 仍能跳出。
 /// 切模式既不移动光标也不消除已插入的右符号，「光标紧贴右符号」的前提仍成立。
 /// （对照组见 `auto_pair_focus_lost_clears_stack`：失焦才该清。）
 #[test]
@@ -7865,10 +7642,9 @@ fn auto_pair_stack_survives_mode_switch() {
     );
 }
 
-/// 跨模式跳出（本次改造的核心目标）：中文里打的配对，切到英文后 Tab 应能跳出。
+/// 跨模式跳出：中文里打的配对，切到英文后 Tab 应能跳出。
 ///
-/// 旧实现下这条必失败——协调器的跳出判定写在中文 composition 路径里，而英文模式在更早处
-/// 就 `PassThrough` 了，那段判定是死代码。
+/// 英文模式在更早处就 `PassThrough`，跳出判定不能只写在中文 composition 路径里。
 #[test]
 fn auto_pair_jump_out_works_in_english_mode() {
     if !has_schemas() {
@@ -7894,8 +7670,7 @@ fn auto_pair_jump_out_works_in_english_mode() {
     );
 }
 
-/// 英文半角普通配对键由协调器接手（此前由 DLL 的 `_englishPairEngine` 本地插入）。
-/// 这是「四条建立路径全部入同一个栈」的关键一步。
+/// 英文半角普通配对键由协调器接手，「四条建立路径全部入同一个栈」。
 #[test]
 fn english_halfwidth_pair_handled_by_coordinator() {
     if !has_schemas() {
@@ -7928,7 +7703,7 @@ fn english_halfwidth_pair_handled_by_coordinator() {
     );
 }
 
-/// 吃键面未扩大（硬性约束的回归保护）：配对开关关闭时，协调器不得接手配对键。
+/// 吃键面未扩大：配对开关关闭时，协调器不得接手配对键。
 /// 接手即意味着 DLL 也吃了它，而 DLL 的判据是 `IsEnabled() && 在配对表内`——
 /// 两侧一旦不同源就是「吃了再吐」丢键。
 #[test]
@@ -7948,11 +7723,11 @@ fn english_pair_not_handled_when_disabled() {
     );
 }
 
-/// 失焦后配对状态的存废。**跨焦点保留已放弃**（2026-07-29 真机后决定）：
-/// 配对状态在 core 全局单栈与每个宿主进程各自一份的 DLL 计数两处，作用域模型对不齐，
-/// 加上焦点离开期间用户做了什么输入法无法感知，保留本质上是猜测——实测大部分情况失效。
-/// 故凡是会清输入缓冲的 reason，一律连配对状态一起清；`CtxLost` 是 DocMgr 噪声层，
-/// 它本来就不清任何输入态，配对状态也跟着不清。
+/// 失焦后配对状态的存废：不跨焦点保留。
+///
+/// 配对状态分在 core 全局单栈与各宿主进程的 DLL 计数两处，作用域对不齐，且焦点离开期间的输入
+/// 无从感知，保留只是猜测。故凡清输入缓冲的 reason 一律连配对状态一起清；`CtxLost` 是 DocMgr
+/// 噪声层，不清任何输入态，配对状态也不清。
 fn pair_state_after_focus_lost(reason: wind_bridge::handler::FocusLostReason) -> KeyAction {
     let mut cfg = config_with("wubi86");
     cfg.input.auto_pair.chinese = true;
@@ -7987,8 +7762,8 @@ fn auto_pair_cleared_on_real_focus_loss() {
     }
 }
 
-/// `CtxLost` 是 DocMgr 噪声层（Excel 实测同一 DocMgr 6ms 内掉了又回），它**不清任何输入态**，
-/// 配对状态也跟着不清——在这里清就是把 Excel 那类抖动变成「配对忽然跳不出去」。
+/// `CtxLost` 是 DocMgr 噪声层（Excel 下同一 DocMgr 会在毫秒级内掉了又回），它不清任何输入态，
+/// 配对状态也跟着不清——在这里清就是把那类抖动变成「配对忽然跳不出去」。
 #[test]
 fn auto_pair_survives_ctx_lost_noise() {
     if !has_schemas() {
@@ -8001,7 +7776,7 @@ fn auto_pair_survives_ctx_lost_noise() {
     );
 }
 
-/// 配对跳出键未配置时：Tab 不被吞（回归保护——默认空集不启用）。
+/// 配对跳出键未配置时：Tab 不被吞（默认空集不启用）。
 #[test]
 fn auto_pair_no_jump_out_key_passes_tab_through() {
     if !has_schemas() {
@@ -8054,8 +7829,8 @@ fn jump_out_right_symbol_enabled_moves_cursor() {
     );
 }
 
-/// `right_symbol` 不在跳出列表内：打右括号 → **正常上屏该字符，不跳出**。
-/// 回归保护：列表里没有就是没有，不做隐式补偿（用户拍板的语义）。
+/// `right_symbol` 不在跳出列表内：打右括号 → 正常上屏该字符，不跳出。
+/// 列表里没有就是没有，不做隐式补偿。
 #[test]
 fn jump_out_right_symbol_disabled_commits_char() {
     if !has_schemas() {
@@ -8088,13 +7863,10 @@ fn jump_out_right_symbol_disabled_commits_char() {
     );
 }
 
-/// 引号配对回归：**连按引号键每次都开新的一对**，绝不交替。
+/// 引号配对：连按引号键每次都开新的一对，绝不交替。
 ///
-/// 历史 bug：引号是唯一的对称配对键，`PunctuationConverter` 用交替开关决定出左还是出右
-/// （第 1 次 `“`、第 2 次 `”`），而自动配对**一次按键就把左右都吐出去了**、开关却只前进
-/// 一格 → 第 2 次按键给出 `”` → 不是左符号（不插对）、却是右符号（跳出或裸提交单个 `”`）
-/// → 「出对 / 出单」严格交替循环。修法是配对生效时把交替态钉死在「左」，
-/// 左右判定单一收口到配对栈，跳出交给 `jump_out_keys`。
+/// 自动配对一次按键吐出左右两个，交替开关却只前进一格，第 2 次就会出 `”`，陷入「出对 / 出单」
+/// 交替。配对生效时交替态钉死在「左」，左右判定收口到配对栈，跳出交给 `jump_out_keys`。
 #[test]
 fn auto_pair_quote_always_opens_new_pair() {
     if !has_schemas() {
@@ -8146,10 +7918,7 @@ fn quote_alternates_when_not_in_pair_table() {
 }
 
 /// 英文模式（半角）下「英文半角」列生效：DLL 按 core 推送的字符集合吃下这些标点键转发，
-/// 此处必须出字。
-///
-/// 历史：英文非全角时 DLL 直接透传标点键（真机日志 `decision=passthrough_not_handled`），
-/// 引擎收不到 → 四列里的「英半」是打不到的死格（英全列有 `english_fullwidth` 分支才生效）。
+/// 此处必须出字；否则英半列是打不到的死格。
 #[test]
 fn english_mode_uses_english_half_width_column() {
     if !has_schemas() {
@@ -8184,11 +7953,10 @@ fn english_mode_uses_english_half_width_column() {
     );
 }
 
-/// 吃键集 ⊆ 出字集的**反向**保证：没配英半列的标点键在英文模式下仍须透传。
+/// 吃键集 ⊆ 出字集的反向保证：没配英半列的标点键在英文模式下仍须透传。
 ///
-/// DLL 只吃 core 推送的字符集合内的键，core 也只接手同一集合——两侧同源。若此处误接手
-/// （返回 Consumed 之类）就会吞掉 DLL 根本没吃的键；反之若 DLL 吃了而这里不出字，
-/// 就是「吃了再吐」，Chrome/Electron 不回退合成 WM_CHAR，键直接丢失。
+/// DLL 与 core 按同一字符集合接手。此处误接手会吞掉 DLL 没吃的键；DLL 吃了这里不出字则是
+/// 「吃了再吐」，Chrome/Electron 不回退合成 WM_CHAR，键直接丢失。
 #[test]
 fn english_mode_uncovered_punct_still_passes_through() {
     if !has_schemas() {
@@ -8219,9 +7987,8 @@ fn english_mode_uncovered_punct_still_passes_through() {
 
 /// 英半列写的就是原字符本身 = 没有改写，英文模式下必须透传。
 ///
-/// 设置端保存一行自定义标点时四列整行落盘，`-` `=` 等行的英半默认值就是原字符；若按
-/// 「非空即覆盖」吃键，core 出的字虽相同，宿主却收不到原始按键，单键快捷键
-/// （Premiere 的 `-`/`=` 缩放）失效。真改写了的键仍要接管。
+/// 设置端保存自定义标点时四列整行落盘，`-` `=` 的英半默认值就是原字符；若按「非空即覆盖」
+/// 吃键，宿主收不到原始按键，单键快捷键（Premiere 的 `-`/`=` 缩放）失效。真改写了的键仍要接管。
 #[test]
 fn english_mode_identity_english_half_column_passes_through() {
     if !has_schemas() {
@@ -8264,12 +8031,10 @@ fn english_mode_identity_english_half_column_passes_through() {
     );
 }
 
-/// 自定义映射 × 引号配对：`"1`/`"2` 两行 = **左形/右形**，配对时一次按键两行都用上。
+/// 自定义映射 × 引号配对：`"1`/`"2` 两行 = 左形/右形，配对时一次按键两行都用上。
 ///
-/// 语义定名（用户拍板）：界面上的「第一次 / 第二次」实质是左形 / 右形，「第几次」只是没有
-/// 自动配对时按次序推导角色的说法。此前配对判定用硬编码的内置 `“”`，而上屏走自定义映射：
-/// 把引号自定义成 `「」` 后判定不命中 → 不钉左 → 交替态照旧前进 → 第 2 次按键出 `」`（右符号）
-/// → 「出对 / 出单」交替循环复发；反过来若判定命中却钉左，`"2` 那行就永远取不到。
+/// 配对判定须用自定义映射而非内置 `“”`：判定不命中会不钉左、陷入「出对 / 出单」交替；
+/// 命中却只钉左则 `"2` 那行永远取不到。
 #[test]
 fn custom_quote_mapping_pairs_by_left_right_rows() {
     if !has_schemas() {
@@ -8307,7 +8072,7 @@ fn custom_quote_mapping_pairs_by_left_right_rows() {
     }
 }
 
-/// 自定义映射 + 引号**不**参与配对时，两行仍按「第一次左 / 第二次右」交替取用。
+/// 自定义映射 + 引号不参与配对时，两行仍按「第一次左 / 第二次右」交替取用。
 #[test]
 fn custom_quote_mapping_alternates_without_pairing() {
     if !has_schemas() {
@@ -8365,13 +8130,10 @@ fn type_str(coord: &Coordinator, s: &str) -> KeyAction {
     last
 }
 
-/// 按**文本**选中候选：翻页找到它，再按该页对应的数字键。
+/// 按文本选中候选：翻页找到它，再按该页对应的数字键。
 ///
-/// ⚠️ **不要在分步上屏类测试里写死候选位置**。这族测试要守的是「选中一个只消费部分
-/// 输入的候选之后，退格/光标/只读前缀的行为」，候选排在第几位是它**不关心**的东西。
-/// 旧写法 `tap(&coord, 0x33)`（写死数字键 3 = 第 3 个候选）在排序按「消费输入长度优先」
-/// 调整后全部失效 —— 单字候选被整体推到消费整串的词之后（`nihao` 下「你」到了第 35 位），
-/// 而机制本身完好。依赖了不关心的东西，就会为不相干的改动买单。
+/// 分步上屏类测试守的是选中部分消费候选之后的退格/光标/只读前缀行为，不关心候选排第几；
+/// 写死位置（如数字键 3）会因排序调整而全部失效。
 fn select_by_text(coord: &Coordinator, text: &str) -> KeyAction {
     let (_, _, total_pages) = coord.debug_page_info();
     for _ in 0..total_pages.max(1) {
@@ -8386,10 +8148,8 @@ fn select_by_text(coord: &Coordinator, text: &str) -> KeyAction {
     );
 }
 
-/// 光标左移跨过引擎插入的音节分隔符时，caret 需按**显示串**位置换算（buffer "nihao" 的第 2
-/// 字节 → 显示 "ni'hao" 的第 2 位，一次左移跨两个显示位）。这是 buffer→display 映射的核心用例。
-///
-/// ←/→ 是 rime 导航语义：光标在音节边界上整音节跳（末尾 → `ni|hao`），音节中间才单字符。
+/// 光标左移跨过引擎插入的音节分隔符时，caret 需按显示串位置换算（buffer "nihao" 的第 2
+/// 字节 → 显示 "ni'hao" 的第 2 位）。←/→ 是 rime 导航语义：音节边界上整音节跳，音节中间才单字符。
 #[test]
 fn test_pinyin_cursor_maps_through_separator() {
     if !has_schemas() {
@@ -8496,7 +8256,7 @@ fn test_cursor_boundary_semantics() {
     );
 }
 
-/// 已转换前缀是**只读**的：光标进不去（Home 只到剩余编码开头），caret 需含前缀的 UTF-16 长度。
+/// 已转换前缀是只读的：光标进不去（Home 只到剩余编码开头），caret 需含前缀的 UTF-16 长度。
 /// Delete 把剩余编码删空时回退最后一段（对齐 Go handleDelete → popConfirmedSegment）。
 #[test]
 fn test_committed_prefix_is_readonly_and_delete_pops_segment() {
@@ -8533,7 +8293,7 @@ fn test_committed_prefix_is_readonly_and_delete_pops_segment() {
     assert_eq!(action_caret(&act), Some(2), "回退后光标落在码末尾");
 }
 
-/// Backspace 的段回退**优先于光标**：即便光标在剩余编码最左（Backspace 本该无字符可删），
+/// Backspace 的段回退优先于光标：即便光标在剩余编码最左（Backspace 本该无字符可删），
 /// 有已转换段时仍先回退段（Go handleBackspace 的分支顺序）。
 #[test]
 fn test_backspace_pops_segment_regardless_of_cursor() {
@@ -8553,15 +8313,11 @@ fn test_backspace_pops_segment_regardless_of_cursor() {
     assert_eq!(action_caret(&act), Some(6), "回退后光标拉到缓冲末尾");
 }
 
-/// 回归：**双拼**分步上屏后退格，回退的必须是原始击键码而非全拼码。
+/// 双拼分步上屏后退格，回退的必须是原始击键码而非全拼码。
 ///
-/// 引擎只把 `consumed_length` 回映射到双拼击键空间，候选的 `code` 刻意保持全拼语义。
-/// 曾因 `committed_segs` 只记全拼码，退格把 `hao` 并回击键缓冲 `ma` → `haoma` 被当双拼
-/// 重解析成 `ha|o|ma`，preedit 变 `ha'oma`，此后整串错乱。
-///
-/// 用 `hcma`（小鹤：hao=hc、ma=ma）而非 `nihc`：**必须选一个双拼码 ≠ 全拼码的首音节**，
-/// 否则 bug 隐身——`ni` 两种码恰好相同，正是它让这个缺陷表现为「有时正常」。
-/// 末尾的 `nihc` 是对照组，锁住等长场景不被改动波及。
+/// 候选 `code` 是全拼语义、`consumed_length` 才映射到击键空间；`committed_segs` 若只记全拼码，
+/// 退格把 `hao` 并回 `ma` → `haoma` 被重解析成 `ha|o|ma`，此后整串错乱。
+/// 用 `hcma`（小鹤 hao=hc）：首音节双拼码必须 ≠ 全拼码，否则测不出；末尾 `nihc` 是等长对照组。
 #[test]
 fn test_shuangpin_backspace_restores_raw_keys() {
     let d = data_dir();
@@ -8770,11 +8526,10 @@ fn test_shuangpin_shared_key_finals_both_readings() {
     }
 }
 
-/// 组码中的 `;` 必须作 **ing 韵母**进缓冲，而不是被次选键 / quick_mix 引导键 / 标点吃掉。
+/// 组码中的 `;` 必须作 ing 韵母进缓冲，而不是被次选键 / quick_mix 引导键 / 标点吃掉。
 ///
-/// 这三条通路会**依次**拦这个键，缺一条没接就仍旧打不出——曾经的
-/// `is_shuangpin_final` 只跳过了选词分支，`y;` 的实际结果是「也」上屏 + 进快捷输入。
-/// 现由码元字符集在 `try_code_char_gate` 一处仲裁（拼音引擎的 `input_chars` 从布局推导）。
+/// 三条通路依次拦这个键，由码元字符集在 `try_code_char_gate` 一处仲裁
+/// （拼音引擎的 `input_chars` 从布局推导）。
 #[test]
 fn test_shuangpin_symbol_final_enters_buffer() {
     let d = data_dir();
@@ -8788,7 +8543,7 @@ fn test_shuangpin_symbol_final_enters_buffer() {
 
     press_letter(&coord, 'y');
     let act = press_char(&coord, ';');
-    // 组合区显示**原始击键**（双拼刻意如此，见 pinyin/mod.rs 的 Fix A：`hcma` 显示
+    // 组合区显示原始击键（双拼刻意如此，见 pinyin/mod.rs 的 Fix A：`hcma` 显示
     // `hc'ma` 而非 `hao'ma`），故这里是 `y;` 不是 `ying`；`;` 真的进了缓冲的证据
     // 是候选——转换成 ying 才查得到这些字。
     assert_eq!(
@@ -8839,7 +8594,7 @@ fn test_shuangpin_symbol_final_enters_buffer() {
     );
 }
 
-/// 空缓冲下的 `;` **不归双拼**：它在布局里只作韵母（第二码），故不进首码集，
+/// 空缓冲下的 `;` 不归双拼：它在布局里只作韵母（第二码），故不进首码集，
 /// quick_mix 引导键照常生效。这是「首码集是仲裁者」契约的另一半——
 /// 只接前半条（`;` 进全集）会让用户永远进不去快捷输入。
 #[test]
@@ -8884,8 +8639,8 @@ fn test_shuangpin_alpha_only_layout_keeps_semicolon_as_select_key() {
 
 // ---- overlay 模式的编码区光标 ----
 
-/// 临时英文：Shift+字母进入时缓冲已含首字母，光标须落其后（回归：曾因光标停在 0 而把
-/// 后续字符插到首字母之前，"Hello" 变成 "elloH"）；随后可在编码区内移动并插入。
+/// 临时英文：Shift+字母进入时缓冲已含首字母，光标须落其后（否则后续字符插到首字母之前，
+/// "Hello" 变成 "elloH"）；随后可在编码区内移动并插入。
 #[test]
 fn test_temp_english_cursor_edit() {
     if !has_schemas() {
@@ -8972,9 +8727,8 @@ fn test_temp_pinyin_cursor_maps_through_separator() {
 }
 
 // ── 全角（英文模式 / 中文模式数字）─────────────────────────────────────────────
-// 背景：全角横跨两层门控——C++ `OnTestKeyDown` 决定是否吃键转发，Rust 决定是否转全角。
-// 两侧不一致即「吃了再吐」(OnTestKeyDown(TRUE)+OnKeyDown(FALSE))，严格 TSF 宿主直接丢键。
-// 下列用例锁的是 Rust 侧「C++ 吃了就必须出字」的契约。
+// 全角跨两层门控：C++ `OnTestKeyDown` 决定是否吃键，Rust 决定是否转全角；两侧不一致即
+// 「吃了再吐」，严格 TSF 宿主直接丢键。下列用例锁 Rust 侧「C++ 吃了就必须出字」的契约。
 
 /// 英文模式 + 全角的配置（C++ `english_fullwidth` 分支会吃 Letter|Number|Punctuation|Space）。
 fn config_english_fullwidth() -> wind_config::Config {
@@ -8989,8 +8743,8 @@ fn test_english_fullwidth_letters_digits_space() {
     if !has_schemas() {
         return;
     }
-    // 回归：英文模式曾无条件 PassThrough（从不读 full_width），而 C++ 已为全角吃下这些键
-    // → 吃了再吐 → Chrome/VSCode 等严格宿主里空格/数字/符号完全打不出。
+    // 英文模式须读 full_width：C++ 已为全角吃下这些键，无条件 PassThrough 就是吃了再吐，
+    // Chrome/VSCode 等严格宿主里空格/数字/符号打不出。
     let coord = Coordinator::new_headless(config_english_fullwidth(), Some(&data_dir()));
     let cases = [
         (0x41_u32, "ａ", "小写字母"),
@@ -9053,7 +8807,7 @@ fn test_english_halfwidth_still_passthrough() {
     if !has_schemas() {
         return;
     }
-    // 零回归：英文半角仍须透传（C++ 此时也不吃键），保留宿主 WM_KEYDOWN 原生语义。
+    // 英文半角仍须透传（C++ 此时也不吃键），保留宿主 WM_KEYDOWN 原生语义。
     let mut cfg = config_with("pinyin");
     cfg.input.default.chinese_mode = false;
     let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
@@ -9095,7 +8849,7 @@ fn test_english_fullwidth_autopair_uses_fullwidth_pairs() {
         return;
     }
     // 配对表须由 english_pairs 逐字符过同一条流水线派生：打 `(` 出 `（` 就配 `）`。
-    // 关键回归：不可复用 cn_pairs——`to_full_width('[')` = `［`(U+FF3B) 而 cn_pairs 是
+    // 不可复用 cn_pairs——`to_full_width('[')` = `［`(U+FF3B) 而 cn_pairs 是
     // `【`(U+3010)，混用会「打 [ 出 【 却配 ］」。故此处专测 `[`。
     let mut cfg = config_english_fullwidth();
     cfg.input.auto_pair.english = true;
@@ -9117,9 +8871,8 @@ fn test_chinese_fullwidth_digits_1_to_9() {
     if !has_schemas() {
         return;
     }
-    // 回归：中文全角空缓冲下 1-9 曾恒 PassThrough（无视 full_width），而 C++ 为全角专门
-    // 在无 session 时也吃数字（`chinese_fullwidth_number`）→ 吃了再吐 → 部分应用丢键、
-    // 部分出半角。`0` 因无该 match 臂、落标点流水线，反而一直正常——本测锁死两者一致。
+    // 中文全角空缓冲下 1-9 须出全角：C++ 为全角在无 session 时也吃数字（`chinese_fullwidth_number`），
+    // 透传就是吃了再吐。`0` 走标点流水线，本测锁死两者一致。
     let mut cfg = config_with("pinyin");
     cfg.input.default.full_width = true;
     let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
@@ -9143,7 +8896,7 @@ fn test_chinese_halfwidth_digits_still_passthrough() {
     if !has_schemas() {
         return;
     }
-    // 零回归：半角态空缓冲数字仍透传（C++ 此时不吃），保留宿主原生按键语义。
+    // 半角态空缓冲数字仍透传（C++ 此时不吃），保留宿主原生按键语义。
     let coord = Coordinator::new_headless(config_with("pinyin"), Some(&data_dir()));
     for vk in [0x30_u32, 0x31, 0x39] {
         assert!(
@@ -9161,10 +8914,8 @@ fn test_chinese_capslock_fullwidth_space_and_numpad() {
     if !has_schemas() {
         return;
     }
-    // 回归：CapsLock+全角分支原用 printable_char 取字符，而它不含 VK_SPACE(punct_char 无该键)
-    // 也不含小键盘 → 落 PassThrough。但 C++ 在中文全角下对空格(chinese_fullwidth_space)
-    // 与小键盘(chinese_fullwidth_number)都吃键 → 吃了再吐 → 严格 TSF 宿主丢键。
-    // 现由 full_width_source_char 统一收口，保证 Rust 出字集 ⊇ C++ 吃键集。
+    // CapsLock+全角分支须经 full_width_source_char 取字符（含空格与小键盘）：C++ 在中文全角下
+    // 对这两类都吃键，Rust 出字集必须 ⊇ C++ 吃键集，否则吃了再吐。
     let mut cfg = config_with("pinyin");
     cfg.input.default.full_width = true;
     let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
@@ -9194,9 +8945,9 @@ fn test_chinese_fullwidth_numpad_direct_no_caps() {
     if !has_schemas() {
         return;
     }
-    // 定位用：中文全角、非 CapsLock、空缓冲、default(direct) numpad_behavior 下，
+    // 中文全角、非 CapsLock、空缓冲、default(direct) numpad_behavior 下，
     // 小键盘数字应走 numpad direct 分支的 to_full_width 出全角。
-    // 若本测通过而真机仍半角/丢键 → 问题在 C++ 吃键或 full_width 跨进程同步，不在 core 逻辑。
+    // 本测通过而真机仍半角/丢键 → 问题在 C++ 吃键或 full_width 跨进程同步，不在 core 逻辑。
     let mut cfg = config_with("pinyin");
     cfg.input.default.full_width = true;
     let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
@@ -9217,9 +8968,8 @@ fn test_chinese_fullwidth_numpad_direct_no_caps() {
 // ──────────────────────────────────────────────────────────────────────────
 // 码表自动造词端到端
 //
-// ⚠ 必须走 `handle_key_event_policed`（bridge 真入口，server.rs:440 调的就是它）。
-// 本文件其余测试调的是裸 `handle_key_event`，那条路**不经过**自提交打点与造词投喂，
-// 用它写造词测试会得到「永远不造词」的假象。
+// 必须走 `handle_key_event_policed`（bridge 真入口）。裸 `handle_key_event` 不经过自提交打点
+// 与造词投喂，用它写造词测试会得到「永远不造词」的假象。
 // ──────────────────────────────────────────────────────────────────────────
 
 use std::sync::Arc;
@@ -9233,12 +8983,9 @@ fn auto_phrase_coord(tag: &str, enabled: bool) -> (Arc<Coordinator>, Arc<Store>,
     let _ = std::fs::remove_file(&db);
     let store = Arc::new(Store::open(&db).unwrap());
     let coord = Coordinator::new_headless_with_store(cfg, Some(&data_dir()), Arc::clone(&store));
-    // 造词要用的两张表（反查索引 + 单字全码表）都是惰性全量构建，生产里由启动后的
-    // 后台预热线程建好（construct.rs → prewarm_indexes）。headless 不跑那个线程。
-    //
-    // 而造词路径现在会在它们未就绪时**主动跳过**——那是刻意的：跑在上屏线程上不能现建
-    // （大词库秒级、TSF 同步 IPC 会卡整机），更不能把「没就绪」当成「查不到」继续，
-    // 否则查重失效、会往临时层写系统词库已有的重复条目。故测试须自己预热。
+    // 造词要用的反查索引与单字全码表是惰性构建，生产里由后台预热线程建好（prewarm_indexes），
+    // headless 不跑那个线程。造词路径在它们未就绪时刻意跳过（上屏线程上不能现建，也不能把
+    // 「没就绪」当「查不到」导致查重失效），故测试须自己预热。
     coord.prewarm_indexes();
     (coord, store, db)
 }
@@ -9281,14 +9028,10 @@ fn commit_one_char(coord: &Coordinator, letter: u8) -> String {
     }
 }
 
-/// 连续单字上屏 → 造出词组，**落点是草稿层**。
+/// 连续单字上屏 → 造出词组，落点是草稿层。
 ///
-/// 覆盖历史上「完全不工作」的两个断裂：触发源（最早的实现挂在拼音专属的 `committed_segs`
-/// 上，码表恒不满足）与编码算法（拼接各段全码，造出的码查不出来）。这两条判据在滑窗模型下
-/// 一字不改地继续成立——**取码规则没变，变的是什么时候取、结果落在哪一层**。
-///
-/// ⚠️ 落点从临时词库改成了草稿层（`docs/design/auto-phrase-draft-layer.md`）：
-/// 词不再是「一次终止信号结算出来的成品」，而是「滑窗记下、等人用过才转正」的猜测。
+/// 同时钉住触发源（码表也能触发）与取码规则（造出的码查得出来）。草稿是「滑窗记下、等人用过
+/// 才转正」的猜测，见 `docs/design/auto-phrase-draft-layer.md`。
 #[test]
 fn test_codetable_auto_phrase_learns_from_single_chars() {
     if !has_schemas() {
@@ -9332,13 +9075,10 @@ fn test_codetable_auto_phrase_learns_from_single_chars() {
     let _ = std::fs::remove_file(&db);
 }
 
-/// ★ **用过即转正**：选中一条草稿候选上屏 ⇒ 它离开草稿层、进入临时词库。
+/// 用过即转正：选中一条草稿候选上屏 ⇒ 它离开草稿层、进入临时词库。没有这一跳草稿只会过期被丢。
 ///
-/// 这是草稿层存在的全部意义。没有这一跳，草稿只会躺到过期被丢——滑窗产出再多也等于没有。
-///
-/// 判据同时钉住 `count == 1`：跃迁本身已经把使用次数记成 1，若「6b 临时词使用累积」
-/// 没有被跳过，同一次上屏会让它变成 2，晋升进度凭空快一倍
-/// （与 `learn_phrase_on_commit` 返回值要跳过 6b 是同一个坑）。
+/// 同时钉住 `count == 1`：跃迁已把使用次数记成 1，若「6b 临时词使用累积」没被跳过就会变成 2，
+/// 晋升进度凭空快一倍（与 `learn_phrase_on_commit` 返回值要跳过 6b 同理）。
 #[test]
 fn test_draft_is_promoted_to_temp_when_user_picks_it() {
     if !has_schemas() {
@@ -9370,7 +9110,7 @@ fn test_draft_is_promoted_to_temp_when_user_picks_it() {
         "跃迁之前临时词库应是空的，否则下面测不出东西"
     );
 
-    // 打出那个词的码。草稿**沉在候选底部**（这是它敢参与召回的前提），所以不能按空格
+    // 打出那个词的码。草稿沉在候选底部（这是它敢参与召回的前提），所以不能按空格
     // 选首选——那选中的是真词。按绝对下标去选它。
     for ch in code.bytes() {
         coord.handle_key_event_policed(&key_event(ch.to_ascii_uppercase() as u32, EVENT_KEY_DOWN));
@@ -9415,15 +9155,11 @@ fn test_draft_is_promoted_to_temp_when_user_picks_it() {
     let _ = std::fs::remove_file(&db);
 }
 
-/// ★ 滑窗草稿的**端到端贯通**：落屏 → 滑窗 → 取码查重 → 异步落库，一条链通到 `DRAFT_WORDS`。
+/// 滑窗草稿的端到端贯通：落屏 → 滑窗 → 取码查重 → 异步落库，一条链通到 `DRAFT_WORDS`。
 ///
-/// 判据是「记下**全部** 2~5 字组合」而不只是最长那个——旧模型一次终止信号只结算出一个词，
-/// 滑窗则把每个窗口都记下来，这是两个模型在可观测行为上的分界。
-///
-/// ⚠️ **本用例不覆盖「词组上屏不中断流」那一条**：在按键路径上造一次真实的词组上屏需要
-/// 词库里恰好有对应词组，随词库更新即失效。那条判据由 `draft_window` 的单测
-/// `phrases_no_longer_break_the_stream` 覆盖（多字文本喂进 `on_commit`），
-/// 而多字文本能否抵达状态机，由本用例这条接线链路保证——两边合起来才是完整的。
+/// 判据是记下全部 2~5 字组合，而不只是最长那个。本用例不覆盖「词组上屏不中断流」（需要词库里
+/// 恰好有对应词组）：那条由 `draft_window` 单测 `phrases_no_longer_break_the_stream` 覆盖，
+/// 多字文本能否抵达状态机由本用例的接线保证。
 #[test]
 fn test_draft_layer_records_every_window_not_just_the_longest() {
     if !has_schemas() {
@@ -9433,7 +9169,7 @@ fn test_draft_layer_records_every_window_not_just_the_longest() {
     let (coord, store, db) = auto_phrase_coord("draft_across", true);
 
     // 三个单字依次上屏。对滑窗来说它们就是一段落屏文本流——旧模型也能处理这一段，
-    // 但旧模型只在终止信号时结算成**一个**词；滑窗会把 2~5 字的组合全记下来。
+    // 但旧模型只在终止信号时结算成一个词；滑窗会把 2~5 字的组合全记下来。
     let a = commit_one_char(&coord, b'A');
     let b = commit_one_char(&coord, b'A');
     let c = commit_one_char(&coord, b'A');
@@ -9472,9 +9208,7 @@ fn test_draft_layer_records_every_window_not_just_the_longest() {
 
 /// 上屏过程中不得落库：写库在后台线程，按键路径上只入队。
 ///
-/// 旧模型这条的理由是「造词只在终止信号发生」；滑窗模型下窗口每次上屏就切出来了，
-/// 但**落库**仍要等队列攒够或断流——判据变了，要守的东西没变：不能让 redb 写事务
-/// 出现在按键路径上。
+/// 落库要等队列攒够或断流，redb 写事务不能出现在按键路径上。
 #[test]
 fn test_codetable_auto_phrase_does_not_learn_before_terminator() {
     if !has_schemas() {
@@ -9534,15 +9268,13 @@ fn test_codetable_auto_phrase_single_char_is_not_a_word() {
     let _ = std::fs::remove_file(&db);
 }
 
-/// 前缀匹配的全局短语（此处以 `$AA` 组 marker 为例）按**来源**统一处理：来源=短语库、全局、
-/// 不与方案挂钩，故前缀命中一律避让、不占首位——码表下与更长编码补全按权重同档、拼音/混输下
-/// 降到拼音精确候选之下。**不按语法类型区分**（`$CC`/`$SS`/静态同规则），也不再靠 40M 类别硬顶。
+/// 前缀匹配的全局短语（此处以 `$AA` 组 marker 为例）按来源统一处理：来源是短语库、全局、不与方案
+/// 挂钩，故前缀命中一律避让、不占首位——码表下与更长编码补全按权重同档，拼音/混输下降到拼音
+/// 精确候选之下。不按语法类型区分（`$CC`/`$SS`/静态同规则）。
 ///
-/// 回归：marker 来自 `lookup_prefix`（前缀枚举、码严格更长＝非完全匹配），曾被标 `is_exact_code=true` +
-/// `PHRASE_WEIGHT_BASE`(40M，该常量后已整体删除) 抬进精确档并整体上浮，压过普通候选（用户报「系统/用户短语前缀
-/// 匹配时优先级偏高、压普通编码/候选」）。现改为 `is_exact_code=false` + `is_prefix=!codetable` +
-/// `weight=hit.weight`。低权重（1）确保 marker 可靠沉到码表候选之下，隔离出「避让」这一单一断言。
-/// 构造组短语码 `nia`（严格长于输入 `ni` → 前缀枚举命中）。
+/// marker 来自 `lookup_prefix`（码严格更长），须 `is_exact_code=false` + `is_prefix=!codetable`
+/// + `weight=hit.weight`。低权重（1）让 marker 可靠沉到码表候选之下，隔离出「避让」这一断言。
+/// 组短语码 `nia` 严格长于输入 `ni` → 前缀枚举命中。
 fn coord_with_group_phrase(schema: &str, tag: &str) -> std::sync::Arc<Coordinator> {
     let store_path = std::env::temp_dir().join(format!("wind_group_marker_{tag}.redb"));
     let _ = std::fs::remove_file(&store_path);
@@ -9555,7 +9287,7 @@ fn coord_with_group_phrase(schema: &str, tag: &str) -> std::sync::Arc<Coordinato
     Coordinator::new_headless_with_store(cfg, Some(&data_dir()), store)
 }
 
-/// 断言：前缀 marker 仍在候选列表里，但**不占首位**（避让首选普通候选）。
+/// 断言：前缀 marker 仍在候选列表里，但不占首位（避让首选普通候选）。
 fn assert_group_marker_defers(coord: &Coordinator, mode: &str) {
     let texts = coord.debug_all_candidate_texts();
     let group_pos = texts.iter().position(|t| t == "测试组");
@@ -9599,14 +9331,12 @@ fn prefix_group_marker_defers_in_codetable_too() {
     assert_group_marker_defers(&coord, "wubi86");
 }
 
-/// 真机回归（`nunl`）：混输下满 4 码，五笔无候选，拼音只有**部分匹配**「嫩」——
-/// `nun` 是标准音节表中的稀有音节（为双拼转换真值补入），故 `nunl` 被切成
-/// 「完成音节 nun + 残码 l」，候选只消费 3 码。用户诉求：这不算匹配，满码应清空。
+/// 混输下 `nunl` 满 4 码、五笔无候选、拼音只有部分匹配「嫩」（`nun` + 残码 `l`，只消费 3 码）：
+/// 这不算匹配，满码应清空。
 ///
-/// **这是三道门串联的唯一端到端验证**，缺任何一道都不会清空：
-/// ① 码表 `clear_on_empty_max`（满码 + 无候选 + 无更长后继）
-/// ② 混输 `should_clear`（两道拼音守护，受 `auto_commit_block_on_pinyin` 支配）
-/// ③ 协调器 `clear_blocked_by_candidates`（拼音部分匹配不算有效候选）
+/// 三道门串联的唯一端到端验证，缺任何一道都不会清空：① 码表 `clear_on_empty_max`；
+/// ② 混输 `should_clear`（受 `auto_commit_block_on_pinyin` 支配）；
+/// ③ 协调器 `clear_blocked_by_candidates`（拼音部分匹配不算有效候选）。
 #[test]
 fn test_mixed_full_code_clears_when_only_partial_pinyin() {
     if !has_schemas() {
@@ -9617,10 +9347,8 @@ fn test_mixed_full_code_clears_when_only_partial_pinyin() {
     cfg.schema.mix.auto_commit_block_on_pinyin = false;
     let coord = Coordinator::new_headless(cfg, Some(&data_dir()));
 
-    // 前置：打到 nun（3 键）时拼音候选「嫩」确实存在——否则后面测的根本不是本场景
-    // （多道闸门串联时，「无候选」会让测试静默退化成从不执行被测分支的假绿）。
-    // 必须查**全部**候选而非当前页：nun 的首页被五笔前缀词（习惯/憧憬…）占满，
-    // 「嫩」排在第 8 位、落到第二页去了。
+    // 前置：打到 nun 时拼音候选「嫩」确实存在，否则测试静默退化成不执行被测分支的假绿。
+    // 须查全部候选而非当前页：nun 首页被五笔前缀词占满，「嫩」在第二页。
     for c in "nun".chars() {
         press_letter(&coord, c);
     }
@@ -9632,7 +9360,7 @@ fn test_mixed_full_code_clears_when_only_partial_pinyin() {
     );
 
     // 第 4 键 l：满码，五笔无候选，拼音只剩部分匹配（嫩/嫰/黁，code 均为 nun、消费 3 码）→ 清空。
-    // 注意此刻候选列表**非空**（3 条），旧判据 `state.candidates.is_empty()` 正是在这里拦下清空的。
+    // 注意此刻候选列表非空（3 条），旧判据 `state.candidates.is_empty()` 正是在这里拦下清空的。
     match press_letter(&coord, 'l') {
         KeyAction::ClearComposition => {}
         other => panic!(
@@ -9643,17 +9371,15 @@ fn test_mixed_full_code_clears_when_only_partial_pinyin() {
     }
 }
 
-/// 反向锁，与上一个测试构成**单一变量对照**：同样满 4 码、同样关掉守护开关、同样是
-/// 「完整音节 + 单个声母字母」的结构（`wanl` vs `nunl`），唯一差别是拼音候选的类型——
+/// 反向锁，与上一个测试构成单一变量对照：同样满 4 码、关守护开关、「完整音节 + 单个声母」结构，
+/// 只差拼音候选的类型——
 ///
 /// | 输入 | 候选 | code | consumed | 判定 |
 /// |---|---|---|---|---|
-/// | `nunl` | 嫩 | `nun`（比输入**短**） | 3 < 4 | 部分匹配 → 清空 |
-/// | `wanl` | 完了/晚了 | `wanle`（比输入**长**） | 4 = 4 | 前缀补全 → 拦住 |
+/// | `nunl` | 嫩 | `nun`（比输入短） | 3 < 4 | 部分匹配 → 清空 |
+/// | `wanl` | 完了/晚了 | `wanle`（比输入长） | 4 = 4 | 前缀补全 → 拦住 |
 ///
-/// 这一条锁住的正是「拼音还没打完」的中途态保护：前缀补全候选消费整串，天然拦下清空，
-/// 用户接着打 `wanle` 不会被吞。**关掉守护开关并不会牺牲这类中途态**——真正被清空的只有
-/// 「候选全是部分匹配」的串，也就是确实打岔了的那些。
+/// 前缀补全候选消费整串，天然拦下清空，「拼音还没打完」的中途态不会被吞。
 #[test]
 fn test_mixed_full_code_keeps_prefix_completion_candidates() {
     if !has_schemas() {
@@ -9681,10 +9407,9 @@ fn test_mixed_full_code_keeps_prefix_completion_candidates() {
 }
 
 /// 翻页键（默认 `-`/`=`）在临英下应翻页。
-/// 回归点：`handle_candidate_nav` 曾按 `ModeKind` 把临英整类排除出可打印导航键
-/// （`include_printable` 恒 false），于是 `=` 落到 `_ =>` 标点臂被判成「上屏高亮候选 +
-/// 标点」——用户按 `=` 想翻页，实得首候选连同 `=` 被直接上屏并退出临英（`Hel=`）。
-/// 与二三候选键 `;`/`'` 是同一条兜底臂的两个出口，但成因不同（那次是漏调选词偏移）。
+///
+/// `handle_candidate_nav` 不能把临英整类排除出可打印导航键，否则 `=` 落到标点臂，
+/// 首候选连同 `=` 被上屏并退出临英（`Hel=`）。
 #[test]
 fn test_temp_english_page_keys_flip_pages_when_symbols_disallowed() {
     if !has_schemas() {
@@ -9726,7 +9451,7 @@ fn test_temp_english_page_keys_flip_pages_when_symbols_disallowed() {
     assert_eq!(coord.debug_page_info().0, 0, "`-` 应翻回第 1 页");
 }
 
-/// 对照组：`=` **被列入白名单**时翻页键让位于字符输入——列入的字符语义是「入缓冲，
+/// 对照组：`=` 被列入白名单时翻页键让位于字符输入——列入的字符语义是「入缓冲，
 /// 而非上屏退出、选词或导航」，与二三候选键 / 数字臂同构，不能被翻页接线破坏。
 #[test]
 fn test_temp_english_page_keys_yield_to_input_when_listed() {
@@ -9757,9 +9482,7 @@ fn test_temp_english_page_keys_yield_to_input_when_listed() {
 
 /// 对照组之反向：白名单只含 `-` 时，同一键组的另一半 `=` 仍翻页。
 ///
-/// 锁住「按字符而非按键组让位」这个判据——`minus_equal` 是成对键组，旧实现下
-/// allow_symbols 一开两个一起让位；改造后 `-` 入缓冲、`=` 照旧翻下一页。
-/// 这也是出厂白名单含 `-` 的已知代价（上一页只剩 ↑ 与 PgUp）的行为快照。
+/// 锁住「按字符而非按键组让位」；也是出厂白名单含 `-` 的已知代价（上一页只剩 ↑ 与 PgUp）的快照。
 #[test]
 fn test_temp_english_page_key_group_split_by_whitelist() {
     if !has_schemas() {
@@ -9796,8 +9519,7 @@ fn test_temp_english_page_key_group_split_by_whitelist() {
 
 /// 缓冲非空时 Shift+字母：组合区如实显示大写，回车上屏也是大写（打 `aBC` 得 `aBC`）。
 ///
-/// 边界（既有行为，不在本功能范围内）：**空缓冲**的 Shift+字母是临时英文的进入方式，
-/// 到不了这里；故用户要打的临时短英文须以小写字母起头。
+/// 空缓冲的 Shift+字母是临时英文的进入方式，到不了这里；临时短英文须以小写字母起头。
 #[test]
 fn normal_input_keeps_uppercase_in_preedit_and_raw_commit() {
     if !has_schemas() {
@@ -9816,8 +9538,8 @@ fn normal_input_keeps_uppercase_in_preedit_and_raw_commit() {
     }
 }
 
-/// ★ 反向对照：大写**只影响呈现**。`aBC` 与 `abc` 的候选列表必须逐项相同——
-/// 这条是「不影响码表和拼音的基础匹配」的直接判据，若哪天有人把大写写进查询串就会红。
+/// 反向对照：大写只影响呈现。`aBC` 与 `abc` 的候选列表必须逐项相同——
+/// 若有人把大写写进查询串就会红。
 #[test]
 fn normal_input_uppercase_does_not_change_candidates() {
     if !has_schemas() {
@@ -9876,7 +9598,7 @@ fn normal_input_uppercase_survives_backspace() {
     }
 }
 
-/// ★ 陈旧大写不得串到下一轮输入：`aBC` → Esc → 再打全小写 `abc`，上屏必须是 `abc`。
+/// 陈旧大写不得串到下一轮输入：`aBC` → Esc → 再打全小写 `abc`，上屏必须是 `abc`。
 /// 缓冲有二十余处写入点，靠的不是逐个接线而是「影子串与缓冲失配即作废」，本条守住它。
 #[test]
 fn normal_input_uppercase_does_not_leak_into_next_composition() {
@@ -9896,12 +9618,10 @@ fn normal_input_uppercase_does_not_leak_into_next_composition() {
 
 // ── 特殊模式（快符等）的候选词条操作 ─────────────────────────────────────────
 //
-// 回归背景：特殊方案接上词库管理时只接了**读端**（`apply_shadow_in` / `record_selection_in`
-// 按 `effective_data_schema` 归属），三条写侧通路仍停在旧假设上——右键菜单被 `overlay`
-// 判据整块拒开、`candidate_op` 因 `input_buffer` 恒空而首行 return、删除热键按 ModeKind
-// 整类屏蔽。**同一能力的多条通路只接一条等于没接**，且失效完全静默。
+// 读端按 `effective_data_schema` 归属；三条写侧通路（右键菜单、`candidate_op`、删除热键）
+// 都要接上特殊方案。同一能力的多条通路只接一条等于没接，且失效完全静默。
 
-/// 主方案**拼音** + 快符引用**五笔**：这个错配组合是回归的关键。
+/// 主方案拼音 + 快符引用五笔：这个错配组合是关键。
 /// 若引擎类型或归属方案任一处照抄主方案，症状分别是「快符候选被当拼音候选禁掉调位」
 /// 与「shadow 规则写进 pinyin 桶、读的却是 wubi86 桶」——后者记账看着成功、顺序永不动。
 fn special_op_fixture(
@@ -9991,16 +9711,16 @@ fn special_mode_candidate_delete_writes_to_own_schema_bucket() {
     coord.debug_candidate_op(CandidateOp::Delete, 0);
     let after = coord.debug_page_texts();
 
-    // ★ 这条锁的是「重建走对了路径」：主路径 update_candidates 读 input_buffer，而快符下它
-    //   恒为空——走错的表现不是「界面没刷新」，是候选窗当场被清空。
+    // 锁「重建走对了路径」：主路径 update_candidates 读 input_buffer，而快符下它
+    //   恒为空——走错的表现是候选窗当场被清空。
     assert!(
         !after.is_empty(),
         "删除后候选列表不应被清空（重建须走 update_special_candidates）"
     );
     assert!(!after.contains(&target), "被删的 '{}' 不应再出现", target);
 
-    // ★ 读写同源：规则必须落在快符方案桶。写进主方案桶的表现同样是「删了没反应」——
-    //   因为读端查的是 wubi86 桶。两种失败在屏幕上完全同形，只有查桶才分得开。
+    // 读写同源：规则必须落在快符方案桶。写进主方案桶的表现同样是「删了没反应」——
+    //   因为读端查的是 wubi86 桶。两种失败在屏幕上同形，只有查桶才分得开。
     let special_bucket = store.get_shadow_rules("wubi86", "a").unwrap();
     assert!(
         special_bucket
@@ -10021,7 +9741,7 @@ fn special_mode_candidate_delete_writes_to_own_schema_bucket() {
 }
 
 /// 调位：快符引用的是码表方案，即便主方案是拼音也应可置顶。
-/// 此前 `current_engine_type()` 问的是主方案，这里会被整体误禁。
+/// 引擎类型须按快符方案问，问 `current_engine_type()`（主方案）会被整体误禁。
 #[test]
 fn special_mode_candidate_move_top_uses_own_engine_type() {
     if !has_schemas() {
@@ -10051,10 +9771,9 @@ fn special_mode_candidate_move_top_uses_own_engine_type() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// 空码浏览态（`show_all_on_enter`）：**必须支持**词条操作，且规则要真的被读回来。
+/// 空码浏览态（`show_all_on_enter`）：必须支持词条操作，且规则要真的被读回来。
 ///
-/// 这是真机报「快符右键仍只有复制」的那个场景：`max_code_length=1` +
-/// `auto_commit_at_full` 的方案敲一码即上屏，浏览态是用户唯一能右键的时机。
+/// `max_code_length=1` + `auto_commit_at_full` 的方案敲一码即上屏，浏览态是唯一能右键的时机。
 /// 空码是合法 shadow 键位（key = `"{schema}\0{code}"`），读写两端都按候选非空放行。
 #[test]
 fn special_mode_show_all_browse_state_supports_candidate_op() {
@@ -10084,7 +9803,7 @@ fn special_mode_show_all_browse_state_supports_candidate_op() {
         target
     );
 
-    // ★ 规则必须落在「快符方案 + 空码」桶，且能被浏览态重新枚举时读回——只写不读的表现是
+    // 规则必须落在「快符方案 + 空码」桶，且能被浏览态重新枚举时读回——只写不读的表现是
     //   「当场看着删掉了、重进模式又回来了」。
     let rec = store.get_shadow_rules("wubi86", "").unwrap();
     assert!(
@@ -10096,7 +9815,7 @@ fn special_mode_show_all_browse_state_supports_candidate_op() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// 浏览态的调整必须**跨重新进入**存活：退出再进快符，被隐藏的候选不能复活。
+/// 浏览态的调整必须跨重新进入存活：退出再进快符，被隐藏的候选不能复活。
 /// 这一条锁的是读端——`update_special_candidates` 的空码分支若不调 `apply_shadow_in`，
 /// 上一条测试照样全绿（规则确实写进了 store），只是永远没人读。
 #[test]
@@ -10130,7 +9849,7 @@ fn special_mode_browse_state_shadow_survives_reenter() {
 }
 
 /// 其余 overlay 不随快符一起放开：临拼没有独立词库落点（`effective_data_schema` 对它
-/// 返回 None，2026-08-04 用户拍板），放行会让规则静默落回主方案桶。
+/// 返回 None），放行会让规则静默落回主方案桶。
 #[test]
 fn temp_pinyin_overlay_still_has_no_candidate_op_scope() {
     if !has_schemas() {
@@ -10159,11 +9878,9 @@ fn temp_pinyin_overlay_still_has_no_candidate_op_scope() {
     );
 }
 
-/// 精确匹配模式 + 进入即展示：浏览态只显示 1 条，隐藏它之后应**补上下一条**而非整屏空白。
+/// 精确匹配模式 + 进入即展示：浏览态只显示 1 条，隐藏它之后应补上下一条而非整屏空白。
 ///
-/// 回归 2026-08-05 真机：`enumerate` 在引擎内按 `single_code_input` 先截到 1 条，协调器
-/// 再 apply_shadow 过滤 → 0 条。「截断 → 过滤」这个次序把「隐藏一条」变成了「清空列表」。
-/// 不变量：**从池中择 N 条必须发生在过滤之后**。
+/// 不变量：从池中择 N 条必须发生在 shadow 过滤之后，「先截断再过滤」会把隐藏一条变成清空列表。
 #[test]
 fn special_mode_browse_exact_mode_hides_first_shows_next() {
     if !has_schemas() {
@@ -10175,7 +9892,7 @@ fn special_mode_browse_exact_mode_hides_first_shows_next() {
     let _ = std::fs::remove_file(&store_path);
     let store = std::sync::Arc::new(wind_store::Store::open(&store_path).unwrap());
     let mut cfg = config_with("pinyin");
-    // ★ 精确匹配写在方案名下：wubi86 在本用例里带 `[overlay]` 段，不继承全局码表配置。
+    // 精确匹配写在方案名下：wubi86 在本用例里带 `[overlay]` 段，不继承全局码表配置。
     let ov = overlay_override_dir_with_codetable(
         "special_mode_browse_exact_mode_hides_fir",
         &[("wubi86", true)],
@@ -10216,9 +9933,7 @@ fn special_mode_browse_exact_mode_hides_first_shows_next() {
 
 /// 空码补全补出来的 `$CC` 直通命令候选，必须显示 display 标签而非 `$CC(...)` 源码。
 ///
-/// 回归用户反馈：`completion_hint` 直接取自引擎、**绕过了 `finalize_candidates` 这个
-/// 统一展开汇聚点**，而同一行下面的 `result.candidates` 走了。于是同一条词条，正常命中
-/// 时显示标签、被当作补全兜底时显示源码。
+/// `completion_hint` 也必须经过 `finalize_candidates` 这个统一展开汇聚点，与正常命中一致。
 #[test]
 fn completion_hint_command_shows_display_label_not_source() {
     if !has_schemas() {
@@ -10228,7 +9943,7 @@ fn completion_hint_command_shows_display_label_not_source() {
     let store_path = std::env::temp_dir().join("wind_completion_hint_cc.redb");
     let _ = std::fs::remove_file(&store_path);
     let store = std::sync::Arc::new(wind_store::Store::open(&store_path).unwrap());
-    // `aab` 复用既有回归码：六库均无精确 `aab`，但主库有 `aab?` 后继（见
+    // `aab`：六库均无精确 `aab`，但主库有 `aab?` 后继（见
     // special_mode_exact_completion_shows_longer_code）。给用户词一个压倒性权重，
     // 保证被备下的那条 hint 就是它。
     store
@@ -10238,9 +9953,8 @@ fn completion_hint_command_shows_display_label_not_source() {
     // 精确匹配 + 空码补全：aab 无精确候选、更长后继有 → 引擎备下 completion_hints。
     cfg.schema.codetable.single_code_input = true;
     cfg.schema.codetable.single_code_complete = true;
-    // 走**特殊模式**路径：它取补全池的引擎序首条（weight 降序），不经跨来源重排，
+    // 走特殊模式路径：它取补全池的引擎序首条（weight 降序），不经跨来源重排，
     // 故高权重用户词必然中选——主路径要与主库后继混排，取到哪条不稳定，断不住。
-    // 这也正是用户报告该现象的场景（快符）。
     let ov = overlay_override_dir(
         "completion_hint_command_shows_display_la",
         &[("wubi86", false)],
@@ -10277,12 +9991,10 @@ fn completion_hint_command_shows_display_label_not_source() {
     let _ = std::fs::remove_file(&store_path);
 }
 
-/// 空码补全的判空必须落在**过滤之后**：短语候选被 shadow 滤光时，应补出引擎备下的
-/// 更长编码候选，而不是空屏。
+/// 空码补全的判空必须落在过滤之后：短语候选被 shadow 滤光时，应补出引擎备下的更长编码候选。
 ///
-/// 构造要点：候选必须在**过滤阶段**才消失。若引擎那一层就没候选，老代码的早判同样
-/// 会补全，测不到次序差异。故让短语层出一条候选（引擎层无精确候选、已备好 hint），
-/// 再用一条 shadow 规则把这条短语滤掉。
+/// 候选必须在过滤阶段才消失，否则测不到次序差异：短语层出一条候选（引擎层无精确候选、已备 hint），
+/// 再用一条 shadow 规则把它滤掉。
 #[test]
 fn completion_fills_after_shadow_empties_the_list() {
     if !has_schemas() {
@@ -10322,10 +10034,8 @@ fn completion_fills_after_shadow_empties_the_list() {
 
 // ===== 双拼下的全拼降级输入（schema.pinyin.shuangpin.allow_full_pinyin）=====
 //
-// ⚠️ 引擎侧已有 `wind-engine` 的 `full_pinyin_*` 一组单测覆盖转换逻辑。下面三条验的是
-// **用户入口**：配置到底有没有传到引擎、候选到底有没有出现在协调器的候选列表里。
-// 本仓反复出现的故障形态正是「引擎 convert 全绿，用户却打不出」——判据在分派层而非
-// 引擎层，故两层都得有测试。
+// 转换逻辑由 `wind-engine` 的 `full_pinyin_*` 单测覆盖；下面三条验用户入口：配置有没有传到
+// 引擎、候选有没有出现在协调器列表里。引擎全绿不等于用户打得出，两层都得有测试。
 
 /// 构造双拼协调器，`allow` 控制全拼降级开关。
 fn shuangpin_coord(allow: bool) -> Option<std::sync::Arc<Coordinator>> {
@@ -10342,10 +10052,9 @@ fn shuangpin_coord(allow: bool) -> Option<std::sync::Arc<Coordinator>> {
     Some(Coordinator::new_headless(cfg, Some(&d)))
 }
 
-/// 开启后，双拼方案下按**全拼**打 `nihao`（5 键）应能出「你好」。
+/// 开启后，双拼方案下按全拼打 `nihao`（5 键）应能出「你好」。
 ///
-/// 双拼的正确打法是 4 键 `nihc`；5 键 `nihao` 被双拼解释为 ni|ha|o，与「你好」的词典
-/// 边界 ni|hao 不符而遭边界校验拒绝——全拼降级支路补的正是这一条。
+/// 5 键 `nihao` 被双拼解释为 ni|ha|o，与词典边界 ni|hao 不符而被拒，全拼降级支路补的正是这条。
 #[test]
 fn shuangpin_full_pinyin_enabled_recalls_word() {
     let Some(coord) = shuangpin_coord(true) else {
@@ -10362,10 +10071,9 @@ fn shuangpin_full_pinyin_enabled_recalls_word() {
     );
 }
 
-/// 反向对照：关闭时行为与改动前逐字一致。
+/// 反向对照：关闭时出不来。
 ///
-/// **这条不可省**——没有它就无法区分「支路真的生效了」与「双拼本来就出得来这个词」，
-/// 上面那条会退化成一个恒真断言。
+/// 没有它就无法区分「支路真的生效了」与「双拼本来就出得来这个词」。
 #[test]
 fn shuangpin_full_pinyin_disabled_keeps_old_behavior() {
     let Some(coord) = shuangpin_coord(false) else {
@@ -10401,15 +10109,11 @@ fn shuangpin_full_pinyin_composes_sentence() {
     );
 }
 
-/// ★★ 真机回归：`zaijian` 选「再见」必须**吃掉全部 7 键**，且排在同码词之前。
+/// `zaijian` 选「再见」必须吃掉全部 7 键，且排在同码词之前。
 ///
-/// 首版的三个缺陷在这一条用例里一起现形过，逐条都值得记住：
-/// ① 双拼流的**简拼前缀回退**（step 6.2）先用前 4 键 `zaij` 召回了「再见」并标
-///    `consumed=4`，本支路想以 `consumed=7`（完整解释）补一条，却被「同文保留先到者」
-///    挡掉 ⇒ 用户选中后缓冲里凭空剩下 `ian`。去重规则因此改为「保留解释得更多的那条」；
-/// ② 支路的子短语 `zai` 同音单字 20+ 条吃光了 `MAX_FULL_PINYIN_RECALL` 配额 ⇒ ① 精确整词
-///    只挤进 4 条、③ 前缀补全一条不剩，「再见」压根没被召回。故 ② 逐级限流；
-/// ③ 全拼候选一律沉底 ⇒ 「再见」排到第 8 位。故高置信候选（精确整词 + 消费整串）不沉底。
+/// 三个要点：① 简拼前缀回退已以 `consumed=4` 召回「再见」，同文去重须保留解释得更多的那条，
+/// 否则缓冲剩下 `ian`；② 子短语同音单字会吃光 `MAX_FULL_PINYIN_RECALL` 配额，故逐级限流；
+/// ③ 高置信候选（精确整词 + 消费整串）不随全拼候选沉底。
 #[test]
 fn shuangpin_full_pinyin_zaijian_commits_whole_buffer() {
     let Some(coord) = shuangpin_coord(true) else {
@@ -10454,16 +10158,11 @@ fn shuangpin_full_pinyin_zaijian_commits_whole_buffer() {
     assert_eq!(coord.debug_candidate_count(), 0, "上屏后组合区应清空");
 }
 
-/// ★ 编码栏必须**跟随高亮候选**在两种切分间切换，而不是按键时算定一次就不动。
+/// 编码栏必须跟随高亮候选在两种切分间切换，而不是按键时算定一次就不动。
 ///
-/// `zaijian` 有两种读法：双拼读作 `za'ij'ia'n`（4 段），全拼读作 `zai'jian`（2 段）。
-/// 高亮在全拼候选（「再见」）上时显示后者，移到双拼候选上时必须切回前者——三段编码配着
-/// 两字候选，用户看不懂，退格时更会以为光标错位。
-///
-/// ⚠️ 首版把形态判定写在引擎里（按首选就地算定 preedit_display），真机现象正是「翻页或
-/// 移动光标到双拼候选，编码栏还停在全拼拆分」：引擎每次按键只 convert 一次，而高亮是之后
-/// 才移动的。判定必须落在协调器的 `effective_preedit_body`（由 `sync_preedit_to_highlight`
-/// 在每次高亮变化时重算）。
+/// `zaijian` 双拼读作 `za'ij'ia'n`、全拼读作 `zai'jian`；高亮移到双拼候选上必须切回前者。
+/// 引擎每次按键只 convert 一次，判定须落在协调器的 `effective_preedit_body`
+/// （由 `sync_preedit_to_highlight` 在每次高亮变化时重算）。
 #[test]
 fn shuangpin_preedit_follows_highlight_between_domains() {
     let Some(coord) = shuangpin_coord(true) else {
@@ -10481,7 +10180,7 @@ fn shuangpin_preedit_follows_highlight_between_domains() {
         coord.debug_page_texts()
     );
 
-    // 逐个下移高亮，落到任一**双拼**候选上时，编码栏须切回双拼切分。
+    // 逐个下移高亮，落到任一双拼候选上时，编码栏须切回双拼切分。
     // 不锁定具体位置（词库权重会浮动），只要求这个切换确实发生。
     let mut switched_back = false;
     for _ in 0..24 {
@@ -10498,14 +10197,11 @@ fn shuangpin_preedit_follows_highlight_between_domains() {
     );
 }
 
-/// ★ 双拼下打**简拼**，编码栏须按简拼切（每键一个声母），不能按双拼的两键一音节切。
+/// 双拼下打简拼，编码栏须按简拼切（每键一个声母），不能按双拼的两键一音节切。
 ///
-/// `wbwn`（万般无奈）在双拼里一个合法音节都拼不出，`build_raw_preedit` 于是原样回显
-/// `wbwn`；`wfwt`（无法无天）更糟——`wf` 恰好是合法双拼音节，切成 `wf'wt`，两段编码配着
-/// 四字候选，用户根本看不出自己打的是简拼。两种切法都成立，只能由高亮候选来选。
-///
-/// ⚠️ 反向对照（下半段）不可省：只断言「简拼时显示 w'f'w't」的话，把 `preedit_display`
-/// 无条件改成简拼切法也能全绿，而那样双拼候选的编码栏就废了。
+/// `wbwn`（万般无奈）一个双拼音节都拼不出；`wfwt`（无法无天）的 `wf` 恰好是合法音节，会切成
+/// `wf'wt`。两种切法都成立，只能由高亮候选来选。反向对照（下半段）不可省：否则把
+/// `preedit_display` 无条件改成简拼切法也全绿，双拼候选的编码栏就废了。
 #[test]
 fn shuangpin_abbrev_preedit_splits_by_keystroke() {
     let Some(coord) = shuangpin_coord(true) else {
@@ -10540,7 +10236,7 @@ fn shuangpin_abbrev_preedit_splits_by_keystroke() {
     );
 }
 
-/// 双拼下**非**简拼的击键不受影响：`nhao` 的首选是双拼候选，仍按 `nh'ao` 显示。
+/// 双拼下非简拼的击键不受影响：`nhao` 的首选是双拼候选，仍按 `nh'ao` 显示。
 /// 与上一条构成配对——防止简拼分支把所有双拼击键都抢过去。
 #[test]
 fn shuangpin_non_abbrev_preedit_unchanged() {
@@ -10576,13 +10272,10 @@ fn shuangpin_full_pinyin_does_not_break_native_path() {
     );
 }
 
-/// issue #64：macOS 的 ⌘（Command）走 `MOD_WIN` 位，未命中热键时必须归宿主。
+/// macOS 的 ⌘（Command）走 `MOD_WIN` 位，未命中热键时必须归宿主。
 ///
-/// 回归前的行为：判据只掩 `MOD_CTRL | MOD_ALT`，于是中文模式下 ⌘+字母一路走到字母臂，
-/// 被当成码元累积（⌘C → 组合区出现 "c"）且响应为 `UpdateComposition` = 吃键，
-/// 宿主再也收不到这一键 —— 网页版 WPS/GitHub 里表现为复制粘贴失灵。
-///
-/// 不依赖词库：只断言「键去了哪条分支」，与候选内容无关。
+/// 判据只掩 `MOD_CTRL | MOD_ALT` 的话，⌘+字母会被当码元累积并吃键，宿主的复制粘贴失灵。
+/// 不依赖词库：只断言「键去了哪条分支」。
 #[test]
 fn cmd_combo_goes_to_host_issue64() {
     const MOD_WIN: u32 = 0x0008;
@@ -10590,7 +10283,7 @@ fn cmd_combo_goes_to_host_issue64() {
     cfg.input.default.chinese_mode = true;
     let coord = Coordinator::new_headless(cfg, None);
 
-    // 空缓冲：⌘C / ⌘V / ⌘A 一律透传，且**不得**污染输入缓冲。
+    // 空缓冲：⌘C / ⌘V / ⌘A 一律透传，且不得污染输入缓冲。
     for (vk, name) in [(0x43u32, "⌘C"), (0x56, "⌘V"), (0x41, "⌘A")] {
         let act = coord.handle_key_event(&key_event_mods(vk, EVENT_KEY_DOWN, MOD_WIN));
         assert!(
@@ -10599,7 +10292,7 @@ fn cmd_combo_goes_to_host_issue64() {
         );
     }
 
-    // 组码中：⌘C 清掉组合但**不算输入**（不得再返回 UpdateComposition）。
+    // 组码中：⌘C 清掉组合但不算输入（不得再返回 UpdateComposition）。
     // 注：`ClearComposition` 在 macOS 侧不等于吃键，由 BridgeResponseRouter 的
     // hostShortcut 判为「组合已清、按键交还宿主」。
     press_letter(&coord, 'n');
@@ -10610,7 +10303,7 @@ fn cmd_combo_goes_to_host_issue64() {
         "组码中 ⌘C 应清组合而非当码元，实际: {act:?}"
     );
 
-    // Ctrl 组合的既有行为不变（回归保护）。
+    // Ctrl 组合的既有行为不变。
     let ctrl_c = coord.handle_key_event(&key_event_mods(0x43, EVENT_KEY_DOWN, 0x0002));
     assert!(
         matches!(ctrl_c, KeyAction::PassThrough),
@@ -10618,14 +10311,10 @@ fn cmd_combo_goes_to_host_issue64() {
     );
 }
 
-/// 顶码上屏（`schema.codetable.top_code_commit`）必须与用户**所见的显示首选**同形：
-/// 简繁开启时上屏繁体。
+/// 顶码上屏（`schema.codetable.top_code_commit`）必须与用户所见的显示首选同形：简繁开启时上屏繁体。
 ///
-/// 回归背景：`commit_top_text` 的三条来路曾各自把候选的简体原文直接送去上屏，于是顶码
-/// 出简体、空格出繁体（2026-08-20 反馈）。转换已收进 `commit_top_text` 内部。
-///
-/// 判据是「上屏文本 == 顶码前的显示首选」而非写死汉字——顶出什么取决于码表数据，
-/// 写死会在词库调整时变成假红。
+/// 简繁转换收在 `commit_top_text` 内部，各来路不得各自送简体原文。判据是「上屏文本 == 顶码前的
+/// 显示首选」而非写死汉字，免得随词库调整假红。
 #[test]
 fn test_s2t_converts_top_code_commit() {
     if !has_schemas() {
@@ -10664,10 +10353,7 @@ fn test_s2t_converts_top_code_commit() {
 }
 
 /// 顶屏进模式（临拼 / mix / 特殊模式 / 临英四处共用 `take_committed_with_highlight`）
-/// 的上屏文本同样须过简繁转换。
-///
-/// 回归背景：这四处曾各自复制同一段「take_committed + 高亮候选」拼接代码，四份**全部**
-/// 漏掉简繁转换（2026-08-20 反馈）。此处以临拼为代表锁住收口后的行为。
+/// 的上屏文本同样须过简繁转换。此处以临拼为代表。
 #[test]
 fn test_s2t_converts_commit_and_enter_mode() {
     if !has_schemas() {
@@ -10702,11 +10388,10 @@ fn test_s2t_converts_commit_and_enter_mode() {
     }
 }
 
-/// 真机回归其二：**顶码切点必须按短语码长走**，而非固定的方案满码长。
+/// 顶码切点必须按短语码长走，而非固定的方案满码长。
 ///
-/// `zzsfz` 是 5 码短语，方案满码长 4。敲到 `zzsfza` 时引擎把 prefix 切在 `zzsf`，与顶码前
-/// 的缓冲 `zzsfz` 对不上 → 落进「多级溢出」分支 → `zzsf` 在 wubi86 码表无字 → 放弃顶码。
-/// 用户看到的是「进了空码状态，而不是顶码」。4 码短语正常，正因为两种切法恰好重合。
+/// `zzsfz` 是 5 码短语、方案满码长 4：敲到 `zzsfza` 时若 prefix 切在 `zzsf`，与缓冲对不上会落进
+/// 「多级溢出」分支，而 `zzsf` 在码表无字，最终放弃顶码进空码。4 码短语两种切法重合，测不出。
 #[test]
 fn top_code_splits_at_phrase_code_length() {
     if !has_schemas() {
@@ -10737,15 +10422,12 @@ fn top_code_splits_at_phrase_code_length() {
     let _ = std::fs::remove_file(&store_path);
 }
 
-/// 真机回归其三：**短语候选的 `code` 恒为空串**，前缀命中与精确命中在候选上无从分辨——
-/// 顶码必须回头问短语层，否则会把「还没打完的短语」提前兑现。
+/// 短语候选的 `code` 恒为空串，前缀命中与精确命中在候选上无从分辨，顶码必须回头问短语层，
+/// 不得把还没打完的短语提前兑现。
 ///
-/// `zzsfz` 敲到 `zzsf` 时就以 `is_phrase=true, is_prefix=false` 排在候选首位（普通字面短语的
-/// 前缀命中**不打 `is_prefix` 标记**，那个标记只给 `$SS`/`$AA` 组导航用）。于是再敲一个 `a`
-/// ——`zzsfa` 这条码短语里根本没有——旧行为顶出了 `zzsfz` 的内容。正确行为是落进空码。
-///
-/// 构造关键：`zzsf` 在 wubi86 码表**无字**，否则码表候选会占住首位、由正常码表顶码兜底，
-/// 这条缺陷就被掩盖（`kkkk` 一类有字的前缀就测不出来）。
+/// `zzsfz` 敲到 `zzsf` 时以 `is_phrase=true, is_prefix=false` 排首位（字面短语的前缀命中不打
+/// `is_prefix`，那个标记只给 `$SS`/`$AA` 组导航用）；再敲 `a` 应落进空码。
+/// `zzsf` 在 wubi86 码表须无字，否则码表顶码兜底会掩盖问题（`kkkk` 一类测不出）。
 #[test]
 fn top_code_rejects_prefix_only_phrase_hit() {
     if !has_schemas() {
@@ -10781,15 +10463,11 @@ fn top_code_rejects_prefix_only_phrase_hit() {
     let _ = std::fs::remove_file(&store_path);
 }
 
-/// 混输（`wubi86_pinyin`）下的超长短语顶码 —— 与纯码表同结论。
+/// 混输（`wubi86_pinyin`）下的超长短语顶码，与纯码表同结论。
 ///
-/// 补这条是因为真机方案是混输，而上面三条回归全用纯 `wubi86`：混输的 `handle_top_code`
-/// 在委托 primary 之前另有一整条拼音/英文否决链（`pinyin_only_overflow` 等），走的不是
-/// 同一段代码。**调查这个 bug 时我一度以为混输下没修好**，实际是当时的探针漏了
-/// `top_code_commit`——`Config::default()` 里它是 `false`，而出厂 toml 是 `true`。
-///
-/// ⚠️ 任何顶码测试都必须显式打开 `top_code_commit`，否则测的是一个关着的功能，
-/// 无论代码对错都「不顶码」。
+/// 混输的 `handle_top_code` 在委托 primary 之前另有拼音/英文否决链（`pinyin_only_overflow` 等），
+/// 走的不是同一段代码。任何顶码测试都必须显式打开 `top_code_commit`（`Config::default()` 里是
+/// `false`，出厂 toml 是 `true`），否则测的是一个关着的功能。
 #[test]
 fn top_code_overlong_phrase_in_mixed_schema() {
     if !has_schemas() {
@@ -10827,18 +10505,13 @@ fn top_code_overlong_phrase_in_mixed_schema() {
 
 // ───── punct_on_empty_behavior：空码时标点键是否丢弃废码 ─────
 //
-// 「空码」= 打了码但一个候选都没有（多为码表打错字根）。既有行为是把废码连同标点一起
-// 送上屏；`clear` 让废码作废、标点照常出。
+// 「空码」= 打了码但一个候选都没有。`commit` 把废码连同标点送上屏；`clear` 让废码作废、标点照常出。
+// 标点有两个独立的上屏出口：普通标点与智能符号 `hold_composition` 的 `CommitAndHoldComposition`，
+// 各写一对测试，只接一个会让开了智能符号的宿主上开关不生效。
 //
-// 标点有**两个彼此独立的上屏出口**，各写一对测试：普通标点，以及智能符号
-// `hold_composition` 的 `CommitAndHoldComposition`。只接一个的后果是「开了智能符号的
-// 宿主上开关不生效」——这种间歇性不一致没有对照测试根本发现不了。
-//
-// ⚠️ 每个测试都必须先断言「候选确实为空」：`bbqq` 若哪天进了词库，测试会退化成在验
-// 「有候选时按标点顶屏首选」，那条路与本开关无关，断言却照样能过。
-//
-// ⚠️ 必须显式开 `punct_commit`：结构体零值是 `false`（出厂 toml 是 `true`），关着时标点
-// 分支在 `has_input` 守卫处就 `return Consumed` 吞键，压根走不到被测代码。
+// 每个测试都先断言「候选确实为空」：`bbqq` 若进了词库，测试会退化成验「有候选时顶屏首选」。
+// 必须显式开 `punct_commit`（结构体零值 `false`、出厂 toml `true`），否则标点在 `has_input`
+// 守卫处就被吞掉，走不到被测代码。
 
 /// 构造 wubi86 + 标点顶屏已开的配置。`clear` 决定空码时是否丢弃废码。
 fn config_punct_on_empty(clear: bool) -> Config {
@@ -10850,8 +10523,8 @@ fn config_punct_on_empty_value(value: &str) -> Config {
     let mut cfg = config_with("wubi86");
     // 出厂即开，测试须显式打开——零值 false 会让标点在 has_input 分支被吞掉。
     cfg.schema.codetable.punct_commit = true;
-    // ⚠️ 每个分支都**显式写**，不靠「不设＝commit」：出厂默认已经是 clear，靠缺省表达
-    // commit 的话，对照组会跟着默认值漂移——那正是它要防的东西。出厂默认本身由
+    // 每个分支都显式写，不靠「不设＝commit」：出厂默认已经是 clear，靠缺省表达
+    // commit 的话对照组会跟着默认值漂移。出厂默认本身由
     // `punct_on_empty_default_discards_without_any_config` 单独守。
     cfg.input.punct_on_empty_behavior = value.into();
     cfg
@@ -10957,15 +10630,11 @@ fn test_punct_on_empty_commit_outputs_raw_code_in_hold_composition() {
     }
 }
 
-/// 行为层守门：**一个相关开关都不设**，只靠出厂默认，空码按标点就应丢弃废码。
+/// 行为层守门：一个相关开关都不设，只靠出厂默认，空码按标点就应丢弃废码。
 ///
-/// 上面那一族测试全都显式写了 `punct_on_empty_behavior`，所以把出厂默认改回 `commit`
-/// 它们一条都不会红——本仓实测过「只翻一个默认值，全量两千多条无一失败」。这条补的正是
-/// 那个缺口：它不写该键，读到什么就是真实用户装完就用的行为。
-///
-/// ⚠️ `punct_commit` 仍要显式对齐 L2（结构体零值 false、出厂 toml true）。不对齐的话标点
-/// 在 `has_input` 守卫处就被吞掉，断言会以「没上屏废码」的形态通过——测的却是一个标点功能
-/// 整个关闭的系统，是彻底的假绿。
+/// 上面那族测试都显式写了 `punct_on_empty_behavior`，把出厂默认改回 `commit` 它们不会红；这条
+/// 不写该键，测的是用户装完就用的行为。`punct_commit` 仍要显式对齐出厂值（零值 false、toml true），
+/// 否则标点被 `has_input` 守卫吞掉，断言以「没上屏废码」的形态假绿。
 #[test]
 fn punct_on_empty_default_discards_without_any_config() {
     if !has_schemas() {
@@ -10987,10 +10656,9 @@ fn punct_on_empty_default_discards_without_any_config() {
     }
 }
 
-/// 反向对照：同一条路径下，回车与空格的出厂默认**仍然上屏原码**。
+/// 反向对照：同一条路径下，回车与空格的出厂默认仍然上屏原码。
 ///
-/// 这组不一致是产品决策，不是漏改。没有这条对照，将来有人「顺手把三个统一成 clear」时，
-/// 上面那条测试照样绿——它只看标点。
+/// 这组不一致是产品决策；没有这条，有人「顺手把三个统一成 clear」时上面那条照样绿。
 #[test]
 fn enter_and_space_on_empty_still_commit_by_default() {
     if !has_schemas() {
@@ -11013,13 +10681,10 @@ fn enter_and_space_on_empty_still_commit_by_default() {
 
 // ───── clear_no_input：废码丢弃，标点本身也不上屏 ─────
 //
-// ★ 这一族配置的行为其实是**两根轴**：「废码上不上屏」与「按键字符本身出不出」。
-// `clear` 是「丢废码、出标点」，`clear_no_input` 是「丢废码、也不出标点」——后者与回车/
-// 空格的 `clear` 才是同一格（那两个键的 clear 本就返回 `ClearComposition`，键本身不产出）。
-//
-// ⚠️ 每条都必须断言**具体的 KeyAction 变体**，不能只看「文本为空」：`InsertText("")` 与
-// `ClearComposition` 在「屏幕上没多出字」这个层面无法区分，而前者是错的——它会把一次空
-// 提交推给宿主，组合态的收尾时机随宿主而异。
+// 这族配置是两根轴：「废码上不上屏」与「按键字符本身出不出」。`clear` 是丢废码、出标点；
+// `clear_no_input` 是丢废码、也不出标点，与回车/空格的 `clear` 同一格。
+// 每条都必须断言具体的 KeyAction 变体：`InsertText("")` 与 `ClearComposition` 屏幕上无法区分，
+// 但前者会把一次空提交推给宿主，组合态收尾时机随宿主而异。
 
 /// clear_no_input：普通标点出口——废码丢弃，句号也不上屏，整个按键当没按过。
 #[test]
@@ -11038,11 +10703,10 @@ fn test_punct_on_empty_clear_no_input_swallows_punct() {
     }
 }
 
-/// clear_no_input：智能符号 hold 出口——**不得**走 CommitAndHoldComposition。
+/// clear_no_input：智能符号 hold 出口不得走 CommitAndHoldComposition。
 ///
-/// ★ 这条是本族最容易漏的一条。上一版的 `clear` 只把 `commit_text` 置空却仍走 hold 分支，
-/// 照搬到 `clear_no_input` 就会挂一个屏幕上并不存在的 hold 态：下一次按同键的 press2 会去
-/// 删一个从未上屏的符号，表现为「开了智能符号后，丢废码会顺手吃掉前面一个字」。
+/// 只把 `commit_text` 置空仍走 hold 分支，会挂一个屏幕上不存在的 hold 态：下一次按同键的 press2
+/// 去删一个从未上屏的符号，表现为「丢废码顺手吃掉前面一个字」。
 #[test]
 fn test_punct_on_empty_clear_no_input_skips_hold_composition() {
     if !has_schemas() {
@@ -11064,8 +10728,7 @@ fn test_punct_on_empty_clear_no_input_skips_hold_composition() {
 
 /// clear_no_input 同样只管空码那一支：有候选时仍顶屏首选 + 标点。
 ///
-/// 没有这条，把短路点提到 `has_input` 守卫之上（一个很自然的「简化」）不会红任何测试，
-/// 而那会让**所有**按标点顶屏的场景都变成吞键。
+/// 没有这条，把短路点提到 `has_input` 守卫之上不会红任何测试，而那会让所有按标点顶屏的场景吞键。
 #[test]
 fn test_punct_on_empty_clear_no_input_does_not_affect_nonempty_candidates() {
     if !has_schemas() {
@@ -11095,18 +10758,12 @@ fn test_punct_on_empty_clear_no_input_does_not_affect_nonempty_candidates() {
     }
 }
 
-/// ★★ 第三条通路：以词定字（`select_char_keys`）会在标点臂**之前**劫走这几个键。
+/// 第三条通路：以词定字（`select_char_keys`）会在标点臂之前劫走这几个键。
 ///
-/// 空码时 `handle_select_char` 拿不到字源，若仍被拦截就会退到 `keys.overflow.select_char_key`
-/// （出厂 `ignore` ＝吞键并**保留**编码），`punct_on_empty_behavior` 整个够不着。修法是空码时
-/// 一律放行——那不是「以词定字越界」，而是「此刻这个键不该算以词定字键」。
-///
-/// ★★★ **三档必须一起断言**。曾经只放行了非 `commit` 两档（拿标点策略的取值当以词定字的
-/// 判据），`commit` 档漏网：开了以词定字得到 `Consumed`（吞键、废码留着），没开得到
-/// `bbqq。`。只测 `clear` 的话那个漏洞完全照不到——**这条测试当初就是这么漏过去的**。
-///
-/// 每档的期望值都取「没开以词定字时该键本来的行为」，即本族其余测试已经钉死的那个结果：
-/// 放行是否正确，判据就是「开不开以词定字，结果一模一样」。
+/// 空码时 `handle_select_char` 拿不到字源，若仍拦截就退到 `keys.overflow.select_char_key`
+/// （出厂 `ignore` = 吞键并保留编码），`punct_on_empty_behavior` 够不着。故空码时一律放行。
+/// 三档必须一起断言（只测 `clear` 照不到 `commit` 档漏放行）；每档期望值取「没开以词定字时
+/// 该键本来的行为」：开不开以词定字，结果须一模一样。
 #[test]
 fn test_punct_on_empty_reaches_select_char_keys() {
     if !has_schemas() {
@@ -11136,7 +10793,7 @@ fn test_punct_on_empty_reaches_select_char_keys() {
     }
 }
 
-/// 反向夹逼：**有候选**时以词定字照常生效，放行判据不得把它一起放跑。
+/// 反向夹逼：有候选时以词定字照常生效，放行判据不得把它一起放跑。
 ///
 /// 与上一条成对。只有上一条时，把拦截条件整个删掉也能过。
 #[test]
@@ -11170,8 +10827,7 @@ fn test_select_char_still_works_with_punct_on_empty_clear() {
 
 /// 出厂零回归：`clear_no_input` 不得成为默认。
 ///
-/// 出厂仍是 `clear`（标点照常上屏）——`clear_no_input` 是给「拿标点当取消键」的人准备的，
-/// 让它变成默认等于让所有人的标点在空码时凭空消失。
+/// 出厂仍是 `clear`（标点照常上屏）；`clear_no_input` 是给「拿标点当取消键」的人准备的。
 #[test]
 fn punct_on_empty_clear_no_input_is_not_the_default() {
     let cfg = Config::default();
@@ -11212,9 +10868,8 @@ fn test_punct_on_empty_clear_does_not_affect_nonempty_candidates() {
 
 /// 繁入简出用例专用的配置：检索范围放到「全部字符」。
 ///
-/// 探针字「漢」在出厂的 `smart` / `general` 档下会被检索范围过滤掉——繁体字不在通用
-/// 规范汉字表里。这不是被测能力的一部分，但不改这一项，用例会以「候选里找不到漢」
-/// 的形式失败，看起来像转换器没工作。真实场景里繁体词库用户本就得把范围放开。
+/// 探针字「漢」不在通用规范汉字表里，出厂 `smart` / `general` 档会把它过滤掉，用例会以「候选里
+/// 找不到漢」失败，像是转换器没工作。
 fn config_t2s(active: &str) -> Config {
     let mut cfg = config_with(active);
     cfg.input.filter_mode = "gb18030".into();
@@ -11223,9 +10878,7 @@ fn config_t2s(active: &str) -> Config {
 
 /// 逐页找第一个满足 `pred` 的候选，返回 (内部文本, 显示文本)。
 ///
-/// 繁入简出的探针字（如「漢」）是低频单字，**不一定在首页**——现有 s2t 用例那种
-/// 「首页找不到就 eprintln 跳过」在这里会退化成恒绿：跳过分支不留断言，词库调整让
-/// 探针字掉出首页时测试照样通过，而被测能力已经没人验证了。
+/// 探针字是低频单字，不一定在首页；「首页找不到就跳过」会退化成恒绿。
 fn find_candidate_across_pages(
     coord: &Coordinator,
     pred: impl Fn(&str) -> bool,
@@ -11248,11 +10901,9 @@ fn find_candidate_across_pages(
     None
 }
 
-/// 打 `han` 找到内部为繁体「漢」的候选（拼音词库 cn_dicts 收了繁体单字），
-/// 开启繁入简出后它的**显示**应是简体「汉」。
+/// 打 `han` 找到内部为繁体「漢」的候选（cn_dicts 收了繁体单字），开启繁入简出后显示应是简体「汉」。
 ///
-/// ★ 用例自带反向对照（关掉时显示 == 内部）：没有它，「转换器压根没加载」
-/// 与「转换生效了」在断言上无从分辨。
+/// 自带反向对照（关掉时显示 == 内部）：否则「转换器没加载」与「转换生效」无从分辨。
 #[test]
 fn test_t2s_converts_candidate_display() {
     if !has_schemas() {
@@ -11283,8 +10934,8 @@ fn test_t2s_converts_candidate_display() {
     assert_eq!((i2.as_str(), d2.as_str()), ("漢", "漢"), "未开启时不该转换");
 }
 
-/// 上屏走的是同一个出口（`maybe_convert`），但**必须单独测**：2026-08-20 那次
-/// 「顶屏出简体、空格出繁体」正是显示与上屏各走各的路造成的。
+/// 上屏走的是同一个出口（`maybe_convert`），但必须单独测：显示与上屏各走各的路就会
+/// 「顶屏出简体、空格出繁体」。
 #[test]
 fn test_t2s_converts_committed_candidate() {
     if !has_schemas() {
@@ -11317,8 +10968,7 @@ fn test_t2s_converts_committed_candidate() {
 
 /// 两个方向互斥：后开的赢，先开的必须被关掉。
 ///
-/// 同时开着的出口行为是「转过去再转回来」，产物是绕了一圈的近似原文——既不是繁体
-/// 也不是简体，且用户看不出是哪一步造成的。
+/// 同时开着会「转过去再转回来」，产物既不是繁体也不是简体。
 #[test]
 fn test_s2t_and_t2s_are_mutually_exclusive() {
     if !has_schemas() {
@@ -11361,14 +11011,12 @@ fn test_s2t_and_t2s_are_mutually_exclusive() {
 
 // ─────────────────── Unicode 码点输入（前缀夺取式） ───────────────────
 //
-// ⚠️ 这一族**必须从 VK 出发**，不能只测 `unicode_decode`：本功能的每一条路都要先经过
-// 按键分派（夺取闸门 / 临英转交 / 回退闸门），而那三处正是最容易接错的地方。
-// 曾有一整族「反向枚举 411 音节」的测试全绿而用户一个字打不出，根因就是入口不同层。
+// 这一族必须从 VK 出发，不能只测 `unicode_decode`：夺取闸门 / 临英转交 / 回退闸门三处按键分派
+// 正是最容易接错的地方。
 //
-// `+` 是 **Shift + VK_OEM_PLUS(0xBB)**，不是 ASCII 0x2B。符号键一律用 VK 常量：
-// 按字符传 VK 会敲到一个不存在的键上，而测试照样「通过」（没人接管那个键码）。
-// 十六进制里的 `0-9`/`a-f` 可以继续用 `press_letter`——大写字母与数字的 VK 恰好等于
-// 它们的 ASCII 码，这是符号键**没有**的巧合，别据此推广。
+// `+` 是 Shift + VK_OEM_PLUS(0xBB)，不是 ASCII 0x2B。符号键一律用 VK 常量：按字符传会敲到
+// 一个不存在的键上，没人接管，测试照样「通过」。十六进制的 `0-9`/`a-f` 可用 `press_letter`——
+// 大写字母与数字的 VK 恰好等于 ASCII 码，符号键没有这个巧合。
 
 /// `+` 键：Shift + VK_OEM_PLUS。
 const VK_OEM_PLUS: u32 = 0xBB;
@@ -11429,7 +11077,7 @@ fn unicode_lowercase_entry_and_commit() {
 
 /// 大写 `U+` 那条入口：Shift+U 会先进临时英文，靠 `handle_temp.rs` 的转交分支接上。
 ///
-/// 这条**不能**由夺取闸门覆盖——那时 `input_buffer` 是空的，闸门看不见那个 U。
+/// 这条不能由夺取闸门覆盖——那时 `input_buffer` 是空的，闸门看不见那个 U。
 #[test]
 fn unicode_uppercase_entry_via_temp_english() {
     if !has_schemas() {
@@ -11459,11 +11107,10 @@ fn unicode_uppercase_entry_via_temp_english() {
     }
 }
 
-/// 在夺取边界按退格 → 回退到**码表**输入流（`RewindOrigin::Normal`）。
+/// 在夺取边界按退格 → 回退到码表输入流（`RewindOrigin::Normal`）。
 ///
-/// ⚠️ 边界判据是「模式缓冲 == `Rewind::host_text`」，而进入时缓冲**恰好就是**那条前缀
-/// ⇒ 刚进模式就已经在边界上，**第一次**退格即回退。别照「先删一个字符再退」的直觉写，
-/// 那样第二次退格作用的已经是恢复后的码表缓冲了（症状：拿到 `ClearComposition`）。
+/// 边界判据是「模式缓冲 == `Rewind::host_text`」，进入时缓冲恰好就是那条前缀，所以第一次退格即
+/// 回退；别写成「先删一个字符再退」（那样第二次退格作用于恢复后的码表缓冲，拿到 `ClearComposition`）。
 #[test]
 fn unicode_rewind_returns_to_codetable() {
     if !has_schemas() {
@@ -11490,7 +11137,7 @@ fn unicode_rewind_returns_to_codetable() {
     }
 }
 
-/// 同上，但来源是临英 → 必须回到**临英**，而不是把大写 U 塞进码表缓冲。
+/// 同上，但来源是临英 → 必须回到临英，而不是把大写 U 塞进码表缓冲。
 ///
 /// 这正是 `RewindOrigin` 存在的理由：两个入口共用一个模式，回退目标却不同。
 #[test]
@@ -11544,7 +11191,7 @@ fn unicode_invalid_code_point_commits_raw_text() {
     }
 }
 
-/// 关着的时候 `u+` 必须仍是普通编码 —— 出厂态零回归。
+/// 关着的时候 `u+` 必须仍是普通编码（出厂态不变）。
 #[test]
 fn unicode_disabled_leaves_input_untouched() {
     if !has_schemas() {
@@ -11562,8 +11209,7 @@ fn unicode_disabled_leaves_input_untouched() {
 
 /// 十六进制里的数字键必须进缓冲，不能被当成序号选词。
 ///
-/// `commit_by_offset` 对本模式返回 `None` 就是为了这条：候选恒只有一条，而 `0-9` 全是
-/// 码位。放行选词的话 `u+1...` 里的每个数字都会被吃掉。
+/// `commit_by_offset` 对本模式返回 `None`：候选恒只有一条，而 `0-9` 全是码位。
 #[test]
 fn unicode_digits_are_code_not_selection() {
     if !has_schemas() {
@@ -11621,7 +11267,7 @@ fn z_hijack_stepwise_to_boundary(
     (coord, word)
 }
 
-/// 分步上屏后缓冲恰等于夺取边界时按退格，**不得**触发夺取回退：已转换前缀还在组合区，
+/// 分步上屏后缓冲恰等于夺取边界时按退格，不得触发夺取回退：已转换前缀还在组合区，
 /// 回退会把它连同本模式一起清掉（`exit_*` 清 `committed_text`），用户选好的字凭空消失、
 /// 组合区跳回 `z`。应走本模式自己的退格——段回退优先，把词退回成码并回缓冲前部。
 fn assert_backspace_pops_segment(coord: &Coordinator, word: &str, mode: &str) {

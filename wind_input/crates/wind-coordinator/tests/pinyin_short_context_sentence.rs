@@ -1,30 +1,12 @@
 //! 「1 个完整音节 + 尾部残码」的残码整句（step 2c 短上下文档 + step 6.5c 延迟定夺）。
 //!
-//! ## 这条路径要治的病
+//! 要治的病：双拼 `zdm` / 全拼 `zaim` 首选是「在美国」而非「在吗」。「在吗」词条 w=0，被降到
+//! 前缀层，而它与 `zhonghuar` 的「种花人」在 (weight, distance) 上同形、规则层无从区分；
+//! 出路是让 Viterbi 用单字拼出残码整句，绕开词条 w=0。判据与取值依据见
+//! docs/architecture/candidate-sorting-rules.md 的「拼音常量的取值依据」。
 //!
-//! 双拼打 `zdm`（zd=zai，m=「吗」的声母）首选是「在美国」而不是「在吗」。根因两层叠加：
-//!
-//! 1. **词库数据缺陷**：「在吗」在 `base.dict.yaml:103576` 里 `w=0`，而「在美国」
-//!    在 ext 库里 `w=14796`；折扣算式严丝合缝 —— `14796 × 0.5² = 3699`、`0 × 0.5 = 0`。
-//! 2. **层级硬闸门**：`w<=0` 命中 `demote_to_prefix_layer`，「在吗」被踢进前缀层，
-//!    而 `cmp_match_layers` 的 `eff_prefix` 是层级键，**跨层不比权重** —— 第 98 位由此而来。
-//!
-//! 而第 2 条不能拆：它正压着 `zhonghuar` 的「种花人」(同样 w=0、distance=1)。
-//! 「在吗」与「种花人」在 (weight, distance) 上**完全同形**，规则层面无从区分。
-//! 出路是给「在吗」开第二条生成路径：残码整句由 Viterbi 用「在」+「吗」拼出，
-//! 走单字乘积、**完全绕开词条 w=0**，这才第一次把两者分开。
-//!
-//! ## 与平台无关（曾被误判为安卓专属）
-//!
-//! 全拼 `zaim` 与双拼 `zdm` 的候选序**逐位相同**（连第 98 位都一样）—— 双拼转换后的
-//! `query` 就是 `"zaim"`，两者在下游是同一个输入。PC 端一直有同样的问题，只是全拼用户
-//! 会一路打完 `zaima`、很难在 `zaim` 停下；而双拼的 `zdm` 里 `zd` 已成完整音节，
-//! **这是个自然的停顿点**。故本文件同时锁住两种方案。
-//!
-//! ## 为什么必须在协调器级测
-//!
-//! 引擎的 `sort_by` 不看 `consumed_length`，残码相关的顺序完全由 `candidate_display_order`
-//! 决定（同 `pinyin_trailing_partial_order.rs` 的开篇说明）。引擎级测试对它没有约束力。
+//! 双拼转换后的 `query` 与全拼相同，两种方案同时锁。须在协调器级测：残码相关顺序由
+//! `candidate_display_order` 决定，引擎的 `sort_by` 不看 `consumed_length`。
 //!
 //! 词典缺失时自动跳过。
 
@@ -130,14 +112,10 @@ fn short_context_sentence_takes_top() {
     }
 }
 
-/// 反向闸门：短上下文残码整句**不得**制造噪音。
+/// 反向闸门：短上下文残码整句不得制造噪音。
 ///
-/// 放开 `syllables.len() >= 1` 会让每个「1 音节 + 残码」输入都多出一条整句，实测
-/// `wom`→「我吗」、`tam`→「他吗」、`nim`→「你吗」、`meiy`→「没也」、`nih`→「你和」
-/// 全部挤进第 2 位。故 step 6.5c 把这一档的插入**推迟到 step 4 之后**，按
-/// `SENTENCE_KEEP_RATIO` 定夺，不够格的根本不进候选。
-///
-/// 本测试锁住这些输入的首选不被整句翻掉。谁把闸门放宽，这里当场变红。
+/// 立即插入会让 `wom`→「我吗」、`nim`→「你吗」等挤进前列；step 6.5c 推迟到 step 4 之后按
+/// `COMPLETION_WEAK_CEILING` 定夺，不够格的不进候选。闸门放宽这里即变红。
 #[test]
 fn short_context_sentence_adds_no_noise() {
     if !has_pinyin() {
@@ -165,15 +143,11 @@ fn short_context_sentence_adds_no_noise() {
     }
 }
 
-/// 已完成音节 ≥ 2 的那一档**行为逐字不变**（`SENTENCE_KEEP_MAX_COMPLETED_SYLS` 的边界）。
+/// 已完成音节 ≥ 2 的一档不受短上下文档影响（`SENTENCE_KEEP_MAX_COMPLETED_SYLS` 的边界），
+/// 整句仍按 6.5b 让位给恰好用完残码的补全。
 ///
-/// 这些是 step 2c 原有的地盘，整句仍按 6.5b 让位给「恰好用完残码的补全」。
-/// 与 `pinyin_trailing_partial_order.rs` 的断言重叠是有意的：那边锁的是 6.5b 本身，
-/// 这边锁的是「新增的短上下文档没有溢出到 ≥2 这一侧」—— 两者失效方式不同。
-///
-/// ⚠️ `duibuq` 是这条边界的关键证据：它的**错解**「对不去」拿到 32.4× 的整句/补全比，
-/// 比正解型的 `jisuanjik`「计算机看」(35.8×) 还高。一旦把
-/// `SENTENCE_KEEP_MAX_COMPLETED_SYLS` 放宽到 2，「对不起」当场被顶掉。
+/// 与 `pinyin_trailing_partial_order.rs` 重叠是有意的：那边锁 6.5b 本身，这边锁短上下文档
+/// 没有溢出到 ≥2 这一侧。
 #[test]
 fn long_context_still_yields_to_completion() {
     if !has_pinyin() {
@@ -197,16 +171,10 @@ fn long_context_still_yields_to_completion() {
     }
 }
 
-/// **语法模型开启时同样成立** —— 这条是用户真机反馈换来的。
+/// 语法模型开启时同样成立。
 ///
-/// 闸门首版用「整句/补全的倍数」(24×) 做判据，而整句分数正是被语法模型平移的那一轴：
-/// 开启万象(w=0.5)后 `zaim` 的「在吗」从 61.3× 掉到 14.0×，被自己的闸门拦掉，
-/// 真机表现为「zdm 还是在美国」。判据遂改为**补全侧的绝对词频**
-/// （[`COMPLETION_WEAK_CEILING`]，单轴、不受 grammar 影响）。
-///
-/// 谁再把判据换回依赖整句分数的形态，这里当场变红。
-///
-/// [`COMPLETION_WEAK_CEILING`]: 见 `wind_engine::pinyin` 的同名常量
+/// 整句分数会被语法模型平移，故判据用补全侧的绝对词频（`wind_engine::pinyin` 的
+/// `COMPLETION_WEAK_CEILING`）。判据换回依赖整句分数的形态（如整句/补全倍数）这里即变红。
 #[test]
 fn short_context_sentence_survives_grammar() {
     if !has_pinyin() {
@@ -240,9 +208,8 @@ fn short_context_sentence_survives_grammar() {
 
 /// 残码场景的候选序快照，改判据前后各跑一次逐条比对。
 ///
-/// 现有门禁只断言**首选**；本探针打印前 8，用来发现首选之外的暗伤
-/// （`meiy` 的单字「没」正卡在 400 条上限的**第 400 位**，多产出一条候选就会把它挤掉
-/// —— `engine_manager::test_pinyin_trailing_partial_prefix_floats_above_exact` 曾因此变红）。
+/// 门禁只断言首选；本探针打印前 8，用来发现首选之外的暗伤（如 `meiy` 的单字「没」卡在
+/// 400 条上限边缘，多产出一条候选就会被挤掉）。
 #[test]
 #[ignore = "定点探针：依赖 build_dev 真实词库，用 --ignored 显式运行"]
 fn trailing_partial_order_snapshot() {

@@ -1,20 +1,17 @@
-//! **单字输入**（`single_char`）：开启后候选只出单字。
+//! 单字输入（`single_char`）：开启后候选只出单字。
 //!
 //! 五笔系输入法的传统功能。取值收口在 `Coordinator::effective_single_char`：英文引擎恒关
-//! （不变量，压过临时态），其余引擎临时态（热键）压过配置层，否则**按引擎分流**——
+//! （不变量，压过临时态），其余引擎临时态（热键）压过配置层，否则按引擎分流——
 //! 码表/混输取 `schema.codetable.single_char`（⊕ 方案级 `[engine.codetable]` 覆盖），
 //! 拼音取 `schema.pinyin.single_char`（无方案级覆盖）。
 //!
 //! 判据本身（哪条候选算「单字」、谁豁免）在 `wind_candidate::single_char_admits` 有单元
-//! 测试；本文件只管**接线**：过滤有没有真的作用到主候选链上、临时态与配置层的优先级、
+//! 测试；本文件只管接线：过滤有没有真的作用到主候选链上、临时态与配置层的优先级、
 //! 切方案的失效点。
 //!
-//! ⚠️ 曾有第三档「只出词组」，2026-09-09 按用户实测反馈删除（表现「非常奇怪」：单字被
-//! 整批滤掉后大量码位只剩零星几条甚至空列表）。别看着「两档互补」好看就加回来。
+//! 不设「只出词组」档：单字被整批滤掉后大量码位只剩零星几条甚至空列表，用户反馈很怪。
 //!
-//! ⚠️ `build_dev/data` 不存在时端到端用例**静默跳过而计数照绿**（判据是耗时，正常秒级
-//! vs 0.0x s）——本仓栽过一次，见 `codetable_filter_scope_consistency.rs` 的文件头。
-//! 恢复命令 `.\scripts\dev.ps1 gd`。
+//! `build_dev/data` 不存在时端到端用例静默跳过而计数照绿（判据是耗时 0.0x s）。
 
 use std::path::PathBuf;
 use wind_bridge::handler::{KeyAction, KeyEventData, MessageHandler};
@@ -56,7 +53,7 @@ fn coord_with(single_char: bool) -> std::sync::Arc<Coordinator> {
     Coordinator::new_headless(wubi_config(single_char), Some(&data_dir()))
 }
 
-/// 按键走**生产入口** `handle_key_event_policed`（同 `codetable_filter_scope_consistency`
+/// 按键走生产入口 `handle_key_event_policed`（同 `codetable_filter_scope_consistency`
 /// 的理由：直接调内部的 `handle_key_event` 会绕过收口，等于验证一条不存在的路径）。
 fn press(coord: &Coordinator, code: &str) {
     for c in code.chars() {
@@ -83,10 +80,7 @@ const MIXED_CODE: &str = "dddd";
 
 // ─────────────────────── 全局配置层 ───────────────────────
 
-/// 前置对照：关闭（出厂）时字与词**都在**。
-///
-/// 这一条不是凑数——没有它，下面那条「词不在」的断言可能只是因为这个码压根没有词候选，
-/// 测了个寂寞。
+/// 前置对照：关闭（出厂）时字与词都在。没有它，下一条「词不在」可能只是因为这个码本无词。
 #[test]
 fn off_keeps_both_chars_and_words() {
     if !dict_ready(&data_dir()) {
@@ -124,7 +118,7 @@ fn on_drops_words_globally() {
 
 // ─────────────────────── 运行时临时态 ───────────────────────
 
-/// 热键切换立刻生效，且**不写配置**。
+/// 热键切换立刻生效，且不写配置。
 #[test]
 fn runtime_switch_takes_effect_without_touching_config() {
     if !dict_ready(&data_dir()) {
@@ -149,10 +143,10 @@ fn runtime_switch_takes_effect_without_touching_config() {
     );
 }
 
-/// 切换从**当前生效**状态取反，一开一关回到原点。
+/// 切换从当前生效状态取反，一开一关回到原点。
 #[test]
 fn toggle_flips_and_flips_back() {
-    // 判据前置：`effective_single_char` 先看**活动引擎类型**，无词库时引擎压根加载不出来
+    // 判据前置：`effective_single_char` 先看活动引擎类型，无词库时引擎压根加载不出来
     // （`current_engine_type()` 为 None），临时态还没轮到就被判成关——那是环境缺数据，
     // 不是接线坏了。CI 无 `build_dev/data`，为此红过一轮。
     if !dict_ready(&data_dir()) {
@@ -167,13 +161,12 @@ fn toggle_flips_and_flips_back() {
     assert!(!coord.debug_effective_single_char(), "再切一次应回到关闭");
 }
 
-/// 切到与当前生效状态**相同**的值不留临时态。
+/// 切到与当前生效状态相同的值不留临时态。
 ///
-/// 否则「方案本来就开着，用户又按了一次开」会平白留下一个 `Some(true)`，
-/// 随后的切方案清空就变成了用户可感知的跳变（他明明什么都没改）。
+/// 否则会平白留下 `Some(true)`，随后切方案清空时变成用户可感知的跳变。
 #[test]
 fn switching_to_the_current_state_leaves_no_override() {
-    // 判据前置：`effective_single_char` 先看**活动引擎类型**，无词库时引擎压根加载不出来
+    // 判据前置：`effective_single_char` 先看活动引擎类型，无词库时引擎压根加载不出来
     // （`current_engine_type()` 为 None），临时态还没轮到就被判成关——那是环境缺数据，
     // 不是接线坏了。CI 无 `build_dev/data`，为此红过一轮。
     if !dict_ready(&data_dir()) {
@@ -189,7 +182,7 @@ fn switching_to_the_current_state_leaves_no_override() {
     );
 }
 
-/// 临时态**压过配置层**：全局开着，热键关掉就该出词。
+/// 临时态压过配置层：全局开着，热键关掉就该出词。
 #[test]
 fn runtime_override_beats_config() {
     if !dict_ready(&data_dir()) {
@@ -212,21 +205,11 @@ fn runtime_override_beats_config() {
 
 // ─────────────────────── 与满码自动上屏的口径 ───────────────────────
 
-/// ★ 单字输入的**核心价值**：同码的词被滤掉后，满码唯一即自动上屏（定长盲打）。
+/// 单字输入的核心价值：同码的词被滤掉后，满码唯一即自动上屏（定长盲打）。
 ///
-/// # 这条为什么不需要动引擎
-///
-/// `decide_auto_commit`（`wind-engine` 的 `codetable/engine.rs`）数的是**引擎自己**那份
-/// 候选里 `code == input` 的条数，本项的过滤却做在协调器侧 ⇒ 引擎看见的列表里那个
-/// 词还在，按它判恒是「不唯一、不上屏」。
-///
-/// 救回来的是既有的**显示态复评**（`handle_candidate.rs` 里 `recheck_auto_commit` 那一段）：
-/// 引擎没给出上屏意向时，按**最终显示列表**再判一次。它当初是为智能过滤加的
-/// （滤掉同码生僻字后复评放行，见 `recheck_auto_commit_unique_after_filter`），而判据落在
-/// 「用户看见的是哪些候选」上、与过滤的成因无关，于是本项天然搭上了同一趟车。
-///
-/// ⇒ 本条同时是那条复评的**第二个消费者**的守门：将来谁把复评改成只认智能过滤
-/// （比如加一个 `filter_mode` 判据），这里会红。
+/// 引擎的 `decide_auto_commit` 看不到协调器侧的过滤，靠的是协调器按最终显示列表再判一次的
+/// `recheck_auto_commit`（原为智能过滤而设，见 `recheck_auto_commit_unique_after_filter`）。
+/// 谁把复评改成只认智能过滤，这里会红。
 #[test]
 fn single_char_enables_auto_commit_at_full_code() {
     if !dict_ready(&data_dir()) {
@@ -247,7 +230,7 @@ fn single_char_enables_auto_commit_at_full_code() {
         "单字输入下同码只剩一个单字，满码应自动上屏它；实际 {last:?}"
     );
 
-    // ★ 反向对照：关闭时同一个码有多条精确候选，**必须不**自动上屏。
+    // 反向对照：关闭时同一个码有多条精确候选，必须不自动上屏。
     // 少了这条，一个「无论如何都上屏首选」的错误实现照样通过上面那条。
     let mut cfg2 = wubi_config(false);
     cfg2.schema.codetable.auto_commit_at_full = true;
@@ -316,7 +299,7 @@ fn schema_level_absent_falls_back_to_global() {
         eprintln!("跳过：五笔词库不存在");
         return;
     }
-    // 方案段里写了**别的**键，段存在但没表态。
+    // 方案段里写了别的键，段存在但没表态。
     let ov = make_override(
         "schema_absent",
         "wubi86",
@@ -334,16 +317,11 @@ fn schema_level_absent_falls_back_to_global() {
     let _ = std::fs::remove_dir_all(&ov);
 }
 
-/// 方案级写错**类型** ⇒ 不得凭空开启。
+/// 方案级写错类型（`single_char = "yes"`）不得凭空开启：走段级降级，`[engine.codetable]`
+/// 整段回落出厂，本项回到「没表态」、跟随全局。
 ///
-/// `single_char = "yes"` 是类型错误（本字段是布尔），走**段级降级**——`[engine.codetable]`
-/// 整段回落出厂，本项自然回到「没表态」⇒ 跟随全局。与同段其它 `Option` 同一条路。
-///
-/// ⛔ 别为它挂 `tolerant_de::tolerant` 想做成字段级容错：那个适配器只认字符串枚举，
-/// 挂上去连正确的 `single_char = true` 都会解析失败（本仓已实测踩过）。
-///
-/// 全局取**关**是刻意的：这样「把 `"yes"` 错当成 true」的实现才会红。全局取开的话
-/// 无论实现对错都是开，测了个寂寞。
+/// 别挂 `tolerant_de::tolerant` 做字段级容错：它只认字符串枚举，挂上去连正确的
+/// `single_char = true` 都会解析失败。全局取关是刻意的，否则把 `"yes"` 当 true 的实现也绿。
 #[test]
 fn schema_level_bad_value_does_not_turn_it_on() {
     if !dict_ready(&data_dir()) {
@@ -367,11 +345,10 @@ fn schema_level_bad_value_does_not_turn_it_on() {
     let _ = std::fs::remove_dir_all(&ov);
 }
 
-/// ★ 失效点：切方案清掉临时态，回到新方案配置的取值。
+/// 失效点：切方案清掉临时态，回到新方案配置的取值。
 ///
-/// 收口在 `sync_schema_scope`（代际驱动）——本仓唯一能覆盖全部五条切方案路径的地方。
-/// 命令式地在各切方案处逐个清必然漏接（`finish_user_schema_switch` 自己的注释就写明
-/// 它只覆盖五条里的两条，启动载入那条一条都不走）。
+/// 收口在 `sync_schema_scope`（代际驱动），唯一能覆盖全部切方案路径的地方；在各切方案处
+/// 逐个清必然漏接。
 #[test]
 fn switching_schema_clears_the_runtime_override() {
     let d = data_dir();
@@ -422,14 +399,10 @@ fn switching_schema_clears_the_runtime_override() {
 
 // ─────────────────────── 两侧独立 ───────────────────────
 
-/// ★★ 码表侧与拼音侧是**两个字段**，互不影响。
+/// 码表侧与拼音侧是两个字段，互不影响，「五笔只出单字、拼音照常出词」在全局层就能表达。
 ///
-/// 这是 2026-09-08 定下的配置形状的核心性质：分成两份，「五笔只出单字、拼音照常出词」
-/// 在全局层就表达得了，不必逐方案配。合成一个字段的实现会让本条红。
-///
-/// ⚠️ 两个方向都要测。只测「拼音不受码表侧管辖」的话，一个把拼音分支写成恒 `false` 的
-/// 实现（或者引擎类型没判出来、落到 `_ => false` 兜底）照样通过——第二段就是为了排除
-/// 那种假绿：它证明拼音分支**确实走到了**，取的确实是 `schema.pinyin.single_char`。
+/// 两个方向都要测：只测一边时，把拼音分支写成恒 `false`（或落到 `_ => false` 兜底）的实现
+/// 也会通过；第二段证明拼音分支确实取的是 `schema.pinyin.single_char`。
 #[test]
 fn codetable_and_pinyin_are_independent() {
     let d = data_dir();
@@ -476,15 +449,11 @@ fn codetable_and_pinyin_are_independent() {
 
 const VK_TAB: u32 = 0x09;
 
-/// `[keys.session_actions]` 绑 `single_char` 时，**空闲按该键必须放行**。
+/// `[keys.session_actions]` 绑 `single_char` 时，空闲按该键必须放行。
 ///
-/// 这张表收的是 Tab / 翻页键那一批**宿主另有原义**的键（`data/config.toml` 的示例键正是
-/// Tab）。执行臂若无条件 `Consumed`，用户照示例写下 `tab = "single_char"` 之后，
-/// Tab 在所有程序里当场失效——不只是「无候选时」，是完全空闲时也吞。
-///
-/// 判据取「有会话」而非「有候选」：单字模式下某个码本来就可能一条候选都不剩，那时若按
-/// 「无候选」放行，用户就再也关不掉它了。`SessionAction::requires_candidates` 把
-/// `SingleChar` 与 `Cancel` 并列，为的就是这个；本测试钉的是**执行臂**的对应守卫。
+/// 这张表收的是 Tab 等宿主另有原义的键，执行臂无条件 `Consumed` 会让 Tab 在所有程序里失效。
+/// 判据取「有会话」而非「有候选」：单字模式下可能一条候选都不剩，那时放行就关不掉了
+/// （同 `SessionAction::requires_candidates`）。本测试钉执行臂的对应守卫。
 #[test]
 fn session_bound_single_char_releases_the_key_when_idle() {
     if !dict_ready(&data_dir()) {
@@ -521,11 +490,10 @@ fn session_bound_single_char_releases_the_key_when_idle() {
     );
 }
 
-/// 英文引擎恒关是**不变量**，压得过临时态。
+/// 英文引擎恒关是不变量，压得过临时态。
 ///
-/// 这道判据必须问在 `single_char_override` **之前**：写在后面就被绕过去了——英文方案下
-/// 按一次 `single_char:on`（或 `toggle`），词库英文候选走主链被整批滤光，
-/// 只剩 `english_head_candidates` 追加的输入原文（那批插在过滤之后）。
+/// 这道判据必须问在 `single_char_override` 之前，否则英文方案下按一次 `single_char:on`，
+/// 词库英文候选会被整批滤光，只剩输入原文。
 #[test]
 fn english_engine_ignores_the_runtime_override() {
     let d = data_dir();

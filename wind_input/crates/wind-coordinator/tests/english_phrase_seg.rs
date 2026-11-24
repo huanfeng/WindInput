@@ -1,10 +1,8 @@
-//! 英文词组分词输入（论坛 t42）端到端：`'` 切段，每段只打前缀。
+//! 英文词组分词输入端到端：`'` 切段，每段只打前缀。
 //!
 //! 设计与判据见 `wind_engine::english_phrase`。
 //!
-//! # ⚠️ 假绿源
-//!
-//! 词典缺失时整族**静默跳过**（判据是耗时而非通过条数），worktree 需自备 `build_dev`。
+//! 词典缺失时整族静默跳过（判据是耗时而非通过条数），worktree 需自备 `build_dev`。
 //! 见 `has_english_schema`。
 
 use std::path::PathBuf;
@@ -88,7 +86,7 @@ fn matches_concatenated_encoding() {
 }
 
 /// 共同前缀式编码（`iPhone 15 Pro Max` → code `iphone`，code 里没有后段词）。
-/// 这是 t42 原帖 `p1..p10` 分列方案够不着的那一类。
+/// 这是 `p1..p10` 分列方案够不着的那一类。
 #[test]
 fn matches_shared_prefix_encoding() {
     if !has_english_schema() {
@@ -119,7 +117,7 @@ fn skips_intervening_words_end_to_end() {
     );
 }
 
-/// ★ 反向对照：开关关闭时 `'` 仍是第三候选键，不进缓冲。
+/// 反向对照：开关关闭时 `'` 仍是第三候选键，不进缓冲。
 ///
 /// 没有这条，「恒夺取」与「按开关夺取」两种实现都能让上面几条通过。
 #[test]
@@ -167,16 +165,10 @@ fn quote_enters_buffer_when_enabled() {
     );
 }
 
-/// ★ 打到分词符那一刻候选不得变空。
+/// 打到分词符那一刻候选不得变空。
 ///
-/// `ip'` 切出的是**一段**。原路径此时必然落空（词库里没有 code 以 `ip'` 开头的条目），
-/// 所以分词路径必须照查——单段查询就是「列出首词以 ip 开头的词组」，正是用户按下
-/// 分词符时想看到的东西。
-///
-/// 这条是实测反馈修出来的：`phrase_candidates` 原先有一条 `segs.len() < 2` 早退，
-/// 理由「单段等价于普通前缀补全，原路径已经做了」——那个理由只对**不含分词符**的输入
-/// 成立，而不含分词符的输入在更上面就被 `!input.contains(sep)` 挡掉了，根本走不到那条
-/// 早退。于是它实际只在 `ip'` 这一种情形生效，且效果恰好是让候选整片消失。
+/// `ip'` 只切出一段，原路径必然落空，分词路径必须照查（列出首词以 ip 开头的词组）。
+/// 别给 `phrase_candidates` 加 `segs.len() < 2` 早退：含分词符的单段输入只有这条路。
 #[test]
 fn candidates_do_not_vanish_right_after_the_separator() {
     if !has_english_schema() {
@@ -190,15 +182,11 @@ fn candidates_do_not_vanish_right_after_the_separator() {
     );
 }
 
-/// ★ 顺序断言：weight 是主键，跨度只在同权重时说话。
+/// 顺序断言：weight 是主键，跨度只在同权重时说话。
 ///
-/// 审查点名的缺口——此前 12 条 e2e **一条顺序断言都没有**，全是 `iter().any(...)`，
-/// 于是引擎内部按什么排都测不出来，而协调器的 `candidate_display_order` 会按 weight
-/// 统一重排（AGENTS.md 硬约定）。单测里的顺序断言测的是用户看不到的中间态。
-///
-/// 判据取 `ip'max`：`iPhone XS Max` 是**跨度 2**（ip→iPhone、max→Max，跳过 XS），
-/// 比 `iPhone 15 Pro Max` 的跨度 3 更紧凑。跨度当主键时它会排在前面；weight 当主键时
-/// 则是 `iPhone … Pro Max` 那批在前。后者才是用户眼前的真实顺序。
+/// 协调器的 `candidate_display_order` 会按 weight 重排，单测里的顺序是用户看不到的中间态，
+/// 故在端到端测。`ip'max` 下 `iPhone XS Max` 跨度 2 比 `iPhone 15 Pro Max` 的 3 紧凑，
+/// 跨度当主键时它会排前；正确顺序是 weight 高的 `iPhone … Pro Max` 那批在前。
 #[test]
 fn weight_outranks_span_end_to_end() {
     if !has_english_schema() {
@@ -240,14 +228,10 @@ fn plain_input_is_untouched() {
     );
 }
 
-/// ★ 合并而非劫持：同一串输入要**同时**拿到原路径与分词路径的候选。
+/// 合并而非劫持：同一串输入要同时拿到原路径与分词路径的候选。
 ///
-/// 这条钉住 `EnglishEngine::convert` 的「原路径照查 + 分词候选追加」。改成
-/// 「见到分词符就改走分词路径」的话，词库里 57 条含撇号的 code 会在打全码时集体失踪。
-///
-/// ⚠️ 输入必须选**两条路都非空**的那种，否则这条护栏是空的：先前用 `let`（不含分词符）
-/// ⇒ 分词候选恒空 ⇒ 劫持分支根本不执行，变异验证里实测不变红。
-/// `o'c` 才同时踩到两边：
+/// 钉住 `EnglishEngine::convert` 的「原路径照查 + 分词候选追加」；改成「见到分词符就改走
+/// 分词路径」会让词库里含撇号的 code 在打全码时失踪。输入须两条路都非空，`o'c` 同时踩到两边：
 /// - 分词路径 → `OS X El Capitan`（还顺带验了跳词：`o`→OS、`c`→Capitan，越过 `X`/`El`）
 /// - 原路径   → `o'clock`（code 自带撇号，靠前缀匹配）
 #[test]
@@ -325,7 +309,7 @@ fn temp_english_matches_phrases_with_skipping() {
     );
 }
 
-/// ★ 临英的开关是**独立**的：英文方案那份开着也不影响临英。
+/// 临英的开关是独立的：英文方案那份开着也不影响临英。
 ///
 /// 反向对照不可省——没有它，「读同一个开关」与「各读各的」两种实现都能过上一条。
 #[test]
@@ -335,7 +319,7 @@ fn temp_english_scope_has_its_own_switch() {
         return;
     }
     let mut cfg = temp_english_config(false);
-    // 英文方案那份**开着**，临英那份关着 ⇒ 临英下 `'` 仍是三选键。
+    // 英文方案那份开着，临英那份关着 ⇒ 临英下 `'` 仍是三选键。
     cfg.schema.english.phrase_seg = true;
     let c = coord_with(cfg, "te_scope");
     type_temp_english(&c, "ip");
@@ -354,7 +338,7 @@ fn temp_english_scope_has_its_own_switch() {
 
 // ───────────────────── 快捷输入（mix） ─────────────────────
 
-/// 快捷输入里的英文读**临英那份**开关（`input.temp_english.phrase_seg`，A2-3b）。
+/// 快捷输入里的英文读临英那份开关（`input.temp_english.phrase_seg`）。
 ///
 /// 英文方案那份刻意置反：两份取值相同时，读错了开关也照样全绿。
 fn quick_config(phrase_seg: bool) -> Config {
@@ -395,7 +379,7 @@ fn quick_input_english_matches_phrases() {
     );
 }
 
-/// ★ 反向对照（A2-3b）：英文方案那份开着、临英那份关着时，快捷输入**不分词**。
+/// 反向对照：英文方案那份开着、临英那份关着时，快捷输入不分词。
 ///
 /// 取 `free_input = off`：出厂 `auto` 下 `'` 不分词时会作字面输入进缓冲（Free 透镜），
 /// 看不出它是不是还是选词键。关掉自由输入后，`'` 要么被分词符臂收走、要么是第三候选键，
@@ -428,13 +412,10 @@ fn quick_input_ignores_english_schema_switch() {
     }
 }
 
-/// ★★ 分词符不得把透镜推进 Free —— 否则词组打得进去却选不出来。
+/// 分词符不得把透镜推进 Free，否则词组打得进去却选不出来。
 ///
-/// 出厂 `free_input = Auto`：缓冲里出现「越界字符」就切 [`MixLens::Free`]，而 Free 透镜
-/// 一个选词键都没有（数字键是字面输入）。分词符必须同时被按键分派收下**和**被
-/// `MixLens::accepts` 认可，两处各写一份判据的表现就是「打得进、选不出」且不报错。
-///
-/// 判据取「数字键仍能选词」：Free 透镜下数字键是字面输入，会继续进缓冲而不是选中候选。
+/// 出厂 `free_input = Auto` 下越界字符会切 [`MixLens::Free`]，那里数字键是字面输入。分词符须
+/// 同时被按键分派收下和被 `MixLens::accepts` 认可。判据取「数字键仍能选词」。
 #[test]
 fn quick_input_separator_keeps_select_keys_alive() {
     if !has_english_schema() {
@@ -464,14 +445,11 @@ fn quick_input_separator_keeps_select_keys_alive() {
     }
 }
 
-/// ★★ H1 回归护栏：开启分词**不得**打散快捷输入里含撇号的自由输入。
+/// 开启分词不得打散快捷输入里含撇号的自由输入。
 ///
-/// 第一版把分词符并进了 `MixLens::Text` 的接受集，于是 `don't` 留在「编码域」被喂给拼音
-/// 成员：实测候选变成 `["东欧","斗殴",…]`，空格上屏得到 `;东欧n't`，整串输入被打散。
-/// `input_flow.rs` 的 `quick_input_free_apostrophe_word` 当初正是为防这个事故而写，
-/// 它没变红只因为用的是出厂 `phrase_seg = false`——**开关一开，它钉住的不变量就没人守了**。
-///
-/// 判据取「开/关两档逐条一致」：这类词本就不是词组，分词开着与关着都该原样上屏。
+/// 分词符若进了 `MixLens::Text` 的接受集，`don't` 会被喂给拼音成员、上屏 `;东欧n't`。
+/// `input_flow.rs` 的 `quick_input_free_apostrophe_word` 只在出厂 `phrase_seg = false` 下守，
+/// 本条补开关打开的一档：开/关两档逐条一致。
 #[test]
 fn phrase_seg_does_not_break_apostrophe_free_input() {
     if !has_english_schema() {
@@ -493,13 +471,11 @@ fn phrase_seg_does_not_break_apostrophe_free_input() {
     }
 }
 
-/// ★ M1 回归护栏：分词符不得在**数字透镜**下被收进缓冲。
+/// 分词符不得在数字透镜下被收进缓冲。
 ///
-/// `accepts` 只在 Text/Phrase 下认分词符；写入侧若不带同样的 `lens` 守卫，两者就不是同一个
-/// 谓词了。实测 `free_input = off` 的实例里 `;12` 按 `'` 会从「选第 3 候选」变成缓冲 `12'`
-/// 且候选整片清空——仓里 `input_flow.rs` 的
-/// `quick_input_numeric_lens_off_keeps_quote_as_third_select_key` 钉的正是前一种行为，
-/// 而它同样只在出厂开关下才守得住。
+/// `accepts` 只在 Text/Phrase 下认分词符，写入侧须带同样的 `lens` 守卫，否则 `;12` 按 `'`
+/// 会变成缓冲 `12'` 而非选第 3 候选。出厂开关一档由 `input_flow.rs` 的
+/// `quick_input_numeric_lens_off_keeps_quote_as_third_select_key` 守。
 #[test]
 fn phrase_seg_keeps_quote_as_select_key_in_numeric_lens() {
     if !has_english_schema() {
@@ -527,10 +503,7 @@ fn phrase_seg_keeps_quote_as_select_key_in_numeric_lens() {
     }
 }
 
-/// ★ 词组透镜只查 english 成员：拼音成员不得掺进来。
-///
-/// 实测（修复前）`;mac'sn` 出的是 `["吗","嘛","骂","马",…]` —— 整串被喂给拼音成员，
-/// 分词符当噪声处理。修复后应当是那条词组。
+/// 词组透镜只查 english 成员：拼音成员不得掺进来（否则 `;mac'sn` 出「吗」「嘛」）。
 #[test]
 fn phrase_lens_queries_english_member_only() {
     if !has_english_schema() {
@@ -545,11 +518,9 @@ fn phrase_lens_queries_english_member_only() {
     );
 }
 
-/// ★ M6 补缺：英文方案的作用域护栏（审查指出此前完全没测）。
+/// 英文方案的作用域护栏：`english_phrase_separator_key` 只在英文引擎下夺取 `'`。
 ///
-/// `english_phrase_separator_key` 承诺「只在英文引擎下夺取 `'`」，但把那条判据换成 `true`
-/// 时整个测试族仍然全绿——即「phrase_seg 开着时五笔/拼音方案下 `'` 仍是三选键」没人守。
-/// 临英与快捷输入各自都写了作用域对照，就差这一处。
+/// phrase_seg 开着时五笔/拼音方案下 `'` 仍须是三选键；把那条判据换成 `true` 这里会红。
 #[test]
 fn quote_stays_a_select_key_in_non_english_schema() {
     if !has_english_schema() {
@@ -577,13 +548,10 @@ fn quote_stays_a_select_key_in_non_english_schema() {
     }
 }
 
-/// ★ M4：分词符是输入语法，不得作为「原文候选」被带上屏。
+/// 分词符是输入语法，不得作为「原文候选」被带上屏。
 ///
-/// 出厂 `raw_candidate = always` 会把所打原文恒插在首位。含分词符时那条候选是字面
-/// `ip'pro`——不是任何人想要的内容，而且它占着首位，把真正想要的词组挤到第二条起。
-///
-/// 三档都该如此：`in_dict` 本来就不产（带分词符的串不可能是词库词），`off` 更不产，
-/// 这条钉的是 `always` 档也对齐。
+/// 出厂 `raw_candidate = always` 会把字面 `ip'pro` 插在首位、挤掉词组；`in_dict`/`off` 本就
+/// 不产，这条钉 `always` 档也对齐。
 #[test]
 fn separator_is_syntax_not_content() {
     if !has_english_schema() {
@@ -596,16 +564,9 @@ fn separator_is_syntax_not_content() {
         "候选里不该出现带分词符的原文，实际: {p:?}"
     );
 
-    // ★★ 但**不能一刀切**：`o'clock` 既含分词符、原文又真是词库词，头部候选该照常产。
-    //
-    // 审查在这里抓到过一次误伤——第一版是「含分词符就整个头部不产」，`o'clock` /
-    // `you're` / `O'Reilly` 这批跟着遭殃。正确的落法是把 `Always` 降级成 `InDict` 的
-    // 「原文字面是不是词库词」判据，两边都照顾到。
-    //
-    // ⚠️ 判据用**临英**而不是英文方案，且看的是**大小写变形**（`O'CLOCK`）：
-    // 英文方案那侧 `o'clock` 作为词库精确命中本来就在首位，断言「首候选是 o'clock」
-    // 区分不了「头部候选」与「词库候选」——一刀切实现照样能过（变异验证实测不变红）。
-    // 而变形候选只有头部才产，它在不在是唯一能分辨两种实现的信号。
+    // 但不能一刀切：`o'clock` 原文是词库词，头部候选该照常产（`Always` 降级成 `InDict` 判据）。
+    // 判据用临英、看大小写变形 `O'CLOCK`：变形只有头部才产，英文方案下 `o'clock` 本就是
+    // 词库精确命中，区分不了一刀切实现。
     let ok = temp_page("o'clock", "m4_dict_word", true);
     assert!(
         ok.iter().any(|t| t == "O'CLOCK"),
@@ -623,7 +584,7 @@ fn separator_is_syntax_not_content() {
         "临英候选里同样不该出现带分词符的原文，实际: {t:?}"
     );
 
-    // ★ 反向对照：不含分词符时原文候选照常在（别把 always 档整个关掉了）。
+    // 反向对照：不含分词符时原文候选照常在（别把 always 档整个关掉了）。
     let plain = page_of("hel", "m4_plain", true);
     assert_eq!(
         plain.first().map(String::as_str),
@@ -634,16 +595,10 @@ fn separator_is_syntax_not_content() {
 
 // ───────────────────── 剥离查询的噪音闸门 ─────────────────────
 
-/// ★★ 打了分词符就不该再看见**普通单词的前缀补全**。
+/// 打了分词符就不该再看见普通单词的前缀补全。
 ///
-/// 实测反馈（本组用例的由来）：打 `p'o`，整屏候选是 pocket / pod / podcast / poem …
-/// 一个词组都没有。来路是 `english.rs` 那条「剥掉分词符再查一次」——`p'o` 剥成 `po`，
-/// 出厂词库里 `po*` 的单词按权重铺满 `max_candidates`，分段候选一条都挤不进来。
-///
-/// 那些单词**不打分词符时本来就查得到**（下面的反向对照），打了分词符还出它们不但没有
-/// 新增信息，还正好淹掉用户用分词符请求的东西。判据落在
-/// `wind_engine::english::stripped_hit_is_relevant`：剥离命中只收「text 含分词符」或
-/// 「text 是多词」的条目。
+/// 剥离查询把 `p'o` 剥成 `po`，`po*` 单词会铺满 `max_candidates`、淹掉词组。判据在
+/// `wind_engine::english::stripped_hit_is_relevant`：剥离命中只收 text 含分词符或多词的条目。
 #[test]
 fn separator_suppresses_plain_word_completions() {
     if !has_english_schema() {
@@ -662,7 +617,7 @@ fn separator_suppresses_plain_word_completions() {
         );
     }
 
-    // ★ 反向对照：同一批词在**不打分词符**时照常出——闸门关的是「打了还出」，
+    // 反向对照：同一批词在不打分词符时照常出——闸门关的是「打了还出」，
     // 不是把它们从词库里抹掉。没有这条，「剥离查询整个删掉」也能过上面那段。
     let plain = page_of("po", "strip_noise_plain", true);
     assert!(
@@ -671,9 +626,9 @@ fn separator_suppresses_plain_word_completions() {
     );
 }
 
-/// ★ 但剥离查询本身不能关掉：拼接式编码的词组只有它够得着。
+/// 但剥离查询本身不能关掉：拼接式编码的词组只有它够得着。
 ///
-/// `macOS Tahoe` 的 text 里 `macOS` 是**一个**词，`mac'os` 的第二段 `os` 无词可配，
+/// `macOS Tahoe` 的 text 里 `macOS` 是一个词，`mac'os` 的第二段 `os` 无词可配，
 /// 分段路径恒空；这一族全靠剥离串 `macos` 前缀命中 code。与上一条构成对照的两半。
 #[test]
 fn stripped_query_still_reaches_concatenated_phrases() {
@@ -688,16 +643,15 @@ fn stripped_query_still_reaches_concatenated_phrases() {
     );
 }
 
-/// ★ 顺序：同权重时**分段命中压过剥离命中**，一路保到用户眼前。
+/// 顺序：同权重时分段命中压过剥离命中，一路保到用户眼前。
 ///
 /// `p'o` 下两类候选都有，且出厂 weight 同为 0：
 /// - `Point-to-Point Protocol over Ethernet` —— 段 `p` 配上首词、段 `o` 配上 `over`，
 ///   这是用户按下分词符真正请求的东西；
 /// - `Pocket PC` —— 只是把分词符当没打过（剥离成 `po` 前缀命中 code `pocketpc`）。
 ///
-/// 变异验证：把引擎里分段那一路挪到剥离之后，本页首条就从前者翻成后者——协调器的
-/// `candidate_display_order` 在同权重时保的正是引擎给的 `natural_order` 序，所以引擎侧
-/// 的先后不是内部细节，它就是用户看到的顺序。
+/// 协调器的 `candidate_display_order` 同权重时保引擎给的 `natural_order`，引擎侧先后就是
+/// 用户看到的顺序。
 #[test]
 fn phrase_hits_outrank_stripped_hits_end_to_end() {
     if !has_english_schema() {

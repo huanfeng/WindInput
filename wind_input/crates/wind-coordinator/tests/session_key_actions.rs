@@ -1,11 +1,10 @@
 //! 会话态按键功能表（`keys.session_actions`）的端到端测试。
 //!
-//! 覆盖两个用户诉求：**Tab 向下翻页**、**CapsLock 向上翻页**。
+//! 覆盖两个用户诉求：Tab 向下翻页、CapsLock 向上翻页。
 //! 设计见 `docs/design/session-key-actions.md`。
 //!
-//! ⚠️ 依赖词库的用例以 `if !has_schemas() { return; }` 开头——缺 `build_dev/data` 时会
-//! **静默跳过且计数照绿**。判据是耗时：假绿 0.0x s，真跑约 1s+。缺数据先跑
-//! `scripts/dev.ps1 gd`。
+//! 依赖词库的用例以 `if !has_schemas() { return; }` 开头，缺 `build_dev/data` 时静默跳过
+//! 且计数照绿（判据是耗时 0.0x s）。
 
 use std::path::PathBuf;
 use wind_bridge::handler::{KeyEventData, MessageHandler};
@@ -41,9 +40,8 @@ fn key(vk: u32, modifiers: u32, event_type: u8) -> KeyEventData {
 
 /// 配置：wubi86 + 指定的会话态绑定。
 ///
-/// ⚠️ 显式写进 `session_actions` 的键**压过**默认 `page_keys`/`highlight_keys` 的折算
-/// （见 `Config::migrate_nav_keys_into_session_actions`），所以这里写 `tab = page_next`
-/// 就能覆盖出厂的 `tab = highlight_down`，不必先清空 `highlight_keys`。
+/// 显式写进 `session_actions` 的键压过默认 `page_keys`/`highlight_keys` 的折算
+/// （见 `Config::migrate_nav_keys_into_session_actions`），不必先清空 `highlight_keys`。
 fn cfg_with(binds: &[(&str, &str)]) -> Config {
     let mut c = Config::default();
     c.schema.available = vec!["wubi86".into()];
@@ -55,7 +53,7 @@ fn cfg_with(binds: &[(&str, &str)]) -> Config {
     c
 }
 
-/// 打出一串码并确认候选**多于一页**——否则翻页测试无从证伪（翻页在只有一页时是 no-op，
+/// 打出一串码并确认候选多于一页——否则翻页测试无从证伪（翻页在只有一页时是 no-op，
 /// 断言「页码没变」会恒真）。
 fn type_until_multipage(coord: &Coordinator) {
     coord.handle_key_event(&key(VK_A, 0, EVENT_KEY_DOWN));
@@ -66,16 +64,11 @@ fn type_until_multipage(coord: &Coordinator) {
     );
 }
 
-/// ★★ 跨 crate 键名表一致性。
+/// 跨 crate 键名表一致性。
 ///
-/// `wind-config` 不能依赖 `wind-keys`（后者经 `wind-cmdbar` 反向依赖前者，加进去成环），
-/// 于是会话态键名解析**存在两份实现**：`hotkey::session_key_to_vk`（决定键进不进 TSF
-/// 转发白名单）与 `keymap::session_key_name_to_vk`（决定按下时查不查得到绑定）。
-///
-/// 两份漂移的后果是**静默半失效**：白名单里有、查表查不到 ⇒ 键被转发过来却什么也不做；
-/// 反过来则是绑定配了永不触发。两种都没有任何报错。本仓已在跨仓 schema 契约上栽过同型的坑。
-///
-/// 本测试是这条契约**唯一**的编译期外守门——它所在的 crate 是唯一同时看得见两份实现的地方。
+/// `wind-config` 不能依赖 `wind-keys`（会成环），会话态键名解析有两份实现：
+/// `hotkey::session_key_to_vk`（TSF 转发白名单）与 `keymap::session_key_name_to_vk`（查绑定）。
+/// 两份漂移会静默半失效（转发了却不做事，或绑定永不触发）。本 crate 是唯一同时看得见两份的地方。
 #[test]
 fn session_key_tables_agree_across_crates() {
     let names = [
@@ -111,8 +104,8 @@ fn session_key_tables_agree_across_crates() {
         // 正是最容易只改一边的形态。
         "z",
         // 纯修饰键：`select_key_groups = ["lrctrl"]` 折算后的形态。
-        // ⚠️ 一期这几个只有 hotkey.rs 认得、wind-keys 漏了，而当时的键名列表恰好没覆盖
-        // 到它们——**这条测试的覆盖面就是它的全部价值**，漏一个名字等于那个名字没被守。
+        // 一期这几个只有 hotkey.rs 认得、wind-keys 漏了，而当时的键名列表恰好没覆盖
+        // 到它们——这条测试的覆盖面就是它的全部价值，漏一个名字等于那个名字没被守。
         "lshift",
         "rshift",
         "lctrl",
@@ -165,10 +158,8 @@ fn tab_pages_next_when_candidates_shown() {
     assert_eq!(page1, page0 + 1, "Tab 应翻到下一页");
 }
 
-/// 对照组：不配 `tab = page_next` 时，Tab 走出厂默认（高亮下移），**页码不变**。
-///
-/// 没有这一条，上面那个用例在「Tab 本来就翻页」时也会绿——而出厂默认恰恰是高亮下移，
-/// 两者的区别只在页码有没有动。
+/// 对照组：不配 `tab = page_next` 时，Tab 走出厂默认（高亮下移），页码不变。
+/// 没有它，上一条在「Tab 本来就翻页」时也会绿。
 #[test]
 fn tab_defaults_to_highlight_not_paging() {
     if !has_schemas() {
@@ -184,14 +175,11 @@ fn tab_defaults_to_highlight_not_paging() {
     assert_ne!(sel1, sel0, "默认配置下 Tab 应移动高亮");
 }
 
-/// 用户明确要求的门控：**没配 `capslock` 就不装全局钩子**。
+/// 门控：没配 `capslock` 就不装全局钩子。
 ///
-/// ★ 钩子是全局的（对所有进程的所有按键生效），装了就有代价：安全软件告警、系统超时后
-/// 静默移除、闸门滞留会让别的应用 CapsLock 失灵。绝大多数用户不配这一项，他们的进程里
-/// 就不该存在这个钩子——这是本功能唯一的风险控制手段。
-///
-/// 判据取**编译后的绑定表**而非原始配置串：动词/键名写错的条目已在 `ConfigBundle::build`
-/// 里被剔除，那些情况装钩子纯属白担风险（用户的配置本来也不会生效）。
+/// 全局钩子有代价（安全软件告警、超时被静默移除、闸门滞留让别的应用 CapsLock 失灵），这是
+/// 本功能唯一的风险控制。判据取编译后的绑定表而非原始配置串：写错的条目已被
+/// `ConfigBundle::build` 剔除，不该为它装钩子。
 #[test]
 fn capslock_hook_installs_only_when_bound() {
     let bare = Coordinator::new_headless(Config::default(), None);
@@ -213,12 +201,9 @@ fn capslock_hook_installs_only_when_bound() {
 
 /// 诉求二：`capslock = "page_prev"` 后，有候选时按 CapsLock 翻到上一页。
 ///
-/// ⚠️ **本测试覆盖的不是真机主路径**。真机上有会话时 CapsLock 被服务进程的
-/// `WH_KEYBOARD_LL` 钩子在 TSF 之前就吃掉了（TSF 根本收不到，见设计文档 §7），动作经
-/// `handle_capslock_hook_press` 走同一个 `apply_session_action`。这里仍按 keyup 喂，
-/// 测的是**动词到动作的映射**那一段；钩子本身跨进程且需 Win32 消息泵，只能真机验。
-///
-/// 保留它的价值：无会话时钩子放行，TSF 照常发 CapsLock keyup，这条路径依然真实存在。
+/// 这不是真机主路径：有会话时 CapsLock 被 `WH_KEYBOARD_LL` 钩子在 TSF 之前吃掉
+/// （设计文档 §7），经 `handle_capslock_hook_press` 走同一个 `apply_session_action`。
+/// 这里按 keyup 喂，测动词到动作的映射；钩子本身只能真机验。
 #[test]
 fn capslock_pages_prev_on_key_up() {
     if !has_schemas() {
@@ -237,11 +222,10 @@ fn capslock_pages_prev_on_key_up() {
     assert_eq!(page1, 0, "CapsLock 的 keyup 应翻到上一页");
 }
 
-/// ★★ CapsLock 翻页**不得**吞掉正在打的编码。
+/// CapsLock 翻页不得吞掉正在打的编码。
 ///
-/// 回归保护：keyup 分支里 CapsLock 的原有处理会调 `take_input_on_mode_switch`，把待输入
-/// 上屏或丢弃。会话态绑定若排在它**之后**，用户每翻一页就毁一次输入，现象是「翻页时
-/// 编码莫名没了」——极难联想到是大小写同步干的。
+/// keyup 分支里 CapsLock 的原有处理会调 `take_input_on_mode_switch` 上屏或丢弃待输入，
+/// 会话态绑定必须排在它之前。
 #[test]
 fn capslock_paging_preserves_composition() {
     if !has_schemas() {
@@ -260,7 +244,7 @@ fn capslock_paging_preserves_composition() {
     );
 }
 
-/// ★ 无候选时 CapsLock 回落原语义（大小写状态同步），不被会话态绑定截走。
+/// 无候选时 CapsLock 回落原语义（大小写状态同步），不被会话态绑定截走。
 ///
 /// 「有会话归绑定、无会话归原语义」正是两张表的分野。判据落在这里而不是 C++ 侧：
 /// 服务端拿到 keyup 后自己决定归谁，C++ 只负责转发。
@@ -272,7 +256,7 @@ fn capslock_without_candidates_falls_back_to_state_sync() {
     let coord =
         Coordinator::new_headless(cfg_with(&[("capslock", "page_prev")]), Some(&data_dir()));
     // 不打任何码，直接按 CapsLock。
-    // ⚠️ 判「无候选」要用 `debug_page_texts()` 而不是 `debug_page_info().2`——后者是
+    // 判「无候选」要用 `debug_page_texts()` 而不是 `debug_page_info().2`——后者是
     // `total_pages`，空候选时返回 1（页数下限）而非 0。
     assert!(coord.debug_page_texts().is_empty(), "前置条件：不应有候选");
 
@@ -284,13 +268,8 @@ fn capslock_without_candidates_falls_back_to_state_sync() {
     );
 }
 
-/// ★★ 可达性：CapsLock 的绑定必须进 keyup 转发白名单。
-///
-/// 这是 keyup 类绑定**唯一**的可达性来源——不在白名单里，TSF 根本不发这个 keyup，
-/// 绑定在配置里躺着但永远不触发。`key_actions` 四期正是漏了这一环（设计文档 §4.4 补充段）。
-///
-/// 断言取的是 `push_activation_status` 真正推给 C++ 的那份，不是旁路重算——用重算值
-/// 断言等于没测。
+/// 可达性：CapsLock 的绑定必须进 keyup 转发白名单，否则 TSF 不发这个 keyup、绑定永不触发
+/// （设计文档 §4.4）。断言取 `push_activation_status` 真正推给 C++ 的那份，不是旁路重算。
 #[test]
 fn capslock_binding_enters_key_up_forward_set() {
     let coord = Coordinator::new_headless(cfg_with(&[("capslock", "page_prev")]), None);
@@ -355,18 +334,15 @@ fn clear_is_an_alias_of_cancel() {
     );
 }
 
-/// ★★★ 判据放宽的守门：**有会话但无候选**时 `cancel` 仍须生效。
+/// 有会话但无候选时 `cancel` 仍须生效（网址模式从不产候选，是天然样本）。
 ///
-/// 一期的守卫是「无候选就返回 None」，那一格里 Tab 根本不会被接管。网址模式是这一格的
-/// 天然样本——它原样累积文本、从不产候选，而用户此刻显然处在一个输入会话里。
-///
-/// 这条测试若失败，说明 `requires_candidates` 的分派被改回了「一刀切守候选」。
+/// 失败说明 `requires_candidates` 的分派被改回了「一刀切守候选」。
 #[test]
 fn cancel_works_in_session_without_candidates() {
     if !has_schemas() {
         return;
     }
-    // ⚠️ `input.url.enabled` **出厂默认关闭**，测试须显式拨开——否则 `www.` 只是普通编码，
+    // `input.url.enabled` 出厂默认关闭，测试须显式拨开——否则 `www.` 只是普通编码，
     // 前置条件不成立。这类「判据依赖一个默认关闭的开关」正是集成测试假绿的常见来源。
     let mut cfg = cfg_with(&[("tab", "cancel")]);
     cfg.input.url.enabled = true;
@@ -394,8 +370,7 @@ fn cancel_works_in_session_without_candidates() {
 
 /// `cancel` 在 overlay 模式里等同 Esc：退出模式并放弃内容。
 ///
-/// ⚠️ 必须先断言**确实进了临拼**：触发键若没生效，按键会落到主输入路径，而那里的
-/// cancel 返回的 `ClearComposition` 与这里一模一样——不验进入就是假绿。
+/// 必须先断言确实进了临拼：否则按键落到主输入路径，返回值同为 `ClearComposition`，假绿。
 #[test]
 fn cancel_exits_overlay_mode() {
     if !has_schemas() {
@@ -416,7 +391,7 @@ fn cancel_exits_overlay_mode() {
     assert_eq!(coord.debug_active_mode(), None, "cancel 应退出临时拼音");
 }
 
-/// ★ 无会话时 Tab 不被截走——空闲按 Tab 该是宿主的制表符。
+/// 无会话时 Tab 不被截走——空闲按 Tab 该是宿主的制表符。
 ///
 /// 「有会话归绑定、无会话归原语义」是两张表的分野，这条守的就是那道边界。
 #[test]
@@ -434,11 +409,9 @@ fn cancel_not_triggered_without_session() {
     );
 }
 
-/// ★★ Esc 收敛的回归保护：六处实现合并成 `cancel_session` 后，各模式行为不变。
+/// 各模式 Esc 经 `cancel_session` 退出，行为一致。
 ///
-/// ⚠️ **每个模式都必须先断言进入**。六处 Esc 的返回值本来就都是 `ClearComposition`，
-/// 触发键没生效、按键落回主输入路径时返回值完全相同——不验进入，这条测试在收敛写错的
-/// 情况下照样全绿。这与 `enter_behavior` 那次的假绿是同一个形状。
+/// 每个模式都必须先断言进入：返回值都是 `ClearComposition`，触发键没生效时也相同，不验进入即假绿。
 #[test]
 fn escape_still_exits_each_mode_after_convergence() {
     if !has_schemas() {
@@ -487,11 +460,10 @@ fn escape_still_exits_each_mode_after_convergence() {
 const VK_SEMICOLON: u32 = 0xBA;
 const VK_LCONTROL: u32 = 0xA2;
 
-/// ★★ 两张表的核心场景：**同一个键在两种状态下是两个动作**。
+/// 两张表的核心场景：同一个键在两种状态下是两个动作。
 ///
-/// `;` 出厂既是快捷输入的引导键（`keys.key_actions`，无会话时）又是次选键
-/// （`keys.session_actions`，有会话时）。这不是冲突，正是分表的理由——若两者合成一张表，
-/// 这个配置根本表达不出来。
+/// `;` 出厂既是快捷输入引导键（`keys.key_actions`，无会话时）又是次选键
+/// （`keys.session_actions`，有会话时）；合成一张表就表达不出来。
 #[test]
 fn semicolon_is_mode_trigger_when_idle_and_select_key_when_composing() {
     if !has_schemas() {
@@ -525,11 +497,8 @@ fn semicolon_is_mode_trigger_when_idle_and_select_key_when_composing() {
     }
 }
 
-/// ★ 修饰键选词键（`select_key_groups = ["lrctrl"]` 的折算形态）必须进 keyup 转发集。
-///
-/// 这是 keyup 类绑定唯一的可达性来源——不在白名单里，TSF 根本不发这个 keyup。三期把
-/// 编译入口从 `compile_select_modifier_group` 换成了统一的 `session_actions` 段，本测试
-/// 守的就是「换了入口之后这批键仍然到得了」。
+/// 修饰键选词键（`select_key_groups = ["lrctrl"]` 的折算形态）必须进 keyup 转发集，
+/// 否则 TSF 不发这个 keyup。它们经统一的 `session_actions` 段编译。
 #[test]
 fn modifier_select_key_reaches_key_up_forward_set() {
     let mut cfg = cfg_with(&[]);
@@ -544,7 +513,7 @@ fn modifier_select_key_reaches_key_up_forward_set() {
 
 /// 修饰键选词端到端：有候选时轻敲左 Ctrl 选次选。
 ///
-/// ⚠️ 走 **keyup**——纯修饰键的 keydown 一律放行（吃掉会让 AutoCAD 看不到修饰键）。
+/// 走 keyup——纯修饰键的 keydown 一律放行（吃掉会让 AutoCAD 看不到修饰键）。
 #[test]
 fn modifier_select_key_picks_second_candidate_on_key_up() {
     if !has_schemas() {
@@ -567,7 +536,7 @@ fn modifier_select_key_picks_second_candidate_on_key_up() {
     }
 }
 
-/// z 是会话态表里唯一收进来的字母：**有候选时**按下即执行动作。
+/// z 是会话态表里唯一收进来的字母：有候选时按下即执行动作。
 #[test]
 fn z_selects_third_candidate_when_candidates_shown() {
     if !has_schemas() {
@@ -589,15 +558,10 @@ fn z_selects_third_candidate_when_candidates_shown() {
     }
 }
 
-/// ★★ **空缓冲按 z 必须照常起头组码**，不能被会话态绑定夺走。
+/// 空缓冲按 z 必须照常起头组码，不能被会话态绑定夺走。
 ///
-/// 这是「只加 z」这个决定能成立的**唯一前提**：导航/选词类动词带
-/// `requires_candidates` 守卫，无候选时 `apply_session_action` 返回 `None`，z 落回大
-/// match 的字母臂。这条一旦破了，配过 z 的用户在该方案里再也起不了以 z 开头的码，
-/// 而症状是「按 z 什么都没发生」——与键盘坏了同形。
-///
-/// 对照组不可省：若 `type_until_multipage` 之外 z 本来就打不出候选，上面那个用例
-/// 也会「绿」，因为它只断言了按下之后的事。
+/// 导航/选词类动词带 `requires_candidates` 守卫，无候选时 z 落回字母臂；破了则配过 z 的用户
+/// 起不了以 z 开头的码。也是上一条的对照：只断言按下之后的事时，z 本就打不出候选也会绿。
 #[test]
 fn z_still_starts_composition_when_buffer_empty() {
     if !has_schemas() {
@@ -614,10 +578,7 @@ fn z_still_starts_composition_when_buffer_empty() {
     );
 }
 
-/// 以词定字折算后仍认 `brackets`——该组**不在**选词键组的值域里。
-///
-/// 回归点：两组曾被张冠李戴（用选词键组的解析器解以词定字配置），`brackets` 静默失效。
-/// 收编后两者靠**动词**区分而非靠解析器区分，那类错配从结构上消失了。
+/// 以词定字折算后仍认 `brackets`：该组不在选词键组的值域里，用错解析器会静默失效。
 #[test]
 fn select_char_brackets_still_work_after_fold() {
     if !has_schemas() {
@@ -664,7 +625,7 @@ const VK_UP: u32 = 0x26;
 const VK_DOWN: u32 = 0x28;
 const VK_NEXT: u32 = 0x22; // PageDown
 
-/// 候选被反转排列时（竖排 + 上翻 + `ui.candidate.flip_when_above`），高亮按**屏幕方向**走。
+/// 候选被反转排列时（竖排 + 上翻 + `ui.candidate.flip_when_above`），高亮按屏幕方向走。
 ///
 /// 反转后屏幕从上到下是候选 n..1，此时 ↑ 指向的是候选序的「下一个」。判据本身只有 UI 侧
 /// 算得出（要窗口尺寸 + 屏幕工作区），协调器只镜像 `UiEvent::CandidateFlipped`，故这里
@@ -700,7 +661,7 @@ fn highlight_follows_visual_direction_when_flipped() {
     assert_eq!(coord.debug_page_info().1, 1, "回落为未反转后 ↓ 应重新前进");
 }
 
-/// Tab / Shift+Tab 与 ↑↓ 同属 `highlight_up`/`highlight_down`，反转时**一并翻转**。
+/// Tab / Shift+Tab 与 ↑↓ 同属 `highlight_up`/`highlight_down`，反转时一并翻转。
 ///
 /// 这是刻意选定的行为：两组键绑在同一对动作上，只翻其中一组会让同一个动作出现两种走向。
 #[test]
@@ -723,7 +684,7 @@ fn flip_also_applies_to_tab_bound_highlight() {
     assert_eq!(coord.debug_page_info().1, 0, "反转后 Tab 应走回候选 1");
 }
 
-/// 反向对照：**翻页键不受反转影响**。
+/// 反向对照：翻页键不受反转影响。
 ///
 /// 缺了这条，「一律把四个 NavAction 全部对调」的实现也能让上面两条通过。页与页之间没有
 /// 空间关系（新页在原处整体替换），反转只发生在页内。
