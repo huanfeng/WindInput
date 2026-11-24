@@ -1,6 +1,6 @@
 //! S3 兼容后端：`rusty-s3` 做 SigV4 预签名，`ureq` 发请求。
 
-use super::{new_agent, parse_http_date, parse_iso_date, read_body, send};
+use super::{host_of, new_agent, parse_http_date, parse_iso_date, read_body, send};
 use crate::backend::{Backend, BackendError, ObjMeta};
 use rusty_s3::actions::ListObjectsV2;
 use rusty_s3::{Bucket, Credentials, S3Action, UrlStyle};
@@ -68,7 +68,7 @@ impl S3Backend {
             creds: Credentials::new(cfg.access_key_id.clone(), cfg.secret_access_key.clone()),
             prefix: normalize_prefix(&cfg.prefix),
             page: cfg.list_page_size,
-            agent: new_agent(cfg.proxy_from_env),
+            agent: new_agent(cfg.proxy_from_env, &host_of(&cfg.endpoint)),
         })
     }
 

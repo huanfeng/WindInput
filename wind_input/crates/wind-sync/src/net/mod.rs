@@ -3,6 +3,8 @@
 //! 超时：连接 15 秒、整体 60 秒。不跟随重定向（重定向多半是 URL 写错或 http→https，
 //! 当作错误报出来比悄悄把 PUT 变成 GET 好）。环境代理默认读取（`ALL_PROXY` / `HTTPS_PROXY` / `HTTP_PROXY`，
 //! 支持 http、socks4/4a/5、socks5h），不支持的写法记警告后直连；配置里 `proxy_from_env = false` 可关闭。
+//! 代理按目标主机决定：localhost/回环一律直连，并遵守 `NO_PROXY`（`*`、域名后缀、IP、CIDR，忽略端口）；
+//! 私网地址不强制直连，需要的话写进 `NO_PROXY`。
 
 mod s3;
 mod webdav;
@@ -12,18 +14,22 @@ pub use webdav::{WebDavBackend, WebDavConfig};
 
 use crate::backend::BackendError;
 use std::io::Read;
+use std::net::IpAddr;
 use std::time::Duration;
 
 const MAX_BODY: u64 = 512 * 1024 * 1024;
 
-pub(crate) fn new_agent(proxy_from_env: bool) -> ureq::Agent {
+/// `host` 是目标主机（URL 的 host 部分）：回环地址与 `NO_PROXY` 命中的主机直连，不走代理。
+/// 私网地址（10/8、172.16/12、192.168/16、fc00::/7、169.254/16）不强制直连——用户可能就是要经代理访问，
+/// 只有写进 `NO_PROXY` 才直连。
+pub(crate) fn new_agent(proxy_from_env: bool, host: &str) -> ureq::Agent {
     let mut b = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(15))
         .timeout(Duration::from_secs(60))
         .redirects(0)
         // 代理由下面自行解析：ureq 内置的环境读取会静默丢弃它不认的写法。
         .try_proxy_from_env(false);
-    if proxy_from_env {
+    if proxy_from_env && !bypass_proxy(host, |k| std::env::var(k).ok()) {
         match proxy_from_vars(|k| std::env::var(k).ok()) {
             Ok(Some(p)) => b = b.proxy(p),
             Ok(None) => {}
@@ -31,6 +37,98 @@ pub(crate) fn new_agent(proxy_from_env: bool) -> ureq::Agent {
         }
     }
     b.build()
+}
+
+/// 从 URL 取主机（去掉 IPv6 方括号）；解析失败返回空串。
+pub(crate) fn host_of(url: &str) -> String {
+    url.trim()
+        .parse::<url::Url>()
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.trim_matches(['[', ']']).to_string()))
+        .unwrap_or_default()
+}
+
+/// 目标主机是否应绕过代理：localhost / 回环一律直连，其余按 `NO_PROXY` / `no_proxy`。
+fn bypass_proxy(host: &str, get: impl Fn(&str) -> Option<String>) -> bool {
+    let host = host
+        .trim()
+        .trim_matches(['[', ']'])
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if host == "localhost" || host.ends_with(".localhost") {
+        return true;
+    }
+    let ip: Option<IpAddr> = host.parse().ok();
+    if ip.is_some_and(|a| a.is_loopback()) {
+        return true;
+    }
+    let list = ["NO_PROXY", "no_proxy"]
+        .iter()
+        .find_map(|k| get(k).filter(|v| !v.trim().is_empty()))
+        .unwrap_or_default();
+    list.split(',')
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .any(|e| no_proxy_entry_matches(e, &host, ip))
+}
+
+fn no_proxy_entry_matches(entry: &str, host: &str, ip: Option<IpAddr>) -> bool {
+    if entry == "*" {
+        return true;
+    }
+    let entry = entry.to_ascii_lowercase();
+    // CIDR：只对 IP 目标生效
+    if let Some((net, bits)) = entry.split_once('/') {
+        let (Some(ip), Ok(net), Ok(bits)) = (
+            ip,
+            net.trim_matches(['[', ']']).parse::<IpAddr>(),
+            bits.parse::<u32>(),
+        ) else {
+            return false;
+        };
+        return cidr_contains(net, bits, ip);
+    }
+    // 去端口：`[::1]:80`、`host:80`、`1.2.3.4:80`；裸 IPv6（多个冒号且无括号）原样保留
+    let entry = if let Some(rest) = entry.strip_prefix('[') {
+        rest.split(']').next().unwrap_or("").to_string()
+    } else if entry.matches(':').count() == 1 {
+        entry.split(':').next().unwrap_or("").to_string()
+    } else {
+        entry
+    };
+    if entry.is_empty() {
+        return false;
+    }
+    if let (Some(ip), Ok(e)) = (ip, entry.parse::<IpAddr>()) {
+        return ip == e;
+    }
+    if ip.is_some() {
+        return false; // IP 目标不做域名后缀匹配
+    }
+    let suffix = entry.trim_start_matches('.').trim_start_matches("*.");
+    host == suffix || host.ends_with(&format!(".{suffix}"))
+}
+
+fn cidr_contains(net: IpAddr, bits: u32, ip: IpAddr) -> bool {
+    match (net, ip) {
+        (IpAddr::V4(n), IpAddr::V4(a)) if bits <= 32 => {
+            let mask = if bits == 0 {
+                0
+            } else {
+                u32::MAX << (32 - bits)
+            };
+            u32::from(n) & mask == u32::from(a) & mask
+        }
+        (IpAddr::V6(n), IpAddr::V6(a)) if bits <= 128 => {
+            let mask = if bits == 0 {
+                0
+            } else {
+                u128::MAX << (128 - bits)
+            };
+            u128::from(n) & mask == u128::from(a) & mask
+        }
+        _ => false,
+    }
 }
 
 /// 按 curl 的习惯顺序取第一个非空的代理变量并解析；没有则 `Ok(None)`。
@@ -81,6 +179,84 @@ mod proxy_tests {
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
         move |k| m.iter().find(|(a, _)| a == k).map(|(_, v)| v.clone())
+    }
+
+    fn bypass(host: &str, no_proxy: &str) -> bool {
+        bypass_proxy(host, env(&[("NO_PROXY", no_proxy)]))
+    }
+
+    #[test]
+    fn loopback_always_direct() {
+        for h in [
+            "localhost",
+            "LOCALHOST",
+            "127.0.0.1",
+            "127.1.2.3",
+            "::1",
+            "[::1]",
+            "a.localhost",
+        ] {
+            assert!(bypass_proxy(h, env(&[])), "{h}");
+        }
+    }
+
+    #[test]
+    fn private_not_forced_direct() {
+        for h in [
+            "10.0.0.1",
+            "172.16.5.5",
+            "192.168.1.9",
+            "169.254.1.1",
+            "fd00::1",
+            "nas.lan",
+        ] {
+            assert!(!bypass_proxy(h, env(&[])), "{h}");
+        }
+    }
+
+    #[test]
+    fn no_proxy_star_and_lowercase_var() {
+        assert!(bypass("example.com", "*"));
+        assert!(bypass_proxy(
+            "example.com",
+            env(&[("no_proxy", "example.com")])
+        ));
+        assert!(!bypass("example.com", "  "));
+    }
+
+    #[test]
+    fn no_proxy_domain_suffix() {
+        for e in ["example.com", ".example.com", "*.example.com"] {
+            assert!(bypass("example.com", e), "{e}");
+            assert!(bypass("a.b.example.com", e), "{e}");
+        }
+        assert!(!bypass("badexample.com", "example.com"));
+        assert!(!bypass("example.org", "example.com"));
+        assert!(!bypass("10.0.0.1", "example.com"));
+    }
+
+    #[test]
+    fn no_proxy_ip_cidr_port_and_spaces() {
+        assert!(bypass("192.168.1.5", "192.168.0.0/16"));
+        assert!(!bypass("192.169.1.5", "192.168.0.0/16"));
+        assert!(bypass("10.1.2.3", "foo.com , 10.0.0.0/8 ,"));
+        assert!(bypass("192.168.1.5", "192.168.1.5"));
+        assert!(bypass("192.168.1.5", "192.168.1.5:8080"));
+        assert!(bypass("nas.lan", "nas.lan:5000"));
+        assert!(bypass("fd12::1", "fc00::/7"));
+        assert!(!bypass("fe80::1", "fc00::/7"));
+        assert!(bypass("fd00::1", "fd00::1"));
+        assert!(bypass("fd00::1", "[fd00::1]:80"));
+        assert!(!bypass("nas.lan", "192.168.0.0/16"));
+        assert!(bypass("1.2.3.4", "0.0.0.0/0"));
+    }
+
+    #[test]
+    fn host_extraction() {
+        assert_eq!(host_of("http://127.0.0.1:5000/dav"), "127.0.0.1");
+        assert_eq!(host_of("https://[::1]:9000"), "::1");
+        assert_eq!(host_of("https://NAS.lan/x"), "nas.lan");
+        assert_eq!(host_of("garbage"), "");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! WebDAV 后端：Basic 认证；PROPFIND Depth:1 逐层递归列目录；写入前逐级 MKCOL。
 
-use super::{new_agent, parse_http_date, read_body, send};
+use super::{host_of, new_agent, parse_http_date, read_body, send};
 use crate::backend::{Backend, BackendError, ObjMeta};
 use base64::Engine as _;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
@@ -182,6 +182,7 @@ impl WebDavBackend {
         if !(base.starts_with("http://") || base.starts_with("https://")) {
             return Err(BackendError::Fatal(format!("WebDAV 地址无效: {}", cfg.url)));
         }
+        let agent = new_agent(cfg.proxy_from_env, &host_of(&base));
         let cred = format!("{}:{}", cfg.username, cfg.password);
         Ok(Self {
             base_path: decode(url_path(&base)).trim_matches('/').to_string(),
@@ -190,7 +191,7 @@ impl WebDavBackend {
                 "Basic {}",
                 base64::engine::general_purpose::STANDARD.encode(cred)
             ),
-            agent: new_agent(cfg.proxy_from_env),
+            agent,
             known_dirs: Mutex::new(HashSet::new()),
         })
     }
