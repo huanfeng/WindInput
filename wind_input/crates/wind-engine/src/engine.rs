@@ -178,6 +178,9 @@ pub struct ConvertOptions {
     /// 双拼走击键坐标整句图（内部开关，默认关；环境变量 `WIND_SP_RAW_LATTICE=1` 亦可打开，
     /// 仅内部调试与评测用）。
     pub sp_raw_lattice: bool,
+    /// 歧义键盘（九宫格）的键 → 字母映射；`None` = 普通键盘（默认，电脑端恒为此）。
+    /// 有值时查询串按 [`crate::pinyin::t9`] 的字母表解释，只有拼音引擎认它。
+    pub keypad: Option<std::sync::Arc<crate::pinyin::t9::KeypadMap>>,
     /// 连续辅助码用的辅码表；`None` 或 `is_empty()` = 关闭（默认）。
     pub aux_continuous: Option<std::sync::Arc<dyn AuxCharLookup>>,
     /// 编码栏里辅码前插的分隔符（带辅码候选的 `meta.preedit_split`）；`None` =

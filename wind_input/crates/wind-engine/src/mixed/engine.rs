@@ -374,6 +374,8 @@ impl MixedEngine {
             // 保留子引擎的简拼配额：协调器会重排，补在尾部是安全的。刻意列全字段，见 `overflow_opts`。
             no_abbrev_quota: false,
             sp_raw_lattice: false,
+            // 九宫格只给纯拼音方案：混输的码表侧不认数字键。
+            keypad: None,
             aux_continuous: None,
             aux_preedit_separator: None,
             no_correction_tail: false,
@@ -392,6 +394,8 @@ impl MixedEngine {
             admit: None,
             no_abbrev_quota: false,
             sp_raw_lattice: false,
+            // 九宫格只给纯拼音方案：混输的码表侧不认数字键。
+            keypad: None,
             aux_continuous: None,
             aux_preedit_separator: None,
             no_correction_tail: false,

@@ -28,6 +28,7 @@ pub mod scorer;
 pub mod shuangpin;
 pub mod spelling;
 pub mod syllable;
+pub mod t9;
 pub mod viterbi;
 
 use crate::engine::{BoundaryResolution, ConvertOptions, ConvertResult, Engine, EngineType};
@@ -2617,6 +2618,9 @@ impl Engine for PinyinEngine {
         let mut timer = ConvertStageTimer::new();
         if input.is_empty() {
             return Ok(ConvertResult::default());
+        }
+        if let Some(keypad) = opts.keypad.as_deref() {
+            return Ok(self.convert_keypad(input, max_candidates, keypad));
         }
 
         // ü 拼写归一化（`xv` → `xu`、`nue` → `nve`，见 [`spelling`]）。落在 `raw_input` 之前，
