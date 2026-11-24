@@ -13,8 +13,8 @@
 use crate::comment::VarValue;
 use crate::handle_mode::MixLens;
 use crate::pipeline::{ModeKind, Rewind};
-// 子模块（src/coordinator/ 目录）：这批切片重度访问本模块**私有**字段/函数，
-// 子模块对父私有项可见，平级模块则须放开可见性——归属判据即「是否需要碰私有态」。
+// 子模块（src/coordinator/ 目录）重度访问本模块私有项；归属判据即「是否需要碰私有态」，
+// 不需要的放平级模块。
 mod app_schema;
 mod ctrl_space;
 mod first_show;
@@ -66,12 +66,9 @@ use wind_ui_types::{GlobalHotkeyEntry, UiCommand, UiEvent};
 use wind_ui_types::{ToastKind, ToastPosition};
 use wind_ui_types::{ToolbarItem, ToolbarState};
 
-/// caret_use_top 兼容下保留给「上方显示」避让正文的最小行高（物理像素——宿主上报的
-/// caret rect 本就是物理像素，此处刻意不做 dp 换算，与 `caret_offset_*` 不是同一件事：
-/// 那是用户配置的校正量，这是拿宿主自己上报的物理量兜底，两者单位巧合都叫「像素」但
-/// 出处不同）。微信 reflow 后的权威帧通常上报真实行高（~20px，随 DPI 缩放），直接取用；
-/// 仅退化帧（height=1）落到此下限，保证上方候选窗底边抬到正文之上而不遮挡。偏大只是
-/// 多留空隙，故取一个稳妥的正文行高量级。
+/// caret_use_top 兼容下「上方显示」避让正文的最小行高，物理像素。宿主上报的 caret rect
+/// 本就是物理像素，故不做 dp 换算（与用户配置的 `caret_offset_*` 不同）。只有退化帧
+/// （height=1）落到此下限；偏大只是多留空隙。
 const CARET_USE_TOP_MIN_LINE_H: i32 = 18;
 
 /// direct_commit 顶码余码新组合的 keyup 兜底定时器时长（ms）。见 top-commit-mode 设计文档 §5。
@@ -79,17 +76,9 @@ pub(crate) const DEFERRED_COMPOSITION_FALLBACK_MS: u32 = 150;
 
 /// 「正在建立词库索引…」提示延后多久才弹（见 `Coordinator::spawn_index_warm`）。
 ///
-/// 索引自 2026-08-24 起落盘为 `.wridx`，于是同一件事有两种量级完全不同的结果：
-/// **复用磁盘缓存约几十毫秒**（feihuzj2 251 万词实测 47.8ms），冷建才是秒级。
-/// 无条件先弹提示就等于给一次根本不存在的等待配了个说明，用户看到的是
-/// 「明明该直接 mmap，怎么还在建索引」。
-///
-/// 判据刻意选「**慢不慢**」而不是「**要不要做事**」：慢不慢不需要预测，到点还没干完
-/// 就是真慢。预测式的做法（先问缓存新不新鲜）得在协调器里复刻一份
-/// `build_reverse_index_for` 的判定，那正是本仓反复吃亏的「同一份推导写两处」。
-///
-/// 取值：明显长于复用（几十毫秒）、又明显短于冷建（秒级），且落在「用户开始觉得卡」
-/// 的门槛附近。
+/// 索引落盘为 `.wridx` 后，复用缓存只需几十毫秒，冷建才是秒级，故不无条件弹提示。
+/// 判据选「到点还没干完」而不是预先判断缓存是否新鲜：后者得在协调器里复刻一份
+/// `build_reverse_index_for` 的判定。取值介于复用与冷建之间，约在「开始觉得卡」的门槛。
 const INDEX_TOAST_DELAY: std::time::Duration = std::time::Duration::from_millis(400);
 
 /// toast 默认显示时长。`ui.toast(ms=…)` 与配置语法错误那条（8s）各自覆盖。
@@ -104,11 +93,9 @@ fn dp_offset_to_pixels(dx_dp: i32, dy_dp: i32, scale: f32) -> (i32, i32) {
     )
 }
 
-/// `apply_caret_compat` 里 dx/dy≠0 分支的完整落地逻辑（含 composition_start 同步平移），
-/// 抽成接受显式 `scale` 的自由函数，好在不依赖 `dpi_scale_for_point`（`cfg(test)` 下恒
-/// 1.0）的前提下，直接用非 1.0 的 scale 单测「dp 换算确实接进了这条变换」——`dp_offset_to_pixels`
-/// 只验证换算数学本身，不证明它真被这里调用；两者故意分成两条覆盖面（2026-08-17 code
-/// review 指出的 test-wiring gap）。
+/// `apply_caret_compat` 里 dx/dy≠0 分支的落地逻辑（含 composition_start 同步平移）。
+/// 接受显式 `scale`，好用非 1.0 的值单测「dp 换算确实接进了这条变换」（`dpi_scale_for_point`
+/// 在 `cfg(test)` 下恒 1.0）。
 fn apply_dp_offset(data: &mut CaretData, dx_dp: i32, dy_dp: i32, scale: f32) {
     let (px_dx, px_dy) = dp_offset_to_pixels(dx_dp, dy_dp, scale);
     data.x += px_dx;
@@ -123,16 +110,11 @@ fn apply_dp_offset(data: &mut CaretData, dx_dp: i32, dy_dp: i32, scale: f32) {
 
 /// 取屏幕点 (x, y) 所在显示器的有效 DPI 缩放（96dpi = 1.0）。
 ///
-/// 非 Windows 平台回退 1.0 是**语义正确**而非「还没实现」：本仓 macOS 端的屏幕坐标口径
-/// 本就是点（point），dp 与点在 1x/Retina 下始终 1:1（Retina 的物理像素放大在別处的
-/// backing scale 里处理，不影响这层点坐标），故 1.0 无需再查。⚠️ 不要照抄 `wind-ui/src/dpi.rs`
-/// 给这里补一条 `CGDisplay` Retina 分支——那是候选窗渲染用物理像素定尺寸，跟这里「点/dp
-/// 之间无缩放」不是同一个问题，抄错了 macOS 会双重缩放。Windows 上失败（`GetDpiForMonitor`
-/// 出错）同样回退 1.0，此时才是真的「查不到就当没有」。
+/// 非 Windows 回退 1.0 是语义正确的：macOS 端屏幕坐标本就是点，dp 与点恒 1:1。别照抄
+/// `wind-ui/src/dpi.rs` 补 Retina 分支，那是渲染用物理像素定尺寸，抄过来会双重缩放。
+/// Windows 上查询失败也回退 1.0。
 ///
-/// `cfg(test)` 下强制回退 1.0：`cargo test` 可能在开发者本机的真实高 DPI 屏幕上跑，
-/// 若测试也走真实 `GetDpiForMonitor`，断言的期望坐标会随本机屏幕缩放而漂移——同一条测试
-/// 换台机器就变红。真实换算逻辑收在 [`dp_offset_to_pixels`] 里单独用显式 scale 值测。
+/// `cfg(test)` 下恒 1.0，免得断言随开发机屏幕缩放漂移；换算逻辑由 [`dp_offset_to_pixels`] 单测。
 #[cfg(all(windows, not(test)))]
 fn dpi_scale_for_point(x: i32, y: i32) -> f32 {
     use windows::Win32::Foundation::POINT;
@@ -170,9 +152,7 @@ pub(crate) fn process_name(pid: u32) -> String {
     unsafe {
         let handle = match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
             Ok(h) => h,
-            // ★ 提权进程（任务管理器、注册表编辑器、以管理员身份运行的任何程序）在这里
-            //   必定 ACCESS_DENIED：本服务是中完整性，目标是高完整性，`PROCESS_QUERY_
-            //   LIMITED_INFORMATION` 也过不去。走快照兜底，见 process_name_via_snapshot。
+            // 提权进程（高完整性）在这里必定 ACCESS_DENIED，走快照兜底。
             Err(_) => return process_name_via_snapshot(pid),
         };
         let mut buf = [0u16; MAX_PATH as usize];
@@ -192,19 +172,11 @@ pub(crate) fn process_name(pid: u32) -> String {
     }
 }
 
-/// 进程名兜底：系统进程快照。**只在 `OpenProcess` 失败时调用**。
+/// 进程名兜底：系统进程快照，只在 `OpenProcess` 失败时调用。
 ///
-/// 为什么需要它：`OpenProcess` 需要对目标进程持句柄权限，跨完整性级别（本服务中完整性 →
-/// 提权进程高完整性）一律拒绝。而快照 API 只是读系统进程表，不需要对任何进程有权限，
-/// 提权进程的映像名照样读得到。
-///
-/// 实测症状（用户报告，2026-08-18）：任务管理器聚焦时进程名取空 ⇒ 匹配不到任何
-/// per-app 规则、`mode_scope` 也无从推进 ⇒ 沿用上一个应用（常常是桌面）的英文策略，
-/// 表现为「任务管理器套上了桌面的配置」。取空与「这个进程确实没配规则」在日志里同形，
-/// 是这个缺陷难以归因的原因，故失败时补一条 WARN。
-///
-/// 代价：一次全系统进程枚举（实测数百微秒到数毫秒）。正常路径永不触发；且调用方
-/// (`cached_proc_name`) 缓存优先，同一 pid 至多走一次。
+/// `OpenProcess` 跨完整性级别（中完整性服务 → 提权进程）一律被拒，快照只读进程表、不需要权限。
+/// 取空会让 per-app 规则与 `mode_scope` 都失效、沿用上一个应用的配置，且在日志里与「没配规则」
+/// 同形，故失败时打 WARN。代价是一次全系统枚举；调用方 `cached_proc_name` 缓存优先，同一 pid 至多一次。
 #[cfg(windows)]
 fn process_name_via_snapshot(pid: u32) -> String {
     use windows::Win32::Foundation::CloseHandle;
@@ -266,18 +238,12 @@ pub(crate) const ENGINE_MAX_CANDIDATES: usize = 50;
 
 /// 临时拼音（overlay 模式）向拼音引擎取数的上限。
 ///
-/// **为什么这里可以直接取全量、而主路径要分批**：拼音引擎的 `max_candidates` 只用于最后
-/// 一步 `truncate`，召回/整句/排序全是全量做的（见 `pinyin/mod.rs`）。实测 `yi` 取 50 与取
-/// 5000 的耗时（6.2ms vs 6.4ms）与峰值内存（778KB）**完全相同**——小 limit 省不到任何成本，
-/// 只是把已构造好的候选丢掉。而临拼**没有翻页扩容通路**（`expand_candidates` 的守卫比对的是
-/// `input_buffer`，临拼的码在 `temp_pinyin_buffer` 里），一次取不全就永远取不到：
-/// 这正是「临拼下 `ying` 打不出「瑩」（该字在第 158 位）」的成因。
+/// 拼音引擎的 `max_candidates` 只用于最后一步 `truncate`，召回与排序本就是全量做的，
+/// 小 limit 省不下成本。而临拼没有翻页扩容通路（`expand_candidates` 守卫比对的是
+/// `input_buffer`），一次取不全就永远翻不到，故取全量；拼音候选上界约千条，5000 留足余量。
 ///
-/// 取全量后翻页天然可穷尽——翻页只是对 `state.candidates` 切片，无需重新查询。
-/// 实测拼音候选上界为 916（`yi`），5000 留足余量。
-///
-/// ⚠️ **该值只对拼音类引擎安全**。码表单字母候选可达 5472 条（`r`），取全量峰值 34.9MB、
-/// 耗时 39.6ms，绝不可用；故取数前须按目标方案的引擎类型分流（见 `temp_pinyin_limit`）。
+/// 该值只对拼音类引擎安全：码表单字母候选可达数千条、取全量代价明显，须按引擎类型分流
+/// （见 `temp_pinyin_limit`）。
 pub(crate) const TEMP_PINYIN_MAX_CANDIDATES: usize = 5000;
 
 /// 自动造词（L）写入临时层的初始权重（保守默认，低于手动加词；后续可接 schema.learning 配置）。
@@ -295,14 +261,9 @@ const _: () =
 /// 自提交宽限期：本输入法吐字后这段时间内收到的 `SelectionChanged` 视为宿主回声，
 /// 不当作用户移动光标（见 `handle_selection_changed`）。
 ///
-/// **已由真机日志校准**（2026-07-20，记事本/Chrome/EverEdit 混合样本 n≈280）：
-/// - 自提交回声：3.6 ~ 10.7ms，离群值 62.9ms / 78.9ms
-/// - 用户真实光标移动：最小 322.8ms，其余 453ms / 828ms / 1.4s / 70s
-///
-/// 两类之间 79ms→323ms 是一段空白，200ms 落在正中，上下均有 2.5 倍以上余量。
-/// 取值过小 → 回声被误判为用户操作，序列被切碎、造词失效；取值过大 → 用户上屏后
-/// 短时间内的真实光标移动漏掉一次终止（由 idle 超时兜底）。
-/// 重新校准方法：把 `handle_selection_changed` 的 TRACE 打开，重跑分布。
+/// 真机日志里回声都在 80ms 内，用户真实移动光标最快也在 300ms 以上，200ms 落在空白区正中。
+/// 过小则回声被当成用户操作、造词序列被切碎；过大则漏掉一次终止（由 idle 超时兜底）。
+/// 重新校准：打开 `handle_selection_changed` 的 TRACE 看分布。
 pub(crate) const SELF_COMMIT_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// 首显长兜底：坐标不可信时等待权威坐标的上限。
@@ -311,16 +272,13 @@ pub(crate) const SELF_COMMIT_GRACE: std::time::Duration = std::time::Duration::f
 /// - `handle_caret_pending`：宿主明说「组合刚起、坐标待定」（`wait` 档）；
 /// - `fire_pending_first_show`：`fast` 档短兜底到期，但坐标缓存未经当前插入点验证。
 ///
-/// 取值来自 `wait` 档既有行为（长期作默认档，用户未反馈过「候选窗要等半秒」）。实测
-/// Excel 首次输入建单元格编辑上下文需 454ms、真坐标 558ms 到达，是已知最慢的一档。
+/// 已知最慢的宿主是 Excel 首次输入（建单元格编辑上下文后真坐标约 560ms 才到）。
 pub(crate) const FIRST_SHOW_LONG_FALLBACK_MS: u64 = 600;
 
 /// 尚未从宿主观测到可靠行高时的保守下限，单位 px。见 [`Coordinator::last_sane_caret_height`]。
 ///
-/// 只用于两个**容差**计算（settle 的偏差吸收、组合起点重锁阈值），不参与任何定位。取值比
-/// 常见正文行高（20~55px）小，但足够让容差脱离 3px 那个下限——偏小会让容差偏紧（多校正
-/// 几次，观感上多跳一下），偏大只会多吸收几像素微移，两个方向都不致命；而塌到 1px 会让
-/// 两个消费点同时失效，那是已经踩过的故障。
+/// 只用于两个容差计算（settle 的偏差吸收、组合起点重锁阈值），不参与定位。偏小多跳一下、
+/// 偏大多吸收几像素，都不致命；塌到 1px 会让两处容差同时失效。
 pub(crate) const FALLBACK_LINE_HEIGHT: i32 = 16;
 
 /// 当前 unix 秒（拼音衰减分以此对 last_used 计龄；与 store record_freq 同口径）。
@@ -341,8 +299,8 @@ pub(crate) const FILTER_MODES: [(wind_candidate::FilterMode, &str); 3] = [
 
 /// 单字输入开 / 关的状态泡文案。
 ///
-/// ⚠️ 与 [`FILTER_MODES`] 是两件事：那三档是检索范围（按字符常用度），本项是单字输入
-/// （按候选长度），两根轴正交、可同时生效。并进同一个菜单会让用户以为它们互斥。
+/// 与 [`FILTER_MODES`]（检索范围，按字符常用度）正交、可同时生效，别并进同一菜单，
+/// 否则用户会以为两者互斥。
 const SINGLE_CHAR_TIPS: (&str, &str) = ("单字输入 开", "单字输入 关");
 
 /// 重启信号通道（对齐 Go restartRequestCh）：菜单"重启服务"→ main 重拉进程。
@@ -397,21 +355,19 @@ pub(crate) fn settings_app_path() -> Option<String> {
 
 /// 组合区「逐步转换」已确认的一段（拼音专属；码表选词消费整串、绝不进入此态）。
 ///
-/// 此前是个五元组，`(raw_code, _, _, _, _)` 这样的解构在文件里到处都是；加第六个成员
-/// （`learn`）之后可读性撑不住，改成具名结构体。字段语义与旧元组逐位一一对应。
 #[derive(Debug, Clone)]
 pub(crate) struct CommittedSeg {
-    /// **原始输入空间**的消费码（双拼下是击键 `hc`）。退格回退（`pop_*_seg`）把它并回
+    /// 原始输入空间的消费码（双拼下是击键 `hc`）。退格回退（`pop_*_seg`）把它并回
     /// 输入缓冲，故必须与缓冲同域。
     pub(crate) raw_code: String,
-    /// **全拼语义**码（`hao`）。词频记账用它，`boundary` 的位移量按它的 `len()` 算。
+    /// 全拼语义码（`hao`）。词频记账用它，`boundary` 的位移量按它的 `len()` 算。
     pub(crate) code: String,
     pub(crate) text: String,
     pub(crate) source: CandidateSource,
     /// 该段 `code` 的音节边界。段自身可能是多音节整词（选「你好」→ 段码 nihao、
     /// 段内边界 ni|hao），故自动造词拼接各段时须把段内边界平移到全局位置。
     pub(crate) boundary: u64,
-    /// **造词专用**的规范词条码与其边界；`None` = 就用 `code`/`boundary`。
+    /// 造词专用的规范词条码与其边界；`None` = 就用 `code`/`boundary`。
     ///
     /// 只有模糊音命中会让两者分家（用户敲 `senri`、词典里是 `shengri`）。`code` 必须留
     /// 用户那份——它绑着 `consumed_length` 的 `starts_with` 判据、preedit 跟随与词频记账；
@@ -452,12 +408,8 @@ pub(crate) struct AltTrack {
     pub dirty: bool,
 }
 
-/// ⚠️ `Default` **只在测试构建下存在**（`cfg_attr(test, ...)`）。
-///
-/// 生产侧一律走 `Coordinator::new` 里的显式构造：那里每个字段的初值都有来历
-/// （`chinese_mode` 取配置、`toolbar_visible` 取配置、`ime_active` 必须为 false 等），
-/// 而 `Default` 会把它们全给成零值。放开给生产用，早晚有人用它造出一个
-/// 「中文模式关着、工具栏不显示」的状态，且完全不报错。
+/// `Default` 只在测试构建下存在。生产侧一律走 `Coordinator::new` 的显式构造：那里每个
+/// 字段的初值都有来历（取配置、`ime_active` 须为 false 等），零值会静默造出错误状态。
 #[cfg_attr(test, derive(Default))]
 pub(crate) struct State {
     pub(crate) chinese_mode: bool,
@@ -465,99 +417,58 @@ pub(crate) struct State {
     pub(crate) chinese_punct: bool,
     /// 插入点前一字符的类别——中英/中数间补空格与英文后智能标点的「上一笔」。
     ///
-    /// 两个写入点（见 `crate::auto_spacing`）：无输入会话时的 keydown 按客户端 `seq_char`
-    /// 重新锁存；服务端每发出一笔上屏就改成那笔的末字符。组合中的后续按键不改它——组字键
-    /// 没写进文档，真正的「前一字符」是组合开始时那个。
+    /// 写入点见 `crate::auto_spacing`：无输入会话时的 keydown 按客户端 `seq_char` 重新锁存；
+    /// 每发出一笔上屏改成其末字符。组合中的按键不改它（组字键没写进文档）。
     pub(crate) spacing_prev: wind_punct::spacing::CharClass,
-    /// 方案级行为覆盖已落地到的**活跃方案代际**（`EngineManager::schema_generation`）。
-    ///
-    /// 见 `docs/design/schema-scoped-behavior.md` §4。初值是哨兵 `u64::MAX`，保证首次
-    /// `sync_schema_scope` 必然执行一次——用 0 的话它恰好等于代际初值，启动时方案声明的
-    /// `[punct]` 就永远落不下去（且完全静默）。
+    /// 方案级行为覆盖已落地到的活跃方案代际（`EngineManager::schema_generation`），
+    /// 见 `docs/design/schema-scoped-behavior.md` §4。初值用哨兵 `u64::MAX` 保证首次
+    /// `sync_schema_scope` 必执行；用 0 会恰好等于代际初值，启动时方案的 `[punct]` 静默落不下去。
     pub(crate) schema_scope_gen: u64,
-    /// 被方案级 `[punct]` 覆盖**之前**的标点态。`None` = 当前没有方案在覆盖它。
+    /// 被方案级 `[punct]` 覆盖之前的标点态。`None` = 当前没有方案在覆盖它。
     ///
-    /// # 为什么标点需要它而布局不需要
-    ///
-    /// 布局的基线是 `candidate_vertical` 镜像，方案意图不写它，`Follow` 每次重算时自然
-    /// 回落到基线。标点没有这样一层：`state.chinese_punct` 既是当前值又是唯一存储，
-    /// 被英文方案覆盖成 `false` 之后，切回一个 `Follow`（= 不干预）的方案时就**没有可回落
-    /// 的原值**——真机现象是「从五笔切到英文，标点变英文；切回五笔，标点还是英文」。
-    ///
-    /// # 这不是被否决的那种「保存 / 回放」
-    ///
-    /// 被否决的是「进入模式时保存、在 8 个清空点各写一遍恢复」那种形态。这里保存与恢复
-    /// **都在 `sync_schema_scope` 一个函数里**，由代际驱动、幂等、代际不变就不动，
-    /// 没有任何分散的恢复点可漏。
+    /// 布局不需要它，因为方案意图不写布局基线；标点则只有 `state.chinese_punct` 一份存储，
+    /// 被覆盖后切回 `Follow` 方案时没有可回落的原值。保存与恢复都在 `sync_schema_scope`
+    /// 一处，由代际驱动、幂等，不是分散在各清空点的「保存 / 回放」。
     pub(crate) punct_before_schema: Option<bool>,
-    /// 候选布局的**本代际手动覆盖**（`Some(true)` = 用户在本方案期间手动切成了竖排）。
+    /// 候选布局的本代际手动覆盖（`Some(true)` = 用户在本方案期间手动切成了竖排）。
     ///
-    /// 只在方案声明了非 `Follow` 的 `[candidate] layout` 时才会被写入——方案没意见时
-    /// 命令栏切换照旧改全局基线并写盘（那才是用户要的「全局改方向」）。
-    /// 随 `schema_scope_gen` 变化清空：切走再切回，回到方案意图。
+    /// 只在方案声明了非 `Follow` 的 `[candidate] layout` 时写入；方案没意见时命令栏切换照旧
+    /// 改全局基线并写盘。随 `schema_scope_gen` 变化清空：切走再切回，回到方案意图。
     pub(crate) layout_manual: Option<bool>,
     /// 简繁转换开关（运行时切换；commit 时把简体输出转繁体）
     pub(crate) s2t_enabled: bool,
     /// 繁简转换开关（运行时切换；commit 时把繁体输出转简体）。给「词库是繁体、
-    /// 想打繁体出简体」的用户。与 [`Self::s2t_enabled`] **互斥**，见
+    /// 想打繁体出简体」的用户。与 [`Self::s2t_enabled`] 互斥，见
     /// `Coordinator::toggle_conversion_direction`。
     pub(crate) t2s_enabled: bool,
     /// 检索范围过滤模式（smart/general/gb18030；运行时切换）
     pub(crate) filter_mode: wind_candidate::FilterMode,
-    /// 检索范围的**临时**放宽（手动触发：末页再按翻页键 / 专用热键）。
+    /// 检索范围的临时放宽（手动触发：末页再按翻页键 / 专用热键），
     /// 设计见 `docs/design/smart-filter-scope-relax.md` §5。
     ///
-    /// **只在内存、绝不写配置**——这是与 `set_filter_mode` 的关键区别，后者会持久化到
-    /// `input.filter_mode`。本次组合结束（缓冲清空）即失效，失效收口在
-    /// `handle_key_event_policed`（清空路径十几处，散点接线必漏）。
-    ///
-    /// 放宽时把**全部**被滤候选带 `is_scope_filtered` 标记**追加到末尾**，与自动补充同一
-    /// 呈现方式（区别只在补多少：自动补到一页、手动放全部）。
-    ///
-    /// ⚠️ 曾设计成「按真实顺序插入，与菜单切『全部字符』所见一致」，**已否决**：翻页是线性
-    /// 前进的动作，翻到末尾再翻却让新字插到第 1 页（实测 `dwi` 的字权重 8999 占三简位，正好
-    /// 排到第 1 页第 2 位），视口要么跳回页首、要么原地不动，两种都突兀。菜单切换是全局持久
-    /// 的换档，末页翻页是临时的渐进探索——语义不同，不必对齐呈现。
+    /// 只在内存、不写配置（与持久化的 `set_filter_mode` 相反）。本次组合结束即失效，收口在
+    /// `handle_key_event_policed`（清空路径十几处，散点接线必漏）。放宽时把全部被滤候选带
+    /// `is_scope_filtered` 标记追加到末尾，不按真实顺序插入：翻页是线性前进，新字插回第 1 页
+    /// 会让视口跳回或原地不动。
     pub(crate) scope_relaxed: bool,
-    /// 单字输入的**运行时临时态**（热键 / 工具栏 / 托盘切换的结果）。
+    /// 单字输入的运行时临时态（热键 / 工具栏 / 托盘切换的结果）。
     ///
-    /// `None` = 用户本次没切过，走配置层（码表：方案级 `[engine.codetable] single_char`
-    /// → 全局 `schema.codetable.single_char`；拼音：全局 `schema.pinyin.single_char` 一份）。
-    /// 取值收口在 [`Coordinator::effective_single_char`]。
+    /// `None` = 本次没切过，走配置层（码表：方案级 `[engine.codetable] single_char` → 全局
+    /// `schema.codetable.single_char`；拼音：全局 `schema.pinyin.single_char`）。取值收口在
+    /// [`Coordinator::effective_single_char`]：本字段压过一切配置层，只让位于「英文引擎恒
+    /// `All`」这条不变量（`Char` 档会把英文候选全滤光）。
     ///
-    /// # 只在内存，绝不写配置（2026-09-07 用户拍板）
-    ///
-    /// 与 `scope_relaxed` 同族、与 `set_filter_mode` 相反：后者切一次就写回
-    /// `input.filter_mode`。这里不写盘的直接好处是**不必碰 `schema_overrides/{id}.toml`
-    /// 那条写盘链**（本项是方案级配置，持久化就得往那儿写，还要登记 `SideCommitter`
-    /// 并处理「设置页正开着时被后台改写」）。
-    ///
-    /// # ★ 它压过**配置**的一切层级，但压不过引擎不变量
-    ///
-    /// 配置层按当前引擎分流（码表/混输一份、拼音一份，见
-    /// [`wind_config::schema::CodeTableSpec::single_char`]）；本字段是「用户此刻的意图」
-    /// ——他刚按下热键，就该立刻生效，不该再问一遍这个码归哪个方案的数据管。
-    ///
-    /// **唯一压得过它的是「英文引擎恒 `All`」**：那是不变量不是默认值（`Char` 档会把
-    /// 英文候选全滤光），故那道判据问在本字段之前。见 `effective_single_char`。
-    ///
-    /// # 失效点：切方案时清空
-    ///
-    /// 收口在 `sync_schema_scope`（代际驱动，与 `punct_before_schema` 同批）——它是本仓
-    /// 唯一能覆盖全部五条切方案路径的地方，命令式地在切方案处逐个清必然漏接。
-    /// ⚠️ 与 `scope_relaxed` 的失效点**刻意不同**：那个按「缓冲清空」失效（一次组合内
-    /// 的探索），本项要跨组合保持到用户切走方案为止。
+    /// 只在内存、不写盘，免得碰 `schema_overrides/{id}.toml` 那条写盘链。切方案时清空，收口在
+    /// `sync_schema_scope`（唯一覆盖全部切方案路径的地方）；与 `scope_relaxed` 按缓冲清空失效
+    /// 刻意不同，本项要跨组合保持。
     pub(crate) single_char_override: Option<bool>,
     /// 用户是否开启常驻工具栏（菜单开关；与“当前是否激活”正交）。
     pub(crate) toolbar_visible: bool,
     /// 本输入法当前是否处于激活态：IME_ACTIVATED/FocusGained 置真；
-    /// IME_DEACTIVATED（切换输入法）与 FocusLost 的 `Thread` reason（整个应用失去前台，
-    /// 含“每应用独立输入法”下切到别的输入法的应用）置假。
+    /// IME_DEACTIVATED（切换输入法）与 FocusLost 的 `Thread` reason（整个应用失去前台）置假。
     ///
-    /// ⚠ 本字段只表达「本输入法是否在为某个宿主服务」，**不表达「焦点在不在可编辑控件
-    /// 里」**——后者是 [`Self::has_edit_context`]。两者变化时机不同（前者随应用切换，
-    /// 后者随控件切换），曾经挤在这一个布尔量里，导致应用内点到非文本框时无法表达，
-    /// 工具栏永不隐藏（实测 LogExpert / 文件管理器，2026-07-26）。
+    /// 只表达「本输入法是否在为某个宿主服务」，不表达焦点是否在可编辑控件里——那是
+    /// [`Self::has_edit_context`]，两者变化时机不同，合成一个量会让工具栏永不隐藏。
     pub(crate) ime_active: bool,
     /// 焦点当前是否落在可编辑控件里。focus_gained 置真；FocusLost 的 `CtxLost` /
     /// `NoEditCtx` / `Thread` reason 置假（`DocChanged` 不动——换文档后由随后的
@@ -566,57 +477,37 @@ pub(crate) struct State {
     /// 与 [`Self::ime_active`] 正交：应用还在前台、输入法仍激活，但焦点可能落在
     /// 不可输入的地方（文件列表、日志面板），此时工具栏应当隐藏。
     pub(crate) has_edit_context: bool,
-    /// 「焦点确实落在一个**没有可编辑上下文**的文档上」——比 `has_edit_context` 权威。
+    /// 「焦点确实落在一个没有可编辑上下文的文档上」，比 `has_edit_context` 权威。
     ///
-    /// ⚠ 两者的差别是**信号权威度**，不是又多了一个负责者：
-    /// · `has_edit_context` 被 `CtxLost`（DocMgr 级失焦）置假。那是**噪声层**——它回答的是
-    ///   「DocMgr 走了」，不是「用户进了不可输入的地方」。用于工具栏可见性没问题：翻错了
-    ///   UI 层 50ms 防抖能吸收，漏隐藏的代价也只是碍眼。
-    /// · 本字段只由两个**权威**信号改写：`focus_lost(NoEditCtx)`（DLL 判定新文档确实没有
-    ///   可编辑上下文）与 `focus_gained`（有可编辑上下文才会发）。
-    ///
-    /// 为什么必须分开：语言栏图标是持续可见的全局指示，误显「英」很刺眼，代价与工具栏
-    /// 完全不对称。实测（2026-08-18）用 `has_edit_context` 驱动图标的后果——
-    ///   `handle_focus_lost reason=CtxLost` → 200ms 后 `input_block → NoEditContext` → 图标变「英」，
-    /// 而那次焦点根本没离开可编辑控件。这正是 C++ 那版最终学会的事（只在 gaining 分支
-    /// 推进状态），我把判定收归 Rust 时**没有把这条一起带过来**。
-    ///
-    /// ⚠ 后续（同日）：本字段仍然维护，但 `InputBlock::NoEditContext` 已**不再让图标显英**
-    /// （见 `shows_english`）——即使只由权威信号驱动，它在 Electron 类宿主上也是每分钟
-    /// 数次的日常事件。字段保留是因为 tooltip 与未来的权威状态上报仍要用它。
+    /// `has_edit_context` 会被 `CtxLost`（DocMgr 级失焦，噪声层）置假，驱动工具栏可以，翻错了
+    /// 有 UI 防抖吸收。本字段只由权威信号改写：`focus_lost(NoEditCtx)` 与 `focus_gained`，
+    /// 供语言栏图标这类误显代价高的全局指示使用。`InputBlock::NoEditContext` 已不让图标显英
+    /// （见 `shows_english`）；字段保留供 tooltip 与权威状态上报。
     pub(crate) focus_no_edit_ctx: bool,
     pub(crate) caps_lock: bool,
-    /// **本次按键**是否来自小键盘（原始键码在 `numpad_to_main` 覆盖内）。
+    /// 本次按键是否来自小键盘（原始键码在 `numpad_to_main` 覆盖内）。
     ///
-    /// 存在的唯一理由是 `numpad_behavior = follow_main` 会在 `handle_key_event` 入口
-    /// 把 `VK_NUMPAD2` **改写成** `VK_2`，此后全部下游再也分不出这键来自哪块键盘，
-    /// 而 `input.numpad_half_width` 恰恰要在**出字那一步**知道来源。
-    ///
-    /// ⚠️ 每次 `handle_key_event` 拿到锁后**无条件写入**（不是「只在为真时置位」），
-    /// 否则会留下上一次按键的陈旧值。读它的地方只有出字点，见
-    /// [`Coordinator::numpad_raw_output`]。
+    /// `numpad_behavior = follow_main` 会在 `handle_key_event` 入口把 `VK_NUMPAD2` 改写成
+    /// `VK_2`，下游再分不出来源，而 `input.numpad_half_width` 要在出字时知道。每次拿到锁后
+    /// 无条件写入，否则留下上一键的陈旧值。读点见 [`Coordinator::numpad_raw_output`]。
     pub(crate) numpad_origin: bool,
     pub(crate) input_buffer: String,
     /// `input_buffer` 的「原始大小写」影子串：用户按 Shift+字母打出的大写只存在这里。
     /// 空 = 没有大写；与缓冲失配同样视为没有大写（见 `preedit_cursor::cased_is_valid`）。
     ///
-    /// **缓冲本身恒为全小写**——引擎查询、顶码判定、词频记账、加词取码一律按它，大小写对
-    /// 匹配零影响。本字段只出现在两个出口：组合区显示，以及「上屏原码」（回车/空格空码/
-    /// 标点顶屏）。读写走 `preedit_cursor::BufEdit::new_cased`，勿裸改。
+    /// 缓冲本身恒为全小写，引擎查询、顶码、词频、加词一律按它。本字段只用于组合区显示与
+    /// 「上屏原码」（回车/空格空码/标点顶屏）。读写走 `preedit_cursor::BufEdit::new_cased`。
     pub(crate) input_buffer_cased: String,
     /// 英文候选的大小写档位（CapsLock 在英文输入态循环切换，见
-    /// `input.capslock.english_case_cycle`）。**一次组合结束即复位**。
-    ///
-    /// ⚠️ 复位点与 `input_buffer_cased` 的清空点是同一批（组合结束的四条路）——
-    /// 新增任何一个清空点都要同步复位它，否则「上一个词按出来的全大写档」会串到下一个词。
+    /// `input.capslock.english_case_cycle`）。一次组合结束即复位，复位点与
+    /// `input_buffer_cased` 的清空点是同一批；新增清空点漏复位，大写档会串到下一个词。
     pub(crate) english_case_variant: crate::english_candidates::CaseVariant,
     /// 编码区光标：`input_buffer` 内的字节偏移，定义域 `[0, input_buffer.len()]`。
-    /// 恒指向剩余编码内部——已转换前缀（`committed_text`）是只读前缀，光标进不去（Home 只到
-    /// 剩余编码开头）。光标**不参与引擎查询**：`update_candidates` 恒查整串，移动光标不重算
-    /// 候选（对齐 Go `inputCursorPos`）。所有读写走 `preedit_cursor::BufEdit`，勿裸改。
+    /// 进不了已转换前缀（`committed_text`）。光标不参与引擎查询：`update_candidates` 恒查
+    /// 整串，移动光标不重算候选。读写走 `preedit_cursor::BufEdit`。
     pub(crate) input_cursor_pos: usize,
-    /// 手机端展开页「首单元读法」的当前选择（见 [`crate::leading_reading`]）：只对**记录它时的那份
-    /// 缓冲**有效——缓冲一变（打字、退格、选词吃掉前缀）就自动失效，不用在十几处清缓冲的地方逐个复位。
+    /// 手机端展开页「首单元读法」的当前选择（见 [`crate::leading_reading`]）：只对记录它时的那份
+    /// 缓冲有效——缓冲一变（打字、退格、选词吃掉前缀）就自动失效，不用在十几处清缓冲的地方逐个复位。
     pub(crate) leading: Option<crate::leading_reading::Applied>,
     /// 组合区显示文本（拼音含音节分隔 "ni'hao"；码表为原始编码）。
     /// 仅显示输入码/拼音，绝不包含候选列表。
@@ -625,44 +516,35 @@ pub(crate) struct State {
     /// 拆分串；高亮码表/五笔候选 → 用原始码（input_buffer）。空串 = 无拆分形态（码表/无拼音，
     /// 恒原始码）。每次 build_candidates 重置；非普通模式（active!=None）不读取。
     pub(crate) preedit_split_body: String,
-    /// **全拼降级**的音节拆分形态（双拼方案下把击键按全拼切分，`zaijian` → `zai'jian`）。
+    /// 全拼降级的音节拆分形态（双拼方案下把击键按全拼切分，`zaijian` → `zai'jian`）。
     /// 高亮到 `is_fullpinyin_fallback` 的候选时 preedit 用它；其余情形不读。
     /// 空串 = 无此形态（非双拼 / 开关关 / 支路无产出）。每次 build_candidates 重置。
     pub(crate) preedit_fp_body: String,
-    /// **简拼分段**形态（把击键按简拼候选的音节序列切开，`wbwn` → `w'b'w'n`）。
-    /// 高亮到 `is_abbrev` 的候选时 preedit 用它；其余情形不读。
-    /// 空串 = 无此形态（非双拼 / 无简拼候选）。每次 build_candidates 重置。
-    ///
-    /// 只有双拼会有值：全拼下简拼分段已经是 `preedit_split_body` 本身
-    /// （见 `ConvertResult::preedit_abbrev`）。
+    /// 简拼分段形态（把击键按简拼候选的音节序列切开，`wbwn` → `w'b'w'n`）。
+    /// 高亮到 `is_abbrev` 的候选时 preedit 用它。空串 = 无此形态。每次 build_candidates 重置。
+    /// 只有双拼会有值：全拼下它就是 `preedit_split_body`（见 `ConvertResult::preedit_abbrev`）。
     pub(crate) preedit_abbrev_body: String,
-    /// **码表整句**的编码单元切分形态（`aawtaawt` → `aawt'aawt`）。
+    /// 码表整句的编码单元切分形态（`aawtaawt` → `aawt'aawt`）。
     /// 高亮到码表整句候选时 preedit 用它；其余情形不读。
     /// 空串 = 本次没有整句解（或方案未开整句）。每次 build_candidates 重置。
     pub(crate) preedit_codetable_body: String,
-    /// **直接辅助码**命中时的组码区形态：前缀的双拼音节分段 + 空格 + 辅码（`ui'du p`）。
+    /// 直接辅助码命中时的组码区形态：前缀的双拼音节分段 + 空格 + 辅码（`ui'du p`）。
     /// 高亮到 `is_direct_aux` 的候选时 preedit 用它，让人看出末尾被当成了辅码；其余情形不读。
     /// 空串 = 本键没有直接辅助命中。每次 build_candidates 重置（见 `apply_direct_aux`）。
     pub(crate) direct_aux_body: String,
     /// 直接辅助码：上一个整音节输入的主候选快照，供后面的键当前缀候选（见 `DirectAuxPrev`）。
     pub(crate) direct_aux_prev: Option<crate::handle_direct_aux::DirectAuxPrev>,
-    /// 候选调整（shadow）规则的**归一编码**；空串 = 落回 `input_buffer`（击键原样）。
+    /// 候选调整（shadow）规则的归一编码；空串 = 落回 `input_buffer`（击键原样）。
     ///
-    /// 取自 `ConvertResult::shadow_code`，与 `preedit_split_body` 同生命周期（每次
-    /// `build_candidates` 重置）。存在的唯一理由是双拼：`data_schema_id` 已把全拼与双拼
-    /// 折叠成同一个 schema，若 key 继续取击键，双拼的 `hc` 与全拼的 `hao` 会落成两个互不
-    /// 相认的键。归一后两者共享同一条规则。全拼恒空串（恒等，存量规则零迁移）。
-    ///
-    /// ⚠️ **读写两端必须同取此值**（`shadow_code_of`）：读端 `apply_shadow`、写端
-    /// `candidate_op_scope`、菜单灰显 `shadow_has_rule` 若有一处漏改，失配是**完全静默**的
-    /// ——规则写得进去、读不出来，界面毫无异常。守门测试见 `handle_candidate.rs` 的
-    /// `every_shadow_read_goes_through_normalized_code`。
+    /// 取自 `ConvertResult::shadow_code`，每次 `build_candidates` 重置。为双拼而设：
+    /// `data_schema_id` 已把全拼与双拼折成同一 schema，key 取击键会让 `hc` 与 `hao` 互不相认。
+    /// 全拼恒空串。读写两端（`apply_shadow`、`candidate_op_scope`、`shadow_has_rule`）必须都经
+    /// `shadow_code_of` 取值，失配完全静默；守门测试 `every_shadow_read_goes_through_normalized_code`。
     pub(crate) shadow_code: String,
     /// 整句 N-best 的池子（本次转换的全部整句，按名次、已去重），供整句切换键滚动窗口。
     ///
-    /// 来自 `ConvertResult::sentence_pool`，**只在 `schema.pinyin.sentence_max_count > 1` 时
-    /// 非空**。每次 `update_candidates` 清空重填：池子只对「当前这串输入」有效，输入一变
-    /// 旧池子里的整句就不再是这串键的解读了。
+    /// 来自 `ConvertResult::sentence_pool`，只在 `schema.pinyin.sentence_max_count > 1` 时非空；
+    /// 每次 `update_candidates` 清空重填。
     pub(crate) sentence_pool: Vec<Candidate>,
     /// 整句切换键把显示窗口在池子里滚到了第几条（0 = 原始名次，即解码最优解打头）。
     /// 与 `sentence_pool` 同生命周期，随它一起清零。
@@ -670,59 +552,41 @@ pub(crate) struct State {
     /// 窗口为 0 时的候选列表快照，第一次切换时拍下；每次切换从它重建（见
     /// `cycle_sentence_window`）。与 `sentence_pool` 同生命周期。
     pub(crate) sentence_base: Vec<Candidate>,
-    /// 出简让全用：本次输入过程中**各级简码位的首选**，下标 0/1/2 = 码长 1/2/3。
-    /// 值为 `(该级的码, 首选文本)`——记的是用户**实际看到的**那一条（已过 `apply_filter` /
-    /// `apply_freq_rerank` / `apply_shadow`），故天然含调频与候选调整的效果。
+    /// 出简让全用：本次输入中各级简码位的首选，下标 0/1/2 = 码长 1/2/3。值为
+    /// `(该级的码, 首选文本)`，记的是用户实际看到的那条（已过滤、调频、候选调整）。
     ///
-    /// **存码而不是只按下标索引**，是因为退格不是唯一的改码方式：`input_cursor_pos` 允许在
-    /// 编码区中间插入/删除，此时缓冲长度不变而码已经变了（`kht` 改成 `kxt`）。用时校验
-    /// `input_buffer.starts_with(code)`，不匹配即视为无记录。
-    ///
-    /// 失效**不靠推送**：`input_buffer.clear()` 在协调器里有十余个散落调用点，逐个接线必漏。
-    /// 改由 `build_candidates` 开头按前缀关系统一淘汰——缓冲清空、光标编辑、方案切换
-    /// 全被同一条规则覆盖。
+    /// 存码是因为光标编辑可以在长度不变时改码（`kht` → `kxt`），用时须校验
+    /// `input_buffer.starts_with(code)`。失效由 `build_candidates` 开头按前缀关系统一淘汰，
+    /// 不在十余个 `input_buffer.clear()` 处逐个接线。
     pub(crate) shortcode_tops: [Option<(String, String)>; 3],
-    /// 用户**显式选中**的 `$SS`/`$AA` 组：`(完整码, 组源文本)`。
+    /// 用户显式选中的 `$SS`/`$AA` 组：`(完整码, 组源文本)`。
     ///
-    /// 精确码下有重码时组默认折叠成一条组名候选（见 `resolve_group_expansion`），用户选中它
-    /// 才展开成员；选中动作把输入补全到完整码并重查，重查时靠这条记录知道「这次要展开」，
-    /// 否则会又折叠回去、永远进不了二级选择。失效与 `shortcode_tops` 同理——`build_candidates`
-    /// 开头按「输入码已不是记录里的码」统一淘汰，不逐个接线。
+    /// 精确码有重码时组默认折叠成一条组名候选（见 `resolve_group_expansion`）；选中后补全输入
+    /// 并重查，靠这条记录展开，否则会折叠回去。失效同 `shortcode_tops`。
     pub(crate) expanded_group: Option<(String, String)>,
     pub(crate) candidates: Vec<Candidate>,
     /// 当前页内高亮候选下标（0-based，相对当前页）——键盘选中项，空格上屏的目标
     pub(crate) selected_index: usize,
     /// 当前页码（0-based）
     pub(crate) current_page: usize,
-    /// 这批候选被翻过页没有（`current_page` 的**历史**，不是它的现值）。
+    /// 这批候选被翻过页没有（`current_page` 的历史，不是现值）。
     ///
-    /// 唯一消费者是 `Coordinator::symbol_buffer_key_free`：未翻过页时「上一页」是一格空转，
-    /// 把 `-` 让给字符输入（打 `sun-panel`）；翻过页之后 `-` 恢复翻页身份。判据取历史而非
-    /// `current_page == 0`，是因为从第 2 页翻回第 1 页的用户**正在翻页**，此刻 `-` 突然
-    /// 变成字符会让人当场打错字。
-    ///
-    /// 与 `current_page` 同生命周期：置位在 `page_prev` / `page_next` 真的翻动那一帧，
-    /// 清零在 [`Coordinator::reset_candidate_view`]（候选重新装填 = 换了一批候选，
-    /// 上一批的翻页史与新的这批无关）。**别在别处清**——`current_page` 归零的地方就是
-    /// 它该归零的地方，两者分家就会漂移。
+    /// 唯一消费者是 `Coordinator::symbol_buffer_key_free`：未翻过页时把 `-` 让给字符输入
+    /// （打 `sun-panel`）。取历史而非 `current_page == 0`：从第 2 页翻回来的用户还在翻页。
+    /// 置位在 `page_prev` / `page_next` 真的翻动时，只在 [`Coordinator::reset_candidate_view`]
+    /// 清零，与 `current_page` 归零同处，别在别处清。
     pub(crate) paged: bool,
     /// 候选展开态（多行网格）的可见区首行：`Some(p)` = 已展开，第 `p` 页在可见区第一行。
     ///
-    /// 网格的**一行就是一页**，高亮行就是 `current_page`。于是页模型的一切——数字键、空格、
-    /// 扩容、末页放宽——原样适用，这里只多记一个滚动位置。设计见
-    /// `docs/design/candidate-grid-expand.md`。
-    ///
-    /// 清零在 [`Coordinator::reset_candidate_view`]：候选重新装填（打字、退格、分步上屏后续查）
-    /// 即收起，与 `paged` 同一个时机、同一个理由；本次组合展开过的话，装填完再由
-    /// [`Self::grid_keep`] 展开回来。
+    /// 网格一行就是一页、高亮行就是 `current_page`，页模型原样适用，这里只多记滚动位置。
+    /// 设计见 `docs/design/candidate-grid-expand.md`。在 [`Coordinator::reset_candidate_view`]
+    /// 清零；本次组合展开过的话，装填后由 [`Self::grid_keep`] 展开回来。
     pub(crate) grid_top: Option<usize>,
-    /// 本次组合展开过：候选重新装填后（继续打字、分步上屏）自动再展开，直到 Esc 收起或组合结束。
-    ///
-    /// 组合结束的出口有几十处，不逐个清：每次按键开头若已没有候选，就说明是一次新组合，在
-    /// `handle_key_event` 开头清掉。
+    /// 本次组合展开过：候选重新装填后自动再展开，直到 Esc 收起或组合结束。
+    /// 组合结束出口太多，改在 `handle_key_event` 开头无候选时清掉。
     pub(crate) grid_keep: bool,
-    /// 注释态的「仅本次候选窗」翻转：与持久态（`ui.comment.state`）异或得当前态。
-    /// 候选窗关闭或被新组合替换即清：`cancel_session`、进出联想、顶码余码、顶屏进模式、`handle_key_event` 开头无会话时。
+    /// 注释态的「仅本次候选窗」翻转：与持久态（`ui.comment.state`）异或得当前态。候选窗关闭或被新组合替换
+    /// 即清：`cancel_session`、进出联想、顶码余码、顶屏进模式、`handle_key_event` 开头无会话时。
     pub(crate) comment_session_flip: bool,
     /// 注释态的「按住切换键」翻转：按住期间为真，与上面那份各自独立地异或。
     pub(crate) comment_hold_flip: bool,
@@ -730,12 +594,10 @@ pub(crate) struct State {
     pub(crate) alt_track: Option<AltTrack>,
     /// 如实上报的 Ctrl（`EVENT_MOD_DOWN`）单击判定中间态：`Some` = 已按下、尚未松开。
     pub(crate) ctrl_track: Option<crate::comment_switch::CtrlTrack>,
-    /// 展开态当前的分类标签（P3）。非 `All` 时 `candidates` 是**筛过的子集**，完整列表暂存在
-    /// [`Self::grid_full`]——下标在几十处调用里按 `candidates` 解释，就地换成子集，选词、序号、
-    /// 右键、置顶删除就都不用知道筛选的存在。重建候选的几处（扩容、末页放宽）之后要重新套一次
-    /// 筛选，见 `Coordinator::grid_reapply_filter`。
-    ///
-    /// 与 `grid_top` 同一个清零点（`reset_candidate_view`）。
+    /// 展开态当前的分类标签。非 `All` 时 `candidates` 是筛过的子集，完整列表暂存在
+    /// [`Self::grid_full`]：下标处处按 `candidates` 解释，就地换成子集，下游就不用知道筛选。
+    /// 重建候选（扩容、末页放宽）后要重新套筛选，见 `Coordinator::grid_reapply_filter`。
+    /// 与 `grid_top` 同一个清零点。
     pub(crate) grid_tab: wind_ui_types::GridTab,
     /// 筛选期间的完整候选列表；`grid_tab == All` 时为空。
     pub(crate) grid_full: Vec<Candidate>,
@@ -751,34 +613,19 @@ pub(crate) struct State {
     /// 全部转换完才整体上屏）。内部存简体原文，输出时再 s2t。仅拼音/临拼/混输文本透镜使用，
     /// 码表（五笔）选词消费整串、绝不进入此态。见 docs/redesign/pinyin-composition-enhance.md。
     pub(crate) committed_text: String,
-    /// 已分步上屏的段：`(raw_code, code, text, source, boundary)`。
-    /// 供退格逐段回退与完整上屏时自动造词；来源用于混输自动造词的"全段同源"归属路由（P2d）。
+    /// 已分步上屏的段，供退格逐段回退与完整上屏时自动造词；来源用于混输自动造词的
+    /// 「全段同源」归属路由。
     ///
-    /// # 为什么记两份码
-    ///
-    /// 两个消费者要的量纲天生不同，**不可合并**：
-    /// - `raw_code` = **原始输入空间**的消费码（双拼下是击键 `hc`）。退格回退（`pop_*_seg`）
-    ///   把它并回输入缓冲，故必须与缓冲同域。
-    /// - `code` = **全拼语义**码（`hao`）。词频记账与自动造词（`learn_phrase_on_commit`）
-    ///   用它，且 `boundary` 的位移量按 `code.len()` 算——换成双拼击键会写坏用户词库
-    ///   并让音节边界位全错。
-    ///
-    /// 引擎侧只把 `consumed_length` 回映射到原始输入空间，`code` 刻意保持全拼语义
-    /// （见 `wind_engine::pinyin` 中 `map_consumed_length` 与 Fix A 的注释）。曾因这里
-    /// 只记全拼码，双拼下退格把 `hao` 并回击键缓冲 `ma` → 重解析成 `ha|o|ma` 而错乱。
-    /// 非双拼场景两者恒相等。
-    ///
-    /// boundary = 该段 code 的音节边界（见 `wind_dict::binformat::DictEntry::boundary`）；
-    /// 段自身可能是多音节整词（选「你好」→ 段码 nihao、段内边界 ni|hao），故自动造词拼接
-    /// 各段时须把段内边界平移到全局位置，不能只按「一段一音节」记。
+    /// 每段记两份码，不可合并：`raw_code` 在原始输入空间（退格并回缓冲用），`code` 是全拼语义
+    /// （词频、造词、`boundary` 位移用）。只记全拼码会让双拼退格把 `hao` 并回击键缓冲而错乱；
+    /// 用击键码造词会写坏用户词库。非双拼时两者相等。段内边界见 [`CommittedSeg::boundary`]。
     pub(crate) committed_segs: Vec<CommittedSeg>,
     /// 当前激活的独占输入模式（临时拼音/快捷输入/临时英文）。`None` = 普通输入。
     /// 单点决策的唯一真相源：结构上保证同一时刻至多一个独占模式（见 `pipeline.rs`）。
     pub(crate) active: Option<ModeKind>,
     /// 各 overlay 模式组合区显示主体（= preedit 去掉只读前缀的部分），供光标位置换算。
-    /// 仅临拼 / mix 需要维护——它们的主体是引擎 `preedit_display`（含插入的音节分隔符），
-    /// 与缓冲不同形；临英 / 特殊 / URL 的主体恒等于自身缓冲，直接用缓冲即可（见
-    /// `overlay_caret_parts`）。缓冲空时可能为 stale，但此时光标必为 0、换算不读它，无害。
+    /// 仅临拼 / mix 需要维护（主体含插入的音节分隔符，与缓冲不同形）；其余模式直接用缓冲
+    /// （见 `overlay_caret_parts`）。缓冲空时可能陈旧，但此时光标为 0、换算不读它。
     pub(crate) overlay_body: String,
     /// 临拼 / mix 文本透镜的编码栏各形态，供高亮跟随（主路那几个 `preedit_*_body` 的 overlay
     /// 对位，生命周期跟各自的候选刷新走）。`overlay_body` 是按高亮从中选出的那一份。
@@ -801,19 +648,16 @@ pub(crate) struct State {
     pub(crate) url_buffer: String,
     /// 网址模式编码区光标（`url_buffer` 内字节偏移）
     pub(crate) url_cursor: usize,
-    /// 邮箱模式输入缓冲（**含 `@` 与用户名**，如 `abc@gmail.com`）。
+    /// 邮箱模式输入缓冲（含 `@` 与用户名，如 `abc@gmail.com`）。
     ///
-    /// 连用户名一起存是刻意的，同 [`Self::unicode_buffer`] 连前缀一起存：编码区要把
-    /// 用户打的整串原样显示出来，且退格退到只剩 `abc@` 时才是夺取边界，
-    /// `Rewind::host_text` 拿它直接比对。拆后缀是候选查询时的事（`email_suffix_part`）。
+    /// 连用户名一起存，理由同 [`Self::unicode_buffer`]；后缀在查询时拆（`email_suffix_part`）。
     pub(crate) email_buffer: String,
     /// 邮箱模式编码区光标（`email_buffer` 内字节偏移）
     pub(crate) email_cursor: usize,
-    /// Unicode 模式输入缓冲（**含触发前缀**，如 `u+4e00`）。
+    /// Unicode 模式输入缓冲（含触发前缀，如 `u+4e00`）。
     ///
-    /// 连前缀一起存是刻意的：编码区要把用户打的整串原样显示出来（`U+` 起手时显示的
-    /// 就该是 `U+`），且退格退到只剩前缀时才是「夺取边界」，`Rewind::host_text`
-    /// 拿它直接比对。码点解析时再把前缀剥掉（`unicode_hex_part`）。
+    /// 连前缀一起存：编码区要原样显示整串，且退格到只剩前缀时才是夺取边界，
+    /// `Rewind::host_text` 拿它直接比对。解析码点时再剥前缀（`unicode_hex_part`）。
     pub(crate) unicode_buffer: String,
     /// Unicode 模式编码区光标（`unicode_buffer` 内字节偏移）
     pub(crate) unicode_cursor: usize,
@@ -822,19 +666,15 @@ pub(crate) struct State {
     /// 特殊模式编码缓冲（自带码表的查询码）
     pub(crate) special_buffer: String,
     /// 特殊模式编码区光标（`special_buffer` 内字节偏移）。
-    /// 注：Go 版特殊模式**不支持**光标（尾加尾删），此处随共享层一并补齐，不再留缺口。
+    /// 注：Go 版特殊模式不支持光标（尾加尾删），此处随共享层一并补齐，不再留缺口。
     pub(crate) special_cursor: usize,
     /// 当前特殊模式下标（= `EngineManager::overlay_modes()` 注册表下标；仅 active==Special 时有效）
     pub(crate) special_id: u8,
-    /// 当前特殊模式的 `[overlay]` 段**快照**（进入时填、退出时清）。
+    /// 当前特殊模式的 `[overlay]` 段快照（进入时填、退出时清）。
     ///
-    /// 快照而非每次查注册表，两个理由：
-    /// 1. 布局取值在候选更新路径上，省掉每次的整表 clone；
-    /// 2. ★ 注册表按 id 排序，装一个新 overlay 方案会让其后方案的下标平移——快照让
-    ///    「模式进行中装了方案」不至于把当前模式的行为换成隔壁那个的。
-    ///
-    /// 这不是 `layout.rs` 反对的那种「进入时保存、退出时回放」：快照的是**只读配置**，
-    /// 随 `active = None` 自然失效，没有需要被回放的动作，声明式重算的性质不变。
+    /// 不每次查注册表：一是省掉候选更新路径上的整表 clone；二是注册表按 id 排序，模式进行中
+    /// 装了新 overlay 方案会让下标平移，换成隔壁方案的行为。快照的是只读配置，随
+    /// `active = None` 失效，不是「进入保存、退出回放」。
     pub(crate) overlay_spec: Option<wind_config::OverlaySpec>,
     /// 特殊模式显示态前缀（进入键符号，如 "\"；只显示不消费，组合区前缀，对齐临时拼音）
     pub(crate) special_prefix: String,
@@ -860,14 +700,14 @@ pub(crate) struct State {
     pub(crate) caret_height: i32,
     /// 上面这组坐标的来源（`wind_ipc::protocol::caret_source::*`）。
     ///
-    /// **与坐标成对写入**——凡是写 `caret_x/y` 的地方都必须同时写它，否则来源会指向上一次的
+    /// 与坐标成对写入——凡是写 `caret_x/y` 的地方都必须同时写它，否则来源会指向上一次的
     /// 坐标，比没有这个字段更危险。焦点气泡靠它判断「这组坐标够不够格拿来定位」：
     /// TSF 域出自当前 context，GUI 域是跨窗口的 Win32 光标，两者不是同一件东西。
     pub(crate) caret_source: i32,
     /// 菜单是否打开（打开时键盘事件转发给菜单窗口；UI 自管导航）
     pub(crate) menu_open: bool,
     /// 菜单打开时刻，供焦点路径的关闭守卫用（见 `menu_close_on_focus_change`）。
-    /// **必须与 `menu_open = true` 成对写入**：漏写会让守卫读到上一次打开的时间戳，
+    /// 必须与 `menu_open = true` 成对写入：漏写会让守卫读到上一次打开的时间戳，
     /// 于是刚弹出的菜单被一条迟到的焦点事件当场关掉。
     pub(crate) menu_opened_at: Option<std::time::Instant>,
     /// Linux 自绘菜单最近一次被操作（打开 / 菜单键 / 指针事件）的时刻，空闲超时兜底用
@@ -890,30 +730,21 @@ pub(crate) struct State {
     /// `add_word_code` 的音节边界（见 `wind_dict::binformat::DictEntry::boundary`）；
     /// 0 = 无信息（码表反查/逐字兜底）。与 code 同生同灭，入库时一并写入用户词。
     pub(crate) add_word_boundary: u64,
-    /// 加词的**剪贴板字符池**，惰性读取：
-    /// `None` = 本轮还没读过，`Some(空)` = 读过、剪贴板没有可用内容。
-    ///
-    /// ⚠️ 「还没读」与「读了是空」必须分得开，否则每次问「剪贴板有没有东西」都会再去读
-    /// 一次系统剪贴板——那正是本字段改成 `Option` 要避免的（读一次最坏 40ms，见
-    /// `clipboard_add_word_chars`）。
+    /// 加词的剪贴板字符池，惰性读取：`None` = 本轮还没读过，`Some(空)` = 读过、没有可用内容。
+    /// 两者必须分开，否则每次询问都会重读系统剪贴板（最坏数十毫秒，见 `clipboard_add_word_chars`）。
     pub(crate) add_word_clip: Option<Vec<char>>,
     /// 当前生效的字符池来源：false = 最近上屏（默认），true = 剪贴板。
-    /// 两个池子的**裁剪方向相反**，读取一律走 `add_word_pool` / `add_word_current_word`。
+    /// 两个池子裁剪方向相反，读取一律走 `add_word_pool` / `add_word_current_word`。
     pub(crate) add_word_from_clip: bool,
 }
 
 impl State {
-    /// 工具栏显示的**三项合取**：本输入法在服务某宿主（`ime_active`）、焦点在可编辑控件里
-    /// （`has_edit_context`）、用户开着工具栏（`toolbar_visible`）。三项正交、缺一不可，
-    /// 各自的失效形态见字段注释。
+    /// 工具栏显示的三项合取：本输入法在服务某宿主（`ime_active`）、焦点在可编辑控件里
+    /// （`has_edit_context`）、用户开着工具栏（`toolbar_visible`）。
     ///
-    /// 单独成函数是因为有**两个**判定点：`notify_toolbar` 的可见性决策，与全屏复查线程的
-    /// 开销闸（见 `coordinator/fullscreen_watch.rs`）。后者必须与前者同源——闸门比判据宽
-    /// 只是白探测，比判据窄则会漏掉「工具栏正显示着、全屏却没人复查」这一格，而那正是
-    /// 复查线程唯一要服务的场景。
-    ///
-    /// ⚠ 全屏否决**不在**本函数里：那是另一层（配置开关 × 探测缓存），且复查线程恰恰要在
-    /// 它为真、工具栏已因此隐藏时继续工作，否则退出全屏后没人把工具栏放回来。
+    /// 两个判定点同源：`notify_toolbar` 的可见性决策与全屏复查线程的开销闸
+    /// （`coordinator/fullscreen_watch.rs`）。闸门比判据窄会漏掉「工具栏显示着却没人复查全屏」。
+    /// 全屏否决不在这里：复查线程要在它为真、工具栏已隐藏时继续工作，否则退出全屏后没人放回工具栏。
     pub(crate) fn toolbar_conjunction(&self) -> bool {
         self.ime_active && self.has_edit_context && self.toolbar_visible
     }
@@ -924,40 +755,24 @@ thread_local! {
     /// 测试钩子：本线程上 `notify_ui_update` 为悬停「编码」段调 `word_codes_display` 的次数
     /// （`ui.tooltip.enabled = false` 时应为 0）。线程局部：并行测试互不干扰。
     ///
-    /// ⚠️ 只覆盖**同步**调用路径：别的线程（后台预热、异步刷新等）上的调用计在那个线程的
-    /// 副本里，这里看不见。计数为 0 只证明调用线程上的候选刷新没查。
+    /// 只覆盖同步调用路径：别的线程上的调用计在那个线程的副本里。
     pub(crate) static WORD_CODE_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// 配置变更后**引擎是否需要重建**（`reload_user_config` 的 `schema_dirty`）。
+/// 配置变更后引擎是否需要重建（`reload_user_config` 的 `schema_dirty`）。
+/// 抽成自由函数好让单测直接喂两份配置：漏收一个键的表现是「设置页改了没反应、重启就好」。
 ///
-/// 抽成自由函数而非内联表达式，就是为了**能被单测直接喂两份配置**——它守的那类缺陷
-/// （某个键漏进判据）在端到端层面只表现为「设置页改了没反应、重启就好」，那是本仓
-/// 反复出现、且最难从现象定位回判据的一类。
+/// 收：`schema` 整段；`input.temp_pinyin` / `input.temp_english`（引擎各持一份镜像）；
+/// `input.reverse.lookup_disabled_dicts`（引擎据它挂影子层；同段的 `candidate_layout` 不收，
+/// 否则每次改布局都丢词典缓存）。
 ///
-/// # 收什么
+/// 新增「协调器实时读、引擎走镜像」的开关时必须同步这里（如 `input.temp_english.phrase_seg`：
+/// 不标脏则协调器已按新值分词、引擎镜像仍是旧值，候选塌成只剩原文直到重启）。判据是
+/// 「引擎侧有没有第二个消费者」，不是「它在不在 schema 段」。
 ///
-/// - `schema` 整段：已含全局 codetable / pinyin / mix（上屏策略、调频等）。
-/// - `input.temp_pinyin`、`input.temp_english`：两者都在 `input` 段却被引擎按需缓存，
-///   [`wind_engine::EngineManager`] 各持一份镜像，只在构造与 `reload_from_config` 里写。
-/// - `input.reverse.lookup_disabled_dicts`：引擎据它挂不挂影子层（未启用扩展库，只给反查模式），
-///   镜像在 `EngineManager`；同段的 `candidate_layout` 只给协调器读，**不收**（收了每次改布局都丢词典缓存）。
-///
-/// # ⚠️ 新增「协调器实时读、引擎走镜像」的开关时必须同步这里
-///
-/// `input.temp_english.phrase_seg` 就栽过：协调器谓词
-/// [`Coordinator::temp_english_phrase_separator_key`] 每次按键现读 `rt().config`，开关一开
-/// `'` 立刻进临英缓冲；而引擎镜像不标脏就永远是旧值 ⇒ `seg_sep` 仍是 `None`、分词候选
-/// 恒空，原路径拿 `ip'pro` 去查 code 前缀也必然落空 ⇒ **候选塌成只剩原文，直到重启**。
-///
-/// 判据是「这个键有没有第二个消费者在引擎侧」，不是「它在不在 schema 段」。
-/// # 不收什么
-///
-/// - `input.correction`：引擎侧 `EngineManager::sync_correction` 自己判要不要重建（只改提示开关的
-///   不重建），结果在 `reload_user_config` 里并进 `schema_dirty`。
-/// - `schema.keep_all_loaded`：方案常驻策略由 `apply_residency_change` 就地对齐（摘除 /
-///   后台预热），引擎侧没有它的镜像；收进来会让「切换常驻开关」把全部引擎丢掉重建。
-/// - `schema.dict_cache_policy`：只在服务启动时读一次（改了要重启才生效），重建引擎也换不了策略。
+/// 不收：`input.correction`（`EngineManager::sync_correction` 自判，结果并进 `schema_dirty`）；
+/// `schema.keep_all_loaded`（由 `apply_residency_change` 就地对齐，收了会丢掉全部引擎重建）；
+/// `schema.dict_cache_policy`（只在启动时读，重建也换不了）。
 pub(crate) fn engine_reload_needed(
     old: &Config,
     new: &Config,
@@ -981,17 +796,14 @@ pub(crate) fn engine_reload_needed(
 
 /// 空码时按标点/符号键怎么处置这串废码（`input.punct_on_empty_behavior` 的解释结果）。
 ///
-/// ★ 这一族配置描述的行为有**两根轴**——「废码上不上屏」与「按键字符本身出不出」——而配置
-/// 值域只有一维，是两轴的合法组合枚举：
+/// 这一族配置有两根轴（废码上不上屏 × 键字符出不出），值域是合法组合的枚举：
 ///
 /// | | 键字符输出 | 键字符吞掉 |
 /// |---|---|---|
 /// | 废码上屏 | [`Self::Commit`] | （无意义，不设值） |
 /// | 废码丢弃 | [`Self::Clear`] | [`Self::ClearNoInput`] |
 ///
-/// 回车/空格的 `clear` 落在**吞键**那一格，标点的 `clear` 落在**出键**那一格——同一字面值在
-/// 第二根轴上取值相反，刻意如此：标点是用户真正想输入的可见字符，吞掉等于吞掉用户意图。
-///
+/// 回车/空格的 `clear` 落在吞键格，标点的 `clear` 落在出键格：标点是用户真正想输入的字符。
 /// 唯一解释器是 [`Coordinator::punct_empty_code_policy`]。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PunctEmptyCodePolicy {
@@ -1001,8 +813,8 @@ pub(crate) enum PunctEmptyCodePolicy {
     Clear,
     /// 丢弃废码，标点本身也不上屏——整个按键当没按过。
     ///
-    /// ⚠️ 标点不上屏 ⇒ **没有可 hold 的对象**。这一态必须在智能符号 `hold_info` 之前短路，
-    /// 否则会挂一个屏幕上并不存在的 hold 态，下一次同键 press2 会去删一个从未上屏的符号。
+    /// 标点不上屏就没有可 hold 的对象，这一态必须在智能符号 `hold_info` 之前短路，
+    /// 否则下一次同键 press2 会去删一个从未上屏的符号。
     ClearNoInput,
 }
 
@@ -1014,7 +826,7 @@ pub(crate) struct SmartSymbolArm {
     /// 武装的触发键（原始英文标点字符）
     pub(crate) key: char,
     /// press1 产出的标点串（…… 为多 rune），删除数 = 其 rune 数。
-    /// 正向存中文串、反向存英文串——恒等于**实际上屏的那个串**，press2 的删除数按它算。
+    /// 正向存中文串、反向存英文串——恒等于实际上屏的那个串，press2 的删除数按它算。
     pub(crate) str: String,
     /// 替换方向：false=正向（press1 中文 → press2 英文，原有语义）；
     /// true=反向（press1 英文 → press2 中文）。反向来源：数字后智能标点、英文标点状态、
@@ -1039,8 +851,7 @@ pub(crate) struct SmartSymbolArm {
 /// focus_gained / ime_activated 时按 `client_token` 高 32 位的 PID 解析进程名并缓存
 /// （见 `update_active_compat`），避免每次 caret 更新重复 OpenProcess。
 ///
-/// 用命名结构体而非元组：多个 bool 语义完全不同，元组下标在调用点无从分辨——本仓已有
-/// 多次「下标/名字与实际语义脱节」的返工。
+/// 用命名结构体而非元组：多个 bool 语义各异，元组下标在调用点无从分辨。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct ActiveCompat {
     /// 已解析的焦点进程 PID（0 = 尚未解析，此时其余字段无意义）。
@@ -1060,24 +871,18 @@ pub(crate) struct ActiveCompat {
     /// 候选窗首显策略（见 `AppCompatRule::first_show_mode`）。三档互斥；
     /// `None` = 跟随全局 `ui.candidate.first_show_mode`。
     ///
-    /// ⚠ **刻意保留 `Option` 而不在这里就地回落到全局值**：这是一份随焦点切换刷新的
-    /// 镜像态，若在写入时就把全局默认烘进来，用户在设置页改了全局档位后要等到下次切
-    /// 焦点才生效（本仓已有一类「设置页改了不生效、重启后生效」的缺陷都源于此）。
-    /// 回落统一放在读取侧的 [`Coordinator::effective_first_show_mode`]。
+    /// 刻意保留 `Option`、不在写入时回落全局值：这是随焦点切换刷新的镜像，烘进全局默认会让设置页改
+    /// 全局档位要等下次切焦点才生效。回落放在读取侧 [`Coordinator::effective_first_show_mode`]。
     pub(crate) first_show_mode: Option<wind_config::app_compat::FirstShowMode>,
     /// 本进程是否配了初始状态规则（`initial_mode` / `initial_punct` 任一非空）。
     ///
-    /// 用途是判定「本次焦点切换是否**进出**了规则应用」：规则的副作用必须严格限制在
-    /// 规则应用的进出，不能外溢。若判据退化成「规则表非空」，那么只要用户配过任意
-    /// 一条规则，**任意两个应用之间**的切换都会触发重算——`global + remember=false`
-    /// （出厂默认）下这会把模式重置成配置默认，用户在 Word 手切的英文切到 Chrome
-    /// 就没了，与 Everything 毫无关系。
+    /// 用于判定本次焦点切换是否进出了规则应用，规则副作用只限于此。若退化成「规则表非空」，
+    /// 任意两个应用间切换都会重算，把用户手切的模式重置掉。
     pub(crate) has_initial_rule: bool,
     /// 本进程的符号自动配对开关；`None` = 跟随全局 `input.auto_pair.*`。
     ///
-    /// ⚠ 消费点三条，缺一即半截修复（见 `AppCompatRule::auto_pair` 的说明）：中文标点态、
-    /// 英文标点流水线、以及推给 DLL 的英文配对配置——纯英文模式的配对完全在 C++ 侧独立
-    /// 处理，协调器收不到那些键，只关前两条的话切到英文模式配对照旧。
+    /// 消费点有三条，缺一即半截修复（见 `AppCompatRule::auto_pair`）：中文标点态、英文标点
+    /// 流水线、推给 DLL 的英文配对配置（纯英文模式的配对完全在 C++ 侧处理）。
     pub(crate) auto_pair: Option<bool>,
     /// 本进程的智能符号替换方案；`None` = 跟随全局 `input.symbol.smart_method`。
     pub(crate) smart_method: Option<wind_config::config::SmartMethod>,
@@ -1100,13 +905,12 @@ pub(crate) struct ActiveCompat {
 
 /// [`ActiveCompat::lookups`]：按键路径上的三项规则值，焦点应用（active 槽）的。
 ///
-/// 这几项原先在按键路径上现查（每次候选窗刷新 / 每键 / 每次收窗判定一次合成查表）；规则表与
-/// 焦点窗口都没变时结果必然不变，故改成在「规则表或焦点窗口变了」的地方预提取：
-/// - 焦点变化、同 pid 换窗口：`update_active_compat`（缓存键 pid + 窗口哈希，变了就整份重算）；
-/// - `reload_app_compat`：规则表重载，右键菜单写回、设置端 per-app 设置变更都经它；
+/// 规则表与焦点窗口不变时结果必然不变，故不在按键路径现查，而在它们变化处预提取：
+/// - 焦点变化、同 pid 换窗口：`update_active_compat`（缓存键 pid + 窗口哈希）；
+/// - `reload_app_compat`：规则表重载（右键菜单写回、设置端 per-app 变更都经它）；
 /// - `revalidate_pid_name`：焦点 pid 的缓存名被改写（PID 复用）。
 ///
-/// 全局回落（候选窗定位的全局档）**不**烘进来，仍在读取侧现取，理由同 `first_show_mode`。
+/// 全局回落不烘进来，仍在读取侧现取，理由同 `first_show_mode`。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct ActiveLookups {
     /// 协调器自己发占位时用的字符（`composition_placeholder`，没配 = 空格）。
@@ -1122,17 +926,12 @@ pub(crate) struct ActiveLookups {
     pub(crate) host_drawn_candidates: Option<bool>,
 }
 
-/// 「当前焦点为什么打不出中文」——全局**唯一**的判定结果。
+/// 「当前焦点为什么打不出中文」——全局唯一的判定结果，由协调器独占。图标、工具栏、
+/// 输入闸都读它；判据分两侧各算一份会漂移（图标说英文、工具栏说中文）。
 ///
-/// 2026-08-18 起由协调器独占。此前判据分散在两侧：C++ 侧算 `_bNoEditContext` /
-/// `IsPasswordSuppressActive()` 驱动语言栏图标（还自带一份 200ms 迟滞），Rust 侧算
-/// `password_suppress` / `has_edit_context` 驱动工具栏与输入闸——**两个负责者、两份迟滞，
-/// 必然漂移**，实测出现过「图标说英文、工具栏说中文」的错位。
-///
-/// ⚠ **只管「显示什么」，不管「吃不吃键」**：吃键闸门必须留在 DLL 本地
-/// （`CTextService::IsPasswordSuppressActive`），因为它要在 IPC **之前**给出答案。
-/// 把它也搬过来就会重现「吃了再吐」丢键——DLL 吃下键、core 回 PassThrough，而
-/// Chrome/Electron 一类严格 TSF 宿主不回退合成 `WM_CHAR`，那个键直接消失。
+/// 只管「显示什么」，不管「吃不吃键」：吃键闸门必须留在 DLL 本地
+/// （`CTextService::IsPasswordSuppressActive`），要在 IPC 之前给出答案。搬过来会重现
+/// 「吃了再吐」丢键：严格 TSF 宿主不回退合成 `WM_CHAR`，键直接消失。
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(crate) enum InputBlock {
     /// 能正常输入。
@@ -1143,10 +942,9 @@ pub(crate) enum InputBlock {
     KeyboardDisabled,
     /// 宿主明说的密码框：`IS_PASSWORD` / `IS_NUMERIC_PASSWORD` InputScope。
     Password,
-    /// 焦点 context 上的 KEYBOARD_DISABLED 置位，但宿主**没报**密码 scope。
-    /// 与 `Password` 同样强制英文（Chromium 密码框就靠这一信号），但成因不同：Gecko 系
-    /// （Zen / Firefox）在页面无输入焦点时也会置它（t197）。分开只为让提示语说真话——
-    /// 把「宿主禁用了输入」说成「密码框」，就会让用户在普通页面上找不到密码框。
+    /// 焦点 context 上的 KEYBOARD_DISABLED 置位，但宿主没报密码 scope。
+    /// 与 `Password` 同样强制英文（Chromium 密码框靠这一信号）；Gecko 系在页面无输入焦点时
+    /// 也会置它，分开只为让提示语不把它说成密码框。
     ContextDisabled,
     /// 焦点不在可编辑控件里（CAD 绘图区、浏览器非输入区、QQ 的 READONLY DocMgr）。
     NoEditContext,
@@ -1155,38 +953,23 @@ pub(crate) enum InputBlock {
 impl InputBlock {
     /// 是否该把模式格 / 图标主字覆盖成「英」。
     ///
-    /// ★★★ **`NoEditContext` 刻意不在内**。它与另外两档看着都是「敲键盘不出中文」，
-    /// 但成因的**发生频率差三个数量级**：密码框与线程级禁用是罕见事件，而「焦点不在
-    /// 可编辑控件里」是日常——实测 VS Code 里 8 分钟发了 35 次 `NoEditCtx`（每换一次
-    /// docMgr 就一次：点标签页、点侧边栏、点终端面板）。每次都翻一下图标，用户看到的
-    /// 是图标自己在抖，而不是任何有用的信息。
+    /// `NoEditContext` 刻意不在内：密码框与线程级禁用罕见，而「焦点不在可编辑控件里」是日常
+    /// （每换一次 docMgr 就一次），每次翻图标只会让图标自己抖；此时也没有输入落点，显示什么
+    /// 不影响功能。桌面显示「英」走的是 initial_mode 规则，不受此影响。
     ///
-    /// 而且此刻图标显示什么都不影响功能：焦点不在输入控件上时，敲键盘本来就没有落点。
-    /// 与 2026-08-04（ce167f37）否掉「用变淡表示无可编辑上下文」是同一条理由，那次也是
-    /// 「日常状态不配强呈现」。桌面显示「英」不受本决定影响——那走的是 initial_mode 规则
-    /// （`chinese_mode` 真的变了），不是本闸门。
-    ///
-    /// ⚠ 另一半原因：`NoEditCtx` 这个 `FocusLostReason` 回答的是「**这个 docMgr** 有没有
-    /// 可编辑 context」，而不是「输入法现在可不可用」。用事件推断状态本身就不严谨——
-    /// C++ 侧表达后者的是 `_hasTextInputContext`，且它在 `OnSetThreadFocus` 里会**重新
-    /// 权威查询**。真要恢复这一档，得让 DLL 把那个状态如实上报，而不是从失焦事件反推。
+    /// 另外 `NoEditCtx` 回答的是「这个 docMgr 有没有可编辑 context」，不是「输入法现在可不可用」。
+    /// 真要恢复这一档，应让 DLL 如实上报 `_hasTextInputContext`，而不是从失焦事件反推。
     pub(crate) fn shows_english(self) -> bool {
         matches!(
             self,
             Self::KeyboardDisabled | Self::Password | Self::ContextDisabled
         )
     }
-    /// 是否该变淡。**只留给线程级禁用**，理由同上。
+    /// 是否该变淡。只留给线程级禁用，理由同上。
     ///
-    /// 唯一的生产调用点在 `langbar_icon.rs`，而那整个模块是
-    /// `cfg(all(feature = "desktop-ui", windows))`——语言栏图标是 Windows 独有形态，
-    /// macOS 的 IMKit 与 headless/Android 形态都没有对应物。故在别的平台上 lib 单独
-    /// 编译时它确实无人调用：本文件的断言在 `#[cfg(test)]` 里，`--all-targets` 的 lib
-    /// 那一趟看不见它们。
-    ///
-    /// 判据取「调用点的 cfg」而非笼统的 `not(windows)`：关掉 `desktop-ui` 的 Windows
-    /// 构建同样没有这个调用点，写成后者会在那个组合下重新变成硬错误。
-    /// 与 `wind-ui/sys.rs` 的 `clamp_content_in_bounds` 同一既定写法。
+    /// 唯一生产调用点在 `cfg(all(feature = "desktop-ui", windows))` 的 `langbar_icon.rs`，
+    /// 故 `allow(dead_code)` 的条件取调用点的 cfg 而非笼统的 `not(windows)`：关掉 `desktop-ui`
+    /// 的 Windows 构建同样没有调用点。
     #[cfg_attr(not(all(feature = "desktop-ui", windows)), allow(dead_code))]
     pub(crate) fn dims_icon(self) -> bool {
         matches!(self, Self::KeyboardDisabled)
@@ -1199,7 +982,7 @@ pub(crate) const INPUT_BLOCK_DELAY: std::time::Duration = std::time::Duration::f
 /// [`Coordinator::input_block_gate`] 的内部状态。
 #[derive(Default)]
 pub(crate) struct InputBlockGate {
-    /// 当前**已呈现**的档位。不变量：图标与工具栏显示的恒等于它。
+    /// 当前已呈现的档位。不变量：图标与工具栏显示的恒等于它。
     shown: InputBlock,
     /// 「已经想切到某个非 None 档，但还没稳够 `INPUT_BLOCK_DELAY`」的起始时刻。
     pending_since: Option<std::time::Instant>,
@@ -1209,31 +992,16 @@ pub(crate) struct InputBlockGate {
 
 /// 焦点切换时是否需要重算初始状态（即是否调用 `apply_initial_mode`）。
 ///
-/// 抽成模块级纯函数是为了能直接单测这个判据本身。内联在 `handle_focus_gained` 里时，
-/// 唯一的覆盖方式是构造完整 `FocusData` 并走那条带 UI/IPC 副作用的路径，于是「门控条件
-/// 写错」这类缺陷极易漏网——本仓已有多次「门控退化后测试仍全绿」的先例。
+/// 抽成纯函数以便直接单测门控条件，内联时只能走带 UI/IPC 副作用的完整路径。
 ///
-/// - `crossed`：焦点是否**跨进程**切入。同应用内的焦点跳转为 false，否则用户手切的
-///   模式会在换输入框时被拉回初始值（「初始值」与「锁定」的分界线）。
-/// - `per_app`：`state_scope="app"` 的既有按应用记忆语义。
-/// - `old_has_rule` / `new_has_rule`：切换前后的进程是否配了 compat.toml 初始状态规则。
-///   两者**取或**，使规则同时覆盖「进入规则应用」和「离开规则应用」两个方向：只看 new
-///   会让从 Everything 切出去后英文状态残留给下一个应用；而放宽成「规则表非空」又会让
-///   任意两个无规则应用之间的切换也重算，把用户手切的状态冲掉。
-/// - `out_of_scope`：切入的窗口是否落在该进程的**初始模式作用域**之外
-///   （见 `InitialModeScopeRule`；未配作用域的进程恒 false）。
-///   **一票否决，压过上面全部条件**。
-///
-///   为什么必须一票否决而不是并进那个「或」：`explorer.exe` 一个进程名同时承载桌面
-///   （用户就是冲它配的 `initial_mode = "english"`）与任务栏 / Alt+Tab / 溢出区，
-///   `new_has_rule` 对两者恒同真，光靠它分不开。判据只能来自窗口类。
-///   实测样本（2026-08-18）：非桌面焦点 169 次、桌面 12 次——**14:1** 的误切代价。
-///
-///   ★★★ 该参数曾是 `new_is_transient`（黑名单：这个类是不是过渡窗口），当天被实测
-///   推翻。窗口类取不到时黑名单恒 false ⇒ 放行 ⇒ 照样套规则，而「拿不到窗口类」恰恰
-///   是 explorer 新起 TSF 连接时的常态（17:24:08 现场：焦点刚建连，caret 都还是
-///   last_known，图标当场闪英）。反转成作用域白名单后，「不知道在哪」自动落在作用域外
-///   = 保持现状。**信息缺失时的正确答案是"别动"，不是"按默认动"。**
+/// - `crossed`：焦点是否跨进程切入。同应用内跳转为 false，否则用户手切的模式会在换输入框时被拉回。
+/// - `per_app`：`state_scope="app"` 的按应用记忆语义。
+/// - `old_has_rule` / `new_has_rule`：切换前后进程是否配了 compat.toml 初始状态规则。取或，
+///   覆盖进入与离开两个方向；只看 new 会让英文状态残留给下一个应用。
+/// - `out_of_scope`：切入的窗口是否落在该进程的初始模式作用域之外（见 `InitialModeScopeRule`；
+///   未配作用域恒 false），一票否决。`explorer.exe` 同时承载桌面与任务栏 / Alt+Tab，
+///   `new_has_rule` 分不开，只能靠窗口类。作用域取白名单：取不到窗口类（新建连时的常态）
+///   自动落在作用域外 = 保持现状。信息缺失时的正确答案是「别动」。
 pub(crate) fn should_reapply_initial(
     crossed: bool,
     per_app: bool,
@@ -1246,37 +1014,22 @@ pub(crate) fn should_reapply_initial(
 
 /// `ui.toolbar.items` → 渲染项序列（`SetToolbarLayout` 的载荷）。
 ///
-/// **数组顺序即渲染顺序**，故本函数保序、不去重排序。
-///
-/// # `-` 前缀 = 「在这个位置，但不显示」
-///
-/// `["mode", "-full_width", "punct"]` 里的 `-full_width` 不渲染，但它**占着位置**：
-/// 用户在设置页把某格拖到第 2 位再关掉，重新打开时它还在第 2 位。
-///
-/// 若关闭的项直接从数组里删掉（本键最初的形态），位置信息就没了，重开时只能补在声明
-/// 序位——用户的体感是「我排好的顺序，关一下再开就乱了」。前缀让顺序与启用态留在**同一个
-/// 数组**里：拆成 `items` + `hidden` 两个键就是本仓栽过的「两张表要同步」形态
-/// （一边有一边没有，两种不一致都得有人处置）。
-///
-/// # 其余四条判据
-///
-/// - **未知键跳过 + 告警**：拼错一个词只让那一格消失，其余照常——比整条回落默认更接近
-///   用户意图，且日志里查得到。带 `-` 前缀的未知键同样告警：`-punkt` 是拼错，不是
-///   「刻意关掉一个不存在的格」。
-/// - **重复项保留**：同一个键写两次就画两格。不特殊处理是因为它无害且无歧义，而"静默
-///   去重"会让用户以为自己没写对。
-/// - **结果为空则回落全集**：合法的"全部隐藏"表达是 `visible = false`（见
-///   `ToolbarConfig::items` 文档）。留着它是因为**空工具栏是一条看着像 bug 的路**——
-///   只剩一个拖动柄，而用户多半不知道那是自己配出来的。
-///   ⚠️ 设置页那侧另有一道「至少留一格」的闸门，故这条只在**手写配置**时可达。
-/// - **`-` 只在最外层剥一次**：`--mode` 剥成 `-mode`，不是合法条目 ⇒ 告警跳过。
-///   不递归剥是有意的——`--mode` 只可能是手滑，把它解释成「关掉的关掉的 mode」没有意义。
-///
-/// `custom:<id>` 条目里 `id` 的最大下标——`ToolbarAction::Custom` 的载荷是 `u8`
-/// （为保住 `Copy`，见其文档），故第 256 个及以后的按钮无法回指，解析时即拒绝。
+/// `custom:<id>` 条目里 `id` 的上限：`ToolbarAction::Custom` 的载荷是 `u8`（为保住 `Copy`），
+/// 第 256 个及以后的按钮无法回指，解析时即拒绝。
 const MAX_CUSTOM_BUTTONS: usize = u8::MAX as usize + 1;
 
-/// 抽成模块级纯函数而非 `Coordinator` 方法：它不碰任何状态，单测无需构造协调器。
+/// `ui.toolbar.items` → 渲染项序列（`SetToolbarLayout` 的载荷）。数组顺序即渲染顺序，保序不去重。
+///
+/// `-` 前缀 = 「占着这个位置但不显示」：关掉再打开时回到原位。顺序与启用态留在同一个数组，
+/// 不拆成 `items` + `hidden` 两张要同步的表。
+///
+/// - 未知键（含带 `-` 的）跳过并告警：拼错只丢那一格，日志查得到。
+/// - 重复项保留：写两次就画两格，静默去重会让用户以为没写对。
+/// - 结果为空则回落全集：空工具栏看着像 bug；合法的「全部隐藏」是 `visible = false`。
+///   设置页另有「至少留一格」的闸门，这条只在手写配置时可达。
+/// - `-` 只剥一次：`--mode` 是手滑，告警跳过。
+///
+/// 模块级纯函数：不碰状态，单测无需构造协调器。
 pub(crate) fn parse_toolbar_items(
     items: &[String],
     buttons: &[wind_config::ToolbarButtonSpec],
@@ -1284,18 +1037,15 @@ pub(crate) fn parse_toolbar_items(
     // 留空 = 全部显示（旧配置无此键时行为不变）。与「写了但全非法」分开处理：
     // 那条要告警，这条是正常默认，不该刷日志。
     //
-    // ⚠️ 留空**不含**自定义按钮：`items` 是显示与顺序的唯一真相源，光在
-    // `[[ui.toolbar.buttons]]` 里定义一个按钮不等于要显示它（否则用户没法"先定义、
-    // 暂时不放上去"）。要显示就得在 items 里写一条 `custom:<id>`——设置页会代劳。
+    // 留空不含自定义按钮：`items` 是显示与顺序的唯一真相源，只在 `[[ui.toolbar.buttons]]`
+    // 定义不等于要显示（允许「先定义、暂不放上去」）。
     if items.is_empty() {
         return wind_ui_types::DEFAULT_TOOLBAR_ITEMS.to_vec();
     }
     let mut out = Vec::with_capacity(items.len());
     for raw in items {
         let trimmed = raw.trim();
-        // `-` 前缀 = 关着的格：仍要**走完整解析**（拼错要告警），只是不产出渲染项。
-        // 用 `sink` 而不是「先判前缀再 continue」：后者会让 `-punkt` 这种拼错悄悄溜过去，
-        // 而它与 `punkt` 是同一个错误，用户同样需要日志线索。
+        // `-` 前缀 = 关着的格：仍走完整解析，`-punkt` 与 `punkt` 是同一个错误，同样要告警。
         let (key, shown) = match trimmed.strip_prefix('-') {
             Some(rest) => (rest, false),
             None => (trimmed, true),
@@ -1330,9 +1080,8 @@ pub(crate) fn parse_toolbar_items(
 
 /// 把一条 `custom:<id>` 解析成渲染项，逐条判非法情形并告警。
 ///
-/// 每一种「配了不出现」的情形都要说清是哪一种：这条链上有 4 个位置能让按钮消失
-/// （id 找不到 / 被 enabled 关掉 / label 为空 / 超出可回指范围），而用户看到的都是
-/// 「我配的按钮没了」。日志里不分辨，就只能靠猜。
+/// 4 个位置能让按钮消失（id 找不到 / enabled 关掉 / label 为空 / 超出可回指范围），
+/// 用户看到的都是「按钮没了」，故每种都单独告警。
 fn push_custom_item(
     out: &mut Vec<ToolbarItem>,
     id: &str,
@@ -1368,30 +1117,20 @@ fn push_custom_item(
 
 /// 上一次推给 UI 的工具栏指令（供 `notify_toolbar` 去重）。
 ///
-/// 区分「隐藏」与「显示某状态」两种，而不是只存 `Option<ToolbarState>`：后者无法表达
-/// 「上次推的是 Hide」，于是 Hide→Show→Hide 中的第二个 Hide 会被误判成「和上次一样」
-/// （上次其实是 Show）而跳过——工具栏就再也藏不掉了。
+/// 区分「隐藏」与「显示某状态」：只存 `Option<ToolbarState>` 表达不了「上次推的是 Hide」，
+/// Hide→Show→Hide 的第二个 Hide 会被误判为重复而跳过，工具栏就藏不掉了。
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ToolbarPush {
     Hidden,
-    /// `Box` 是为了压小枚举体积：`ToolbarState` 带 String，比 `Hidden` 大得多，
-    /// clippy 的 large_enum_variant 会因此告警。
+    /// `Box` 压小枚举体积（clippy large_enum_variant）。
     Shown(Box<ToolbarState>),
 }
 
-/// `toggle_schema` 去程的**落点快照**：上次这把键把用户送到的那个输入状态。
+/// `toggle_schema` 去程的落点快照：上次这把键把用户送到的那个输入状态。
 ///
-/// # 字段为什么恰好是这三项
-///
-/// 判据不是「我能想到哪些状态」，而是**去程自己断言了哪些状态**。
-/// `Coordinator::finish_user_schema_switch` 断言的正是：活跃方案 = 目标、中文态、
-/// CapsLock 关（后两者的理由写在那个函数里——它们开着时按键根本不进引擎）。
-///
-/// 回程是去程的撤销；**去程断言过的东西不再成立时，就没有可撤销的东西了**，此时该做的
-/// 是重新落地而不是回程。
-///
-/// ⚠ 将来给 `finish_user_schema_switch` 加新断言时，这里必须同步加一项，否则那项被扰动
-/// 后回程会静默失准——漏项没有任何编译期或测试期信号。
+/// 字段恰好是去程断言过的状态（`Coordinator::finish_user_schema_switch`：活跃方案 = 目标、
+/// 中文态、CapsLock 关）。其中任一不再成立就没有可撤销的东西，该重新落地而不是回程。
+/// 给 `finish_user_schema_switch` 加新断言时这里必须同步加一项，漏项没有任何编译期或测试期信号。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ToggleLanding {
     /// 活跃方案变更代际（`EngineManager::schema_generation`）。
@@ -1402,20 +1141,15 @@ pub(crate) struct ToggleLanding {
     pub(crate) caps_lock: bool,
 }
 
-/// 一次「切换」对**切换前那串未上屏编码**的处置结果。
+/// 一次「切换」对切换前那串未上屏编码的处置结果。
 ///
-/// 两个字段各回答一个必须分开问的问题：
 /// - `text`：要不要上屏（`keys.commit_on_switch`：开则上屏原码，关则丢弃）；
-/// - `had_pending`：切换前**有没有**编码/候选在打。它单独决定要不要让宿主结束
-///   composition —— 丢弃分支下 `text` 恒空，但宿主里那串编码还在，不结束组合就会
-///   原样残留在应用里。「切英文后编码不清空」栽的正是这条判据（见
-///   `message_handler` 的 toggle_mode 分支注释）。
+/// - `had_pending`：切换前有没有编码/候选在打，单独决定要不要让宿主结束 composition。
+///   丢弃分支下 `text` 恒空，但不结束组合那串码就会残留在宿主里。
 ///
-/// 出口有两个，按调用方有没有按键上下文选：[`Coordinator::schema_switch_key_action`]
-/// （按键路径，经 KeyAction 回给宿主）/ [`Coordinator::push_switch_commit`]（菜单、
-/// 全局热键、命令直通车，只能走 push 管道）。
-/// `#[must_use]`：丢弃它 = 编码已被取走（内部状态清了）却没人交给宿主 —— 用户那串码
-/// 凭空消失，且没有任何编译期或运行期信号。
+/// 出口按有没有按键上下文选：[`Coordinator::schema_switch_key_action`]（按键路径）/
+/// [`Coordinator::push_switch_commit`]（菜单、全局热键、命令直通车，走 push 管道）。
+/// `#[must_use]`：丢弃它 = 内部状态已清、编码却没交给宿主，用户那串码凭空消失。
 #[must_use]
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SwitchCommit {
@@ -1444,12 +1178,10 @@ pub(crate) enum CapsCancelSwitch {
     /// 用户按出来的系统切换（Ctrl+空格 / 系统输入法开关热键）：携带目标模式（`true`＝中文）。
     System(bool),
     /// 非用户发起的切换（宿主写 compartment、功能菜单、旧版 DLL 无 Ctrl）：携带目标模式，
-    /// **恒按请求落地**、不吃 `mode_after_cancel` 的改写——宿主请求「中文」时 CapsLock
-    /// 恰好开着被取消，不能因为用户选了 `english` 就落成英文。
+    /// 恒按请求落地、不吃 `mode_after_cancel` 的改写。
     Host(bool),
-    /// 定向切换（`ime.set("cn-en", …)`）：用户**明确点了目标**，取消锁定只是附带动作，
-    /// 模式必须直达目标——出厂 `mode_after_cancel` 只该管「切一下」这种没有方向的翻转
-    /// （Shift / 切换键）。
+    /// 定向切换（`ime.set("cn-en", …)`）：用户明确点了目标，模式直达目标；
+    /// `mode_after_cancel` 只管没有方向的「切一下」。
     Directed(bool),
 }
 
@@ -1457,7 +1189,7 @@ impl CapsCancelSwitch {
     /// 按 `CMD_SYSTEM_MODE_SWITCH` 的来源分派。「是不是用户按的」判据与
     /// [`Coordinator::host_ime_switch_ignored`] 同源：系统热键（Ctrl+空格）翻 compartment 时
     /// Ctrl 尚未释放，宿主自己写则没有伴随按键；按键侧兜底（`CtrlSpaceKey`）恒算用户发起。
-    /// 菜单是用户**明确点了目标**，没有「切一下」的歧义，按请求。
+    /// 菜单是用户明确点了目标，没有「切一下」的歧义，按请求。
     pub(crate) fn from_system(
         requested: bool,
         source: wind_ipc::protocol::ModeSwitchSource,
@@ -1485,9 +1217,8 @@ pub struct Coordinator {
     /// 访问统一经 `self.rt()`。
     rt: std::sync::RwLock<std::sync::Arc<ConfigBundle>>,
     /// UI 命令发送端。
-    ///
-    /// 不是裸的 `mpsc::Sender`：UI 线程是事件驱动的，投递之后还得把它叫醒，而这里有 50 余处
-    /// 发送点——[`crate::UiSender`] 把这两步绑成一次 `send`，漏不掉。详见其模块文档。
+    /// UI 命令发送端。UI 线程事件驱动，投递后还得叫醒它；[`crate::UiSender`] 把两步绑成一次
+    /// `send`，50 余处发送点漏不掉。
     pub(crate) ui_tx: crate::UiSender,
     pub(crate) engine_mgr: EngineManager,
     /// 输入行为的平台档位，构造时定下，之后不变。见 [`crate::input_profile`]。
@@ -1505,41 +1236,35 @@ pub struct Coordinator {
     pub(crate) punct: Mutex<PunctuationConverter>,
     /// 智能符号模式待命态（同键连按删中文标点改英文）
     pub(crate) smart_symbol: Mutex<SmartSymbolArm>,
-    /// 滑窗草稿的**落屏文本流**缓冲。独立于 `State` 的理由同 `auto_phrase`。
+    /// 滑窗草稿的落屏文本流缓冲。独立于 `State` 的理由同 `auto_phrase`。
     ///
     /// 与 `auto_phrase` 的分界：那边缓冲「连续单字序列」（多字词即终止），这边缓冲
     /// 「最近落屏的文本流」（词组照样进流）。见 `draft_window` 模块头注释。
     pub(crate) draft_window: Mutex<crate::draft_window::DraftWindowBuf>,
     /// 待落库的草稿词队列。
     ///
-    /// ★ **按键路径上只做「滑窗切分 + push」**，取码、查重、写库全在后台线程
-    /// （`spawn_draft_flush`）。草稿的产生速率约每字 4 条，而取码要查单字全码表、
-    /// 查重要查反查索引与用户词库——任何一项落在上屏线程上都是在给每次按键加钱。
+    /// 按键路径上只做「滑窗切分 + push」，取码、查重、写库全在后台线程（`spawn_draft_flush`）：
+    /// 草稿约每字 4 条，任何查表落在上屏线程上都是给每次按键加钱。
     pub(crate) draft_queue: Mutex<Vec<crate::draft_window::DraftWord>>,
     /// 是否已有草稿 flush 线程在跑。没有这道闸，队列每满一次就会 spawn 一个新线程去
     /// 抢同一把 redb 写锁（同 `is_building_reverse_index` 那道闸的理由）。
     pub(crate) draft_flushing: std::sync::atomic::AtomicBool,
-    /// 最近一次**本输入法自己**向宿主吐字的时刻（`note_self_commit` 打点，经
-    /// `finish_session_action` 按来源调用）。
+    /// 最近一次本输入法自己向宿主吐字的时刻（`note_self_commit` 打点）。
     ///
-    /// 用途只有一个：宿主插入我们提交的文字后会回送 `SelectionChanged`，它和「用户真的
-    /// 移动了光标」在协议层**长得一模一样**，只能靠时间区分。若不区分，每上屏一个字就会
-    /// 被自己的回声判成「用户移动光标」→ flush → 缓冲永远只有 1 个字 → 造词恒不触发。
-    ///
-    /// **打点必须收口在 `finish_session_action` 一处**：漏掉任一吐字路径，该路径的回声就会
-    /// 切碎序列。不经它的推送通路（落点指引 §4.3 末表）目前不打点。
+    /// 宿主插入我们提交的文字后会回送 `SelectionChanged`，在协议层与用户移动光标同形，只能靠
+    /// 时间区分；不区分则每上屏一字就 flush，造词恒不触发。打点必须收口在
+    /// `finish_session_action` 一处，漏掉的吐字路径会切碎序列；不经它的推送通路（落点指引
+    /// §4.3 末表）目前不打点。
     pub(crate) last_self_commit: Mutex<Option<std::time::Instant>>,
     /// 自动造词写入计数，供临时词库淘汰按次节流（见 `maybe_evict_temp`）。
     pub(crate) auto_phrase_writes: std::sync::atomic::AtomicUsize,
     /// 全局低级键盘钩子（CapsLock，兼管 Windows 上的注释切换键 Alt）。
     ///
-    /// ★ **只有用户在 `keys.session_actions` 里真的配了 `capslock`、或注释切换键选了 Alt
-    /// 时才是 `Some`**。没配的用户进程里根本不存在全局键盘钩子——这是本功能唯一的风险
-    /// 控制手段（用户明确要求）。
+    /// 只有用户在 `keys.session_actions` 里配了 `capslock`、或注释切换键选了 Alt 时才是 `Some`：
+    /// 没配的用户进程里不存在全局键盘钩子（用户明确要求的风险控制）。
     ///
-    /// 为什么非钩子不可：CapsLock 的锁定态由系统在 TSF **之前**维护，`pfEaten` 压不住；
-    /// 而「让它翻转再回敲复原」在快速连按下有竞态（大写会卡住），还会被厂商 OSD 工具
-    /// 观测到并弹窗。详见 `wind_keys::capslock_hook` 模块文档。
+    /// 非钩子不可：CapsLock 锁定态由系统在 TSF 之前维护，`pfEaten` 压不住；「翻转再回敲」在
+    /// 快速连按下有竞态，还会触发厂商 OSD。见 `wind_keys::capslock_hook` 模块文档。
     pub(crate) capslock_hook: Mutex<Option<wind_keys::capslock_hook::CapsLockHook>>,
     /// 钩子线程 → 动作消费线程的投递口。
     ///
@@ -1561,9 +1286,8 @@ pub struct Coordinator {
     /// 智能联想「下一词」表的路径（`assoc/assoc_bigram.txt`，用户目录同名文件整体替代）；
     /// None = 数据缺失，Bigram 源不出、配额顺延。
     pub(crate) assoc_bigram_path: Option<std::path::PathBuf>,
-    /// 「下一词」表本体：**用得上才读**（桌面联想默认关，不该为它多占内存），且只在后台线程读
-    /// （约 2 MB 文本，见 `ensure_assoc_bigram_async`）。读失败记一条警告、之后一直是 None，
-    /// 不反复重试。`Arc` 是为了让加载线程不必持有协调器。
+    /// 「下一词」表本体：用得上才读，且只在后台线程读（见 `ensure_assoc_bigram_async`）。
+    /// 读失败记一条警告、之后一直是 None，不反复重试。`Arc` 让加载线程不必持有协调器。
     pub(crate) assoc_bigram: std::sync::Arc<
         std::sync::OnceLock<Option<std::sync::Arc<wind_assoc::bigram::AssocBigram>>>,
     >,
@@ -1584,24 +1308,20 @@ pub struct Coordinator {
     pub(crate) t2s: Mutex<Option<wind_transform::s2t::Converter>>,
     /// 通用规范汉字表（检索范围"常用字"判定；空集时退化为不过滤）。
     ///
-    /// 置于 `RwLock`：出厂基表在构造期一次性加载，而**用户覆盖**（候选右键「设为生僻字 /
-    /// 设为常用字」、词库管理界面）随时可改，改完必须当场生效。若仍是不可变字段，用户
-    /// 就会撞上那类最难查的现象——「设了没反应，重启后才对」。
-    /// 常用字表。**`Arc` 是为了让准入判据能被交给引擎**（`ConvertOptions::admit` 要求
-    /// `Send + Sync + 'static` 的闭包，捕获裸字段做不到）；除此之外用法与普通 `RwLock` 相同。
+    /// `RwLock`：用户覆盖（候选右键「设为生僻字 / 常用字」、词库管理界面）随时可改，须当场生效。
+    /// `Arc` 是为了把准入判据交给引擎（`ConvertOptions::admit` 要 `'static` 闭包）。
     pub(crate) common_chars: std::sync::Arc<std::sync::RwLock<wind_candidate::CommonChars>>,
     // Shadow 规则已迁至 redb（self.store 的 SHADOW 表）。
-    /// 工具栏锚点（窗口**右下角**屏幕坐标），按显示器 key（`monitor_key` 的
+    /// 工具栏锚点（窗口右下角屏幕坐标），按显示器 key（`monitor_key` 的
     /// `"workRight,workBottom@scalePct"`）独立记录。语义与落盘形态见
     /// [`wind_config::RuntimeState::toolbar_anchors`]。
     pub(crate) toolbar_anchors: Mutex<std::collections::HashMap<String, (i32, i32)>>,
-    /// 软键盘锚点（面板**右下角**屏幕坐标），按显示器 key 独立记录。与
+    /// 软键盘锚点（面板右下角屏幕坐标），按显示器 key 独立记录。与
     /// [`Self::toolbar_anchors`] 同构。
     pub(crate) softkeyboard_anchors: Mutex<std::collections::HashMap<String, (i32, i32)>>,
     /// 工具栏当前所在显示器的 key（None=尚未定位）。`sync_toolbar_monitor` 的去重依据：
-    /// notify_toolbar 在每次模式切换/焦点事件上都跑，无此缓存就会把用户拖动过的位置
-    /// 反复重置回记忆值。拖动落盘时（`save_toolbar_anchor`）同步更新，否则拖到别的屏之后
-    /// 这里仍记着旧 key，下一次校正会被误判为「屏没变」而跳过。
+    /// 没有它，每次模式切换/焦点事件都会把拖动过的位置重置回记忆值。拖动落盘
+    /// （`save_toolbar_anchor`）时须同步更新，否则拖到别的屏后会被误判为「屏没变」。
     pub(crate) current_toolbar_monitor: Mutex<Option<String>>,
     /// Linux：addon 最近一次 `host.display` 报的焦点输出（显示器）名与其工作区。服务端问不到
     /// 屏幕几何，工具栏 / 软键盘的位置记忆改以输出名分桶（见 `Coordinator::current_monitor`）。
@@ -1613,9 +1333,8 @@ pub struct Coordinator {
     /// 左上角换算成右下角回报（`ToolbarMoved` / `SoftKeyboardMoved`）时作为落盘的显示器键取走。
     #[cfg(all(target_os = "linux", ext_presenter))]
     pub(crate) panel_drop_output: Mutex<std::collections::HashMap<u32, String>>,
-    /// Linux：addon 在 `host.display` 里声明过 `panels`（能贴工具栏 / 软键盘浮层）。旧 addon 不认
-    /// 这两种浮层、收到就丢——升级 deb 后 fcitx5 没重启，旧 addon 拉起的是新服务，放任软键盘
-    /// 开着会接管主键区而屏上什么都没有。请求连接断开即复位（下一个 addon 实例得重新声明）。
+    /// Linux：addon 在 `host.display` 里声明过 `panels`（能贴工具栏 / 软键盘浮层）。旧 addon
+    /// 收到这两种浮层就丢，放任软键盘开着会接管主键区而屏上什么都没有。连接断开即复位。
     #[cfg(all(target_os = "linux", ext_presenter))]
     pub(crate) host_panels: std::sync::atomic::AtomicBool,
     /// `state.toml` 的单点延迟写入器：合并连续微调、进程内串行化 load-modify-save。
@@ -1631,24 +1350,21 @@ pub struct Coordinator {
         std::sync::RwLock<Option<Arc<crate::aux_code_source::AuxCodeRuntime>>>,
     /// emoji 扩展表（`[input.emoji]`，mmap 只读）。`None` = 功能关闭 / 数据缺失 / 建缓存失败。
     ///
-    /// ★ 功能关闭时恒为 `None` 且**数据文件根本不打开**——未启用的用户为本功能付出的
-    /// 常驻内存与启动开销都是零。这是 `.wemj` 走 mmap 的同一条理由的延伸：本表按需读页，
-    /// 常驻内存与库大小基本无关，但「不加载」比「加载得很省」还要省。
+    /// 功能关闭时恒为 `None` 且数据文件根本不打开，未启用的用户零开销。
     pub(crate) emoji_dict: std::sync::RwLock<Option<EmojiTables>>,
     /// 上次生效的 emoji 加载参数 `(enabled, categories, 开着的附加模块 id)`，
     /// `sync_emoji_dict` 的去重依据。
     ///
-    /// 只记**影响加载结果**的几项：`show_as` / `max_per_word` 这些是查询期参数，改了不必
-    /// 重建 mmap。判据写宽了会让每次 reload 都重解析一遍词表。
+    /// 只记影响加载结果的几项；`show_as` / `max_per_word` 是查询期参数，写进来会让每次
+    /// reload 都重解析词表。
     pub(crate) emoji_spec: Mutex<Option<EmojiSpec>>,
     /// 「辅助码触发键被音节分隔符占用」的告警是否已发过（每方案一次，随
     /// `invalidate_aux_code_table` 复位）。见 `handle_aux_code::warn_aux_code_key_taken`。
     pub(crate) aux_code_key_warned: std::sync::atomic::AtomicBool,
     /// 快捷输入格式表（`system.quick.toml`，支持用户目录整份覆盖）。
     ///
-    /// 启动加载后不变，故无锁：与 `system.phrases.toml` 同语义——**改完必须重启服务**，
-    /// 全仓的覆盖点都没有文件监视器。加载失败已在 `FormatTable::load` 内回落内置默认表，
-    /// 此处恒是一张可用的表。
+    /// 启动加载后不变，故无锁：改完须重启服务（全仓覆盖点都没有文件监视器）。加载失败已在
+    /// `FormatTable::load` 内回落内置默认表，此处恒可用。
     pub(crate) quick_formats: wind_quick_input::FormatTable,
     /// 软键盘映射表（出厂画布 ⊕ 用户按面覆盖）。设置端编辑器写完用户层后经
     /// `reload_softkeyboard` 整表换新，故是 `RwLock<Arc<_>>`：读侧取一份 `Arc` 快照即放锁，
@@ -1656,103 +1372,82 @@ pub struct Coordinator {
     pub(crate) softkeyboard: std::sync::RwLock<Arc<wind_softkeyboard::SoftKeyboardTable>>,
     /// 软键盘面板开着。
     ///
-    /// ★ **刻意不放 `State`**，虽然它看起来像一个输入状态。理由是死锁：状态推送
-    /// （`push_state_update` → `build_status`）自己要 `state.lock()`，而开关软键盘发生在
-    /// 已经持有 `&mut State` 的按键路径里——放进 `State` 就意味着「改完必须先还锁再推送」，
-    /// 那是个只能靠注释维持的不变量，漏一处的症状还极隐蔽（Rust 认为开着并接管按键，
-    /// C++ 仍按没开判定而不吃数字键，数字行整行失效）。放在 atomic 上，两条路径互不相干。
-    ///
-    /// 语义上它也确实与输入状态正交：软键盘不组码、不产候选、不进 `ModeKind`。
+    /// 刻意不放 `State`：开关软键盘发生在已持有 `&mut State` 的按键路径里，而状态推送
+    /// （`push_state_update` → `build_status`）自己要 `state.lock()`，放进去就得靠注释维持
+    /// 「先还锁再推送」，漏一处的症状是两侧对开关态认知不一致、数字行整行失效。
+    /// 语义上它也与输入状态正交：不组码、不产候选、不进 `ModeKind`。
     pub(crate) softkeyboard_active: std::sync::atomic::AtomicBool,
     /// 当前面在 [`Self::softkeyboard`] 里的下标。关闭再开会停在同一面，
-    /// **重启也会**（启动时按 `RuntimeState::last_softkeyboard_page` 的面 id 还原）。
+    /// 重启也会（启动时按 `RuntimeState::last_softkeyboard_page` 的面 id 还原）。
     pub(crate) softkeyboard_page: std::sync::atomic::AtomicUsize,
     /// 已写进 `state.toml` 的面 id，用于去重写盘。
     ///
-    /// 落盘挂在「软键盘状态变了」那个收口上（`after_softkeyboard_change`），而**开合远比
-    /// 换面频繁**——每次开关都 load-modify-save 一遍整个 state.toml 是白费。初值取自启动
-    /// 时读到的那一份，故「开了面板、没换面、关掉」全程零写盘。
+    /// 落盘挂在 `after_softkeyboard_change` 收口上，而开合远比换面频繁；初值取自启动时读到的
+    /// 那份，故「开了面板、没换面、关掉」全程零写盘。
     pub(crate) softkeyboard_page_saved: std::sync::Mutex<String>,
     /// 软键盘状态有变、待推给 C++。由 `SoftKeyboardPushOnDrop` 在按键返回时消费。
     pub(crate) softkeyboard_dirty: std::sync::atomic::AtomicBool,
-    /// **DLL 最后收到的** `STATUS_HOTKEY_SESSION` 取值。
+    /// DLL 最后收到的 `STATUS_HOTKEY_SESSION` 取值。
     ///
-    /// ⚠️ 语义是「对端收到了什么」，不是「我上次算出什么」—— 每一条把这一位发出去的
-    /// 路径都必须对齐它（`push_hotkey_session_if_changed` 自己对齐，其余路径调
-    /// `sync_hotkey_session_cache`）。脱节的后果是**漏推**：缓存停在 A 而 DLL 已收到 B，
-    /// 此后状态从 B 变回 A 时 `prev == now` 被判成「没变」而不推，DLL 就永远停在 B。
-    /// 那正是 C2 的形状 —— 不是「白推一次 IPC」那种良性代价。
+    /// 语义是「对端收到了什么」，不是「我上次算出什么」：每条发出这一位的路径都必须对齐它
+    /// （`push_hotkey_session_if_changed` 自己对齐，其余路径调 `sync_hotkey_session_cache`）。
+    /// 脱节的后果是漏推：缓存停在 A 而 DLL 已收到 B，状态变回 A 时被判「没变」，DLL 永远停在 B。
     pub(crate) last_pushed_hotkey_session: std::sync::atomic::AtomicBool,
-    /// 本次按键命中过 key_down 热键 ⇒ 返回时**无条件**推一次状态（不走比较）。
-    ///
-    /// 与 C++ `WM_HOTKEY` 那一处乐观置位一一对称：那边置位不看动作，这边就不看状态有没有
-    /// 变。详见 `message_handler.rs` 里置位处的长注释。
+    /// 本次按键命中过 key_down 热键 ⇒ 返回时无条件推一次状态（不走比较）。
+    /// 与 C++ `WM_HOTKEY` 处的乐观置位对称，见 `message_handler.rs` 置位处。
     pub(crate) hotkey_session_force_push: std::sync::atomic::AtomicBool,
-    /// 软键盘打开时刻，供焦点路径的关闭守卫用。**必须与开启成对写入**，理由同
-    /// `State::menu_opened_at`：漏写会让守卫读到上一次的时间戳，于是刚弹出的面板
-    /// 被一条迟到的焦点事件当场关掉。
+    /// 软键盘打开时刻，供焦点路径的关闭守卫用。必须与开启成对写入（理由同
+    /// `State::menu_opened_at`），否则刚弹出的面板会被一条迟到的焦点事件当场关掉。
     pub(crate) softkeyboard_opened_at: std::sync::Mutex<Option<std::time::Instant>>,
     /// 软键盘开着时「它在服务哪个宿主进程」，0 = 未知（开启时尚无活动宿主）。
     ///
-    /// 关闭判据按**宿主进程**粒度而不是按焦点事件粒度：同宿主内的 DocMgr 抖动、退出编辑、
-    /// 换文档都不算「用户离开」（Excel 退出单元格再切到下一格就是这样），只有换了宿主才算。
+    /// 关闭判据按宿主进程粒度：同宿主内 DocMgr 抖动、退出编辑、换文档都不算离开，只有换宿主才算。
     /// 与开启成对写入，见 `open_softkeyboard`。
     pub(crate) softkeyboard_host_pid: std::sync::atomic::AtomicU32,
-    /// 钉住：面板不随焦点变化自动关闭（跨应用也留着）。是**用户偏好**：关闭不复位，
+    /// 钉住：面板不随焦点变化自动关闭（跨应用也留着）。是用户偏好：关闭不复位，
     /// 下次打开照旧钉着，跨重启经 `RuntimeState::softkeyboard_pinned` 还原。
     /// 唯一的翻转入口是 `toggle_softkeyboard_pin`。
     pub(crate) softkeyboard_pinned: std::sync::atomic::AtomicBool,
-    /// 快捷输入格式表的**用户调整**（右键调序 / 停用）运行时镜像，键为格式类别。
+    /// 快捷输入格式表的用户调整（右键调序 / 停用）运行时镜像，键为格式类别。
     ///
-    /// 真相在用户数据目录的 `quick_format.toml`，这里是读缓存：候选生成在热路径上
-    /// （每次按键都跑），每次去读文件不划算。
-    ///
-    /// ⚠️ 右键操作必须**写库 + 更新本镜像**两件都做。只写库不回灌，症状就是
-    /// 「调了没反应、重启才生效」——本仓这个坑踩过不止一次。
-    ///
-    /// 与 `quick_formats`（文件，启动后不变）分开存放是刻意的：GUI 调整绝不回写
-    /// `system.quick.toml`，那会抢走高级用户手写文件的所有权，也会让普通用户
-    /// 点两下右键就永久脱离出厂更新。
+    /// 真相在用户数据目录的 `quick_format.toml`，这里是热路径读缓存。右键操作必须写库并更新
+    /// 本镜像，只写库就是「调了没反应、重启才生效」。GUI 调整绝不回写 `system.quick.toml`：
+    /// 那会抢走手写文件的所有权，也让用户永久脱离出厂更新。
     pub(crate) quick_adjust:
         std::sync::RwLock<std::collections::HashMap<String, wind_quick_input::FormatAdjust>>,
     /// 拆字资产当前生效状态（库解析路径 / 已下发字根字体），reload 变更检测用。
     pub(crate) chaizi_assets: Mutex<ChaiziAssets>,
     /// 注释词库当前生效的 `(解析路径, 适用方案白名单)` 列表（顺序即优先级），
-    /// reload 变更检测用。白名单也进变更判据——只比路径的话，用户改完「适用方案」
-    /// 会因「路径没变」被判成空操作，表现是「改了要重启才生效」。见 `sync_comment_dicts`。
+    /// reload 变更检测用。白名单也进判据，否则只改「适用方案」会被判成空操作。见 `sync_comment_dicts`。
     pub(crate) comment_dict_paths: Mutex<Vec<(std::path::PathBuf, Vec<String>)>>,
     /// 标点配对跟踪栈（用于智能跳过）；中/英配对表在 rt bundle 内。
     pub(crate) pair_tracker: Mutex<wind_transform::pair_tracker::PairTracker>,
     /// 最近一次有效光标坐标 (x,y,height)；用于无效坐标时回退，避免候选窗跑到左上角
     last_valid_caret: Mutex<(i32, i32, i32)>,
-    /// 延迟首次显示：新组合首帧不立即显示候选窗，待 handle_caret_update 收到 reflow 后的权威坐标、
-    /// 或兜底 timer 超时再首显，避免在 reflow 前的陈旧坐标处先显示再跳（对齐 Go pendingFirstShow）。
-    /// 宿主不依赖光标坐标（自绘候选条，如 Android）：跳过首显闸门的等待。
+    /// 延迟首次显示：新组合首帧不立即显示候选窗，待 handle_caret_update 收到 reflow 后的权威
+    /// 坐标、或兜底 timer 超时再首显，避免先在陈旧坐标处显示再跳。
     ///
-    /// 闸门存在的理由是**桌面候选窗要等宿主 reflow 后的权威坐标**才好定位。自绘宿主
-    /// 把候选画在自己的固定位置上，坐标毫无意义——不关掉的话，宿主只能编造一组非零
-    /// 合成坐标去骗过闸门（Android 一度就是这么做的，`height` 写 0 还会被判为「宿主
-    /// 尚未 reflow」整帧丢弃，候选一次都不下发）。
+    /// 宿主不依赖光标坐标（自绘候选条，如 Android）时跳过这道闸：自绘宿主的坐标毫无意义，
+    /// 不关掉就只能编造坐标骗过闸门（`height` 为 0 还会被当成未 reflow 整帧丢弃）。
     caret_independent: std::sync::atomic::AtomicBool,
-    /// 宿主对配置的**强制改写**（见 [`Self::set_config_overlay`]），每次从磁盘重载配置后
+    /// 宿主对配置的强制改写（见 [`Self::set_config_overlay`]），每次从磁盘重载配置后
     /// 重新套上。只设一次（构造后），故用 `OnceLock` 而不加锁。
     config_overlay: std::sync::OnceLock<fn(&mut Config)>,
-    /// 暂停学习（隐私 / 无痕输入）：置位期间上屏照常、候选照常，但**不把这次输入写进任何
-    /// 用户数据**（词频、自动造词 / 草稿、联想历史与下一词、英文造词、输入统计、快捷输入 /
-    /// 网址 / 邮箱历史、上屏历史）。见 [`Coordinator::set_learning_suspended`]。
+    /// 暂停学习（隐私 / 无痕输入）：置位期间上屏、候选照常，但不把这次输入写进任何用户数据
+    /// （词频、造词 / 草稿、联想、英文造词、统计、快捷输入 / 网址 / 邮箱历史、上屏历史）。
+    /// 见 [`Coordinator::set_learning_suspended`]。
     ///
-    /// 纯运行时、**不进配置**：它描述的是「当前这个输入框」的属性（Android 的
-    /// `IME_FLAG_NO_PERSONALIZED_LEARNING`），宿主每次聚焦重新声明；持久化下来反而会让
-    /// 一次无痕输入把之后所有输入框都变成不学习。
+    /// 纯运行时、不进配置：它是「当前这个输入框」的属性（Android 的
+    /// `IME_FLAG_NO_PERSONALIZED_LEARNING`），宿主每次聚焦重新声明。
     learning_suspended: std::sync::atomic::AtomicBool,
     /// 宿主报的光标坐标可直接当权威用（Linux addon：来自应用自己上报的光标矩形，没有 Windows
     /// 那种跨窗口 Win32 光标冒充插入点的问题，但来源字段恒为 UNKNOWN）。见 `host.display`。
     host_caret_trusted: std::sync::atomic::AtomicBool,
-    /// 焦点宿主**显示不了**应用内预编辑（Linux addon：客户端没声明 Fcitx5 的 Preedit 能力位，
+    /// 焦点宿主显示不了应用内预编辑（Linux addon：客户端没声明 Fcitx5 的 Preedit 能力位，
     /// 如 WPS、QQ 一类走 XIM 的应用）。置位时编码改由我们自己的候选窗画，见
     /// [`Coordinator::preedit_in_app_effective`]。见 `host.display` 的 `inline_preedit`。
     host_no_inline_preedit: std::sync::atomic::AtomicBool,
-    /// 热重载成功后**不弹**「设置已更新」（移动端）。见 [`Coordinator::set_quiet_reload_toast`]。
+    /// 热重载成功后不弹「设置已更新」（移动端）。见 [`Coordinator::set_quiet_reload_toast`]。
     quiet_reload_toast: std::sync::atomic::AtomicBool,
     /// 被压制的引导键 VK（0=无）。命中时 `bound_action_for` 按「未绑定」处理。
     /// 见 [`Coordinator::set_trigger_suppressed`]。
@@ -1765,323 +1460,202 @@ pub struct Coordinator {
     /// 上述兜底 timer 的代际令牌：每次 arm 自增，超时回调比对以作废被新按键取代的旧 timer。
     pending_first_show_token: Mutex<u64>,
     /// 联想窗自动隐藏 timer 的代际令牌（同上，见 `handle_assoc::arm_assoc_hide`）。
-    /// **进入与退出联想态都要自增**——退出时不加，旧计时会在下一轮联想里提前把窗收掉。
+    /// 进入与退出联想态都要自增，否则旧计时会在下一轮联想里提前把窗收掉。
     pub(crate) assoc_hide_token: Mutex<u64>,
-    /// 联想的占位组合在宿主里成了**孤儿**：服务端已退出联想态，宿主那边的组合还挂着。
+    /// 联想的占位组合在宿主里成了孤儿：服务端已退出联想态，宿主那边的组合还挂着。
     ///
-    /// 只有自动隐藏超时会造出孤儿——其余退出联想的路径都发生在按键上下文里，收口动作
-    /// 搭着那次按键的应答就送到宿主了（见 `handle_assoc::assoc_dismiss_with`）；超时由
-    /// 定时器线程触发，**没有待应答的按键可搭**，而服务端→TSF 的 push 通道里没有任何
-    /// 一条能结束组合。见 [`Coordinator::fire_assoc_hide`]。
-    ///
-    /// 置位后由 [`Coordinator::adopt_orphaned_placeholder`] 在按键处理的唯一出口消费。
+    /// 只有自动隐藏超时会造出孤儿：其余退出路径都在按键上下文里，收口动作搭按键应答送达；
+    /// 超时没有按键可搭，push 通道里也没有能结束组合的指令。置位后由
+    /// [`Coordinator::adopt_orphaned_placeholder`] 在按键处理的唯一出口消费。
     pub(crate) assoc_placeholder_orphaned: std::sync::atomic::AtomicBool,
     /// 本次组合候选窗是否已首次显示过（true=后续刷新可立即下发；false=首帧需延迟）。
     candidate_shown: Mutex<bool>,
     /// 显示授权：handle_caret_update / 兜底 timer 在调 notify_ui_update 前置位以放行首帧显示；
     /// 按键路径不置位，首帧改为 arm 延迟。notify_ui_update 内 swap 消费。
     show_authorized: std::sync::atomic::AtomicBool,
-    /// 候选窗当前是否正在**反转排列**候选项（`ui.candidate.flip_when_above` 真正生效）。
+    /// 候选窗当前是否正在反转排列候选项（`ui.candidate.flip_when_above` 真正生效）。
     ///
-    /// 由 UI 侧 `UiEvent::CandidateFlipped` 单向写入：判据要窗口尺寸 + 屏幕工作区才算得出
-    /// （还叠加模式级强制横/竖排），协调器读配置推不出来，故只镜像不推导。
-    /// 消费点唯一：[`Coordinator::apply_session_action`] 用它把 `highlight_up`/`highlight_down`
-    /// 的走向翻过来，见那里的说明。
+    /// 由 UI 侧 `UiEvent::CandidateFlipped` 单向写入：判据要窗口尺寸与屏幕工作区，协调器推不出来。
+    /// 唯一消费点 [`Coordinator::apply_session_action`] 据此翻转 `highlight_up`/`highlight_down`。
     candidate_flipped: std::sync::atomic::AtomicBool,
     /// 鼠标悬停目标（原始 tag）：-1 无，0..N 候选页内下标，或翻页器 tag。
     /// 与 `State::selected_index` 相互独立：悬停只是视觉提示，不改变空格上屏的目标。
     ///
-    /// # ★★ 为什么不放在 `State` 里
-    ///
-    /// 它的生命周期是**候选窗会话**（窗口一隐藏就该归零），不是输入状态。放在 `State` 里时，
-    /// 清空只能由每个候选装填点手工执行——主路径 `update_candidates` 做了，
-    /// 特殊模式 / 临拼 / 混输 / 快捷输入的 8 个装填点全部漏了，于是悬停高亮与 tooltip 跨组合、
-    /// 跨模式存活（用户 2026-08-12 反馈「再次弹出时悬停被记忆」）。普通输入下每敲一键都重走
-    /// 主路径，残留被持续覆盖掉，**故该缺陷在主路径上物理不可观测**。
-    ///
-    /// 移出为原子量后，[`Coordinator::clear_hover`] **不需要 state 锁**，才能安放进
-    /// [`Coordinator::notify_ui_hide`]——那里有 40+ 个调用点，无法逐一确认是否已持锁，
-    /// 加锁即埋死锁。「窗口隐藏即清空悬停」这句话至此才在真相源上成立，而不只在 UI 侧的
-    /// 防抖状态（`CandidateMouse::reset_hover`）上成立。
+    /// 不放 `State`：它的生命周期是候选窗会话（窗口一隐藏就归零），放进 `State` 就得由每个
+    /// 候选装填点手工清空，漏一处就让悬停跨组合存活（主路径每键覆盖，看不出来）。原子量让
+    /// [`Coordinator::clear_hover`] 不需要 state 锁，才能放进有 40+ 调用点的
+    /// [`Coordinator::notify_ui_hide`] 而不埋死锁。
     pub(crate) hover_index: std::sync::atomic::AtomicI32,
-    /// 本轮组合的首显是否用了**非权威**坐标（fast 的试探采样 / instant 沿用的旧坐标）。
+    /// 本轮组合的首显是否用了非权威坐标（fast 的试探采样 / instant 沿用的旧坐标）。
     /// 置位后，该轮第一次权威坐标到达时改用放宽的容差判断要不要校正——校正动作本身
     /// 才是抖动的观感来源，小偏差不动比「跳一下修正」更稳。组合结束时复位。
     pub(crate) first_show_was_provisional: std::sync::atomic::AtomicBool,
-    /// 本轮组合紧接在一次**上屏**之后开（Shift+字母上屏进临英）：宿主插入点必然已前移，
-    /// 兜底首显用的旧坐标是确定的陈旧值，不是「可能差一点」。置位时兜底首显**不记**
-    /// `first_show_was_provisional`，让随后到达的权威坐标按常规 3px 容差校正，
-    /// 而不是被放宽容差（≈2 个行高）当微移吞掉、候选窗留在上屏前的位置。
-    /// 由 [`Coordinator::reset_first_show`] 复位，兜底首显消费。
+    /// 本轮组合紧接在一次上屏之后开（Shift+字母上屏进临英）：宿主插入点必然已前移，兜底首显
+    /// 的旧坐标确定陈旧。置位时兜底首显不记 `first_show_was_provisional`，让随后的权威坐标按
+    /// 常规 3px 容差校正，而不是被放宽容差吞掉。由 [`Coordinator::reset_first_show`] 复位。
     pub(crate) first_show_after_commit: std::sync::atomic::AtomicBool,
-    /// 坐标缓存是否已被**当前插入点**验证过（= `state.caret_*` 还算不算数）。
+    /// 坐标缓存是否已被当前插入点验证过（= `state.caret_*` 还算不算数）。`fast` 档短兜底的
+    /// 前提是「旧坐标 ≈ 当前插入点」，本标志把它显式化；清位后短兜底退让为
+    /// [`FIRST_SHOW_LONG_FALLBACK_MS`]（判据在 [`Coordinator::arm_pending_first_show`]）。
     ///
-    /// `fast` 档短兜底的隐含前提是「手里的旧坐标 ≈ 当前插入点」——同一行连打时它只差一个
-    /// 字宽，所以拿它首显毫无问题。本标志就是那个前提的显式化：
+    /// - 置位：[`Coordinator::handle_caret_update`] 采纳一帧权威坐标时，但
+    ///   [`wind_ipc::protocol::caret_source::TSF_DEFAULT_POS`] 除外（不对应任何插入点）。
+    ///   该来源有两个入口，组合前那处靠 `is_tsf` 挡住，组合期那处须单独挡。
+    /// - 清位：焦点到达（换 DocMgr）、用户移动光标（`handle_selection_changed` 的非回声分支）。
     ///
-    /// - **置位**：[`Coordinator::handle_caret_update`] 采纳一帧权威坐标（与
-    ///   `last_authoritative_caret` 同一处，同一条「够格当基准」的判据）。
-    ///   ⛔ 唯一例外是 [`wind_ipc::protocol::caret_source::TSF_DEFAULT_POS`]：它虽被采纳为
-    ///   定位坐标，却按定义**不对应任何插入点**（宿主答的是「我不知道插入点在哪」）。
-    ///   置位会让下一次组合错走 25ms 短兜底 ⇒ 先在旧坐标处闪一下再跳到默认位置。
-    ///   ⚠ 该来源有**两个**入口能置位本标志，组合前那处靠 `is_tsf` 天然挡住，组合期那处
-    ///   原本是无条件置位、需要单独挡——挡一处不等于挡住了。
-    /// - **清位**：焦点到达（换 DocMgr，坐标属于上一个文档/单元格/应用）、
-    ///   用户移动光标（[`Coordinator::handle_selection_changed`] 的非回声分支，
-    ///   同一 DocMgr 内点到别处）。
-    ///
-    /// 清位后 `fast` 的 25ms 短兜底会退让为 [`FIRST_SHOW_LONG_FALLBACK_MS`] 长兜底（判据在
-    /// [`Coordinator::arm_pending_first_show`]）：此时「快」没有意义，只会把候选窗快速显示
-    /// 到一个错误位置、再当着用户的面跳回来。
-    ///
-    /// ⚠ **不复用 `last_authoritative_caret.2`**：那个字段回答的是「有没有可比的基准值」
-    /// （probe 判据用），本字段回答「手里的值可不可信」。当前取值恰好一致，但两者对边缘
-    /// 输入的期望会分化，合用一个必有一方错。
+    /// 不复用 `last_authoritative_caret.2`：那个答「有没有可比的基准」，本字段答「手里的值可不可信」。
     caret_cache_verified: std::sync::atomic::AtomicBool,
-    /// 坐标缓存当前这份值，是不是**本次组合开始之前**由宿主主动上报的「空闲光标位置」。
+    /// 坐标缓存当前这份值，是不是本次组合开始前由宿主主动上报的「空闲光标位置」。
     ///
-    /// 上屏后到下一次按键之间，宿主仍会上报 caret（`handle_caret_update` 的「无组合」
-    /// 分支）。那一帧是宿主对**当前插入点**的直接测量，比组合期间的 rect 更可信——
-    /// 尤其在用户上屏后又移动过光标（打空格/点一下）的时候，它是唯一说得出「光标现在
-    /// 到底在哪」的数据。
+    /// 空闲上报是宿主对当前插入点的直接测量。本标志让 [`Coordinator::handle_caret_probe`]
+    /// 识破陈旧 probe：微信组合期报的 rect 仍是上一次组合的位置，而「≠ 上一轮权威坐标」的判据
+    /// 对此没有判断力，只能换依据（见 docs/architecture/caret-position-host-compat-notes.md B 类）。
     ///
-    /// 本标志存在的唯一理由，是让 [`Coordinator::handle_caret_probe`] 能识破一类陈旧
-    /// probe：微信（Qt WebView）在 composition 期间报的 rect 仍是**上一次组合**的位置，
-    /// 实测与真实插入点差 136px。而 probe 判据 1（「≠ 上一轮权威坐标 ⇒ 已 reflow」）
-    /// 对此完全没有判断力——正确答案和陈旧值**都** ≠ 那个基准，判据把两者一视同仁。
-    /// 换句话说这不是判据太松，是判据问错了问题；只能换依据，不能调松紧。
+    /// - 置位：`handle_caret_update` 的「无组合」分支。
+    /// - 清位：`handle_caret_update` 采纳一帧组合期间的权威坐标时。
     ///
-    /// - **置位**：`handle_caret_update` 的「无组合」分支（那一帧只更新缓存、不做显示决策）。
-    /// - **清位**：`handle_caret_update` 采纳一帧组合期间的权威坐标时——此后缓存里装的
-    ///   是本次组合的位置，不再是「组合前的空闲上报」，本标志的前提随之消失。
-    ///
-    /// ⚠ 不与 [`Self::caret_cache_verified`] 合并：那个答「手里的值可不可信」，本字段答
-    /// 「手里的值是不是组合前刚测的」。微信这个场景里前者为真、后者也为真，但正是靠后者
-    /// 才能判定 probe 陈旧——合成一个就再也分不出「缓存可信」与「probe 可信」了。
+    /// 不与 [`Self::caret_cache_verified`] 合并：一个答「值可不可信」，一个答「是不是组合前刚测的」。
     pub(crate) caret_cache_is_idle_report: std::sync::atomic::AtomicBool,
-    /// 本次焦点到达后，**还没有**经历过一次组合期间的权威坐标。
+    /// 本次焦点到达后，还没有经历过一次组合期间的权威坐标。
     ///
-    /// 专门用来把 `idle_anchor` 逃生口挡在「焦点后的第一个组合」之外。空闲上报在**组合之间**
-    /// 是可信的（焦点没变、文档没变，宿主报的就是当前插入点），但在**焦点刚到达时**恰恰最
-    /// 不可信——宿主还没 reflow，报的往往是上一处的位置。EverEdit 实测：焦点坐标 (2599,703)、
-    /// 空闲上报 (1949,527)、真实位置 (749,529)，三个互不相同，拿空闲上报立即首显错 1200px。
+    /// 用来把 `idle_anchor` 逃生口挡在焦点后的第一个组合之外：空闲上报在组合之间可信，焦点刚到
+    /// 时却往往是上一处的位置（宿主还没 reflow）。单独立字段而不收窄 `caret_cache_verified` 的
+    /// 置位：收窄了焦点后首字就退回长兜底；挡住后首字走短兜底，其间 probe 已把缓存刷对。
     ///
-    /// ★ 这正是 `caret_cache_verified` 在 `focus_gained` 处清位要防的那件事。让空闲上报也能
-    /// 置 `verified` 之后，焦点后的第一次空闲上报就把那道门重新顶开了——**修复不能把它本来
-    /// 要堵的洞重新打开**，故单独立一个字段挡住逃生口，而不是收窄 `verified` 的置位
-    /// （收窄了焦点后首字就退回 600ms 长兜底，那是真正要避免的）。
-    ///
-    /// 挡住之后焦点后首字走 25ms 短兜底：其间 probe 会把缓存刷成正确位置，EverEdit 实测
-    /// 9ms 后就到了，兜底到期时用的已是对的坐标（甚至更早由 probe 判据提前首显）。
-    ///
-    /// - **置位**：`handle_focus_gained` 清 `caret_cache_verified` 处（同一件事的两面）。
-    /// - **清位**：`handle_caret_update` 采纳一帧组合期间的权威坐标处。
+    /// - 置位：`handle_focus_gained` 清 `caret_cache_verified` 处。
+    /// - 清位：`handle_caret_update` 采纳一帧组合期间的权威坐标处。
     awaiting_first_authority_after_focus: std::sync::atomic::AtomicBool,
-    /// 候选窗**当前实际显示**所用的位置基准（x, y, 有效）。
+    /// 候选窗当前实际显示所用的位置基准（x, y, 有效）。
     ///
-    /// 存在的理由：`state.caret_x/y` 是**缓存**，它会被 probe 的 `absorb_probe_coords` 和被
-    /// `settle` 吸收掉的那次权威坐标悄悄改写，而候选窗并不跟着动。于是缓存跑到候选窗前面，
-    /// 此后任何**非坐标原因**的重绘（悬停、翻页、候选变化）都会把这段差额一次性补上——
-    /// 表现为「鼠标一指候选窗，位置跳一个字符」（微信实测 483→496）。
+    /// `state.caret_x/y` 是缓存，会被 probe 的 `absorb_probe_coords` 与被 `settle` 吸收的权威坐标
+    /// 悄悄改写而候选窗不动；拿缓存重绘（悬停、翻页、候选变化）会把这段差额一次性补上，表现为
+    /// 「鼠标一指候选窗就跳一个字符」。连打时 `composition_start` 每次上屏都被清掉，替代不了它。
     ///
-    /// 组合起点 `composition_start` 锁定时不需要本字段（那时位置本就钉死），但它在连打时
-    /// 每次上屏都被 `reset_first_show` 清掉，`idle_anchor` 这条路首显时它还没锁上。
-    ///
-    /// - **更新**：`notify_ui_update` 每次**首显**或**坐标校正**（`show_authorized`）下发之后。
-    /// - **清位**：`reset_first_show`（组合结束，锚点随之失效）。
+    /// - 更新：`notify_ui_update` 每次首显或坐标校正（`show_authorized`）下发之后。
+    /// - 清位：`reset_first_show`。
     shown_anchor: Mutex<(i32, i32, bool)>,
     /// 定位调试浮窗开关（仅 Dev 变体的菜单可切；默认关）。
     ///
-    /// ★ 它存在的理由见 `wind_ui::caret_overlay` 的模块文档：定位缺陷是**空间**问题，
-    /// 日志只能给出离散数值。开关放运行时而非配置——它是排查动作，不该被记住。
+    /// 存在理由见 `wind_ui::caret_overlay` 模块文档。开关放运行时而非配置：它是排查动作，不该被记住。
     pub(crate) caret_overlay_enabled: std::sync::atomic::AtomicBool,
     /// 最近一帧 caret_update 的几何与判据结果，供浮窗渲染。
     ///
-    /// 分两处填：`handle_caret_update` 知道宿主上报了什么、判据走了哪条；
-    /// `notify_ui_update` 知道候选窗**实际**用了哪个锚点。两者合起来才回答得了
-    /// 「算出来的位置对不对」，所以先暂存，下发时补齐锚点再推给 UI。
+    /// 分两处填：`handle_caret_update` 知道宿主报了什么、判据走了哪条；`notify_ui_update` 知道
+    /// 候选窗实际用了哪个锚点。先暂存，下发时补齐锚点再推给 UI。
     caret_overlay_frame: Mutex<Option<wind_ui_types::diag::CaretOverlayView>>,
-    /// 坐标校正判据的比较基准（x, y, 有效）——「上一次**被认可**的插入点位置」。
+    /// 坐标校正判据的比较基准（x, y, 有效）——「上一次被认可的插入点位置」。
     ///
-    /// ⚠ 与 [`Self::shown_anchor`] 只差一处，但那一处正是缺陷发生的地方，**不可合并**：
-    /// `settle` 吸收一帧权威坐标时（判定这点偏差不值得移动候选窗），候选窗不动、故
-    /// `shown_anchor` 不动，但那一帧的坐标**已被认可**，基准必须跟上。
+    /// 不可与 [`Self::shown_anchor`] 合并：`settle` 吸收一帧权威坐标时候选窗不动，但那一帧已被
+    /// 认可，基准必须跟上。合用的话被吸收的偏差永久留在基准里，而放宽容差只在本轮首帧有效，
+    /// 下一帧必然 reshow（「打第二三个字时候选窗自己挪一格」）。
     ///
-    /// 合用一个字段的后果：被吸收的偏差永久留在基准里，下一帧权威坐标与它一比又是同样的
-    /// 偏差，而 `settle` 的放宽容差只在本轮第一帧有效（`swap` 消费掉），于是 tol 掉回 3px
-    /// ⇒ 必然 reshow。微信实测「打第二三个字时候选窗自己挪一格」（483→496，dx=13）即此。
-    ///
-    /// `settle` 说的是「这次偏差不值得校正」，它没说「以后也不值得」。
-    ///
-    /// - **更新**：`notify_ui_update` 下发新位置时；`handle_caret_update` 的 settle 吸收分支。
-    /// - **清位**：`reset_first_show`。
+    /// - 更新：`notify_ui_update` 下发新位置时；`handle_caret_update` 的 settle 吸收分支。
+    /// - 清位：`reset_first_show`。
     caret_baseline: Mutex<(i32, i32, bool)>,
-    /// 最近一次**非退化**的 caret 高度，用作行高估计。
+    /// 最近一次非退化的 caret 高度，用作行高估计。
     ///
-    /// 行高是**宿主的属性**，不是单帧的属性——同一个输入框不会这一帧 20px、下一帧 1px。
-    /// 但微信等 WebView 的 `GetTextExt` 返回的 height 恰好在 1↔20px 之间跳变（`caret_use_top`
-    /// 这条 per-app 规则就是为它加的），而 settle 容差是「行高 × ratio」：
+    /// 行高是宿主的属性，不是单帧的属性；而 WebView 类宿主的 height 在 1↔20px 间跳变，settle
+    /// 容差是「行高 × ratio」，h=1 时塌到 3px 下限，一个字宽的偏差就触发校正。故单独记住。
     ///
-    /// ```text
-    /// h = 1  ⇒  settle = (1 × 0.8) as i32 = 0  ⇒  tol = max(0, 3) = 3px
-    /// ```
-    ///
-    /// 容差整个塌缩到下限，放宽多少倍都没用（2 × 0 还是 0），于是一个字符宽的偏差必然触发
-    /// 校正——微信实测「每次自动上屏后回退 20px」。故行高单独记住，不跟着单帧的退化值走。
-    ///
-    /// ⚠ 跨宿主**刻意不重置**：换到行高不同的宿主时它会偏大一阵，而偏大只意味着多吸收几个
-    /// 像素的微移（settle 本就只作用于本轮第一帧），比「刚切过去那一帧恰好 h=1、容差又塌成
-    /// 3px」这个已知故障安全得多。
-    ///
-    /// ⚠⚠ 初值是 [`FALLBACK_LINE_HEIGHT`] 这个**保守下限**而不是 0：本字段有两种「取不到可靠
-    /// 值」的方式——被单帧退化值污染（已由 `> 1` 的写入闸挡住）、以及**尚未观测到任何一帧**。
-    /// 后者同样会让两个消费点（settle 容差、组合起点重锁阈值）塌缩到下限 3px，后果分别是
-    /// 「每次自动上屏后回退一个字宽」和「任何微移都重锁组合起点」。它只参与容差计算，偏大
-    /// 远比塌成 1px 安全。
+    /// 跨宿主刻意不重置：偏大只是多吸收几像素微移，比切过去那帧恰好 h=1 安全。初值取
+    /// [`FALLBACK_LINE_HEIGHT`] 而非 0：尚未观测到任何一帧时同样会让两个容差塌到下限。
     last_sane_caret_height: std::sync::atomic::AtomicI32,
     /// 本轮组合的首显是否已进入「长兜底等待」（首帧信任门命中）。
     ///
-    /// 唯一用途是让后续按键**不重置**那段等待的计时——见
-    /// [`Coordinator::arm_pending_first_show`] 里对该死结的说明。`reset_first_show` 复位。
+    /// 唯一用途是让后续按键不重置那段等待的计时，见 [`Coordinator::arm_pending_first_show`]。
+    /// `reset_first_show` 复位。
     first_show_extended: std::sync::atomic::AtomicBool,
     /// `ui.status.show_on_focus` 的焦点气泡正等一个 TSF 权威坐标。
     ///
     /// 焦点事件到达时坐标常常还只是 GUI 回退值（`OnSetFocus` 拿不到同步 edit session 锁），
-    /// 直接拿它定位就是用户反馈的「还没输入时定位非常不准」。故置位挂起，由
-    /// [`Coordinator::handle_caret_update`] 在权威坐标到来时消费并补显示。
+    /// 故置位挂起，由 [`Coordinator::handle_caret_update`] 在权威坐标到来时消费并补显示。
     ///
-    /// **不配「拿现有坐标显示」的兜底 timer**：超时后那样做只能用不可信坐标，正是本机制要挡的
-    /// 事。等不到就不显示，失焦/下一次焦点事件清位。唯一的超时是兜底为**锚点**时（锚点不读
-    /// 光标，不在上述反对理由之列），见 `status_placement::park_focus_tip`。
+    /// 不配「拿现有坐标显示」的兜底 timer（那正是要挡的不可信坐标）：等不到就不显示。唯一的
+    /// 超时是兜底为锚点时（锚点不读光标），见 `status_placement::park_focus_tip`。
     pending_focus_tip: std::sync::atomic::AtomicBool,
     /// 焦点气泡挂起的代际：每次挂起 +1。锚点超时到期时比对它，被新的挂起取代则作废。
     pending_focus_tip_gen: std::sync::atomic::AtomicU64,
     /// 上一次弹过焦点气泡的宿主（`client_token`，DLL 实例级 = 每进程一个）。
     ///
-    /// **气泡的语义是「切到了新的输入宿主」，不是「换了 docMgr」**。一个宿主内部可以有多个
-    /// docMgr 并频繁互切：Excel 在单元格里起输入时切一次、输入完焦点落到公式编辑栏又切一次，
-    /// 若按 docMgr 计就成了「输入一次闪两下」（同一单元格内连续输入反而不闪，因为中途不换
-    /// docMgr）——这个「闪的时机与用户的操作节奏对不上」正是它扰人的原因。
-    /// 故以 token 去重：同 token 只在首次进入时弹，离开该宿主（`FocusLostReason::Thread`）时清零。
+    /// 气泡的语义是「切到了新的输入宿主」，不是「换了 docMgr」：一个宿主内部可能频繁互切
+    /// docMgr（Excel 单元格与公式栏），按 docMgr 计就会「输入一次闪两下」。故以 token 去重，
+    /// 离开该宿主（`FocusLostReason::Thread`）时清零。
     last_focus_tip_token: Mutex<u64>,
     /// 上一次按键时刻，仅用于算出下面那个「相邻按键间隔」。
     pub(crate) last_key_at: Mutex<Option<std::time::Instant>>,
-    /// **相邻两次按键**的间隔（毫秒），fast 档据此判断是否处于连续快速输入。
+    /// 相邻两次按键的间隔（毫秒），fast 档据此判断是否处于连续快速输入。
     ///
-    /// ⚠ 必须是「按键与按键之间」，不能用 `last_key_at.elapsed()`——后者是「距上次按键多久」，
-    /// 而试探坐标恒在按键后 10ms 内到达，那个条件永远成立、判据会被完全绕过。本功能就这么
-    /// 空跑过一轮：日志里 163 次全报「连续输入 7~13ms」，而实际脚本节奏是 60ms。
+    /// 必须是按键与按键之间，不能用 `last_key_at.elapsed()`：试探坐标恒在按键后 10ms 内到达，
+    /// 那个条件永远成立，判据被完全绕过。
     pub(crate) last_key_interval_ms: Mutex<Option<u64>>,
-    /// 上一轮组合最终采纳的**权威** caret 坐标 (x, y, valid)，供首显试探采样做判据。
+    /// 上一轮组合最终采纳的权威 caret 坐标 (x, y, valid)，供首显试探采样做判据。
     ///
-    /// 为什么这个能当判据：首帧 reflow 未完成时，宿主的 GetTextExt 返回的正是上一轮那个
-    /// 位置（实测 WPS 连续两次返回上一轮终值，第三次才更新）；而真正 reflow 之后，光标
-    /// 必然因新插入的组合内容而移动。所以「与上一轮权威坐标不同」≈「宿主已经 reflow」。
-    /// 误判方向是安全的：判成「未 reflow」只是退回等 debounce（慢而不错）。
+    /// 首帧 reflow 未完成时宿主返回的正是上一轮的位置，reflow 后光标必然因新插入的组合内容而移动，
+    /// 所以「与上一轮权威坐标不同」≈「已 reflow」。误判方向安全：判成未 reflow 只是退回等 debounce。
     pub(crate) last_authoritative_caret: Mutex<(i32, i32, bool)>,
     /// 组合起点屏幕坐标 (x, y, valid)：嵌入预编辑模式（编码插入宿主、光标随输入右移）下候选窗锚此处
     /// （缓冲头部），不随输入移动。同一组合只锁定首个有效值（handle_caret_update），组合结束复位。
     composition_start: Mutex<(i32, i32, bool)>,
-    /// 本轮组合里 DLL 标记为 `PRE_REFLOW` 的那一帧坐标 (x, y, seen)——**宿主重排前的位置**。
+    /// 本轮组合里 DLL 标记为 `PRE_REFLOW` 的那一帧坐标 (x, y, seen)——宿主重排前的位置。
     ///
-    /// 用途只有一个：给 probe 的「宿主 reflow 了没有」判据当基准。原判据拿的是**上一轮**
-    /// 权威坐标，而终端换行时陈旧值与它天然不等（行尾 1432 vs 上一轮 1401，差一个字符宽），
-    /// 于是陈旧值被判成「已 reflow」⇒ 候选窗画在行尾、67ms 后横穿屏幕跳到行首 1044px。
-    /// 本轮的 pre_reflow 帧是更贴切的基准：DLL 已经明说它是重排前的，probe 与它相同就是
-    /// 「还没重排」。
-    ///
-    /// ★ 这是**换依据**，不是给位置关系再加一条物理约束——后者的四个变体全被真机推翻过
-    /// （见 `handle_caret_probe` 里那段「已否定」清单）。本条不问坐标之间的几何关系，
-    /// 只问「这一帧和宿主自己声明的重排前坐标是不是同一个值」。
+    /// 只给 probe 的「宿主 reflow 了没有」判据当基准。拿上一轮权威坐标当基准在终端换行时失效
+    /// （陈旧值与它天然差一个字宽，被判成已 reflow，候选窗先画在行尾再跳到行首）；DLL 明说的
+    /// 重排前坐标更贴切。这是换依据，不是再加一条几何约束（那些都被推翻过，见
+    /// `handle_caret_probe` 的「已否定」清单）。
     pub(crate) last_pre_reflow_probe: Mutex<(i32, i32, bool)>,
-    /// 本轮 `PRE_REFLOW` 帧携带的组合起点 (x, y, seen)，**只供兜底首显定位**（A2-42）。
+    /// 本轮 `PRE_REFLOW` 帧携带的组合起点 (x, y, seen)，只供兜底首显定位。
     ///
-    /// 首显等不到权威坐标时（记事本常见：OnLayoutChange 25ms 内不来），兜底只能用缓存——
-    /// 而缓存 caret 已被这一帧刷成**首字母之后**的位置，组合起点却要等随后的矩形帧才锁。
-    /// 于是首显画在 caret、第 2 个字母 reshow 时改取组合起点，当着用户的面左跳一格。
-    /// 组合起点是按键前的插入点，宿主重排不挪它，比同一帧的 caret 更接近最终锚点。
-    /// ⚠ 只作显示位置，**不锁进 `composition_start`**：锁错了本组合内救不回来，
-    /// 而只显示的话，后续权威帧与它不符时照常 reshow 纠正。组合结束 / 换 docMgr 时清。
+    /// 兜底首显时缓存 caret 已是首字母之后的位置，组合起点却要等随后的矩形帧才锁，于是首显画在caret、第 2
+    /// 个字母时左跳一格。组合起点是按键前的插入点，重排不挪它。只作显示位置、不锁进`composition_start`：
+    /// 锁错了本组合救不回来，只显示则后续权威帧照常纠正。组合结束 / 换 docMgr 时清。
     pub(crate) pre_reflow_comp_start: Mutex<(i32, i32, bool)>,
-    /// 本组合内**组合矩形**首帧给出的锚点 (x, y, locked)——同一行里它就是最终答案。
+    /// 本组合内组合矩形首帧给出的锚点 (x, y, locked)——同一行里它就是最终答案。
     ///
-    /// ★★ 存的是**值**而不是一个 bool，因为矩形这条路必须保持「**每帧如实**」的语义。
-    /// `composition_start` 在同一次组合里还有另外两个写入者，它们都只要求「本帧没有可信矩形」：
-    /// `shown_anchor` 回灌（把「候选窗画在哪」写回起点）与大偏移逃生阀（把起点推到当前 caret
-    /// ＝ 组合**末端**）。两处的注释都明写自己敢这么做的前提是「矩形每帧如实到达，锁不错也
-    /// 就无需逃生」。若本锁只是「置位后什么都不做」，那么全零矩形帧（组合 range 的
-    /// `GetTextExt` 回 `TS_E_NOLAYOUT`，`comp_rect_from_bytes` 给 `None` 而 `frame_layout_degenerate`
-    /// 为 false）让逃生阀武装一次，`cs` 就被改成组合末端，**此后本行再也纠不回来**——改动前
-    /// 每帧无条件覆盖时下一帧矩形会自动自愈。存值后锁定分支改为把 `cs` 恢复成本值，
-    /// 那个前提重新成立，另外两个写入者一行都不用动。
+    /// 存值而不是 bool：`composition_start` 另有两个写入者（`shown_anchor` 回灌、大偏移逃生阀），
+    /// 它们敢写的前提是「矩形每帧如实到达」。全零矩形帧（`TS_E_NOLAYOUT`）会让逃生阀把 `cs` 推到
+    /// 组合末端；锁定分支每帧把 `cs` 恢复成本值，前提才重新成立。不复用 `composition_start.2`：
+    /// 那是 DLL `compStart` 路径的锁，新组合首帧的 `compStart` 常陈旧，要靠矩形修正。
     ///
-    /// ★ 为什么不能复用 `composition_start.2`：那一位是**路径 A**（DLL 上报的 `compStart`）的锁，
-    /// 而新组合第一帧的 `compStart` 常常是陈旧的——Tabby 实测新组合第一帧路径 A 锁进上一组合的
-    /// 末端 `453`，随后由矩形修正成真起点 `442`。绑在 `.2` 上会把这次**必要的修正**一并挡掉，
-    /// 错位 11px 且不自愈。本位只锁矩形自己那条路，两条路各锁各的。
-    ///
-    /// ⚠ **已知盲区**：同一行内**合法**的起点变化（终端行内重排——D 类记着 WindTerm 同行左移
-    /// 312px；单行编辑框组合超宽后横向滚动）在本组合内同样不再跟随，要等换行或组合结束才恢复。
-    /// 没有收窄成「只挡小幅右移」是刻意的：那要回到「用位置关系判断这一帧准不准」，而那条路的
-    /// 四个变体全被真机推翻过（见 `handle_caret_probe` 里的清单）。宁可要一个**形状确定**的盲区。
-    ///
-    /// 清位与 `composition_start` 同步：组合结束（`reset_first_show`）与焦点换 docMgr 各一处，
-    /// 少清一处就会跨组合钉死。
+    /// 已知盲区：同一行内合法的起点变化（终端行内重排、单行框横向滚动）在本组合内不再跟随。
+    /// 刻意不收窄成「只挡小幅右移」，那要回到用几何关系判断帧准不准。清位与 `composition_start`
+    /// 同步（`reset_first_show` 与焦点换 docMgr），少清一处就会跨组合钉死。
     pub(crate) locked_rect_anchor: Mutex<(i32, i32, bool)>,
-    /// 宿主**上一帧如实上报**的组合起点 (x, y, seen)。只由 `handle_caret_update` 按帧写入，
-    /// 且只在本帧 compStart 非零时更新——零值表示「宿主这帧没报」，不是「起点变成了 0」。
+    /// 宿主上一帧如实上报的组合起点 (x, y, seen)。只由 `handle_caret_update` 在本帧 compStart
+    /// 非零时写入（零值 = 这帧没报）。
     ///
-    /// ★ 它与 `composition_start` 是**两个语义**，不可互相替代：`composition_start` 有三个
-    /// 写入者（宿主上报、空闲缓存首显、微移路径的 `shown_anchor` 回灌），后两者写进去的是
-    /// 「候选窗该画在哪」而非「宿主说的起点在哪」。QQ 实测（2026-09-05 09:51）宿主报的
-    /// compStart 全程恒为 (2268,1070)，而 `composition_start` 被首显缓存写成 (2266,1072)
-    /// ——差 2px，足以让任何拿 `composition_start` 与 reported compStart 做相等比较的判据
-    /// 整条失效。要问「宿主是否说起点没动」，只能问本字段。
-    ///
-    /// 无需跨组合显式复位：换了组合，宿主报的起点自然与上一帧不同，判据随之不成立。
+    /// 与 `composition_start` 不可互替：后者另有写入者写的是「候选窗该画在哪」，与宿主报的起点
+    /// 常差几像素，足以让相等比较整条失效。要问「宿主是否说起点没动」只能问本字段。
+    /// 换了组合宿主报的起点自然不同，无需显式复位。
     last_reported_comp_start: Mutex<(i32, i32, bool)>,
     /// 本组合内是否已收到过 TSF 域的 caret 帧。置位后，`GUI_CARET` 帧一律不再采信。
     ///
-    /// 背景：Word 在按键期可拒绝同步 edit session（`TS_E_SYNCHRONOUS`），DLL 回退到 Win32
-    /// 光标上报——那是个跨窗口的陈旧位置（实测恒在别的行），不带组合起点与组合矩形。它若
-    /// 进入组合期的跟行 / 重锁，候选窗就在它与 TSF 真坐标之间来回跳。
+    /// Word 在按键期可拒绝同步 edit session，DLL 回退到 Win32 光标上报：跨窗口的陈旧位置，不带
+    /// 组合起点与矩形。让它进入组合期的跟行 / 重锁，候选窗就会在两者之间来回跳。
     ///
     /// 只在「已有 TSF 坐标」后才屏蔽：纯 GUI 回退的宿主（无 TSF 坐标可言）行为不变。
     /// 清位与 `composition_start` 同步：组合结束（`reset_first_show`）与焦点换 docMgr 各一处。
     tsf_frame_seen_in_composition: std::sync::atomic::AtomicBool,
     /// 应用兼容规则表（compat.toml，系统层 + 用户层覆盖）。按焦点进程名查规则。
     ///
-    /// 用 Mutex 而非不可变字段：右键菜单切换 per-app 开关后要写用户层并**立即重载**。
-    /// 只更新 `active_compat` 缓存是不够的——切到别的应用再切回来时 pid 变化两次，
-    /// `update_active_compat` 会拿这张表重新解析，用旧表就会把刚才的切换悄悄回滚。
+    /// 用 Mutex：右键菜单切换 per-app 开关后要写用户层并立即重载。只更新 `active_compat` 不够，
+    /// 切走再切回时 `update_active_compat` 会拿旧表重新解析，把刚才的切换悄悄回滚。
     pub(crate) app_compat: Mutex<wind_config::app_compat::AppCompat>,
     /// 启动时的 (系统数据目录, 用户配置目录)，供 compat.toml 热重载复用同一口径。
-    /// 不用 `Config::data_dir()` 等静态函数：便携版/测试会传入自定义路径，静态函数
-    /// 拿到的是默认安装位置，重载后规则会与初次加载不一致。
+    /// 不用 `Config::data_dir()` 等静态函数：便携版/测试会传入自定义路径，重载后会与初次加载不一致。
     pub(crate) compat_dirs: (Option<std::path::PathBuf>, Option<std::path::PathBuf>),
     /// 当前焦点进程派生的 caret 兼容态，见 [`ActiveCompat`]。
     pub(crate) active_compat: Mutex<ActiveCompat>,
     /// pid → 进程名（小写）缓存，`update_active_compat` 填充，会话级只增不清。
     /// 供 FOCUS_GAINED 同步路径（`get_current_mode`）免 OpenProcess 查询进程名。
     pub(crate) pid_names: Mutex<HashMap<u32, String>>,
-    /// 「上一次**真正参与**初始模式决策的宿主」：`(pid, 该宿主是否配了初始状态规则)`。
+    /// 「上一次真正参与初始模式决策的宿主」：`(pid, 该宿主是否配了初始状态规则)`。
     ///
-    /// ⚠ 必须与 `active_compat.pid` **分开**，尽管两者绝大多数时候相同。
-    /// `active_compat` 记的是「当前焦点在哪个进程」——过渡窗口（任务栏）也要更新它，
-    /// 因为任务栏搜索框同样需要 caret 兼容项。而本字段记的是「初始模式该按谁算」，
-    /// 过渡窗口**不更新**它。
-    ///
-    /// 合用一个变量的后果实测过（2026-08-18）：点任务栏时虽然正确跳过了模式重算，
-    /// 但那次焦点仍把 `active_compat.pid` 变成了 explorer，于是紧接着**真正回到桌面**时
-    /// `crossed` 恒为假（同一个 explorer pid），桌面配的 `initial_mode = "english"`
-    /// 再也不会生效——过渡窗口把「跨进程切入」这个一次性事件提前消费掉了。
-    ///
-    /// 同源教训见 `_hasFocus` / `_hasThreadFocus`（TSF 侧）与
-    /// `ime_active` / `has_edit_context` 的拆分：一个变量同时回答两个问题，
-    /// 迟早会遇到两个答案相反的场景。
+    /// 必须与 `active_compat.pid` 分开：过渡窗口（任务栏）要更新 `active_compat`（搜索框也需要
+    /// caret 兼容项），却不该更新本字段。合用时点一下任务栏就把 explorer pid 写进去，随后真正
+    /// 回到桌面时 `crossed` 恒假，桌面的 `initial_mode` 不再生效。
     ///
     /// 第三项（[`ModeScope::entry_windows`]）是命中的带窗口条件的进入类规则：同进程内它变了也算
-    /// 「切进来」（AutoHotkey 两个 GUI 窗口各配各的 initial_mode），见 [`focus_crossed`]。
+    /// 「切进来」（同一进程的两个窗口各配各的 initial_mode），见 [`focus_crossed`]。
     pub(crate) mode_scope: Mutex<ModeScope>,
     /// `client_token → 最近一次 focus_gained 的窗口`（+ `active_compat` 当前的窗口），见
     /// `coordinator/window_ctx.rs`。
@@ -2099,79 +1673,41 @@ pub struct Coordinator {
     front_ctx: Mutex<(String, String, String)>,
     /// 主题搜索层：各资源层的 `themes/` 目录，靠前者优先（user > custom > data）。
     ///
-    /// 带层名而不是裸路径列表：`list_themes_full` 要靠层名区分「内置（随安装包分发，
-    /// 不可删）」与「用户自带」，靠路径前缀猜会在便携版/自定义 data 目录下猜错。
+    /// 带层名而不是裸路径：`list_themes_full` 要区分「内置（不可删）」与「用户自带」，
+    /// 靠路径前缀猜在便携版/自定义 data 目录下会猜错。
     pub(crate) theme_layers: Vec<wind_config::ResourceLayer>,
     /// 当前主题名
     pub(crate) theme_name: Mutex<String>,
     /// 主题颜色风格：0=跟随系统 1=亮色 2=暗色
     pub(crate) theme_style: Mutex<ThemeStyle>,
     /// 状态气泡上一次显示的文本，用于抑制"内容没变却重复弹窗"。
-    /// 关掉某个内容段后（如全半角），切换该状态不再改变气泡文本，此时应当整个不弹窗。
-    /// 在 `show_status` 做文本比对而非判断"这次变的是哪个字段"，是因为后者要给全部
-    /// 十余个调用点传参，而文本比对一处生效、且将来新增状态项零成本。
+    /// 关掉某个内容段后（如全半角），切换该状态不再改变气泡文本，此时整个不弹。在 `show_status`
+    /// 比对文本，而不是让十余个调用点传「变的是哪个字段」。
     pub(crate) last_status_text: Mutex<String>,
-    /// 上一次推给 UI 的工具栏指令，用于**去重**。`None` = 本次会话还没推过。
-    ///
-    /// 宿主焦点抖动会把同一份状态连推数次（真机：飞书 200ms 内 5 轮
-    /// focus_lost/gained，每轮一组 HideToolbar + UpdateToolbar + HideCandidates），
-    /// 全部挤在 UI 线程上，表现就是「切换时占用高、语言栏图标迟钝」——图标更新排在
-    /// 这些重复消息后面。内容没变就不必再推。
+    /// 上一次推给 UI 的工具栏指令，用于去重。`None` = 本次会话还没推过。
+    /// 宿主焦点抖动会把同一份状态连推数次，挤占 UI 线程，让语言栏图标更新变迟钝。
     pub(crate) last_toolbar_push: Mutex<Option<ToolbarPush>>,
-    /// `toggle_schema:<id>` 的**去程记录**：从哪个方案按进来、送达时的落点、用的哪个键。
+    /// `toggle_schema:<id>` 的去程记录：从哪个方案按进来、送达时的落点、用的哪个键。
     ///
-    /// 刻意只存运行时、不落配置：它描述的是「用户此刻的往返意图」，不是偏好。持久化会让
-    /// 重启后第一次按跳到一个用户早忘了的方案——那正是「回到来源」这个语义最容易失信的
-    /// 时刻。无有效记录时按 `toggle_schema` 到已在的方案是 no-op（不切走）。
+    /// 只存运行时、不落配置：它是用户此刻的往返意图，持久化会让重启后第一次按跳到早忘了的方案。
+    /// 无有效记录时按 `toggle_schema` 到已在的方案是 no-op。三分支裁决（见 `toggle_schema_by_id`）：
     ///
-    /// # 判据分两层：代际决定「来源还算不算数」，落点决定「这次是回程还是重新落地」
+    /// - 代际不等 ⇒ 期间用别的方式切过方案，作废且不动作（没有依据说明用户想去哪）。
+    /// - 代际相等、落点不等 ⇒ 没离开目标方案，只是中英态/大写被扰动；重新落地，来源保留。
+    /// - 落点相等 ⇒ 回程。
     ///
-    /// ★ 早期只有代际一层，于是**去程之后在目标方案里切中英、开大写时代际不动、记录照旧
-    /// 有效**，再按就把用户送回来源。真机报障原话：「从五笔一键切到英文方案，又用别的方式
-    /// 切了英文状态，再按却切回了五笔」。根因是「来源还算不算数」与「这次该回程还是该去
-    /// 程」两个问题压在同一个判据上，必错一个。现按三分支裁决（见 `toggle_schema_by_id`）：
+    /// 用代际而非在切方案时清空：切方案有五条路径，只有两条走 `finish_user_schema_switch`，
+    /// 散点清空必漏。只比方案 id 也不够，「切走又切回」与「从未变过」同形。
     ///
-    /// - 代际不等 ⇒ 期间用别的方式切过方案，来源已是几步之前的地方，**作废且不动作**
-    ///   （此时没有任何依据说明用户想去哪，随便挑一个会把往返键变成随机跳转键）。
-    /// - 代际相等、落点整体不等 ⇒ 用户没离开过目标方案，只是中英态/大写被扰动了。来源
-    ///   仍然成立，本次按键退回本义「去目标」——重新落地一次，**来源保留**，再按仍回得去。
-    /// - 落点整体相等 ⇒ 回程。
-    ///
-    /// # 代际为什么是代际，而不是在切方案时清空
-    ///
-    /// 切 active 方案在协调器侧有**五条路径**（循环键 / 直达热键 / 命令栏 / 菜单
-    /// `select_schema` / 设置页 RPC），其中只有两条走 `finish_user_schema_switch`——
-    /// 那个"统一收尾"从来就没统一到全部。散点补清空必漏，且漏掉的表现是「往返键把人送回
-    /// 几步之前的方案」，低频且难复现。
-    ///
-    /// 改为记下写入时 `EngineManager::schema_generation()` 的值，读取时比对是否仍相等：
-    /// 期间**任何**路径切过方案，代际就对不上，来源自动失效。零散点接线。
-    ///
-    /// 只比对方案 id 是不够的——「切走又切回来」与「从未变过」在 id 上完全同形。
-    ///
-    /// [`SchemaToggleOrigin::trigger_vk`] 是**触发键 VK**（0 = 非方案级绑定触发，如全局
-    /// 组合热键）。有它，往返才真正「不依赖目标方案的配置」：去程后该键在目标方案里临时
-    /// 获得往返语义，哪怕目标方案的 `[key_actions]` 是空的。
-    ///
-    /// ★ 没有这一项时，「五笔按 RShift 去英文方案」要求英文方案**自己也配一遍** RShift
-    /// 才回得来——设计文档 §5 原本断言 `toggle_schema` 对锁死「从结构上免疫」，那只覆盖了
-    /// 「回到哪」，没覆盖「怎么按得动」。测试里复现过。
+    /// [`SchemaToggleOrigin::trigger_vk`] 让去程的键在目标方案里临时获得往返语义，即使目标方案
+    /// 的 `[key_actions]` 没配它，否则用户得在目标方案再配一遍同一把键才回得来。
     pub(crate) schema_toggle_origin: Mutex<Option<SchemaToggleOrigin>>,
-    /// **单向** `switch_schema` 的送达记录：`(触发键 VK, 送达时的方案代际)`。
+    /// 单向 `switch_schema` 的送达记录：`(触发键 VK, 送达时的方案代际)`。
     ///
-    /// 用途**只有一个**：目标方案里再按这把键时**吞键**，不让它漏回全局链。
-    /// 方案级 `[key_actions]` 按活跃方案查表，单向切走后目标方案没有这条绑定 ⇒ 走到
-    /// `NotBound` ⇒ 若就此返回 `None`，键会落到 `is_toggle_mode_keycode`，而
-    /// `lshift`/`rshift` 出厂就是 `toggle_mode` 键 ⇒ **用户配的是「切方案」却切了中英文**。
-    /// 这正是方案级单向曾被整条禁掉的理由；改为放行 + 本记录兜底后，那个后果不再成立。
-    ///
-    /// ★ **刻意不复用 [`SchemaToggleOrigin`]**：那个结构的每个字段都为**回程**服务
-    /// （`origin` 是回程目标、`landing` 是「该回程还是该重新落地」的判据），而单向记录
-    /// 两样都不需要——它只回答「这把键刚把用户送到这儿吗」。塞进同一个结构等于让
-    /// `origin` 对一半记录无意义，是「一条记录承载两种语义」的开端。
-    ///
-    /// 代际用于失效：期间用别的方式切过方案 ⇒ 记录作废 ⇒ 该键恢复它原本的语义
-    /// （与往返记录的失效判据同源，理由见 `schema_toggle_key_authorized`）。
+    /// 唯一用途：目标方案里再按这把键时吞键。否则目标方案没有这条绑定，键会落到
+    /// `is_toggle_mode_keycode`，而 `lshift`/`rshift` 出厂就是 `toggle_mode`——配的是切方案却切了中英。
+    /// 不复用 [`SchemaToggleOrigin`]：那里每个字段都为回程服务，单向记录两样都不需要。
+    /// 代际用于失效，与往返记录同源（见 `schema_toggle_key_authorized`）。
     pub(crate) schema_switch_arrival: Mutex<Option<(u32, u64)>>,
     /// 当前主题定义的序号槽位字符（views.index.labels）；push_theme 载入时刷新。
     /// 序号优先级：用户配置 index_labels > 本字段 > 默认数字。
@@ -2180,13 +1716,13 @@ pub struct Coordinator {
     pub(crate) cmdbar_services: std::sync::OnceLock<wind_cmdbar::Services>,
     /// 宿主服务（剪贴板等平台能力）。`OnceLock` 构造后注入惯例（同 `self_weak`）；
     /// 未注入时首次取用即固化默认实现（桌面 DesktopHostServices），故 Android FFI
-    /// 必须在**首个可能触碰剪贴板的调用之前** `set_host_services`。
+    /// 必须在首个可能触碰剪贴板的调用之前 `set_host_services`。
     pub(crate) host_services: std::sync::OnceLock<Arc<dyn crate::host_services::HostServices>>,
     /// 自身 Weak 引用：$CC 命令在独立线程异步执行（避免持 state 锁回调自锁方法致死锁）。
     pub(crate) self_weak: std::sync::OnceLock<std::sync::Weak<Coordinator>>,
     /// 上屏历史环形缓冲（index 0 = 最近）：供命令栏 `last(n)` 取最近上屏文本。
     pub(crate) recent_commits: Mutex<std::collections::VecDeque<String>>,
-    /// 下一词学习的上文：最近一次**选词整体上屏**的词（简体）。默认断开：任何上屏记账
+    /// 下一词学习的上文：最近一次选词整体上屏的词（简体）。默认断开：任何上屏记账
     /// （`record_commit`）、焦点变化、宿主自行出字 / 挪光标、取消、撤销上屏都清空，只有
     /// `commit_selected` 接得上——只记真正相邻的两个词，见 [`Self::learn_next_word`]。
     pub(crate) next_word_prev: Mutex<Option<String>>,
@@ -2195,11 +1731,9 @@ pub struct Coordinator {
     /// 两次报告之间也不脱节。桌面宿主不报，恒空。
     pub(crate) preceding_text: Mutex<String>,
     /// 撤销上屏（`ime.undo_commit`）删除量：最近一次「同步落到光标前」的字符数（UTF-16 单元，
-    /// 与 TSF ShiftStart / macOS NSRange 同量纲）。**刻意与 `recent_commits` 分离**——历史队列
-    /// 记「上过什么」（供 last/加词，深度 16），本值记「光标前紧邻的还是不是它、有几个字」这一
-    /// 时效态。默认 1 → undo 永远有动作；每次上屏经 `note_commit_action` 覆盖 → 只有「刚输入完
-    /// 那次」精准删多个；撤销一次即复位 1、焦点变化亦复位 → 之后回落删 1（宁可少删多按几次，
-    /// 也不按陈旧计数误删多个）。
+    /// 与 TSF ShiftStart / macOS NSRange 同量纲）。与 `recent_commits`（上过什么）分离，本值记
+    /// 「光标前紧邻的还是不是它」这一时效态：默认 1；每次上屏经 `note_commit_action` 覆盖；撤销
+    /// 一次或焦点变化即复位 1。宁可少删多按几次，也不按陈旧计数误删。
     pub(crate) last_commit_len: std::sync::atomic::AtomicUsize,
     /// 最近一次上屏的文本开头是不是 `crate::auto_spacing` 补的空格。造词草稿流要把它剥掉：
     /// 草稿窗口遇到非汉字就断流并丢掉整笔，不剥的话交界后的第一个字永远进不了草稿。
@@ -2213,10 +1747,10 @@ pub struct Coordinator {
     hide_candidate_window: Mutex<bool>,
     /// 候选布局方向运行时态（命令栏 ime.toggle("layout") 切换；true=竖排，初值随配置，持久化）。
     ///
-    /// 这是布局方向的**基线真相源**——模式级覆盖（`layout.rs`）在它之上叠加，不改写它。
+    /// 这是布局方向的基线真相源，模式级覆盖（`layout.rs`）在它之上叠加，不改写它。
     pub(crate) candidate_orientation: Mutex<Orientation>,
     /// 上次真正下发给 UI 的候选方向（`layout.rs` 的去重缓存，避免每次按键重发致重排抖动）。
-    /// 与 `candidate_vertical` 的区别：后者是基线，本字段是**叠加模式意图后实际生效**的值。
+    /// 与 `candidate_vertical` 的区别：后者是基线，本字段是叠加模式意图后实际生效的值。
     pub(crate) candidate_layout_sent: Mutex<Orientation>,
     /// 上次下发的方案级候选字族（去重用）。见 `sync_candidate_font`。
     pub(crate) candidate_font_sent: Mutex<String>,
@@ -2235,76 +1769,62 @@ pub struct Coordinator {
     /// 全屏状态缓存：由 notify_toolbar_async 在后台线程异步刷新，notify_toolbar 直接读取，
     /// 消除 bridge handler 线程上的 SHQueryUserNotificationState 阻塞。
     ///
-    /// ⚠ 这一位的**含义随写者而异**，读它之前先想清楚：焦点事件那条（`commit_fullscreen_kind`）
-    /// 写的是「任意全屏形态」（含 D3D 独占 / 演示模式），周期复查那条
-    /// （`commit_fullscreen_covering`）写的只是判据②「铺满显示器」——后者刻意不问判据①，
-    /// 因为那要跨进程问 shell，不能按拍反复发。两者可在「演示模式已置但窗口未铺满」这类
-    /// 罕见格上给出不同的值。目前唯一的生产读者是 `notify_toolbar` 的 `hide_fullscreen`，
-    /// 它只关心「要不要收工具栏」，对这点差异不敏感；独占那一侧另有
-    /// `fullscreen_exclusive_cached` 与 UI 线程的按需闸负责。**新增读者前先确认你要的是哪个**。
+    /// 这一位的含义随写者而异：焦点事件那条（`commit_fullscreen_kind`）写「任意全屏形态」，
+    /// 周期复查那条（`commit_fullscreen_covering`）只写「铺满显示器」（不按拍跨进程问 shell）。
+    /// 两者在罕见格上可能不同；唯一生产读者 `notify_toolbar` 的 `hide_fullscreen` 对此不敏感，
+    /// 独占那侧另有 `fullscreen_exclusive_cached`。新增读者前先确认要的是哪个。
     pub(crate) fullscreen_cached: std::sync::atomic::AtomicBool,
-    /// 全屏探测的单飞闸：已有探测在途时跳过新的。焦点变化是成串来的，而探的是同一个
-    /// 全局前台状态，此前每次都 spawn 一个线程。
+    /// 全屏探测的单飞闸：焦点变化成串到来，而探的是同一个全局前台状态。
     ///
-    /// 两个获取点（焦点事件的 `notify_toolbar_async`、复查线程的 `ensure_fullscreen_watch`）
-    /// 都经 `try_take_probe_gate`，归还统一由 `ProbeGate` 的 `Drop` 负责——**不要**直接写它。
+    /// 两个获取点（`notify_toolbar_async`、`ensure_fullscreen_watch`）都经 `try_take_probe_gate`，
+    /// 归还统一由 `ProbeGate` 的 `Drop` 负责，不要直接写它。
     pub(crate) fullscreen_probing: std::sync::atomic::AtomicBool,
     /// 全屏复查线程是否已起——懒启动的单次闸，见 `coordinator/fullscreen_watch.rs`。
     #[cfg(windows)]
     pub(crate) fullscreen_watch_started: std::sync::atomic::AtomicBool,
-    /// 前台是否 **D3D 独占**全屏（`FullscreenKind::D3dExclusive`），与 `fullscreen_cached`
+    /// 前台是否 D3D 独占全屏（`FullscreenKind::D3dExclusive`），与 `fullscreen_cached`
     /// 同一探测线程刷新。独立成位是因为后果不同：它压的是候选窗（弹了会把游戏踢出独占态），
     /// 而 `fullscreen_cached` 只管工具栏。见 `handle_uielement.rs`。
     pub(crate) fullscreen_exclusive_cached: std::sync::atomic::AtomicBool,
     /// 接管了候选绘制的宿主进程（TSF UI-less / `pbShow=FALSE`），按 pid 记账。
     /// 焦点落在其中任一进程时不弹本地候选窗。写入见 `handle_uielement.rs`。
     pub(crate) uielement_host_pids: Mutex<std::collections::HashSet<u32>>,
-    /// 实际读走过候选串的进程（`UIELEMENT_FLAG_HOST_READS`）。与上面那张分开：
-    /// 那是宿主的声明，这是推断，只有这张受 compat `host_drawn_candidates` 管，
-    /// 且 2026-09-15 起是 opt-in（默认不收窗）。
+    /// 实际读走过候选串的进程（`UIELEMENT_FLAG_HOST_READS`）。与上面那张分开：那是宿主的声明，
+    /// 这是推断，只有这张受 compat `host_drawn_candidates` 管，且是 opt-in（默认不收窗）。
     pub(crate) uielement_reader_pids: Mutex<std::collections::HashSet<u32>>,
-    /// 「当前在输入的进程」：焦点/激活事件与**每个按键**都会写它（bridge 按管道对端 pid）。
-    /// 与 `active_compat.pid` 的区别：那份只由焦点/激活事件维护，而游戏这类宿主常常没有
-    /// 可编辑 TSF 上下文、`focus_gained` 一次都不来——按键才是「谁在输入」的最强证据
-    /// （host-render 的 `note_focus` 是同一条理由的先例）。0 = 未知。
+    /// 「当前在输入的进程」：焦点/激活事件与每个按键都会写它（bridge 按管道对端 pid）。0 = 未知。
+    /// 与只由焦点事件维护的 `active_compat.pid` 不同：游戏类宿主常常一次 `focus_gained` 都不来，
+    /// 按键才是「谁在输入」的最强证据。
     pub(crate) focus_pid: std::sync::atomic::AtomicU32,
     /// host-render 管理器（Windows）：与 `BridgeServer` 共享同一 `Arc` 实例。
-    /// 服务入口经 `set_host_render` 注入一次；Task 6/7 据此写候选/工具提示/状态帧并隐藏。
+    /// 服务入口经 `set_host_render` 注入一次，据此写候选/工具提示/状态帧并隐藏。
     /// 采用 `OnceLock`（与 `self_weak`/`cmdbar_services` 同一构造后注入惯例），
     /// 避免为其贯穿 `new`/`new_headless` 等构造器签名。
     #[cfg(windows)]
     #[allow(dead_code)] // Task 6/7 接线写帧/隐藏后即被读取
     host_render: std::sync::OnceLock<Arc<wind_bridge::host_render_windows::HostRenderManager>>,
-    /// 最近一次输入诊断快照（compartment 禁用态 / InputScope 密码位），供 Task 6 HUD 展示。
+    /// 最近一次输入诊断快照（compartment 禁用态 / InputScope 密码位），供输入诊断 HUD 展示。
     pub(crate) last_input_diag: Mutex<crate::input_diag::InputDiagState>,
     /// 最近一次窗口 / TSF 上下文诊断快照（`CMD_DIAG_SNAPSHOT`）。
     /// 与 `last_input_diag` 分开存：两者上报时机不同，合成一个就得回答「只到了一半算什么」。
     pub(crate) last_window_diag: Mutex<crate::input_diag::WindowDiagView>,
     /// 密码框强制英文抑制态：命中密码 InputScope 时置 true，输入闸据此强制英文透传
-    /// （**不改 `chinese_mode` 持久值**）。
-    ///
-    /// 呈现：2026-08-04 起工具栏模式格显 "英" 且不高亮（`ToolbarState::password_suppress`），
-    /// TSF 语言栏图标同样显 "英"（C++ 侧本地判 `IsPasswordSuppressActive`，不经 IPC）。
-    /// 此前的「图标保持不变」是对齐 Go 旧版的决策，已按用户反馈推翻——图标显方案标签
-    /// 而键已被全放行，用户无从知道自己打不出中文。
-    /// ⚠ 呈现与输入闸是两条独立的路：改这里的展示**不会**改变是否抑制，反之亦然。
+    /// （不改 `chinese_mode` 持久值）。工具栏模式格与语言栏图标都显「英」，否则用户无从知道
+    /// 自己打不出中文。呈现与输入闸是两条独立的路，改一边不影响另一边。
     pub(crate) password_suppress: std::sync::atomic::AtomicBool,
     /// 扩展程序事件出口与会话状态，见 `hook_events`。
     pub(crate) hook: Arc<wind_hook::tap::Tap>,
     pub(crate) hook_session: std::sync::Mutex<crate::hook_events::HookSession>,
     pub(crate) extensions_config_hook:
         std::sync::OnceLock<crate::hook_events::ExtensionsConfigHook>,
-    /// 「不可输入」**呈现**的迟滞闸门（判定本身见 [`Coordinator::input_block`]）。
+    /// 「不可输入」呈现的迟滞闸门（判定本身见 [`Coordinator::input_block`]）。
     ///
-    /// 两个方向不对称，取值与理由继承自已删除的 C++ 版：
-    /// · 恢复（→ 可输入）**立即**生效——误显「英」很刺眼；
-    /// · 进入（→ 不可输入）延迟 [`INPUT_BLOCK_DELAY`]——晚一点显「英」用户察觉不到。
-    /// 实测 QQ 密码框场景这两个量每约 180ms 翻转两次，不做迟滞就是图标闪烁源。
+    /// 两个方向不对称：恢复立即生效（误显「英」很刺眼）；进入延迟 [`INPUT_BLOCK_DELAY`]（晚一点
+    /// 显「英」察觉不到）。密码框等场景这两个量会频繁来回翻转，不做迟滞图标就闪。
     pub(crate) input_block_gate: Mutex<InputBlockGate>,
     /// 上次广播出去的语言栏悬停提示文本，用于去重。
     ///
-    /// tooltip 只有几种取值，而状态推送远比它频繁（全半角、标点、方案切换都会推状态却
-    /// 不改 tooltip）。不去重的话每次状态变化都白发一条 IPC 给所有宿主。
+    /// tooltip 只有几种取值，而状态推送远比它频繁；不去重则每次状态变化都白发一条 IPC 给所有宿主。
     pub(crate) last_langbar_tooltip: Mutex<String>,
     /// 当前页每个候选的悬停提示（含原始行），每次候选页组装时整体覆盖。
     pub(crate) tooltip_page: Mutex<Vec<crate::handle_tooltip::TooltipPageEntry>>,
@@ -2312,23 +1832,22 @@ pub struct Coordinator {
     pub(crate) tooltip_menu_target: Mutex<Option<crate::handle_tooltip::TooltipMenuTarget>>,
     /// Linux：开着的菜单是候选右键菜单（`State::menu_target_text` 的无锁镜像）。
     ///
-    /// 只给 `notify_ui_hide` 用：它的不少调用点正持着 `state` 锁，在里面再取锁就是自锁死
-    /// （实测：服务端卡死、每个键 2s 超时）。所以这里只读原子量、只发命令不碰 `state`，
-    /// 复位 `menu_open` 交给 UI 回送的 `MenuClose`（见 `menu_host::MenuHost::hide`）。
+    /// 只给 `notify_ui_hide` 用：它的不少调用点正持着 `state` 锁，再取锁就自锁死。所以这里只读原子
+    /// 量、不碰 `state`，复位 `menu_open` 交给 UI 回送的 `MenuClose`（见
+    /// `menu_host::MenuHost::hide`）。
     #[cfg(ext_presenter)]
     pub(crate) candidate_menu_open: std::sync::atomic::AtomicBool,
     /// 密码框抑制策略开关，`input.password_force_english` 的运行时镜像（构造与热重载时回灌，
-    /// 见 `set_password_suppress_enabled`）。这是**全局**值：未配 per-app 规则的进程跟随它；
+    /// 见 `set_password_suppress_enabled`）。这是全局值：未配 per-app 规则的进程跟随它；
     /// 判定一律经 `password_force_english_for_pid`，不要直接读本字段做抑制决策。
     pub(crate) password_suppress_enabled: std::sync::atomic::AtomicBool,
-    /// 输入诊断 HUD 是否可见（Task 6/7 接线；本任务先占位默认 false）。
+    /// 输入诊断 HUD 是否可见（默认 false）。
     pub(crate) input_diag_hud_visible: std::sync::atomic::AtomicBool,
     /// HUD 分区显示开关（右键菜单「显示分类」）。会话级，不持久化。
     pub(crate) input_diag_sections: Mutex<wind_ui_types::DiagSections>,
     /// HUD 冻结中（右键菜单「停止刷新」）：新快照不再推给 UI。
     ///
-    /// 冻结落在**推送**这一层而不是 UI 渲染层：数据照常进 `last_*_diag`（解冻后立即有
-    /// 最新值），只是不往屏幕上送。若改在 UI 侧丢弃，解冻后得等下一次焦点事件才恢复。
+    /// 冻结落在推送层而不是 UI 渲染层：数据照常进 `last_*_diag`，解冻后立即有最新值。
     pub(crate) input_diag_frozen: std::sync::atomic::AtomicBool,
     /// HUD 窗口置顶（右键菜单）。默认开——诊断浮窗被盖住就失去意义。
     pub(crate) input_diag_topmost: std::sync::atomic::AtomicBool,
@@ -2350,8 +1869,8 @@ pub(crate) struct ChaiziAssets {
     /// 运行期路径本代次已经试过（含「方案没配拆字库 / 库文件不存在」）：不再每键重读方案
     /// 文件、每键告警。sync 时清掉，给换了方案之后一次重试。
     pub(crate) tried: bool,
-    /// 当前这份表是运行期格式串按需装的（配置里没有拆字消费者）。sync 据此**不卸**它——
-    /// 否则每次配置生效都卸、下一次 `dict.rev` 又装，来回读盘。方案的拆字库路径变了才卸。
+    /// 当前这份表是运行期格式串按需装的（配置里没有拆字消费者）。sync 据此不卸它，否则每次
+    /// 配置生效都卸、下一次 `dict.rev` 又装。方案的拆字库路径变了才卸。
     pub(crate) runtime: bool,
     /// 测试计数：运行期路径解析拆字库（读方案文件）的次数。
     #[cfg(test)]
@@ -2400,10 +1919,8 @@ fn build_comment_lib(
 
 /// 读盘加载一个方向的简繁转换器（`to_traditional` = 简入繁出）。数据缺失返回 `None`。
 ///
-/// 转换链里的**每本 octrie 各自按层序解析**（走 resolve_data_file 这个单文件收口点，
-/// `opencc/<名>.octrie`），定制层只放一本 `STPhrases.octrie` 也能正常工作，缺的那本自动
-/// 落回出厂。**不能整份目录胜出**——理由见 `Converter::load_variant_resolved` 的文档
-/// （残链会一个字都不转，且无从察觉）。
+/// 转换链里每本 octrie 各自按层序解析（`resolve_data_file`），定制层只放一本也能工作，缺的
+/// 落回出厂。不能整份目录胜出，理由见 `Converter::load_variant_resolved`（残链会一个字都不转）。
 pub(crate) fn load_converter(
     data_dir: Option<&Path>,
     config: &Config,
@@ -2433,9 +1950,8 @@ pub(crate) fn load_converter(
 
 /// 字根字体从 `sent` 变到 `want` 时要下发的 `(路径, 家族名)`；不用发时 `None`。
 ///
-/// 变为「没有」时下发**空路径**＝撤掉，而不是什么都不发：渲染端的私用区字体位只有一个，
-/// 且压过方案级 `[candidate] font_family`。以前只停发不撤，五笔（黑体字根）切到蒙古文
-/// 方案后，蒙文的私用区码位仍被切到字根字体，画成字根或空白。
+/// 变为「没有」时下发空路径＝撤掉：渲染端的私用区字体位只有一个且压过方案级
+/// `[candidate] font_family`，只停发不撤会让下一个方案的私用区码位仍画成字根。
 fn chaizi_font_to_send(
     sent: &Option<(String, String)>,
     want: &Option<(String, String)>,
@@ -2520,13 +2036,13 @@ impl Coordinator {
     #[cfg(windows)]
     pub fn set_host_render(&self, mgr: Arc<wind_bridge::host_render_windows::HostRenderManager>) {
         let _ = self.host_render.set(mgr.clone());
-        // 把同一 Arc 传给 UI 线程，使其在消息循环中激活 SHM 分流路径（Task 7）。
+        // 把同一 Arc 传给 UI 线程，使其在消息循环中激活 SHM 分流路径。
         let _ = self.ui_tx.send(wind_ui_types::UiCommand::SetHostRender(
             wind_ui_types::HostRenderArc(mgr),
         ));
     }
 
-    /// 取已注入的 host-render 管理器（Windows）；未注入返回 None。供 Task 6/7 写帧/隐藏。
+    /// 取已注入的 host-render 管理器（Windows）；未注入返回 None。
     #[cfg(windows)]
     pub(crate) fn host_render(
         &self,
@@ -2536,10 +2052,8 @@ impl Coordinator {
 
     /// 把 `app_compat` 现算的 HostRender 白名单同步给 manager。
     ///
-    /// 白名单来自 compat.toml 的 `host_render = true` 规则（`AppCompatRule::host_render`），
-    /// 不是 config.toml 字段——调用点是每次 `app_compat` 被重新加载之后（menu 写规则、
-    /// 未来若加设置页开关同理），而非常规配置热重载（compat.toml 与 config.toml 是两个
-    /// 独立文件，后者变了不代表前者变了）。
+    /// 白名单来自 compat.toml 的 `host_render = true` 规则，不是 config.toml 字段，故调用点是
+    /// 每次 `app_compat` 重新加载之后，而非常规配置热重载。
     #[cfg(windows)]
     pub(crate) fn sync_host_render_whitelist(&self) {
         if let Some(mgr) = self.host_render() {
@@ -2553,10 +2067,8 @@ impl Coordinator {
     }
 
     /// 当前是否处于 host-render 受限宿主模式（SearchHost.exe / 开始菜单搜索框等）。
-    /// `active_target()` 每次现查（无缓存），避免跨帧持有失效目标；它仅在 active 连接
-    /// **已完成 setup** 时返回 Some，而 setup 会拒绝白名单外进程——故此判定天然经过
-    /// 白名单过滤，语义为「确实在 host 渲染」（比按事件源 pid 查白名单更严格）。
-    /// 非 Windows 编译始终返回 false，零开销。
+    /// `active_target()` 每次现查（不跨帧持有失效目标），且只在 active 连接已完成 setup 时返回
+    /// Some，而 setup 会拒绝白名单外进程，故语义为「确实在 host 渲染」。非 Windows 恒 false。
     pub(crate) fn host_render_active(&self) -> bool {
         #[cfg(windows)]
         return self
@@ -2580,12 +2092,9 @@ impl Coordinator {
 
     /// 触发后台准备（幂等、非阻塞）。返回 `false` = 已在进行或已就绪。
     ///
-    /// 准备的内容是**首次真实查询才会触发的惰性构建**（反查/合并索引，实测真机冷启动
-    /// 同步阻塞 2.8 秒）。故这里走**与 `handle_key_event` 完全相同的按键路径**——
-    /// 另写一条「预加载」必然与真实路径漂移：Android 侧手写预热的第一版就漏掉了释放
-    /// 首显闸门那步，「预热」只花 3ms 返回，惰性构建原样留给了用户的第一次按键。
-    ///
-    /// 喂 'a' 再退格，一进一删回到空缓冲，不留状态。
+    /// 准备的内容是首次真实查询才触发的惰性构建（反查/合并索引，冷启动可阻塞数秒）。故走与
+    /// `handle_key_event` 完全相同的按键路径：另写一条「预加载」必然与真实路径漂移（漏掉
+    /// 释放首显闸门之类的步骤，惰性构建原样留给第一次按键）。喂 'a' 再退格，回到空缓冲。
     pub fn prepare(self: &Arc<Self>) -> bool {
         use std::sync::atomic::Ordering;
         // Idle → Preparing 的 CAS 保证只跑一次
@@ -2613,8 +2122,7 @@ impl Coordinator {
                 };
                 use wind_bridge::handler::MessageHandler;
                 this.handle_key_event(&key(0x41));
-                // 收尾用**退格**而非 ESC：ESC 未必清空编码缓冲，实测预热完缓冲里还留着
-                // 那个 'a'，用户接着打 "aa" 会得到 "aaa"。退格逐码删，一进一删必回空。
+                // 收尾用退格而非 ESC：ESC 未必清空编码缓冲，残留的 'a' 会混进用户接着打的码。
                 this.handle_key_event(&key(wind_keys::keymap::VK_BACK));
                 this.readiness_state.store(2, Ordering::Relaxed);
                 info!("prepare 完成，耗时 {:?}", t0.elapsed());
@@ -2628,16 +2136,13 @@ impl Coordinator {
 
     /// 是否在启动时预热全部已装方案。移动端应设 `false`（理由见构造里的说明）。
     ///
-    /// 构造返回后**立即**调用即可生效：预热线程有 1.5s 的启动延迟专为此留（见构造处）。
+    /// 构造返回后立即调用即可生效：预热线程有 1.5s 的启动延迟专为此留（见构造处）。
     pub fn set_eager_prewarm(&self, value: bool) {
         self.eager_prewarm
             .store(value, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// 声明本宿主**不提供光标坐标**（自绘候选条）。
-    ///
-    /// 置位后首显闸门直接放行，宿主不必再喂合成 caret。这不是能力协商——没有分支矩阵，
-    /// 只是关掉一段桌面专属的等待逻辑。
+    /// 声明本宿主不提供光标坐标（自绘候选条）：首显闸门直接放行，宿主不必喂合成 caret。
     pub fn set_caret_independent(&self, value: bool) {
         self.caret_independent
             .store(value, std::sync::atomic::Ordering::Relaxed);
@@ -2646,23 +2151,20 @@ impl Coordinator {
     /// 登记宿主对配置的强制改写（移动端：编码区归候选区、联想态空格不选词…），
     /// [`Self::reload_user_config`] 从磁盘重读后会再套一遍。
     ///
-    /// 宿主在构造前已经改写过一次传进来的 `Config`，但那只管到第一次重载：设置页每改一项
-    /// 就发一次重载，`Config::load` 读回的是盘上的值，强制项随之悄悄回到桌面默认——
-    /// 表现为「改了任意一个设置之后，联想态空格又开始选词」，而且与改的那一项毫无关系。
-    /// 只能设一次：第二次调用被忽略（返回 false），防止两处各登记一份互相覆盖。
+    /// 宿主在构造前改写过一次 `Config`，但设置页每改一项就重载，`Config::load` 读回盘上的值，
+    /// 强制项会悄悄回到桌面默认。只能设一次：第二次调用被忽略（返回 false）。
     pub fn set_config_overlay(&self, overlay: fn(&mut Config)) -> bool {
         self.config_overlay.set(overlay).is_ok()
     }
 
     /// 暂停 / 恢复学习（隐私 / 无痕输入，见字段 `learning_suspended`）。
     ///
-    /// 判断收口在各条**学习入口**（`record_selection_cased_in`、`learn_phrase_on_commit_in`、
+    /// 判断收口在各条学习入口（`record_selection_cased_in`、`learn_phrase_on_commit_in`、
     /// `bump_selected_temp_word`、`promote_draft_on_commit`、`note_draft_commit`、
     /// `learn_english_raw`、`record_assoc_pick`、`learn_next_word`、`record_commit_ks` /
     /// `handle_english_stats`、`learn_quick_history`、`learn_url_history`、
-    /// `learn_email_suffix`、`push_commit_history`），而不是散在各个 store 写函数里：
-    /// 用户**主动**的操作（加词、删词、置顶、清空）也走同一批 store 写函数，那是用户意图、
-    /// 不是学习，暂停期间必须照常生效。读路径一概不看本开关。
+    /// `learn_email_suffix`、`push_commit_history`），不放在 store 写函数里：用户主动的
+    /// 加词、删词、置顶、清空也走那些函数，暂停期间必须照常生效。读路径不看本开关。
     ///
     /// 切换时顺带打一个下一词断点：暂停前最后一个词不该和恢复后的第一个词连成一对。
     pub fn set_learning_suspended(&self, on: bool) {
@@ -2679,8 +2181,7 @@ impl Coordinator {
 
     /// 热重载成功后不弹「设置已更新」（失败、语法错误照常提示）。
     ///
-    /// 电脑上改设置是在独立的设置程序里点「保存」，弹一句确认是合适的；手机设置页**每改一项**
-    /// 就重载一次，连改几项就连弹几条，而且改动本身在设置页上就看得见（真机反馈）。
+    /// 手机设置页每改一项就重载一次，连改几项就连弹几条，而改动在设置页上本就看得见。
     pub fn set_quiet_reload_toast(&self, value: bool) {
         self.quiet_reload_toast
             .store(value, std::sync::atomic::Ordering::Relaxed);
@@ -2845,8 +2346,7 @@ impl Coordinator {
         session_tx: Option<crate::session_output::SessionSender>,
     ) -> Arc<Self> {
         // 注入 redb Store：码表引擎注册用户词/临时词层，用户词进候选合并。
-        // override_dir 为 None 时由 EngineManager 取默认（用户配置目录下的 schema_overrides）。
-        // 覆盖层在构造时传入（引擎一次建成）；override_dir 为 None 取默认目录。
+        // 覆盖层在构造时传入（引擎一次建成）；override_dir 为 None 取默认目录（schema_overrides）。
         let engine_mgr = EngineManager::with_store_override_overlay(
             &config,
             data_dir,
@@ -2881,8 +2381,7 @@ impl Coordinator {
         // 启动解析的条目缓存进结构体，作为"恢复默认"重读文件失败时的回退。
         let mut system_phrase_entries: Vec<wind_phrase::SystemPhraseEntry> = Vec::new();
         // 用户目录同名文件整体替代安装目录那份（覆盖替换，非合并）。
-        // ⚠️ 解析在此**一次定死**：后续 `current_system_phrase_entries` 的重读走同一路径，
-        // 故运行时新放的覆盖文件要下次启动才生效（与全仓其它覆盖点一致，无文件监视）。
+        // 解析在此一次定死，后续重读走同一路径：运行时新放的覆盖文件要下次启动才生效。
         let assoc_bigram_path = Config::resolve_data_file(data_dir, "assoc/assoc_bigram.txt");
         let system_phrase_path = Config::resolve_data_file(data_dir, "system.phrases.toml");
         if system_phrase_path.is_none() && data_dir.is_some() {
@@ -2957,9 +2456,8 @@ impl Coordinator {
             }
         };
 
-        // 简繁转换器（解析规则见 `load_converter`）：只预载**开着的**方向（两份合计约
-        // 1.8 MB）。关着的方向在切换入口（热键 / 菜单 / 工具栏 / 命令栏）先同步加载再切，
-        // 见 `ensure_converter`——切换是一次性的用户动作，不是逐键路径。
+        // 简繁转换器（解析规则见 `load_converter`）：只预载开着的方向。关着的方向在切换入口
+        // （热键 / 菜单 / 工具栏 / 命令栏）先同步加载再切，见 `ensure_converter`——切换不是逐键路径。
         let s2t = needs
             .s2t
             .then(|| load_converter(data_dir, &config, true))
@@ -2973,11 +2471,9 @@ impl Coordinator {
 
         // 标点配对表（中/英）已在 ConfigBundle 内构建。
 
-        // 通用规范汉字表（检索范围"常用字"判定）。用户目录同名文件整体替代（见
-        // docs/architecture/user-override.md）——自定义"常用字"范围是这张表的主要用途。
-        // 全表与判定同源：都来自装配好的字符类 registry（常用字表在
-        // `charsets/common_han.yaml`）。两处各读一份文件的话，用户换了字表却只有一半
-        // 生效——而那半是哪半，取决于他改的是哪个文件。
+        // 通用规范汉字表（检索范围「常用字」判定），用户目录同名文件整体替代（见
+        // docs/architecture/user-override.md）。全表与判定同源于字符类 registry
+        // （`charsets/common_han.yaml`），各读一份文件会让用户换字表只生效一半。
         let common_chars = wind_candidate::CommonChars::from_registry(&engine_mgr.charsets());
         if common_chars.is_empty() {
             warn!("common_chars.txt 缺失，检索范围过滤将退化为不过滤");
@@ -3008,8 +2504,7 @@ impl Coordinator {
         let quick_formats = wind_quick_input::FormatTable::load(
             Config::resolve_data_file(data_dir, "system.quick.toml").as_deref(),
         );
-        // 表达式条目在这里预检一次：写错的表达式在运行期只表现为「那条候选不出现」，
-        // 没有预检就没有任何线索（热路径不能每次按键都告警）。
+        // 表达式条目在这里预检一次：写错的表达式运行期只表现为那条候选不出现，热路径又不能逐键告警。
         crate::quick_eval::precheck(&quick_formats);
 
         // 软键盘映射表：出厂画布 ⊕ 定制层按面覆盖 ⊕ 用户层按面覆盖（分层理由见函数文档）。
@@ -3033,15 +2528,13 @@ impl Coordinator {
             .unwrap_or_default();
         let toolbar_anchors_init = runtime_state.toolbar_anchors.clone();
         let softkeyboard_anchors_init = runtime_state.softkeyboard_anchors.clone();
-        // 在 `store` 被 move 进结构体之前取：字段字面量按书写顺序求值，`state_writer`
-        // 排在 `store` 之后，那时已经借不到了。
+        // 在 `store` 被 move 进结构体之前取：字段字面量按书写顺序求值，`state_writer` 排在 `store` 之后。
         let persists_state = store.is_some();
         // 全局方案初值取引擎解析后的活跃方案（含定制版隐藏降级），而不是 `schema.active` 原值。
         let global_schema_init = engine_mgr.active_schema_id();
         let app_schemas_init = runtime_state.app_schemas.clone();
-        // 软键盘上次停在哪一面：按**面 id** 还原（面表来自配置，两次运行之间可能增删面，
-        // 存下标必然指到别处）。id 找不到就当没记录过、开在第一面——那比默默开到一个
-        // 陌生的面好。
+        // 软键盘上次停在哪一面：按面 id 还原（两次运行之间可能增删面，存下标会指到别处）。
+        // id 找不到就开在第一面。
         let softkeyboard_page_init = softkeyboard
             .index_of(&runtime_state.last_softkeyboard_page)
             .unwrap_or(0);
@@ -3061,8 +2554,8 @@ impl Coordinator {
         // 初始明暗：config.ui.theme.style（system 跟随系统实时探测，见 ThemeStyle::resolve_dark）。
         let theme_style_init = ThemeStyle::from_config(&config.ui.theme.style);
 
-        // 标点转换器：只持引号交替态，自定义映射每次从实时配置读（故此处无需注入——
-        // 曾在此注入一份副本且仅此一次，设置页改自定义标点必须重启服务才生效）。
+        // 标点转换器：只持引号交替态，自定义映射每次从实时配置读，故此处无需注入
+        // （注入副本会让设置页改自定义标点必须重启才生效）。
         let punct_conv = PunctuationConverter::new();
 
         // 编码显示方式运行时初值（config 移入结构体前先算）。
@@ -3071,10 +2564,10 @@ impl Coordinator {
         // 候选布局方向运行时初值（与下方 SetCandidateLayout 下发一致；config 移入前先算）。
         let candidate_orientation_init = Orientation::from_layout_str(&config.ui.candidate.layout);
 
-        // 候选窗显隐运行时初值（ui.candidate.hide_window；此前恒为 false，配置不生效）。
+        // 候选窗显隐运行时初值（ui.candidate.hide_window）。
         let hide_candidate_window_init = config.ui.candidate.hide_window;
 
-        // 密码框强制英文开关初值（input.password_force_english；此前恒为 true，菜单关掉重启即复原，t197）。
+        // 密码框强制英文开关初值（input.password_force_english）。
         let password_suppress_enabled_init = config.input.password_force_english;
 
         // 统计采集器：与 store 共享 Arc，内存聚合 + 后台定时 flush。
@@ -3094,8 +2587,7 @@ impl Coordinator {
         };
         let (capslock_press_tx, capslock_press_rx) =
             std::sync::mpsc::channel::<wind_keys::capslock_hook::HookEvent>();
-        // 简繁两方向的生效口径（互斥，冲突时 s2t 赢）收在 config 层的单一函数里，
-        // 与 reload 那处同源——散着写迟早漏改一处。
+        // 简繁两方向的生效口径（互斥，冲突时 s2t 赢）收在 config 层的单一函数里，与 reload 那处同源。
         let (conv_s2t, conv_t2s) = config.input.conversion_directions();
         let coordinator = Arc::new(Self {
             state: Mutex::new(State {
@@ -3245,13 +2737,12 @@ impl Coordinator {
             panel_drop_output: Mutex::new(std::collections::HashMap::new()),
             #[cfg(all(target_os = "linux", ext_presenter))]
             host_panels: std::sync::atomic::AtomicBool::new(false),
-            // 判据借 `store`：它的文档本来就写着「None = 无持久化（headless 测试）」。
-            // 只看 `state_dir()` 挡不住测试夹具——那是进程外的全局路径，夹具同样取得到。
+            // 判据借 `store`（None = 无持久化）：只看 `state_dir()` 挡不住测试夹具，那是进程外的全
+            // 局路径。
             state_writer: state_writer::StateWriter::new(persists_state, Config::state_dir()),
             reverse: std::sync::RwLock::new(reverse),
             aux_code_runtime: std::sync::RwLock::new(None),
-            // 空初值 + 下面 new() 里的 sync_emoji_dict 首次加载：与注释库/拆字字体同一套
-            // 「声明式变更」写法，启动与后续 reload 走**同一条**代码路径。
+            // 空初值 + new() 里的 sync_emoji_dict 首次加载：启动与后续 reload 走同一条代码路径。
             emoji_dict: std::sync::RwLock::new(None),
             emoji_spec: Mutex::new(None),
             aux_code_key_warned: std::sync::atomic::AtomicBool::new(false),
@@ -3278,8 +2769,7 @@ impl Coordinator {
                 font: None, // 字体在 new() 经 sync_chaizi_assets 下发（headless 无 UI 不发）
                 ..Default::default()
             }),
-            // 空初值 + new() 里的 sync_comment_dicts 首次加载：与拆字字体同一套「声明式变更
-            // 检测」，构造期不做 IO，加载与热重载走同一条路径（不会出现只在启动生效的分叉）。
+            // 空初值 + new() 里的 sync_comment_dicts 首次加载：构造期不做 IO，加载与热重载同一路径。
             comment_dict_paths: Mutex::new(Vec::new()),
             pair_tracker: Mutex::new(wind_transform::pair_tracker::PairTracker::new()),
             last_valid_caret: Mutex::new((0, 0, 0)),
@@ -3417,12 +2907,9 @@ impl Coordinator {
                 })
                 .ok();
         }
-        // 常用字表的用户覆盖（右键「设为生僻字/常用字」）：真相在 store，构造体内只装得下
-        // 出厂基表，这里补灌运行时镜像。
-        //
-        // ⚠️ 落在 `build` 而非 `new`（对比 `reload_quick_adjust`）：`new_headless_with_store`
-        // 直接走 build、不经过 new，放在 new 里会让 headless 测试恒看不到已存在的覆盖——
-        // 那是一条真实存在但测不到的路径。
+        // 常用字表的用户覆盖（右键「设为生僻字/常用字」）：真相在 store，这里补灌运行时镜像。
+        // 落在 `build` 而非 `new`：`new_headless_with_store` 不经过 new，放在 new 里 headless
+        // 测试就恒看不到已存在的覆盖。
         coordinator.reload_common_chars();
         // 命令栏：装配 Services（ime/config/dict 后端）+ 自身 Weak 引用。
         coordinator.init_cmdbar();
@@ -3491,10 +2978,8 @@ impl Coordinator {
 
     /// 回车键是否配置为「清空编码」（`input.enter_behavior = "clear"`）。
     ///
-    /// 回车有五条彼此独立的处理路径（主输入 / 临时拼音 / 临时英文 / 混合输入 / 特殊模式），
-    /// 此判据由它们共用。此前各路径内联比较字符串，且**只判在「空缓冲」分支上**，
-    /// 于是「打了码再按回车」时配置静默失效、照旧上屏原码；收口成单一具名判据，
-    /// 使「某条路径没接」退化为「没有调用点」这种更容易发现的缺失。
+    /// 回车有五条独立处理路径（主输入 / 临拼 / 临英 / 混输 / 特殊模式），共用此判据；各自内联
+    /// 时漏判「打了码再按回车」那支。收口成具名判据，漏接就表现为「没有调用点」。
     ///
     /// 会话态动词 `commit_code` 借回车的臂上屏编码，那一下恒为假（见
     /// [`Self::redispatch_commit_code`]）——这里是各臂唯一的读点，故只在这里拦。
@@ -3510,22 +2995,14 @@ impl Coordinator {
 
     /// 空码时按标点/符号键怎么处置这串废码（`input.punct_on_empty_behavior`）。
     ///
-    /// 「空码」= 缓冲非空但一个候选都没有（多为码表打错字根）。既有行为是把废码连同标点
-    /// 一起送上屏，用户要的往往是「这串码作废、句号照打」，也有人要「连句号一起当没按过」。
+    /// 「空码」= 缓冲非空但一个候选都没有（多为码表打错字根）。
     ///
-    /// **非空码时恒返回 [`PunctEmptyCodePolicy::Commit`]**——空码判定折在函数内部，调用方
-    /// 不必也不该自己再拼一遍 `candidates.is_empty() && !input_buffer.is_empty()`：那个条件
-    /// 曾在两个出口各写一份，两份哪天走岔了没有任何东西拦得住。
+    /// 非空码时恒返回 [`PunctEmptyCodePolicy::Commit`]：空码判定折在函数内部，调用方不该自己再拼
+    /// 一遍条件。只管无候选那一支，有候选时标点仍顶屏首选。与 `schema.codetable.punct_commit`
+    /// 正交：那一项关掉是「吞键、保留编码」，本开关的 `clear_no_input` 是「吞键、丢弃编码」。
     ///
-    /// ⚠️ 只管**无候选**那一支。有候选时按标点仍顶屏首选——那是「就选高亮那条吧」的既有
-    /// 语义，与本开关无关。
-    ///
-    /// ⚠️ 与 `schema.codetable.punct_commit` 正交：那一项关掉是「吞键、**保留**编码」，编码
-    /// 留在组合区继续输入；本开关的 `clear_no_input` 是「吞键、**丢弃**编码」。
-    ///
-    /// ★ 返回枚举而非 bool 是刻意的：标点有**两个彼此独立的上屏出口**（普通标点、智能符号
-    /// `CommitAndHoldComposition`），第三态加进来时，bool 判据的漏接会静默落进 else 分支，
-    /// 而 `match` 的漏接是编译错误。参见 [`Self::enter_clears_composition`] 的同款教训。
+    /// 返回枚举而非 bool：标点有两个上屏出口（普通标点、智能符号 `CommitAndHoldComposition`），
+    /// 加第三态时 `match` 漏接是编译错误，bool 漏接则静默落进 else。
     pub(crate) fn punct_empty_code_policy(&self, state: &State) -> PunctEmptyCodePolicy {
         // 缓冲里有入缓冲符号（`gong-`）时候选恒空，但那是用户打的字面文本，不是废码。
         if self.buffer_has_literal_symbol(state) {
@@ -3548,20 +3025,18 @@ impl Coordinator {
         match self.rt().config.input.punct_on_empty_behavior.as_str() {
             "clear" => PunctEmptyCodePolicy::Clear,
             "clear_no_input" => PunctEmptyCodePolicy::ClearNoInput,
-            // 未知值落回 commit（＝历史行为）。存量非法值本已由
-            // `Config::migrate_empty_code_behavior_value` 归一，此处只是防御。
+            // 未知值落回 commit。存量非法值已由 `Config::migrate_empty_code_behavior_value` 归一，
+            // 此处只是防御。
             _ => PunctEmptyCodePolicy::Commit,
         }
     }
 
-    /// 焦点/IME 激活时按 client_token 高 32 位的 PID 解析焦点进程名，缓存其 caret 兼容态
-    /// （对齐 Go `HandleFocusGained` 设置 activeCompatRule）。仅在重型/异步段调用，不在 DLL
-    /// 同步阻塞路径上。
+    /// 焦点/IME 激活时按 client_token 高 32 位的 PID 解析焦点进程名，缓存其 caret 兼容态。
+    /// 仅在重型/异步段调用，不在 DLL 同步阻塞路径上。
     ///
-    /// 规则按**窗口上下文**解析：窗口取该 token 最近一次 focus_gained 记下的那个
+    /// 规则按窗口上下文解析：窗口取该 token 最近一次 focus_gained 记下的那个
     /// （[`Self::note_focus_window`]；ime_activated 不带窗口信息，即沿用它）。缓存键是
-    /// (pid, 类名小写 + 标题的哈希)：同进程同窗口直接返回，避免每次焦点事件重复 OpenProcess；
-    /// 同进程换了窗口则重新解析——持续类字段（定位、首显、配对…）随之即时刷新。
+    /// (pid, 类名小写 + 标题的哈希)：同进程同窗口直接返回；换了窗口则重新解析。
     fn update_active_compat(&self, client_token: u64) {
         let pid = (client_token >> 32) as u32;
         if pid == 0 {
@@ -3569,16 +3044,13 @@ impl Coordinator {
         }
         self.focus_pid
             .store(pid, std::sync::atomic::Ordering::Relaxed);
-        // 缓存优先于反查：macOS 的 `.app` 随焦点事件把宿主 bundle id 送进 `pid_names`
-        // （服务进程那边 `process_name` 恒返回空串），此处必须先读缓存才能拿到宿主名。
-        // Windows 上首次见到该 pid 时缓存为空 → 照常 OpenProcess 反查，行为不变。
-        //
-        // ⚠ 在取 `active_compat` 锁**之前**读缓存：本函数末尾是「先 drop(ac) 再锁
-        // pid_names」，两把锁在此嵌套会引入一个方向相反的持有序。
+        // 缓存优先于反查：macOS 的 `.app` 随焦点事件把宿主 bundle id 送进 `pid_names`（服务进程的
+        // `process_name` 恒空）。Windows 上首次见到该 pid 时缓存为空，照常反查。在取 `active_compat` 锁之
+        // 前读缓存：末尾是「先 drop(ac) 再锁 pid_names」，嵌套会引入反向持有序。
         let cached_name = self.cached_proc_name(client_token);
         // 同理先于 `active_compat` 锁取窗口（`focus_windows` 锁内不取任何别的锁）。
         // 该 token 从没 focus_gained 过（新实例只发了 ime_activated）⇒ 退回该 pid 最近获焦的窗口，
-        // 而不是按空窗口重解析——那会把 Chromium 的占位、窗口规则的初始模式一起丢掉。
+        // 按空窗口重解析会把占位字符、窗口规则的初始模式一起丢掉。
         let win = self.focus_window_of_token_or_pid(client_token);
         let window_hash = win.cache_hash();
         let mut ac = self.active_compat.lock().unwrap_or_else(|e| e.into_inner());
@@ -3622,9 +3094,7 @@ impl Coordinator {
                     initial_punct,
                 )
             });
-        // 无条件记录（对齐 Go handle_lifecycle.go:698）。原实现仅在 caret_use_top=true 时打，
-        // 规则未命中与「命中但全 false」在日志里无从区分，查「某应用兼容项没生效」时看不到
-        // 究竟是没匹配上进程名还是字段没读到。
+        // 无条件记录：只在命中时打，「规则未命中」与「命中但全 false」在日志里无从区分。
         debug!(
             "Compat rule for process={name} class={:?} title_len={}: matched={} caret_use_top={} stale_probe_guard={} composition_start_pair_guard={} pin_anchor_when_start_drifts={} first_show_mode={} initial_mode={} initial_punct={} auto_pair={} smart_method={} caret_offset=({},{})",
             win.class,
@@ -3671,23 +3141,16 @@ impl Coordinator {
 
     /// 客户端连接时校正 `pid_names` 缓存：现查一次真名，与缓存不符即覆盖并记 WARN。
     ///
-    /// 为什么需要：`pid_names` 是**一次写入、永不失效**的 pid→名字缓存，而
-    /// `cached_proc_name` / `update_active_compat` 都是缓存优先。Windows 会复用已退出
-    /// 进程的 PID，于是「A 退出 → B 拿到同一个 pid」之后，B 会被永久当成 A——整条
-    /// per-app 链一起错：compat 规则（`initial_mode` / `caret_*` / `auto_pair` /
-    /// `smart_method` / `first_show_mode`）与中英记忆表。而且**没有任何自愈路径**：
-    /// `update_active_compat` 对同 pid 直接早退，连重查的机会都没有。
+    /// `pid_names` 一次写入、永不失效，而 `cached_proc_name` / `update_active_compat` 都缓存优先。
+    /// Windows 会复用 PID，「A 退出 → B 拿到同一个 pid」后 B 会被永久当成 A，整条 per-app 链
+    /// 一起错，且 `update_active_compat` 对同 pid 早退、没有自愈路径。新进程必然连一次，
+    /// 选这个时机校正；多余的重查只是几微秒。
     ///
-    /// 选连接时机校正，是因为新进程必然连一次，而同进程多次连接（多 TSF 实例、管道抖动
-    /// 后重连）重查一次也只是几微秒的 `OpenProcess`，宁可多查不可不查。
+    /// 现查为空时保留缓存：macOS 服务进程 `process_name` 恒空，名字由 `.app` 随焦点事件送入。
     ///
-    /// ⚠ 现查为空时**保留缓存**：macOS 的服务进程 `process_name` 恒返回空串，那边的名字
-    /// 由 `.app` 随焦点事件送进缓存。清掉会让 compat 规则在下一次 focus_gained 之前全部失配。
-    ///
-    /// ★ 真的改写了缓存时，给该进程的推送客户端**补推**按 pid 现算的 DLL 配置（密码框吃键
-    /// 门控、英文自动配对）：推送通道的握手可能早于主管道的这次校正，那时推过去的值是按
-    /// **旧名**算的——密码框门控错了就打破 core.suppress ⊆ C++.suppress（密码框丢键）。
-    /// 首次落缓存（`None` 分支）不用补推：缓存为空时握手现查的就是真名。
+    /// 真的改写了缓存时，给该进程的推送客户端补推按 pid 现算的 DLL 配置（密码框吃键门控、
+    /// 英文自动配对）：握手可能早于这次校正、按旧名算，门控错了会打破 core.suppress ⊆
+    /// C++.suppress。首次落缓存（`None` 分支）不用补推：那时握手现查的就是真名。
     #[cfg(any(windows, test))]
     pub(crate) fn revalidate_pid_name(&self, pid: u32, live_name: &str) {
         if pid == 0 || live_name.is_empty() {
@@ -3699,8 +3162,7 @@ impl Coordinator {
             match names.get(&pid) {
                 Some(cached) if *cached == live => false,
                 Some(cached) => {
-                    // 这条 WARN 就是 PID 复用的现场证据。缓存过一个名字、现查却是另一个，
-                    // 只可能是那个 pid 换了进程——在此之前它一直是静默错配。
+                    // 缓存过一个名字、现查却是另一个，只可能是 PID 被复用。
                     tracing::warn!(
                         "pid_names 校正：pid={pid} 缓存={cached} 实际={live}（PID 已被复用，此前按缓存匹配的 per-app 规则是错的）"
                     );
@@ -3714,9 +3176,8 @@ impl Coordinator {
             }
         };
         // 焦点 pid 的名字刚落缓存或被改写：按键路径那三项按新名字重算（它们只读缓存名）。
-        // 改写 = PID 复用：active 槽记的窗口也属于上一任进程，一并清掉（与下面
-        // `forget_focus_windows_of_pid` 清 token 表同理），window_hash 同步改成空窗口的，
-        // 新进程下一次获焦不会被「同 pid 同窗口」早退拦住。
+        // 改写 = PID 复用：active 槽记的窗口也属于上一任进程，一并清掉，window_hash 同步改成
+        // 空窗口的，新进程下一次获焦才不会被「同 pid 同窗口」早退拦住。
         let is_active = {
             let mut ac = self.active_compat.lock().unwrap_or_else(|e| e.into_inner());
             let is_active = ac.pid == pid;
@@ -3748,15 +3209,12 @@ impl Coordinator {
         }
     }
 
-    /// `MessageHandler::handle_client_connected` 的纯逻辑部分：只有 `pid` 确实等于当前
-    /// 前台窗口的 pid 才刷新规则字段，避免后台宿主的无关重连（管道抖动等）覆盖掉
-    /// 真正聚焦应用的 per-app 兼容态。`foreground_pid` 作为参数传入而非内部现查，是为了
-    /// 脱离真实 `GetForegroundWindow` 单测——`dpi_scale_for_point` 已经吃过一次「测试跑在
-    /// 真实系统 API 上导致断言随运行环境漂移」的教训。
+    /// `MessageHandler::handle_client_connected` 的纯逻辑部分：只有 `pid` 等于当前前台窗口的 pid
+    /// 才刷新规则字段，免得后台宿主重连覆盖聚焦应用的 per-app 兼容态。`foreground_pid` 作参数
+    /// 传入，好脱离真实 `GetForegroundWindow` 单测。
     ///
-    /// 生产调用点仅有 `handle_client_connected` 的 `#[cfg(windows)]` 分支；非 Windows 的
-    /// 非测试构建没有调用方也没有本函数（连同 `refresh_active_compat_rule_fields` 一起
-    /// 用同一个 cfg 门控，避免出现「函数存在但调不到」的死代码）。
+    /// 生产调用点仅在 `handle_client_connected` 的 `#[cfg(windows)]` 分支，故与
+    /// `refresh_active_compat_rule_fields` 用同一个 cfg 门控。
     #[cfg(any(windows, test))]
     fn apply_connected_pid_compat(&self, pid: u32, foreground_pid: u32) {
         if foreground_pid != pid {
@@ -3767,26 +3225,15 @@ impl Coordinator {
 
     /// 只刷新 `active_compat` 里「当前生效设置」那一半字段（`caret_use_top` /
     /// `stale_probe_guard` / `composition_start_pair_guard` / `first_show_mode` / `auto_pair` /
-    /// `smart_method` / `caret_offset_*`），**刻意不碰
-    /// `.pid` 与 `.has_initial_rule`**。
+    /// `smart_method` / `caret_offset_*`），刻意不碰 `.pid` 与 `.has_initial_rule`。
     ///
-    /// 这两个字段的另一重身份是「上一次真实 `FOCUS_GAINED` 落在哪个进程」——
-    /// `get_current_mode`（DLL 同步路径）与 `handle_focus_gained` 的 `crossed` 判据都靠
-    /// 它俩识别「这次是不是跨进程切入」。连接建立**不是**真实的焦点事件：对一个全新启动、
-    /// TSF DLL 第一次在其中加载、且此刻恰好已在前台的进程，管道连接必然先于它有史以来
-    /// 第一条 `FOCUS_GAINED`（发不出消息就说明还没连上）。若这里跟 `update_active_compat`
-    /// 一样整体覆写 `ActiveCompat`，会让 `.pid` 提前变成新进程，随后真正到达的那条
-    /// `FOCUS_GAINED` 就会被 `crossed` 误判成「同进程」，吞掉 `should_reapply_initial`
-    /// （该应用的 `initial_mode`/`initial_punct` 规则）与 `get_current_mode` 的首键竞态
-    /// 消除逻辑（2026-08-17 code review 发现，未真机复现）。
+    /// 那两个字段还表示「上一次真实 `FOCUS_GAINED` 落在哪个进程」，`get_current_mode` 与
+    /// `crossed` 判据靠它识别跨进程切入。连接建立不是焦点事件：已在前台的新进程，管道连接必然
+    /// 先于它的第一条 `FOCUS_GAINED`；在这里改写 `.pid` 会让随后那条被误判成同进程，吞掉
+    /// `initial_mode` 规则与首键竞态消除。
     ///
-    /// 字段提取逻辑刻意与 `update_active_compat` 分开写而非提取共用：那是已跑通真机验证的
-    /// 现有函数，为省几行重复去动它的取值顺序/锁持有范围不划算——两处字段列表如有出入，
-    /// 应同步核对。
-    ///
-    /// 未做「同 pid 重复调用去重」：不像 `update_active_compat` 有 `.pid` 可比对，本函数
-    /// 没有身份缓存可用；接受每次连接都重新 `OpenProcess` 一次（<1ms，且连接本就是低频
-    /// 事件，不是按键路径）。
+    /// 字段提取刻意与 `update_active_compat` 分开写，两处字段列表须同步核对。不做同 pid 去重
+    /// （没有身份缓存可比），每次连接重查一次进程名，连接是低频事件。
     #[cfg(any(windows, test))]
     pub(crate) fn refresh_active_compat_rule_fields(&self, pid: u32) {
         if pid == 0 {
@@ -3922,17 +3369,16 @@ impl Coordinator {
         }
     }
 
-    /// 按 active 槽（`active_compat.pid` 的缓存名 + active 窗口）重算 [`ActiveCompat::lookups`]。
-    /// 不动其余字段（`.pid` / `.has_initial_rule` 的另一重身份见 `refresh_active_compat_rule_fields`）。
+    /// 按 active 槽（`active_compat.pid` 的缓存名 + active 窗口）重算 [`ActiveCompat::lookups`]。不
+    /// 动其余字段（`.pid` / `.has_initial_rule` 的另一重身份见
+    /// `refresh_active_compat_rule_fields`）。
     ///
-    /// 名字只读 `pid_names` 缓存、不反查进程：与这几项原先在按键路径上现查的口径
-    /// （`active_process_name`）相同。
+    /// 名字只读 `pid_names` 缓存、不反查进程（同 `active_process_name` 的口径）。
     ///
-    /// ⚠ 与 `update_active_compat` 并发时不能「先算后写」：算的期间焦点切到了别的应用，旧结果
-    /// 就会盖掉新应用的值，而之后同一窗口的焦点又被 `window_hash` 早退拦住，永不自愈。故分两步：
-    /// 先在锁外取名字（`pid_names` 不与 `active_compat` 嵌套），再持 `active_compat` 锁核对
-    /// (pid, window_hash) 没变、并在锁内现算现写；变了就放弃（换焦点的那一方已按新表算好）。
-    /// 在锁内算也顺带保证：两次重载并发时，最后写入的那份读的是最后换上的表。
+    /// 与 `update_active_compat` 并发时不能「先算后写」：期间焦点换了应用，旧结果会盖掉新值，
+    /// 且之后被 `window_hash` 早退拦住永不自愈。故先在锁外取名字（`pid_names` 不与
+    /// `active_compat` 嵌套），再持 `active_compat` 锁核对 (pid, window_hash) 未变并现算现写；
+    /// 变了就放弃。锁内算也保证并发重载时最后写入的读的是最后换上的表。
     pub(crate) fn refresh_active_compat_lookups(&self) {
         let snap = self.active_lookups_snapshot();
         self.store_active_lookups_if_current(&snap);
@@ -3986,12 +3432,11 @@ impl Coordinator {
         self.apply_input_diag_capped(pid, disabled, reason_byte, mask, true);
     }
 
-    /// 同 [`Self::apply_input_diag`]，`allow_raise = false` 时本次**只降不升**：算出要抑制也先不置位。
+    /// 同 [`Self::apply_input_diag`]，`allow_raise = false` 时本次只降不升：算出要抑制也先不置位。
     ///
-    /// 给「同一 token 刚换了窗口」用：DLL 那份门控按旧窗口算、新值的重推还在路上，此刻服务端
-    /// 按新窗口当场置位就是 core 抑制而 DLL 照吃——违反 core.suppress ⊆ C++.suppress
-    /// （同 [`Self::relax_password_suppress_for_focus`] 的口径）。置位留给 DLL 下一次
-    /// input_state_report（那时它手里必然已有新值）。
+    /// 给「同一 token 刚换了窗口」用：DLL 那份门控按旧窗口算、新值重推还在路上，此刻服务端按新窗口
+    /// 置位会违反 core.suppress ⊆ C++.suppress（同 [`Self::relax_password_suppress_for_focus`]）。
+    /// 置位留给 DLL 下一次 input_state_report。
     pub(crate) fn apply_input_diag_capped(
         &self,
         pid: u32,
@@ -4001,10 +3446,9 @@ impl Coordinator {
         allow_raise: bool,
     ) {
         use std::sync::atomic::Ordering::Relaxed;
-        // 展示原因 = mask/disabled 推导，再叠加 DLL 上报的 reason_byte 里「context 级禁用」这一档：
-        // DLL 把 context 级 KEYBOARD_DISABLED 折进了 mask 的 IS_PASSWORD 位，折位前的区分只有
-        // 它知道（见 `reason_from_report`）。reason 只管展示与提示语，**不参与**下面的抑制决策
-        // ——抑制仍只看 mask，两种来源行为一致，避免「双重来源」歧义。
+        // 展示原因 = mask/disabled 推导，再叠加 DLL 上报 reason_byte 里「context 级禁用」这一档
+        // （DLL 把它折进了 mask 的 IS_PASSWORD 位，见 `reason_from_report`）。reason 只管展示与
+        // 提示语，抑制决策仍只看 mask。
         let reason = crate::input_diag::reason_from_report(disabled, reason_byte, mask);
         let name = if pid != 0 {
             self.cached_proc_name((pid as u64) << 32)
@@ -4013,21 +3457,12 @@ impl Coordinator {
         };
         // 抑制：命中密码 InputScope 位 且 策略开关开 → 强制英文。
         //
-        // ⚠ 曾经这里还有一条 `&& !disabled`，理由是「disabled 时 DLL 已放行所有键、引擎收不到
-        // 键，抑制 moot」。那条推理错在 `disabled` 的层级：DLL 放行看的是**线程级**
-        // KEYBOARD_DISABLED，而 Windows 侧当时往这个字段传的是**context 级**的密码框判定。
-        // 于是 Chromium 网页密码框（只置 context 级）被这条判据整个否掉——键没被放行、抑制也
-        // 不生效，密码框里照打中文，高级菜单的开关看着像坏了。2026-07-27 两侧一并修正：
-        // `disabled` 统一为线程级语义，密码信号只走 mask。
-        //
-        // 现在 disabled 只参与 `reason_from` 的展示推导，不再进决策——单一来源，避免再次歧义。
-        // 线程级 disabled 为真时本判据仍可能算出 suppress=true，这是**安全的**：那时 DLL 在
-        // OnTestKeyDown 开头就全放行了，一个键都不会送到引擎，suppress 取值无从被观测。
-        // 危险的只有反方向（core 抑制而 DLL 吃键 → 「吃了再吐」丢键），故不变量是
-        // **core.suppress ⊆ C++.suppress**，见 C++ `IsPasswordSuppressActive`。
-        //
-        // 开关取值按 pid 走 `password_force_english_for_pid`（per-app 规则优先，否则全局）——
-        // 与推给该 DLL 的值**同一个函数**，这是上面那条不变量在按应用覆盖下成立的前提。
+        // 不再要求 `!disabled`：DLL 放行看的是线程级 KEYBOARD_DISABLED，而 Chromium 密码框只置
+        // context 级，加这条会把它整个否掉。disabled 只参与 `reason_from` 的展示推导。线程级
+        // disabled 为真时算出 suppress=true 是安全的（DLL 已全放行，引擎收不到键）；危险的只有
+        // 反方向，故不变量是 core.suppress ⊆ C++.suppress（见 C++ `IsPasswordSuppressActive`）。
+        // 开关取值走 `password_force_english_for_pid`，与推给该 DLL 的值同一个函数，这是不变量
+        // 在按应用覆盖下成立的前提。
         let suppress = allow_raise
             && crate::input_diag::is_password_scope(mask)
             && self.password_force_english_for_pid(pid);
@@ -4050,15 +3485,13 @@ impl Coordinator {
 
     /// 消费一次诊断快照：存 DLL 上报的窗口链 / TSF 实例。
     ///
-    /// ⚠ host-render 运行态（白名单 / 活跃）**不在这里算**——它们是服务端随时可查的实时值，
-    /// 存进快照就等于被冻结在「快照到达那一刻」。而 `active_target` 恰恰要到**首次按键**
-    /// 才置位（searchapp/SearchHost 这类 transient DocMgr 宿主不发 focus_gained，note_focus
-    /// 只能走 CMD_KEY_EVENT），快照却在 OnSetFocus 就发出了 ⇒ 存下来的必然是 `活跃: 否`，
-    /// 让人误判成 host render 没生效。现算在 [`Self::push_input_diag_hud`]。
+    /// host-render 运行态（白名单 / 活跃）不在这里算：快照在 OnSetFocus 就发出，而 `active_target`
+    /// 要到首次按键才置位（transient DocMgr 宿主不发 focus_gained），存下来必然是「活跃: 否」。
+    /// 现算在 [`Self::push_input_diag_hud`]。
     pub(crate) fn apply_diag_snapshot(&self, snap: &wind_ipc::protocol::DiagSnapshotPayload) {
         // 进程名：服务端按 pid 现查（DLL 不上报——它未必有权限打开别的进程）。
-        // 快照来源进程与前台进程分别查：多进程宿主下它们本就可能不同，而「本快照来自谁」
-        // 是判读整份数据的前提（见 `WindowDiagView::pid`）。
+        // 快照来源进程与前台进程分别查：多进程宿主下两者可能不同，而「本快照来自谁」是判读
+        // 整份数据的前提（见 `WindowDiagView::pid`）。
         let proc_name = |pid: u32| {
             if pid != 0 {
                 self.cached_proc_name((pid as u64) << 32)
@@ -4106,9 +3539,8 @@ impl Coordinator {
 
     /// 下发诊断快照采集开关给 DLL（随 HUD 显隐 + 握手时）。
     ///
-    /// 采集要查三次窗口类名 + band，故默认关；**握手时必须也推一次**——DLL 每次重连都从
-    /// 默认值（关）起步，只在切换时推会让重连后的宿主永远不采集，而 SearchHost 这类
-    /// transient 宿主恰恰最常重连，也恰恰最需要 HUD（它是 AppContainer，写不了日志）。
+    /// 采集要查三次窗口类名 + band，故默认关。握手时也必须推一次：DLL 每次重连都从关起步，
+    /// 而 SearchHost 这类 transient 宿主最常重连、也最需要 HUD（AppContainer 写不了日志）。
     pub fn push_diag_snapshot_config(&self, client_token: u64) {
         let enabled = self
             .input_diag_hud_visible
@@ -4125,16 +3557,15 @@ impl Coordinator {
         }
     }
 
-    /// HUD 推送（数据到达路径）：HUD 可见且**未冻结**时下发一帧。
+    /// HUD 推送（数据到达路径）：HUD 可见且未冻结时下发一帧。
     pub(crate) fn push_input_diag_hud_if_visible(&self) {
         self.push_input_diag_hud(false);
     }
 
     /// HUD 推送。`force=true` 时无视冻结照常下发。
     ///
-    /// ⚠ 冻结只该挡住**数据变化**引起的刷新，不该挡住用户自己的操作（切分区/切置顶/
-    /// 切冻结本身）。两者混为一谈的后果是"点了菜单屏幕毫无反应"——而那与"菜单坏了"
-    /// 在用户眼里完全一样。故所有菜单动作一律走 `force=true`。
+    /// 冻结只挡数据变化引起的刷新，不挡用户自己的操作（切分区/置顶/冻结本身），否则点了菜单
+    /// 屏幕毫无反应、像菜单坏了。故所有菜单动作一律走 `force=true`。
     pub(crate) fn push_input_diag_hud(&self, force: bool) {
         use std::sync::atomic::Ordering::Relaxed;
         if !self.input_diag_hud_visible.load(Relaxed) {
@@ -4163,12 +3594,9 @@ impl Coordinator {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        // host-render 运行态**在此现算**，不沿用快照里的值：它们随时可查，存进快照就会被
-        // 冻结在快照到达那一刻（详见 `apply_diag_snapshot` 文档）。
-        //
-        // ⚠ 必须按**快照来源进程**的 pid 直查，不得走 `ActiveCompat` 全局焦点槽——开始菜单
-        // 弹出会连带激活兄弟进程污染该槽，那正是当初 avail 位被污染、DLL 陷入销毁重建循环的
-        // 成因（`docs/redesign/host-render-windows-port.md` §11.2）。
+        // host-render 运行态在此现算，不沿用快照里的值（见 `apply_diag_snapshot` 文档）。
+        // 必须按快照来源进程的 pid 直查，不得走 `ActiveCompat` 全局焦点槽：开始菜单弹出会连带激活
+        // 兄弟进程污染该槽（`docs/redesign/host-render-windows-port.md` §11.2）。
         #[cfg(windows)]
         if window.pid != 0
             && let Some(mgr) = self.host_render()
@@ -4185,8 +3613,8 @@ impl Coordinator {
             pid,
             disabled,
             reason_text: crate::input_diag::reason_label(reason).to_string(),
-            // 展示宿主**原始**报的 scope：context 级禁用那档要摘掉 DLL 折进去的 IS_PASSWORD 位，
-            // 否则 HUD 上会出现宿主根本没报过的 0x80000001（t197 楼主被它误导成「scope 变密码」）。
+            // 展示宿主原始报的 scope：context 级禁用那档要摘掉 DLL 折进去的 IS_PASSWORD 位，
+            // 否则 HUD 上会出现宿主根本没报过的 0x80000001。
             mask: crate::input_diag::display_mask(reason, mask),
             ime_active,
             has_edit_context,
@@ -4223,12 +3651,11 @@ impl Coordinator {
 
     /// 这次系统模式切换是不是「宿主自作主张切中英」，且当前应用（或全局）配了忽略。
     ///
-    /// 不看方向：开和关一样拦（宿主关 IME 让用户点一下按钮就变英文；SSMS 内部焦点切换把
-    /// OPENCLOSE 写成开，英文态被切成中文、第一键被吃，GH#312）。三个条件缺一不可
-    /// （顺序即成本，先便宜的）：
-    /// 1. **Ctrl 未按住**——按住＝用户在按 Ctrl+Space，系统热键必须放行，
-    ///    否则该应用里中英切换彻底失灵（判据由 DLL 现场采样，见 `MODE_SWITCH_CTRL_HELD`）；
-    /// 2. **来源是 compartment**——按键兜底与功能菜单是我们自己发起的，永远照办；
+    /// 不看方向：开和关一样拦（宿主关 IME 会让英文态出现在用户没切的时候；也有宿主内部焦点
+    /// 切换把 OPENCLOSE 写成开，英文态变中文、第一键被吃）。三个条件缺一不可（先便宜的）：
+    /// 1. Ctrl 未按住：按住 = 用户在按 Ctrl+Space，系统热键必须放行（DLL 现场采样，
+    ///    见 `MODE_SWITCH_CTRL_HELD`）；
+    /// 2. 来源是 compartment：按键兜底与功能菜单是我们自己发起的，永远照办；
     /// 3. 生效值为真：该应用规则写了 `ignore_host_ime_switch` 就以它为准，没写取全局
     ///    `input.ignore_host_ime_switch`（出厂关）。
     pub(crate) fn host_ime_switch_ignored(
@@ -4261,16 +3688,11 @@ impl Coordinator {
 
     /// 决策进程 `proc_name` 的中英初始状态（初始状态语义的单一内聚点）。
     ///
-    /// 顺序：**按应用规则表（compat.toml）** → per-app 记忆表 → 全局记忆 / 配置默认。
+    /// 顺序：按应用规则表（compat.toml）→ per-app 记忆表 → 全局记忆 / 配置默认。
     ///
-    /// ⚠ 规则表排在记忆表**之前**是刻意的，与此处原 `TODO(app_rules)` 注释设想的位置相反。
-    /// 原设想是「首次进入时生效，之后跟随用户手切」，那个语义对 Everything / Listary 这类
-    /// **常驻隐藏式**窗口不成立：进程始终不退出，会话级记忆表里「首次」只有一次，用户从第二次
-    /// 唤出起规则就再也不生效。放到记忆表之前，配合 `apply_initial_mode` 的跨进程守卫，语义
-    /// 才是「每次从别的应用切进来都套用，停留在该应用期间尊重手切」。
-    ///
-    /// 规则是**初始值不是锁定**：它只在焦点跨进程切入的那一刻参与决策，此后用户手切自由，
-    /// 且同应用内的焦点跳转不会重新套用（守卫见 `apply_initial_mode` 调用点）。
+    /// 规则表排在记忆表之前：Everything / Listary 这类常驻隐藏式窗口进程不退出，「首次进入」
+    /// 只有一次，放在记忆表后面从第二次唤出起规则就不生效。配合 `apply_initial_mode` 的跨进程
+    /// 守卫，语义是「每次从别的应用切进来都套用，停留期间尊重手切」——是初始值不是锁定。
     ///
     /// 规则按 (进程, 窗口) 解析；per-app 记忆表仍按进程名（记忆是「这个应用」的，不分窗口）。
     fn initial_chinese_mode_for(&self, proc_name: &str, win: &FocusWindow) -> bool {
@@ -4303,8 +3725,7 @@ impl Coordinator {
     /// remember_last_state=true 时经 `state_writer` 落盘 state.toml。
     /// 必须在释放 state 锁后调用。
     ///
-    /// 这里是 state.toml 写得**最频繁**的一处：每次切中英/全半角/标点都来一趟，
-    /// 而那正是用户连打时最爱按的几个键。走延迟写入器后，一串连续切换只落一次盘。
+    /// 这里是 state.toml 写得最频繁的一处（连打时最爱按的几个键），走延迟写入器后一串连续切换只落一次盘。
     pub(crate) fn record_last_state(&self) {
         let (c, f, p) = {
             let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -4345,26 +3766,11 @@ impl Coordinator {
         }
     }
 
-    /// 「切换**中英模式**时取消大小写锁定」（input.capslock.cancel_on_mode_switch）：
-    /// CapsLock 开着时 `effective_chinese = chinese_mode && !caps_lock` 恒为英文大写，
-    /// 切中英"看似无效"。开启该配置后，切换动作先物理敲击 CapsLock 取消系统
-    /// 锁定并同步镜像，让切换真正生效。返回是否执行了取消（供调用方决定归位语义）。
-    /// 需在未持有 state 锁时调用。
-    ///
-    /// ⚠ **切方案不走这里**，走无条件的 [`Self::force_cancel_caps_lock`]。判据是「这个动作
-    /// 的语义前提是不是『我要用中文打字』」：切中英模式时用户可能正是要打大写英文，取消
-    /// 大写会与他的意图相反，故留给配置；切方案则不然——没有任何解释能让「切到五笔之后
-    /// 继续打大写英文」成立。把两者共用一个开关，就是本开关（出厂 false）关着时
-    /// 「英文态/大写态下方案切换看着毫无反应」的成因。
     /// 工具栏推送去重：与上次推的相同则返回 `false`（调用方跳过下发）。
     ///
-    /// 只做「内容比对」，**不判断该不该显示**——那是 `notify_toolbar` 四项合取的事。
-    /// 相同即跳过是安全的：UI 侧的工具栏是纯粹的状态镜像，没有需要靠重复消息驱动的
-    /// 动画或计时。
-    ///
-    /// ⚠️ 配置热重载后要 `reset_toolbar_push_dedup`：那条路径可能改变工具栏的呈现
-    /// （显隐开关、全屏策略），而 `ToolbarState` 里并不带这些量，光比内容会把该重推的
-    /// 那一次判成「没变」——同 `last_status_text` 在 reload 里被清空的理由。
+    /// 只做内容比对，不判断该不该显示（那是 `notify_toolbar` 的合取）。UI 侧工具栏是纯状态镜像，
+    /// 相同即跳过是安全的。配置热重载后要 `reset_toolbar_push_dedup`：显隐开关、全屏策略不在
+    /// `ToolbarState` 里，光比内容会把该重推的那次判成「没变」。
     pub(crate) fn take_toolbar_push_if_changed(&self, want: ToolbarPush) -> bool {
         let mut last = self
             .last_toolbar_push
@@ -4385,6 +3791,13 @@ impl Coordinator {
             .unwrap_or_else(|e| e.into_inner()) = None;
     }
 
+    /// 「切换中英模式时取消大小写锁定」（input.capslock.cancel_on_mode_switch）：CapsLock 开着时
+    /// `effective_chinese` 恒为英文大写，切中英看似无效。开启后先物理敲击 CapsLock 取消锁定并同步
+    /// 镜像。返回是否执行了取消（供调用方决定归位语义）。需在未持有 state 锁时调用。
+    ///
+    /// 切方案不走这里，走无条件的 [`Self::force_cancel_caps_lock`]：切中英时用户可能正要打大写
+    /// 英文，故留给配置；切到五笔后继续打大写英文没有意义。共用一个开关会让开关关着时
+    /// 「大写态下切方案毫无反应」。
     pub(crate) fn cancel_caps_on_switch(&self) -> bool {
         if !self.rt().config.input.capslock.cancel_on_mode_switch {
             return false;
@@ -4392,14 +3805,12 @@ impl Coordinator {
         self.force_cancel_caps_lock()
     }
 
-    /// 切中英时**已经取消了大写锁定**，此刻该落到哪个模式（`input.capslock.mode_after_cancel`，
-    /// 论坛 t283）。只在 [`Self::cancel_caps_on_switch`] 返回真时调用；没取消时两条路径照旧
-    /// （Shift 翻转、Ctrl+空格 按请求），不经这里。
+    /// 切中英时已经取消了大写锁定，此刻该落到哪个模式（`input.capslock.mode_after_cancel`）。
+    /// 只在 [`Self::cancel_caps_on_switch`] 返回真时调用；没取消时两条路径照旧（Shift 翻转、
+    /// Ctrl+空格 按请求）。
     ///
-    /// `chinese`（出厂）对两条路径给的是**不同的**结果，这是有意的：它逐字保留本配置出现前
-    /// 的行为——Shift 没有方向，旧逻辑归位中文（翻转的话，被大写压着的 `chinese_mode=true`
-    /// 会翻成英文，用户看来「切了没反应」）；Ctrl+空格 带着系统算好的目标，旧逻辑只取消大写、
-    /// 不改目标。
+    /// `chinese`（出厂）对两条路径给不同结果是有意的：Shift 没有方向，归位中文（翻转的话被大写
+    /// 压着的 `chinese_mode=true` 会翻成英文，像是切了没反应）；Ctrl+空格带着系统算好的目标，按目标。
     pub(crate) fn mode_after_caps_cancel(
         setting: &str,
         switch: CapsCancelSwitch,
@@ -4419,11 +3830,11 @@ impl Coordinator {
         }
     }
 
-    /// 取消大小写锁定，**不看配置开关**。仅供语义前提为「我要用中文打字」的动作调用
+    /// 取消大小写锁定，不看配置开关。仅供语义前提为「我要用中文打字」的动作调用
     /// （目前只有切方案，见 `finish_user_schema_switch`）。
     ///
-    /// CapsLock 未开时返回 false 且不注入——「没开着」与「开关关着」在调用方看来都是
-    /// 「本次没取消」，两者都不该触发归位记账。
+    /// CapsLock 未开时返回 false 且不注入：「没开着」与「开关关着」都是「本次没取消」，
+    /// 都不该触发归位记账。
     pub(crate) fn force_cancel_caps_lock(&self) -> bool {
         {
             let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -4432,9 +3843,8 @@ impl Coordinator {
             }
         }
         // 防抖：同一轮切换动作内不重复注入（一次注入的系统回环在几十 ms 内完成）。
-        // 振荡回路的主熔断在 C++ 侧（OPENCLOSE 的 CapsLock 联动抑制 + Ctrl 判据），
-        // 此处窗口必须远小于用户连续两轮「开大写→切换」的最短间隔——曾设 1500ms，
-        // 实测会吞掉快节奏的第二轮合法请求（表现为"有时要按两次"），勿再调大。
+        // 振荡回路的主熔断在 C++ 侧（OPENCLOSE 的 CapsLock 联动抑制 + Ctrl 判据）。此窗口必须远小于
+        // 用户连续两轮「开大写→切换」的最短间隔，调大会吞掉快节奏的第二轮合法请求。
         {
             let mut last = self
                 .last_caps_inject
@@ -4480,9 +3890,8 @@ impl Coordinator {
         let d = &bundle.config.input.default;
         let proc = self.cached_proc_name(client_token);
         let chinese = self.initial_chinese_mode_for(&proc, win);
-        // per-app：首次进入就把这个进程的中英态记进表。只在手动切换时记的话，没切过的进程
-        // 表里没有它，下次回来会退回全局「前次状态」——在别的应用里切的那一下就把它带走了。
-        // 有应用规则的进程不记：规则每次都压过记忆表。
+        // per-app：首次进入就把这个进程的中英态记进表。只在手动切换时记的话，没切过的进程下次
+        // 回来会退回全局「前次状态」，被别的应用里的切换带走。有应用规则的进程不记（规则压过记忆表）。
         if d.per_app_scope() && !proc.is_empty() && self.rule_initial_mode(&proc, win).is_none() {
             self.mode_states
                 .lock()
@@ -4500,7 +3909,7 @@ impl Coordinator {
         if s.chinese_mode != chinese {
             // 模式变更的四个入口都打一条同形日志（见 `handle_system_mode_switch`）。
             // 只在真改变时打：本函数每次焦点切换都会走到，无条件打会淹掉日志。
-            // 注意此处已持 state 锁，取旧值只能读 `s`，不可调 `is_chinese_mode()`（会死锁）。
+            // 此处已持 state 锁，取旧值只能读 `s`，不可调 `is_chinese_mode()`（会死锁）。
             tracing::debug!(
                 "initial_mode: proc={} {} -> {}",
                 proc,
@@ -4513,30 +3922,28 @@ impl Coordinator {
                 self.set_punct_below_schema_intent(&mut s, chinese);
             }
         }
-        // per-app 标点规则**最后**落地，压过 follow_mode 的推导与 reset_aux 的重置。
-        // 顺序反了的话，用户配了 initial_punct 却恰好开着 follow_mode 时，规则会被
-        // 上面那行静默覆盖——「配了没反应、日志里也没有痕迹」正是本仓反复出现的形态。
+        // per-app 标点规则最后落地，压过 follow_mode 的推导与 reset_aux 的重置；顺序反了，
+        // 配了 initial_punct 又开着 follow_mode 时规则会被静默覆盖。
         if let Some(p) = rule_punct {
             s.chinese_punct = p.is_chinese();
         }
     }
 
-    /// 「当前焦点为什么打不出中文」的**真值**（未过迟滞）。呈现请用
-    /// [`Self::effective_input_block`]。
+    /// 「当前焦点为什么打不出中文」的真值（未过迟滞）。呈现请用 [`Self::effective_input_block`]。
     ///
-    /// 三个信号源都已由 DLL 上报到位，无需新增 IPC：
-    /// · 线程级禁用 → `focus_gained` 的 `disabled` 字段（DLL 注释写明该字段**统一是线程级**，
-    ///   密码框那一层折在 mask 的 IS_PASSWORD 位里，两者不可混为一谈）；
+    /// 三个信号源都已由 DLL 上报：
+    /// · 线程级禁用 → `focus_gained` 的 `disabled` 字段（统一是线程级；密码框那层折在 mask 的
+    ///   IS_PASSWORD 位里）；
     /// · 密码框     → `apply_input_diag` 据 mask 置位的 `password_suppress`，与输入闸同源；
-    /// · 无编辑上下文 → `focus_lost(NoEditCtx/CtxLost)` / `focus_gained` 维护的 `has_edit_context`。
+    /// · 无编辑上下文 → 只由权威信号维护的 `focus_no_edit_ctx`。
     ///
-    /// ⚠ `ime_active` 为假时一律返回 `None`：那说明本输入法根本没在服务任何宿主
-    /// （用户切到了别的输入法），此时 `has_edit_context` 恒假，不早退就会把图标永久钉成「英」。
+    /// `ime_active` 为假时一律返回 `None`：本输入法没在服务任何宿主（用户切到了别的输入法），
+    /// 不早退就会把图标永久钉成「英」。
     pub(crate) fn input_block(&self) -> InputBlock {
         let (ime_active, no_edit_ctx) = {
             let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            // ⚠ 读 `focus_no_edit_ctx` 而**不是** `has_edit_context`：后者被噪声层的
-            // CtxLost 置假，拿它驱动图标会在焦点根本没离开输入框时显「英」（实测见字段注释）。
+            // 读 `focus_no_edit_ctx` 而不是 `has_edit_context`：后者被噪声层的 CtxLost 置假，
+            // 会在焦点没离开输入框时显「英」。
             (s.ime_active, s.focus_no_edit_ctx)
         };
         if !ime_active {
@@ -4573,10 +3980,9 @@ impl Coordinator {
         InputBlock::None
     }
 
-    /// 过了迟滞闸门之后**该呈现**的档位。图标与工具栏都只许读这一个。
+    /// 过了迟滞闸门之后该呈现的档位。图标与工具栏都只许读这一个。
     ///
-    /// 未到期时返回旧值并安排一次复查——否则 churn 停下后没有任何事件会再驱动它，
-    /// 状态会永久停在「差一点就该变」。
+    /// 未到期时返回旧值并安排一次复查，否则 churn 停下后没有事件再驱动它，状态永久停在「差一点就该变」。
     pub(crate) fn effective_input_block(&self) -> InputBlock {
         let now = self.input_block();
         let mut g = self
@@ -4595,7 +4001,7 @@ impl Coordinator {
             return now;
         }
         // 进入方向：要求稳定 INPUT_BLOCK_DELAY。
-        // ⚠ 用 `get_or_insert` 而非直接赋值：每次事件都重置起点的话，churn 下永远等不到到期。
+        // 用 `get_or_insert` 而非直接赋值：每次事件都重置起点的话，churn 下永远等不到到期。
         let t0 = *g.pending_since.get_or_insert(std::time::Instant::now());
         let waited = t0.elapsed();
         if waited >= INPUT_BLOCK_DELAY {
@@ -4652,13 +4058,12 @@ impl Coordinator {
         p
     }
 
-    /// 运行期格式串（cmdbar `dict.rev`、短语里的反查）要拆字而表没在内存里：后台加载，
-    /// 本次照旧返回空、下次就有（与 `ensure_reverse_index_async` 同一模式）。配置里的消费者
-    /// 不走这里——它们由 [`Self::sync_chaizi_assets`] 按 `DataNeeds` 装好。
+    /// 运行期格式串（cmdbar `dict.rev`、短语里的反查）要拆字而表没在内存里：后台加载，本次返回空、
+    /// 下次就有（同 `ensure_reverse_index_async`）。配置里的消费者由 [`Self::sync_chaizi_assets`]
+    /// 按 `DataNeeds` 装好，不走这里。
     ///
-    /// 可能每键都被调（短语求值），故先过闸：本代次（两次 sync 之间）只派一次，找不到库也记
-    /// 「试过」。方案字段走缓存；库路径解析（查文件存在）与加载都在后台线程，按键线程不碰盘。
-    /// 只在换入那一刻取反查表写锁：候选渲染持着它的读锁。
+    /// 可能每键都被调（短语求值），故先过闸：两次 sync 之间只派一次，找不到库也记「试过」。
+    /// 库路径解析与加载都在后台线程，按键线程不碰盘。只在换入那一刻取反查表写锁（候选渲染持读锁）。
     pub(crate) fn ensure_chaizi_async(&self) {
         let generation = {
             let mut a = self.chaizi_assets.lock().unwrap_or_else(|e| e.into_inner());
@@ -4731,19 +4136,13 @@ impl Coordinator {
         info!("拆字表按运行期用到后台加载完成");
     }
 
-    /// 热重载用户配置：从磁盘重读 Config 并原子替换 bundle（轻量设置即时生效），
-    /// 再 best-effort 刷新主题/工具栏。返回是否仍需重启才能完全生效。
-    /// 轻量项（标点/智能符号/候选数/热键/配对/导航键等）即时生效；重型项（引擎/方案/
-    /// 词典/字体）当前不在 bundle 内，需重启——为不打断使用，这里统一返回 false，
-    /// 由调用方/用户按需重启。
     /// 同步拆字资产到当前来源方案（`chaizi_spec`：码表=自身、混输=其主码表成员、拼音=全局
-    /// 主码表，与编码段同源）：库路径变了才重载反查表拆字段（含变为无配置时清空释放内存），
-    /// 字根字体变了才重发（渲染端每次 set 都重建字体集，勿重复下发）。调用点=启动、方案切换
-    /// （菜单/循环/设置页）、配置生效（`apply_data_needs`）。资源相对路径按「用户方案目录
-    /// 优先、回落系统数据目录」解析（与方案文件同规则）。
+    /// 主码表，与编码段同源）：库路径变了才重载反查表拆字段（变为无配置时清空），字根字体变了
+    /// 才重发（渲染端每次 set 都重建字体集）。调用点=启动、方案切换、配置生效
+    /// （`apply_data_needs`）。资源相对路径按「用户方案目录优先、回落系统数据目录」解析。
     ///
-    /// 库只在 [`DataNeeds::chaizi`](crate::data_needs::DataNeeds) 为真时加载，变为假时卸载
-    /// （反查表拆字段清空）；字体照旧随方案下发（它不占本进程内存，撤换另有判据）。
+    /// 库只在 [`DataNeeds::chaizi`](crate::data_needs::DataNeeds) 为真时加载，变为假时卸载；
+    /// 字体照旧随方案下发（不占本进程内存，撤换另有判据）。
     pub(crate) fn sync_chaizi_assets(&self) {
         self.sync_chaizi_assets_with(&self.data_needs());
     }
@@ -4756,11 +4155,8 @@ impl Coordinator {
             .as_ref()
             .filter(|c| !c.font_path.is_empty())
             .and_then(|c| {
-                // 缺失必须告警：与上面 `db_path` 对称。此前只有拆字库缺失会 warn，字根字体
-                // 缺失则一路静默——而这两者的现象天差地别：库缺失是「悬停里根本没有拆字段」，
-                // 字体缺失是「拆字段有内容、但每个字根都是方框」。后者用户看得见、日志里
-                // 却一个字都没有，只能凭空猜「字体没装上」还是「家族名不对」还是「渲染没生效」
-                // （issue #126 正是这一形态：方案 TOML、字体文件、家族名、字根码位四项全对）。
+                // 缺失必须告警（与 `db_path` 对称）：字体缺失的现象是「拆字段有内容但字根都是方框」，
+                // 不告警的话日志里毫无线索。
                 let p = Config::resolve_schema_resource(data_dir.as_deref(), &c.font_path);
                 if p.is_none() {
                     warn!(
@@ -4775,8 +4171,8 @@ impl Coordinator {
         // 进行中的运行期加载作废、运行期路径给一次重试（可能换了方案）。
         assets.generation += 1;
         assets.tried = false;
-        // 配置要拆字 ⇒ 装方案的库。不要 ⇒ 卸，**除非**当前那份是运行期按需装的、且方案的
-        // 拆字库没换（见 `ChaiziAssets::runtime`）。
+        // 配置要拆字 ⇒ 装方案的库。不要 ⇒ 卸，除非当前那份是运行期按需装的、且方案的拆字库没换
+        // （见 `ChaiziAssets::runtime`）。
         let keep = needs.chaizi || (assets.runtime && assets.db == spec_db);
         let new_db = if keep { spec_db } else { None };
         if assets.db != new_db {
@@ -4799,10 +4195,8 @@ impl Coordinator {
             if path.is_empty() {
                 info!("撤下字根字体（当前方案无可用的 [engine.chaizi] 字体）");
             } else {
-                // 打成 info 而不是 debug：「字根字体到底下发过没有」是这条链路上唯一能把
-                // 「没解析到」「解析到但渲染端加载失败」「一切正常」三态分开的观测点，
-                // 而渲染端的失败告警在另一个日志域里（wind-ui）。缺了这一行，日志上
-                // 「没有任何字根字体相关记录」既可能是没配、也可能是没走到这里。
+                // 打成 info：这是唯一能把「没解析到」「渲染端加载失败」「一切正常」三态分开的
+                // 观测点（渲染端的失败告警在 wind-ui 日志域里）。
                 info!("下发字根字体: {path}（家族名 {family}）");
             }
             let _ = self
@@ -4812,34 +4206,10 @@ impl Coordinator {
         assets.font = new_font;
     }
 
-    /// 同步注释词库（`[[ui.comment_dicts]]`）到反查表：解析路径列表，与上次生效的比对，
-    /// **变了才重载**。调用点=启动、reload_user_config。
-    ///
-    /// 变更检测比的是**解析后的 `(路径, 适用方案)` 序列**（含顺序）而非配置结构：顺序即
-    /// 优先级，调换两个库的位置必须触发重载；而只改 `label` 这类不影响加载的字段则不该重载。
-    ///
-    /// # ★ 挂载**不按方案过滤**——`schemas` 是查询期判据
-    ///
-    /// 早先这里按 `active_schema_id()` 筛挂载集合，于是切方案就要重挂 mmap（成本几乎全在
-    /// 「读整份源文件算内容指纹」），而且判据本身是错的：临英背后是硬编码的 `english`
-    /// 方案，`schemas = ["english"]` 在五笔方案下永远挂不上。
-    ///
-    /// 现在白名单随 spec 一起交给 `ReverseLookup`，在 `comment_of` 查询时求值（见
-    /// [`wind_reverse::ReverseLookup::comment_of`]）。挂载集合于是只跟**配置**走、
-    /// 不随方案抖动 ⇒ **切方案不再需要调本函数**。mmap 的常驻内存与库大小无关，
-    /// 挂载全集的代价只是启动时每库一次指纹校验。
-    ///
-    /// 路径**以 `schemas/` 为基准**解析（`resolve_schema_resource`，用户目录优先、回落安装
-    /// 目录），与拆字库、字根字体这些方案附属资源同一规则 —— 注释库本就是同类东西：
-    /// 放在 `schemas/` 下、随整机备份走（`user_schemas_dir` 递归打包）、不参与召回。
-    /// 配置里因此写 `comments/xxx.dict.yaml` 而非 `schemas/comments/xxx.dict.yaml`。
     /// 词库自带 `comment` 列时自动派生出的注释源（`[ui.candidate].auto_comment_dicts`）。
     ///
-    /// 每次调用都重新检测：方案启用/停用、词库换层（用户目录覆盖安装目录）都会改变结果，
-    /// 而检测本身只读每个词库的 YAML 头，代价与词库大小无关。
-    ///
-    /// 总开关关闭时返回空表 —— 于是配置里的引用空壳一条都认领不到，自动派生整体消失，
-    /// 不需要在合并那侧再判一次开关。
+    /// 每次调用都重新检测：方案启用/停用、词库换层都会改变结果，而检测只读每个词库的 YAML 头。
+    /// 总开关关闭时返回空表，配置里的引用空壳一条都认领不到，合并那侧不必再判开关。
     pub fn auto_comment_sources(&self) -> Vec<AutoCommentSource> {
         if !self.rt().config.ui.candidate.auto_comment_dicts {
             return Vec::new();
@@ -4862,6 +4232,18 @@ impl Coordinator {
             .collect()
     }
 
+    /// 同步注释词库（`[[ui.comment_dicts]]`）到反查表：解析路径列表，与上次生效的比对，
+    /// 变了才重载。调用点=启动、reload_user_config。
+    ///
+    /// 变更检测比的是解析后的 `(路径, 适用方案)` 序列（含顺序，顺序即优先级），只改 `label`
+    /// 这类不影响加载的字段不重载。
+    ///
+    /// 挂载不按方案过滤：`schemas` 白名单随 spec 交给 `ReverseLookup`，在
+    /// [`wind_reverse::ReverseLookup::comment_of`] 查询时求值（临英背后是硬编码的 `english`
+    /// 方案，按活跃方案筛挂载会让它永远挂不上）。故切方案不需要调本函数。
+    ///
+    /// 路径以 `schemas/` 为基准解析（`resolve_schema_resource`，用户目录优先），与拆字库、字根
+    /// 字体同一规则；配置里写 `comments/xxx.dict.yaml` 而非 `schemas/comments/xxx.dict.yaml`。
     pub(crate) fn sync_comment_dicts(&self) {
         let data_dir = Config::data_dir();
         let auto = self.auto_comment_sources();
@@ -4886,10 +4268,9 @@ impl Coordinator {
             rl.set_named_only(&named_only);
             return;
         }
-        // 注释库缓存与词库 .wdat **同根**：`comment_cache_path` 自己按 schemas 下的目录链分
-        // 命名空间（`schemas/comments/x.dict.yaml` → `<cache>/comments/x.wcmt`），与
-        // `EngineManager::cache_path` 同构，不再另立一层专用目录。
-        // 无缓存目录（便携/测试）时传 None，注释库退化为内存加载，功能不受影响。
+        // 注释库缓存与词库 .wdat 同根：`comment_cache_path` 按 schemas 下的目录链分命名空间（
+        // `schemas/comments/x.dict.yaml` → `<cache>/comments/x.wcmt`），与 `EngineManager::cache_path` 同
+        // 构。无缓存目录（便携/测试）时传 None，注释库退化为内存加载。
         let cache_dir = Config::cache_dir();
         {
             let mut rl = self.reverse.write().unwrap_or_else(|e| e.into_inner());
@@ -4903,15 +4284,11 @@ impl Coordinator {
     /// 同步 emoji 扩展表（`[input.emoji]`）。调用点=启动、`reload_user_config`，与
     /// [`Self::sync_comment_dicts`] 同一套「声明式变更」写法：变了才重载。
     ///
-    /// 变更判据只取 `(enabled, categories)` ——**只有这两项影响加载结果**。`show_as`
-    /// `max_per_word` 之类是查询期参数，把它们写进判据会让每次 reload 都重解析一遍
-    /// 4600 行词表并重建缓存。
+    /// 变更判据只取 `(enabled, categories)`：`show_as` / `max_per_word` 是查询期参数，写进判据会让
+    /// 每次 reload 都重解析词表、重建缓存。
     ///
-    /// # 加载失败**不记录** spec
-    ///
-    /// 三种结局分开处置：功能关（记录，置 None）、加载成功（记录）、加载失败（**不记录**）。
-    /// 失败不记录 ⇒ 下次 sync 会重试，于是用户补跑 `gen-data` 后不必改配置就能生效；
-    /// 重试成本只是解析一次路径后发现文件不在，可以忽略。
+    /// 三种结局分开处置：功能关（记录，置 None）、加载成功（记录）、加载失败（不记录）。失败不记录
+    /// 让下次 sync 重试，用户补跑 `gen-data` 后不必改配置就能生效。
     pub(crate) fn sync_emoji_dict(&self) {
         let (enabled, categories, modules) = {
             let rt = self.rt();
@@ -4925,8 +4302,7 @@ impl Coordinator {
                     .collect();
             (e.enabled, e.categories, modules)
         };
-        // 值域校验放在去重之前：`scope`/`show_as` 不影响加载、不进变更判据，但配置变更
-        // 时正是唯一该告警的时机。放进热路径的话每次按键都会刷一条。
+        // 值域校验放在去重之前：配置变更时是唯一该告警的时机，放进热路径会每键刷一条。
         {
             let rt = self.rt();
             let e = &rt.config.input.emoji;
@@ -4956,7 +4332,7 @@ impl Coordinator {
                 return;
             }
         }
-        // 关闭：连数据文件都不打开。未启用的用户为本功能付出的开销就此归零。
+        // 关闭：连数据文件都不打开。
         if !enabled {
             *self.emoji_dict.write().unwrap_or_else(|e| e.into_inner()) = None;
             *self.emoji_spec.lock().unwrap_or_else(|e| e.into_inner()) = Some(spec);
@@ -4969,14 +4345,9 @@ impl Coordinator {
                 let _ = std::fs::remove_file(dir.join("emoji").join(f));
             }
         }
-        // ★ 先放掉旧表，再重建。`categories` 翻转会改变指纹源 ⇒ `load_or_build` 要写新的
-        // `.wemj` 并 rename 覆盖旧文件，而旧表此刻还被本字段的 Arc 持着 mmap——Windows 上
-        // 覆盖被映射的文件返回拒绝访问（本机以 mmap + `os.replace` 探针实测 WinError 5，
-        // `emojidict.rs` 的测试也为此显式 `drop(r)`）。不先放掉，表现为「打开分类词后
-        // emoji 整个消失，随便再改一项配置又回来」——spec 未记录使下次 sync 重试成功，
-        // 恰好把这个缺陷藏成了偶发。
-        //
-        // 池里只存 Weak（`reader_pool` 模块文档），本字段是唯一的强引用；写锁会等正在
+        // 先放掉旧表再重建：`categories` 翻转会让 `load_or_build` 写新 `.wemj` 并 rename 覆盖旧文件，
+        // 而 Windows 上覆盖仍被 mmap 的文件会被拒绝访问（表现为 emoji 整个消失，下次 sync 重试又
+        // 回来，像是偶发）。池里只存 Weak（见 `reader_pool`），本字段是唯一强引用；写锁会等正在
         // `apply_emoji_suggestions` 里的读者退出，之后旧映射即释放。
         *self.emoji_dict.write().unwrap_or_else(|e| e.into_inner()) = None;
         let loaded = Self::load_emoji_dict(categories, &modules);
@@ -4989,17 +4360,13 @@ impl Coordinator {
 
     /// 实际加载 emoji 表：解析路径 → （繁简归一）→ 建/复用 `.wemj` 缓存 → mmap。
     ///
-    /// **一表一缓存**（`<cache>/emoji/<id>.wemj`），查询期按顺序合并（[`EmojiTables`]）：
-    /// 开关一个模块只是挂 / 不挂那张表，其余的缓存原样复用、永不因别人重建。合建一份的话，
-    /// 翻任何一个开关都要重写整份 `.wemj`，而 Windows 上覆盖被映射的文件会被拒（见
-    /// `sync_emoji_dict` 里「先放掉旧表」那段）。
+    /// 一表一缓存（`<cache>/emoji/<id>.wemj`），查询期按顺序合并（[`EmojiTables`]）：开关一个模块
+    /// 只是挂 / 不挂那张表，其余缓存原样复用。合建一份的话翻任何开关都要重写整份，Windows 上
+    /// 还会撞上覆盖被映射文件的拒绝访问。
     ///
-    /// 顺序：rime-emoji 主表 → 分类表 → 附加模块（[`wind_config::EMOJI_MODULES`] 的顺序）。
-    /// 主表在前，开了附加模块的用户原有的首个 emoji 不变。
-    ///
-    /// 一张都没加载成返回 `None`（＝功能不可用），**不降级成内存表**——理由见
-    /// [`wind_dict::emojidict::load_or_build`]：本功能是纯锦上添花的可选项，而「常驻内存
-    /// 随功能数量累积」正是它要避开的东西。
+    /// 顺序：rime-emoji 主表 → 分类表 → 附加模块（[`wind_config::EMOJI_MODULES`] 的顺序），
+    /// 开了附加模块的用户原有的首个 emoji 不变。一张都没加载成返回 `None`，不降级成内存表
+    /// （理由见 [`wind_dict::emojidict::load_or_build`]）。
     fn load_emoji_dict(
         categories: bool,
         modules: &[wind_config::EmojiModuleEntry],
@@ -5076,9 +4443,8 @@ impl Coordinator {
         Some(EmojiTables(readers))
     }
 
-    /// rime-emoji 的繁→简归一表。上游键全是繁体（实测 国0/國28、爱0/愛16），而本仓候选
-    /// 恒简体 ⇒ 缺了它主表与分类表**一条都命中不了**，此时宁可不挂这两张，也不挂上一张
-    /// 看着启用、实际全空的表。
+    /// rime-emoji 的繁→简归一表。上游键全是繁体，而本仓候选恒简体，缺了它主表与分类表一条
+    /// 都命中不了；此时宁可不挂这两张，也不挂一张看着启用、实际全空的表。
     fn load_emoji_norm(
         dd: Option<&std::path::Path>,
     ) -> Option<(wind_transform::s2t::Dict, std::path::PathBuf)> {
@@ -5099,13 +4465,9 @@ impl Coordinator {
         Some((norm, norm_path))
     }
 
-    /// 辅助码来源缓存失效：方案切换后置 `None`，下次进入辅助码时按新方案的
-    /// `[engine.aux_code]` 重建（`ensure_aux_code_runtime` 另按来源清单比对，来源没变也会
-    /// 因这里置空而重读文件表——切方案时顺带刷新磁盘上改过的码表）。
-    ///
-    /// 缓存是**全局共享一份**、不区分方案，而各方案码表不同（拼音用笔画表、双拼用
-    /// 小鹤全码表）——切方案不清缓存会让双拼仍在用拼音那份表。与 `sync_chaizi_assets`
-    /// / `sync_comment_dicts` 同源：方案附属资源随活跃方案切换重挂载。
+    /// 辅助码来源缓存失效：方案切换后置 `None`，下次进入辅助码时按新方案的 `[engine.aux_code]`
+    /// 重建（顺带重读磁盘上改过的码表）。缓存全局共享一份、不区分方案，切方案不清会让双拼
+    /// 仍在用拼音那份表。
     pub(crate) fn invalidate_aux_code_table(&self) {
         *self
             .aux_code_runtime
@@ -5116,27 +4478,15 @@ impl Coordinator {
             .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// 就地改写内存配置并重建 ConfigBundle，**不触发** reload_user_config 的那一整套副作用
-    /// （toast、引擎热重建、热键重注册、主题下发、向 TSF 推 IPC 配置）。
-    ///
-    /// 用于「改动只影响少数几个 UI 字段、且发生频率高」的场景——典型是拖动窗口后落盘位置：
-    /// 走 reload_user_config 会每拖一次弹一个「设置已更新」toast，明显不合适。
-    /// 调用方仍需自行用 `Config::set_user_*` 把值写盘，本函数只负责让内存态立刻跟上。
     /// 候选窗定位参数 `(fixed, fixed_x, fixed_y)`，随每次 `UpdateCandidates` 下发。
     ///
-    /// fixed 时 UI 侧忽略光标坐标，改用 `custom_x/custom_y`；`(0,0)` 表示"已开启固定
-    /// 但用户还没拖过"，由 UI 落到屏幕默认锚点。快捷加词面板复用同一个候选窗实例，
-    /// 因此也走这里——否则同一个窗口会在"加词时跟随、打字时固定"之间来回跳。
-    /// per-app 规则**整条压过**全局：命中的应用用它自己的定位方式与自己的那份坐标，
-    /// 未命中（或规则里没配这一项）才读全局。
+    /// fixed 时 UI 侧忽略光标坐标，改用 `custom_x/custom_y`；`(0,0)` 表示「已开启固定但还没拖过」，
+    /// 由 UI 落到屏幕默认锚点。快捷加词面板复用同一个候选窗实例，也走这里，否则同一个窗口会在
+    /// 加词时跟随、打字时固定之间来回跳。
     ///
-    /// ⚠ 坐标必须与定位方式**同层取**，不能「模式取 per-app、坐标回落全局」：那样
-    /// 「这个应用固定、但还没拖过」会去用全局那份为别的应用摆的坐标，候选窗一上来就
-    /// 落在莫名其妙的位置，而用户根本没为这个应用设过位置。`(0,0)` 交给 UI 落默认锚点
-    /// 才是这一档的正确答案。
-    ///
-    /// per-app 那一层读 [`ActiveCompat::lookups`] 预提取的值（本函数在每次候选窗刷新上），
-    /// 与 [`Self::rule_candidate_fixed_pos`] 对焦点窗口现查同值。先取值放锁再读配置（`rt()` 另有锁）。
+    /// per-app 规则整条压过全局：坐标必须与定位方式同层取，不能「模式取 per-app、坐标回落全局」，
+    /// 否则还没为这个应用拖过的固定窗会用上别的应用摆的坐标。per-app 层读
+    /// [`ActiveCompat::lookups`] 预提取的值，与 [`Self::rule_candidate_fixed_pos`] 现查同值。
     pub(crate) fn candidate_fixed_pos(&self) -> (bool, i32, i32) {
         let rule = self
             .active_compat
@@ -5179,32 +4529,39 @@ impl Coordinator {
         *self.comment_lib.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(lib);
     }
 
+    /// 就地改写内存配置并重建 ConfigBundle，不触发 reload_user_config 的那一整套副作用
+    /// （toast、引擎热重建、热键重注册、主题下发、向 TSF 推 IPC 配置）。
+    ///
+    /// 用于只影响少数 UI 字段、且发生频率高的改动（典型是拖动窗口后落盘位置，走 reload 会每拖
+    /// 一次弹一个 toast）。调用方仍需自行用 `Config::set_user_*` 写盘，本函数只让内存态跟上。
     pub(crate) fn refresh_config_in_memory(&self, mutate: impl FnOnce(&mut Config)) {
         let mut cfg = self.rt().config.clone();
         mutate(&mut cfg);
         let keys = schema_key_union(&self.engine_mgr);
         let bundle = std::sync::Arc::new(ConfigBundle::build(cfg, &keys));
-        // 字符类 registry 由配置派生，**不在 schema_dirty 分支内**：
-        // `input.rare_char.include_blocks` 在 input 段，改它不会把 schema 标脏，
-        // 放进那个分支等于「改了没反应，切一次方案才生效」。见 `rebuild_charsets`。
+        // 字符类 registry 由配置派生，不在 schema_dirty 分支内：`input.rare_char.include_blocks`
+        // 不会把 schema 标脏，放进去等于「改了没反应，切一次方案才生效」。见 `rebuild_charsets`。
         self.engine_mgr.rebuild_charsets(&bundle.config);
         self.rebuild_comment_lib(&bundle.config);
         *self.rt.write().unwrap_or_else(|e| e.into_inner()) = bundle;
         // 托盘 / 右键菜单 / 命令栏改配置走这里而不经 `reload_user_config`，扩展同样要知道。
         self.hook_lifecycle(wind_hook::msg::lifecycle::CONFIG_RELOADED);
-        // 状态气泡去重缓存只在"内容配置不变"的前提下有效：改了 ui.status.items 之类后，
-        // 同一状态该合成出不同文本，留着旧缓存会把改动后的第一次显示误判成"内容没变"而吞掉。
+        // 状态气泡去重缓存只在内容配置不变时有效：改了 ui.status.items 之类后，留着旧缓存会把
+        // 改动后的第一次显示误判成「内容没变」而吞掉。
         self.last_status_text
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
     }
 
+    /// 热重载用户配置：从磁盘重读 Config 并原子替换 bundle，方案相关项变了才重建引擎
+    /// （见 [`engine_reload_needed`]），再 best-effort 刷新主题/工具栏。成功返回 false；
+    /// 读盘或解析失败返回 true（弹「配置加载失败」，沿用旧配置）。
     pub fn reload_user_config(&self) -> bool {
         self.reload_user_config_quiet(false)
     }
 
-    /// `quiet = true` 只压热重载**成功**的「设置已更新」（`config.set(…, toast="off")` 用）；
+    /// `quiet = true` 只压热重载成功的「设置已更新」（`config.set(…, toast="off")` 用）；
     /// 失败 / 语法错误的提示不受它影响，照常弹。
     pub fn reload_user_config_quiet(&self, quiet: bool) -> bool {
         match Config::load(Config::data_dir().as_deref()) {
@@ -5233,8 +4590,7 @@ impl Coordinator {
                 self.rebuild_comment_lib(&new_cfg);
                 *self.rt.write().unwrap_or_else(|e| e.into_inner()) = bundle;
                 info!("User config hot-reloaded (schema_dirty={})", schema_dirty);
-                // 同 refresh_config_in_memory：设置页改了 ui.status.items 后，旧的去重缓存
-                // 会把改动后的第一次状态显示误判成"内容没变"而吞掉。
+                // 同 refresh_config_in_memory：清状态气泡去重缓存。
                 self.last_status_text
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
@@ -5242,13 +4598,10 @@ impl Coordinator {
                 // 工具栏去重缓存同理：热重载可能改变工具栏的显隐策略，而 ToolbarState
                 // 不带那些量，不清就会把该重推的那一次判成「内容没变」。
                 self.reset_toolbar_push_dedup();
-                // 注释词库跟随全局配置，**不在 schema_dirty 分支内**：`[[ui.comment_dicts]]`
-                // 改动本身不会把 schema 标脏，放进那个分支等于「改了挂载列表没反应，
-                // 直到下次切方案才生效」。自身按路径序列做变更检测，未变即空操作。
+                // 注释词库跟随全局配置、不在 schema_dirty 分支内：`[[ui.comment_dicts]]` 的改动不会
+                // 把 schema 标脏。自身做变更检测，未变即空操作。
                 self.sync_comment_dicts();
-                // emoji 扩展表同理跟随全局配置（`[input.emoji]`），不属 schema——它按候选
-                // 文本查表、与编码域无关，本就不是某个方案的属性。自带变更检测（只看
-                // enabled/categories），未变即空操作。
+                // emoji 扩展表同理（按候选文本查表，本就不是方案属性）。自带变更检测。
                 self.sync_emoji_dict();
                 // 扩展段跟随全局配置；订阅方自己做变更检测。
                 self.notify_extensions_config();
@@ -5260,20 +4613,17 @@ impl Coordinator {
                     }
                     self.apply_user_text_changes(&changed);
                 }
-                // 语言栏图标的呈现参数同理跟随全局配置（`[ui.langbar]`），也不属 schema。
-                // 少了这一步，改角标形状/配色要重启才生效——「改了没反应、重启就好」正是
-                // 本仓反复出现的那类缺陷（运行时镜像态没回灌）。自带变更检测，未变即空操作。
+                // 语言栏图标的呈现参数（`[ui.langbar]`）同理跟随全局配置，不回灌就要重启才生效。
+                // 自带变更检测。
                 #[cfg(all(feature = "desktop-ui", windows))]
                 self.apply_langbar_config();
 
                 if schema_dirty {
                     // 热重建方案集：清输入缓冲、刷新工具栏/状态，免重启切换方案。
                     self.engine_mgr.reload_from_config(&new_cfg);
-                    // 主码表可能变更：拆字库/字根字体随之切换——由下面 `apply_data_needs`
-                    // 统一做（变更检测，未变不动），它必须排在 `reload_from_config` 之后。
-                    // 注释库**不需要**在这里复核：它只跟 `[[ui.comment_dicts]]` 走，
-                    // 而那份配置在上面的非 schema_dirty 路径里已经同步过；方案集重建
-                    // 换掉活跃方案也不改变该挂载什么（`schemas` 是查询期判据）。
+                    // 主码表可能变更：拆字库/字根字体由下面 `apply_data_needs` 统一切换，它必须排在
+                    // `reload_from_config` 之后。注释库不需要在这里复核：它只跟 `[[ui.comment_dicts]]`
+                    // 走，已在上面同步过（`schemas` 是查询期判据）。
                     {
                         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
                         s.input_buffer.clear();
@@ -5285,20 +4635,13 @@ impl Coordinator {
                     self.notify_ui_hide();
                     self.push_state_update();
                     self.notify_toolbar(); // 方案名变化 → 刷新工具栏标签
-                    // 重建把反查索引与单字全码表都置空了（`reload_from_config`），必须补一次
-                    // 预热，否则它们要等**首次上屏**才惰性重建——而自动造词的取码与查重正好
-                    // 跑在那条路径上，`flush_draft_batch` 在未就绪时是**整批丢弃**。
-                    // 表现：用户在设置页打开自动造词后，最先打的那几个词被静默吞掉，
-                    // 大词库上（真机 253 万条实测秒级构建）能吞掉一整句。
+                    // 重建把反查索引与单字全码表都置空了，必须补一次预热，否则要等首次上屏才惰性重
+                    // 建，而 `flush_draft_batch` 在未就绪时整批丢弃：刚打开自动造词时最先打的词会被
+                    // 静默吞掉。辅助码引用的方案来源也在 `prewarm_indexes` 里（在用集合的变化都会标
+                    // 脏）。必须后台：`prewarm_indexes` 阻塞秒级，而本函数是设置页 RPC 调过来的。
                     //
-                    // 辅助码引用的方案来源也在 `prewarm_indexes` 里（在用集合只随 `schema` 段与
-                    // `input.temp_pinyin` 变，二者都会标脏，故不必在非脏分支另补）。
-                    //
-                    // ⚠️ 必须后台：`prewarm_indexes` 阻塞秒级，而本函数是设置页 RPC 调过来的。
-                    // 与启动线程、测试、移动端 prepare() 共用同一个 `prewarm_indexes`。
-                    // 重建把活跃方案重置成了磁盘上的 `schema.active`（= 全局方案）。焦点若在
-                    // 配了 schema 规则的应用里，要把它对齐回去，否则设置页保存一次就把该应用
-                    // 冲回全局。按应用方案的自动切换不写盘，本身不会走到这里。
+                    // 重建把活跃方案重置成了磁盘上的 `schema.active`（= 全局方案）。焦点若在配了
+                    // schema 规则的应用里，要对齐回去，否则保存一次设置就把该应用冲回全局。
                     self.resync_app_schema_after_reload();
                     if let Some(weak) = self.self_weak.get().cloned() {
                         let _ = std::thread::Builder::new()
@@ -5321,8 +4664,7 @@ impl Coordinator {
                 self.apply_data_needs();
                 // 方案常驻策略变了：就地摘除 / 后台预热（这个键不标脏，见 engine_reload_needed）。
                 self.apply_residency_change(was_keep_all);
-                // 同步主题选择:设置页改 config.ui.theme.* 后内存态须跟随,reload_config 才会下发新主题
-                // (此前 reload_config 只重推旧内存主题 → 设置页切主题不生效)。
+                // 同步主题选择：设置页改 config.ui.theme.* 后内存态须跟随，reload_config 才会下发新主题。
                 {
                     let name = new_cfg.ui.theme.name.trim();
                     if !name.is_empty() {
@@ -5333,14 +4675,11 @@ impl Coordinator {
                         ThemeStyle::from_config(&new_cfg.ui.theme.style);
                 }
                 // 同步工具栏显隐:设置页改 ui.toolbar.visible 后运行时态跟随,再刷新工具栏。
-                // 运行时镜像态回灌：这些开关运行时读 state（菜单/热键直改），config 是持久化
-                // 真相源，两者只在启动时拷贝一次是不够的——设置页改了必须在此跟随，否则要重启
-                // 服务才生效（症状：设置页改「检索范围」无效、而右键菜单正常）。
-                // 简繁两个方向互斥。写入侧的归一在这里**落盘**（见
-                // `normalize_conversion_exclusivity`），不能只在下面读时压掉——UI 不是唯一
-                // 入口，命令行改 config.toml、导入配置包、别的客户端都能造出两个都开的组合，
-                // 只压不写的话配置文件里那个非法组合会一直留着，用户在设置页看到两个都亮、
-                // 实际只有一个在工作，而且怎么改都改不掉。
+                // 运行时镜像态回灌：这些开关运行时读 state（菜单/热键直改），config 是持久化真相源，
+                // 设置页改了必须在此跟随，否则要重启服务才生效。
+                // 简繁两个方向互斥，写入侧的归一在这里落盘（见 `normalize_conversion_exclusivity`）：
+                // 命令行、导入配置包等都能造出两个都开的组合，只在读时压掉的话非法组合会一直留在
+                // 配置里，设置页看到两个都亮、实际只有一个在工作。
                 let (s2t_on, t2s_on) = new_cfg.input.conversion_directions();
                 self.normalize_conversion_exclusivity(&new_cfg);
                 let filter_changed = {
@@ -5364,9 +4703,8 @@ impl Coordinator {
                     }
                 }
                 self.apply_ui_config(); // 外观项（候选排列/编码显示/候选窗显隐）即时生效
-                // 「定位方式」刚从跟随切到固定：若候选窗此刻正显示着，就地固定在它当前的位置，
-                // 而不是跳到陈旧的 custom_x/custom_y（用户从没拖过时是 0,0，会窜到屏幕左上角）。
-                // 窗口没显示则不上报，首显时由 UI 侧落到屏幕默认锚点。与 status_toggle_pinned 同构。
+                // 「定位方式」刚从跟随切到固定：候选窗正显示着就地固定在当前位置，而不是跳到陈旧的
+                // custom_x/custom_y（没拖过时是 0,0）。窗口没显示则不上报，首显时由 UI 落默认锚点。
                 if !cand_was_fixed && new_cfg.ui.candidate.is_fixed_position() {
                     let _ = self.ui_tx.send(UiCommand::ReportCandidatePos);
                 }
@@ -5392,29 +4730,18 @@ impl Coordinator {
                 self.push_space_before_digit_config(0); // 中数间补空格：DLL 据此吃汉字后的数字
                 self.push_pair_state_ttl_config(0); // 配对状态时效（DLL 侧闸门据此判陈旧）
                 self.push_ctrl_space_toggle_config(0); // Ctrl+空格 切换开关：DLL 据此吃不吃该键（GH#172）
-                // 诊断采集开关本身与配置文件无关（会话级），这里重推纯属幂等保险——
-                // 与 password_suppress 同样处理，让"重载一次"能修好任何 DLL 侧状态漂移。
+                // 诊断采集开关与配置文件无关（会话级），重推是幂等保险，让「重载一次」能修好 DLL 侧漂移。
                 self.push_diag_snapshot_config(0);
-                // ★★ 热键表重新下发。上面的 `ConfigBundle::build` 已经**重编**过一遍
-                // （`Compiler::compile` 读的就是这份新配置），但编出来的表要经 activation
-                // push 才到得了 DLL —— 而 TSF 侧的 `RegisterHotKey` 抢占（GLOBAL 位）与
-                // 吃键闸门都建立在那张表上。上面那几条 `push_*_config` 各自推的是自己那
-                // 一小段配置，没有一条捎带热键表。
-                //
-                // 不推的表现是「设置页把热键改了，按下去还是老的；切一次焦点或重启才
-                // 生效」—— 因为热键表此前**只随 focus_gained 下发**。
-                //
-                // ⚠️ 定向推给当前活跃客户端，**不广播**：`push_activation_status` 里的
-                // `hostRenderAvail` 位是按 token 的 pid 算出来的，广播会把一个进程的值
-                // 污染给其它客户端。没有活跃 token 就什么都不做 —— 那种情况下下一次
-                // focus_gained 自会带上新表。
+                // 热键表重新下发：`ConfigBundle::build` 已重编过，但表要经 activation push 才到得了 DLL
+                // （`RegisterHotKey` 抢占与吃键闸门都建在它上面），上面的 `push_*_config` 都不捎带它。
+                // 只定向推给当前活跃客户端、不广播：`hostRenderAvail` 位按 token 的 pid 算，广播会污染
+                // 别的客户端。没有活跃 token 时下一次 focus_gained 自会带上新表。
                 let active_token = self.push_server.active_token();
                 if active_token != 0 {
                     self.push_activation_status(active_token);
                 }
-                // 语法错误时**取代**「设置已更新」，而不是两条都弹：报成功再报失败会让
-                // 用户以为是两件事，而这里只有一件——他刚存的设置里有一部分没生效。
-                // 此时 `self.rt()` 已是上面换进去的新 bundle，读到的就是本次加载的降级记录。
+                // 语法错误时取代「设置已更新」而不是两条都弹。此时 `self.rt()` 已是新 bundle，读到的
+                // 就是本次加载的降级记录。
                 if !self.notify_config_syntax_error()
                     && !quiet
                     && !self
@@ -5443,25 +4770,15 @@ impl Coordinator {
 
     /// 方案文件/方案覆盖里某些段解析失败、已回落出厂默认值 ⇒ 提示用户。返回是否弹了。
     ///
-    /// # 为什么这条提示必须存在
+    /// 段级降级（`EngineManager::salvage_schema`）救回了方案的其余部分，代价是被降级的那一段
+    /// 悄悄变回出厂值；没有提示用户只会看到「写了没反应」。同 [`Self::notify_config_syntax_error`]。
     ///
-    /// 段级降级（`EngineManager::salvage_schema`）救回了方案的其余部分，代价是**被降级的
-    /// 那一段悄悄变回出厂值**。没有这条提示，用户的处境是「我明明在 `schema_overrides` 里
-    /// 写了，重启后没反应，也没有任何报错」——这正是本轮要消灭的失败形态，
-    /// 与 [`Self::notify_config_syntax_error`] 同一条纪律。
+    /// 列表限长（批量改坏能攒出十几条）；数量只由外层 `{total}` 说一次，括号里超长只补「等」，
+    /// 同 `UnparsableLayer::lines_phrase`。
     ///
-    /// ⚠️ 列表限长：项数通常只有一两个，但一份被批量改坏的方案能攒出十几条，全列进 toast
-    /// 会撑爆版面，而那时具体是哪几项本就没意义。同 `UnparsableLayer::lines_phrase`。
-    /// ★ 数量只由外层的 `{total}` 说一次，括号里超长时只补「等」不再报数——两处都带数字会
-    /// 拼出「有 5 项设置无法识别（… 等 5 项）」。同一个语病 `lines_phrase` 已经踩过一次。
-    ///
-    /// # ⛔ 不要挂到配置热重载上
-    ///
-    /// 落点刻意只有两个：**服务启动**与**切到该方案**——都是「用户正要用这个方案」的时刻。
-    /// 顺手加到 `reload_config` 的 toast 优先级链里看着很自然，但那条链每次保存设置都会走，
-    /// 而方案降级与「刚保存了什么设置」没有因果关系，且 `behavior_cache` 未失效时读到的还是
-    /// 上一次的记录 ⇒ 用户每点一次保存都被同一条提示打断，把「设置已更新」也挤掉了。
-    /// 提示的价值在于出现在困惑的那一刻，不在于出现得多。
+    /// 不要挂到配置热重载上：落点只有服务启动与切到该方案。每次保存设置都会走 reload 那条链，
+    /// 而方案降级与刚保存的设置无关，`behavior_cache` 未失效时还会反复读到同一条记录，每次保存
+    /// 都被打断、把「设置已更新」也挤掉。
     pub fn notify_schema_degradation(&self, schema_id: &str) -> bool {
         let behavior = self.engine_mgr.behavior_for(schema_id);
         if behavior.degraded_items.is_empty() {
@@ -5497,8 +4814,8 @@ impl Coordinator {
     }
 
     /// 完整形态的 toast：另给时长与自定义强调色，供 `ui.toast` 的具名参数落地。
-    /// `duration_ms` 为 0 时取默认时长——0 在 UI 侧会被 `max(1)` 变成"闪一下就消失"，
-    /// 而调用方传 0 的意思一律是"没指定"。
+    /// `duration_ms` 为 0 时取默认时长：0 在 UI 侧会被 `max(1)` 变成闪一下就消失，而调用方传 0
+    /// 的意思一律是「没指定」。
     pub(crate) fn show_toast_ex(
         &self,
         text: &str,
@@ -5520,37 +4837,18 @@ impl Coordinator {
         );
     }
 
-    /// 确保 `schema_id` 的反查索引在**后台**建好；已就绪、或已有线程在建，则什么都不做。
+    /// 阻塞地建好那些「首次查询才会惰性构建」的索引（反查索引）。
     ///
-    /// # 为什么只能派活、不能等
-    ///
-    /// 唯一调用点在候选刷新链路（`notify_ui_update`）里，那里**正持着 state 锁**，
-    /// 且整条链路身处 TSF→服务的**同步 IPC** 中。索引对超大词库是秒级构建，在此等待
-    /// 就是让整台机器停住——真机 feihuzj2（253 万条）实测卡死 29.5 秒。
-    /// 故本次渲染照常完成，只是暂时没有编码段；建好后由本线程重渲染一次补上。
-    ///
-    /// # 去重
-    ///
-    /// 构建期间的**每一次按键**都会走到这里，没有 `is_building_reverse_index` 这道闸，
-    /// 就会每按一键 spawn 一个线程去建同一份上百 MB 的东西。
-    /// （引擎侧那道闸用 `try_lock`，与 `ensure_loaded` 的 single-flight 同源。）
-    /// **阻塞地**建好那些「首次查询才会惰性构建」的索引（反查索引）。
-    ///
-    /// 生产路径由启动后的预热线程调用（见 `construct.rs`）；测试与移动端 `prepare()`
-    /// 也走这里——三方共用一条路径，避免各写一份预热逻辑而互相漂移。
-    ///
-    /// ⚠️ 会阻塞秒级，**只可在后台线程/测试里调用**，绝不能进按键链路。
+    /// 启动后的预热线程、测试与移动端 `prepare()` 共用这一条路径，免得各写一份预热逻辑而漂移。
+    /// 会阻塞秒级，只可在后台线程/测试里调用，绝不能进按键链路。
     pub fn prewarm_indexes(&self) {
         // 按键路径要用的方案级字段先填缓存（输入流程零读盘）。
         self.engine_mgr.warm_hot_schema_fields();
-        // 悬停 [编码] / 编码提示取 code_source_schema，词语联想取 assoc_word_schema。
-        // 混输下两者通常都解析到同一个主码表成员，故去重后一般只建一份。
-        // 两者相同时不必去重：prewarm_reverse_index 幂等，第二次直接返回。
-        //
-        // 只在有消费者时建（`DataNeeds::reverse_index`）：主码表反查索引常驻 2~3 MB，
-        // 悬停[编码]、`${code_rev}`、联想、辅助码、自动造词都没开的用户不该付。
-        // 之后才打开的功能由 `apply_data_needs` 后台补建；运行期格式串（cmdbar `dict.rev`）
-        // 里的 `${code_rev*}` 由 `eval_text_var` 首次用到时后台建。
+        // 悬停 [编码] / 编码提示取 code_source_schema，词语联想取 assoc_word_schema（混输下通常是同
+        // 一个；prewarm_reverse_index 幂等，不必去重）。只在有消费者时建（
+        // `DataNeeds::reverse_index`）：这些功能都没开的用户不该付常驻内存。之后才打开的功能由
+        // `apply_data_needs` 后台补建；运行期格式串里的 `${code_rev*}` 由 `eval_text_var` 首次用到
+        // 时后台建。
         if self.data_needs().reverse_index {
             let ids = [
                 self.engine_mgr.code_source_schema(),
@@ -5563,9 +4861,8 @@ impl Coordinator {
                 }
             }
         }
-        // 辅助码引用的码表方案（`schema:<id>`，含临拼目标方案引用的）：进入辅助码的门卫
-        // 要求其反查索引已就绪、按键线程绝不现建——不预热的话每次启动后第一次按辅助码键
-        // 都静默不进。辅助码关着时集合为空，不白建。
+        // 辅助码引用的码表方案（`schema:<id>`，含临拼目标方案引用的）：进入辅助码的门卫要求其反查
+        // 索引已就绪、按键线程绝不现建，不预热的话启动后第一次按辅助码键会静默不进。
         for id in self.engine_mgr.aux_code_schemas_in_use() {
             let t0 = std::time::Instant::now();
             if self.engine_mgr.prewarm_reverse_index(&id) {
@@ -5579,8 +4876,8 @@ impl Coordinator {
         {
             self.ensure_assoc_bigram_async();
         }
-        // 词语联想的用户词 / 临时词文本索引（t185）：联想开着才建——它要扫整张用户词表，
-        // 关着联想的用户不该付这笔。没预热也不致命：首次联想会起后台重建，那一次只出系统词。
+        // 词语联想的用户词 / 临时词文本索引：联想开着才建（要扫整张用户词表）。没预热也不致命：
+        // 首次联想会起后台重建，那一次只出系统词。
         if self.assoc_config().kind != wind_assoc::AssocKind::Off {
             let sid = self.engine_mgr.assoc_word_schema();
             let t0 = std::time::Instant::now();
@@ -5588,8 +4885,7 @@ impl Coordinator {
                 debug!("预热联想用户词索引 {} 用时 {:?}", sid, t0.elapsed());
             }
         }
-        // 自动造词开着才预热单字全码表：它是另一次全量扫描（同量级），关着的用户
-        // 不该为一个用不到的功能付出启动时间与内存。开着而不预热则第一次上屏必卡，
+        // 自动造词开着才预热单字全码表（另一次全量扫描）；开着而不预热则第一次上屏必卡，
         // 因为造词跑在上屏线程上。
         if self.auto_phrase_enabled() {
             let sid = self.engine_mgr.code_source_schema();
@@ -5604,10 +4900,9 @@ impl Coordinator {
 
     /// 后台预热辅助码在用的方案来源（见 [`EngineManager::aux_code_schemas_in_use`]）。
     ///
-    /// 切方案、保存 / 重置方案设置（`refresh_schema_derived_config`）之后调：这些操作会换掉
-    /// 「在用」集合或让反查索引失效，不补一次预热，下一次按辅助码键就会因索引未就绪而静默
-    /// 不进。全局配置重载走 `reload_user_config` 里那次 [`Self::prewarm_indexes`]，已含本集合。
-    /// 只派活不等（`spawn_index_warm` 自带去重与延迟提示），可在 RPC / 切方案路径上调。
+    /// 切方案、保存 / 重置方案设置（`refresh_schema_derived_config`）之后调：这些操作会换掉「在用」
+    /// 集合或让反查索引失效，不补预热则下一次按辅助码键会静默不进。全局配置重载已由
+    /// [`Self::prewarm_indexes`] 覆盖。只派活不等，可在 RPC / 切方案路径上调。
     ///
     /// [`EngineManager::aux_code_schemas_in_use`]: wind_engine::EngineManager::aux_code_schemas_in_use
     pub(crate) fn warm_aux_code_sources(&self) {
@@ -5616,15 +4911,20 @@ impl Coordinator {
         }
     }
 
+    /// 确保 `schema_id` 的反查索引在后台建好；已就绪、或已有线程在建，则什么都不做。
+    ///
+    /// 只能派活、不能等：唯一调用点在候选刷新链路（`notify_ui_update`）里，正持着 state 锁，
+    /// 且身处 TSF→服务的同步 IPC 中，超大词库秒级构建会让整台机器停住。本次渲染照常完成、
+    /// 暂缺编码段，建好后由本线程重渲染补上。构建期间每次按键都会走到这里，靠
+    /// `is_building_reverse_index` 这道闸避免每键 spawn 一个线程（引擎侧那道闸用 `try_lock`）。
     fn ensure_reverse_index_async(&self, schema_id: &str) {
         self.spawn_index_warm(schema_id, false);
     }
 
-    /// 同上，另带**单字全码表**（自动造词取码用）。
+    /// 同上，另带单字全码表（自动造词取码用）。
     ///
-    /// 造词路径两样东西都要：全码表用来按 `[[encoder.rules]]` 组码，反查索引用来做
-    /// 「系统词库是否已有这个码+词」的查重。两者都是惰性全量构建，而造词跑在上屏
-    /// （按键）线程上，故一律后台预热、本次跳过。
+    /// 造词要全码表按 `[[encoder.rules]]` 组码、要反查索引做「系统词库是否已有」的查重；两者都是
+    /// 惰性全量构建，而造词跑在上屏线程上，故一律后台预热、本次跳过。
     pub(crate) fn ensure_word_encoding_async(&self, schema_id: &str) {
         self.spawn_index_warm(schema_id, true);
     }
@@ -5636,9 +4936,8 @@ impl Coordinator {
         let index_ready = self.engine_mgr.reverse_index_if_ready(schema_id).is_some();
         let single_char_ready =
             !with_single_char || self.engine_mgr.single_char_codes_ready(schema_id);
-        // 已被 build_guard 放弃的方案不再起线程：构建线程结束时会通知重绘，重绘又回到这里，
-        // 不挡住就是「每次重绘起一个线程」的无限循环。造词缺了反查索引也做不了查重，
-        // 故单字全码表一并不建。
+        // 已被 build_guard 放弃的方案不再起线程：构建线程结束会通知重绘、重绘又回到这里，不挡就是
+        // 无限循环。造词缺了反查索引也做不了查重，故单字全码表一并不建。
         if (index_ready && single_char_ready)
             || self.engine_mgr.reverse_index_skipped(schema_id)
             || self.engine_mgr.is_building_reverse_index(schema_id)
@@ -5668,11 +4967,9 @@ impl Coordinator {
                     if done.load(std::sync::atomic::Ordering::Acquire) {
                         return;
                     }
-                    // 让用户知道「编码/联想这一会儿是缺的」而不是坏了。
-                    // ⚠️ 这条提示**伴随**真实工作、且以下面的重渲染收尾；不要把它改成那种
-                    // 「弹个准备中然后什么也不发生」的提示——那种做法在本仓被删过一次
-                    // （见 handle_mode.rs 关于 is_loaded 守卫的说明）。延后弹并不违背这条：
-                    // 它只在工作**确实还在进行**时才出现。
+                    // 让用户知道「编码/联想这一会儿是缺的」而不是坏了。这条提示伴随真实工作、并以
+                    // 下面的重渲染收尾，别改成「弹个准备中然后什么也不发生」（见 handle_mode.rs 关于
+                    // is_loaded 守卫的说明）。
                     c.show_toast(
                         "正在建立词库索引…",
                         ToastPosition::BottomCenter,
@@ -5696,15 +4993,13 @@ impl Coordinator {
                 if with_single_char {
                     c.engine_mgr.prewarm_single_char_codes(&sid);
                 }
-                // 必须在重渲染**之前**置位：重渲染本身也要花时间，拖在它后面会让
-                // 一次快速复用照样弹出提示——那正是本次要消灭的现象。
+                // 必须在重渲染之前置位：重渲染本身也花时间，拖在后面会让快速复用照样弹出提示。
                 done.store(true, std::sync::atomic::Ordering::Release);
                 if !built_index && !with_single_char {
                     return; // 等锁期间已被别的线程建好，且无别的活要干
                 }
                 debug!("后台建成词库索引 {} 用时 {:?}", sid, t0.elapsed());
-                // 重渲染当前这屏候选，把编码段补上——否则要等用户下一次按键。
-                // 与 reload_user_config / set_filter_mode 的「改完就地重刷」同构。
+                // 重渲染当前这屏候选把编码段补上，否则要等下一次按键。
                 let s = c.state.lock().unwrap_or_else(|e| e.into_inner());
                 if !s.input_buffer.is_empty() {
                     c.notify_ui_update(&s);
@@ -5731,30 +5026,20 @@ impl Coordinator {
         );
     }
 
-    /// 配置文件**语法不合法**时弹一次提示，返回是否弹了。
+    /// 配置文件语法不合法时弹一次提示，返回是否弹了。
     ///
-    /// # 为什么这条提示非有不可
+    /// 语法错误的后果是整层配置失效，只留日志的话用户只会看到「设置全变回默认了」。写盘侧已在
+    /// `wind-config` 堵死（`ConfigDegradation::unparsable`），但堵住损坏不等于告诉用户。
     ///
-    /// 语法错误此前只留一行 INFO 日志（默认不打印），而后果是整层配置失效——用户看到的
-    /// 是「我的设置怎么全变回默认了」，唯一线索藏在一个他不会去看、也看不到的地方。
-    /// 真机上更糟：后台的 `key_actions` 物化拿空表当种子把 config.toml 整个覆盖了。
-    /// 写盘那一侧已经在 `wind-config` 里堵死（`ConfigDegradation::unparsable`），
-    /// 但**堵住损坏不等于告诉用户**——不提示的话，他的设置依然静默失效，只是这次文件还在。
-    ///
-    /// 时长给足 8 秒（默认 2.5 秒）：这条提示带着文件路径和行号，是要照着去改的，
-    /// 不是「已保存」那种扫一眼即可的回执。
-    ///
-    /// 只报**第一个**出问题的层：多层同时坏是极罕见的，而堆两条路径会把 toast 撑爆。
+    /// 时长给足 8 秒：这条带着文件路径和行号，是要照着去改的。只报第一个出问题的层，免得撑爆 toast。
     pub fn notify_config_syntax_error(&self) -> bool {
         let rt = self.rt();
         let Some(u) = rt.config.degradation.unparsable.first() else {
             return false;
         };
-        // ★ 判据是 `is_salvaged()`，不是 `skipped_lines` 非空——「跳过了几行」不等于
-        // 「救回来了」，啃到上限仍失败时两者同时成立。用后者会在一个字都没加载的时候
-        // 报「该行设置未生效」，暗示其余还在，而实际整份都没生效。
-        // 行号走 `lines_phrase()`：紧凑（啃不动的文件会攒到 32 个行号，全列进 toast
-        // 会把版面撑爆）且自带量词——模板里再拼「第 {} 行」会拼出「等 32 处 行」的语病。
+        // 判据是 `is_salvaged()`，不是 `skipped_lines` 非空：啃到上限仍失败时两者同时成立，用后者
+        // 会在一个字都没加载时报「该行设置未生效」。行号走 `lines_phrase()`：紧凑且自带量词，
+        // 模板里再拼「第 {} 行」会出语病。
         let text = if !u.is_salvaged() {
             format!("配置文件语法错误，本次全部未生效\n{}", u.path.display())
         } else {
@@ -5783,15 +5068,11 @@ impl Coordinator {
         }
     }
 
-    /// 按当前配置（bundle）重新下发外观相关 UI 指令并同步运行时态。
-    /// 热重载用：候选排列方向 / 编码显示方式 / 候选窗显隐 改动即时生效（无需重启）。
-    /// 与命令栏 ime.toggle 共写同一组运行时 Mutex；以 config 为准重置（config 为持久化真相源）。
-    /// 下发候选字号与字体（`ui.candidate.font_size` / `ui.font.*`）。原样下发用户值：
-    /// 与主题的合并（0 / 空 = 跟随主题）只在渲染端 `CandidateWindow::refresh_effective_theme`
-    /// 一处完成，这里不做判断。
+    /// 下发候选字号与字体（`ui.candidate.font_size` / `ui.font.*`）。原样下发用户值：与主题的
+    /// 合并（0 / 空 = 跟随主题）只在渲染端 `CandidateWindow::refresh_effective_theme` 一处完成。
     ///
-    /// 启动时须排在首次 `push_theme` **之前**（见 construct.rs）：用户字体先到，主题到达时
-    /// 被它覆盖掉的主题字族就不会被当作「将要使用」去查存在性、误报缺字体。
+    /// 启动时须排在首次 `push_theme` 之前（见 construct.rs）：用户字体先到，被它覆盖掉的主题字族
+    /// 就不会被当作「将要使用」去查存在性、误报缺字体。
     pub(crate) fn send_candidate_font(&self, config: &wind_config::Config) {
         let _ = self.ui_tx.send(UiCommand::SetCandidateFontSize(
             config.ui.candidate.font_size,
@@ -5810,13 +5091,13 @@ impl Coordinator {
         });
     }
 
+    /// 按当前配置（bundle）重新下发外观相关 UI 指令并同步运行时态，启动与热重载共用。
+    /// 与命令栏 ime.toggle 共写同一组运行时 Mutex；以 config（持久化真相源）为准重置。
     pub(crate) fn apply_ui_config(&self) {
         let bundle = self.rt();
         let cand = &bundle.config.ui.candidate;
-        // 候选排列方向（ui.candidate.layout）：config 是**基线**的持久化真相源，
-        // 但实际下发要叠加当前模式的布局意图（见 layout.rs）——热重载不能把模式级覆盖清掉。
-        // 此前这里无条件下发 config 值：模式进行中改任意一项设置都会静默取消强制竖排，
-        // 且因为不留痕迹而极难复现。
+        // 候选排列方向（ui.candidate.layout）：config 是基线的持久化真相源，但实际下发要叠加当前模式
+        // 的布局意图（见 layout.rs），热重载不能把模式级覆盖清掉（否则改任意设置都会取消强制竖排）。
         *self
             .candidate_orientation
             .lock()
@@ -5891,7 +5172,6 @@ impl Coordinator {
             .ui_tx
             .send(UiCommand::SetTooltipDelay(bundle.config.ui.tooltip.delay));
         // 工具栏自动隐藏（ui.toolbar.auto_hide / auto_hide_delay 秒→毫秒；下限 1 秒防误设 0 即隐）。
-        // apply_ui_config 为启动(:717)与配置重载(:1270)共用单点，设置页改动即时生效。
         let tb = &bundle.config.ui.toolbar;
         let _ = self.ui_tx.send(UiCommand::SetToolbarAutoHide {
             enabled: tb.auto_hide,
@@ -5914,7 +5194,7 @@ impl Coordinator {
         self.engine_mgr.active_schema_id()
     }
 
-    /// 可选方案的 `(id, 显示名, 短称)`，**顺序即 [`MenuCmd::SchemaSelect`] 的下标**。
+    /// 可选方案的 `(id, 显示名, 短称)`，顺序即 [`MenuCmd::SchemaSelect`] 的下标。
     ///
     /// 给自绘方案选择器的宿主用（Android）：桌面在协调器里直接构建菜单树，移动端的
     /// 选择器长什么样由宿主决定，只要拿到条目与下标即可。顺序必须原样透传——
@@ -5960,8 +5240,6 @@ impl Coordinator {
         Some(KeyAction::Consumed)
     }
 
-    /// 编码区光标移动后的返回：刷新候选窗，并带上组合区新插入符位置（与默认 ←/→ 臂同形）。
-    /// 只回 `Consumed` 的话宿主里的插入符不会跟着动。
     /// Ctrl+←/→ 整音节跳是否启用：`session_actions` 里写了 `ctrl+left` / `ctrl+right = "none"` 即关
     /// （同时热键编译器也不再向宿主转发该键）。
     pub(crate) fn ctrl_syllable_enabled(&self, vk: u32) -> bool {
@@ -5981,7 +5259,7 @@ impl Coordinator {
 
     /// 编码区的音节停靠点（缓冲内字节位置，见 [`preedit_cursor::syllable_stops`]）。
     ///
-    /// 拆分串取引擎对**整串缓冲**的切分（`preedit_split_body` / 码表整句的 `preedit_codetable_body`），
+    /// 拆分串取引擎对整串缓冲的切分（`preedit_split_body` / 码表整句的 `preedit_codetable_body`），
     /// 不随高亮候选变——否则高亮一动，光标的停靠点就跟着变。对不上缓冲（双拼等）→ `None`。
     fn caret_syllable_stops(state: &State) -> Option<Vec<usize>> {
         [&state.preedit_split_body, &state.preedit_codetable_body]
@@ -6017,6 +5295,8 @@ impl Coordinator {
         }
     }
 
+    /// 编码区光标移动后的返回：刷新候选窗，并带上组合区新插入符位置（与默认 ←/→ 臂同形）。
+    /// 只回 `Consumed` 的话宿主里的插入符不会跟着动。
     pub(crate) fn caret_moved_action(&self, state: &mut State) -> KeyAction {
         let text = state.preedit.clone();
         let caret_pos = self.composition_caret(state);
@@ -6049,21 +5329,17 @@ impl Coordinator {
     ///
     /// 命中并执行返回 `Some`，未命中或条件不足返回 `None`（键回落调用方的原有处理）。
     ///
-    /// # ★ 守卫按动作分，不按调用点分
-    ///
-    /// 导航类只在有候选时有意义（`requires_candidates`），`cancel` 则在「打了码还没出
-    /// 候选」时也必须生效。判据挂在 `SessionAction` 上而不是写在这里的 `if`——本函数有
-    /// 三个调用点（主输入 / mix / 候选导航），条件写死在函数体内还好，写到调用点上就是
-    /// 三份要保持一致的守卫，那正是本仓栽过四次的形状。
+    /// 守卫按动作分，不按调用点分：导航类只在有候选时有意义（`requires_candidates`），`cancel`
+    /// 在「打了码还没出候选」时也必须生效。判据挂在 `SessionAction` 上，而不是在三个调用点
+    /// （主输入 / mix / 候选导航）各写一份要保持一致的守卫。
     pub(crate) fn apply_session_action(
         &self,
         state: &mut State,
         data: &KeyEventData,
         include_printable: bool,
     ) -> Option<KeyAction> {
-        // 展开态专属键（←→ / Esc）先于绑定表：它们在网格里另有含义，且必须赶在各模式的
-        // 光标移动臂与 Esc 臂之前截下——本函数恰好是所有模式都先经过的那一处
-        // （快捷输入例外，它的光标与 Esc 臂在本函数之前，自己先调 `grid_key_action`）。
+        // 展开态专属键（←→ / Esc）先于绑定表：它们在网格里另有含义，须赶在各模式的光标臂与 Esc 臂
+        // 之前截下（快捷输入例外，它的这两臂在本函数之前，自己先调 `grid_key_action`）。
         if let Some(act) = self.grid_key_action(state, data) {
             return Some(act);
         }
@@ -6107,59 +5383,35 @@ impl Coordinator {
                 }
                 return Some(self.cancel_session(state));
             }
-            // 选词 / 以词定字**刻意不在这里执行**，返回 None 让键落到各自的既有消费点
-            // （`select_char_index` 在本函数之前、`select_key_offset` 在数字选词臂之后）。
-            //
-            // ★ 理由是它们带 **overflow 语义**：候选不足 / 词长不够时要按
-            // `keys.overflow.{select_key,select_char_key}` 分档处置（吞键 / 上屏高亮候选 /
-            // 上屏并追加字符），而本函数只有「命中就执行」一种结局。搬进来就得把三档策略
-            // 和各模式的选中出口一起搬，那是把两件事挤进一个函数。
-            //
-            // 收编改变的是**配置从哪来**（session_actions 而非 select_key_groups），
-            // 不是执行路径——后者一行未动，故 overflow 与各模式的选中语义零回归。
+            // 选词 / 以词定字刻意不在这里执行，返回 None 让键落到各自的既有消费点
+            // （`select_char_index` 在本函数之前、`select_key_offset` 在数字选词臂之后）：它们带
+            // overflow 语义（候选不足时按 `keys.overflow.{select_key,select_char_key}` 分档处置），
+            // 而本函数只有「命中就执行」一种结局。收编只改了配置从哪来，不改执行路径。
             wind_config::SessionAction::SelectCandidate(_)
             | wind_config::SessionAction::SelectChar(_) => return None,
-            // 辅助码：**不顶字**，原地筛当前候选（见 `enter_aux_code` / `commit_and_enter_bound_action`
-            // 的同名分支）。门卫在 `enter_aux_code` 里（未开启 / 无码表 / 该键被音节分隔符占用
-            // 都返回 None），此处不重复判断——两处各写一份判据必然漂移。
-            //
-            // 无候选时走不到这里：上面的 `requires_candidates()` 已经放行了按键，
-            // 于是空闲按 Tab 仍是宿主的制表符。
+            // 辅助码：不顶字，原地筛当前候选（见 `enter_aux_code`）。门卫只在 `enter_aux_code` 里，
+            // 此处不重复判断。无候选时走不到这里（`requires_candidates()` 已放行），空闲 Tab 仍归宿主。
             wind_config::SessionAction::AuxCode(share) => {
                 if let Some(act) = self.enter_aux_code(state, data.key_code) {
                     return Some(act);
                 }
-                // 门卫没过。**顺序即优先级**：专用触发键到此为止（不吞键，落该键原语义）；
-                // 共键（`aux_code:page_next`）降级为下翻页，落到下面那段统一的 nav 执行
-                // ——不在这里自己写一份 `page_next` + `notify_ui_update`，那是第二份要跟着
-                // `flipped` / 混输 preedit 同步一起维护的翻页逻辑。
-                //
-                // ★ 这条降级同时覆盖三种情形，无需各写一个特判：辅助码态内继续翻页
-                // （`active.is_some()` 被拒）、功能未开启 / 方案无码表时退化成纯翻页键。
+                // 门卫没过。顺序即优先级：专用触发键到此为止（不吞键，落该键原语义）；共键
+                // （`aux_code:page_next`）降级为下翻页，落到下面统一的 nav 执行，不在这里另写一份
+                // 翻页逻辑。这条降级同时覆盖辅助码态内继续翻页、功能未开启、方案无码表三种情形。
                 match share {
                     wind_config::AuxCodeShare::Solo => return None,
                     wind_config::AuxCodeShare::PageNext => keymap::NavAction::PageNext,
                 }
             }
-            // 单字输入：原地开关并重建候选，**不顶字、不退模式**——用户切的是「这一码
-            // 出什么」，正在打的这串码要留着。
+            // 单字输入：原地开关并重建候选，不顶字、不退模式（正在打的码要留着）。
             //
-            // ⚠️ **无会话时放行**，判据与 `Cancel` 同侧（有会话即可，不要求有候选）。
-            // 本表收的是 Tab / 翻页键那一批**宿主另有原义**的键：空闲时按下必须还给宿主，
-            // 否则用户照 `data/config.toml` 里的示例写了 `tab = "single_char"`，Tab
-            // 在所有程序里当场失效。「走到这里说明用户明确绑了它，故恒吞键」是错的——
-            // `Cancel` 臂那句同款守卫正是本函数在无会话时也会被走到的证据。
+            // 无会话时放行（同 `Cancel`）：本表收的 Tab / 翻页键宿主另有原义，空闲时必须还给宿主，
+            // 否则照示例写了 `tab = "single_char"` 的用户 Tab 在所有程序里失效。判据取「有会话」
+            // 而非「有候选」：单字档下某个码可能一条候选都不剩，那时放行就再也切不回去了。
+            // 想空闲时也能切 → 绑到 `keys.key_actions`（那张表没有宿主原义要让，恒吞键）。
             //
-            // 判据取「有会话」而非「有候选」：单字档下某个码本来就可能一条候选都不剩，
-            // 那时若按「无候选」放行，用户就再也切不回去了（`requires_candidates` 把
-            // `SingleChar` 与 `Cancel` 并列，为的就是这个）。
-            //
-            // 想空闲时也能切 → 绑到 `keys.key_actions`（`BoundAction::SingleChar`）：
-            // 那张表收的是符号键 / z / 组合键，没有宿主原义要让，故那边恒吞键。
-            //
-            // 状态泡走 `show_tip_locked`：本函数持着 state 锁，`show_tip` 会重入取锁。
-            // ⚠️ 开启后候选可能整个变空（这个码一个单字都没有），那时**只剩**
-            // 状态泡这一个反馈——不能因为「候选窗自己会变，用户看得见」就省掉它。
+            // 状态泡走 `show_tip_locked`（本函数持着 state 锁）。开启后候选可能整个变空，那时只剩
+            // 状态泡这一个反馈，不能省。
             wind_config::SessionAction::SingleChar(a) => {
                 if !Self::has_input_session(state) {
                     return None;
@@ -6167,8 +5419,7 @@ impl Coordinator {
                 if let Some(label) = self.apply_single_char_action(state, a) {
                     self.show_tip_locked(state, label);
                 }
-                // `Consumed` = 吞键、组合区不变（同翻页与移高亮的结局）：开关只换候选
-                // 内容，用户正在打的那串码要原样留着。
+                // `Consumed` = 吞键、组合区不变：开关只换候选内容。
                 return Some(KeyAction::Consumed);
             }
             // 注释态：判据与 `SingleChar` 同侧——无会话放行（Tab 等键空闲时要还给宿主），
@@ -6183,18 +5434,14 @@ impl Coordinator {
                 }
                 return Some(KeyAction::Consumed);
             }
-            // 上屏高亮：与各模式空格臂**同一个函数**，副作用逐字一致（见 `commit_highlighted`）。
-            // 不走空格臂本身——那里有 `space_as_input` 这类**空格键**的变体，本动词不跟；
-            // 联想 `space_commits = false` 则跟（判据在 `commit_highlighted` 里）。
-            // 无候选已被上面的 `requires_candidates` 放行。
+            // 上屏高亮：与各模式空格臂同一个函数，副作用一致（见 `commit_highlighted`）。不走空格臂
+            // 本身：`space_as_input` 这类空格键变体本动词不跟；联想 `space_commits = false` 则跟。
             wind_config::SessionAction::CommitHighlighted => {
                 return self.commit_highlighted(state);
             }
             // 悬停提示开关：把悬停目标设为高亮项（再按一次清掉），其余全走鼠标悬停那条通路。
-            // 展开态的高亮项是平铺下标（高亮行之前的整行都算），与 `notify_ui_update` 同口径。
-            //
-            // 绑在 → 上时（t372）：编码区光标不在末尾，→ 照旧右移光标；到了末尾才开关提示。
-            // 只在主路判（overlay 各有自己的光标与 → 臂，同 `CaretRight`）。
+            // 展开态的高亮项是平铺下标，与 `notify_ui_update` 同口径。绑在 → 上时：编码区光标
+            // 不在末尾照旧右移，到了末尾才开关提示；只在主路判（overlay 各有自己的 → 臂）。
             wind_config::SessionAction::ToggleTip => {
                 if data.key_code == keymap::VK_RIGHT
                     && state.active.is_none()
@@ -6214,14 +5461,11 @@ impl Coordinator {
             }
             // 编码区光标移动（macOS 式方向键，见 design/macos-style-arrow-keys.md）。
             //
-            // 只在主路生效：overlay（临拼 / 快捷输入 / Url / Email / Special）各有自己的
-            // 缓冲光标与 ←→ 臂，`state.active` 非 `None` 时放行让位——绑了本动词不能把
-            // overlay 的编辑键抢走。展开态（网格）的 ←→ 在本函数最前已被 `grid_key_action`
-            // 截走，轮不到这里。无会话放行：空闲方向键是宿主的。
+            // 只在主路生效：overlay 各有自己的缓冲光标与 ←→ 臂，`state.active` 非 `None` 时放行让位。
+            // 展开态的 ←→ 已在本函数最前被 `grid_key_action` 截走。无会话放行：空闲方向键是宿主的。
             //
-            // `caret_right` 在**末尾**改为上屏高亮候选（macOS「→ 进选词」）；无候选时没有
-            // 可上屏的东西，纯吞键——组合进行中把 → 交给宿主会移动宿主光标，与组合区错位。
-            // 移动成功只刷新组合区（caret 位置变了，缓冲与候选都没变，无需重查）。
+            // `caret_right` 在末尾改为上屏高亮候选（「→ 进选词」）；无候选时纯吞键，把 → 交给宿主
+            // 会让宿主光标与组合区错位。移动成功只刷新组合区，无需重查候选。
             wind_config::SessionAction::CaretLeft | wind_config::SessionAction::CaretRight(_) => {
                 if state.active.is_some() || !Self::has_input_session(state) {
                     return None;
@@ -6290,11 +5534,7 @@ impl Coordinator {
                     .store(true, std::sync::atomic::Ordering::Relaxed);
                 return Some(KeyAction::Consumed);
             }
-            // 命令：执行，**当前组合原样不动**（不清空、不上屏），吞键。
-            //
-            // 无会话放行，判据与 `Cancel` / `SingleChar` 同侧：本表收的 Tab / 翻页键那一批
-            // 宿主另有原义，空闲时必须还给宿主。想空闲时也能按 → 绑到 `keys.key_actions`。
-            //
+            // 命令：执行，当前组合原样不动（不清空、不上屏），吞键。无会话放行，判据同 `Cancel`。
             // 持 state 锁调用是安全的：`run_bound_command` 只起线程，不等它跑完。
             wind_config::SessionAction::Command(expr) => {
                 if !Self::has_input_session(state) {
@@ -6306,23 +5546,15 @@ impl Coordinator {
             // 表里只存启用项（`ConfigBundle::build` 过滤过），None 到不了这里。
             wind_config::SessionAction::None => return None,
         };
-        // 候选被反转排列时，高亮移动按**屏幕上看到的方向**走：竖排 + 上翻 + flip_when_above
-        // 三者同时成立时，屏幕从上到下是候选 n..1，此时 ↑ 对应的是候选序的「下一个」。
-        // 不区分按键（↑/↓ 与 Shift+Tab/Tab 一并翻转）——这两组都绑在同一对
-        // `highlight_up`/`highlight_down` 上，行为分叉会让「同一个动作两种走向」。
-        //
-        // **翻页键不在此列**：页与页之间没有空间关系（新页在原处整体替换），反转只发生在页内。
-        //
-        // 回卷语义无需另写：反转后视觉最下方是页内第 0 项，按 ↓ 越界 == `move_up` 的
-        // 「页首回卷到上一页末项」，两者本就是同一件事。
+        // 候选被反转排列时，高亮移动按屏幕上看到的方向走（↑/↓ 与 Shift+Tab/Tab 一并翻转，它们绑在
+        // 同一对动作上）。翻页键不翻转：页与页之间没有空间关系。回卷无需另写：反转后按 ↓ 越界
+        // 就是 `move_up` 的页首回卷。
         let flipped = self
             .candidate_flipped
             .load(std::sync::atomic::Ordering::Relaxed);
-        //
         // 展开态（`grid_top` 有值）整组改写：高亮上下 = 换行、翻页 = 滚一行（PageUp/PageDown
-        // 可翻一屏），见 `candidate_grid`。
-        // 网格只在横排出现，`flipped`（竖排专属）在这里恒为 false，两支不会相遇。
-        // 收起态按下翻页先试展开：展开了就只展开、不翻页（设计 D3）。
+        // 可翻一屏），见 `candidate_grid`。网格只在横排出现，`flipped`（竖排专属）在这里恒为 false。
+        // 收起态按下翻页先试展开：展开了就只展开、不翻页。
         let changed = if Self::grid_active(state) {
             match nav {
                 keymap::NavAction::HighlightUp => self.grid_move_row(state, false),
@@ -6360,16 +5592,12 @@ impl Coordinator {
     /// 高亮 / 页码变了之后的收尾：混输按新高亮重算组合区形态，再重绘候选窗。
     ///
     /// 返回 `Some` = 组合区形态变了且编码嵌在宿主里，须把新组合串回传给宿主。
-    /// 收进一处，是因为网格专属键（←→）与绑定表里的导航动作都要走它——少走一处，
-    /// 混输下用 ←→ 移到拼音候选时组合区就不跟着变形。
+    /// 网格专属键（←→）与绑定表里的导航动作都要走这里，少走一处，混输下移到拼音候选时组合区
+    /// 就不跟着变形。
     fn after_nav_changed(&self, state: &mut State) -> Option<KeyAction> {
-        // 混输高亮跟随：普通模式下高亮在五笔↔拼音候选间移动可能切换 preedit 形态
-        // （原始码 ↔ 音节拆分）。重算 preedit；若形态变化且嵌入编码（app_inline），须回传
-        // 组合串使宿主内联编码同步；候选窗模式仅 notify_ui_update 刷新即可。
-        // 拼音候选各带自己的切分（`pinan` 高亮「平安」`pin'an`、高亮「皮」`pi'nan`），纯拼音
-        // 下形态同样会变。临拼 / mix 文本透镜与主路同一套跟随（overlay 对齐主路）。
-        // 门控：普通模式存在拆分形态或有候选自带切分（混输下首选与原始码同形时前者为空）
-        // ——纯五笔不触发，零回归；其余 overlay 各自维护 preedit，不碰。
+        // 高亮跟随：高亮在不同候选间移动可能切换 preedit 形态（原始码 ↔ 音节拆分；拼音候选各带
+        // 自己的切分）。形态变化且编码嵌在宿主里时须回传组合串；候选窗模式只需重绘。临拼 / mix
+        // 文本透镜与主路同一套跟随。门控：存在拆分形态或有候选自带切分，纯五笔不触发。
         let mut composed: Option<KeyAction> = None;
         let follows = match state.active {
             None => {
@@ -6395,8 +5623,7 @@ impl Coordinator {
             let before = state.preedit.clone();
             self.sync_preedit_to_highlight(state);
             if state.preedit != before {
-                // ★ 必须用**有效**归属而不是配置原值：压制态下候选窗不下发，编码只剩组合区
-                // 这一条出口，这里不回传就等于让游戏聊天框里的编码停在旧形态。
+                // 必须用有效归属而不是配置原值：压制态下候选窗不下发，编码只剩组合区这一条出口。
                 if self.preedit_in_app_effective() {
                     let text = state.preedit.clone();
                     let caret_pos = self.reshaped_caret(state);
@@ -6421,10 +5648,8 @@ impl Coordinator {
 
     /// 翻页键翻不动时是否按 `keys.overflow.page_key = "commit_and_input"` 交给标点臂。
     ///
-    /// 只在主路（overlay 各有自己的翻页语义）、该键能出符号（PageUp/PageDown/Tab 不算，
-    /// 数字另有选词臂）、且本批候选**从未翻过页**时成立——判据取 `state.paged` 而非
-    /// `current_page == 0`，理由同 [`Self::symbol_buffer_key_free`]：翻回首页的用户仍在
-    /// 翻页，此刻按键突然出字会让人当场打错。
+    /// 只在主路、该键能出符号（PageUp/PageDown/Tab 不算，数字另有选词臂）、且本批候选从未翻过页
+    /// 时成立；取 `state.paged` 的理由同 [`Self::symbol_buffer_key_free`]。
     fn page_key_overflow_to_punct(
         &self,
         state: &State,
@@ -6452,12 +5677,9 @@ impl Coordinator {
 
     /// 当前是否有输入会话：正在 overlay 模式里，或普通输入有编码 / 候选 / 已上屏段。
     ///
-    /// 与 C++ 的 `_HasInputSession()`（`hasComposition || _hasCandidates`）**语义对齐**：
-    /// overlay 模式一定持有 composition。两侧判据必须同构，否则会出现「C++ 吃了键、
-    /// 服务端这边判定无会话不接管」的丢键，或反过来「C++ 放行了、这边却想处理」。
-    ///
-    /// ⚠️ 不能只判 buffer 非空：overlay 模式在**空缓冲**时按取消键同样要退出模式——
-    /// 那时「退出」本身就是用户要的动作。
+    /// 与 C++ 的 `_HasInputSession()`（`hasComposition || _hasCandidates`）语义对齐：两侧判据
+    /// 必须同构，否则会丢键（C++ 吃了、这边不接管）或反过来。不能只判 buffer 非空：overlay
+    /// 模式在空缓冲时按取消键同样要退出模式。
     pub(crate) fn has_input_session(state: &State) -> bool {
         state.active.is_some()
             || !state.input_buffer.is_empty()
@@ -6465,19 +5687,11 @@ impl Coordinator {
             || !state.committed_text.is_empty()
     }
 
-    /// 放弃当前输入会话：清掉未上屏内容，并退出所在的 overlay 模式。**Esc 的语义单点**。
+    /// 放弃当前输入会话：清掉未上屏内容，并退出所在的 overlay 模式。Esc 的语义单点：主输入与
+    /// 各 overlay 共用，按 `state.active` 分派退出函数，免得新逻辑只惠及主路径。
     ///
-    /// # 收敛了六处逐字重复的实现
-    ///
-    /// 主输入路径与五个 overlay handler 此前各写一份 Esc 分支，形态完全一致
-    /// （`exit_X` + `notify_ui_hide` + `ClearComposition`），**差异只在退出函数**，
-    /// 而那按 `state.active` 分派即可。散着的代价不是重复本身，是「回车五条路径」
-    /// 那次的形状：任何一条新逻辑都只惠及主路径，其余五处静默落后。
-    ///
-    /// ⚠️ 菜单（`menu_open`）与快捷加词（`add_word_active`）**刻意不收**：它们是模态窗口，
-    /// 菜单的键直接转发给 UI 窗口自行解释（`UiCommand::MenuKey`），协调器这边根本不决定
-    /// 语义；加词模式则消费全部按键。要让自定义取消键在那两处也生效，得改 `wind-ui` 的
-    /// 键解释器，是另一层的事。
+    /// 菜单（`menu_open`）与快捷加词（`add_word_active`）刻意不收：它们是模态窗口，菜单键直接转发
+    /// 给 UI 窗口解释，加词模式消费全部按键。要让自定义取消键在那两处生效，得改 `wind-ui` 的键解释器。
     pub(crate) fn cancel_session(&self, state: &mut State) -> KeyAction {
         self.note_word_boundary();
         state.clear_comment_flips();
@@ -6491,24 +5705,15 @@ impl Coordinator {
                 self.exit_special_mode(state)
             }
             Some(ModeKind::Mix(_)) => self.exit_mix_mode(state),
-            // ★ 辅助码要**两步**：`exit_aux_code` 是本仓唯一一个「退出后主组合仍存活」的
-            // 退出函数——它按设计还原拼音候选与 preedit（辅助码只是筛选，Esc 的语义是
-            // 「放弃筛选、继续拼音」，见该函数注释）。而本函数末尾无条件
-            // `notify_ui_hide` + `ClearComposition`，两者拼在一起就自相矛盾：协调器认为
-            // 组合区里还有 `li`、候选窗里还有三条，宿主那边却收到了「清掉组合」。下一次
-            // 敲 `a` 会让屏幕上凭空冒出 `lia`。
-            //
-            // 所以取消键在辅助码态要连主组合一起放弃 —— 用户按的是「放弃」，不是「退出
-            // 筛选」；后者由 Esc 那一臂与触发键复按承担（都走 `aux_code_exited`，返回
-            // UpdateComposition 而非 ClearComposition），两个动作从此语义分明。
+            // 辅助码要两步：`exit_aux_code` 是唯一「退出后主组合仍存活」的退出函数（Esc = 放弃筛选、
+            // 继续拼音），而本函数末尾无条件 `ClearComposition`，两者拼在一起协调器与宿主就对不上
+            // （下一键会冒出旧码）。故取消键在辅助码态连主组合一起放弃；「只退筛选」由 Esc 那一臂与
+            // 触发键复按承担（`aux_code_exited`，返回 UpdateComposition）。
             Some(ModeKind::AuxCode) => {
                 self.exit_aux_code(state);
-                // `exit_aux_code` 已把 `active` 还原成**来源模式**。取消的语义是「连来源
-                // 一起放弃」，故还要把那个模式也退掉——否则从临拼进来的会话按 Esc 后，
-                // `active` 停在 `TempPinyin`、`temp_pinyin_buffer` 还留着码，而下面
-                // 无条件 `ClearComposition` 已告诉宿主「组合没了」，正是上面那段注释
-                // 描述的自相矛盾，只是换了个缓冲。主输入路来源时 `active == None`，
-                // 走 `_` 臂 `reset_pinyin_composition`，与改动前逐字等价。
+                // `exit_aux_code` 已把 `active` 还原成来源模式，取消还要把它也退掉，否则从临拼进来的
+                // 会话会留着 `TempPinyin` 与它的缓冲。主输入路来源时 `active == None`，走 `_` 臂
+                // `reset_pinyin_composition`。
                 match state.active {
                     Some(ModeKind::TempPinyin) => self.exit_temp_pinyin(state),
                     None
@@ -6532,27 +5737,13 @@ impl Coordinator {
         KeyAction::ClearComposition
     }
 
-    /// keyup-only 键（CapsLock / 纯修饰键）上的会话态绑定（`keys.session_actions`）。
+    /// 会话态动词 `commit_code` 的执行：本次按键若命中了它，把触发键当成一次回车重新分派，
+    /// 并让这一下回车恒走「上屏编码」那一支。
     ///
-    /// 这批键**只有 keyup 到得了服务端**：C++ 对纯修饰键的 keydown 一律放行不吃（吃掉会让
-    /// AutoCAD 看不到修饰键、正交模式覆盖失效），CapsLock 的 keydown 则压根不转发给服务端。
-    /// 所以它们的绑定只能在这里消费——挂到 keydown 链上是配得上、永不触发。
-    ///
-    /// 一期只有导航类动词，[`Self::apply_session_action`] 自带「无候选返回 `None`」的守卫，正好
-    /// 实现「有会话归绑定、无会话归原语义」：空闲时按 CapsLock 仍然切大小写。
-    ///
-    /// ⚠️ 二期加 `clear` / `cancel` 时，判据要放宽到「有编码**或**有候选」——那时改**这一处**
-    /// 的守卫，别在各调用点各判一次（Esc 散成七处就是那么来的）。
-    /// 会话态动词 `commit_code` 的执行：本次按键若命中了它，把触发键当成一次回车重新
-    /// 分派，并让这一下回车恒走「上屏编码」那一支。
-    ///
-    /// ★ 借回车的臂而不是另写上屏：回车在主路与各 overlay 里各有一条臂（引导符归还、
-    /// 已转换前缀、全角、英文造词、上屏历史各有讲究），另写一份就得跟着它们逐个维护。
-    /// 与回车唯一的不同是不看 `input.enter_behavior`——用户绑这个键要的就是上屏编码，
-    /// 「回车清空编码」是回车这个键的配置。
-    ///
-    /// 不在命中处直接执行：那里持着 `State` 锁，分派要自己取锁。按键出口
-    /// （`handle_key_event_policed`、CapsLock 钩子）都在锁外，于是挂在那里。
+    /// 借回车的臂而不是另写上屏：回车在主路与各 overlay 里各有讲究（引导符归还、已转换前缀、
+    /// 全角、英文造词、上屏历史），另写一份就得逐个跟着维护。唯一不同是不看
+    /// `input.enter_behavior`（那是回车这个键的配置）。不在命中处执行：那里持着 `State` 锁，
+    /// 而分派要自己取锁；按键出口（`handle_key_event_policed`、CapsLock 钩子）都在锁外。
     pub(crate) fn redispatch_commit_code(
         &self,
         data: &KeyEventData,
@@ -6575,23 +5766,26 @@ impl Coordinator {
         act
     }
 
+    /// keyup-only 键（CapsLock / 纯修饰键）上的会话态绑定（`keys.session_actions`）。
+    ///
+    /// 这批键只有 keyup 到得了服务端：C++ 对纯修饰键的 keydown 一律放行（吃掉会让 AutoCAD 看不到
+    /// 修饰键），CapsLock 的 keydown 不转发。故绑定只能在这里消费。目前只有导航类动词，
+    /// [`Self::apply_session_action`] 自带「无候选返回 `None`」的守卫：空闲时 CapsLock 仍切大小写。
+    /// 将来加 `clear` / `cancel` 时，判据要放宽到「有编码或有候选」，改这一处，别在各调用点各判。
     fn handle_session_action_key_up(&self, data: &KeyEventData) -> Option<KeyAction> {
         if !keymap::is_key_up_only_vk(data.key_code) {
             return None;
         }
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        // include_printable 取值在这里无关紧要——keyup-only 键没有一个是可打印的。
-        // 传 true 与主输入路径保持一致，免得日后有人照抄这行时带走一个错误的先例。
+        // include_printable 在这里无关紧要（keyup-only 键都不可打印），传 true 与主输入路径一致，
+        // 免得有人照抄这行时带走错误的先例。
         self.apply_session_action(&mut state, data, true)
     }
 
-    /// 该字符此刻能否进输入缓冲：缓冲为空时查**首码集**，否则查码元**全集**。
+    /// 该字符此刻能否进输入缓冲：缓冲为空时查首码集，否则查码元全集。
     ///
-    /// 首码判据取 `input_buffer.is_empty()`，而不是「无候选且无已提交」——码是按
-    /// `input_buffer` 查询的，缓冲空就是新一轮码的开头；分步上屏后续打的第一个字符
-    /// 同样算首码，与引擎的查询语义保持一致。
-    ///
-    /// 默认码元集（`a-z`）下，字母恒为真、其余恒为假，与历史逐键等价。
+    /// 首码判据取 `input_buffer.is_empty()`：码按 `input_buffer` 查询，分步上屏后续打的第一个字符
+    /// 同样算首码。默认码元集（`a-z`）下字母恒为真、其余恒为假。
     pub(crate) fn can_enter_buffer(&self, state: &State, ch: char) -> bool {
         if state.input_buffer.is_empty() {
             self.engine_mgr.active_is_leading_char(ch)
@@ -6602,14 +5796,12 @@ impl Coordinator {
 
     /// 非码元字符的处置：终结当前组合并输出该字符。
     ///
-    /// ⚠️ **刻意不透传**。C++ 在中文模式下对字母键是**无条件吃**的
-    /// （`KeyEventSink.cpp` 的 `chinese_letter` 分支，仅 CapsLock 透传例外），
-    /// 此处返回 `PassThrough` 就构成「吃了再吐」：不补发 `WM_KEYDOWN` 的宿主
-    /// （EverEdit 一类）直接丢字符，全角态下还会出半角。故一律由本侧出字——
-    /// 铁律是「C++ 吃键集 ⊆ Rust 出字集」，见 project_fullwidth_eat_flip。
+    /// 刻意不透传：C++ 在中文模式下对字母键无条件吃（`KeyEventSink.cpp` 的 `chinese_letter`
+    /// 分支，仅 CapsLock 例外），返回 `PassThrough` 就是「吃了再吐」，不补发 `WM_KEYDOWN` 的宿主
+    /// 直接丢字符、全角态还会出半角。不变量：C++ 吃键集 ⊆ Rust 出字集。
     ///
-    /// 空组合时同样走这条路：`commit_highlight_then_char` 在无候选无已提交时
-    /// 只输出该字符（并按全角态转换），正是需要的行为。
+    /// 空组合时同样走这条路：`commit_highlight_then_char` 在无候选无已提交时只输出该字符
+    /// （并按全角态转换）。
     pub(crate) fn reject_non_code_char(&self, state: &mut State, ch: char) -> KeyAction {
         let has_comp = !state.input_buffer.is_empty()
             || !state.committed_text.is_empty()
@@ -6619,40 +5811,27 @@ impl Coordinator {
 
     /// 码元字符进缓冲的公共通路：插入 → 顶码上屏 → 候选刷新 → 组合区更新。
     ///
-    /// 字母臂与非字母码元闸门（[`Self::try_code_char_gate`]）共用本函数——两条路进来的
-    /// 只是「哪个键产出了这个字符」不同，进缓冲之后的处置完全一致。**不要复制这段**：
-    /// 顶码的显示首选一致性、自动上屏的记账码分流都在这里，复制出去必然漂移。
+    /// 字母臂与非字母码元闸门（[`Self::try_code_char_gate`]）共用本函数，不要复制这段：顶码的
+    /// 显示首选一致性、自动上屏的记账码分流都在这里，复制出去必然漂移。
     ///
     /// `ch` 是进缓冲的小写码元，`raw` 是进影子串的原始形态（Shift 大写等）。
     pub(crate) fn accumulate_code_char(&self, state: &mut State, ch: char, raw: char) -> KeyAction {
-        // 顶码前记住「即将成为前缀」的缓冲及其显示首选：顶码上屏文本须与用户实际所见的
-        // 首候选一致——调频置顶 / shadow 在协调器层重排（apply_freq_rerank/apply_shadow），
-        // 引擎 handle_top_code 内部 convert 看不到，会顶出权重首选而非显示首选（对齐 Go
-        // 复用 ConvertEx 取 Candidates[0] 的一致性修复）。顶码绝大多数发生在「满码+1」，
-        // 此时前缀恰为顶码前缓冲，state.candidates 正是其显示候选。
+        // 顶码上屏的必须是用户实际所见的显示首选：调频置顶 / shadow 在协调器层重排，引擎
+        // handle_top_code 内部看不到，会顶出权重首选。顶码绝大多数发生在「满码+1」，此时前缀恰为
+        // 顶码前缓冲，state.candidates 正是其显示候选。
         let pre_buf = state.input_buffer.clone();
-        // 顶码上屏候选 = 用户实际所见的**显示首选**：取顶码前缓冲（即将成为前缀）的显示
-        // 首候选——它已过智能过滤 / 词频重排 / shadow，正是用户所见。保留整条候选（含
-        // is_command / phrase_template / group_code），供顶码分流：码表候选 & 普通短语 →
-        // 文本顶上屏；$CC 命令短语 → 求值执行。短语 source 为 `Phrase`（**不参与**本
-        // filter，放行靠 is_phrase / is_command 显式判定，与 source 取值无关）；拼音/英文
-        // 候选（拼音本就排首，或智能过滤掉生僻码表字后仅剩拼音，如「wang」只有生僻字
-        // 「佢」被过滤、显示全是拼音）仍被排除 → 下方放弃顶码继续组合
-        // （对齐「上屏须与显示一致 + 非码表/短语类不上屏」）。
+        // 保留整条候选供分流：码表候选与普通短语文本顶屏、$CC 命令短语求值执行；拼音/英文候选
+        // 排除 → 放弃顶码继续组合。
         //
-        // ⚠️ 短语候选**必须再问一次短语层**：它们的 `code` 恒为空串，前缀命中与精确命中
-        // 在候选上长得一模一样（`is_prefix` 只标 marker 导航，普通字面短语的前缀命中不打
-        // 标记）。5 码短语 `zzsfz` 敲到 `zzsf` 时就已排在候选首位——不加这道判据，打
-        // `zzsfa`（短语里没有这条码）会顶出 `zzsfz` 的内容，而正确行为是落进空码。
+        // 短语候选必须再问一次短语层：它们的 `code` 恒为空串，前缀命中与精确命中在候选上同形。
+        // 不加这道判据，5 码短语 `zzsfz` 在打 `zzsfa` 时会被顶出，而正确行为是落进空码。
         let pre_display_first = state.candidates.first().cloned().filter(|c| {
-            // 通配结果不参与顶码（spec §3.2）：混输下 4 码通配串 +1 键会把整串判成超长字面串，
-            // 通配探测放行、拼音也接不了，前缀恰为顶码前缓冲，显示首选就是通配结果——
-            // 在此剔除，与通配关闭 / 纯码表的行为一致（该键只判字面串，不上屏通配结果）。
+            // 通配结果不参与顶码：混输下通配串 +1 键时显示首选就是通配结果，在此剔除，与通配关闭 /
+            // 纯码表的行为一致。
             (c.source == CandidateSource::CodeTable && !c.is_wildcard)
                 || ((c.is_phrase || c.is_command) && self.phrase_has_exact_code(state, &pre_buf))
         });
-        // 在光标处插入（光标在末尾时等价于旧的 push）。后续顶码/候选刷新一律按整串
-        // 缓冲判定，与光标位置无关——光标只是编辑位置，不参与引擎查询。
+        // 在光标处插入。后续顶码/候选刷新一律按整串缓冲判定，光标不参与引擎查询。
         preedit_cursor::BufEdit::new_cased(
             &mut state.input_buffer,
             &mut state.input_cursor_pos,
@@ -6660,29 +5839,22 @@ impl Coordinator {
         )
         .insert_cased(ch, raw);
 
-        // 顶码上屏：缓冲超过满码长且整串无匹配 → 顶前 N 码首选，余码续打
-        // （schema.top_code_commit；置于候选刷新前，对齐 Go handleAlphaKey）。
-        // 短语侧否决：整串已是精确码短语 / 还能续打成更长短语 → 不是「溢出」，放弃顶码
-        // 继续组合（见 `phrase_vetoes_top_code`：引擎的两道闸只问码表，够不着短语层）。
-        //
-        // 通配组码不顶字（spec §3.2）。引擎的 `handle_top_code` 是字面语义（`aaaza` 在它看来
-        // 是「超码长 + 无匹配 + 无后继」的典型溢出），故短路必须落在这里。
+        // 顶码上屏：缓冲超过满码长且整串无匹配 → 顶前 N 码首选，余码续打（schema.top_code_commit；
+        // 置于候选刷新前）。短语侧否决：整串已是精确码短语 / 还能续打成更长短语 → 不是溢出
+        // （见 `phrase_vetoes_top_code`，引擎的两道闸够不着短语层）。通配组码不顶字：引擎的
+        // `handle_top_code` 是字面语义，短路必须落在这里。
         let top_code = if self.wildcard_pattern_of(state).is_some() {
             None
         } else {
             self.engine_mgr
                 .handle_top_code(&state.input_buffer)
                 .filter(|_| !self.phrase_vetoes_top_code(state, &state.input_buffer))
-                // 缓冲里混进了入缓冲符号 ⇒ 这串不是本方案的编码，没有「码长溢出」可言。
-                // 不否决的话，码表方案下打 `sun-panel` 到第 5 个字符就会把 `sun` 顶上屏、
-                // 余码续打，用户正打的标识符当场被拆两半。判据与候选侧同源，见
-                // `buffer_has_literal_symbol`。
+                // 缓冲里混进了入缓冲符号 ⇒ 不是本方案的编码，没有「码长溢出」可言；不否决的话打
+                // `sun-panel` 会在第 5 个字符把 `sun` 顶上屏。判据见 `buffer_has_literal_symbol`。
                 .filter(|_| !self.buffer_has_literal_symbol(state))
-                // 切点修正：引擎把 prefix 固定切在 `max_code_length`，而**短语码长不受方案满码长
-                // 约束**（5 码短语 `zzsfz` 落在 4 码五笔里）。顶码前的缓冲若恰是一条精确码短语，
-                // 就以短语码为切点。不修则 `zzsfza` 被切成 `zzsf` + `za`，与 `pre_buf` 对不上而
-                // 落进「多级溢出」分支，又因 `zzsf` 在码表无字放弃顶码——表现为「进空码不顶码」。
-                // pre_buf 长度恰为满码长时两种切法本就重合（`zzbd` 一类），行为不变。
+                // 切点修正：引擎把 prefix 固定切在 `max_code_length`，而短语码长不受满码长约束。
+                // 顶码前缓冲若恰是一条精确码短语，就以短语码为切点；不修则与 `pre_buf` 对不上、落进
+                // 「多级溢出」分支，又因码表无字放弃顶码。缓冲长度恰为满码长时两种切法重合。
                 .map(|(engine_top, remainder)| {
                     if self.phrase_has_exact_code(state, &pre_buf) {
                         let rem: String = state
@@ -6700,9 +5872,8 @@ impl Coordinator {
             let buf = state.input_buffer.clone();
             let prefix: String = buf[..buf.len().saturating_sub(remainder.len())].to_string();
             // 顶码候选决策：
-            // - prefix==顶码前缓冲（满码+1，最常见）：用显示首选候选（码表/普通短语/命令）；
-            //   显示首选非码表且非短语 → None → 放弃顶码（继续组合让用户选拼音）。
-            // - 否则（多级溢出，罕见 wubi 场景）：回退引擎码表顶码纯文本（无命令语义）。
+            // - prefix==顶码前缓冲（满码+1，最常见）：用显示首选候选；非码表且非短语 → 放弃顶码。
+            // - 否则（多级溢出，罕见）：回退引擎码表顶码纯文本（无命令语义）。
             if prefix == pre_buf {
                 match pre_display_first {
                     // $CC 命令短语顶码：纯文本命令（≈词条）同步求值文本走标准文本顶码；
@@ -6714,9 +5885,8 @@ impl Coordinator {
                             cand.group_code.clone()
                         };
                         return match self.eval_command_text_only(&cand.phrase_template, &input) {
-                            // 求值文本与 `cand.text`（display 标签）无关，变体覆盖对它没有语义
-                            // → None，走 `commit_top_text` 内的默认转换（对齐 `AutoCommit` 的
-                            // 命令文本同样只过 `maybe_convert`）。
+                            // 求值文本与 `cand.text`（display 标签）无关，变体覆盖对它没有语义 → None，
+                            // 走 `commit_top_text` 内的默认转换（同 `AutoCommit` 的命令文本）。
                             Some(text) => self.commit_top_text(
                                 state,
                                 &prefix,
@@ -6772,9 +5942,8 @@ impl Coordinator {
         // 全码自动上屏 / 满码空码清空（schema.auto_commit_at_full / clear_on_empty_max）。
         match self.update_candidates(state) {
             InputOutcome::AutoCommit(text) => {
-                // 自动上屏文本取自首候选（handle_candidate.rs 构造 AutoCommit 时同源）。
-                // 记账码同取首候选（按来源分流，见 `freq_code`），无候选时退回输入缓冲。
-                // 记账文本同理取首候选的 `freq_text`（模板词是源文本，GH#177）。
+                // 自动上屏文本、记账码（按来源分流，见 `freq_code`）、记账文本（`freq_text`，模板词是
+                // 源文本）都取首候选，与 handle_candidate.rs 构造 AutoCommit 时同源；无候选时退回缓冲。
                 let (source, code, freq_text) = state
                     .candidates
                     .first()
@@ -6786,12 +5955,11 @@ impl Coordinator {
                         let buf = state.input_buffer.clone();
                         (CandidateSource::default(), buf, text.clone())
                     });
-                // `6a-draft`：满码自动上屏 / 空码顶出也是「词落了屏」，草稿候选同样算用过。
-                // 判据与顶码一致（见 `commit_top_text`）：算数的不是用户按了哪颗键，而是词有
-                // 没有真上屏——开着 `auto_commit_at_full` 时候选栏根本没机会让人按选择键。
+                // 满码自动上屏 / 空码顶出也是词落了屏，草稿候选同样算用过（判据同 `commit_top_text`：
+                // 开着 `auto_commit_at_full` 时候选栏根本没机会让人按选择键）。
                 self.promote_draft_on_auto_commit(state, &text, &code);
                 let out = self.commit_candidate(state, &text, &freq_text, None, source, &code);
-                // 满码自动上屏同样要接联想（t185），出口与手动选词一致。
+                // 满码自动上屏同样要接联想，出口与手动选词一致。
                 return self.auto_commit_then_assoc(state, out, &text);
             }
             // 含副作用命令自动命中：与空格选中命令同路（清组合 + 异步执行）。
@@ -6817,14 +5985,10 @@ impl Coordinator {
 
     /// 非字母码元闸门：本方案把某个数字/符号配成了码元，且此刻允许它进缓冲 → 接管。
     ///
-    /// 置于优先级链的「模式激活/URL 夺取之后、以词定字/翻页/大 match 之前」，于是组码中
-    /// 的码元抢在选词键、翻页键、标点流水线之前——这正是「组码中码元优先」契约。
-    /// 空缓冲时 `can_enter_buffer` 查的是**首码集**，数字默认不在其中 ⇒ 不接管，
-    /// 数字键照常作选词/透传，用户不会失去「选第 1 个候选」与原生数字输入。
-    ///
-    /// 字母**不走这里**：它们在大 match 的字母臂处理，那里还有 z-fallback 等字母专属判定。
-    ///
-    /// ⚠️ 默认码元集 `a-z` 不含任何非字母字符 ⇒ 本闸门恒返回 `None`，与历史逐键等价。
+    /// 置于优先级链的「模式激活/URL 夺取之后、以词定字/翻页/大 match 之前」，于是组码中的码元
+    /// 抢在选词键、翻页键、标点流水线之前（「组码中码元优先」契约）。空缓冲时查的是首码集，数字
+    /// 默认不在其中，故数字键照常作选词/透传。字母不走这里（字母臂另有 z-fallback 等判定）。
+    /// 默认码元集 `a-z` 下本闸门恒返回 `None`。
     pub(crate) fn try_code_char_gate(
         &self,
         state: &mut State,
@@ -6854,29 +6018,16 @@ impl Coordinator {
 
     /// 组码中符号入缓冲闸门（`input.buffer_symbol_chars`，出厂 `-`）：打 `sun-panel`。
     ///
-    /// # 与 [`Self::try_code_char_gate`] 的分工是「谁让位」
+    /// 与 [`Self::try_code_char_gate`] 的分工是「谁让位」：那道管真码元（方案 `input_chars`），
+    /// 无条件夺取该键，冲突由 [`Self::code_char_conflicts`] 告警。本闸门让位优先，只捡该键此刻
+    /// 空着的那一格（见 [`Self::symbol_buffer_key_free`]），本身不制造冲突，不进那张清单。
     ///
-    /// 那道闸门管的是**真码元**（方案 `input_chars`）：字符进缓冲并参与码长/顶码判定，
-    /// 且**无条件夺取**该键——方案作者说了算，撞了什么功能由
-    /// [`Self::code_char_conflicts`] 告警而不阻止。
+    /// 存在理由：`-` 既是英文标识符高频字符又是出厂翻页键。配成翻页键时首页按下被吞、没反应；
+    /// 不配则落标点臂顶码上屏；写进 `input_chars` 又会夺走翻页身份，且拼音方案的 `input_chars`
+    /// 由双拼布局推导、不读该字段。
     ///
-    /// 本闸门相反，是**让位优先**：只捡该键此刻空着的那一格（见
-    /// [`Self::symbol_buffer_key_free`]），任何活身份都能把它挡回去。所以它不需要、也不该
-    /// 进那张冲突清单——它本身就不制造冲突。
-    ///
-    /// # 为什么非要有这一格
-    ///
-    /// `-` 同时是英文标识符的高频字符和出厂翻页键（`keys.page_keys` 含 `minus_equal`），
-    /// 撞车处此前**两边都不通**：配成翻页键时首页按下走
-    /// [`Self::apply_session_action`] 的「命中即吞」（`page_prev` 返回 false 也照吞，
-    /// 用户观感是按了没反应）；不配翻页键则落兜底标点臂顶码上屏。两条路都打不出
-    /// `sun-panel`，而把 `-` 写进 `input_chars` 又会彻底夺走翻页身份——且拼音方案根本
-    /// 走不通那条路（`PinyinEngine::input_chars` 完全由双拼布局推导，不读该字段）。
-    ///
-    /// 复用 [`Self::accumulate_code_char`] 而不另起一条插入路径：顶码、全码自动上屏、
-    /// 满码空码清空、影子串、光标中插全在那里，另写一份就是第二套组码语义。
-    /// 拼音下顶码对它恒不触发（顶码要求显示首选是码表候选），码表下则与「把该符号配成
-    /// 码元」逐字同路——那正是同一件事该有的样子。
+    /// 复用 [`Self::accumulate_code_char`] 而不另起插入路径：顶码、自动上屏、空码清空、影子串、
+    /// 光标中插全在那里。拼音下顶码对它恒不触发，码表下则与「把该符号配成码元」同路。
     pub(crate) fn try_symbol_buffer_gate(
         &self,
         state: &mut State,
@@ -6886,16 +6037,14 @@ impl Coordinator {
         if data.modifiers & MOD_SHORTCUT != 0 {
             return None;
         }
-        // ★ 只在组码中。空闲时这些键归标点流水线/宿主——否则用户在任何程序里都打不出减号。
-        // 判据取 `input_buffer` 而非 `has_input_session`：已上屏前缀（`committed_text`）
-        // 非空而缓冲已空时，这一码是新一轮的开头，符号当首码没有意义。
+        // 只在组码中：空闲时这些键归标点流水线/宿主。判据取 `input_buffer` 而非 `has_input_session`：
+        // 已上屏前缀非空而缓冲已空时，这一码是新一轮的开头，符号当首码没有意义。
         if state.input_buffer.is_empty() {
             return None;
         }
         let shift = data.modifiers & MOD_SHIFT != 0;
         let ch = printable_char(data.key_code, shift)?;
-        // 字母不走这里（同 `try_code_char_gate`）：字母臂上还有 z-fallback 等专属判定，
-        // 从这里抄近路会把它们全绕过去。
+        // 字母不走这里（同 `try_code_char_gate`）：从这里抄近路会绕过 z-fallback 等专属判定。
         if ch.is_ascii_alphabetic() {
             return None;
         }
@@ -6912,25 +6061,13 @@ impl Coordinator {
     /// 缓冲里有没有经 [`Self::try_symbol_buffer_gate`] 进来的符号 —— 即「这一串还是不是
     /// 本方案的编码」。
     ///
-    /// 两个消费点，**必须同一个谓词**：
-    /// 1. [`Self::update_candidates`]：是 ⇒ 不问引擎，候选空着（否则拼音引擎按合法前缀
-    ///    容错，`sun-panel` 会顶着 `sun` 的候选，空格上屏「孙」）；
-    /// 2. [`Self::accumulate_code_char`] 的顶码否决：是 ⇒ 不顶码（否则码表方案下打到第 5
-    ///    个字符就把 `sun` 顶上屏、余码 `-p` 续打，用户正打的标识符当场被拆成两半）。
+    /// 两个消费点必须同一个谓词，分家就会出现「候选空着但还在顶码」：
+    /// 1. [`Self::update_candidates`]：是 ⇒ 不问引擎，候选空着（否则拼音引擎按合法前缀容错，
+    ///    `sun-panel` 会顶着 `sun` 的候选）；
+    /// 2. [`Self::accumulate_code_char`] 的顶码否决：是 ⇒ 不顶码。
     ///
-    /// 两处判据若分家，会分裂成「候选空着但还在顶码」这种自相矛盾的中间态。
-    ///
-    /// ⚠️ `!active_is_code_char` 这一条不能省：方案作者把某符号配成**真码元**
-    /// （`[engine.codetable] input_chars`）时，它是合法编码的一部分，该照常查引擎、
-    /// 照常参与顶码。本谓词只管本闸门放进来的那类字面符号。
-    ///
-    /// ⚠️ 分隔符那一条同样不能省，而且是**反着**踩出来的：`symbol_buffer_key_free` 已经
-    /// 让位给音节分隔符 / 英文分词符了，于是 `'` 是经**那条通路**进的缓冲——可本谓词只问
-    /// 「这个字符在不在白名单里」，照样把它认成自己放进来的，`xi'an` 的候选于是被清空。
-    /// 让位与识别必须用同一套判据，否则「让了位」只是让到一半。
-    ///
-    /// 判据落在**字符**上（`char_to_main_vk` 反查回键）而不是记一个「这一帧是谁放进来的」
-    /// 标志位：缓冲会被退格、光标中插改写，来源标志迟早与内容对不上，而字符本身不会。
+    /// 判据落在字符上（见 [`Self::char_is_literal_symbol`]）而不是记「这一帧是谁放进来的」标志位：
+    /// 缓冲会被退格、光标中插改写，来源标志迟早与内容对不上。
     pub(crate) fn buffer_has_literal_symbol(&self, state: &State) -> bool {
         let bundle = self.rt();
         let set = &bundle.config.input.buffer_symbol_chars;
@@ -6945,16 +6082,16 @@ impl Coordinator {
 
     /// 缓冲里的这个字符，是[`Self::try_symbol_buffer_gate`] 放进来的那一类吗。
     ///
-    /// 两条排除各有来历：
-    /// - **真码元**（方案 `input_chars`）是合法编码的一部分，该照常查引擎、照常参与顶码；
-    /// - **音节分隔符 / 英文分词符**根本不经本闸门（`symbol_buffer_key_free` 给它们让了位），
-    ///   把它们算进来等于把自己让出去的那条路又堵死一次。
+    /// 两条排除：
+    /// - 真码元（方案 `input_chars`）是合法编码的一部分，该照常查引擎、参与顶码；
+    /// - 音节分隔符 / 英文分词符根本不经本闸门（`symbol_buffer_key_free` 给它们让了位），算进来
+    ///   会把 `xi'an` 的候选清空。让位与识别必须用同一套判据。
     fn char_is_literal_symbol(&self, c: char) -> bool {
         if self.engine_mgr.active_is_code_char(c) {
             return false;
         }
-        // 通配键进缓冲走的是通配闸门，不是本闸门；它是查询的一部分，不是字面符号。
-        // 同时列在 `buffer_symbol_chars` 里也一样——否则候选被清空、通配形同虚设。
+        // 通配键进缓冲走的是通配闸门，它是查询的一部分，不是字面符号；同时列在
+        // `buffer_symbol_chars` 里也一样，否则候选被清空、通配形同虚设。
         if self.engine_mgr.active_wildcard_key() == Some(c) {
             return false;
         }
@@ -6967,60 +6104,24 @@ impl Coordinator {
 
     /// 这个键此刻有没有别的活身份——有就让位，[`Self::try_symbol_buffer_gate`] 的唯一判据。
     ///
-    /// 四问覆盖 [`Self::code_char_conflicts`] 的 owners 链，**两处必须同增同减**：
-    /// 那边漏一臂是「本该告警却没告警」，这边漏一臂是「本该让位却夺了键」——后者用户
-    /// 立刻可见，且会被归因成「翻页键忽然不灵了」。
+    /// 各问覆盖 [`Self::code_char_conflicts`] 的 owners 链，两处必须同增同减：那边漏一臂是
+    /// 「该告警没告警」，这边漏一臂是「该让位却夺了键」。那边的次选键与以词定字键在这里不单独问：
+    /// 它们都是 [`Self::session_action_for`] 的派生，第一问已拦下；哪天改成独立取表就得补问。
     ///
-    /// 那边的次选键与以词定字键在这里**不单独问**：
-    /// [`Self::select_key_offset`] / [`Self::select_char_index`] 都是
-    /// [`Self::session_action_for`] 的派生（取 `candidate_ordinal` / `char_ordinal`），
-    /// 第一问已经拦下。那边分开列是因为要给用户报出**是哪个功能**占了键，这里只需要
-    /// 知道「有没有人占」。⚠️ 哪天它们改成独立取表，这里就得跟着补问。
+    /// 音节分隔符与数字选词（`VK_1..=VK_9` 臂）不走 `session_actions`，也要显式问，否则往
+    /// `buffer_symbol_chars` 加 `'` 会让 `xi'an` 没有候选、加数字会废掉选词。分隔符尤其要问：
+    /// `manual_separator_key` 的 `auto` 档挑中 `'` 的条件恰好是前两问的补集，必撞。
     ///
-    /// # 两张不经会话表的表也要问
+    /// 唯一例外：没翻过页的「上一页」且此刻有候选——那一格确是空转（`page_prev` 返回 false、
+    /// `apply_session_action` 照吞）。判据取 `state.paged` 而非 `current_page == 0`，理由同
+    /// [`State::paged`]。「有候选」不能省：无候选时导航类动作不吞键，键会继续走 `try_z_fallback`、
+    /// 标点臂甩废码（`punct_on_empty_behavior`）、全角与自定义标点映射三条通路，夺过来就一次废掉它们。
+    /// 例外的例外：缓冲里已有本闸门放进来的符号时照收（那串早已不是编码，标点臂会把它整串丢掉）。
     ///
-    /// 音节分隔符（`'` / 反引号）与数字选词（硬编码的 `VK_1..=VK_9` 臂）都不走
-    /// `session_actions`，上面两问一个都查不到，而它们的消费点全排在本闸门之后。
-    /// 不显式问一句，用户照文档的邀请往 `buffer_symbol_chars` 里加 `'` 就会让
-    /// `xi'an` 彻底没有候选，加数字就会废掉 1-9 选词，且都**无声无息**。
+    /// 「下一页」不给这个待遇：末页按 `=` 带 [`Self::try_relax_scope_on_page_end`]，不是空转。
     ///
-    /// 分隔符那条尤其阴：`manual_separator_key` 的 `auto` 档只在「`'` 未被占作选词键
-    /// **且**未被 `[key_actions]` 绑定」时才挑中 `'`——那恰好是上面两问的补集，于是
-    /// 「它当上了分隔符」与「本闸门判它空闲」是同一个不等式，必撞。
-    ///
-    /// # 唯一的例外：没翻过页的「上一页」，且**此刻有候选**
-    ///
-    /// 有候选时那一格确是空转——`page_prev` 在 `current_page == 0` 时返回 false，而
-    /// [`Self::apply_session_action`] 末尾无条件 `Consumed`，按下什么都不发生。
-    ///
-    /// 判据取 `state.paged`（这批候选**翻过页没有**）而不是 `current_page == 0`：
-    /// 从第 2 页翻回第 1 页的用户正在翻页，此刻 `-` 突然变回字符会让人当场打错字。
-    /// 候选一重装 `paged` 即清零（[`Self::reset_candidate_view`]），所以「打一串码、
-    /// 翻过页、再接着打字母」之后的那个 `-` 仍然是字符。
-    ///
-    /// ★ **「有候选」这个前提不能省**，它是本函数最后一问。无候选时导航类动作被
-    /// `SessionAction::requires_candidates` 挡在 `apply_session_action` 门外，**键根本
-    /// 不会被吞**，而是继续往下走三条各有行为的通路：`try_z_fallback`（`z_key_action`
-    /// 配成临英/mix 时 `z-` 要夺取残余码）、标点臂按 `punct_on_empty_behavior` 甩掉废码
-    /// （出厂 `clear`，那是用户打错码时的退出口）、以及标点臂里的全角与自定义标点映射。
-    /// 把这一格也夺过来等于一次废掉三条既有行为，而它们都不是「按下没反应」。
-    ///
-    /// 例外的例外：缓冲里**已经有**本闸门放进来的符号时照收不误。那一串早已不是本方案
-    /// 的编码（候选因此恒空，见 [`Self::buffer_has_literal_symbol`]），上面三条通路对它
-    /// 要么无从谈起，要么反而有害——标点臂会把用户打了一半的 `e-mail-addr` 整串丢掉。
-    ///
-    /// # 「下一页」刻意不给这个待遇
-    ///
-    /// 末页按 `=` **不是**空转：它带 [`Self::try_relax_scope_on_page_end`]（翻到底了还想
-    /// 看更多 ⇒ 临时放宽检索范围）。把它判成空转会把那个功能整个砍掉，而 `=` 也不是
-    /// 英文标识符字符，换不来什么。
-    ///
-    /// # shift
-    ///
-    /// 第一问**带** shift（`SessionKey::matches` 要求精确相等），所以 `;` 作为无 shift 的
-    /// 次选键挡不住 `:`；真正保守让位的是 `bound_action_for`，它没有 shift 维度，绑定键的
-    /// shift 形态会跟着一起让。这不构成缺口：选词键与以词定字键的两个消费点自带
-    /// `!shift` 守卫，shift 形态本就不归它们。
+    /// 第一问带 shift（`SessionKey::matches` 精确相等），`;` 作为次选键挡不住 `:`；`bound_action_for`
+    /// 没有 shift 维度，绑定键的 shift 形态一起让。选词键的消费点自带 `!shift` 守卫，不构成缺口。
     fn symbol_buffer_key_free(&self, state: &State, key_code: u32, shift: bool) -> bool {
         match self.session_action_for(key_code, shift, true) {
             Some(wind_config::SessionAction::PagePrev(_)) if !state.paged => {}
@@ -7034,19 +6135,17 @@ impl Coordinator {
         ) {
             return false;
         }
-        // ⚠️ 删掉这一问**不会有用例变红**——`char_is_literal_symbol` 那侧也排除了分隔符，
-        // 候选照样出得来。两处不是重复防御，是同一条规则的两面：这里管「`'` 走不走它自己
-        // 那条分隔符通路」（那条臂在本闸门之后，抢了就再也到不了），那里管「已经在缓冲里
-        // 的 `'` 算不算本闸门放进来的」。只留那一侧的话，`'` 会被当字面符号塞进缓冲，
-        // 缓冲内容碰巧一样、候选碰巧也一样，但它再不是分隔符了——引擎侧的硬边界语义
-        // （双拼的配对边界、`consumed_length` 的计入）会无声消失。
+        // 这一问删掉不会有用例变红（`char_is_literal_symbol` 也排除了分隔符），但两处是同一条规则
+        // 的两面：这里管 `'` 还走不走分隔符通路（那条臂在本闸门之后，抢了就到不了），那里管已在
+        // 缓冲里的 `'` 算不算字面符号。只留那一侧，`'` 会被当字面符号塞进缓冲，候选碰巧一样，
+        // 但引擎侧的硬边界语义（双拼配对边界、`consumed_length` 计入）会无声消失。
         if self.manual_separator_key(key_code) || self.english_phrase_separator_key(key_code) {
             return false;
         }
         if (keymap::VK_0..=keymap::VK_9).contains(&key_code) {
             return false;
         }
-        // 最后一问：这个键此刻**真的**空转吗（见上方 ★）。
+        // 最后一问：这个键此刻真的空转吗（见文档「唯一例外」）。
         self.buffer_has_literal_symbol(state) || !state.candidates.is_empty()
     }
 
@@ -7056,16 +6155,14 @@ impl Coordinator {
     /// 这是方案作者的选择，不该阻止；但必须让他知道——否则现场表现是「翻页键忽然不灵了」，
     /// 而两处配置分开看都合理，无从查起。
     ///
-    /// 判定**反查现有函数**而非重新解析配置：`page_keys` 一类存的是键组名（`minus_equal`），
+    /// 判定反查现有函数而非重新解析配置：`page_keys` 一类存的是键组名（`minus_equal`），
     /// 自己再解析一遍必然与 `NavKeys::from_config` 漂移。此处对码元集里的每个非字母字符
     /// 找回它的 VK，再逐个问那些判定函数「这个键归你吗」——判据因此永远与实际行为同源。
     ///
     /// 只查非字母：字母本就是默认码元，且字母触发键（z）有专门的裁决顺序，不构成冲突。
     ///
-    /// ⚠️ **新增引导键类动词时必须同时往下面的 `owners` 链里加一臂**。这张清单是手写的，
-    /// 漏加不会有任何报错：撞车检测对那个新动词恒不报，方案作者把它的引导键配成码元时
-    /// 一声不吭，直到现场发现「那个模式再也进不去了」。失效的是**保护性功能**，
-    /// 没有人会来报这个 bug ——「本该警告却没警告」不构成用户可见的症状。
+    /// 新增引导键类动词时必须同时往下面的 `owners` 链里加一臂：清单是手写的，漏加不会报错，
+    /// 撞车检测对那个新动词恒不报，而「本该警告却没警告」没有用户可见的症状。
     pub fn code_char_conflicts(&self) -> Vec<(char, Vec<&'static str>)> {
         let charset = self.engine_mgr.active_input_chars();
         if charset.is_default_alpha() {
@@ -7089,13 +6186,9 @@ impl Coordinator {
             if ch.is_ascii_digit() {
                 owners.push("数字选词键");
             }
-            // 会话态绑定：翻页/移高亮/取消都在组码期间抢这个键，故都算占用。
-            // 措辞按实际动作分——设置页把这行原样显示给用户，笼统写「会话态按键」
-            // 等于让用户自己去查是哪个功能占了。
-            // ★ 走**当前方案**的语义表（含方案级 `[session_actions]`），不是跨方案并集：
-            // 本函数比较的另一方是 `active_input_chars()`——活跃方案的码元集。两边必须同
-            // 方案才谈得上冲突，拿并集去比会报出「别的方案里占了」这种当前根本不存在的冲突。
-            // 可达性并集另有其人（`schema_session_vks`），别把两者混用。
+            // 会话态绑定：翻页/移高亮/取消都在组码期间抢这个键。措辞按实际动作分（设置页原样显示）。
+            // 走当前方案的语义表（含方案级 `[session_actions]`），不是跨方案并集：另一方是活跃方案的
+            // 码元集，拿并集比会报出当前根本不存在的冲突。可达性并集是 `schema_session_vks`，别混用。
             if let Some(a) = self.session_action_for(vk, false, true) {
                 owners.push(match a {
                     wind_config::SessionAction::Cancel => "取消键",
@@ -7120,10 +6213,8 @@ impl Coordinator {
 
             // ── 空缓冲类占用：模式引导键 ──
             //
-            // ★ 只在该字符**可作首码**时才是真冲突。首码仲裁
-            // （`code_char_takes_lead`）此时让引导键让位给码表 ⇒ 该模式再也进不去。
-            // 不能作首码时两者井水不犯河水——模式只在空缓冲用、码元只在组码中用，
-            // 报出来只会变成噪音，把真冲突淹掉。
+            // 只在该字符可作首码时才是真冲突：首码仲裁（`code_char_takes_lead`）让引导键让位，该模式
+            // 再也进不去。不能作首码时两者互不相干，报出来只会淹掉真冲突。
             if charset.contains_leading(ch) {
                 if self.match_special_trigger(vk).is_some() {
                     owners.push("特殊模式引导键");
@@ -7152,9 +6243,8 @@ impl Coordinator {
     pub(crate) fn warn_code_char_conflicts(&self) {
         let charset = self.engine_mgr.active_input_chars();
         for (ch, owners) in self.code_char_conflicts() {
-            // 后果按「能否作首码」分档：首码意味着连空缓冲都归码表，被占用的模式引导键
-            // 会彻底进不去；仅后续码则只影响组码期间。文案里直接给出化解办法，
-            // 否则用户看到告警也不知道下一步该改哪。
+            // 后果按「能否作首码」分档：首码意味着连空缓冲都归码表，被占用的引导键彻底进不去；仅后续码
+            // 只影响组码期间。文案里直接给出化解办法。
             if charset.contains_leading(ch) {
                 warn!(
                     "码元集含 {:?} 且允许其作首码，但该键原配作 {}；空缓冲时它将归码表，这些功能再也进不去。\
@@ -7173,8 +6263,7 @@ impl Coordinator {
     }
 
     /// 普通模式「顶屏高亮候选 + 输出字符」：把已转换前缀与当前高亮候选一并上屏，再接该字符。
-    /// 小键盘 direct 语义共用此路（编码型缓冲里数字不是合法编码，故终结当前组合而非入缓冲；
-    /// 但**不丢弃**用户已打的码——顶屏它，对齐主键盘标点键的既有行为）。
+    /// 小键盘 direct 语义共用此路（编码型缓冲里数字不是合法编码，故终结当前组合，但不丢弃已打的码）。
     ///
     /// `has_comp` 由调用方在改动 state 前算好：空组合时无需隐藏候选窗。
     pub(crate) fn commit_highlight_then_char(
@@ -7194,15 +6283,9 @@ impl Coordinator {
         }
         let committed = self.take_committed(state);
         let mut out = self.maybe_convert(state, &committed);
-        // ★ 联想态**不顶屏**。
-        //
-        // 顶屏的语义前提是「用户打了码、还没选词，按这个字符意味着『就选高亮那条吧』」。
-        // 联想态**没有码**——高亮那条是输入法猜的，不是用户在选。此刻按「。」的意图
-        // 就是打个句号，顶屏等于替用户做了个他没做的选择。
-        //
-        // 不修的后果真机上很刺眼（2026-08-16 反馈）：打「我」上屏、联想首条「我们」、
-        // 按「。」得到「我我们。」——既顶了不该顶的，又用了整词而非该补的那半截「们」。
-        // 两个错叠在一起，看起来像凭空多出一个字。
+        // 联想态不顶屏：顶屏的前提是用户打了码、按这个字符意味着「就选高亮那条吧」；联想态没有码，
+        // 高亮那条是输入法猜的，按「。」只是要打个句号（否则「我」+ 联想「我们」+「。」会得到「我我
+        // 们。」）。
         if !state.candidates.is_empty() && !state.assoc_active() {
             let idx = self
                 .highlighted_global_index(state)
@@ -7219,11 +6302,9 @@ impl Coordinator {
         if has_comp {
             self.notify_ui_hide();
         }
-        // 英文补空格（`schema.english.commit_space`）**刻意不接这里**：本函数的用途是
-        // 「顶掉高亮候选 + 紧接着上屏这个字符」，补了会得到 `hello ,` 这种断开的标点。
-        // 不是漏接。
-        // `numpad_raw_output`：小键盘恒半角时不转全角（普通模式 direct 档的落点，
-        // 也是这个开关最常被触发的一条路——空缓冲下按小键盘数字就走这里）。
+        // 英文补空格（`schema.english.commit_space`）刻意不接这里：本函数紧接着上屏这个字符，补了
+        // 会得到 `hello ,` 这种断开的标点。
+        // `numpad_raw_output`：小键盘恒半角时不转全角（空缓冲下按小键盘数字就走这里）。
         out.push_str(&if state.full_width && !self.numpad_raw_output(state) {
             to_full_width(&ch.to_string())
         } else {
@@ -7249,15 +6330,11 @@ impl Coordinator {
         std::mem::take(&mut state.committed_text)
     }
 
-    /// 清空拼音逐步转换的组合态（已转换前缀 + 缓冲 + 候选）。
-    /// 把首显闸门要等的坐标预置成「已就绪」（**仅 crate 内单元测试用**）。
+    /// 把首显闸门要等的坐标预置成「已就绪」（仅 crate 内单元测试用）。
     ///
-    /// headless 下没有宿主上报 caret，于是每一帧都是「首帧且坐标未就绪」，
-    /// `notify_ui_update` 会在闸门处 return，候选压根不下发——任何断言「UI 收到了什么」
-    /// 的测试都会拿到空通道，看着像功能没接上，其实是被闸门拦了。
-    ///
-    /// 放在本文件是因为它要写的两个字段是 `coordinator` 模块私有的；
-    /// 兄弟模块（如 `handle_assoc`）的测试够不着，只能经这个入口。
+    /// headless 下没有宿主上报 caret，每一帧都是「首帧且坐标未就绪」，`notify_ui_update` 在闸门处
+    /// return，断言「UI 收到了什么」的测试会拿到空通道。放在本文件是因为要写的两个字段是本模块
+    /// 私有的，兄弟模块的测试只能经这个入口。
     #[cfg(test)]
     pub(crate) fn debug_mark_coords_ready(&self) {
         *self
@@ -7353,6 +6430,7 @@ impl Coordinator {
             .send(wind_ui_types::UiCommand::ShowCaretOverlay(Box::new(view)));
     }
 
+    /// 清空拼音逐步转换的组合态（已转换前缀 + 缓冲 + 候选）。
     pub(crate) fn reset_pinyin_composition(&self, state: &mut State) {
         state.committed_text.clear();
         state.committed_segs.clear();
@@ -7371,20 +6449,16 @@ impl Coordinator {
         self.reset_candidate_view(state);
     }
 
-    /// cmdbar 能力 wrapper（被 handle_cmdbar 控制器经 Weak 回调）。各方法自锁，**禁止**在持
-    /// state 锁时调用（spawn_command 已确保在独立线程、未持锁时执行）。
-    /// 撤销最近一次上屏（cmdbar `ime.undo_commit`）：删除光标前 `last_commit_len` 个字符
-    /// （UTF-16 单元），推 ReplaceBackward(N, "") 给活跃客户端（复用智能标点删除替换通道及其
-    /// 全部宿主兼容修复）。计数语义见 [`Self::last_commit_len`]：默认 1 → 永远有动作；被最近
-    /// 一次上屏覆盖 → 只精准删「刚输入完那次」；`swap(1)` 读取即复位 → 连续触发第二次起逐字删
-    /// （数量不再可信，宁可少删多按几次，也不按陈旧计数误删多个）。
+    /// cmdbar 能力 wrapper（被 handle_cmdbar 控制器经 Weak 回调）。各方法自锁，禁止在持 state 锁时
+    /// 调用（spawn_command 已确保在独立线程、未持锁时执行）。
     ///
-    /// v1 不校验光标前内容（用户主动触发；焦点变化/其它输入均已把计数刷回 1，故误删至多 1 个）；
-    /// 「其它输入」= 宿主自行出字 / 重放 / 用户挪光标（`note_host_wrote_text`），其中宿主自行出字
-    /// 要等**下一个**送达的 keydown 带透传位才知道——工具栏按钮触发撤销没有 keydown，那一下仍按
-    /// 旧计数删（冷门入口，已知限制）；
-    /// v2 预留 prevChar 比对。已知限制：SendInput 退格兜底宿主按「一次退格删一整字」处理时，
-    /// emoji 会多删（兜底宿主 × emoji 双重边缘），留待后续按宿主特判。
+    /// 撤销最近一次上屏（cmdbar `ime.undo_commit`）：删除光标前 `last_commit_len` 个字符（UTF-16
+    /// 单元），推 ReplaceBackward(N, "") 给活跃客户端（复用智能标点删除替换通道）。计数语义见字段
+    /// `last_commit_len`：读取即复位为 1，连续撤销第二次起逐字删。
+    ///
+    /// 不校验光标前内容：焦点变化与其它输入（`note_host_wrote_text`）都把计数刷回 1，误删至多 1 个。
+    /// 已知限制：宿主自行出字要等下一个 keydown 才知道，工具栏按钮触发撤销时仍按旧计数删；
+    /// SendInput 退格兜底的宿主按「一次退格删一整字」处理时 emoji 会多删。
     pub(crate) fn cmd_undo_commit(&self) {
         // 正在打字（缓冲非空）时不动作：ReplaceBackward 作用于已上屏文本，
         // 与组合态并存会把删除落进组合窗前的位置，语义混乱。
@@ -7414,11 +6488,9 @@ impl Coordinator {
     /// - `emoji:<模块id>`：附加模块（`input.emoji.modules.<id>`，含用户放进 `emoji/` 的文件）；
     /// - `dict:<注释库id>`：注释词库（`[[ui.comment_dicts]]` 的 `enabled`，中英释义、拆分等）。
     ///
-    /// `want` = 目标状态，`None` = 取反（toggle）。已是目标状态时不写盘、不重载——`ime.set`
-    /// 的语义就是「确保是这个状态」——但**照样提示**「…已是开启状态」：一点反应都没有的话，
-    /// 用户分不清是状态本就如此还是命令没被调用（维护者实测反馈）。改了则写用户配置后热重载
-    /// （emoji 表 / 注释库按新开关重挂），提示「…已开启 / 已关闭」：命令栏与短语没有别的
-    /// 反馈渠道，开了没反应和关掉了在界面上无从分辨。
+    /// `want` = 目标状态，`None` = 取反（toggle）。已是目标状态时不写盘、不重载，但照样提示
+    /// 「…已是开启状态」，否则用户分不清状态本就如此还是命令没被调用。改了则写用户配置后热重载，
+    /// 提示「…已开启 / 已关闭」：命令栏与短语没有别的反馈渠道。
     pub(crate) fn cmd_set_feature(&self, target: &str, want: Option<bool>) -> anyhow::Result<()> {
         let (name, on) = if target == "emoji" {
             let cur = self.rt().config.input.emoji.enabled;
@@ -7494,18 +6566,16 @@ impl Coordinator {
         info!("ime.set {target}: {text}（未改动）");
     }
 
-    /// `ime.set` 的输入状态开关（`cn-en` / `fullshape` / `s2t` / `t2s` / `toolbar`）：已是目标
-    /// 状态只提示（同数据开关）。`cn-en` 是**直达**路径（置到目标态，CapsLock 取消后也按
-    /// 目标落地）；其余走 `ime.toggle` 同一条切换路径——那条路径自带状态气泡与工具栏刷新，
-    /// 这里不另弹提示，免得一次切换两个浮窗。
-    ///
-    /// `cn-en` 读的是 `chinese_mode`（用户选的中英），不含 CapsLock 临时英文：`set` 回答的是
-    /// 「切到中文」，CapsLock 松开后自然回到中文。
+    /// `ime.set` 的输入状态开关（`cn-en` / `fullshape` / `s2t` / `t2s` / `toolbar`）：已是目标状态
+    /// 只提示。`cn-en` 走直达路径（CapsLock 取消后也按目标落地）；其余走 `ime.toggle` 同一条切换路
+    /// 径，自带状态气泡与工具栏刷新，这里不另弹提示。`cn-en` 读的是 `chinese_mode`，不含 CapsLock
+    /// 临时英文。
     pub(crate) fn cmd_set_state(&self, target: &str, on: bool) -> anyhow::Result<()> {
         self.ime_state_set(target, on, true).map(|_| ())
     }
 
-    /// 输入状态开关的当前值（`cn-en` 为 true = 中文）。目标只认 cn-en / fullshape / s2t / t2s / toolbar。
+    /// 输入状态开关的当前值（`cn-en` 为 true = 中文）。
+    /// 目标只认 cn-en / fullshape / s2t / t2s / toolbar。
     pub fn ime_state_get(&self, target: &str) -> anyhow::Result<bool> {
         let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         match target {
@@ -7539,10 +6609,8 @@ impl Coordinator {
             return Ok(false);
         }
         if target == "cn-en" {
-            // 中英开关走**直达**路径，不吃 ime.toggle 的翻转语义：ime.set 的契约是
-            // 「置为目标态」，已在目标态根本到不了这里（上面已 return）。
-            // CapsLock 开着时取消锁定并直达目标（Directed，不吃 mode_after_cancel 归位）；
-            // 待编码经 push 出口交还宿主，避免丢字（见 [`SwitchCommit`]）。
+            // 中英开关走直达路径，不吃 ime.toggle 的翻转语义：CapsLock 开着时取消锁定并直达目标
+            // （Directed，不吃 mode_after_cancel），待编码经 push 出口交还宿主（见 [`SwitchCommit`]）。
             let (_, commit) = self.cn_en_set_with_commit(on);
             self.push_switch_commit(&commit);
             return Ok(true);
@@ -7565,8 +6633,7 @@ impl Coordinator {
             }
             "fullshape" => {
                 self.handle_menu_command("toggle_width");
-                // handle_menu_command 只 push_state_update，不刷工具栏；菜单路径由调用方
-                // 补 notify_toolbar，命令栏路径同样需要补，否则工具栏全/半角状态不更新。
+                // handle_menu_command 只 push_state_update，不刷工具栏，命令栏路径要补 notify_toolbar。
                 self.notify_toolbar();
             }
             // 两个转换方向各一个 target。互斥由 `toggle_conversion_direction` 统一保证，
@@ -7598,37 +6665,26 @@ impl Coordinator {
         }
     }
 
-    /// 「编码这一刻是不是嵌在宿主组合区里」——`preedit_display` 的**有效**取值，全部消费点共用。
+    /// 「编码这一刻是不是嵌在宿主组合区里」——`preedit_display` 的有效取值，全部消费点共用。
     ///
     /// 配置说 `candidate_top` / `candidate_inline` 时编码归候选窗画；但候选窗被宿主压住
-    /// （TSF UI-less 的全屏游戏 / D3D 独占全屏，见 [`Self::ui_suppressed_by_host`]）时它
-    /// **根本不画**，此时一律回到嵌入，否则编码两条出口全断、游戏里一个字都看不见。
-    /// 完整论证见 `preedit_uses_placeholder` 与 `docs/design/game-compat-tsf-uielement.md` §4.4 末。
+    /// （TSF UI-less 的全屏游戏 / D3D 独占全屏，见 [`Self::ui_suppressed_by_host`]）时根本不画，
+    /// 此时一律回到嵌入，否则编码两条出口全断。见 `docs/design/game-compat-tsf-uielement.md` §4.4。
     ///
-    /// ⛔ **别再在别处写 `preedit_display.lock().map(|m| m.in_app())`**。这个访问器是从四个
-    /// 各判各的读点收上来的，其中「混输高亮跟随」那处（`handle_candidate_nav` 里）漏掉压制态
-    /// 的后果是可见的：↑↓ 改了编码形态却不回传组合串，游戏聊天框里的编码停在旧形态。
-    /// 配置的**写入**点（`apply_ui_config` / [`Self::cmd_toggle_preedit`]）不在此列——它们存的是
-    /// 用户选的值，不是这一刻的有效值。
+    /// 别在别处写 `preedit_display.lock().map(|m| m.in_app())`：各判各的读点漏掉压制态，会让编码形态变了
+    /// 却不回传组合串。配置的写入点（`apply_ui_config` / [`Self::cmd_toggle_preedit`]）不在此列。锁毒化时
+    /// 回 `true`（嵌入），与 `preedit_uses_placeholder` 的 `unwrap_or(false)` 互为反面。
     ///
-    /// 锁毒化时回 `true`（嵌入）：与收上来的三处原有兜底逐字一致，也与
-    /// `preedit_uses_placeholder` 的 `unwrap_or(false)` 互为反面。
-    ///
-    /// ⚠️ **加锁顺序**：本函数会在**持有 `state`** 的路径里被调用（混输高亮跟随、
-    /// `maybe_enter_assoc`），而它自己要取 `uielement_*_pids` / `active_compat` / `app_compat`。
-    /// 全局持有序是 `state → uielement_*_pids → active_compat → app_compat`，它取的这几把
-    /// **必须永远排在 `state` 之后**；谁哪天写出一条「持 `active_compat` 再锁 `state`」就成环。
-    /// 本仓在同类问题上翻过一次车，见 `apply_compat_for_pid` 上方那条「两把锁在此嵌套会引入
-    /// 一个方向相反的持有序」。本函数**没有引入新的锁边**：那两个调用点本来紧接着就要调
-    /// `notify_ui_update(state)`，而那里面的压制态守卫早就在做同样的 `state → uielement_*_pids`。
+    /// 加锁顺序：本函数会在持有 `state` 的路径里被调用，而它自己要取 `uielement_*_pids` /
+    /// `active_compat` / `app_compat`。全局持有序是 `state → uielement_*_pids → active_compat →
+    /// app_compat`，谁写出「持 `active_compat` 再锁 `state`」就成环。
     pub(crate) fn preedit_in_app_effective(&self) -> bool {
         if self.ui_suppressed_by_host().is_some() {
             return true;
         }
-        // 反方向的同一个道理：宿主**没有**应用内预编辑（Linux 下不声明 Preedit 能力位的客户端，
-        // WPS / QQ 等），配置说 app_inline 也嵌不进去。addon 不能把编码转交 Fcitx5 的输入面板
-        // ——那会由 classicui 另起一个小窗，正好被我们的候选窗盖住——所以编码归候选窗顶部栏
-        // （`SetPreeditEmbedded` 按配置原值下发，app_inline 时为 false，即顶部栏）。
+        // 反方向：宿主没有应用内预编辑（Linux 下不声明 Preedit 能力位的客户端），配置说 app_inline
+        // 也嵌不进去。不能转交 Fcitx5 输入面板（classicui 另起的小窗会被候选窗盖住），故编码归候选窗
+        // 顶部栏（`SetPreeditEmbedded` 按配置原值下发，app_inline 时为 false）。
         if self
             .host_no_inline_preedit
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -7703,9 +6759,8 @@ impl Coordinator {
     /// 候选窗是否被 `ime.toggle("candwin")` 隐藏（测试/诊断用）。
     ///
     /// 住在这里而非 `debug_support.rs`：字段私有，以本模块为界。
-    ///
-    /// 命令类绑定的端到端测试拿它当探针：这个开关**只改一个内存位**——不写盘、不碰组合区，
-    /// 于是「命令执行了」与「当前组合原样不动」可以在同一条用例里同时断言。
+    /// 命令类绑定的端到端测试拿它当探针：这个开关只改一个内存位，「命令执行了」与「当前组合原样
+    /// 不动」可以在同一条用例里同时断言。
     pub fn debug_candidate_window_hidden(&self) -> bool {
         *self
             .hide_candidate_window
@@ -7718,18 +6773,15 @@ impl Coordinator {
     fn cmd_toggle_layout(&self) {
         // ── 方案声明了方向时：只翻本方案的手动覆盖，不动全局基线、不写盘 ──────────
         //
-        // 判据是「用户此刻表达的是什么」：在一个 `[candidate] layout = "vertical"` 的方案里
-        // 按切换，他要的是「这个方案里我要横排」，不是「把全局默认改成横排」。后者的效果
-        // 要等切到别的方案才显形，用户完全无法把它和刚才那次按键联系起来。
-        //
-        // 手动值随 `schema_scope_gen` 失效：切走再切回，回到方案意图（见 crate::schema_scope）。
+        // 用户在声明了方向的方案里按切换，要的是「这个方案里换方向」，不是改全局默认（那要等切到别
+        // 的方案才显形）。手动值随 `schema_scope_gen` 失效，切走再切回回到方案意图（见
+        // crate::schema_scope）。
         if self.schema_layout_intent() != wind_config::LayoutIntent::Follow {
             let vertical = {
                 let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
                 // 先收敛代际，否则刚切完方案就按切换会基于上个方案的手动值取反。
                 self.sync_schema_scope(&mut state);
-                // 翻转的基准是**当前实际生效值**，不是基线——基线在方案意图之下，
-                // 对它取反在强制竖排的方案里一次都不会改变用户看到的方向。
+                // 翻转的基准是当前实际生效值，不是基线：对基线取反在强制竖排的方案里一次都不会改变方向。
                 let want = !self.desired_orientation(&state).vertical;
                 state.layout_manual = Some(want);
                 self.sync_candidate_layout(&state);
@@ -7742,9 +6794,8 @@ impl Coordinator {
             });
             return;
         }
-        // 切换只翻**竖排位**这一根轴，不碰文字排列：后者由 `desired_orientation` 每次从当前
-        // 数据方案重新取。故在蒙古文方案里切到竖排（旋转按 `normalized()` 归零——竖排再转
-        // 90° 就是横排，没有定义）、再切回横排时旋转原样回来，方案意图不被这个二值开关吃掉。
+        // 切换只翻竖排位这一根轴，不碰文字排列（由 `desired_orientation` 每次从当前数据方案重新取）：
+        // 蒙古文方案里切到竖排再切回横排，旋转原样回来。
         let vertical = {
             let mut v = self
                 .candidate_orientation
@@ -7758,8 +6809,8 @@ impl Coordinator {
             };
             next
         };
-        // 翻转的是**基线**；实际下发仍要叠加当前模式意图（见 layout.rs），否则在强制竖排的
-        // 模式里切换会绕过覆盖直接改方向，且去重缓存与真实下发值脱节。
+        // 翻转的是基线；实际下发仍要叠加当前模式意图（见 layout.rs），否则会绕过模式覆盖，且去重缓存
+        // 与真实下发值脱节。
         {
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             self.sync_candidate_layout(&state);
@@ -7815,13 +6866,9 @@ impl Coordinator {
         // CapsLock 钩子闸门：本函数是候选/编码状态变化后的必经出口，挂在这里覆盖面最大。
         // 放在最前面，使下方的 early return（无候选无编码 → 隐藏）也走得到。
         self.sync_capslock_gate(state);
-        // 模式指示标记（拼/双/快/英/符）：仅在候选为空时显示（进入模式/无候选阶段），
-        // 一旦有候选即隐藏，减少干扰。必须纳入下方"空则隐藏"守卫——否则进入模式时
-        // 缓冲为空会直接隐藏，标记发不出。
-        // 联想候选就住在 `candidates` 里，故「有候选即隐藏模式标记」这条**原样适用**
-        // ——不必也不该为联想加判据。曾经加过一条 `|| assoc_active()`，那会让下面的
-        // 「空则隐藏」守卫在联想态成立，候选窗直接被收掉：本该只影响标记的改动，
-        // 顺手把整个窗关了。
+        // 模式指示标记（拼/双/快/英/符）：仅在候选为空时显示，一旦有候选即隐藏。必须纳入下方「空则
+        // 隐藏」守卫，否则进入模式时缓冲为空会直接隐藏、标记发不出。联想候选就住在 `candidates`
+        // 里，这条原样适用，不必为联想加判据（加了会让联想态候选窗被直接收掉）。
         let mode_label = if state.candidates.is_empty() {
             self.mode_indicator_text(state).unwrap_or_default()
         } else {
@@ -7853,15 +6900,12 @@ impl Coordinator {
             self.reset_first_show();
             return;
         }
-        // 中立通道（移动端）：到这里三道隐藏判断都过了，只发一帧快照。
-        // 下面的候选窗布局 / 字体、首显闸门、注释与悬停提示渲染、锚点与 overlay 帧都是桌面
-        // 候选窗专属，移动端没有对应物（见 session_output 模块文档）。
+        // 中立通道（移动端）：三道隐藏判断都过了，只发一帧快照。下面的布局 / 字体、首显闸门、注释与
+        // 悬停渲染、锚点与 overlay 帧都是桌面候选窗专属（见 session_output 模块文档）。
         if self.session_tx.is_some() {
-            // 提示卡（长按取 `candidate_tooltip`）要用的两样懒建结构——反查索引、按词查编码的
-            // 用户层——都在首次使用时后台构建，建好后各补刷一帧。若等到长按才触发，补刷帧会
-            // 把刚弹出的提示卡收掉（宿主在任意候选帧上收卡），用户的下一次点击落到键盘上。
-            // 所以在首个候选帧就触发，让补刷帧落在打字这段里。桌面路径每帧组装候选页时
-            // 经 `tooltip_eval_ctx` 触发反查索引；这里不组装候选页，结果丢弃，只要副作用。
+            // 提示卡（长按取 `candidate_tooltip`）要的两样懒建结构（反查索引、按词查编码的用户层）
+            // 建好后各补刷一帧，而宿主在任意候选帧上收卡；等长按才触发，补刷帧会把刚弹出的提示卡
+            // 收掉。故在首个候选帧就触发（结果丢弃，只要副作用），让补刷帧落在打字这段里。
             let ctx = self.tooltip_eval_ctx(state, &self.rt().tooltip);
             if let Some(sid) = ctx.code_schema.as_deref() {
                 let _ = self.engine_mgr.text_codes(sid);
@@ -7869,47 +6913,33 @@ impl Coordinator {
             self.emit_view(state, mode_label);
             return;
         }
-        // 模式级候选布局：按当前模式意图叠加全局基线重算方向，与上次下发不同才下发。
-        // 必须在下方 UpdateCandidates **之前**——同 channel 按序处理，UI 先改方向再填候选。
-        // 这是「强制竖排/横排」的唯一执行点，模式进入/退出各处都不再自己动布局（见 layout.rs）。
+        // 模式级候选布局：按当前模式意图叠加全局基线重算方向，与上次下发不同才下发。必须在
+        // UpdateCandidates 之前（同 channel 按序处理）。这是「强制竖排/横排」的唯一执行点（见
+        // layout.rs）。
         self.sync_candidate_layout(state);
-        // 方案级候选字体：归属是**数据方案**，随临英/快符叠加逐次按键变化，故与布局同处重算。
+        // 方案级候选字体：归属是数据方案，随临英/快符叠加逐次按键变化，故与布局同处重算。
         self.sync_candidate_font(state);
-        // 延迟首次显示：新组合首帧若非经授权（reflow 后权威坐标 / 兜底 timer）则不立即显示，
-        // 改 arm 兜底 timer，待 handle_caret_update 的权威坐标或超时再首显。避免在 reflow 前的
-        // 陈旧坐标处先显示、reflow 后再跳（根治"上屏后立即输入候选窗错位约一个上屏宽度"）。
-        // 例外①：仅显示模式标记（无候选/无编码）时跳过延迟——进入模式时缓冲为空、无刚上屏文字，
-        // 光标无 reflow 跳动风险，强制延迟只会让状态提示迟钝。
-        // 注：host-render 受限宿主**不**跳过首帧延迟——曾以「服务端直绘 SHM 无需等 reflow」
-        // 为由直显，结果首帧用的是陈旧 caret（SearchHost 的 caret 事件在首键后才到），
-        // 显示后再跳位（真机踩坑）。本机制自带兜底 timer，受限宿主 caret 事件缺席时
-        // 也会超时首显，不存在「永不显示」风险。
+        // 延迟首次显示：新组合首帧若非经授权（reflow 后权威坐标 / 兜底 timer）则不立即显示，改 arm
+        // 兜底 timer，避免先在 reflow 前的陈旧坐标处显示再跳。
+        // 例外①：仅显示模式标记（无候选/无编码）时跳过延迟，此时没有 reflow 跳动风险。
+        // host-render 受限宿主不跳过：它的 caret 事件在首键后才到，直显用的是陈旧坐标；兜底 timer
+        // 保证不会永不显示。
         let only_mode_label =
             !mode_label.is_empty() && state.candidates.is_empty() && state.input_buffer.is_empty();
         let authorized = self
             .show_authorized
             .swap(false, std::sync::atomic::Ordering::Relaxed);
-        // 例外②③：两个「不必等」的逃生口。对齐 Go handle_key_action.go:207-209——本仓移植时
-        // 只搬了「等」的一侧，漏了 Go 用来跳过等待的这两项，故此前比 Go 原版更保守：无论坐标
-        // 是否已就绪、宿主是否光标稳定，新组合首帧一律压到 reflow 权威坐标才显示。实测代价是
-        // 按键→候选窗恒定 85~95ms（其中 C++ OnLayoutChange 的 50ms debounce 占大头），连打时
-        // 候选窗只来得及显示 2~29ms，表现为「迟钝」。
-        //   ② skip_caret_pending：compat.toml 把该宿主标记为「光标稳定、无 reflow 漂移」，
-        //      直接首显。连打场景**只有这一项能生效**——③ 依赖的组合起点会被
-        //      reset_first_show() 在每次上屏时复位（Go 的 clearState 同样如此）。
-        //   ③ 坐标已就绪：已有过有效 caret 且本轮组合起点已锁定 ⇒ 没有漂移可等。
-        //      对应 Go 的 `!caretValid || !compositionStartValid` 取反。
-        //   ④ 组合前的空闲上报可作锚点：见 `caret_cache_is_fresh_idle_report`。补的是 ③ 在
-        //      连打时的死角——③ 的组合起点每次上屏被清、重锁又要等那个等不到的权威坐标，
-        //      于是 fast 档连打时两个逃生口全部失效，只能走等待。
+        // 其余「不必等」的逃生口（不放行时新组合首帧一律压到权威坐标，连打时显得迟钝）：
+        //   ② skip_caret_pending：compat.toml 标记该宿主「光标稳定、无 reflow 漂移」，直接首显。
+        //   ③ coords_ready：已有有效 caret 且本轮组合起点已锁定 ⇒ 没有漂移可等。组合起点每次上屏
+        //      被 reset_first_show() 清掉，连打时它不生效。
+        //   ④ idle_anchor：组合前的空闲上报可作锚点（见 `caret_cache_is_fresh_idle_report`），补 ③
+        //      在连打时的死角。
         let skip_caret_pending =
             self.effective_first_show_mode() == wind_config::app_compat::FirstShowMode::Instant;
-        // ⚠ 焦点后的第一个组合不吃这条：那时的空闲上报最不可信（EverEdit 实测错 1200px）。
-        // 它只被挡在「立即显示」之外，仍走 25ms 短兜底——足够 probe 把缓存刷成正确位置。
-        // ⚠ 只给 probe 不可信的宿主用：probe 可信时等那 25ms 让它说话更准——它是宿主在本次
-        // 组合里现测的，而空闲上报是按键**之前**的。EverEdit 实测空闲上报滞后一拍（点击移
-        // 光标后既不发 caret_update 也不发 selection_changed），拿它抢跑 ⇒ 候选窗恒慢一拍，
-        // 而 probe 1ms 后就给出了正确位置。见 `probe_is_untrusted`。
+        // 焦点后的第一个组合不吃 ④：那时的空闲上报最不可信，它只被挡在立即显示之外，仍走短兜底，
+        // 足够 probe 把缓存刷对。④ 也只给 probe 不可信的宿主用：probe 是本次组合里现测的，空闲上报
+        // 可能滞后一拍（点击移光标后宿主不一定上报），见 `probe_is_untrusted`。
         let idle_anchor = self.probe_is_untrusted()
             && self.caret_cache_is_fresh_idle_report()
             && !self
@@ -7931,14 +6961,13 @@ impl Coordinator {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let is_first_frame = !authorized && !shown && !only_mode_label;
-        // 自绘候选的宿主不等坐标：闸门的全部意义是等宿主 reflow 后的权威坐标，
-        // 而它根本不用坐标。
+        // 自绘候选的宿主不等坐标：闸门的全部意义是等权威坐标，而它根本不用坐标。
         let caret_free = self
             .caret_independent
             .load(std::sync::atomic::Ordering::Relaxed);
-        // 上屏后开的新组合（`first_show_after_commit`）：插入点必然已前移，instant 的遗留坐标、
-        // idle_anchor 的「按键前」坐标都是上屏前的陈旧值，逃生口一律不放行，老老实实等
-        // 权威坐标（兜底超时到期时消费该标记，见 `fire_pending_first_show`）。
+        // 上屏后开的新组合（`first_show_after_commit`）：插入点必然已前移，instant 的遗留坐标与
+        // idle_anchor 的按键前坐标都是陈旧值，逃生口一律不放行（兜底到期时消费该标记，见
+        // `fire_pending_first_show`）。
         let after_commit = self
             .first_show_after_commit
             .load(std::sync::atomic::Ordering::Relaxed);
@@ -7946,8 +6975,7 @@ impl Coordinator {
             && !caret_free
             && (after_commit || (!skip_caret_pending && !coords_ready && !idle_anchor))
         {
-            // 唯一的「等」出口。与下面的放行日志成对，两条合起来即可从服务端日志判定
-            // 每一帧走了哪条路、以及是哪个逃生口生效——不必再对着 TSF 日志比时间戳。
+            // 唯一的「等」出口，与下面的放行日志成对：从服务端日志即可判定每一帧走了哪条路。
             debug!(
                 "first_show 闸门 → 等待权威坐标（arm {}ms 兜底）: skip_caret_pending=0 coords_ready=0 idle_anchor=0",
                 self.planned_first_show_timeout_ms()
@@ -7956,28 +6984,13 @@ impl Coordinator {
             return;
         }
         if is_first_frame {
-            // instant 档用的是上一轮遗留的坐标，必然是「非权威」；coords_ready 那条是已锁定
-            // 的本轮组合起点，属权威，不置位。
-            //
-            // idle_anchor 跟 instant 同待遇而非跟 coords_ready：它是**按键前**的光标位置，
-            // 组合一开始首字母就落进编辑区，真实光标随即前移一个字符宽（记事本实测 15px）。
-            // 不置位则 tol 只有 3px，那一次权威坐标必然触发 reshow——首显是准的，却要当着
-            // 用户的面跳一格。置位后走 settle 放宽容差（0.8×行高 ≈ 44px）吸收掉。
+            // instant 用的是上一轮遗留坐标，必然非权威；coords_ready 是已锁定的本轮组合起点，属权威，
+            // 不置位。idle_anchor 跟 instant 同待遇：它是按键前的位置，首字母落下后真实光标前移一个
+            // 字宽，不置位则 3px 容差必然触发一次 reshow，置位后由 settle 放宽容差吸收。
             if skip_caret_pending || idle_anchor {
                 self.first_show_was_provisional
                     .store(true, std::sync::atomic::Ordering::Relaxed);
             }
-            // ★ 空闲上报坐标**就是**组合起点——它是按键前的光标位置。抢在宿主之前锁上。
-            //
-            // 部分宿主根本没实现组合起点：微信（Qt WebView）报的 compStart 恒等于当前光标 x
-            // （实测逐帧 `compStart=(2241,783)` 与 `x=2241` 相等），于是「组合起点」随每个字母
-            // 右移一格。首显用的是按键前坐标（对的），reshow 却改用宿主那份偏右一格的 compStart
-            // ⇒ 打第二个字母时候选窗自己挪 12px。「同一组合只锁首个 compStart」那条守卫防的是
-            // 起点持续漂移，但它锁到的已经是**第一个字母落下之后**的位置，差的就是这一格。
-            //
-            // ⚠ 只在 idle_anchor 这条路上锁：这份坐标是宿主对当前插入点的直接测量，够格当起点。
-            // 其余路径（兜底用的旧缓存、instant 用的上一轮遗留坐标）本身就可能是错的，锁进
-            // 组合起点会让 reshow 也救不回来——组合起点一旦锁定，本组合内不再更新。
             debug!(
                 "first_show 闸门 → 立即显示（逃生口）: instant={} coords_ready={} idle_anchor={}",
                 skip_caret_pending as u8, coords_ready as u8, idle_anchor as u8
@@ -7989,21 +7002,16 @@ impl Coordinator {
         let grid_range = self.grid_visible_range(state);
         let (start, end) = grid_range.unwrap_or_else(|| self.page_range(state));
         let per_page = self.page_size(state);
-        // 展开态一帧有好几页候选，悬停气泡**只为鼠标下的那一格**渲染——每格各渲染一份会把
-        // 持锁热路径上的开销放大成行数倍，而 UI 本来就只显示悬停那一格的气泡（悬停一变，
-        // `mouse_hover` 就会重新下发）。
+        // 展开态一帧有好几页候选，悬停气泡只为鼠标下的那一格渲染：UI 本来只显示那一格，逐格渲染
+        // 会把持锁热路径的开销放大成行数倍。
         let hover_now = self.hover_target();
         // 展开态带序号的格子（平铺下标区间）：从高亮行行首起，按 `grid_index_fill` 往下顺延，
         // 与数字键的选择范围 `select_range` 同源。
         let grid_index = self.grid_index_of(state, grid_range);
-        // 候选序号标签：
-        //  - 数字透镜：数字键正在录表达式 → 选词改用字母标签 a/b/c（实例关了字母选词除外）
-        //  - 其余（含自由输入）：正常序号
-        //
-        // ★ 自由输入（Free 透镜）下字母与数字**都是**字面输入，没有键能按序号选——曾经因此
-        // 干脆不画序号。维护者 2026-10-07 改定为照常显示：与其它状态的候选窗外观一致，
-        // 尤其快捷输入历史在这里置首、候选一多时，序号是用户辨认「第几条」的唯一参照。
-        // 选词靠空格（高亮）、方向键与 `keys.quick_input_select`（出厂 Ctrl+序号）。
+        // 候选序号标签：数字透镜录表达式时选词改用字母标签 a/b/c（实例关了字母选词除外），其余正常
+        // 序号。自由输入（Free 透镜）下没有键能按序号选，仍照常显示序号：外观一致，且快捷输入历史置
+        // 首、候选一多时序号是辨认「第几条」的唯一参照。选词靠空格、方向键与
+        // `keys.quick_input_select`。
         let mix_lens = matches!(state.active, Some(ModeKind::Mix(_))).then(|| self.mix_lens(state));
         // 关掉 `numeric_letter_select` 的实例字母是字面输入，标签回到数字序号。
         let alpha =
@@ -8018,20 +7026,17 @@ impl Coordinator {
         let scope_prefix = rt.config.input.scope_relax.prefix.as_str();
         // 换位纠错候选的标记（`input.correction.marker`，留空不加）。
         let corrected_prefix = rt.config.input.correction.marker.as_str();
-        // 编码提示(反查):拼音来源候选的 `${code_rev}` / `${shuangpin}` 只看候选来源,显不显示
-        // 由分到的注释模板决定(设计 §13.6)。码表类候选的剩余编码由码表引擎在 convert 内填。
+        // 编码提示（反查）：拼音来源候选的 `${code_rev}` / `${shuangpin}` 只看候选来源，显不显示由
+        // 分到的注释模板决定。码表类候选的剩余编码由码表引擎在 convert 内填。
         // 悬停提示与注释段共用的整页上下文（编码来源方案、调试归属、注释库作用域…），
         // 见 `TooltipEvalCtx`；移动端按下标取提示走同一份。
         let tip_ctx = self.tooltip_eval_ctx(state, tip);
         // 反查表读锁在候选循环外取一次（写方只有拆字段的装卸：sync_chaizi_assets /
         // ensure_chaizi_async）。
         let reverse = self.reverse.read().unwrap_or_else(|e| e.into_inner());
-        // 注释段（候选右侧灰字）模板，见 `crate::comment`。横竖各持一份、互不影响：
-        // 两种排布的可用横向空间差一个数量级，能放什么本就不是同一个答案。
-        // 按 模式 → 方案 → 方案类型 → 全局 取当前态那一格，见 `comment_template_for`。
-        // ⚠️ 注释模板按 `vertical` 位取，旋转态因此走**横排**那一份模板。
-        // 这是「旋转态的 vertical 恒为 false ⇒ 所有按方向分叉的配置走横排支」这条总规则的
-        // 一个实例，不是遗漏。
+        // 注释段（候选右侧灰字）模板，见 `crate::comment`。横竖各持一份（可用横向空间差一个数量级），
+        // 按 模式 → 方案 → 方案类型 → 全局 取当前态那一格，见 `comment_template_for`。旋转态的
+        // `vertical` 恒为 false，故走横排那一份（所有按方向分叉的配置同此规则）。
         let comment_vertical = self.desired_orientation(state).vertical;
         // 解析一次、循环里逐候选只渲染（模板串对整页相同）。
         let comment_tpl = crate::comment::Template::parse(&self.comment_template_for(
@@ -8044,9 +7049,8 @@ impl Coordinator {
         // 本页每个候选的气泡原文，右键菜单按段 / 按行复制、上屏时从这里取（见 handle_tooltip）。
         let mut tip_page: Vec<crate::handle_tooltip::TooltipPageEntry> =
             Vec::with_capacity(end.saturating_sub(start));
-        // 命令候选加前缀标注（截断后再加,保证前缀不被截掉）。
-        // 检索范围放宽补进来的候选同理加标注（`input.scope_relax.prefix`），让用户
-        // 一眼看出「这几条是超出当前检索范围补来的」，而非词库里本该有的常用字。
+        // 命令候选加前缀标注（截断后再加，保证前缀不被截掉）。检索范围放宽补进来的候选同理加标注
+        // （`input.scope_relax.prefix`），让用户看出这几条是超出当前检索范围补来的。
         let prefix_of = |c: &Candidate| {
             if c.is_command && !cmd_prefix.is_empty() {
                 cmd_prefix
@@ -8105,11 +7109,9 @@ impl Coordinator {
                     text: c.text.clone(),
                     rendered,
                 });
-                // 注释段（候选右侧灰字）：渲染当前排布对应的模板。
-                // 与悬停提示无耦合——注释放不下的内容不往气泡里塞，气泡有自己的
-                // `ui.tooltip.sections`，塞了会与之重复。
-                // 上方注释条开关开：模板字面 `\n` 拆出上段（`comment_above`）。开关关走原路径，
-                // 不拆分、字面 `\n` 原样留在 `comment`，`comment_above` 恒空。
+                // 注释段：渲染当前排布对应的模板。注释放不下的内容不往气泡里塞（气泡有自己的
+                // `ui.tooltip.sections`）。上方注释条开关开：模板字面 `\n` 拆出上段（
+                // `comment_above`）；关则不拆分、`\n` 原样留在 `comment`。
                 let (comment_above, comment) = if cand_cfg.comment_above {
                     self.comment_parts_for(c, &comment_tpl, comment_max, &reverse, &dict_schema)
                 } else {
@@ -8177,35 +7179,20 @@ impl Coordinator {
                 }
                 h => h, // 翻页器 tag / -1
             };
-        // preedit 是否嵌入宿主（app_inline）：嵌入时编码插入宿主、光标随输入右移，候选窗须锚在
-        // 组合起点（缓冲头部）而非跟随光标末尾；非嵌入时 preedit 在候选窗、宿主光标不动，用当前光标。
-        // 该标志同时门控下方 preedit 是否下发候选窗渲染（嵌入时候选窗不重复显示 preedit）。
-        // 联想态**不再强制非嵌入**：宿主侧此刻挂着占位组合（见 `assoc_composition`），
-        // 归属如实按配置走即可。嵌入模式下 `maybe_enter_assoc` 干脆不给标识
-        // （`state.preedit` 为空），候选窗因此没有编码栏、高度不跳。
+        // preedit 是否嵌入宿主（app_inline）：嵌入时编码插入宿主、光标随输入右移，候选窗须锚在组合
+        // 起点而非光标末尾；非嵌入时用当前光标。该标志同时门控 preedit 是否下发候选窗渲染。
+        // 联想态不强制非嵌入：宿主侧挂着占位组合（见 `assoc_composition`），归属按配置走；嵌入模式下
+        // `maybe_enter_assoc` 不给标识，候选窗没有编码栏、高度不跳。
         let in_app = self.preedit_in_app_effective();
-        // 坐标基准：嵌入模式且组合起点已锁定 → 用组合起点（钉在缓冲头部，不随输入移动）；否则当前光标。
-        // 组合起点由 handle_caret_update 在本组合首个有效坐标处锁定。候选窗首显已由"延迟首显"门控
-        // 保证发生在 reflow 后的权威坐标处。无效坐标回退最近有效坐标，避免跑到屏幕左上角。
-        // ★ 首次下发候选窗时，若首显坐标来自「组合前的空闲上报」，那它**就是**组合起点
-        // ——空闲上报是按键前的光标位置，组合正是从那里开始的。抢在宿主之前锁上。
+        // 坐标基准：嵌入模式且组合起点已锁定 → 用组合起点；否则当前光标。无效坐标回退最近有效坐标。
         //
-        // 部分宿主根本没实现组合起点：微信（Qt WebView）报的 compStart 恒等于当前光标 x
-        // （实测逐帧 `compStart=(2241,783)` 与 `x=2241` 相等），于是「组合起点」随每个字母
-        // 右移一格。首显用的是按键前坐标（对的），reshow 却改用宿主那份偏右一格的 compStart
-        // ⇒ 打第二个字母时候选窗自己挪 12px。「同一组合只锁首个 compStart」那条守卫防的是
-        // 起点持续漂移，但它锁到的已经是**第一个字母落下之后**的位置，差的就是这一格。
+        // 首次下发时若坐标来自组合前的空闲上报，它就是组合起点（按键前的光标位置），抢在宿主之前
+        // 锁上：部分宿主报的 compStart 恒等于当前光标，锁到的已是首字母之后的位置（见
+        // docs/architecture/caret-position-host-compat-notes.md B 类）。
         //
-        // ⚠ 判据用 `!shown`（本轮尚未下发过）而**不是** `is_first_frame`：兜底 timer 到期那条
-        // 路径先置了 `show_authorized`，`is_first_frame` 已为 false，绑在它上面会漏掉整条兜底
-        // 首显——微信「焦点后第一个组合」走的正是这条，表现为第三个字好了、第二个字仍挪一格。
-        //
-        // ⚠ 只在坐标确实来自空闲上报时锁：兜底用的旧缓存、`instant` 用的上一轮遗留坐标本身
-        // 就可能是错的，锁进组合起点会让 reshow 也救不回来（本组合内不再更新）——WPS 表格的
-        // 「恒慢一步」正是宿主自己先报了旧单元格的 compStart 造成的，前车之鉴。
-        // ⚠ 同样限 probe 不可信的宿主：probe 可信时宿主自己报的 compStart 就够用，而空闲上报
-        // 可能滞后（EverEdit）——把一个陈旧坐标锁成组合起点，后续 reshow 就再也救不回来了
-        // （本组合内不再更新）。EverEdit 实测：reshow 正确判出 447px 偏移，位置却纹丝不动。
+        // 判据用 `!shown` 而非 `is_first_frame`：兜底 timer 那条路径先置了 `show_authorized`，绑在
+        // `is_first_frame` 上会漏掉整条兜底首显。只在坐标确实来自空闲上报、且 probe 不可信时锁：
+        // 旧缓存、instant 遗留坐标或滞后的空闲上报锁进组合起点后，本组合内 reshow 也救不回来。
         if !shown && self.probe_is_untrusted() && self.caret_cache_is_fresh_idle_report() {
             let mut cs_lock = self
                 .composition_start
@@ -8219,19 +7206,14 @@ impl Coordinator {
             .composition_start
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        // ★ 非首显、非坐标校正的重绘（悬停 / 翻页 / 候选变化）复用候选窗**当前**的位置基准：
-        // `state.caret_x/y` 是缓存，会被 probe 的 `absorb_probe_coords`、以及被 settle 吸收掉的
-        // 那一帧权威坐标悄悄改写，而候选窗并不跟着动。此时直接读缓存 ⇒ 鼠标一指候选窗，位置
-        // 跳一个字符（微信实测 483→496）。`cs.2` 那条不需要本机制（组合起点本就钉死），但它在
-        // 连打时每次上屏都被 `reset_first_show` 清掉，`idle_anchor` 首显时更是还没锁上。
+        // 非首显、非坐标校正的重绘（悬停 / 翻页 / 候选变化）复用候选窗当前的位置基准，理由见
+        // `shown_anchor` 字段文档。
         let anchor = *self.shown_anchor.lock().unwrap_or_else(|e| e.into_inner());
         let hold_anchor = anchor.2 && !is_first_frame && !authorized;
-        // ⚠ 锚点必须**压过** `cs.2`，不能排在它后面：组合起点常常在首显**之后**才由宿主报来
-        // （微信实测首显 03.980 用 (483,987)，38ms 后才锁定 (496,989)），一旦锁上就接管位置，
-        // 把候选窗从首显处挪到组合起点——而上一行 `settle` 刚判定这 13px 不值得校正。排在
-        // `cs.2` 后面等于让组合起点从侧面绕过 settle，悬停一次就补上那 13px。
-        // 真正该动候选窗的两种情形（首显、坐标校正）都不满足 `hold_anchor`，照常走下面两条。
-        // 本轮首次下发、组合起点还没锁：pre_reflow 帧报过组合起点就先用它（见字段注释，A2-42）。
+        // 锚点必须压过 `cs.2`：组合起点常在首显之后才由宿主报来，排在它后面等于让组合起点绕过
+        // settle，悬停一次就把刚判定不值得校正的那几像素补上。真正该动候选窗的两种情形（首显、
+        // 坐标校正）都不满足 `hold_anchor`，照常走下面两条。
+        // 本轮首次下发、组合起点还没锁：pre_reflow 帧报过组合起点就先用它（见字段注释）。
         let pre_cs = *self
             .pre_reflow_comp_start
             .lock()
@@ -8252,9 +7234,8 @@ impl Coordinator {
         };
         let (caret_x, caret_y, caret_height, caret_valid) = self.resolve_caret_for_ui(cx, cy, ch);
         let n_items = items.len();
-        // 编码区**恒下发**：谁来画由 `preedit_host_owned` 表达。
-        // 曾经是「in_app 就发空串」——那等于把渲染策略焊进数据通道，自绘编码栏的宿主
-        // 拿不到数据（Android 侧一度只能靠改显示模式配置绕开）。
+        // 编码区恒下发，谁来画由 `preedit_host_owned` 表达：in_app 就发空串等于把渲染策略焊进数据
+        // 通道，自绘编码栏的宿主拿不到数据。
         let (preedit, preedit_caret) = self.display_preedit(state);
         let (cand_fixed, cand_fixed_x, cand_fixed_y) = self.candidate_fixed_pos();
         // mode_label 已在顶部计算（纳入空则隐藏守卫）：作为候选窗内联标记随候选窗一并显示。
@@ -8279,15 +7260,13 @@ impl Coordinator {
             fixed_y: cand_fixed_y,
         });
         self.push_overlay_frame((caret_x, caret_y), anchor_source);
-        // 记下候选窗**实际**用的位置基准，供后续非坐标重绘复用（见上面 `hold_anchor`）。
-        // 只在首显和坐标校正时更新：复用锚点的那些重绘按定义不改变位置，回写等于把
-        // 「谁有资格移动候选窗」这条判据又散成两处。
+        // 记下候选窗实际用的位置基准，供后续非坐标重绘复用（见上面 `hold_anchor`）。只在首显和坐标
+        // 校正时更新，免得「谁有资格移动候选窗」散成两处。
         if !hold_anchor {
             *self.shown_anchor.lock().unwrap_or_else(|e| e.into_inner()) = (cx, cy, true);
-            // 基准**只在首显时**用显示位置初始化：那一刻还没有「上一次被认可的插入点」。
-            // 之后它由 `handle_caret_update` 用宿主报的坐标维护（settle 吸收与 reshow 两处）。
-            // ⚠ 若在这里跟着每次下发一起覆盖，reshow 刚写进去的插入点会被显示位置盖回去 ⇒
-            // 组合起点钉住位置后，基准与宿主坐标的差值恒定存在，同一个 dx 反复触发 reshow。
+            // 基准只在首显时用显示位置初始化，之后由 `handle_caret_update` 用宿主坐标维护（settle 吸收
+            // 与 reshow 两处）。每次下发都覆盖的话，reshow 刚写进的插入点会被显示位置盖回去，同一个
+            // dx 反复触发 reshow。
             if !shown {
                 *self
                     .caret_baseline
@@ -8318,21 +7297,18 @@ impl Coordinator {
     pub(crate) fn notify_ui_hide(&self) {
         // 候选窗隐藏即会话终结：无条件收回 CapsLock 拦截。
         //
-        // ★ 这里刻意**不查 state** 而是直接归零。闸门的两个方向后果不对称：少吃只是
-        // 「CapsLock 绑定这一次没生效」，多吃却是「用户在别的应用里 CapsLock 按不动」。
-        // 凡拿不准就归零。
+        // 刻意不查 state 而直接归零：少吃只是 CapsLock 绑定这一次没生效，多吃却是用户在别的应用里
+        // CapsLock 按不动。拿不准就归零。
         wind_keys::capslock_hook::set_should_eat(false);
         wind_keys::capslock_hook::set_alt_gate(0);
         wind_keys::capslock_hook::set_alt_pid(0);
-        // 悬停归零同理：窗口没了，悬停目标不可能还有意义。UI 侧 `CandidateMouse::reset_hover`
-        // 清的只是防抖闸门（决定何时**发**事件），高亮与 tooltip 读的是本值——不清这一句，
-        // 特殊模式下窗口再次弹出时会带着上次的悬停高亮，鼠标却从未移动过。
+        // 悬停归零同理。UI 侧 `CandidateMouse::reset_hover` 清的只是防抖闸门，高亮与 tooltip 读的是
+        // 本值，不清则窗口再次弹出时带着上次的悬停高亮。
         self.clear_hover();
         self.emit_hide();
         self.reset_first_show();
-        // Linux：候选收起 ⇒ 候选右键菜单失去操作对象，一并收掉（主菜单不受影响：它可以在没有
-        // 候选时打开，一条无关的 HideCandidates 不该把它收掉——与 Windows 连带收掉任何菜单不同）。
-        // ⚠ 本函数常在持 `state` 锁时被调用，这里绝不能取锁，见 `candidate_menu_open`。
+        // Linux：候选收起 ⇒ 候选右键菜单失去操作对象，一并收掉（主菜单可以在没有候选时打开，不收）。
+        // 本函数常在持 `state` 锁时被调用，这里绝不能取锁，见 `candidate_menu_open`。
         #[cfg(ext_presenter)]
         if self
             .candidate_menu_open
@@ -8346,12 +7322,9 @@ impl Coordinator {
 
     /// 注入渲染端反向事件（[`UiEvent`]）——headless/Android FFI 的公开入口。
     ///
-    /// 桌面路径由 `new` 里 spawn 的事件线程消费 `Receiver<UiEvent>` 后调用同一分发；
-    /// Android 的候选点击/翻页/菜单动作语义上就是 UiEvent，Kotlin 侧经 FFI 直调本方法，
-    /// 不再另设通道（入方向无排队语义，与 `MessageHandler` 的方法直调先例一致）。
-    ///
-    /// 线程契约：可从任意**非协调器回调**线程调用（内部按需自行加锁/推送；
-    /// 与桌面事件线程同款纪律，勿在持 state 锁的回调里重入）。
+    /// 桌面路径由 `new` 里 spawn 的事件线程消费 `Receiver<UiEvent>` 后调用同一分发；Android 的候选
+    /// 点击/翻页/菜单动作经 FFI 直调本方法，不另设通道。可从任意非协调器回调线程调用，勿在持
+    /// state 锁的回调里重入。
     pub fn inject_ui_event(&self, ev: UiEvent) {
         self.handle_ui_event(ev);
     }
@@ -8450,17 +7423,13 @@ impl Coordinator {
         self.show_tip(label);
     }
 
-    /// 开 / 关**单字输入**，以新状态重过滤并刷新候选。
+    /// 开 / 关单字输入，以新状态重过滤并刷新候选。
     ///
-    /// # ⚠️ 与 [`Self::set_filter_mode`] 的关键区别：**不写配置**
+    /// 与 [`Self::set_filter_mode`] 不同，不写配置：只改内存里的 [`State::single_char_override`]，
+    /// 重启或切方案即回到配置值。本项是方案级配置，写盘要落到 `schema_overrides/{id}.toml`
+    /// （另一条链，须登记 `SideCommitter`），别照抄那边的 `set_user_string`。
     ///
-    /// 那个切一次就写回 `input.filter_mode`；本项只改内存里的
-    /// [`State::single_char_override`]，重启或切方案即回到配置值（2026-09-07 用户拍板）。
-    /// 照抄那边加一行 `set_user_string` 是错的——本项是**方案级**配置，写盘要落到
-    /// `schema_overrides/{id}.toml`，那是另一条链（须登记 `SideCommitter`）。
-    ///
-    /// 目标状态与当前**生效**状态相同时直接返回，故「方案本来就开着，用户又按了一次开」
-    /// 不会平白留下一个临时态——那会让随后的切方案清空变成用户可感知的跳变。
+    /// 目标与当前生效状态相同时直接返回，免得平白留下一个临时态，让随后的切方案清空变成可感知的跳变。
     pub fn set_single_char(&self, on: bool) {
         let tip = {
             let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -8471,10 +7440,10 @@ impl Coordinator {
         }
     }
 
-    /// 持 state 锁的调用点用的本体。返回**要显示的状态泡文案**，`None` = 无变化。
+    /// 持 state 锁的调用点用的本体。返回要显示的状态泡文案，`None` = 无变化。
     ///
-    /// ⚠️ 状态泡刻意由调用方在**锁外**弹（`show_tip` 会走 UI 通道）。这与
-    /// `set_filter_mode` 里那句 `drop(s); self.show_tip(label);` 是同一条约束。
+    /// 状态泡刻意由调用方在锁外弹（`show_tip` 会走 UI 通道），同 `set_filter_mode` 的
+    /// `drop(s); self.show_tip(label);`。
     ///
     /// `on` 为 `None` = 清掉临时态、回落配置层（`single_char:follow` 动词）。
     pub(crate) fn set_single_char_in(
@@ -8509,8 +7478,8 @@ impl Coordinator {
 
     /// 在开 / 关之间切换（`single_char:toggle` 与裸 `single_char` 的实现）。
     ///
-    /// 从**当前生效**状态取反，而不是从临时态取反：临时态为 `None` 时用户看到的是配置
-    /// 值，切换必须从他看见的那个状态出发，否则第一次按热键可能毫无变化。
+    /// 从当前生效状态取反，而不是从临时态取反：临时态为 `None` 时用户看到的是配置值，否则第一次
+    /// 按热键可能毫无变化。
     pub fn toggle_single_char(&self) {
         let tip = {
             let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -8529,8 +7498,8 @@ impl Coordinator {
 
     /// 执行一个单字输入按键动词（[`wind_config::SingleCharAction`]）。
     ///
-    /// 三个消费点（`key_actions` 空缓冲 / `key_actions` 缓冲非空 / `session_actions`）
-    /// 共用这一处，免得三份 `match` 各自漂移——本仓「三处必须一致」的约束已栽过四次。
+    /// 三个消费点（`key_actions` 空缓冲 / `key_actions` 缓冲非空 / `session_actions`）共用这一处，
+    /// 免得三份 `match` 各自漂移。
     pub(crate) fn apply_single_char_action(
         &self,
         state: &mut State,
@@ -8561,18 +7530,6 @@ impl Coordinator {
         self.refresh_config_in_memory(|c| c.input.t2s.enabled = on);
     }
 
-    /// 两个转换方向都开着时把 `t2s` 关掉并**落盘**，让配置文件回到合法状态。
-    ///
-    /// # 为什么关的是 t2s 而不是 s2t
-    ///
-    /// 走到这里说明配置里已经是「两个都 true」，**无从知道用户后开的是哪一个**——
-    /// 配置是一份快照，不带顺序。于是取一个可解释的固定优先级：保简入繁出。理由是
-    /// 它是既有功能、用户基数大，而繁入简出是后加的小众档；反过来会让一批老用户在
-    /// 某次升级后莫名其妙地不出繁体了。
-    ///
-    /// 真正「后开的赢」那条语义住在 [`Self::toggle_conversion_direction`]（热键/工具栏/
-    /// 菜单/命令栏）与设置页的互斥联动里——那两处**知道**用户此刻按的是哪一个。本函数
-    /// 是最后一道防线，接的是那两处都够不着的入口。
     /// 启动期归一（见 [`Self::normalize_conversion_exclusivity`]）：读自己的运行时配置，
     /// 不像 reload 那样有一份现成的 `new_cfg`。
     // 唯一调用方是 construct::new（desktop-ui 特性）；wind-webdata 等不带该特性的依赖方编译时它无人调用。
@@ -8584,6 +7541,11 @@ impl Coordinator {
         }
     }
 
+    /// 两个转换方向都开着时把 `t2s` 关掉并落盘，让配置文件回到合法状态。
+    ///
+    /// 配置是快照，不知道用户后开的是哪一个，故取固定优先级保简入繁出（既有功能、用户基数大）。
+    /// 「后开的赢」由 [`Self::toggle_conversion_direction`] 与设置页的互斥联动负责（它们知道用户
+    /// 此刻按的是哪个）；本函数是兜住其它入口的最后一道防线。
     fn normalize_conversion_exclusivity(&self, cfg: &Config) {
         if !cfg.input.has_conversion_conflict() {
             return;
@@ -8592,12 +7554,11 @@ impl Coordinator {
         self.persist_t2s_enabled(false);
     }
 
-    /// 确保 `to_traditional` 方向（true = 简入繁出）的转换器在内存里：缺则**同步**读盘。
+    /// 确保 `to_traditional` 方向（true = 简入繁出）的转换器在内存里：缺则同步读盘。
     /// 返回该方向是否可用（数据缺失为 false）。
     ///
-    /// 只在切换入口与配置生效时调——那是一次性的用户动作，不是逐键路径。release 实测
-    /// s2t 1.3–3.4 ms、t2s 0.1–0.3 ms（2026-10-08，Linux 页缓存热，`data_needs` 的
-    /// `converter_load_timing`），远低于设计稿的 50 ms 门槛，故同步加载、不弹「正在加载」。
+    /// 只在切换入口与配置生效时调（一次性的用户动作，不是逐键路径）。加载只需几毫秒
+    /// （见 `data_needs` 的 `converter_load_timing`），故同步加载、不弹「正在加载」。
     pub(crate) fn ensure_converter(&self, to_traditional: bool) -> bool {
         let slot = if to_traditional { &self.s2t } else { &self.t2s };
         let mut g = slot.lock().unwrap_or_else(|e| e.into_inner());
@@ -8611,11 +7572,8 @@ impl Coordinator {
         g.is_some()
     }
 
-    /// 切换入口（热键、菜单、工具栏、命令栏）共用：要**打开**的方向先确保数据在内存，
-    /// 缺数据就提示「简繁数据缺失」且不切。返回是否切了。
-    ///
-    /// 两条入口曾各写一份：热键路径查「已加载」、菜单路径不查——数据缺失时菜单照样把开关
-    /// 拨上，状态显示「繁」而上屏原样不转。
+    /// 切换入口（热键、菜单、工具栏、命令栏）共用：要打开的方向先确保数据在内存，缺数据就提示
+    /// 「简繁数据缺失」且不切，免得开关拨上而上屏原样不转。返回是否切了。
     pub(crate) fn try_toggle_conversion(&self, to_traditional: bool) -> bool {
         let turning_on = {
             let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -8641,13 +7599,11 @@ impl Coordinator {
     /// `reload_user_config` 与方案设置变更（`refresh_schema_derived_config`）调。各项方向不同：
     ///
     /// - 拆字表：装 / 卸都做（见 `sync_chaizi_assets`；运行期按需装的那份不卸）。
-    /// - 主码表反查索引：只**补建**（后台，`spawn_index_warm` 单飞、已就绪即返回）。消费者
-    ///   （联想、`${code_rev}`）只问 `reverse_index_if_ready`，从不自己建——不在这里补，
-    ///   设置页刚打开的功能就一直拿不到索引。不需要时**不卸**：它有内存护栏（只留在用的几份），
-    ///   失效由 `invalidate_schema` / `reload_from_config` 负责。
-    /// - 用户层编码索引：只**清空**（不需要时）；需要时由消费者首次用到时后台建。
-    /// - 简繁转换器：只**加载**（开着的方向），从不卸载——切换常来回按；`input.s2t.variant`
-    ///   改了要重启才生效（沿用原有行为，已加载的那份不重读）。
+    /// - 主码表反查索引：只补建（后台，`spawn_index_warm` 单飞）。消费者（联想、`${code_rev}`）只问
+    ///   `reverse_index_if_ready`、从不自己建，不在这里补则刚打开的功能一直拿不到索引。不需要时不卸
+    ///   （有内存护栏），失效由 `invalidate_schema` / `reload_from_config` 负责。
+    /// - 用户层编码索引：只清空（不需要时）；需要时由消费者首次用到时后台建。
+    /// - 简繁转换器：只加载开着的方向，从不卸载（切换常来回按）；`input.s2t.variant` 改了要重启才生效。
     pub(crate) fn apply_data_needs(&self) {
         let needs = self.data_needs();
         self.engine_mgr
@@ -8673,18 +7629,11 @@ impl Coordinator {
         self.engine_mgr.warm_hot_schema_fields();
     }
 
-    /// 切换简繁转换的**一个方向**，返回切换后该方向是否开着。
+    /// 切换简繁转换的一个方向，返回切换后该方向是否开着。`to_traditional=true` 即简入繁出（`s2t`），
+    /// `false` 即繁入简出（`t2s`）。
     ///
-    /// `to_traditional=true` 即简入繁出（`s2t`），`false` 即繁入简出（`t2s`）。
-    ///
-    /// # 为什么两个方向必须互斥
-    ///
-    /// 内部候选域只有一个。两个方向同时开，出口就是「先按一个方向转、再按另一个转
-    /// 回来」——产物是绕了一圈的**近似**原文（一对多的字回不来），用户既得不到繁体也
-    /// 得不到简体，还看不出是哪一步造成的。所以开一个即关另一个。
-    ///
-    /// ★ 被顺手关掉的那个**也要落盘**：只改内存的话，下次配置重载（设置页保存任意一项
-    /// 都会触发）就把它从配置文件里读回来，两个方向重新同时开着，且用户什么都没做。
+    /// 两个方向必须互斥：内部候选域只有一个，同时开就是转过去再转回来，产物是近似原文（一对多的
+    /// 字回不来）。被顺手关掉的那个也要落盘，否则下次配置重载会把它读回来、两个方向重新同时开着。
     pub(crate) fn toggle_conversion_direction(&self, to_traditional: bool) -> bool {
         let (on, other_off) = {
             let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -8720,9 +7669,9 @@ impl Coordinator {
 
     /// 影子规则：当前 code 是否对该候选有规则（置顶/删除），决定菜单"恢复默认"可用性。
     ///
-    /// `cand_id` 取候选的稳定 id（短语候选非空）：动态短语的规则 `word` 记的是写入当天的
-    /// 求值文本，只按 word 查会在次日恒判「无规则」——菜单「恢复默认」永久灰显，用户既改
-    /// 不动也清不掉。判据与 `apply_shadow` / `candidate_op` 的写入端保持同一把键。
+    /// `cand_id` 取候选的稳定 id（短语候选非空）：动态短语的规则 `word` 记的是写入当天的求值文本，
+    /// 只按 word 查会在次日恒判「无规则」、菜单永久灰显。判据与 `apply_shadow` / `candidate_op`
+    /// 的写入端同一把键。
     pub(crate) fn shadow_has_rule(
         &self,
         schema: &str,
@@ -8745,9 +7694,8 @@ impl Coordinator {
     /// 优先，未配则跟随全局——全局开关仍在各自的 `input.auto_pair.chinese/english` 里，
     /// 本函数只回答「这个宿主要不要一刀切关掉」。
     ///
-    /// ⚠ 三个消费点必须都问它：`active_pairs()`、`english_pairs_via_pipeline()`、
-    /// `push_english_pair_config()`。前两条走协调器，第三条是 C++ 侧英文配对引擎——
-    /// 纯英文模式的标点键根本到不了协调器，漏接它等于「切到英文就又配对了」。
+    /// 三个消费点必须都问它：`active_pairs()`、`english_pairs_via_pipeline()`、
+    /// `push_english_pair_config()`。第三条是 C++ 侧英文配对引擎：纯英文模式的标点键到不了协调器。
     pub(crate) fn auto_pair_allowed_here(&self) -> bool {
         self.active_compat
             .lock()
@@ -8758,8 +7706,8 @@ impl Coordinator {
 
     /// 当前模式下生效的配对表（按中/英标点 + 各自开关）
     pub(crate) fn active_pairs(&self, chinese_punct: bool) -> Option<Vec<(char, char)>> {
-        // per-app 关闭：返回 None 等价于「配对表为空」，插对与右符号跳出一并失效。
-        // 在取表这一层收口，而不是在每个使用点各加一个 if——后者是本仓栽过四次的形态。
+        // per-app 关闭：返回 None 等价于「配对表为空」，插对与右符号跳出一并失效。在取表这一层收口，
+        // 不在每个使用点各加一个 if。
         if !self.auto_pair_allowed_here() {
             return None;
         }
@@ -8809,9 +7757,8 @@ impl Coordinator {
     fn mouse_hover(&self, target: i32) {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.candidates.is_empty() {
-            // 候选已清空 → 悬停不再对应屏幕上任何东西，归零后返回（无候选时窗口本就不显示，
-            // 不必重绘）。★ 必须**归零而非早退**：早退会让「鼠标移出候选窗」发出的那条
-            // `Hover(-1)` 在候选恰好清空时被整个吞掉，旧值一路残留到下一次候选窗显示。
+            // 候选已清空 → 悬停不再对应屏幕上任何东西，归零后返回。必须归零而非早退：否则
+            // 「鼠标移出候选窗」的 `Hover(-1)` 在候选恰好清空时被吞掉，旧值残留到下一次显示。
             self.clear_hover();
             return;
         }
@@ -8841,19 +7788,11 @@ impl Coordinator {
         }
     }
 
-    /// 当前状态该显示的图标主字。**这是这个标签的唯一产地。**
+    /// 当前状态该显示的图标主字，这个标签的唯一产地（语言栏图标 + IPC、工具栏共用）。
     ///
-    /// 从前 `build_status`（语言栏图标 + IPC）、`handle_menu`（工具栏）、
-    /// `status_indicator_text`（状态气泡）各抄了一份
-    /// `effective_chinese ? schema : caps ? "A" : "英"`。三份字面量意味着任何一次
-    /// "让标签可配"的改动都得记得改三处，漏一处的表现是"设置里改了，某个面还是旧字"。
-    ///
-    /// ⚠️ 状态气泡**刻意没有**改成调用本函数：它比这里多一个维度——`ui.status.items`
-    /// 的内容段过滤（关掉 `caps` 段时大写锁定不顶替、落回中英显示）。硬套进来会静默
-    /// 丢掉那个维度。它只共享 `[ui.labels]` 的**取值**，不共享分支结构。
-    ///
-    /// 中文态回落的「中」不可配：那一档是"方案没配 `icon_label`"的兜底，属于方案侧
-    /// 的缺省而非一个用户会想改的状态标签。
+    /// 状态气泡刻意没有改成调用本函数：它多一个维度（`ui.status.items` 的内容段过滤，关掉 `caps`
+    /// 段时大写锁定不顶替），只共享 `[ui.labels]` 的取值，不共享分支结构。中文态回落的「中」不可配：
+    /// 那是方案没配 `icon_label` 的兜底。
     pub(crate) fn mode_icon_label(&self, chinese_mode: bool, caps_lock: bool) -> String {
         // 有效中文：中文模式且大写锁定未开（对齐 Go effectiveChinese = chineseMode && !capsLockOn）。
         if chinese_mode && !caps_lock {
@@ -8898,17 +7837,13 @@ impl Coordinator {
         .then_some(sep)
     }
 
-    /// 「热键激活的模式活着吗」—— `STATUS_HOTKEY_SESSION` 的判据，**单一真相源**。
+    /// 「热键激活的模式活着吗」—— `STATUS_HOTKEY_SESSION` 的判据，单一真相源。
     ///
-    /// 抽出来是因为它落在**每一次按键**的返回路径上（`push_hotkey_session_if_changed`），
-    /// 而走整个 `build_status()` 只为取这一个 bool 太贵：那边还要 `mode_icon_label()`
-    /// 造一个 String、`key_down_tsf_hashes()` / `key_up_tsf_hashes()` 各 collect 一个全量
-    /// `Vec<u32>`，三次分配白白落在热路径上。
+    /// 抽出来是因为它在每一次按键的返回路径上（`push_hotkey_session_if_changed`），走整个
+    /// `build_status()` 只为取一个 bool 太贵。
     ///
-    /// ⚠️ 判据**刻意不含「且没有 composition」**：C++ 侧 `_HasInputSession()` 是 OR，
-    /// 有 composition 时本位多余但无害；加上那个条件反而要在这里复算一份「有没有
-    /// composition」，与 DLL 的 `HasActiveComposition()` 成为两个真相源 —— 那正是前一版
-    /// （边沿驱动）出问题的形态。宁可多置一位。
+    /// 判据刻意不含「且没有 composition」：C++ 侧 `_HasInputSession()` 是 OR，多置一位无害；加上
+    /// 反而要复算一份 composition 状态，与 DLL 的 `HasActiveComposition()` 成为两个真相源。
     pub(crate) fn hotkey_session_now(&self) -> bool {
         // 无占位的联想会话也算：宿主里没有组合，DLL 只能靠这一位知道该转发按键。
         // 先于取 state 锁（`assoc_bare_session_now` 自己会取），避免重入。
@@ -8940,12 +7875,12 @@ impl Coordinator {
             )
         };
         // 判据收在 `hotkey_session_now()` 一处（它也在每次按键的返回路径上被调）。
-        // ⚠️ 必须在上面那个 guard 释放**之后**取：`std::sync::Mutex` 不可重入。
+        // 必须在上面那个 guard 释放之后取：`std::sync::Mutex` 不可重入。
         let hotkey_session = self.hotkey_session_now();
         let soft_keyboard = self
             .softkeyboard_active
             .load(std::sync::atomic::Ordering::Relaxed);
-        // 键盘面：按键交还输入法，C++ 不启用软键盘总闸。**每次都从当前面重新读**，
+        // 键盘面：按键交还输入法，C++ 不启用软键盘总闸。每次都从当前面重新读，
         // 不另存一份 atomic——多一份镜像就多一处会与切面动作漂移的状态。
         let soft_keyboard_keys = soft_keyboard
             && self
@@ -8973,38 +7908,16 @@ impl Coordinator {
         }
     }
 
-    /// 焦点事件携带的 caret 落缓存的**唯一入口**。
+    /// 应用 per-app 的光标坐标兼容变换（`caret_use_top` 抬升 + `caret_offset_*` 校正），并返回与本次
+    /// 变换同一时刻的规则快照：后续协议帧判据共用它，免得焦点恰在两次取锁之间切换时拿到两个
+    /// 宿主的规则拼盘。
     ///
-    /// 焦点 caret 有两条到达路径——同步段的 [`Self::handle_focus_gained_caret`] 与重型段的
-    /// [`Self::handle_focus_gained`]——而**重型段必然晚于同步段执行**（见 `server.rs::handle_client`：
-    /// 同步段先回 `ModePush` 解除 DLL 阻塞，重型段延后到响应写出之后才跑）。
+    /// 两个调用点（`apply_focus_caret` 与 `handle_caret_update`）必须都走它，漏一处的症状是「有时
+    /// 生效有时不生效」。偏移校正修的是宿主报告的光标坐标本身（兼容层），与主题里候选窗相对光标的
+    /// 偏移（样式层）不是一回事，所有消费者一并受益。
     ///
-    /// 此前重型段自己直写 `state.caret_*`，既没有 `height == 0` 守卫也不做 `caret_use_top`
-    /// 变换，于是把同步段刚做好的两道处理**整个抹掉**：退化矩形进了缓存，微信一类宿主的
-    /// 坐标差一个行高。两处口径分裂既不编译报错也不 panic，只表现为「焦点后第一次定位偏一行」，
-    /// 是典型的看不见的分裂。故合并到此，两条路径都必须经由它。
-    /// 应用 per-app 的光标坐标兼容变换：`caret_use_top` 抬升 + `caret_offset_*` 校正。
-    ///
-    /// ★ **两个调用点必须都走它**（`apply_focus_caret` 与 `handle_caret_update`）。
-    /// `caret_use_top` 原本就是分头写在这两处的，任何新增变换只要漏一处，症状就是
-    /// 「有时生效有时不生效」——取决于本次坐标是走焦点路径还是常规更新路径，极难归因。
-    ///
-    /// 偏移校正针对的是**宿主报告的坐标本身系统性偏移**（如 Windows Terminal，别家输入法
-    /// 同样偏）。与主题里的候选窗偏移不是一回事：那个是候选窗相对光标的布局（样式层），
-    /// 这个修的是光标坐标（兼容层），故候选窗/状态气泡/HUD 等所有消费者一并受益。
-    ///
-    /// `caret_offset_*` 以 dp（96dpi 基准逻辑像素）配置，而宿主上报的 caret 坐标是物理像素
-    /// （屏幕坐标，DPI-aware 进程下即物理像素）——同一份 dp 配置在 100%/200% 缩放的显示器上
-    /// 观感应一致，故须按**目标点所在显示器**的当前 DPI 换算成物理像素后再叠加，而不能直接
-    /// 相加。多屏且缩放不同时，用哪块屏的 DPI 只能在换算时按坐标现查，缓存不得。
-    ///
-    /// 组合起点坐标同步平移以保持锚点一致；为 0（未提供）时不动，避免把「没有值」
-    /// 变成「一个偏移后的假值」。
-    /// 对 caret 应用当前宿主兼容变换，并返回与本次变换**同一时刻**的规则快照。
-    ///
-    /// 高频 caret 路径后续还要判断宿主协议帧对；若变换后再锁一次 `active_compat`，焦点恰在
-    /// 两次取锁之间切换时就可能拿到两个宿主的规则拼盘。返回 Copy 快照既少一次锁，也让
-    /// 本帧所有兼容判据共享同一来源。
+    /// `caret_offset_*` 以 dp 配置而宿主坐标是物理像素，须按目标点所在显示器的 DPI 现查换算，不得缓存。
+    /// 组合起点同步平移；为 0（未提供）时不动，免得把「没有值」变成假值。
     fn apply_caret_compat(&self, data: &mut CaretData) -> ActiveCompat {
         let active = *self.active_compat.lock().unwrap_or_else(|e| e.into_inner());
         let (use_top, dx, dy) = (
@@ -9027,9 +7940,13 @@ impl Coordinator {
         active
     }
 
+    /// 焦点事件携带的 caret 落缓存的唯一入口。
+    ///
+    /// 两条到达路径（同步段 [`Self::handle_focus_gained_caret`] 与重型段 [
+    /// `Self::handle_focus_gained`]）都必须经由它；重型段必然晚于同步段执行，自己直写
+    /// `state.caret_*` 会把同步段做好的`height == 0` 守卫与 `caret_use_top` 变换整个抹掉。
     fn apply_focus_caret(&self, data: &CaretData, via: &str) {
-        // 独立日志行：与 handle_caret_update 区分开，否则无法从日志判断焦点坐标走的是哪条路
-        // （2026-08-01 那轮修复第一版就因为看不出这点，白跑了一轮真机验证）。
+        // 独立日志行：与 handle_caret_update 区分开，否则无法从日志判断焦点坐标走的是哪条路。
         tracing::debug!(
             "{via} (no-show): x={} y={} h={} src={}",
             data.x,
@@ -9052,10 +7969,8 @@ impl Coordinator {
 
     /// [`Self::resolve_caret_for_ui`] 的判据内核：这一组坐标本身是否可信（不看历史值）。
     ///
-    /// ★ **负坐标是合法的**：主显示器左上角才是虚拟桌面原点，摆在主屏左侧/上方的显示器，
-    /// 其坐标整块为负。把负数一并判为"异常"会让副屏用户的光标永远取不到有效坐标，
-    /// 从而永远走回退分支——症状与本次要修的「气泡永远在主屏」一模一样。
-    /// 上界 32000 只用于挡住 i32 溢出级的脏数据（宿主偶发上报的未初始化值）。
+    /// 负坐标是合法的：主显示器左上角才是虚拟桌面原点，主屏左侧/上方的显示器坐标整块为负，
+    /// 判为异常会让副屏永远取不到有效坐标。上界 32000 只挡 i32 溢出级的脏数据（未初始化值）。
     fn caret_is_valid(x: i32, y: i32, height: i32) -> bool {
         height > 0 && !(x == 0 && y == 0) && x > -32000 && x < 32000 && y > -32000 && y < 32000
     }
@@ -9063,14 +7978,11 @@ impl Coordinator {
     /// 解析「用于 UI 定位」的光标坐标：无效坐标回退到最近一次有效坐标。
     /// 返回 `(x, y, height, valid)`，`valid=false` 表示本进程至今没收到过任何可信坐标。
     ///
-    /// ★ **候选窗与状态气泡必须共用本函数**。`state.caret_*` 里可以躺着 (0,0)：
-    /// [`Self::handle_caret_update`] 是**先写缓存、后判 `now_valid`** 的（无效坐标写进去了才
-    /// return），所以「读 `state.caret_*` 得到的坐标」与「可信坐标」并不等价。候选窗一直有这道
-    /// 闸门、状态气泡没有，于是同一份 (0,0) 只让气泡飞到主显示器左上角 —— 多显示器下表现为
-    /// 「气泡永远在主屏」，而候选窗一切正常，两者症状分裂正是这道闸门只装了一半造成的。
+    /// 候选窗与状态气泡必须共用本函数：[`Self::handle_caret_update`] 先写缓存、后判 `now_valid`，
+    /// `state.caret_*` 里可能躺着 (0,0)。只有一方过这道闸门，就会出现候选窗正常、气泡飞到主屏左上角。
     ///
-    /// (0,0) 当哨兵而非合法坐标：主显示器左上角虽是合法位置，但宿主「没有坐标」时报的也是它，
-    /// 两者不可区分；判为无效只损失「光标恰在主屏左上角」这一像素级罕见情形。
+    /// (0,0) 当哨兵：宿主「没有坐标」时报的也是它，两者不可区分；判为无效只损失光标恰在主屏左上角
+    /// 这一像素级情形。
     fn resolve_caret_for_ui(&self, cx: i32, cy: i32, ch: i32) -> (i32, i32, i32, bool) {
         let valid = Self::caret_is_valid(cx, cy, ch);
         let mut lv = self
@@ -9095,16 +8007,13 @@ impl Coordinator {
         if !si.enabled {
             return;
         }
-        // 宿主接管了 UI（TSF UI-less）或前台是 D3D 独占全屏：气泡也是本进程的一个窗口，
-        // 盖到独占全屏的游戏上同样会把它踢出独占态。规范原话是 TIP 的**任何** UI 都得经
-        // UIElementMgr 征得宿主同意——气泡没有对应的 UIElement，只能不弹。
+        // 宿主接管了 UI（TSF UI-less）或前台是 D3D 独占全屏：气泡也是本进程的窗口，同样会把游戏踢出
+        // 独占态。TIP 的任何 UI 都得经 UIElementMgr 征得宿主同意，气泡没有对应的 UIElement，只能不弹。
         if let Some(reason) = self.ui_suppressed_by_host() {
             debug!("status_tip 被压住: {reason}");
             return;
         }
-        // 空文本不弹窗：ui.status.items 全部取消勾选时合成文本为空，此前会渲染出一个
-        // 什么都没有的小气泡（本地窗口路径无空文本判断，只有 host-render 的 render_frame 有）。
-        // 与设置页「全部取消则不显示气泡」的说明保持一致。
+        // 空文本不弹窗：ui.status.items 全部取消勾选时合成文本为空（与设置页「全部取消则不显示」一致）。
         if text.trim().is_empty() {
             return;
         }
@@ -9117,19 +8026,13 @@ impl Coordinator {
         self.show_tip_at(text, raw_x, raw_y, raw_h);
     }
 
-    /// **持 state 锁时**弹状态泡。
-    ///
-    /// 与 [`Self::show_tip`] 的唯一区别是 caret 从调用方已有的 `state` 里读，而不是自己
-    /// 再取一次 state 锁（本仓 state 锁**不可重入**，重入即死锁）。
-    ///
-    /// ⚠️ 锁序仍是 `state → last_valid_caret`（后者在 `resolve_caret_for_ui` 内取），
-    /// 与候选窗路径同向，不构成反序。`show_tip` 那句「先放锁再解析」说的是它自己没必要
-    /// 持着锁，不是「持锁调用会反序」。
+    /// 持 state 锁时弹状态泡。与 [`Self::show_tip`] 的唯一区别是 caret 从调用方已有的 `state` 里读
+    /// （state 锁不可重入）。锁序仍是 `state → last_valid_caret`，与候选窗路径同向。
     pub(crate) fn show_tip_locked(&self, state: &State, text: &str) {
         self.show_tip_at(text, state.caret_x, state.caret_y, state.caret_height);
     }
 
-    /// 状态泡的发送本体（caret 由调用方给出）。**不取 state 锁**。
+    /// 状态泡的发送本体（caret 由调用方给出）。不取 state 锁。
     fn show_tip_at(&self, text: &str, raw_x: i32, raw_y: i32, raw_h: i32) {
         self.show_tip_with(text, raw_x, raw_y, raw_h, None);
     }
@@ -9144,7 +8047,7 @@ impl Coordinator {
     }
 
     /// `forced = None` 时按 [`Self::status_position`] + 原始坐标可信度解析定位（见
-    /// [`Self::placement_for`]），解析为「不显示」就直接返回。**不取 state 锁**。
+    /// [`Self::placement_for`]），解析为「不显示」就直接返回。不取 state 锁。
     fn show_tip_with(
         &self,
         text: &str,
@@ -9193,9 +8096,8 @@ impl Coordinator {
             }
         };
         self.emit_status_tip(text.to_string(), x, y, caret_height, duration_ms, placement);
-        // 记录实际显示出去的文本，供 show_status 去重。临时提示（模式标记/主题名等）
-        // 也记在这里：它们会覆盖掉旧的状态文本，从而使随后的同名状态气泡照常显示，
-        // 不会被误判成"内容没变"。
+        // 记录实际显示出去的文本，供 show_status 去重。临时提示也记在这里：它们覆盖了旧状态文本，
+        // 随后的同名状态气泡才不会被误判成「内容没变」。
         *self
             .last_status_text
             .lock()
@@ -9224,32 +8126,22 @@ impl Coordinator {
         }
     }
 
-    /// `ui.status.show_on_focus`：焦点切到新输入框时强制显示一次状态气泡。
+    /// 不走 [`Self::show_status`]：那条路会因「文本与上次相同」跳过，而焦点切换正是「状态没变但仍要
+    /// 提示」的场景。
     ///
-    /// **不走 [`Self::show_status`]**：那条路会因「文本与上次相同」整个跳过，而焦点切换正是
-    /// 「状态没变但仍要提示」的场景——走去重就等于这个开关在同状态下完全不生效。
+    /// 坐标可信度闸门：`follow_caret` 模式下只在坐标属 TSF 语义域时才显示。`OnSetFocus` 不是按键
+    /// 上下文，同步 edit session 必被拒绝，回退链交出的是跨窗口的陈旧 Win32 光标。拿不到就不显示、
+    /// 不回退：弹在错误位置是负价值。DLL 侧会很快补一条 TSF 坐标，由 [`Self::handle_caret_update`]
+    /// 消费本次挂起并补显示。`fixed` 与锚点模式不读 caret，不受本闸门约束。
     ///
-    /// ## 坐标可信度闸门
-    ///
-    /// `follow_caret` 模式下只在坐标属 TSF 语义域时才显示。理由：`OnSetFocus` 不是按键上下文，
-    /// 同步 edit session 必被宿主拒绝，回退链交出的是**跨窗口的** Win32 光标——Word 只在正文行
-    /// 维护它，标题行上取到的是别处的陈旧值（实测偏差 814px）。用那种坐标弹气泡，正是用户
-    /// 反馈的「还没输入时定位非常不准」。
-    ///
-    /// 拿不到就**不显示**，不做任何回退。下界 = 和没有这个功能一样好，不存在比原状更差的分支；
-    /// 而弹在错误位置是实实在在的负价值。DLL 侧排队档会在 1~2ms 内补一条 TSF 坐标，
-    /// 由 [`Self::handle_caret_update`] 消费本次挂起并补显示，故绝大多数宿主上并不会真的落空。
-    ///
-    /// `fixed` 与锚点模式不读 caret，故不受本闸门约束，一律直接显示。
-    /// `client_token` 用于按**宿主**去重，见 [`Self::last_focus_tip_token`]：同一宿主内部换
-    /// docMgr（Excel 单元格 ↔ 公式编辑栏）不该重复弹。
+    /// `client_token` 用于按宿主去重，见 [`Self::last_focus_tip_token`]。
     pub(crate) fn show_focus_status_if_enabled(&self, client_token: u64) {
         let si = &self.rt().config.ui.status;
         if !si.enabled || !si.show_on_focus {
             return;
         }
-        // 宿主去重。放在最前面：后面几条分支（fixed / TSF 闸门 / 挂起）都属于「这一次该怎么弹」，
-        // 而这里回答的是**该不该弹**，语义在先。token=0 是旧 DLL 未携带的占位，不参与去重。
+        // 宿主去重放在最前面：后面几条分支回答「这一次该怎么弹」，这里回答「该不该弹」。
+        // token=0 是旧 DLL 未携带的占位，不参与去重。
         if client_token != 0 {
             let mut last = self
                 .last_focus_tip_token
@@ -9280,10 +8172,9 @@ impl Coordinator {
             s.caret_source
         };
         // 不需要等 TSF 坐标的两种宿主，直接显示：
-        // - 宿主自己摆窗口（`caret_independent`，Wayland 的 input popup 由合成器按光标摆）：
-        //   坐标根本不用，等它只会永远等不到；
-        // - 宿主声明光标可信（`host_caret_trusted`，Linux addon）：来源恒为 UNKNOWN（没有 TSF
-        //   语义域），按 TSF 判就永远挂起，「焦点变化时显示」在 Linux 上从不出现。
+        // - 宿主自己摆窗口（`caret_independent`，Wayland 的 input popup 由合成器按光标摆）；
+        // - 宿主声明光标可信（`host_caret_trusted`，Linux addon）：来源恒为 UNKNOWN，
+        //   按 TSF 判就永远挂起。
         let host_caret_trusted = self
             .caret_independent
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -9295,11 +8186,8 @@ impl Coordinator {
                 .store(false, std::sync::atomic::Ordering::Relaxed);
             self.show_tip(&self.status_indicator_text());
         } else {
-            // 挂起，等 DLL 补来的 TSF 坐标。挂起在下次焦点事件/失焦时作废。
-            //
-            // 兜底为 `last` / `hide` 时**不设超时**：超时到期只能拿现有的不可信坐标显示，那正是
-            // 本闸门要挡的东西。兜底为**锚点**时设约 150ms 超时——锚点不是光标坐标，不在这条
-            // 反对理由之列，到期仍无 TSF 坐标就显示在锚点（C2-33 / GH#148）。
+            // 挂起，等 DLL 补来的 TSF 坐标；下次焦点事件/失焦时作废。兜底为 `last` / `hide` 时不设超时
+            // （到期只能拿不可信坐标，正是要挡的）；兜底为锚点时设约 150ms 超时，到期显示在锚点。
             debug!(
                 "focus_tip → 挂起: 坐标来源 {} 非 TSF 域，等待权威坐标",
                 wind_ipc::protocol::caret_source::name(source)
@@ -9328,10 +8216,9 @@ impl Coordinator {
         let show = |k: &str| items.is_empty() || items.iter().any(|i| i == k);
 
         let mut parts: Vec<String> = Vec::new();
-        // 方案 / 中英 / 大写锁定。三者共用首个槽位：关掉 caps 段时大写锁定不再顶替，
-        // 落回正常的中英/方案显示。
-        // 标签取值与语言栏图标 / 工具栏同源（`[ui.labels]`），但**分支结构是本函数独有的**：
-        // 下面这三档比 `mode_icon_label` 多了 `show()` 内容段过滤，不能合并过去。
+        // 方案 / 中英 / 大写锁定共用首个槽位：关掉 caps 段时大写锁定不再顶替，落回中英/方案显示。
+        // 标签取值与语言栏图标 / 工具栏同源（`[ui.labels]`），但多了 `show()` 内容段过滤，
+        // 不能合并进 `mode_icon_label`。
         if caps && show("caps") {
             parts.push(self.rt().config.ui.labels.caps_label());
         } else if !show("schema") {
@@ -9372,22 +8259,14 @@ impl Coordinator {
         if full && show("full_width") {
             parts.push("全".into());
         }
-        // 转换方向：简入繁出显示「繁」，繁入简出显示「简」。默认态两个都关，此段整体省略
-        // ——于是「简」出现本身就意味着「有转换、出的是简体」。
-        //
-        // ★ 两个方向共用 `s2t` 这一个内容段（`ui.status.items`），不新开一个：它回答的是
-        //   「上屏出什么体」，而两个方向互斥，一个槽位就够。
-        // ★ 这一段是繁入简出**唯一**的视觉反馈：它按设计不进右键菜单也不进工具栏，
-        //   而 `show_status` 在文本与上次相同时整个跳过 ⇒ 不加这里，按下热键会是彻底的
-        //   「按了没反应」。
+        // 转换方向：简入繁出显示「繁」，繁入简出显示「简」，默认态整段省略。两个方向共用 `s2t` 这一个
+        // 内容段（互斥，一个槽位就够）。这一段是繁入简出唯一的视觉反馈（它不进右键菜单与工具栏）。
         if show("s2t") {
             if s2t {
                 parts.push("繁".into());
             } else if t2s {
-                // ★ 这里带方向而 s2t 那档不带，是**刻意的不对称**：简入繁出是多数人用的
-                // 那档，「繁」这一个字已经沿用很久，加成「简→繁」是拿所有人的习惯去换
-                // 一个对称性。繁入简出没有历史包袱，而它单显「简」会与默认态（不转换、
-                // 本段整体省略）说的是同一件事——只有写出方向才看得出「转过」。
+                // 刻意不对称：「繁」沿用已久，不拿多数人的习惯换对称性；繁入简出单显「简」会与默认态
+                // 无法区分，只有写出方向才看得出「转过」。
                 parts.push("繁→简".into());
             }
         }
@@ -9396,8 +8275,7 @@ impl Coordinator {
 
     /// 显示合成的核心状态气泡（中英/标点/全半角/简繁/方案切换共用）。
     ///
-    /// 文本与上次显示的完全相同时**整个跳过**，不弹窗——用户通过 `ui.status.items`
-    /// 关掉某段后，切换该状态不再改变气泡文本，弹一个和上次一模一样的气泡纯属噪声。
+    /// 文本与上次显示的完全相同时整个跳过：用户关掉某段后，切换该状态不再改变气泡文本，再弹纯属噪声。
     pub(crate) fn show_status(&self) {
         // 同 push_state_update：状态泡文案含标点态，先让方案级覆盖落地。
         self.sync_schema_scope_locked();
@@ -9414,11 +8292,10 @@ impl Coordinator {
         self.show_tip(&text);
     }
 
-    /// `toggle_mode` 的分发内核：切中英，并**回传**切换前那串编码的处置结果。
+    /// `toggle_mode` 的分发内核：切中英，并回传切换前那串编码的处置结果。
     ///
-    /// 抽出来是因为出口有两个（见 [`SwitchCommit`]）。此前 `dispatch_hotkey` 直接
-    /// `let (status, _)` 丢掉 commit_text，于是经热键表/菜单触发的中英切换既不上屏
-    /// 也不结束组合——与本次修的方案切换是同一个缺口，只是少了一个出口。
+    /// 抽出来是因为出口有两个（见 [`SwitchCommit`]）：丢掉 commit_text 的话，经热键表/菜单触发的
+    /// 中英切换既不上屏也不结束组合。
     pub(crate) fn toggle_mode_with_commit(&self) -> (Option<StatusUpdateData>, SwitchCommit) {
         self.toggle_mode_with_commit_cased(false)
     }
@@ -9433,12 +8310,10 @@ impl Coordinator {
         (status, SwitchCommit { text, had_pending })
     }
 
-    /// `ime.set("cn-en", …)` 的执行体：**置**中英态为目标值（区别于 toggle 的翻转）。
+    /// `ime.set("cn-en", …)` 的执行体：置中英态为目标值（区别于 toggle 的翻转）。
     ///
-    /// 调用方保证「已在目标态」根本不会进来（`ime_state_set` 先判，只提示不动作），
-    /// 待编码零扰动的问题不存在；走到这里必然真切换，编码按 toggle 同一策略交还宿主。
-    /// CapsLock 开着时走 [`CapsCancelSwitch::Directed`]：取消锁定的同时直达目标，
-    /// 不吃 `mode_after_cancel` 的归位改写。
+    /// 调用方保证「已在目标态」不会进来（`ime_state_set` 先判），走到这里必然真切换，编码按 toggle
+    /// 同一策略交还宿主。CapsLock 开着时走 [`CapsCancelSwitch::Directed`]，不吃 `mode_after_cancel`。
     pub(crate) fn cn_en_set_with_commit(
         &self,
         chinese: bool,
@@ -9448,7 +8323,7 @@ impl Coordinator {
         (status, SwitchCommit { text, had_pending })
     }
 
-    /// **按键上下文**的热键分发：与 [`Self::dispatch_hotkey`] 共用同一张动作表，区别只在
+    /// 按键上下文的热键分发：与 [`Self::dispatch_hotkey`] 共用同一张动作表，区别只在
     /// 「切换前未上屏编码」的出口——这里经 `KeyAction` 交还宿主（`CommitText` 会顺带
     /// `EndComposition`），那里只能 push。返回 `None` = 该动词未被接受，调用方不吞键。
     ///
@@ -9470,9 +8345,9 @@ impl Coordinator {
 
     /// 分发热键动作；返回是否已处理。
     ///
-    /// ⚠ **无按键上下文**的路径（全局热键 `WM_HOTKEY`、托盘/工具栏菜单）用本函数：
-    /// 会动输入状态的两个动词在这里把编码经 push 出口交给宿主。按键路径请走
-    /// [`Self::dispatch_hotkey_keyed`]，否则空文本清不掉宿主里的组合。
+    /// 无按键上下文的路径（全局热键 `WM_HOTKEY`、托盘/工具栏菜单）用本函数：会动输入状态的两个
+    /// 动词在这里把编码经 push 出口交给宿主。按键路径请走 [`Self::dispatch_hotkey_keyed`]，否则空文本
+    /// 清不掉宿主里的组合。
     pub(crate) fn dispatch_hotkey(&self, action: &str) -> bool {
         match action {
             "toggle_mode" => {
@@ -9518,9 +8393,8 @@ impl Coordinator {
                     return true;
                 }
                 self.show_status();
-                // 工具栏「繁」格随切即刷（对齐 toggle_full_width 与菜单路径）。缺这步时
-                // 只有一闪而过的状态气泡，工具栏状态滞后到下次刷新事件，被误感知为“切换卡”。
-                // 关掉 s2t 的那一半同样要刷——互斥让一次按键改动两个方向。
+                // 工具栏「繁」格随切即刷（同 toggle_full_width 与菜单路径），否则工具栏滞后到下次刷新。
+                // 关掉 s2t 的那一半同样要刷：互斥让一次按键改动两个方向。
                 self.notify_toolbar();
                 true
             }
@@ -9599,12 +8473,9 @@ impl Coordinator {
                 action: name.clone(),
             });
         }
-        // macOS：activate_ime 也走本进程的 Carbon 全局热键。
-        //
-        // 它**不**读 keys.global_hotkeys——那个列表是「哪些动作要额外提升为全局」的开关，
-        // 而 activate_ime 的语义本来就只有全局一种（本输入法没激活时才需要它）。Windows 上
-        // 它同样不在该列表里，是由 ctfmon 从注册表直接接管的；macOS 无对应机制，只能自己注册。
-        // 判据因此是「配了就注册」，与 sync_direct_switch_hotkey 的 Windows 分支一致。
+        // macOS：activate_ime 也走本进程的 Carbon 全局热键。它不读 keys.global_hotkeys（那个列表是
+        // 「哪些动作要额外提升为全局」），其语义本来只有全局一种；Windows 上由 ctfmon 从注册表接管，
+        // macOS 无对应机制，故配了就注册，与 sync_direct_switch_hotkey 的 Windows 分支一致。
         #[cfg(target_os = "macos")]
         {
             let hotkey = self.rt().config.keys.activate_ime.trim().to_string();
@@ -9625,19 +8496,13 @@ impl Coordinator {
 
     /// 配置里是否给 CapsLock 配了会话态绑定（决定要不要装全局钩子）。
     ///
-    /// 判据取**编译后的绑定表**而非原始配置串：动词写错、键名写错的条目在 `ConfigBundle::build`
-    /// 里已被剔除，那些情况不该装钩子（用户的配置根本不会生效，装了纯属白担全局钩子的风险）。
-    /// ★ **方案级取并集，不取活跃方案那一份。** 钩子是进程级资源，且
-    /// `SetWindowsHookExW` 重复装会留下卸不掉的旧钩子（见 `sync_capslock_hook`）——
-    /// 按活跃方案取值就成了「方案 A 配了、方案 B 没配 ⇒ 每次切方案装卸一次」，
-    /// 表现是「切完方案 CapsLock 时灵时不灵」。这与 C++ 转发表取并集是同一条判据
-    /// （资源进程级 + 切换不幂等），只是它落在 Rust 侧。
+    /// 判据取编译后的绑定表而非原始配置串：写错的条目已在 `ConfigBundle::build` 剔除，不该为不生效
+    /// 的配置白担全局钩子的风险。方案级取并集而非活跃方案那份：钩子是进程级资源，且重复装会留下
+    /// 卸不掉的旧钩子（见 `sync_capslock_hook`），按活跃方案取就会每次切方案装卸一次。
     pub fn capslock_bound(&self) -> bool {
         let rt = self.rt();
-        // ★ 大小写档位循环**选了 CapsLock 时**同样要求装钩子：CapsLock 的 keydown 压根不
-        // 转发给服务端、锁定态又由系统在 TSF 之前维护 —— 没有钩子，功能永不触发且毫无报错。
-        // 判据是「配置的触发键恰好是 CapsLock」而不是「功能开着」：选了 tab 的用户（macOS
-        // 的推荐值）走的是 keydown 主链路，不该为此白装一个全局钩子。
+        // 大小写档位循环选了 CapsLock 时同样要装钩子：CapsLock 的 keydown 不转发、锁定态由系统在 TSF
+        // 之前维护，没有钩子功能永不触发。判据是「触发键恰好是 CapsLock」：选 tab 的走 keydown 主链路。
         rt.english_case_cycle_vk == Some(keymap::VK_CAPITAL)
             || rt
                 .session_keys
@@ -9648,11 +8513,9 @@ impl Coordinator {
 
     /// keyup 到达服务端时，该键的会话动作是否仍应执行。
     ///
-    /// ★ 唯一为假的情形：CapsLock **且**钩子装着。keyup 能到服务端，本身就证明钩子那一刻
-    /// 没吃它 ⇒ 系统已经翻转了锁定态（不可撤销），此时再执行绑定动作就是「和系统抢」，
-    /// 用户看到翻页与大写同时发生。详见 `message_handler` 调用点的长注释。
-    ///
-    /// 纯函数：真装钩子的分支在 CI 的 Linux 上跑不到，判据必须能脱离平台单独验证。
+    /// 唯一为假的情形：CapsLock 且钩子装着。keyup 能到服务端就证明钩子那一刻没吃它，系统已翻转了
+    /// 锁定态，再执行绑定动作就是和系统抢（翻页与大写同时发生）。见 `message_handler` 调用点。
+    /// 纯函数：真装钩子的分支在 Linux CI 上跑不到，判据须能脱离平台单独验证。
     pub(crate) fn key_up_session_action_allowed(
         key_code: u32,
         capslock_hook_installed: bool,
@@ -9662,10 +8525,9 @@ impl Coordinator {
 
     /// 钩子此刻是否真的装着。
     ///
-    /// ★ 与 [`Self::capslock_bound`] 是**两件事**：后者是「配置想不想要」，本函数是「系统里
-    /// 有没有」。安装可能失败（非 Windows、`SetWindowsHookExW` 被拒），也可能事后被系统静默
-    /// 移除。凡是要判「这个键归谁管」的地方都必须问本函数——问 `capslock_bound()` 会在钩子
-    /// 装不上时把键判给一个不存在的处理者，那正是「按了完全没反应」。
+    /// 与 [`Self::capslock_bound`] 是两件事：后者是「配置想不想要」，本函数是「系统里有没有」（安装
+    /// 可能失败，也可能被系统静默移除）。判「这个键归谁管」必须问本函数，否则钩子装不上时会把键判给
+    /// 一个不存在的处理者。
     ///
     /// 只为注释切换键 Alt 装的钩子不算：那时 CapsLock 不归它管。
     pub(crate) fn capslock_hook_installed(&self) -> bool {
@@ -9674,7 +8536,7 @@ impl Coordinator {
 
     /// 按配置装/卸全局键盘钩子（启动与配置热重载时调用）：CapsLock 要 ∪ 注释切换键 Alt 要。
     ///
-    /// ★ 幂等：已装且仍该装 → 不动（重复 `SetWindowsHookExW` 会留下卸不掉的旧钩子）。
+    /// 幂等：已装且仍该装 → 不动（重复 `SetWindowsHookExW` 会留下卸不掉的旧钩子）。
     pub(crate) fn sync_capslock_hook(&self) {
         use std::sync::atomic::Ordering::Relaxed;
         let caps = self.capslock_bound() || self.capslock_is_toggle_key();
@@ -9682,9 +8544,7 @@ impl Coordinator {
         let want = caps || alt != 0;
         let mut slot = self.capslock_hook.lock().unwrap_or_else(|e| e.into_inner());
         let installed = if want == slot.is_some() {
-            // ★ 「没配所以没装」此前是**完全静默**的：装成功打 INFO、卸载打 INFO，唯独这条
-            // 最常见的路径一行都没有。排障时日志里搜不到任何 CapsLock 字样，无从区分
-            // 「用户没配」「配了但动词/键名写错被剔除」「装失败」——三者的处置完全不同。
+            // 「没配所以没装」也要打一行：否则排障时分不清「没配」「写错被剔除」「装失败」。
             if want {
                 debug!("全局键盘钩子保留（CapsLock 要: {caps}，注释切换键 Alt 闸门: {alt:#x}）");
             } else {
@@ -9699,8 +8559,7 @@ impl Coordinator {
             info!("CapsLock 未配置会话态绑定、注释切换键未选 Alt → 全局钩子已卸载");
             false
         } else {
-            // 钩子回调在钩子线程执行，**必须只做非阻塞投递**：它超时会被系统静默移除且无从察觉。
-            // 故这里只 send，真正的动作在 new 起的消费线程里做（可安全加锁）。
+            // 钩子回调必须只做非阻塞投递（超时会被系统静默移除）；真正的动作在 new 起的消费线程里做。
             let tx = self.capslock_press_tx.clone();
             match wind_keys::capslock_hook::CapsLockHook::install(Box::new(move |ev| {
                 let _ = tx.send(ev);
@@ -9711,8 +8570,8 @@ impl Coordinator {
                     true
                 }
                 Err(e) => {
-                    // 装不上就退化为「CapsLock 绑定 / Alt 切换注释不生效」，不影响其余功能。绝不回退到
-                    // 「翻转再回敲」——那条路已被真机否掉（竞态 + 厂商 OSD 弹窗）。
+                    // 装不上就退化为「CapsLock 绑定 / Alt 切换注释不生效」。绝不回退到「翻转再回敲」
+                    // （有竞态，且会触发厂商 OSD 弹窗）。
                     tracing::error!(
                         "全局键盘钩子安装失败，CapsLock 绑定 / Alt 切换注释将不生效: {e}"
                     );
@@ -9754,9 +8613,8 @@ impl Coordinator {
 
     /// 同步「钩子此刻该不该吃 CapsLock」。
     ///
-    /// ★★ 这个标志为 true 的时间窗必须尽量短。钩子是**全局**的：标志滞留意味着用户在
-    /// **别的应用**里按 CapsLock 也切不动大小写——比功能不生效糟糕得多。故凡是会改变
-    /// 「有没有输入会话」的出口都要调它，宁可多调（幂等的原子写，开销可忽略）。
+    /// 这个标志为 true 的时间窗必须尽量短：钩子是全局的，标志滞留意味着用户在别的应用里按 CapsLock
+    /// 也切不动大小写。故凡是会改变「有没有输入会话」的出口都要调它，宁可多调（幂等的原子写）。
     ///
     /// Alt 闸门同在这里：有候选时下发切换键那几侧，否则 0。
     pub(crate) fn sync_capslock_gate(&self, state: &State) {
@@ -9779,34 +8637,20 @@ impl Coordinator {
         wind_keys::capslock_hook::set_alt_pid(pid);
     }
 
-    /// 钩子报告「CapsLock 被按下」（在专用消费线程执行，可安全加锁）。
+    /// CapsLock 在英文输入态临时夺取为「候选大小写档位循环」：默认 → 全大写 → 全小写 → 默认。
+    /// 返回 `None` = 本次不夺取，按键归原有语义。
     ///
-    /// 走的是与键盘 keyup 路径**同一对函数、同一顺序**，故动词值域、守卫、各模式的选中/
-    /// 翻页出口都不会分叉。钩子只负责「这个键被按了」，「按了该干什么」仍归那两张表。
-    /// CapsLock 在**英文输入态**临时夺取为「候选大小写档位循环」：
-    /// 默认 → 全大写 → 全小写 → 默认。返回 `None` = 本次不夺取，按键归原有语义。
+    /// 三道守卫缺一不可：`input.capslock.english_case_cycle`（出厂关）；[`Self::in_english_input_context`
+    /// ]（英文方案常驻或临英）；有候选（空闲时 CapsLock 仍是大写锁定）。
     ///
-    /// # 三道守卫，缺一不可
-    ///
-    /// - `input.capslock.english_case_cycle`：功能开关，**出厂关**；
-    /// - [`Self::in_english_input_context`]：英文方案常驻 或 临英 overlay；
-    /// - 有候选：空闲时按 CapsLock 仍是系统原生的大写锁定，不能吞掉。
-    ///
-    /// 这三条与 `apply_session_action` 的「有会话归绑定、无会话归原语义」是同一条纪律，
-    /// 只是判据多了「语境是英文」这一维。
-    ///
-    /// # 为什么重建候选而不是就地改写
-    ///
-    /// 就地重套档位要先把每条候选还原成词库原文（`case_source`），漏一条就会得到
-    /// 「档位切了一半」的列表；更要命的是它与「用户继续打下一个字母」那条路的产出可能
-    /// 不同——同一个档位、同一串输入，两条路给出两份候选，这种不一致最难查。重建则天然
-    /// 与逐键路径同源：候选表本就是每次按键从零装配的。
+    /// 重建候选而不是就地改写：就地重套档位要先把每条还原成词库原文（`case_source`），漏一条就切一半，
+    /// 且可能与「继续打下一个字母」那条路的产出不一致；重建天然与逐键路径同源。
     pub(crate) fn try_english_case_cycle(&self) -> Option<KeyAction> {
         // 未配置触发键就没有这条路：`?` 在此只作「无配置即返回 None」的守卫，值本身不用。
         self.rt().english_case_cycle_vk?;
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        // 快捷输入单列一问（`mix_highlight_is_english`），**不**并进 `in_english_input_context`：
-        // 那是「整个语境在打英文」，mix 的中文候选不该跟着补空格（见 `mix_candidate_is_english`）。
+        // 快捷输入单列一问（`mix_highlight_is_english`），不并进 `in_english_input_context`：那是
+        // 「整个语境在打英文」，mix 的中文候选不该跟着补空格。
         if state.candidates.is_empty()
             || !(self.in_english_input_context(&state) || self.mix_highlight_is_english(&state))
         {
@@ -9826,19 +8670,12 @@ impl Coordinator {
         Some(KeyAction::Consumed)
     }
 
-    /// keydown 主链路上的档位循环闸门：配置的触发键**不是** CapsLock 时走这条。
+    /// keydown 主链路上的档位循环闸门：配置的触发键不是 CapsLock 时走这条。
     ///
-    /// # 为什么与钩子那条分成两个消费点
-    ///
-    /// CapsLock 是 keyup-only 键（C++ 压根不转发它的 keydown，锁定态由系统在 TSF 之前
-    /// 维护），只能靠全局钩子拦；而 tab / enter 这些是普通键，走的是正常的 keydown 链路。
-    /// 两条路的**判据**共用 [`Self::try_english_case_cycle`]，分开的只是「谁把按键送进来」。
-    ///
-    /// ★ 落点在**单点分派之前**（`handle_candidate_action_hotkey` 旁边）：那里是「候选窗
-    /// 显示期间生效的快捷键」的既定位置，五个模式一次接通。挂进各模式处理器要写五遍还会漏
-    /// ——`overlay_ctrl_alt_guard` 的文档里点名了这条纪律。
-    ///
-    /// ⚠️ 只认 keydown：keyup 也放行的话，一次按键会切两档。
+    /// CapsLock 是 keyup-only 键，只能靠全局钩子拦；tab / enter 走正常的 keydown 链路。两条路判据
+    /// 共用 [`Self::try_english_case_cycle`]。落点在单点分派之前（`handle_candidate_action_hotkey`
+    /// 旁边），那是「候选窗显示期间生效的快捷键」的既定位置，五个模式一次接通。只认 keydown，
+    /// 否则一次按键会切两档。
     pub(crate) fn try_english_case_cycle_key(&self, data: &KeyEventData) -> Option<KeyAction> {
         if data.event_type != EVENT_KEY_DOWN {
             return None;
@@ -9848,8 +8685,8 @@ impl Coordinator {
             return None;
         }
         let vk = self.rt().english_case_cycle_vk?;
-        // CapsLock 那份归钩子路径，走不到这里（它的 keydown 不会到达服务端）；显式排除是
-        // 为了「同一个键被两条路各处理一次」这种最难查的重复触发从结构上不可能发生。
+        // CapsLock 那份归钩子路径（它的 keydown 不会到达服务端），显式排除让同一个键被两条路各处理
+        // 一次从结构上不可能。
         if vk == keymap::VK_CAPITAL || data.key_code != vk {
             return None;
         }
@@ -9858,12 +8695,8 @@ impl Coordinator {
 
     /// 启动体检：档位循环的触发键被别的功能占着 → 告警。
     ///
-    /// 这不是配置冲突（各自都合法），而是**运行期的优先级夺取**：英文输入期间那些绑定
-    /// 按不出来。现场表现是「CapsLock 翻页在中文里好用，一打英文就失灵」「Tab 在英文里
-    /// 调不出辅助码」——不告警的话无从知道是谁夺走的。文案照
-    /// [`Self::warn_code_char_conflicts`] 的形制，直接给出化解办法而不是只陈述状态。
-    ///
-    /// ⚠️ 占用方要**逐类点名**：只报「被占用」而不说被谁，用户仍得挨个试。
+    /// 不是配置冲突，而是运行期的优先级夺取：英文输入期间那些绑定按不出来，不告警的话无从知道
+    /// 是谁夺走的。占用方逐类点名，并直接给出化解办法（形制同 [`Self::warn_code_char_conflicts`]）。
     pub(crate) fn warn_english_case_cycle_conflict(&self) {
         let rt = self.rt();
         let Some(vk) = rt.english_case_cycle_vk else {
@@ -9907,7 +8740,8 @@ impl Coordinator {
         self.rt().sentence_cycle_key
     }
 
-    /// 当前方案的整句块露几条（`place_sentence_block` 用）。规则同 [`Self::active_sentence_cycle_key`]。
+    /// 当前方案的整句块露几条（`place_sentence_block` 用）。规则同 [
+    /// `Self::active_sentence_cycle_key`]。
     pub(crate) fn active_sentence_count(&self) -> usize {
         if self.engine_mgr.current_engine_type() == Some(wind_engine::engine::EngineType::CodeTable)
         {
@@ -9921,19 +8755,15 @@ impl Coordinator {
 
     /// 整句切换键（拼音 / 码表各一把，见 [`Self::active_sentence_cycle_key`]）：在整句池里滚动显示窗口。
     ///
-    /// 与英文大小写档位循环同处「候选显示期间生效的快捷键」这一层、同为**临时夺取**：
-    /// 守卫任一不成立即返回 `None`，按键原样落回它本来的语义（Tab 出厂是高亮下移键）。
+    /// 与英文大小写档位循环同属「候选显示期间生效的快捷键」、同为临时夺取：守卫任一不成立即返回
+    /// `None`，按键落回本来的语义（Tab 出厂是高亮下移键）。
     ///
-    /// 守卫：配了键 / 按的就是那个键（含 Shift 位）/ **不是本方案的手动分隔符、也没被本方案
-    /// `[key_actions]` 绑定** / 普通拼音输入态（无 overlay 模式）/ 有输入 / **整句池 ≥ 2 条**。
+    /// 守卫：配了键 / 按的就是那个键（含 Shift 位）/ 不是本方案的手动分隔符、也没被本方案
+    /// `[key_actions]` 绑定（那两者在打拼音中途有自己的语义）/ 普通拼音输入态（无 overlay）/
+    /// 有输入 / 整句池 ≥ 2 条（出厂 `sentence_max_count = 1` 时池子恒空，配了键也不吃）。
     ///
-    /// 分隔符与方案绑定那条是审查查出的：全拼出厂 `separator = "auto"`，`'` 被选词键占着时
-    /// 反引号就是音节分隔符；用户在设置页把切换键选成反引号，打到 2 个音节以上（池子才非空）
-    /// 分隔符就永远按不进去。这两者在「打拼音中途」有自己的语义，一律让位。最后一条是关键：出厂 `sentence_max_count = 1` 时池子恒空，
-    /// 即使用户配了键也不会吃；开了 N-best 但这串输入只解出一种整句时也不吃。
-    ///
-    /// 切换**不重新转换**：池子是这串输入的完整解码结果，换窗口只是换显示。下一次按键
-    /// 触发 `update_candidates` 时池子与窗口一并重置（见 `State::sentence_pool`）。
+    /// 切换不重新转换：池子是这串输入的完整解码结果，换窗口只是换显示；下一次按键时池子与窗口
+    /// 一并重置（见 `State::sentence_pool`）。
     pub(crate) fn try_sentence_cycle_key(&self, data: &KeyEventData) -> Option<KeyAction> {
         if data.event_type != EVENT_KEY_DOWN {
             return None;
@@ -9972,17 +8802,15 @@ impl Coordinator {
             &mut state.sentence_window,
         )?;
         // 高亮落到窗口首条上：空格上屏的就是用户刚切到的那种解读。
-        // 直接写页码而**不经 `turn_page`**：那个会置 `paged`（「这批候选被翻过页」），
-        // 而切换整句不是翻页，`-` 键的翻页身份不该因此改变。
+        // 直接写页码而不经 `turn_page`：那个会置 `paged`，而切换整句不是翻页，`-` 的翻页身份不该变。
         let per_page = self.page_size(state);
         state.current_page = first / per_page;
         state.selected_index = first % per_page;
         // 展开态下页码变了，可见区要跟上，否则高亮行落在可见区外（屏幕上高亮错格）。
         self.grid_follow(state);
         self.clear_hover();
-        // 高亮换了 ⇒ 组合区按高亮候选重算（双拼下简拼 / 整句的切法不同，审查查出漏了这步）。
-        // 回传写法同方向键移动高亮（`handle_nav_key`）：只有形态真变了、且编码显示在宿主里时
-        // 才回传组合串，否则吞键即可。
+        // 高亮换了 ⇒ 组合区按高亮候选重算（双拼下简拼 / 整句的切法不同）。回传写法同方向键移动高亮：
+        // 只有形态真变了、且编码显示在宿主里时才回传组合串。
         let before = state.preedit.clone();
         self.sync_preedit_to_highlight(state);
         let composed = (state.preedit != before && self.preedit_in_app_effective()).then(|| {
@@ -9997,8 +8825,7 @@ impl Coordinator {
     /// 启动体检：整句切换键被别的功能占着 → 告警（文案同 `warn_english_case_cycle_conflict`
     /// 的形制：逐类点名占用方，并给出化解办法）。
     ///
-    /// 这不是配置冲突（各自都合法），而是**运行期的优先级夺取**：整句池 ≥ 2 条时那些绑定
-    /// 按不出来。不告警的话用户只会看到「Tab 翻页有时好用有时不好用」，无从知道是谁夺走的。
+    /// 不是配置冲突，而是运行期的优先级夺取：整句池 ≥ 2 条时那些绑定按不出来。
     ///
     /// 拼音与码表两把键各体检一次（码表取全局值；方案里另写的见
     /// [`Self::warn_schema_sentence_cycle_conflict`]）。
@@ -10063,8 +8890,7 @@ impl Coordinator {
     ) {
         let rt = self.rt();
         let vk = key.vk;
-        // 键配好了、池子却恒空 ⇒ 用户以为开了、实际永远不生效。「键即开关」的初衷就是不要
-        // 第二道闸，而算几条整句事实上成了第二道——至少把它说出来（审查查出）。
+        // 键配好了、池子却恒空 ⇒ 用户以为开了、实际永远不生效，至少把它说出来。
         if count.max(max_count) < 2 {
             warn!(
                 "整句切换键（{path} = {raw:?}）已配置，但同段的 sentence_count 与 \
@@ -10085,8 +8911,7 @@ impl Coordinator {
         if !key.shift && rt.english_case_cycle_vk == Some(vk) {
             owners.push("英文大小写档位循环（input.english_case_cycle_key，它先处理、会先截走）");
         }
-        // 下两类在夺键时会**让位**（本键不生效），而不是被夺——同样要说出来，否则用户只看到
-        // 「配了切换键没反应」。
+        // 下两类在夺键时会让位（本键不生效），同样要说出来，否则用户只看到「配了切换键没反应」。
         if !key.shift && self.manual_separator_key(vk) {
             owners.push("当前方案的音节分隔符（schema.pinyin.separator，本键此时让位给分隔符）");
         }
@@ -10183,7 +9008,8 @@ impl Coordinator {
         }
     }
 
-    /// 返回这次按下是否被某个会话动作用掉了。
+    /// 钩子报告「CapsLock 被按下」（在专用消费线程执行，可安全加锁）。返回这次按下是否被某个会话
+    /// 动作用掉了。走与键盘 keyup 路径同一对函数、同一顺序，动词值域、守卫与各模式出口都不会分叉。
     fn handle_capslock_hook_press(&self) -> bool {
         // 合成一个 keyup 事件：CapsLock 在键盘路径上本来就只有 keyup 到得了服务端
         // （见 `handle_session_action_key_up`），保持同形以免两条路径的守卫产生差异。
@@ -10197,9 +9023,8 @@ impl Coordinator {
             prev_char: 0,
             seq_char: 0,
         };
-        // ★ **最先**试大小写档位循环：它是「英文输入态下临时夺取本键」，优先级按定义高于
-        // 用户给 CapsLock 配的任何会话动作。守卫（开关 / 英文语境 / 有候选）都在函数内部，
-        // 三者有一个不成立就返回 None，键原样落回下面的既有两条路。
+        // 最先试大小写档位循环：英文输入态下的临时夺取，优先级高于用户给 CapsLock 配的会话动作。
+        // 守卫都在函数内部，不成立就返回 None，落回下面两条路。
         if self.rt().english_case_cycle_vk == Some(keymap::VK_CAPITAL)
             && let Some(act) = self.try_english_case_cycle()
         {
@@ -10207,13 +9032,9 @@ impl Coordinator {
             let _ = act;
             return true;
         }
-        // ★ 必须先试选词出口，顺序与 `message_handler` 的 keyup 分支逐字一致。
-        //   `apply_session_action` 对 `select_candidate:N` / `select_char:N` 一律
-        //   `return None`（它们带 overflow 语义，要落到各自的既有消费点执行），而键盘路径
-        //   上「落到既有消费点」靠的是 keydown 继续往下走——CapsLock **没有可用的 keydown**
-        //   （C++ 压根不发），钩子路径更是走完就结束，None 即终点。少了这一行的表现是
-        //   `capslock = "select_candidate:3"` 配了完全没反应：既不选词，也因为钩子照吃而
-        //   连大写都不翻。2026-08-31 修。
+        // 必须先试选词出口，顺序与 `message_handler` 的 keyup 分支一致：`apply_session_action` 对
+        // `select_candidate:N` / `select_char:N` 返回 None（要落到各自的既有消费点），而 CapsLock
+        // 没有 keydown 可继续往下走，钩子路径上 None 即终点，配了会完全没反应。
         let action = self
             .handle_select_key_up(&data)
             .or_else(|| self.handle_session_action_key_up(&data))
@@ -10223,13 +9044,10 @@ impl Coordinator {
             None => false,
             Some(KeyAction::Consumed) => true,
             Some(act) => {
-                // 钩子路径**没有 TSF 按键上下文**可回传——与鼠标点选候选完全同一处境，
-                // 故复用它的既有出口 `push_no_key_ctx_action`（`UpdateComposition` / `InsertText`
-                // 经 push 通道定向投递，C++ 侧再用合成提交键在按键上下文里落地）。
-                //
-                // ⚠️ 此处曾只打一行 debug 就把结果**丢弃**，于是选词类动作「引擎状态变了、
-                // 词频记了，字却没上屏」——比不生效更难查，因为看起来什么都没发生。
-                // 不经按键出口，收尾在这里做（同鼠标点选，见 `crate::session_exit`）。
+                // 钩子路径没有 TSF 按键上下文可回传，与鼠标点选候选同一处境，故复用其出口
+                // `push_no_key_ctx_action`（经 push 通道定向投递，C++ 侧再用合成提交键落地）。结果
+                // 不能丢弃，否则「词频记了，字却没上屏」。收尾在这里做（同鼠标点选，见
+                // `crate::session_exit`）。
                 let (act, chinese_mode, main_path) = {
                     let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
                     let (chinese_mode, main_path) = (st.chinese_mode, st.active.is_none());
@@ -10258,8 +9076,8 @@ impl Coordinator {
     /// 该热键由 ctfmon 原生处理（per-app 切换到本输入法），本进程不参与按键分发；
     /// 未配置/解析失败 → 仅清理注册表旧条目。
     ///
-    /// 非 Windows 为空操作：macOS 的 activate_ime 走 `build_global_hotkey_entries` 里的
-    /// Carbon 注册（切换是**全局**的，非 per-app——系统无对应 API，差异不可消除）。
+    /// 非 Windows 为空操作：macOS 的 activate_ime 走 `build_global_hotkey_entries` 里的 Carbon 注册
+    /// （切换是全局的，非 per-app：系统无对应 API）。
     pub(crate) fn sync_direct_switch_hotkey(&self) {
         #[cfg(windows)]
         {
@@ -10283,22 +9101,14 @@ impl Coordinator {
         }
     }
 
-    /// 放弃整段输入、上屏原码时该**归还**的引导符（不归还则为空串）。
+    /// 放弃整段输入、上屏原码时该归还的引导符（不归还则为空串）。
     ///
-    /// 三个同源出口共用：临拼回车 / mix 回车 / 切中英文（`take_input_on_mode_switch`）。
-    /// 只改其中一处就会造成「回车带 z、切英文不带」这类不一致，故判据收在这里。
+    /// 三个同源出口共用：临拼回车 / mix 回车 / 切中英文（`take_input_on_mode_switch`），只改一处就会
+    /// 出现「回车带 z、切英文不带」。
     ///
-    /// # 为什么字母归还、符号不归还
-    ///
-    /// 符号引导键（`` ` ``、`;`）在码表里不产出编码，用户按它只可能是为了开模式；字母
-    /// （z）在码表里是**合法编码字符**，按下时它既可能是开关也可能是码。放弃整段的语义正是
-    /// 「别猜了，把我打的原样给我」，此时吞掉那个字母就是猜错了还不还。z-fallback 进来的
-    /// 更是如此——那个 z 是从 `input_buffer` 里抢走的真实击键。
-    ///
-    /// # 为什么 committed_text 非空就不归还
-    ///
-    /// 用户已经在模式内选过词，说明他认可了这次进入，引导符归模式所有；再吐出来只会得到
-    /// 「z你好ma」这种谁也不想要的东西。
+    /// 字母归还、符号不归还：符号引导键（`` ` ``、`;`）在码表里不产出编码，按它只为开模式；字母
+    /// （z）是合法编码字符，放弃整段时吞掉它就是猜错了还不还（z-fallback 那个 z 更是抢来的真实击键）。
+    /// committed_text 非空就不归还：用户已在模式内选过词，引导符归模式所有，否则得到「z你好ma」。
     pub(crate) fn guide_to_return(prefix: &str, committed_text: &str) -> String {
         if committed_text.is_empty()
             && prefix
@@ -10314,9 +9124,8 @@ impl Coordinator {
 
     /// 切换前是否有未上屏的编码/候选/独占模式缓冲。
     ///
-    /// 判据比中英切换那两处**宽**：多问 `preedit` 与 `active`。独占模式（临拼/混输/
-    /// 临英/辅助码）的码不落在 `input_buffer` 里，只看主缓冲会把「临拼态下切换」判成
-    /// 无待处理，于是不结束 composition —— 宿主里的引导符和码原样留着。
+    /// 判据比中英切换那两处宽：多问 `preedit` 与 `active`。独占模式的码不落在 `input_buffer` 里，
+    /// 只看主缓冲会把「临拼态下切换」判成无待处理，不结束 composition，引导符和码留在宿主里。
     pub(crate) fn has_pending_composition(&self) -> bool {
         let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         !s.input_buffer.is_empty()
@@ -10326,18 +9135,12 @@ impl Coordinator {
             || s.active.is_some()
     }
 
-    /// 方案切换时对未上屏编码的处置——与中英切换**同一条策略**（`keys.commit_on_switch`：
-    /// 开则上屏原码，关则丢弃），这也正是用户要求的「按中英切换那套来」。
+    /// 方案切换时对未上屏编码的处置，与中英切换同一条策略（`keys.commit_on_switch`：开则上屏原码，
+    /// 关则丢弃）。
     ///
-    /// ★ 必须在 `EngineManager` 真正换掉活跃方案**之前**调用：上屏走 `record_commit`，
-    /// 而那里的 `schema_id` 取的是**当前**活跃方案。切完再取，这串码会记到新方案头上。
-    ///
-    /// 传 `chinese = false` 不是「切到英文」的意思——该参数在
-    /// [`Self::take_input_on_mode_switch`] 里只参与 `!chinese && commit_on_switch` 这一个
-    /// 判断，问的是「这串码还要不要」。切方案与切英文对它的答案相同：编码属于旧方案，
-    /// 新方案接不下去。
-    ///
-    /// ⚠ 取 `State` 锁，必须在**不持锁**时调用（与 `finish_user_schema_switch` 同约束）。
+    /// 必须在 `EngineManager` 换掉活跃方案之前调用：上屏走 `record_commit`，其 `schema_id` 取当前
+    /// 活跃方案，切完再取这串码会记到新方案头上。传 `chinese = false` 只表示「这串码还要不要」的
+    /// 判断与切英文相同（编码属于旧方案），不是切到英文。取 `State` 锁，必须在不持锁时调用。
     pub(crate) fn take_input_on_schema_switch(&self) -> SwitchCommit {
         // 切方案 = 一段输入结束，与中英切换同义。须在取 state 锁之前调用（内部走词库 IO）。
         self.terminate_auto_phrase("switch_schema");
@@ -10349,12 +9152,11 @@ impl Coordinator {
         SwitchCommit { text, had_pending }
     }
 
-    /// **无按键上下文**的路径（托盘/工具栏菜单、全局热键、命令直通车）把处置结果交给宿主。
+    /// 无按键上下文的路径（托盘/工具栏菜单、全局热键、命令直通车）把处置结果交给宿主。
     ///
-    /// 两条出口对应 `SwitchCommit` 的两个字段：有文本走 `CommitText`（C++ 侧提交时顺带
-    /// 结束 composition），无文本但切换前有编码则单独推 `ClearComposition`——push 通道的
-    /// `CommitText` 在 C++ `AsyncReader` 里被 `!response.text.empty()` 门控，
-    /// **空文本清不掉组合**，与按键路径那条「空文本也能 EndComposition」不同源。
+    /// 有文本走 `CommitText`（C++ 侧提交时顺带结束 composition）；无文本但切换前有编码则单独推
+    /// `ClearComposition`：push 通道的 `CommitText` 在 C++ `AsyncReader` 里被 `!response.text.empty()`
+    /// 门控，空文本清不掉组合，与按键路径不同源。
     pub(crate) fn push_switch_commit(&self, commit: &SwitchCommit) {
         if !commit.text.is_empty() {
             self.push_commit_text(&commit.text);
@@ -10364,11 +9166,10 @@ impl Coordinator {
         }
     }
 
-    /// **按键路径**把处置结果包成本次按键的应答。
+    /// 按键路径把处置结果包成本次按键的应答。
     ///
-    /// 与中英切换 keyup 分支同构：**空文本也要走 `InsertText`**——C++ 的 `CommitText`
-    /// 即便文本为空也会 `EndComposition`，清掉宿主里残留的编码；而 `StatusUpdate` 那条
-    /// 路不结束组合，正是「切了方案编码还挂在应用里」的根因。
+    /// 与中英切换 keyup 分支同构：空文本也要走 `InsertText`（C++ 的 `CommitText` 文本为空也会
+    /// `EndComposition`），`StatusUpdate` 那条路不结束组合，编码会挂在应用里。
     /// `mode_changed = true` 让中英图标跟着刷新（切方案会归位中文）。
     pub(crate) fn schema_switch_key_action(&self, commit: SwitchCommit) -> KeyAction {
         if commit.text.is_empty() && !commit.had_pending {
@@ -10391,18 +9192,10 @@ impl Coordinator {
     /// 切换中英文时取消当前输入：清空缓冲/候选/preedit，并按 `hotkeys.commit_on_switch`
     /// 决定是否把已输入的原始编码上屏（仅在切到英文且有待输入时）。返回待上屏文本。
     ///
-    /// ★ **换行改写收口在这里**（A3-3）。本函数产出的文本经 `CMD_TOGGLE_MODE` /
-    /// `CMD_SYSTEM_MODE_SWITCH` 的**同步回包**直接上屏（`wind-bridge/src/server.rs` 里
-    /// 各自 `encode_commit_text`），既不走 `handle_key_event_policed`，也不在 push 那几条
-    /// 路上——三个调用方（切中英 / 系统切换 / CapsLock）都从这里取文本，收在此处一处覆盖。
-    /// 漏了它的症状是「同一个词，回车上屏对、切中英上屏不对」。
-    ///
-    /// ⚠️ 但这一处堵的是**理论缺口，不是能复现的故障**，上面那句是失效形态、不是现场记录，
-    /// 别照着它反推「曾经有个 bug」：
-    /// 本函数上屏的绝大多数是**原始编码**（普通组合）或英文缓冲原文，两者都不可能带换行。
-    /// 唯一带得上换行的是拼音类逐步转换的 `committed_text`（已选中的汉字，见其字段注释）
-    /// ——要触发得先在临拼/混输的逐步转换里选中一个带换行的词条，再切中英；而码表（五笔）
-    /// 选词消费整串、根本不进那个态。⇒ 修它是为了让四条出口语义一致，不是修现场。
+    /// 换行改写收口在这里：本函数产出的文本经 `CMD_TOGGLE_MODE` / `CMD_SYSTEM_MODE_SWITCH` 的同步
+    /// 回包直接上屏（`wind-bridge/src/server.rs`），既不走 `handle_key_event_policed` 也不走 push，
+    /// 三个调用方（切中英 / 系统切换 / CapsLock）都从这里取文本。目前只有拼音类逐步转换的
+    /// `committed_text` 带得上换行，收在这里是为了让各条上屏出口语义一致。
     pub(crate) fn take_input_on_mode_switch(&self, state: &mut State, chinese: bool) -> String {
         self.take_input_on_mode_switch_cased(state, chinese, false)
     }
@@ -10428,9 +9221,8 @@ impl Coordinator {
         upper: bool,
     ) -> String {
         let cased = |code: String| if upper { code.to_uppercase() } else { code };
-        // 快捷加词预览还开着：切中英等于放弃它。不退的话 `add_word_active` 留着，
-        // `hotkey_session` 恒为真，DLL 把所有 Ctrl 组合键（Ctrl+-）乃至单键 `-` 都当作
-        // 加词会话里的键吞掉，英文模式下宿主快捷键整片失效（GH#254）。
+        // 快捷加词预览还开着：切中英等于放弃它。不退的话 `hotkey_session` 恒为真，DLL 会把 Ctrl 组合键
+        // 乃至单键 `-` 都当作加词会话里的键吞掉，英文模式下宿主快捷键整片失效。
         if state.add_word_active {
             self.exit_add_word_mode(state);
         }
@@ -10470,13 +9262,9 @@ impl Coordinator {
                 Some(ModeKind::Mix(_)) => {
                     Some((state.mix_buffer.clone(), state.mix_prefix.clone()))
                 }
-                // 辅助码是唯一**不清空来源缓冲**的独占模式（它只筛候选，拼音码原封不动
-                // 留在来源那儿），故上面那句「独占模式下 input_buffer 必为空」对它不成立。
-                // 取来源缓冲、按来源给引导前缀——语义与「在来源模式里直接切英文」完全一致，
-                // 否则辅助码态下切英文会把待上屏的拼音原码静默丢掉。
-                //
-                // ⚠️ 「来源」不再恒是主输入路：辅助码现在也能从临拼进入，那时码在
-                // `temp_pinyin_buffer`、引导前缀是 `temp_pinyin_prefix`（`z` 要归还）。
+                // 辅助码是唯一不清空来源缓冲的独占模式（只筛候选），上面「独占模式下 input_buffer
+                // 必为空」对它不成立。取来源缓冲、按来源给引导前缀，否则辅助码态下切英文会静默丢掉
+                // 待上屏的拼音原码。来源可能是主输入路或临拼（码在 `temp_pinyin_buffer`，`z` 要归还），
                 // 判据取 `AuxCodeOverlay::origin`，与 `aux_code_source_buffer` 同源。
                 Some(ModeKind::AuxCode) => {
                     Some(match state.aux_code.as_ref().and_then(|o| o.origin) {
@@ -10520,9 +9308,8 @@ impl Coordinator {
                 let has_pending = !buf.is_empty() || !state.committed_text.is_empty();
                 if !chinese && self.rt().config.keys.commit_on_switch {
                     if has_pending {
-                        // 有待输入：上屏「引导字母 + 已转换前缀 committed_text + 剩余原码」。
-                        // 符号引导符不输出、字母引导符归还，判据见 `guide_to_return`
-                        // ——与临拼/mix 的回车上屏共用同一条，三处必须同进同出。
+                        // 有待输入：上屏「引导字母 + 已转换前缀 committed_text + 剩余原码」。符号引导符
+                        // 不输出、字母引导符归还，判据见 `guide_to_return`（与临拼/mix 回车同进同出）。
                         // committed 段已在选词时记过，此处只记本次实际上屏的原码（来源模式切换）。
                         let guide = cased(Self::guide_to_return(&prefix, &state.committed_text));
                         let buf = cased(buf);
@@ -10530,7 +9317,7 @@ impl Coordinator {
                         self.record_commit(&code, code.len() as u32, -1, CommitSource::ModeSwitch);
                         let raw = format!("{}{}{}", guide, state.committed_text, buf);
                         let out = self.maybe_convert(state, &raw);
-                        // 快捷输入含英文成员时对齐临英（A2-3b）：全角态转全角，与 mix 回车
+                        // 快捷输入含英文成员时对齐临英：全角态转全角，与 mix 回车
                         // 同一判据（`mix_raw_counts_as_english`，数字透镜除外）。
                         if matches!(state.active, Some(ModeKind::Mix(_)))
                             && self.mix_raw_counts_as_english(state)
@@ -10583,8 +9370,8 @@ impl Coordinator {
         state.committed_segs.clear();
         state.input_buffer.clear();
         state.input_buffer_cased.clear();
-        // 组合随切换结束，检索放宽一并复原（独占分支经 `reset_exclusive_modes` 复原）。托盘 / 热键 /
-        // 按应用切方案走推送上屏、不经出口的 `expire_scope_override`，不在这里复原就会带进新方案。
+        // 组合随切换结束，检索放宽一并复原（独占分支经 `reset_exclusive_modes` 复原）：托盘 / 热键 /
+        // 按应用切方案走推送上屏，不经出口的 `expire_scope_override`，不在这里复原就会带进新方案。
         state.scope_relaxed = false;
         state.english_case_variant = crate::english_candidates::CaseVariant::default();
         state.candidates.clear();
@@ -10594,12 +9381,8 @@ impl Coordinator {
 }
 
 impl Coordinator {
-    /// 从一次按键的最终 KeyAction 提取上屏文本，按中文/英文字符埋点到每日统计。
-    /// 受 `features.stats.enabled` 控制；`track_english` 关闭时不计英文。无 store 静默跳过。
-    /// 记录一次上屏事件到统计采集器。各上屏路径在已知码长/候选位/来源时调用，
-    /// 并置位 stat_recorded，使顶层 record_input_stats 跳过兜底（避免重复计数）。
-    /// 对齐 Go `recordCommit`：track_english 仅作用于 TSF 英文路径（Rust 暂无），
-    /// 普通上屏按 4 分类记录全部字符。
+    /// 记录一次上屏事件到统计采集器。各上屏路径在已知码长/候选位/来源时调用，并置位stat_recorded，
+    /// 使顶层 record_input_stats 跳过兜底（避免重复计数）。普通上屏按 4 分类记录全部字符。
     pub(crate) fn record_commit(
         &self,
         text: &str,
@@ -10625,8 +9408,7 @@ impl Coordinator {
         if text.is_empty() {
             return;
         }
-        // 下一词学习**默认断开**：任何上屏（标点、原码、顶码、满码自动上屏…）都清上文。
-        // 只有 `commit_selected` 记账前先暂存上文、记账后再学习，见那里。
+        // 下一词学习默认断开：任何上屏都清上文；只有 `commit_selected` 记账前暂存上文、记账后再学习。
         self.note_word_boundary();
         if let Some(log) = self
             .debug_stat_events
@@ -10643,9 +9425,8 @@ impl Coordinator {
         if !self.rt().config.stats.enabled {
             return;
         }
-        // 暂停学习：逐日字数与速度同样是「这次输入留下的痕迹」。放在断点与调试捕获之后——
-        // 断点照打，调试捕获只观测「本该记哪一笔」。`stat_recorded` 照常置位，与正常记账
-        // 同一形状，顶层 `record_input_stats` 才不会把这次当成漏记、再走一遍兜底。
+        // 暂停学习：逐日字数与速度同样是输入痕迹。放在断点与调试捕获之后（断点照打，调试捕获只观测
+        // 「本该记哪一笔」）。`stat_recorded` 照常置位，顶层 `record_input_stats` 才不会再走兜底。
         if self.learning_suspended() {
             self.stat_recorded
                 .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -10705,7 +9486,6 @@ impl Coordinator {
         self.record_commit(text, 0, -1, source);
     }
 
-    /// 从 store 重建短语层（短语类 RPC 改动后调用，使输入期即时生效）。
     /// 用户文本重新载入后，按变了的项重建内存镜像：短语层、快捷格式调整、常用字覆盖、字符集
     /// 注册表。用户词与 Shadow 由引擎 / 按键路径直接读表，不用重建。
     pub(crate) fn apply_user_text_changes(&self, changed: &[String]) {
@@ -10729,6 +9509,7 @@ impl Coordinator {
         }
     }
 
+    /// 从 store 重建短语层（短语类 RPC 改动后调用，使输入期即时生效）。
     pub(crate) fn rebuild_phrases(&self) {
         let recs: Vec<wind_phrase::PhraseSeed> = match self.store.as_ref() {
             Some(store) => store
@@ -10755,9 +9536,8 @@ impl Coordinator {
 
     /// 当前有效的系统短语条目：重读 system.phrases.toml，为空则回退启动缓存。
     ///
-    /// 重读使手工编辑 TOML 后无需重启服务。`parse_system_entries` 对"文件缺失"与
-    /// "TOML 语法错误"同样返回空，二者不可区分，故重读为空时回退到启动缓存——
-    /// 否则一个语法错误就会让调用方的 sync 把库里系统短语全部删除。
+    /// 重读使手工编辑 TOML 后无需重启服务。`parse_system_entries` 对「文件缺失」与「TOML 语法错误」
+    /// 同样返回空，故重读为空时回退到启动缓存，否则一个语法错误就会让 sync 把库里系统短语全部删除。
     pub(crate) fn current_system_phrase_entries(
         &self,
         reason: &str,
@@ -10789,19 +9569,15 @@ impl Coordinator {
         }
     }
 
-    /// 把**缺失**的系统短语条目补回库里（不动任何已存在的行）。
+    /// 把缺失的系统短语条目补回库里（不动任何已存在的行）。
     ///
-    /// 用户短语遮蔽同键系统条目时该行**归属用户**（`is_system=false`，见
-    /// `Store::add_phrase`），于是任何「清空用户短语」的动作都会把它连同遮蔽关系一起删掉——
-    /// 库里该 `(code,text)` 彻底消失，系统条目也随之不见。sync 平时只在 TOML 哈希变化或
-    /// 「系统恢复默认」时才跑，不补这一次，被遮蔽过的系统短语要等到下次哈希变动才回来。
-    ///
-    /// **两个调用点**（漏一个就等于那条路上的系统短语静默丢失）：设置页「清空用户短语」、
+    /// 用户短语遮蔽同键系统条目时该行归属用户（`is_system=false`，见 `Store::add_phrase`），「清空
+    /// 用户短语」会把它连同遮蔽关系一起删掉，系统条目也随之不见，而 sync 平时只在 TOML 哈希变化或
+    /// 恢复默认时才跑。两个调用点漏一个就等于那条路上的系统短语静默丢失：设置页「清空用户短语」、
     /// 备份还原的 replace 模式（`restore_backup` 内部会先 `reset_user_phrases`）。
     ///
-    /// ⚠️ **走 `ensure_system_phrases` 而非 `sync_system_phrases`**：后者会用 TOML 值覆盖已存在
-    /// 系统行的 weight/position，那样一次「清空用户短语」会顺带把用户在系统短语列表里改过的
-    /// 权重重置掉——用户没要求这件事。补齐只应补缺失的。
+    /// 走 `ensure_system_phrases` 而非 `sync_system_phrases`：后者会用 TOML 值覆盖已存在系统行的
+    /// weight/position，把用户改过的权重一并重置。
     pub(crate) fn restore_missing_system_phrases(&self, reason: &str) {
         let Some(store) = self.store.as_ref() else {
             return;
@@ -10850,10 +9626,9 @@ impl Coordinator {
                 enabled: e.enabled,
             })
             .collect();
-        // 先认领：历史上 `add_phrase`/wdict 导入撞键时会把系统行降级成用户行，此后
-        // `sync_system_phrases` 的 `!cur.is_system → continue` 分支永远跳过它，该条目
-        // 从「系统短语」列表里再也回不来。「恢复默认」是显式动作，在此把归属改回去。
-        // 必须排在 sync 之前，认领后的行才能被 sync 刷新 weight/position。
+        // 先认领：`add_phrase`/wdict 导入撞键时会把系统行降级成用户行，此后 sync 永远跳过它，「恢复
+        // 默认」是显式动作，在此把归属改回去。必须排在 sync 之前，认领后的行才能被刷新
+        // weight/position。
         match store.reclaim_system_phrases(&sys) {
             Ok(n) if n > 0 => info!("恢复默认：认领回 {n} 条被降级的系统短语"),
             Err(e) => warn!("恢复默认：系统短语认领失败: {e}"),
@@ -10891,8 +9666,8 @@ fn phrase_entries_hash(entries: &[wind_phrase::SystemPhraseEntry]) -> String {
 /// 悬停提示（与注释段）渲染的整页上下文：只依赖状态与配置、对一页候选相同的那些量，
 /// 候选循环外解析一次，循环里逐候选 [`Coordinator::render_candidate_tooltip`]。
 ///
-/// 桌面候选页组装与移动端按绝对下标取提示（[`Coordinator::candidate_tooltip_at`]）共用这一份——
-/// 两边各解析一遍就是两个真相源，漂移后的表现是「同一个候选，电脑上气泡有编码段、手机上没有」。
+/// 桌面候选页组装与移动端按绝对下标取提示（[`Coordinator::candidate_tooltip_at`]）共用这一份，
+/// 两边各解析一遍就会出现「同一个候选，电脑上有编码段、手机上没有」。
 pub(crate) struct TooltipEvalCtx {
     /// 调试提示上下文：仅有段引用 `${debug}` 时解析（mixed 归属 / 方案 id）。
     dbg_ctx: Option<DebugSchemaCtx>,
@@ -10901,7 +9676,7 @@ pub(crate) struct TooltipEvalCtx {
     code_source_name: Option<String>,
     /// 快捷输入（mix）下注释库归属逐候选取，见 [`Coordinator::comment_dict_scope`]。
     pub(crate) mix_comment_scope: bool,
-    /// 注释**库**的 `schemas` 白名单作用域（非 mix 时整页共用）。
+    /// 注释库的 `schemas` 白名单作用域（非 mix 时整页共用）。
     pub(crate) comment_dict_schema: String,
 }
 
@@ -10913,40 +9688,30 @@ impl Coordinator {
     ) -> TooltipEvalCtx {
         let force_hint = Self::forces_code_hint(state);
         let dbg_ctx = if tip.references("debug") {
-            // 归属与读写两端同源（`effective_data_schema`）：特殊模式下若这里仍按 active 解析，
-            // 调试段显示的计数与排序实际用的不是同一个 key——排查时会被它带偏，
-            // 而这正是最难察觉的一种不一致。
+            // 归属与读写两端同源（`effective_data_schema`）：特殊模式下按 active 解析的话，调试段显示的
+            // 计数与排序实际用的 key 不一致。
             Some(self.build_debug_schema_ctx(self.effective_data_schema(state).as_deref()))
         } else {
             None
         };
-        // 注释**库**的 `schemas` 白名单作用域：与词频/短语同源取 `effective_data_schema`
-        // （临英归 english 桶）。⚠️ 与上面模板层取 active 刻意不同——库是数据、模板是呈现。
+        // 注释库的 `schemas` 白名单作用域：与词频/短语同源取 `effective_data_schema`（临英归 english
+        // 桶）。与上面模板层取 active 刻意不同：库是数据、模板是呈现。
         let comment_dict_schema = self
             .effective_data_schema(state)
             .unwrap_or_else(|| self.engine_mgr.active_schema_id());
-        // ⚠️ 快捷输入（mix）下这一份**不够**：它把多个成员方案的候选合进同一张列表，
-        // 而 `effective_data_schema` 对 `Mix(_)` 返回 `None` ⇒ 整列表都按主方案（五笔等）
-        // 求白名单，于是英文成员的候选查不到白名单写着 `english` 的注释库——同一个单词，
-        // 英文方案/临英下有释义，快捷输入里没有（论坛 #153）。
-        //
-        // 归属逐候选取 `mix_candidate_owner`，与词频/加词**同一个**函数：注释库是数据类
-        // 资源，归属与词频/短语同源（见 `comment.rs` 里 `dict` 变量那段）。另写一份
-        // 「哪个候选算哪个成员」的判据就是第二个真相源，漂移后的表现是「词频记进 A 桶、
-        // 注释查的是 B 桶」这类只在多成员配置下才现形的错配。
+        // 快捷输入（mix）下这一份不够：`effective_data_schema` 对 `Mix(_)` 返回 `None`，整列表按主
+        // 方案求白名单，英文成员的候选就查不到写着 `english` 的注释库。故归属逐候选取
+        // `mix_candidate_owner`，与词频/加词同一个函数（见 `comment.rs` 里 `dict` 变量那段），不另
+        // 写第二个真相源。
         let mix_comment_scope = matches!(state.active, Some(ModeKind::Mix(_)));
-        // `${word_code}` / `${code_source}` 的来源方案（循环外解析一次，没有段引用就不碰）：
-        // 码表方案=自身全部编码（码长升序 a/ab/abc）、混输=其主码表成员、拼音=全局主码表。
-        // 编码按词查方案词库反查索引（word_codes_display），不按取码规则生成；含用户层：
-        // 自己造的词也显示编码（text-code-lookup.md）。候选并非用该编码方案
-        // 直接输入时（来源方案≠活跃方案，或处于临时拼音/快捷输入反查模式）`${code_source}`
-        // 才有值，出厂段名据此显示为 [编码(五笔)]。
+        // `${word_code}` / `${code_source}` 的来源方案（循环外解析一次，没有段引用就不碰）：码表方案=
+        // 自身、混输=其主码表成员、拼音=全局主码表。编码按词查方案词库反查索引（含用户层，见
+        // text-code-lookup.md），不按取码规则生成。来源方案≠活跃方案（或临拼/快捷输入反查模式）时
+        // `${code_source}` 才有值，出厂段名据此显示为 [编码(五笔)]。
         let code_schema = (tip.references("word_code") || tip.references("code_source"))
             .then(|| self.engine_mgr.code_source_schema())
             .filter(|s| !s.is_empty());
-        // 反查索引没就绪就**在后台建**，本次先不显示编码段（绝不在此等）。
-        // 索引对超大词库是秒级构建，而这里是按键处理链路、且正持有 state 锁——
-        // 真机上曾因此让整机卡死 29.5 秒。
+        // 反查索引没就绪就在后台建，本次先不显示编码段：这里是按键链路且持有 state 锁，绝不在此等。
         if let Some(sid) = code_schema.as_deref() {
             self.ensure_reverse_index_async(sid);
         }
@@ -10982,19 +9747,13 @@ impl Coordinator {
         ctx: &TooltipEvalCtx,
         reverse: &wind_reverse::ReverseLookup,
     ) -> crate::tooltip::RenderedTooltip {
-        // 悬停提示按段列表渲染（见 `crate::tooltip`）。逐字段遍历**截断后**的显示文本、
-        // 且不含截断追加的 `…`：超长候选（如长短语）逐字展开会撑爆气泡，只提示实际
-        // 显示出的字；被截掉的部分由「完整原文」段（`${full_text}`）整段给出。
-        // `${word_code}` 则按候选**完整原文**查词库（截断/繁化文本词库里没有；
-        // 查不到=空，段随之消失）。
+        // 悬停提示按段列表渲染（见 `crate::tooltip`）。逐字段遍历截断后的显示文本、不含 `…`：
+        // 超长候选逐字展开会撑爆气泡，被截掉的部分由「完整原文」段（`${full_text}`）给出。
         //
-        // ⚠️ 曾改成按显示文本（`full`）查编码，动机是「气泡三段应同属一个域」——已回退。
-        // 拼音段/拆字段吃显示文本是**它们**的事（拆字库覆盖繁体字，查得到），而编码段
-        // 回答的是「这个候选怎么打出来」，用户实际敲的就是内部文本那个码；改成查繁化
-        // 文本只会让它查不到而整段消失，是拿一个**已经正确**的段去换取形式上的一致。
-        // 想再动它之前，先拿出一个真实的错例（2026-09-08 复核，没有找到）。
-        // `word_codes_display` 返回 None＝**系统层反查索引尚未就绪**（区别于「查不到」的
-        // Some("")）。此时本段不显示，并已在 [`Self::tooltip_eval_ctx`] 里触发后台构建，建好后自动补上。
+        // `${word_code}` 按候选完整原文查词库，不按显示文本（`full`）：编码段回答「这个候选怎么打出
+        // 来」，繁化后的文本词库里查不到、整段会消失（拼音段/拆字段吃显示文本是它们的事）。
+        // `word_codes_display` 返回 None＝系统层反查索引尚未就绪（区别于「查不到」的 Some("")），此
+        // 时本段不显示，[`Self::tooltip_eval_ctx`] 已触发后台构建，建好后自动补上。
         let word_code = ctx
             .code_schema
             .as_deref()
@@ -11086,22 +9845,10 @@ impl Coordinator {
         }
     }
 
-    /// 候选来源标签：短语（系统/用户 + 组/成员）优先，其次用户/临时词库，再按来源 + 方案名。
-    /// 混输下英文候选归码表体系。
-    /// 调试段的「来源」行：词库来源 + **整句标记**。
+    /// 调试段的「来源」行：词库来源 + 整句标记。
     ///
-    /// 整句标记单列一层、不并进 `match c.source`：整句不是第七种来源，而是正交于来源的
-    /// 一个身份——拼音、码表（`codetable/sentence.rs`）两侧都产整句，而同一条整句还可能
-    /// 是「词典里本就有的词被补标了整句身份」（同文合并，见 `Candidate::is_synthesized`
-    /// 的文档）。把它揉进 `match` 就要在每个分支重复一遍。
-    ///
-    /// 三个标志各自回答一个不同的问题，调试时都需要：
-    /// - `is_sentence` —— 它是不是「对整串输入的最优解读」；
-    /// - `is_synthesized` —— 是引擎新拼出来的，还是词库本就有这个词条；
-    /// - `is_sentence_demoted` —— 是否已让位于精确整词（还在列表里，只是不占首位）。
-    ///
-    /// **验证 S2（用户词进整句词图）时这行是主要抓手**：整句只出一条、赢者通吃，
-    /// 光看候选文本分不清「用户词赢了」和「系统词本来就长这样」。
+    /// 整句标记单列一层、不并进来源的 `match`：整句是正交于来源的身份（拼音、码表两侧都产整句，
+    /// 词典里本就有的词也可能被补标整句身份）。标记判据见 [`sentence_debug_tag`]。
     fn debug_source_label(&self, c: &Candidate, ctx: &DebugSchemaCtx) -> String {
         let base = self.debug_source_base(c, ctx);
         // 逆切分候选的 `code` 是整串、来源是码表，不标出来就和词库词条长得一模一样。
@@ -11112,7 +9859,8 @@ impl Coordinator {
         }
     }
 
-    /// 词库来源本身（不含整句标记），见 [`Self::debug_source_label`]。
+    /// 词库来源本身（不含整句标记），见 [`Self::debug_source_label`]：短语（系统/用户 + 组/成员）
+    /// 优先，其次用户/临时词库，再按来源 + 方案名。混输下英文候选归码表体系。
     fn debug_source_base(&self, c: &Candidate, ctx: &DebugSchemaCtx) -> String {
         use wind_candidate::CandidateSource as S;
         if c.is_phrase {
@@ -11159,12 +9907,9 @@ impl Coordinator {
     ///
     /// 查询码走 [`Self::freq_code`]（按来源分流：拼音/英文用候选存储码，码表用输入码）。
     ///
-    /// 拼音侧不能用击键缓冲——双拼 `siyr`/分隔符 `xi'an`/前缀补全下与候选码不同域，用后者
-    /// 查恒 miss、显示恒 0；码表侧反过来必须用输入码，否则 `d`/`de`/`def` 三个码位串扰。
-    ///
-    /// 与 `apply_freq_rerank` 及写入端 `record_selection` 同口径，**三处必须一致**——
-    /// 本处不同步的后果最隐蔽：调试信息显示的计数与排序实际用的那条不是同一个 key，
-    /// 排查时会被它带偏。
+    /// 拼音侧不能用击键缓冲（双拼 `siyr`/分隔符 `xi'an`/前缀补全下与候选码不同域，查恒 miss）；码表
+    /// 侧必须用输入码，否则 `d`/`de`/`def` 三个码位串扰。与 `apply_freq_rerank` 及写入端
+    /// `record_selection`三处必须一致，否则调试信息显示的计数与排序实际用的不是同一个 key。
     fn debug_freq_count(&self, c: &Candidate, input_code: &str, ctx: &DebugSchemaCtx) -> u32 {
         let Some(store) = &self.store else {
             return 0;
@@ -11191,9 +9936,8 @@ impl Coordinator {
         if !c.code.is_empty() {
             parts.push(format!("码 {}", c.code));
         }
-        // 权重后标出**贡献层**：跨词库同词合并时 weight 取各启用层的最大值，而 code 仍属
-        // 首个出现层，光看数字分不清它出自哪本词库。少了这一标注，「扩展词库权重没生效」
-        // 与「生效了但被别的排序维度盖过」在界面上长得一模一样。
+        // 权重后标出贡献层：跨词库同词合并时 weight 取各启用层的最大值，而 code 仍属首个出现层，
+        // 不标就分不清「扩展词库权重没生效」与「生效了但被别的排序维度盖过」。
         parts.push(match &c.meta.weight_layer {
             Some(layer) => format!("权 {} ←{layer}", c.weight),
             None => format!("权 {}", c.weight),
@@ -11209,17 +9953,12 @@ impl Coordinator {
 
 /// 候选的整句身份标记，供调试段的「来源」行使用（`None` = 不是整句）。
 ///
-/// 抽成自由函数是为了可单测：整个调试段要一个活的 `Coordinator` 才跑得起来，
-/// 而这段判据是纯的——它只问候选身上那三个布尔。
+/// 抽成自由函数以便单测（调试段要活的 `Coordinator` 才跑得起来，这段判据只问候选身上的标志）：
+/// - `is_sentence`：它是不是对整串输入的最优解读；
+/// - `is_synthesized`：引擎新拼出来的，还是词库本就有这个词条（同文合并会给后者补上整句身份）；
+/// - `is_sentence_demoted`：是否已让位于精确整词（还在列表里，只是不占首位）。
 ///
-/// 三个标志各自回答一个不同的问题：
-/// - `is_sentence` —— 它是不是「对整串输入的最优解读」；
-/// - `is_synthesized` —— 引擎新拼出来的，还是词库本就有这个词条（同文合并会给后者
-///   补上整句身份，见该字段文档）；
-/// - `is_sentence_demoted` —— 是否已让位于精确整词（还在列表里，只是不占首位）。
-///
-/// 另带 N-best 名次 `sentence_rank`：**只在 ≥ 2 时**写成 `整句#2(…)`。最优解（名次 1）与
-/// 出厂单条整句不标号，出厂下的标记因此与 N-best 之前一字不差。
+/// N-best 名次 `sentence_rank` 只在 ≥ 2 时写成 `整句#2(…)`，最优解与出厂单条整句不标号。
 fn sentence_debug_tag(c: &Candidate) -> Option<String> {
     if !c.is_sentence {
         return None;
@@ -11352,9 +10091,8 @@ pub(crate) type EmojiSpec = (bool, bool, Vec<String>);
 pub(crate) struct EmojiTables(pub(crate) Vec<std::sync::Arc<wind_dict::emojidict::EmojiReader>>);
 
 impl EmojiTables {
-    /// 各表命中的值按表序拼成一串（空格分隔）。表间的重复（同一符号、或带 / 不带 U+FE0F）
-    /// 不在这里去：消费端本就要按 `emoji_dedup_key` 去重并截断到 `max_per_word`，在这里
-    /// 再去一遍只是多分配。
+    /// 各表命中的值按表序拼成一串（空格分隔）。表间重复不在这里去：消费端本就要按 `emoji_dedup_key`
+    /// 去重并截断到 `max_per_word`。
     pub(crate) fn lookup(&self, text: &str) -> Option<String> {
         let parts: Vec<&str> = self.0.iter().filter_map(|r| r.lookup(text)).collect();
         (!parts.is_empty()).then(|| parts.join(" "))
@@ -11374,15 +10112,13 @@ pub struct AutoCommentSource {
     pub path: std::path::PathBuf,
     /// 声明了这份词库的方案 id —— 直接就是它的适用方案白名单。
     ///
-    /// 自动项的白名单**不可编辑**，因为它不是一个偏好而是一个事实：这份注释随词库分发，
-    /// 拿到别的方案下去查纯属浪费（还查不到）。用户想跨方案共用，正确做法是把它当独立
-    /// 注释库手工挂一条。
+    /// 自动项的白名单不可编辑：这份注释随词库分发，拿到别的方案下查不到。想跨方案共用，把它当
+    /// 独立注释库手工挂一条。
     pub schemas: Vec<String>,
 }
 
-/// 自动项的稳定 id。带 `auto:` 前缀是为了与用户手写的 id 分处两个命名空间 ——
-/// 手工项与自动项同 id 时，认领逻辑靠 `auto` 标志位区分而不靠 id，但日志里两条同名
-/// 记录足够让人查半天。
+/// 自动项的稳定 id。带 `auto:` 前缀与用户手写的 id 分处两个命名空间：认领逻辑靠 `auto` 标志位区分，
+/// 但日志里两条同名记录会让人困惑。
 pub(crate) fn auto_comment_id(rel: &str) -> String {
     format!("auto:{}", rel.replace('\\', "/"))
 }
@@ -11447,8 +10183,7 @@ pub(crate) fn resolve_comment_mounts(
     // `${dict:id}` 用：每个库被哪些 id 指到（去重合并的那条的 id 也算它的）。
     let mut ids: Vec<(std::path::PathBuf, Vec<String>)> = Vec::new();
     for eff in specs.iter().filter(|e| e.enabled) {
-        // 自动项的路径已经是解析好的绝对路径（检测时就得打开文件），手工项才需要按
-        // `schemas/` 逐层解析。两者到这里汇成同一条流水线。
+        // 自动项的路径已是解析好的绝对路径（检测时就得打开文件），手工项才需要按 `schemas/` 逐层解析。
         let resolved = match &eff.kind {
             EffectiveCommentKind::Auto { path } => Some(path.clone()),
             EffectiveCommentKind::Manual { path } if path.is_empty() => continue,
@@ -11465,10 +10200,8 @@ pub(crate) fn resolve_comment_mounts(
         };
         let s = eff;
         match resolved {
-            // 按**解析后路径**去重：两条 spec 写不同的相对路径却指向同一个文件时
-            // （`a.dict.yaml` 与 `./a.dict.yaml`，或用户目录与安装目录同名文件都被
-            // 解析到同一处），只加载一次。重复加载除了浪费解析时间，还会让优先级
-            // 判定变得依赖「第几次出现」——去重后靠前那条恒胜出。
+            // 按解析后路径去重：不同相对路径或不同层的同名文件可能解析到同一处，只加载一次，
+            // 否则优先级判定会依赖「第几次出现」。去重后靠前那条恒胜出。
             Some(p) if paths.iter().any(|(q, _)| *q == p) => {
                 info!("注释词库重复挂载，已跳过: {} (id={})", p.display(), s.id);
                 if let Some((_, v)) = ids.iter_mut().find(|(q, _)| *q == p) {
@@ -11515,20 +10248,17 @@ fn builtin_effective(
     }
 }
 
-/// 把配置里的挂载表与自动检测结果合成**最终挂载序列**（顺序即优先级）。
+/// 把配置里的挂载表与自动检测结果合成最终挂载序列（顺序即优先级）。
 ///
-/// - 配置里 `auto = true` 的条目是**引用空壳**：按 id 去 `auto` 里认领，认领到就用检测出
-///   的 `path`/`schemas`，只保留用户的 `enabled` 与位置；认领不到则**静默丢弃**（词库被删、
-///   被停用、或总开关关了——都是常态，不是配置错误）。
-/// - `builtin = true` 的条目同理，按 id 认领随包内置库（`builtin`），认领不到静默丢弃。
+/// - 配置里 `auto = true` 的条目是引用空壳：按 id 去 `auto` 里认领，认领到就用检测出的
+///   `path`/`schemas`，只保留用户的 `enabled` 与位置；认领不到则静默丢弃（词库被删、被停用、
+///   或总开关关了都是常态）。
+/// - `builtin = true` 的条目同理，按 id 认领随包内置库，认领不到静默丢弃。
 /// - 其余条目原样保留为手工项。
-/// - 没被认领的内置项默认启用，追加在用户项之后；再其后是没被认领的 `auto` 项（同样默认启用）。
+/// - 没被认领的内置项默认启用，追加在用户项之后；再其后是没被认领的 `auto` 项。
 ///
-/// # 为什么新自动项默认排末尾
-///
-/// 用户显式挂的库表达的是明确意图，自动项是「顺手给的」。装了个新方案就把用户排好的第一
-/// 优先级挤到后面去，是这类「自动」功能最招人烦的地方。想让它靠前，拖一下即可 —— 拖过
-/// 之后它就有了空壳，位置从此归用户所有。
+/// 新自动项默认排末尾：用户显式挂的库是明确意图，不该被新装的方案挤到后面。拖过之后它就有了
+/// 空壳，位置从此归用户。
 pub(crate) fn merge_comment_dicts(
     configured: &[wind_config::CommentDictSpec],
     builtin: &[wind_config::comment_lib::BuiltinCommentDict],
@@ -11599,18 +10329,14 @@ mod hover_reset_tests;
 mod caret_for_ui_tests {
     //! 「用于 UI 定位的光标坐标」闸门（[`Coordinator::resolve_caret_for_ui`]）。
     //!
-    //! 本组测试锁的是一个曾按消费者分裂的缺陷：`state.caret_*` 里可以躺着 (0,0)
-    //! （`handle_caret_update` 先写缓存、后判有效性），候选窗一直有回退闸门、状态气泡没有，
-    //! 于是同一份 (0,0) 只让气泡飞到**主显示器左上角**——多显示器下表现为「气泡永远在主屏」，
-    //! 而候选窗一切正常。两者现已共用本函数，测试同时钉住判据与回退。
+    //! 候选窗与状态气泡共用本函数；测试同时钉住判据与回退（无效坐标不能让气泡飞到主屏左上角）。
     use super::*;
 
     fn coord() -> Arc<Coordinator> {
         Coordinator::new_headless(Config::default(), None)
     }
 
-    /// ★ 负坐标是**合法**的：主屏左上角才是虚拟桌面原点，左侧/上方的副屏整块为负。
-    /// 若把负数一并判为异常，副屏用户就永远取不到有效坐标 → 永远走回退 → 症状同样是「永远在主屏」。
+    /// 负坐标是合法的：主屏左上角才是虚拟桌面原点，左侧/上方的副屏整块为负。
     #[test]
     fn negative_coords_are_valid() {
         assert!(Coordinator::caret_is_valid(-1200, 500, 20), "左侧副屏");
@@ -11634,8 +10360,7 @@ mod caret_for_ui_tests {
         );
     }
 
-    /// ★ 修复核心：无效坐标必须回退到最近一次有效坐标，且该坐标可以在副屏（负值）。
-    /// 原样交给 UI 就是「气泡跳到主显示器左上角」。
+    /// 无效坐标必须回退到最近一次有效坐标，且该坐标可以在副屏（负值）。
     #[test]
     fn invalid_falls_back_to_last_valid_on_secondary_monitor() {
         let c = coord();
@@ -11661,8 +10386,7 @@ mod caret_for_ui_tests {
 
 /// `[ui.labels]` → 图标主字的产地测试。
 ///
-/// 这些断言覆盖的是 `mode_icon_label` 这个**单点**；语言栏图标、工具栏、状态气泡
-/// 三个消费面都从它取值（气泡共享取值、不共享分支结构），故不必逐面重复断言。
+/// 断言只覆盖 `mode_icon_label` 这个单点；语言栏图标、工具栏、状态气泡都从它取值，不必逐面重复。
 #[cfg(test)]
 mod mode_icon_label_tests {
     use crate::coordinator::Coordinator;
@@ -11689,8 +10413,7 @@ mod mode_icon_label_tests {
         );
     }
 
-    /// 留空回落内置默认，**不是回落空**——空标签会让语言栏图标画出一个没有主字的
-    /// 空白方块，用户既看不出模式也无从理解。
+    /// 留空回落内置默认，不是回落空：空标签会让语言栏图标画出一个没有主字的空白方块。
     #[test]
     fn empty_falls_back_to_builtin() {
         let c = coord_with("", "");
@@ -11698,7 +10421,7 @@ mod mode_icon_label_tests {
         assert_eq!(c.mode_icon_label(false, true), "A");
     }
 
-    /// 出厂配置必须与本次改造前的字面量逐字一致：老用户升级后不该看到任何变化。
+    /// 出厂配置必须与改造前的字面量一致：老用户升级后不该看到任何变化。
     #[test]
     fn default_config_preserves_legacy_labels() {
         let c = Coordinator::new_headless(Config::default(), None);
@@ -11706,11 +10429,8 @@ mod mode_icon_label_tests {
         assert_eq!(c.mode_icon_label(false, true), "A");
     }
 
-    /// ★ 反向对照：英文标签**不得**渗进中文态。
-    ///
-    /// 缺了这条，一个"所有分支都返回 english_label"的错误实现能让上面的断言全绿，
-    /// 而它在真机上的表现是打中文时图标也显 `En`。无方案数据时中文态回落「中」，
-    /// 正好不需要任何 fixture 就能把这个方向钉死。
+    /// 反向对照：英文标签不得渗进中文态。缺了这条，「所有分支都返回 english_label」的错误实现能让
+    /// 上面的断言全绿。无方案数据时中文态回落「中」，不需要 fixture 就能钉死。
     #[test]
     fn english_label_does_not_leak_into_chinese() {
         let c = coord_with("En", "Cp");
@@ -11723,9 +10443,8 @@ mod mode_icon_label_tests {
 
     /// 超长配置在这一层就被截断。
     ///
-    /// ⚠️ 这是 C++ 侧 `_inputTypeLabel` 缓冲的**第一道**防线（第二道是那边的
-    /// `_TRUNCATE`）。这条断言挂了意味着超长标签能一路走到 `wcsncpy_s`，
-    /// 别把它当成"显示不好看"的测试。
+    /// 这是 C++ 侧 `_inputTypeLabel` 缓冲的第一道防线（第二道是那边的 `_TRUNCATE`），挂了意味着
+    /// 超长标签能一路走到 `wcsncpy_s`。
     #[test]
     fn overlong_label_truncated_before_leaving_coordinator() {
         let c = coord_with("English", "CapsLock");

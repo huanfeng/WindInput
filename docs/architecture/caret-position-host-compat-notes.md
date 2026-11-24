@@ -100,6 +100,15 @@ QQNT、Excel、WPS 表格、EverEdit、记事本上暴露出**八种互不相同
 不参与首显判据。刷新缓存不改变任何档位的首显时机，故这条处理放在档位门**之前**——`wait` 档
 宿主同样需要（EverEdit 配的是 `wait`，曾因放在门后一条都收不到）。
 
+EverEdit 的空闲上报还会滞后一拍：点击移动光标后既不发 `caret_update` 也不发 selection 变更，缓存
+停在上一次的位置，而 probe 在 1ms 后就给出正确坐标。因此 probe 可信的宿主不拿空闲上报抢跑首显
+（`probe_is_untrusted` 为假时 idle_anchor 逃生口不开），否则候选窗恒慢一拍。
+
+焦点刚到达时的空闲上报同样不可信：宿主还没 reflow，报的往往是上一处的位置（EverEdit 实测焦点坐标、
+空闲上报、真实位置三者互不相同，拿空闲上报首显会错上千像素）。故焦点后的第一个组合不开 idle_anchor
+逃生口（`awaiting_first_authority_after_focus`），仍走 25ms 短兜底，其间 probe 已把缓存刷对；
+不能改为收窄 `caret_cache_verified` 的置位，那会让焦点后首字退回 600ms 长兜底。
+
 ### D 类：终端 / 浏览器
 
 代表：**WindTerm**、**Windows Terminal**、**Edge**。
@@ -373,6 +382,14 @@ B 屏的任务栏。
 - **`gui_caret`**（`GetGUIThreadInfo`）可能是任务栏等别处残留的 Win32 光标。它够格当「没有更好
   选择时的兜底位置」，不够格解除首帧信任门（`caret_cache_verified`）。它与 TSF 的 compStart 不同源，
   锁组合起点时的 500px 同源校验对它不适用：此时直接采信 compStart。
+- **Word 组合期的 `gui_caret` 帧**：Word 在按键期可拒绝同步 edit session（`TS_E_SYNCHRONOUS`），
+  DLL 回退到 Win32 光标上报，那是跨窗口的陈旧位置（恒在别的行），不带组合起点与矩形。让它进入
+  组合期的跟行 / 重锁，候选窗就在它与 TSF 真坐标之间来回跳。故本组合收到过 TSF 域帧之后，GUI 帧
+  一律不再采信（`tsf_frame_seen_in_composition`）；纯 GUI 回退的宿主不受影响。
+- **焦点事件上的坐标**：`OnSetFocus` 不是按键上下文，同步 edit session 必被拒绝，回退链交出的是
+  跨窗口的 Win32 光标（Word 只在正文行维护它，标题行上取到的是别处的值，实测偏差 800px 以上）。
+  `ui.status.show_on_focus` 的焦点气泡因此在 `follow_caret` 模式下只认 TSF 域坐标，拿不到就挂起
+  等 DLL 补来的 TSF 帧（`pending_focus_tip`），不做回退。
 - **Java 被动客户端**（如 JTable 未进入编辑）按键时 DLL 退到 `gui_caret`，拿到的是窗口客户区原点；
   TSF probe 报的是 Windows 输入编辑框的位置，它不随单元格移动，常恰好等于上一轮权威坐标而被判
   「未 reflow」。此时 probe 仍应替换掉非 TSF 的缓存，否则兜底到期时候选窗先闪到屏幕左边。
@@ -491,6 +508,10 @@ caret_probe → 拒绝: 该宿主 composition rect 恒陈旧，改用组合前�
   见 §二·六。
 - **大偏移逃生阀拿已锁的 `composition_start` 与宿主上报的 compStart 比**：见 E 类，问宿主前后两帧，
   别问自己。
+- **上屏后在 `reset_first_show` 里清掉 `caret_cache_verified`**，让下一组合改等权威坐标：上屏前移了
+  插入点、缓存确实陈旧（微信五笔满码上屏后约 20px），但清掉后下一组合走 600ms 长兜底，而长按时
+  组合寿命仅约 128ms，兜底每次都被作废、永不到期，候选窗停在几百像素之外。微信的权威坐标要约
+  190ms 才到，「等到正确坐标」与「在组合内显示」互斥，取一次性小抖动。
 - **靠单个宿主验证**：见第三节。
 
 ## 六、相关文件
