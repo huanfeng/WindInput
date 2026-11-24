@@ -1,32 +1,11 @@
-//! 移动端的**配置读写门面**。
+//! 移动端的配置读写门面。
 //!
-//! # 为什么必须走这里，而不是让宿主自己读写文件
+//! 宿主不自己读写 config.toml：[`Config::set_user_value`] 负责容错解析、损坏即备份
+//! （备份失败就拒绝写）、等于默认值的键不落盘，宿主重写一份必然漏掉其中几条。
+//! 这一层只做转发与类型投影，不写落盘逻辑。
 //!
-//! 移动端宿主（Android 的 Kotlin 侧）本来就有 TOML 解析器，"自己读改写用户层
-//! config.toml" 看起来是最短的路。它不成立，因为 [`Config::set_user_value`] 里压着
-//! 一整套用血换来的讲究，宿主重写一份必然违反其中某几条：
-//!
-//! - **容错解析**：用户层语法坏了不能整份丢弃，要尽量救回；
-//! - **损坏即备份，备份失败就拒绝写**——写回会永久删掉没救回的行，无备份写回等于
-//!   用户亲手点的保存把自己的配置吃了；
-//! - **等于默认值的键不写入**：写了就等于把当前默认"钉死"，将来默认值一改用户被留在
-//!   旧行为上。`schema.mix.auto_commit_block_on_pinyin` 已经这么引爆过一次
-//!   （见 `set_user_value` 的注释，那里记着 62 颗同形的雷）。
-//!
-//! 这些规矩属于**配置系统**，不属于某个宿主。所以这一层只做转发与类型投影，
-//! 一行落盘逻辑都不自己写。
-//!
-//! # 快照为什么是 TOML 而不是 JSON
-//!
-//! 配置文件本身就是 TOML，宿主侧也已经有解析器（布局/清单都在用）。用同一种表示，
-//! 「快照里的键」与「文件里的键」就是同一个东西，不需要第二套映射，也就没有第二处
-//! 会漂移的地方。
-//!
-//! # 注册表为什么要一起暴露
-//!
-//! 宿主的设置清单里写的是**字符串键**。写错一个字母的后果是「这个开关点了没反应」，
-//! 而且不报错——本仓最不愿意再制造的那类缺陷。把 core 的字段注册表原样交给宿主，
-//! 宿主就能在加载清单时当场比对：清单里有而注册表没有的键，直接报出来。
+//! 快照用 TOML：与配置文件同一种表示，快照里的键就是文件里的键，不需要第二套映射。
+//! 字段注册表一并暴露，宿主加载设置清单时可当场比对出写错的键（否则是「开关点了没反应」且不报错）。
 
 use std::path::Path;
 use std::sync::{Mutex, RwLock};
@@ -37,7 +16,7 @@ use wind_config::config_schema::{self, FieldType};
 /// 一个配置值（跨语言边界的最小值类型集合）。
 ///
 /// 刻意不含 Map / 结构体数组：那些在设置界面上要专门的编辑器，不是「一个值」，
-/// 目前经快照读出来展示、由桌面端编辑。将来移动端要编辑它们时，应当为**那一类**
+/// 目前经快照读出来展示、由桌面端编辑。将来移动端要编辑它们时，应当为那一类
 /// 单独设计入口（如标点映射表有自己的行编辑界面），而不是往这个枚举里塞一个
 /// 万能的字符串。
 #[derive(Debug, Clone)]
@@ -72,9 +51,7 @@ pub struct ConfigFieldInfo {
     pub ty: String,
     /// `enum` 的合法值集合；其余类型为空。
     ///
-    /// 值域进注册表而不是让宿主手抄一份，是因为手抄的那份会滞后：core 加了新取值而
-    /// 宿主没跟上，用户就永远看不到新选项；反向漂移（宿主多出 core 不认的值）则是
-    /// 「选了没反应」。`ui.candidate.layout` 在桌面端已经踩过这个形状。
+    /// 值域由注册表给出，不让宿主手抄：手抄的会与 core 漂移，表现为新选项看不到或「选了没反应」。
     pub options: Vec<String>,
 }
 
@@ -98,8 +75,7 @@ pub fn registry() -> Vec<ConfigFieldInfo> {
         .map(|f| ConfigFieldInfo {
             key: f.key.to_string(),
             ty: type_name(&f.ty).to_string(),
-            // LayoutEnum 也报成 enum（见 type_name），值域同样要交出去——此前只填了 Enum，
-            // LayoutEnum 键到宿主手里是「枚举但没有选项」，设置页画不出选择器。
+            // LayoutEnum 也报成 enum（见 type_name），值域同样要交出去，否则设置页画不出选择器。
             options: match f.ty {
                 FieldType::Enum(vals) | FieldType::LayoutEnum(vals) => {
                     vals.iter().map(|s| s.to_string()).collect()
@@ -110,14 +86,10 @@ pub fn registry() -> Vec<ConfigFieldInfo> {
         .collect()
 }
 
-/// **当前生效**配置的全量快照（TOML 文本）。
+/// 当前生效配置的全量快照（TOML 文本）。
 ///
-/// 生效 = 四层合并 **再套上移动端强制项**后的结果，不是用户层那一份，也不是裸的
-/// 四层合并结果。设置界面要显示的正是这个：
-///
-/// - 用户没设过的键也得显示出它此刻实际取什么值，否则开关的显示态与引擎行为对不上；
-/// - 移动端强制改写的键（见 [`apply_mobile_overrides`]）必须显示**改写后**的值，
-///   否则设置页会照着磁盘上的原值显示一个引擎根本没在用的状态。
+/// 生效 = 四层合并再套上移动端强制项（[`apply_mobile_overrides`]），不是用户层那一份。
+/// 设置页要按它显示，开关的显示态才与引擎实际行为一致。
 pub fn snapshot(data_dir: &Path) -> String {
     let mut cfg = Config::load(Some(data_dir)).unwrap_or_else(|e| {
         tracing::warn!("配置快照加载失败，回落代码默认值: {e}");
@@ -127,42 +99,27 @@ pub fn snapshot(data_dir: &Path) -> String {
     to_toml(&cfg)
 }
 
-/// 移动端对加载结果的**强制改写**——`MobileCore::new` 与 [`snapshot`] 共用这一份。
+/// 移动端对加载结果的强制改写，`MobileCore::new` 与 [`snapshot`] 共用。
 ///
-/// 抽出来是因为两处必须一致：构造时改了、快照时不改，设置页显示的就是一个引擎没在用
-/// 的值；用户还能去"改"它，改完毫无反应。共用一个函数，新增强制项时不会漏掉快照。
-///
-/// ⚠ 这里改写的键**不该出现在移动端设置清单里**——它们不是用户可选项。
+/// 两处必须一致，否则设置页显示的是引擎没在用的值。这里改写的键不是用户可选项，
+/// 不该出现在移动端设置清单里。
 pub fn apply_mobile_overrides(cfg: &mut Config) {
-    // 启用的方案：每次（构造、每次重载）都重算——此前只在构造时把可选方案换成「装了的全部」，
-    // 重载一读回出厂 `available = ["wubi86", "wubi86_pinyin"]`，拼音、双拼、英文就从列表里没了
-    // （真机：快捷面板一操作方案就少了）。
+    // 构造与每次重载都要重算：只在构造时算的话，重载读回出厂 `available` 会丢掉已装的方案。
     apply_enabled_schemas(cfg);
-    // 编码区归候选区自绘（移动端必须如此，非偏好）：默认的 `app_inline` 是把编码塞进
-    // 宿主组合区、协调器**不下发 preedit** 给候选窗。移动端没有桌面那种浮在光标旁的
-    // 候选窗，编码要显示在键盘上方的编码栏里，就必须让协调器把 preedit 发出来。
+    // 移动端没有光标旁的候选窗，编码显示在键盘上方的编码栏，必须让协调器下发 preedit
+    // （默认的 `app_inline` 不下发）。
     cfg.ui.candidate.preedit_display = "candidate_top".to_string();
-    // 联想态空格选不选联想：不在这里强制，归 `[mobile.association] space_commits`（出厂关，
-    // 设置页可开）。此前在这里强改成 false，用户想要「空格选首个联想」也没有办法。
+    // 联想态空格是否选联想不在这里强制，归 `[mobile.association] space_commits`。
 }
 
-/// **出厂默认**配置的全量快照（TOML 文本）。
+/// 出厂默认配置的全量快照（TOML 文本）。
 ///
-/// # 「默认」是哪一层，必须说清楚
+/// 给的是 L1⊕L2⊕L2.5（代码默认 ⊕ `data/config.toml` ⊕ 定制层），不是 `Config::default()`：
+/// [`Config::set_user_value`] 的「等于默认不落盘」比对的正是这一层（`preset_for_pruning`）。
+/// 拿 L1 当默认，在出厂文件改写过的键上「默认：X」会标错，「恢复默认」写回的值也剪不掉。
 ///
-/// 这里给的是 **L1⊕L2⊕L2.5**（代码默认 ⊕ `data/config.toml` ⊕ 定制层），
-/// **不是** `Config::default()`。两者在「出厂 config.toml 显式写了、且与代码默认不同」
-/// 的键上分叉——`schema.active` 这类只写在 L2 的键是最明显的一类。
-///
-/// 判据来自 [`Config::set_user_value`]：它的「等于默认就不落盘」比对的正是这一层
-/// （`preset_for_pruning`）。设置端若拿 L1 当默认，在那些分叉的键上会有两个后果：
-/// - 「默认：X」标错——显示的是代码默认，而引擎实际回落到的是出厂默认；
-/// - **「恢复默认」失效**：写回 L1 的值不等于 L2 的默认，键留在用户层没被剪掉，
-///   用户看到的是「点了恢复默认，它还在那儿」。
-///
-/// 取不到出厂配置时降级到 L1 并**留一条警告**。那说明 `WIND_INSTALL_ROOT` 没钉对
-/// （见 `crate::mount_dirs`）；此时核心那边的剪枝也同样是关着的，两处症状同源——
-/// 安卓端「恢复默认后键仍在用户层」最初就是这么来的，与本层选哪一层默认无关。
+/// 取不到出厂配置时降级到 L1 并告警，这说明 `WIND_INSTALL_ROOT` 没钉对（见 `crate::mount_dirs`），
+/// 核心侧的剪枝此时同样失效。
 pub fn defaults(data_dir: &Path) -> String {
     let preset = match Config::system_preset_value(Some(data_dir)) {
         Ok(v) => v,
@@ -194,7 +151,7 @@ fn to_toml(cfg: &Config) -> String {
 
 // ── 启用的方案 ──────────────────────────────────────────────────────
 //
-// 移动端语义：**装了的方案默认全部可用**；用户在设置里关掉某些，就写用户层 `schema.available`
+// 移动端语义：装了的方案默认全部可用；用户在设置里关掉某些，就写用户层 `schema.available`
 // （装了的里头他要的那些）。英文方案恒在其中——它是中英键切换的目标，关掉中英键就失灵；
 // 也因此用户写下的列表恒含 `english`，不会与出厂列表相等而被「等于默认不落盘」剪掉。
 
@@ -320,12 +277,10 @@ pub fn set_schema_enabled(id: &str, on: bool) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// 用户层写入的进程内互斥。
+/// 用户层写入的进程内互斥，本模块的写口一律经这把锁。
 ///
-/// `Config::set_user_value` 是「读整份 config.toml → 改一键 → 整份写回」，本身不加锁；
-/// [`set_tooltip_section_enabled`] 更是先 load 再整份写回段列表。宿主的设置页把各卡片的写入
-/// 各自丢到 IO 线程上，连点两个开关就是两条并发的读改写——后写的拿着旧文件覆盖先写的，
-/// 界面上表现为「刚打开的开关又弹回去」。本模块的写口一律经这把锁。
+/// `Config::set_user_value` 是不加锁的整份读改写；宿主把各卡片的写入各自丢到 IO 线程，
+/// 并发时后写的会拿旧文件覆盖先写的（「刚打开的开关又弹回去」）。
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 fn write_guard() -> std::sync::MutexGuard<'static, ()> {
@@ -346,7 +301,7 @@ pub struct EmojiModuleState {
 
 /// 全部 emoji 附加模块（内置在前，其后是用户放进 `emoji/` 的表）及当前开关。
 ///
-/// 单独开口而不走 [`set`]：`input.emoji.modules` 是**按模块 id 为键的表**，注册表里只登记了
+/// 单独开口而不走 [`set`]：`input.emoji.modules` 是按模块 id 为键的表，注册表里只登记了
 /// 表本身（条数不定，用户能自己加），逐个 id 的叶子键不在注册表里，[`set`] 会当成未知键拒掉。
 /// 用户没设过的模块取它的出厂开关（`default_on`），与核心查表时的口径一致。
 pub fn emoji_modules(data_dir: &Path) -> Vec<EmojiModuleState> {
@@ -431,7 +386,7 @@ fn section_title(label: &str) -> String {
 /// 打开 / 关闭名为 `label` 的提示段：整份段列表写回用户层（改回与出厂一致时由
 /// `set_user_value` 剪掉，不留残余）。没有这一段 → Err。同 [`set`]，只写盘，生效要另发重载。
 ///
-/// ⚠ 已知取舍（与电脑版设置页的段列表对话框相同）：开关过任意一段后，用户层存的是整份
+/// 已知取舍（与电脑版设置页的段列表对话框相同）：开关过任意一段后，用户层存的是整份
 /// 列表，此后出厂对段模板的修改到不了这位用户——直到他把列表改回与出厂一致。出厂段列表
 /// 变更时由 `Config::migrate_stale_factory_tooltip_sections_value` 认出存量副本迁移。
 pub fn set_tooltip_section_enabled(data_dir: &Path, label: &str, on: bool) -> Result<(), String> {
@@ -498,10 +453,9 @@ pub fn quick_mix_members(data_dir: &Path) -> QuickMixMembers {
 
 /// 整列写回快捷输入的候选来源（写用户层 `schema.mix_modes`）。只写盘，生效要另发重载。
 ///
-/// ⚠ 不能拿 `Config::load` 的结果整份写回：加载期 `normalize` 会把各实例的 `trigger_keys`
-/// 折算进 `keys.key_actions` 并清空，写回的是 `trigger_keys = []`——那等于「用户清空了触发键」，
-/// 下次加载 `;` 就进不了快捷输入了。所以在**原始值**上改：用户层写过 `schema.mix_modes` 就改那份，
-/// 没写过就改出厂那份（与出厂一致时由 `set_user_value` 剪掉，不留残余），其余字段原样保留。
+/// 不能拿 `Config::load` 的结果整份写回：加载期 `normalize` 已把 `trigger_keys` 折算进
+/// `keys.key_actions` 并清空，写回就等于清空了触发键。所以在原始值上改：用户层写过
+/// `schema.mix_modes` 就改那份，没写过就改出厂那份（与出厂一致时被剪掉），其余字段原样保留。
 pub fn set_quick_mix_members(data_dir: &Path, members: Vec<String>) -> Result<(), String> {
     let _w = write_guard();
     let cfg = Config::load(Some(data_dir)).map_err(|e| e.to_string())?;
@@ -557,18 +511,15 @@ fn patch_quick_mix_members(
 
 /// 写一个配置键到用户层。
 ///
-/// **只写盘，不重载引擎**——重载走 [`crate::MobileCommand::ReloadConfig`]。分开是为了
-/// 让宿主能把「连改若干项」合成一次重载：重载会重建引擎集，逐项重载会让设置页每点
-/// 一下卡一下。
+/// 只写盘，不重载引擎；重载走 [`crate::MobileCommand::ReloadConfig`]，宿主可把连改的
+/// 若干项合成一次重载（重载会重建引擎集）。
 ///
-/// @return 失败原因（磁盘只读、用户层语法坏且备份失败…）。这些必须让用户看见：
-/// 都是他能处理的问题，而「点了没反应」他处理不了。
+/// 失败原因（磁盘只读、用户层语法坏且备份失败等）要展示给用户。
 pub fn set(key: &str, value: ConfigValue) -> Result<(), String> {
     if key.is_empty() {
         return Err("配置键为空".to_string());
     }
-    // 只认注册表里的键：设置清单写错键名时当场报错，而不是落盘一个引擎永远不读的值
-    // ——那样的症状是「这个开关点了没反应」，且什么都不提示。
+    // 只认注册表里的键：清单写错键名时当场报错，而不是落盘一个引擎永远不读的值。
     if !config_schema::is_known_key(key) {
         return Err(format!("未登记的配置键：{key}"));
     }

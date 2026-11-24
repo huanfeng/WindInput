@@ -397,6 +397,21 @@ B 屏的任务栏。
   它时不算「对应当前插入点」，`caret_cache_verified` 必须清为 false，否则下一次组合会走 25ms 短兜底，
   先在上一次 `gui_caret` 位置闪一下再跳到默认位置。代价是该宿主恒 arm 600ms 长兜底：默认位置帧
   通常几十毫秒内就到并消费掉兜底，但 `IsHostDefaultPosition` 失败关闭时会等满 600ms。
+  - 识别指纹：`GetTextExt` 返回高度为 0 的退化矩形，选区、组合起点、组合矩形三者同值，且重试窗口
+    过完仍是它（Illustrator 画布恒为工作区右下角最后一个像素；多个宿主给同一个值，是 TSF 的通用
+    惯用语而非脏数据）。
+  - 要采信、不能丢：其它输入法直接采信，候选窗落在右下角任务栏之上；丢掉它回退链会跌到 `gui_caret`
+    （无关控件的 Win32 光标），候选窗被钉在左上角。采信后 `place_window` 现有的上翻 / 左移 / 钳制
+    就会把它落到右下角，无需新代码。
+  - 它不属 TSF 语义域（`caret_source::is_tsf` 为 false），因为它明说「没有插入点」，不能当权威坐标
+    参与跟行与漂移校正；但照常走首显（`pending_first_show` 消费不看来源），不再空等 600ms。
+  - 跟行（`pin_anchor_when_start_drifts` 把锚点 y 换成 `caret.y`）不看来源，本值也会被用上。没补来源闸，
+    因为该指纹下 `caret.y` 恒等于已锁锚点的 y，构造不出可达的失败。
+- **`imm_candidate_form`**：宿主经 `ImmSetCandidateWindow` 声明的候选窗位置（DLL 已换成屏幕坐标）。
+  DLL 只在出现上面 `tsf_default_pos` 指纹时才取。典型宿主是走 CUAS 的 Java AWT/Swing（医疗 HIS/LIS
+  客户端）：`GetTextExt` 恒为工作区右下角，而它把组合起点下沿写进 `CANDIDATEFORM`，微软拼音能跟随
+  光标靠的也是它。它属 TSF 语义域（点就是组合起点下沿）。这类帧不带组合起点：宿主写 `CANDIDATEFORM`
+  是异步的，组合首帧多是上次组合的旧值，带上会被锁成锚点、整场偏一截；不带则锚点跟逐帧 caret 走。
 
 ## 二·八、热键直达模式的占位 composition（`input.caret`，`CaretPlacementConfig`）
 

@@ -37,30 +37,26 @@ pub const CMD_SHOW_CONTEXT_MENU: u16 = 0x020A;
 pub const CMD_SYSTEM_MODE_SWITCH: u16 = 0x020B;
 pub const CMD_INPUT_STATE_REPORT: u16 = 0x0213;
 /// 旁路按键（上行，异步，仅 Windows DLL）：DLL 放行给宿主、核心本看不见的用户按键（英文模式的
-/// 字母数字、无会话时的退格回车……），只为扩展程序上报，**不进按键处理**。只在服务端推开
+/// 字母数字、无会话时的退格回车……），只为扩展程序上报，不进按键处理。只在服务端推开
 /// [`CONFIG_KEY_EXTENSION_KEY_OBSERVE`] 时发，密码框与键盘禁用时不发。载荷见 [`KeyObservedPayload`]。
 pub const CMD_KEY_OBSERVED: u16 = 0x021D;
 /// 诊断快照（上行，异步）：焦点窗口链 + 前台窗口 + TSF 上下文实例 id。载荷见
 /// [`DiagSnapshotPayload`]。
 ///
-/// **刻意不并入 `CMD_FOCUS_GAINED`**：那条路径是宿主 UI 线程上的**同步** IPC 往返
-/// （见 `TextService.cpp` 的 `focusIpcT0` 计时），首字延迟直接挂在它身上；本命令要做
-/// 三次窗口类名查询 + band 查询，塞进去等于给每次焦点切换加固定开销。故独立成命令、
-/// 异步发送，且由 [`CONFIG_KEY_DIAG_SNAPSHOT`] 门控——HUD 关闭时 DLL 一次都不采集。
+/// 刻意不并入 `CMD_FOCUS_GAINED`：那条是宿主 UI 线程上的同步往返，首字延迟挂在它身上，
+/// 而本命令要做几次窗口查询。故独立、异步发送，并由 [`CONFIG_KEY_DIAG_SNAPSHOT`] 门控。
 pub const CMD_DIAG_SNAPSHOT: u16 = 0x0214;
 
 /// `CMD_FOCUS_LOST` 载荷的 reason 字段（第 9 字节）。与 C++ `BinaryProtocol.h` 的
 /// `FOCUS_LOST_REASON_*` 一一对应，改动须两边同步。
 ///
-/// 「失焦」在 TSF 里是四件语义不同的事，过去挤在一个命令里，服务端只能一刀切地
-/// 「清激活态 + 清输入态」：于是同宿主换文档也会关掉工具栏，而 DocMgr 级失焦因为不敢
-/// 清输入态干脆什么都不发、工具栏永不隐藏。拆开后三项后果各自独立：
+/// 「失焦」在 TSF 里是四件语义不同的事，各自的后果：
 ///
 /// | reason        | ime_active | has_edit_context | 输入态 |
 /// |---------------|------------|------------------|--------|
 /// | `Thread`      | false      | false            | 清     |
 /// | `DocChanged`  | 不动       | 不动             | 清     |
-/// | `CtxLost`     | 不动       | false            | **不清** |
+/// | `CtxLost`     | 不动       | false            | 不清   |
 /// | `NoEditCtx`   | 不动       | false            | 清     |
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FocusLostReason {
@@ -70,8 +66,8 @@ pub enum FocusLostReason {
     DocChanged,
     /// 焦点离开可编辑控件（DLL 的 DocMgr 级失焦）。
     ///
-    /// **绝不可用它清输入态**：该事件来自噪声层（Excel 实测同一 DocMgr 6ms 内掉了又回），
-    /// 在那里销毁输入态正是「首字符不进编码、直接上屏」的根因。只翻可见性标志才安全。
+    /// 不可用它清输入态：该事件来自噪声层（同一 DocMgr 可能几毫秒内掉了又回），在那里销毁
+    /// 输入态会导致「首字符不进编码、直接上屏」。只翻可见性标志。
     CtxLost,
     /// 换到了没有可编辑控件的文档（QQ Ctrl+1 切会话）。残留 buffer 无处可去，须清。
     NoEditCtx,
@@ -112,26 +108,20 @@ pub const CMD_MENU_ACTION: u16 = 0x0210; // 上行：统一菜单项被选中 (p
 pub const CMD_CANDIDATE_SCROLL: u16 = 0x0211; // 上行：host 候选框滚轮 (payload: delta i32，WHEEL_DELTA 倍数，正=上滚)；服务端解释成「上下键调整高亮项」（到页边界翻到相邻页），见 Coordinator::handle_candidate_scroll
 /// 上报前台上下文（命令直通车 `app()`/`title()`/`sel()` 取值，目前仅 darwin `.app` 发）：
 /// payload = appLen u32 + app(UTF-8) + titleLen u32 + title + selLen u32 + sel，均 LE 长度前缀。
-///
-/// 该值原为 `0x0211`，与 `CMD_CANDIDATE_SCROLL` 同码位、靠 `cfg` 分臂区分平台。那是唯一
-/// 一处**同方向**的语义复用，代价是「macOS 永远做不了滚轮翻页」。macOS 尚未发布，故直接
-/// 迁到空闲码位消除该约束，两平台此后码位含义完全一致。
 pub const CMD_FRONT_CONTEXT: u16 = 0x0215;
 
 // ── TSF UI-less（UIElement）三件套：宿主自绘候选时的数据通道 ──
 //
-// 背景：TSF 允许宿主（游戏 / 全屏应用 / 搜索框）经 `ITfUIElementSink::BeginUIElement`
-// 回 `pbShow=FALSE` 接管候选绘制，输入法须改由 `ITfCandidateListUIElement` 把候选
-// 数据**交给宿主**、并且**不再弹自己的候选窗**。候选列表住在服务进程，DLL 手里没有，
-// 于是需要这三条命令：DLL 报告「谁画」、DLL 拉取当页数据、宿主的操作回流。
-// 设计见 `docs/design/game-compat-tsf-uielement.md`。
+// 宿主经 `BeginUIElement` 回 `pbShow=FALSE` 接管候选绘制时，输入法须经
+// `ITfCandidateListUIElement` 把候选交给宿主、不再弹自己的窗。候选在服务进程，故需要这三条：
+// DLL 报告「谁画」、DLL 拉取当页数据、宿主的操作回流。设计见 `docs/design/game-compat-tsf-uielement.md`。
 //
 /// 上行（异步）：DLL 报告本进程的 UIElement 状态。payload = [`UiElementStatePayload`]。
-/// 服务端据此**按 pid** 决定要不要弹自己的候选窗——宿主接管绘制时弹了也是遮挡/闪烁。
+/// 服务端据此按 pid 决定要不要弹自己的候选窗。
 pub const CMD_UIELEMENT_STATE: u16 = 0x0217;
 /// 上行（同步）：DLL 拉取当前候选快照，供 `ITfCandidateListUIElement` 各 getter 回答宿主。
-/// 无 payload；响应为 [`CMD_UIELEMENT_PAGE`]。**只在宿主接管绘制时**才发（拉取模型：
-/// 不接管的宿主零成本，键路径不多一次往返）。
+/// 无 payload；响应为 [`CMD_UIELEMENT_PAGE`]。只在宿主接管绘制时才发（拉取模型：
+/// 不接管的宿主零成本）。
 pub const CMD_UIELEMENT_QUERY: u16 = 0x0218;
 /// 下行（`CMD_UIELEMENT_QUERY` 的响应）：候选快照。编码见 [`crate::codec::encode_uielement_page`]。
 pub const CMD_UIELEMENT_PAGE: u16 = 0x0219;
@@ -139,12 +129,11 @@ pub const CMD_UIELEMENT_PAGE: u16 = 0x0219;
 /// （选高亮 / 定稿 / 放弃 / 翻页）。payload = [`UiElementActionPayload`]。
 pub const CMD_UIELEMENT_ACTION: u16 = 0x021A;
 
-/// 上行（**仅 Linux** Fcitx5 addon）：自绘菜单打开期间的原始指针事件。
+/// 上行（仅 Linux Fcitx5 addon）：自绘菜单打开期间的原始指针事件。
 ///
-/// Linux 的菜单与候选窗同构——服务进程光栅化、addon 只贴图（见 [`overlay::OVERLAY_KIND_MENU`]），
-/// 命中测试、悬停高亮、子菜单展开全在服务端的 `popup_menu` 里做，addon 不知道哪一行是什么。
-/// 于是 addon 在菜单打开期间抓住指针（X11 pointer grab），把每次移动 / 按下原样报上来。
-/// 移动事件每秒可达上百次，按 [`CMD_EXT`] 的两档划分属高频，故占专用码位、定长载荷。
+/// 菜单由服务进程光栅化、addon 只贴图（见 [`overlay::OVERLAY_KIND_MENU`]），命中测试与子菜单
+/// 展开都在服务端，故 addon 抓住指针把移动 / 按下原样报上来。移动事件属高频，按 [`CMD_EXT`]
+/// 的划分占专用码位、定长载荷。
 ///
 /// payload（16 字节，小端）：`event u32`（[`menu_pointer`]）+ `button u32`（X11 按键号：
 /// 1 左 / 2 中 / 3 右；移动时 0）+ `x i32` + `y i32`（屏幕坐标 = X11 根窗口坐标）。
@@ -157,14 +146,13 @@ pub mod menu_pointer {
     pub const MENU_POINTER_PRESS: u32 = 2;
 }
 
-/// 上行（**仅 Linux** Fcitx5 addon）：交互浮层（悬浮工具栏 / 软键盘）上的指针事件。
+/// 上行（仅 Linux Fcitx5 addon）：交互浮层（悬浮工具栏 / 软键盘）上的指针事件。
 ///
-/// 这两层与自绘菜单一样由服务进程光栅化、addon 只贴图（见 [`overlay::OVERLAY_KIND_TOOLBAR`]），
-/// 命中测试、悬停高亮、按键按下都在服务端。addon 把窗口内的指针事件原样报上来。
+/// 与自绘菜单一样由服务端光栅化与命中测试（见 [`overlay::OVERLAY_KIND_TOOLBAR`]），addon 原样上报。
 ///
 /// payload（20 字节，小端）：`kind u32`（浮层 kind）+ `event u32`（[`panel_pointer`]）+
 /// `button u32`（X11 按键号：1 左 / 2 中 / 3 右；滚轮取 4 上 / 5 下；移动与离开时 0）+
-/// `x i32` + `y i32`（**位图内**坐标，含软阴影扩边，与 Windows 客户区坐标同义）。
+/// `x i32` + `y i32`（位图内坐标，含软阴影扩边，与 Windows 客户区坐标同义）。
 /// 同步请求回 ack。
 pub const CMD_PANEL_POINTER: u16 = 0x021C;
 
@@ -185,8 +173,8 @@ pub mod menu_target {
     /// 状态提示气泡的右键菜单（Windows `RequestStatusMenu`）。
     pub const MENU_TARGET_STATUS: i32 = -2;
     /// 悬停提示的右键菜单（Windows `RequestTooltipMenu`）：body 另带 `lx`/`ly`——右键点在
-    /// 提示**位图内**的坐标（含软阴影扩边，同 Windows 的客户区坐标）。按段 / 按行的命中在
-    /// 服务端做：文本块的排布只有光栅化的一方知道。
+    /// 提示位图内的坐标（含软阴影扩边，同 Windows 的客户区坐标）。命中在服务端做：
+    /// 文本排布只有光栅化的一方知道。
     pub const MENU_TARGET_TOOLTIP: i32 = -3;
 }
 
@@ -194,27 +182,18 @@ pub mod menu_target {
 /// 或此后 `ITfUIElement::Show(FALSE)`）。置位 ⇒ 服务端对该 pid 不弹自己的候选窗。
 pub const UIELEMENT_FLAG_HOST_DRAWS: u32 = 0x0001;
 /// [`UiElementStatePayload::flags`] bit1：线程以 `TF_TMAE_UIELEMENTENABLEDONLY` 激活
-/// （宿主声明自己是 UI-less 线程）。规范原话：TIP 此时「已经知道」该线程不要它的 UI，
-/// 可以直接省掉——故服务端把它当作与 bit0 同义，**从激活起**就不弹窗，省掉首次组合
-/// 时「先弹再收」的一帧闪烁。
+/// （宿主声明自己是 UI-less 线程）。服务端把它当作与 bit0 同义，从激活起就不弹窗，
+/// 省掉首次组合时「先弹再收」的一帧闪烁。
 pub const UIELEMENT_FLAG_UI_LESS_THREAD: u32 = 0x0002;
-/// [`UiElementStatePayload::flags`] bit2：宿主**没有**声明接管（`pbShow=TRUE`），却实际
-/// 调了 `ITfCandidateListUIElement::GetString` 把候选串取走。
+/// [`UiElementStatePayload::flags`] bit2：宿主没有声明接管（`pbShow=TRUE`），却实际
+/// 调了 `ITfCandidateListUIElement::GetString` 把候选串取走（典型是 CUAS 的 IMM32 桥）。
 ///
-/// 已知的读取者是 CUAS 的 IMM32 桥——传统宿主经 `ImmGetCandidateList` 取候选，由宿主
-/// 或 `DefWindowProc` 画出旧版候选窗。2026-09-11 新枫之谷实测：屏幕上两个候选框，游戏
-/// 画的那个还停在第一个码的候选上。
-///
-/// ⚠ 与 bit0 **分开报**：bit0 是宿主的声明（事实），本位是「读了就是在画」的推断。
-/// 推断已被证伪为普遍规律——Notepad / Illustrator / EverEdit 都整串读走却都不画
-/// （2026-09-15 实测），故 core 侧对本位单独记账，且**默认不据此收窗**：要收的宿主得在
-/// compat 里写 `host_drawn_candidates = true`（opt-in，见 `AppCompatRule` 的字段文档）。
-/// 合并成一位就没法只让推断那一半改默认。
-///
-/// DLL 侧照常如实上报本位——「宿主读没读」是观测事实，怎么用是 core 的判断。
+/// 与 bit0 分开报：bit0 是宿主的声明，本位只是观测事实，「读了就是在画」并不普遍成立。
+/// core 默认不据此收窗，要收的宿主在 compat 里写 `host_drawn_candidates = true`。
+/// DLL 照常如实上报。背景见 `docs/design/game-compat-tsf-uielement.md` §1.4。
 pub const UIELEMENT_FLAG_HOST_READS: u32 = 0x0004;
 
-/// [`UiElementActionPayload::action`]：把高亮移到**页内**下标 `arg`（`SetSelection`；
+/// [`UiElementActionPayload::action`]：把高亮移到页内下标 `arg`（`SetSelection`；
 /// 快照只带当页，宿主眼里的下标就是页内下标）。
 pub const UIELEMENT_ACTION_SET_SELECTION: u32 = 1;
 /// 定稿当前高亮候选（`Finalize`）。`arg` 忽略。
@@ -224,11 +203,8 @@ pub const UIELEMENT_ACTION_ABORT: u32 = 3;
 /// 翻到第 `arg` 页（`SetPageIndex` 之后宿主改 current page 的常见用法）。
 pub const UIELEMENT_ACTION_SET_PAGE: u32 = 4;
 
-/// 拉取快照里最多携带的候选条数（护栏，正常远小于此：快照**只带当页**）。
-///
-/// 曾带「从 0 起、至少盖住当页」的前缀让宿主自己切页，被 Dota 2 这类自绘候选的宿主
-/// 整条画出来（微软五笔在 Dota 2 里「所有页一次显示、翻页崩游戏」正是这个形状，只带当页的
-/// 微软拼音则正常），故收敛为当页，与 Weasel 同一形状。
+/// 拉取快照里最多携带的候选条数（护栏，正常远小于此：快照只带当页，理由见
+/// `docs/design/game-compat-tsf-uielement.md` §4.3）。
 pub const UIELEMENT_MAX_ITEMS: usize = 200;
 /// Host render: DLL 侧 Band 窗口创建失败（异步上行，payload = reason u32）。
 /// 服务端收到后记日志并让 UI 回退本地窗口。与 C++ BinaryProtocol.h:36 对齐。
@@ -239,8 +215,8 @@ pub const CMD_CARET_UPDATE: u16 = 0x0301;
 pub const CMD_SELECTION_CHANGED: u16 = 0x0302;
 pub const CMD_CARET_PENDING: u16 = 0x0303;
 /// 首显试探采样：DLL 在首帧 reflow 的每次 layout change 各发一条（限 5 条），payload 同
-/// `CaretPayload`。**采样不等于可信**——首帧期间宿主可能仍返回旧坐标（实测 WPS 前两条是上
-/// 一轮的值、EverEdit 第一条就已正确），是否采纳由服务端按 per-app 策略判定。
+/// `CaretPayload`。采样不等于可信：首帧期间宿主可能仍返回旧坐标，是否采纳由服务端按
+/// per-app 策略判定。
 pub const CMD_CARET_PROBE: u16 = 0x0304;
 
 // Host Render
@@ -255,8 +231,7 @@ pub const CMD_HOST_RENDER_FRAME: u16 = 0x0502; // SHM 新帧就绪通知 (seq+�
 pub const CMD_CANDIDATE_RECTS: u16 = 0x0503; // 候选命中矩形 (panel-local)
 pub const CMD_MODE_STATUS: u16 = 0x0504; // 输入模式状态 (菜单栏指示器)
 pub const CMD_MENU_SHOW: u16 = 0x0506; // 统一菜单树 (响应 CmdShowContextMenu)
-// 0x0507 曾是 CMD_OPEN_SETTINGS（payload 为「页名+参数」空格串）。已改走扩展信封的
-// `settings.open`（body 为 JSON argv 数组），码位空出——新增下行专用码位可从这里取。
+// 0x0507 空闲（设置深链已走扩展信封的 `settings.open`），新增下行专用码位可从这里取。
 // 命令直通车按键合成（darwin 下行）：服务进程无辅助功能授权无法 post CGEvent，
 // 故把 key.tap/seq/hold/release/type 推给 .app 侧 KeySynthesizer 合成（.app 有授权）。
 // combo 载荷：keyLen u32 + key + modCount u32 + modCount×(modLen u32 + mod)，key/mod 均 UTF-8。
@@ -312,20 +287,19 @@ pub mod overlay {
     /// 落位恒为 `OVERLAY_PLACE_EXACT`，坐标即候选窗建议落点（`.app` 跟着候选窗走，不读它）。
     pub const OVERLAY_KIND_DECOR: u32 = 12;
 
-    /// 落位方式（place）。坐标一律指**内容盒**左上（不含软阴影扩边），宿主减去
+    /// 落位方式（place）。坐标一律指内容盒左上（不含软阴影扩边），宿主减去
     /// `content_x/y` 得窗口左上。
     /// - `ABSOLUTE`：`(x, y)` 即落点，宿主只夹进工作区；
     /// - `FLIP`：首选 `(x, y)`；内容右溢改用 `alt_x`、下溢改用 `alt_y`（`alt_y` 越过上沿则贴下沿），再夹回；
-    /// - `FOLLOW_CANDIDATE`：同 `FLIP`，但坐标是按候选窗**建议**落点算的，宿主先平移
+    /// - `FOLLOW_CANDIDATE`：同 `FLIP`，但坐标是按候选窗建议落点算的，宿主先平移
     ///   「候选窗实际落点 − 建议落点」（候选窗被宿主翻转/钳制过时，提示跟着走）；
     /// - `ANCHOR`：按 `anchor` 在工作区内落位，离边 `margin` 像素；`(x, y)` 不用。
     pub const OVERLAY_PLACE_ABSOLUTE: u32 = 0;
     pub const OVERLAY_PLACE_FLIP: u32 = 1;
     pub const OVERLAY_PLACE_FOLLOW_CANDIDATE: u32 = 2;
     pub const OVERLAY_PLACE_ANCHOR: u32 = 3;
-    /// `(x, y)` 已由服务端按宿主报来的工作区算定（菜单：翻转、子菜单左右展开、钳制都在
-    /// `popup_menu` 里做完），宿主**原样摆放、不再夹回**——命中测试在服务端按这个位置做，
-    /// 宿主挪一个像素两边就对不上。
+    /// `(x, y)` 已由服务端按宿主报来的工作区算定（翻转、子菜单展开、钳制都在 `popup_menu` 里
+    /// 做完），宿主原样摆放、不再夹回：命中测试在服务端按这个位置做，挪一个像素就对不上。
     pub const OVERLAY_PLACE_EXACT: u32 = 4;
 
     /// 锚点（anchor，仅 `ANCHOR` 用）。状态气泡的窗口锚点在 Linux 拿不到前台窗口边框，
@@ -345,30 +319,23 @@ pub mod overlay {
 
 /// 通用扩展信封：`kindLen u32 + kind(UTF-8) + bodyLen u32 + body(任意字节)`。
 ///
-/// # 为什么要有它
+/// 专用码位要三处常量同步（本文件 / `wind_tsf/include/BinaryProtocol.h` / Swift
+/// `ProtocolTypes.swift`），且一旦被某端固化就难回收；低频消息不值得付这个代价。
 ///
-/// 每加一个小功能就占一个码位，代价是**三处常量必须同步**（本文件 /
-/// `wind_tsf/include/BinaryProtocol.h` / Swift `ProtocolTypes.swift`），且码位一旦被某端
-/// 固化就再难回收——`CMD_FRONT_CONTEXT` 当年就是这么撞上 `CMD_CANDIDATE_SCROLL` 的。
-/// 低频消息没必要为此付出这个代价。
+/// # 两档划分（新增消息时按此判断）
 ///
-/// # 两档划分（新增消息时按此判断，不要凭直觉）
+/// 判据是一次连续输入里会不会被反复触发：
 ///
-/// 判据是**一次连续输入里会不会被反复触发**：
-///
-/// - **高频**（每键 / 每帧 / 每次鼠标移动）→ **专用码位 + 定长或长度前缀的二进制**。
-///   如 `CMD_KEY_EVENT`、`CMD_HOST_RENDER_FRAME`、`CMD_CANDIDATE_HOVER`。这类路径上
-///   一次 JSON 解析与一次堆分配都是要算的。
-/// - **低频**（菜单动作、位置回报、诊断上报、截图请求、设置深链）→ **走本信封**，
-///   `kind` 命名 + `body` 放 JSON 或数据块。加功能=加一个 `kind` 字符串，不动协议常量。
+/// - 高频（每键 / 每帧 / 每次鼠标移动）→ 专用码位 + 定长或长度前缀的二进制，
+///   如 `CMD_KEY_EVENT`、`CMD_HOST_RENDER_FRAME`、`CMD_CANDIDATE_HOVER`。
+/// - 低频（菜单动作、位置回报、诊断上报、截图请求、设置深链）→ 走本信封，
+///   加功能 = 加一个 `kind` 字符串，不动协议常量。
 ///
 /// # 演进性
 ///
-/// - **未知 `kind` 一律安静忽略**（记 debug 日志，不报错、不断连）。这是新旧版本能互相
-///   兼容的根本：旧端收到新 `kind` 就当没看见，而不是解析失败把连接搞坏。
-/// - `body` 用 JSON 时，字段增删天然向前/向后兼容（未知字段忽略、缺失字段取默认）。
-/// - `body` 是**不透明字节**，本层不解析——既支持 JSON，也支持二进制块（如截图回传）。
-///   解析归消费方，避免 `wind-ipc` 被拖进业务语义。
+/// - 未知 `kind` 一律安静忽略（记 debug 日志，不报错、不断连），新旧版本靠这个互相兼容。
+/// - `body` 用 JSON 时，字段增删天然前后兼容（未知字段忽略、缺失字段取默认）。
+/// - `body` 是不透明字节，本层不解析（JSON 或二进制块均可），解析归消费方。
 ///
 /// # `kind` 命名约定
 ///
@@ -376,13 +343,13 @@ pub mod overlay {
 /// 新域在下方 [`ext_kind`] 里登记一个常量，不要在调用处写裸字符串。
 pub const CMD_EXT: u16 = 0x0E01;
 
-/// 扩展信封的 `kind` 常量登记处。**新增 kind 必须在此登记**（而不是在调用点写裸串），
-/// 否则两端拼写不一致的错误只会表现为「消息静默丢失」。
+/// 扩展信封的 `kind` 常量登记处。新增 kind 必须在此登记而不是在调用点写裸串，
+/// 否则两端拼写不一致只会表现为消息静默丢失。
 pub mod ext_kind {
     /// 下行：请求 `.app` 打开设置应用。body = `{"args":["--page=dict", …]}`。
     pub const SETTINGS_OPEN: &str = "settings.open";
     /// 上行：候选窗被拖动到新位置。body = `{"x":123,"y":456}`，wire 坐标系（屏幕左上为
-    /// 原点、y 向下）下的**内容左上角**，与配置里的 `ui.candidate.custom_x/y` 同义。
+    /// 原点、y 向下）下的内容左上角，与配置里的 `ui.candidate.custom_x/y` 同义。
     pub const POS_CANDIDATE: &str = "pos.candidate";
     /// 上行：状态提示气泡被拖动到新位置。body 同 [`POS_CANDIDATE`]。
     pub const POS_STATUS_TIP: &str = "pos.status_tip";
@@ -412,19 +379,14 @@ pub mod ext_kind {
     /// `{"caret_free":bool,"caret_trusted":bool,"scale":1.5}`，各字段都可缺省（缺省 = 不改现值）。
     /// 每次焦点获得时由 addon 重报，服务重启也不会丢。
     ///
-    /// - `caret_trusted`：宿主报的光标坐标可直接当权威。Linux addon 的光标来自应用自己上报的光标
-    ///   矩形，没有 Windows「跨窗口 Win32 光标冒充插入点」的问题，但来源字段恒为 UNKNOWN（没有
-    ///   TSF 语义域）；不声明的话，「焦点变化时显示」这类要等权威坐标的路径会永远挂起。
-    ///
-    /// - `caret_free`：宿主不需要也给不出光标坐标。Wayland 原生应用的光标矩形是窗口相对坐标、
-    ///   应用屏幕位置只有合成器知道，候选窗由合成器按 input popup 自己摆位（见 wind_linux 的
-    ///   WaylandPanel）——服务端再等「权威光标坐标」就是白等：首显闸门会一直压到
-    ///   [`FIRST_SHOW_LONG_FALLBACK_MS`] 长兜底才放行（实测首键后 1~2 秒）。置位后按「自绘候选的
+    /// - `caret_trusted`：宿主报的光标坐标可直接当权威。Linux addon 的光标来源字段恒为 UNKNOWN
+    ///   （没有 TSF 语义域），不声明的话要等权威坐标的路径会永远挂起。
+    /// - `caret_free`：宿主不需要也给不出光标坐标（Wayland 原生应用，候选窗由合成器按 input popup
+    ///   摆位）。不声明则首显闸门要压到 [`FIRST_SHOW_LONG_FALLBACK_MS`] 长兜底；置位后按「自绘候选的
     ///   宿主」处理（同 `set_caret_independent`），首帧直接下发。
-    /// - `inline_preedit`：宿主能否在应用内显示预编辑（Linux：客户端是否声明了 Fcitx5 的
-    ///   Preedit 能力位）。`false` 时编码改由候选窗画（见协调器 `preedit_in_app_effective`）——
-    ///   addon 不把编码转交 Fcitx5 自己的输入面板，否则 classicui 会另起一个小窗、被候选窗盖住
-    ///   （WPS / QQ 实测）。缺省 = 不改现值；只有 Linux addon 发，其他平台恒按「能」处理。
+    /// - `inline_preedit`：宿主能否在应用内显示预编辑（客户端是否声明了 Fcitx5 的 Preedit 能力位）。
+    ///   `false` 时编码改由候选窗画（见协调器 `preedit_in_app_effective`），addon 不转交 Fcitx5 的
+    ///   输入面板，否则 classicui 会另起一个被候选窗盖住的小窗。缺省 = 不改现值；其他平台恒按「能」处理。
     /// - `scale`：界面缩放因子（1.0 = 96dpi）。服务不链接桌面库，Linux 上的缩放只能由宿主报：
     ///   Wayland 取输出的缩放，X11 取 `Xft.dpi / 96`。落在 `wind_ui::dpi`，所有浮层的字号与几何
     ///   都从它派生；帧位图因此按物理像素光栅化，addon 贴图时再按同一个因子折回逻辑尺寸。
@@ -448,17 +410,12 @@ pub mod ext_kind {
     /// 上行（Windows TSF）：host render 候选窗建成后的落位诊断，只进日志。body =
     /// `{"pid":..,"trigger":"setup"|"recheck","probed":..,"requested":..,"actual":..,"owner":bool}`，
     /// `recheck` 另带被换掉那个窗口的 `prev_probed` / `prev_requested` / `prev_actual` / `prev_owner`。
-    /// 存在理由：SearchHost 这类 AppContainer 宿主写不了 tsf_log，band 判错（候选被开始菜单
-    /// 盖住）只能靠这条在中央日志里看见。C++ 侧编码见 `wind_tsf/include/HostBandPolicy.h`。
+    /// SearchHost 这类 AppContainer 宿主写不了 tsf_log，band 判错只能靠这条在中央日志里看见。
+    /// C++ 侧编码见 `wind_tsf/include/HostBandPolicy.h`。
     pub const DIAG_HOST_RENDER_PLACED: &str = "diag.host_render_placed";
     //
-    // 为什么这两个「位置」要一问一答，而不是服务进程自己记账：
-    //
-    // 浮窗是 `.app` 侧的原生 NSPanel，服务进程发出去的只是**建议落点**。`.app` 还会按
-    // 所在屏的可见区钳制、在下方放不下时翻到光标上方、以及沿用用户本次组合内拖出来的
-    // 落位——三者都会让实际位置与服务进程发的那个值不同。用户点「固定位置」时要以**当前
-    // 看到的位置**落盘，记账值会把窗口摆到一个它从没出现过的地方（而 Windows 那边读的是
-    // 真 `GetWindowRect`，不存在这个问题）。
+    // `*.query` 位置要一问一答而不是服务端记账：服务端发的只是建议落点，`.app` 还会钳制、
+    // 翻转、沿用拖动落位；「固定位置」要以用户当前看到的位置落盘。
 }
 
 // 批处理
@@ -495,9 +452,8 @@ pub const CMD_COMMIT_AND_HOLD: u16 = 0x010B;
 /// 余码新组合 deferred_composition 延迟到触发键 keyup（或 timeout_ms 兜底）才开。
 /// 载荷：timeout_ms(u32 LE) + commit_len(u32 LE) + defer_len(u32 LE) + commit_utf8 + defer_utf8
 pub const CMD_COMMIT_THEN_DEFER: u16 = 0x010C;
-/// ClearCompositionThenPassThrough 响应 (0x010D)：收掉组合，并把**当前这个键**交还宿主。
-/// 无载荷——要重放的就是宿主此刻正在处理的那个键，由它自己取 vk；带 vk 反而制造
-/// 「服务端说重放 A、宿主正在处理 B」的错位可能。见 `KeyAction::ClearCompositionThenPassThrough`。
+/// ClearCompositionThenPassThrough 响应 (0x010D)：收掉组合，并把当前这个键交还宿主。
+/// 无载荷：重放的就是宿主正在处理的那个键，带 vk 反而可能错位。见 `KeyAction::ClearCompositionThenPassThrough`。
 pub const CMD_CLEAR_THEN_PASS_THROUGH: u16 = 0x010D;
 
 // 状态
@@ -506,8 +462,8 @@ pub const CMD_STATE_PUSH: u16 = 0x0206;
 pub const CMD_SERVICE_READY: u16 = 0x0207; // push only
 pub const CMD_ACTIVATION_STATUS_PUSH: u16 = 0x020C;
 /// FocusGained 同步路径的轻量模式回传（仅 chineseMode+fullWidth，4 字节 flags）。
-/// DLL 在 OnSetFocus 内同步等本响应，首键前写好 _bChineseMode，根治"切应用首键上屏英文"
-/// 竞态；同时解除 DLL 的同步等待（否则无响应会卡到 READ_TIMEOUT_MS）。位定义同 STATUS_*。
+/// DLL 在 OnSetFocus 内同步等本响应，首键前写好 _bChineseMode，避免「切应用首键上屏英文」；
+/// 无响应会卡到 READ_TIMEOUT_MS。位定义同 STATUS_*。
 // 注：0x020D 双用途——下行此 CMD_MODE_PUSH（service→client push，仅编码）；
 // 上行 CMD_CANDIDATE_SELECT（client→service 请求，仅 dispatch）。方向区分，勿在 dispatch 加 MODE_PUSH 臂。
 pub const CMD_MODE_PUSH: u16 = 0x020D;
@@ -516,31 +472,21 @@ pub const CMD_MODE_PUSH: u16 = 0x020D;
 pub const CMD_SHELL_EXEC: u16 = 0x020E;
 /// 「只重取语言栏图标」的下行推送，无载荷。
 ///
-/// 存在的理由是 `GetIcon` 是**被动回调**：服务端把新位图写进共享内存后，DLL 不会自己
-/// 察觉，必须由 `OnUpdate(TF_LBI_ICON)` 让系统再来取一次。此前这件事完全寄生在状态推送
-/// 上——而 `UpdateFullStatus` 的 `needUpdate` 去重会挡掉「状态没变、只有位图变了」的情形，
-/// 于是调试菜单改角标形状要等下一次焦点切换才生效，演示动画更是根本动不起来。
+/// `GetIcon` 是被动回调：位图写进共享内存后须由 `OnUpdate(TF_LBI_ICON)` 让系统再取一次，
+/// 而状态推送的 `needUpdate` 去重会挡掉「状态没变、只有位图变了」的情形。
 ///
-/// 刻意**不带载荷**：本命令只回答「去重取一次」，图标内容的唯一真相在共享内存里。
-/// 若把状态塞进载荷，就等于开了第二条真相通路，两者不一致时无从判定谁对。
-///
-/// 与状态推送的分工：状态变化走 `CMD_STATE_PUSH` / `CMD_ACTIVATION_STATUS_PUSH`
-/// （它们本就会触发 `OnUpdate`），**不要**再叠一条本命令，否则每次切换都会让每个宿主
-/// 多做一次无谓的 `GetIcon` 重绘。本命令只用于「位图变了但状态没变」的路径。
+/// 刻意不带载荷：图标内容的唯一真相在共享内存里，不开第二条通路。
+/// 状态变化走 `CMD_STATE_PUSH` / `CMD_ACTIVATION_STATUS_PUSH`（本就会触发 `OnUpdate`），
+/// 不要再叠本命令；它只用于「位图变了但状态没变」的路径。
 pub const CMD_REFRESH_ICON: u16 = 0x0216;
 pub const CMD_SYNC_CONFIG: u16 = 0x0303;
 
 /// 配置同步键名（对齐 C++ BinaryProtocol.h CONFIG_KEY_*）。
 ///
-/// ⚠ 名为 config，实为**服务端 → DLL 的单向键值推送通道**，承载的不止「配置」：
-/// `CONFIG_KEY_LANGBAR_TOOLTIP` 就是随状态变化的**显示内容**。判断一个东西该不该走
-/// 这里，看的不是「它是不是配置」，而是这两条：
-///   ① 需要**广播**给所有宿主（状态推送是定向的，见 `push_activation_status`）；
-///   ② 变化频率**低于**状态推送（否则每次状态变化都要多发一条）。
-/// 两条都满足才走这里；只满足①不满足②的，应当考虑并进状态推送而不是在这里高频刷。
-///
-/// 沿用 config 这个名字是因为两侧 + C++ 回调链（`SyncConfigCallback`）都已叫它，
-/// 改名要动的地方远多于收益——但语义得在这里写清楚，否则下一个人会按字面意思判断。
+/// 名为 config，实为服务端 → DLL 的单向键值推送通道，承载的不止配置（如
+/// `CONFIG_KEY_LANGBAR_TOOLTIP` 是显示内容）。该不该走这里看两条：① 需要广播给所有宿主
+/// （状态推送是定向的，见 `push_activation_status`）；② 变化频率低于状态推送。
+/// 只满足①不满足②的，应考虑并进状态推送。名字沿用是因为两侧回调链都已这么叫。
 pub const CONFIG_KEY_ENGLISH_PAIRS: &str = "en_pairs";
 /// 配对跳出键（VK 码集合）同步键名。TSF 端英文模式配对跳出直接消费；
 /// 中文模式仅用于「有待跳出配对时」放行转发（真正裁决在协调器）。
@@ -549,53 +495,45 @@ pub const CONFIG_KEY_JUMP_OUT_KEYS: &str = "jump_out_keys";
 /// TSF 端据此 + 自身持有的 InputScope 掩码在 `OnTestKeyDown` 本地判定是否放行：
 /// 吃键决策发生在 IPC 之前，协调器回 PassThrough 已太晚（形成「吃了再吐」丢键）。
 pub const CONFIG_KEY_PASSWORD_SUPPRESS: &str = "password_suppress";
-/// Ctrl+空格 中英切换开关（GH#172，`keys.ctrl_space_toggle` 的**有效值**）同步键名。
+/// Ctrl+空格 中英切换开关（`keys.ctrl_space_toggle` 的有效值）同步键名。
 /// 格式：`enabled(u8)`。关闭时 DLL 在 `OnTestKeyDown` 不吃 Ctrl+空格、`OnKeyDown` 不做兜底
 /// 切换，键原样交给宿主（IDEA 的代码提示）。吃键决策在 IPC 之前，故必须由 DLL 本地判。
 /// DLL 每次重连从默认值（开，历史行为）起步，握手必推。
 pub const CONFIG_KEY_CTRL_SPACE_TOGGLE: &str = "ctrl_space_toggle";
 /// 「英文半角列有自定义标点映射」的源字符集合同步键名。英文模式（非全角）下 TSF 默认直接
-/// 透传标点键、引擎收不到，英半列因此永远不生效；TSF 据此集合**精确**吃下这些键转发引擎
-/// （集合为空 = 行为与历史完全一致）。判据须与 `wind_punct::custom_english_punct_chars`
+/// 透传标点键、引擎收不到，英半列因此永远不生效；TSF 据此集合精确吃下这些键转发引擎
+/// （集合为空 = 不额外吃）。判据须与 `wind_punct::custom_english_punct_chars`
 /// 同源，漂移即「吃了再吐」丢键。
 pub const CONFIG_KEY_CUSTOM_EN_PUNCT: &str = "custom_en_punct";
-/// 「中文模式下产物就是原样半角 ASCII、该由 TSF **直接透传**」的标点集合同步键名。
+/// 「中文模式下产物就是原样半角 ASCII、该由 TSF 直接透传」的标点集合同步键名。
 /// 与 `CONFIG_KEY_CUSTOM_EN_PUNCT` 共用编码格式（count(u8) + UTF-16LE 字符数组）。
 ///
-/// 方向与上一个键**相反**：那个是「本该透传的，请多吃几个」，这个是「本该吃的，请别吃」。
-/// 成因是「吃了再吐」在非 TSF-aware 宿主上不是无害的往返——CUAS 送达的字符码会被宿主当
-/// **虚拟键码**解释（Tkinter 实测 `#`→VK_END、`%`→VK_LEFT、`&`→VK_UP，字不上屏反而移了光标，
-/// 见 B-9）。微软拼音对这批符号根本不吃键，本键就是让我们对齐那个行为。
+/// 方向与上一个键相反：「本该吃的，请别吃」。吃了再吐时非 TSF-aware 宿主会把字符码当虚拟键码
+/// 解释，见 `docs/architecture/smart-symbol-compat-notes.md`「产物不变的标点要透传」。
 ///
-/// 判据须与 `wind_punct::chinese_passthrough_punct_chars` 同源；集合为空 = 行为与历史完全一致。
-/// TSF 侧还要再叠两道**动态**闸门（有输入会话 / 全角），那两个只有 DLL 自己知道。
+/// 判据须与 `wind_punct::chinese_passthrough_punct_chars` 同源；集合为空 = 不额外透传。
+/// TSF 侧还要再叠两道动态闸门（有输入会话 / 全角），那两个只有 DLL 自己知道。
 pub const CONFIG_KEY_CN_PASSTHROUGH_PUNCT: &str = "cn_passthrough_punct";
-/// 同上，但用于**英文标点态**（中文输入模式 + 标点切英文）。格式与上一个键相同。
+/// 同上，但用于英文标点态（中文输入模式 + 标点切英文）。格式与上一个键相同。
 ///
-/// 必须是**两个**集合而不是一个加条件：英文标点态不走中文标点表，`,` `.` `;` `'` `[` `]`
-/// `\` 这些在中文态必须吃的键，在那个态下产物也是原样 ASCII ⇒ 英文态的集合是中文态的
-/// **超集**。撞码在那个态下更凶：`.`→`VK_DELETE` 吞字符、`[`→`VK_LWIN` 弹开始菜单。
-///
-/// TSF 侧按**当下**标点态（`STATUS_CHINESE_PUNCT`）二选一，标点态是运行时状态、进不了配置。
+/// 必须是两个集合：英文标点态不走中文标点表，`,` `.` `;` 等在中文态必须吃的键在那个态下
+/// 产物也是原样 ASCII，两态的集合不同。TSF 侧按当下标点态（`STATUS_CHINESE_PUNCT`）二选一，
+/// 标点态是运行时状态、进不了配置。
 pub const CONFIG_KEY_EN_PASSTHROUGH_PUNCT: &str = "en_passthrough_punct";
 /// 空格行配了自定义标点映射的列（位掩码，第 i 位 = 列 i：0=中半 1=英全 2=中全 3=英半）。
 /// 格式：`mask(u8)`。中文模式空缓冲时 TSF 默认透传空格、只在全角态吃；按 `OnTestKeyDown`
-/// 结论走的宿主（Notepad++、WPS）因此收不到半角列配的映射（t337）。TSF 据此按当下标点态 /
-/// 全半角多吃，引擎对吃下的空格必须出字。DLL 每次重连从 0（历史行为）起步，握手必推。
+/// 结论走的宿主（Notepad++、WPS）因此收不到半角列配的映射。TSF 据此按当下标点态 /
+/// 全半角多吃，引擎对吃下的空格必须出字。DLL 每次重连从 0 起步，握手必推。
 pub const CONFIG_KEY_SPACE_CUSTOM_COLS: &str = "space_custom_cols";
 /// 配对状态时效（秒，0=不过期）同步键名。TSF 端持有吃键闸门（`_pairPendingDepth`），
-/// 必须能本地判定状态是否陈旧：若只有协调器过期而 DLL 仍吃跳出键，协调器回 PassThrough
-/// 已太晚（形成「吃了再吐」丢键）。故 TTL 判据以 DLL 侧为准，此键把阈值推给它。
-///
-/// **刻意不并入 `CONFIG_KEY_JUMP_OUT_KEYS` 的 payload**：那个格式已经改过一次
-/// （前置 `right_symbol` u8，两侧解析偏移 1→2），再叠字段容易出现偏移不同步。
+/// 必须能本地判定状态是否陈旧，否则协调器过期后 DLL 仍吃跳出键、回 PassThrough 已太晚。
+/// 故 TTL 判据以 DLL 侧为准。刻意不并入 `CONFIG_KEY_JUMP_OUT_KEYS` 的 payload，免得两侧解析偏移不同步。
 pub const CONFIG_KEY_PAIR_STATE_TTL: &str = "pair_state_ttl";
 /// 配对插入提交方式（直写 vs 按键注入）同步键名。格式：`enabled(u8)`。
 ///
 /// 开启后 DLL 对 `InsertTextWithCursor`（及空闲态 ASCII 提交）以 `VK_PACKET`
-/// 按键注入文本，再注入 `VK_LEFT` 回移光标，替代 `ITfInsertAtSelection` 直写。背景：
-/// AutoCAD 表格在位编辑器丢弃直写的 ASCII 却谎报 `S_OK`，字符静默丢失；TSF 的各种写法
-/// （含组合语义）都救不了，只有真实字符消息能上屏。
+/// 按键注入文本，再注入 `VK_LEFT` 回移光标，替代 `ITfInsertAtSelection` 直写。用于丢弃直写
+/// 却谎报 `S_OK` 的宿主（AutoCAD 表格在位编辑器），TSF 的各种写法都救不了。
 ///
 /// 按客户端现算（compat `pair_via_comp` 可按应用覆盖全局
 /// `input.auto_pair.commit_via_composition`），不走焦点槽——同
@@ -603,19 +541,17 @@ pub const CONFIG_KEY_PAIR_STATE_TTL: &str = "pair_state_ttl";
 pub const CONFIG_KEY_PAIR_VIA_COMP: &str = "pair_via_comp";
 /// 诊断快照采集开关（会话级，随输入诊断 HUD 显隐）同步键名。格式：`enabled(u8)`。
 ///
-/// 采集本身要查三次窗口类名 + band，属于「只有排查时才值得付」的开销，故默认关闭、
-/// 由服务端在 HUD 打开时推开。**必须在握手时也推一次**：DLL 每次重连都从默认值
-/// （关）起步，只在切换时推会让重连后的宿主永远不采集（`push_connect_fix` 记过同型）。
+/// 采集有开销，故默认关闭、由服务端在 HUD 打开时推开。DLL 每次重连都从关起步，
+/// 故握手必推，只在切换时推会让重连后的宿主永远不采集。
 pub const CONFIG_KEY_DIAG_SNAPSHOT: &str = "diag_snapshot";
-/// 组合区**空文本兜底占位**用哪个字符（GH#175）同步键名。格式：`kind(u8)`，取值见
+/// 组合区空文本兜底占位用哪个字符同步键名。格式：`kind(u8)`，取值见
 /// `COMPOSITION_PLACEHOLDER_*`（0 = 空格、1 = ZWSP、2 = U+2800 盲文空白）。
 ///
-/// 按**客户端 pid** 现算（compat 规则 `composition_placeholder`），逐客户端推送：DLL 的组合区
+/// 按客户端 pid 现算（compat 规则 `composition_placeholder`），逐客户端推送：DLL 的组合区
 /// 在文本为空时要补一个占位撑开 range，补哪个字符只有服务端知道。协调器自己发出的占位
 /// 不经这里（直接把字符写进组合文本）。DLL 每次重连从默认（空格）起步，故握手必推。
 ///
-/// 向后兼容：DLL 的 `PlaceholderForKind` 对**认不出的值一律回落空格**，所以只认 0/1 的旧 DLL
-/// 收到 2 时兜底占位是空格（历史行为），不会出错；新加档位照此只追加、不复用旧值。
+/// 向后兼容：DLL 的 `PlaceholderForKind` 对认不出的值一律回落空格；新加档位只追加、不复用旧值。
 pub const CONFIG_KEY_COMPOSITION_PLACEHOLDER: &str = "composition_placeholder";
 /// 中数间补空格（`input.spacing.cjk_digit` 且本应用 compat 未关）：DLL 据此把汉字后的数字吃下
 /// 交给 core。值 enabled(u8)，按客户端现算，推送时机同 [`CONFIG_KEY_COMPOSITION_PLACEHOLDER`]。
@@ -623,7 +559,7 @@ pub const CONFIG_KEY_SPACE_BEFORE_DIGIT: &str = "space_before_digit";
 /// 含换行的上屏是否改走剪贴板粘贴同步键名。格式：`mode(u8)`，0 = commit（TSF 上屏，默认）、
 /// 1 = paste（结束组合后写剪贴板 + 注入 Ctrl+V）。
 ///
-/// 按**客户端 pid** 现算（compat 规则 `multiline_commit`），逐客户端推送；DLL 每次重连从
+/// 按客户端 pid 现算（compat 规则 `multiline_commit`），逐客户端推送；DLL 每次重连从
 /// commit 起步，故握手必推。认不出的值 DLL 按 commit 处理。
 pub const CONFIG_KEY_MULTILINE_COMMIT: &str = "multiline_commit";
 /// 「本进程可能命中 compat 标题规则」开关（采不采窗口标题）同步键名。格式：`enabled(u8)`。
@@ -633,10 +569,10 @@ pub const CONFIG_KEY_MULTILINE_COMMIT: &str = "multiline_commit";
 /// 取值 = `AppCompat::process_may_match_title(该客户端的进程名)`（有不限进程的标题规则、或本进程有
 /// 标题规则），逐客户端推：握手时推，compat 重载 / pid 名纠正后重推。DLL 在开关 0→1 时若本焦点
 /// 发出的 FocusGained 没带标题，会补发一次。
-/// DLL 每次重连从默认值（关）起步，故**握手必推**（`diag_snapshot` 同型）。
+/// DLL 每次重连从默认值（关）起步，故握手必推。
 pub const CONFIG_KEY_COMPAT_TITLE_MATCH: &str = "compat_title_match";
 /// 「有扩展订阅按键」开关同步键名（仅 Windows DLL）。格式：`enabled(u8)`。开着时 DLL 把放行给
-/// 宿主的用户按键经 [`CMD_KEY_OBSERVED`] 旁路上报。DLL 每次重连从关起步，故**握手必推**；
+/// 宿主的用户按键经 [`CMD_KEY_OBSERVED`] 旁路上报。DLL 每次重连从关起步，故握手必推；
 /// 扩展授权变化时广播。
 pub const CONFIG_KEY_EXTENSION_KEY_OBSERVE: &str = "extension_key_observe";
 /// `CONFIG_KEY_COMPOSITION_PLACEHOLDER` 的取值：空格 U+0020（默认）。
@@ -647,24 +583,14 @@ pub const COMPOSITION_PLACEHOLDER_ZWSP: u8 = 1;
 pub const COMPOSITION_PLACEHOLDER_BLANK: u8 = 2;
 
 /// 语言栏按钮的悬停提示文本。格式：`[ch:u16(LE)]...`（UTF-16LE，无长度前缀，
-/// `value` 本身就是整段）。与 `CONFIG_KEY_CUSTOM_EN_PUNCT` 同惯例——C++ 侧照此可以
-/// 直接构造 `std::wstring`，不必再跨类去借编码转换函数。
+/// `value` 本身就是整段），C++ 侧可直接构造 `std::wstring`。
 ///
-/// 文案与选择逻辑都在服务端：DLL 只存一份字符串，`GetTooltipString` 原样返回。
-/// 收归的理由与 `InputBlock` 同一条——DLL 本地只有 `_bChineseMode` / `_bCapsLock` 两个
-/// 量，判不出「密码框」「已禁用」这些成因，删掉那些分支后 tooltip 就只能说个大概；
-/// 而这些成因服务端全都有。
+/// 文案与选择逻辑都在服务端（DLL 判不出「密码框」「已禁用」等成因），DLL 只存一份字符串、
+/// `GetTooltipString` 原样返回。
 ///
-/// **刻意走 sync_config 而不是并进 activation status push**，决定性理由是**推送范围**：
-/// 那条推送是定向的（`hostRenderAvail` 按事件源 pid 算，广播会污染无关客户端，真机
-/// 踩过 SearchHost 的 Band 重建循环），而 tooltip 必须广播——非事件源的宿主悬停时
-/// 同样要看到最新文案。**所以它即使能塞进去也不该塞，格式修好了也不该迁回去。**
-///
-/// 次要理由：那条消息的 `icon_label` 是尾部不定长段（无长度前缀、占满剩余 payload），
-/// 本来也加不进去，见 `encode_status_update_ex`。
-///
-/// 变化频率低于状态变化（tooltip 只有几种取值，全半角/标点变化不影响它），
-/// 故服务端只在**文本真的变了**时才推。
+/// 刻意走 sync_config 而不并进 activation status push：那条推送是定向的（`hostRenderAvail`
+/// 按事件源 pid 算，广播会让无关宿主的 Band 反复重建），而 tooltip 必须广播。即使格式允许也别迁回去。
+/// 服务端只在文本真的变了时才推。
 pub const CONFIG_KEY_LANGBAR_TOOLTIP: &str = "langbar_tooltip";
 
 // 消费确认
@@ -798,9 +724,9 @@ impl fmt::Debug for IpcHeader {
 ///
 /// `seq_char`（偏移 18）是后加的：18 字节的旧包照收，该字段读成 0。
 ///
-/// 两个「不知道」要分开：`0` = 客户端根本不报（旧版），[`SEQ_CHAR_UNKNOWN`] = 客户端在记账、
-/// 但这一刻不知道光标前是什么（导航键、焦点刚切过来）。前者服务端会退回自己的记录保住旧行为，
-/// 后者不会——否则回车换行后行首也会被补上一个空格。
+/// 两个「不知道」要分开：`0` = 客户端根本不报（旧版），服务端退回自己的记录；
+/// [`SEQ_CHAR_UNKNOWN`] = 在记账但此刻不知道光标前是什么（导航键、焦点刚切过来），服务端
+/// 不退回，否则回车换行后行首也会被补上空格。
 #[derive(Clone, Copy, Debug)]
 #[repr(C, packed)]
 pub struct KeyPayload {
@@ -874,9 +800,8 @@ pub struct CaretPayload {
 
 /// 坐标来源，与 C++ `BinaryProtocol.h` 的 `CARET_SRC_*` 逐值对齐。
 ///
-/// 同一组 x/y/h 可能来自语义完全不同的通道：TSF context 的插入点、组合起点，或**跨窗口**的
-/// Win32 光标。压进同一个字段后下游就再也分不开了——曾因此让 `GetGUIThreadInfo` 的光标冒充
-/// TSF 插入点，在 Word 非正文行错位 814px、在桌面输入定位到任务栏。
+/// 同一组 x/y/h 可能来自语义完全不同的通道：TSF context 的插入点、组合起点，或跨窗口的
+/// Win32 光标。不标来源的话下游无法区分，`GetGUIThreadInfo` 的光标就会冒充 TSF 插入点。
 pub mod caret_source {
     pub const UNKNOWN: i32 = 0;
     pub const TSF_SELECTION: i32 = 1;
@@ -885,85 +810,38 @@ pub mod caret_source {
     pub const GUI_CARET: i32 = 4;
     pub const CONSOLE: i32 = 5;
     pub const LAST_KNOWN: i32 = 6;
-    /// 组合刚启动时的异步探测值（`CaretProbeKind::FirstShowProbe`）——**reflow 前**的坐标。
+    /// 组合刚启动时的异步探测值（`CaretProbeKind::FirstShowProbe`），即宿主重排前的坐标。
     ///
-    /// 出自 TSF `GetTextExt`，但绝大多数宿主对这次请求选择内联执行，等同同步取，
-    /// 拿到的是宿主尚未重排的旧值（Excel 实测与随后的权威值差 16px）。所以它
-    /// **不可作权威、不可作首显的位置来源**——2026-08-01 曾让它走普通 probe 通道，
-    /// 被 fast 档的判据采信提前首显，16px 偏差随后又被 settle 容差吞掉，错位就此固定。
-    ///
-    /// ★ 但它**可以当否决基准**（2026-09-17 追加）：「这一帧与本轮 pre_reflow 逐位相同
-    /// ⇒ 宿主还没重排 ⇒ 别用它首显」。分界线是**拿它定位置**还是**拿它否决别人**——
-    /// 前者把错位固定下来，后者只会让首显多等一轮，方向相反。见
-    /// `wind-coordinator` 的 `last_pre_reflow_probe`。
-    ///
-    /// 它唯一的正当用途是**刷新坐标缓存**：连续快速上屏时（五笔 4 码自动上屏 + 长按，
-    /// 33ms 一键），宿主的 `OnLayoutChange` 有 50ms debounce、被输入彻底压住，整段
-    /// **一条权威 caret_update 都不来**（实测松手后 82ms 才到），此时它是唯一的位置来源。
-    /// 缓存里那份几百毫秒前的旧坐标会让每轮兜底首显都钉在原地，实测偏差 456px——
-    /// 相比之下 reflow 前的 ~30px 好得多。
-    ///
-    /// ★ 同一条数据源在两个场景里价值相反，区别不在来源而在**用途**：拿它做决策有害，
-    /// 拿它更新缓存有益。故独立成一个 source 值，由消费端按用途区分，而不是放开来源。
+    /// 不可作权威、不可作首显的位置来源（与重排后的值有偏差，会被 settle 容差固定下来）。
+    /// 可用于两件事：刷新坐标缓存（连续快速上屏时它可能是唯一的位置来源），以及当否决基准
+    /// （probe 与它逐位相同 ⇒ 宿主还没重排，见 `wind-coordinator` 的 `last_pre_reflow_probe`）。
+    /// 独立成一个 source 值，由消费端按用途区分。背景见
+    /// `docs/architecture/caret-position-host-compat-notes.md` 的 C 类。
     pub const PRE_REFLOW: i32 = 7;
 
-    /// 宿主对本 context 报「**这里没有插入点可给**」——`GetTextExt` 返回一个高度为 0 的
-    /// 退化矩形，且**重试窗口过完仍是它**（C++ `CaretProbeKind::RetryDeadline`）。
+    /// 宿主对本 context 报「这里没有插入点可给」：`GetTextExt` 返回高度为 0 的退化矩形，
+    /// 且重试窗口过完仍是它（C++ `CaretProbeKind::RetryDeadline`）。
     ///
-    /// Illustrator 30.8 画布文字实测恒为 `(2559,1367,2560,1367)`：选区矩形、组合起点、
-    /// 组合矩形三者同值，正是工作区（2560×1368）右下角最后一个像素；同一台机器上 10 个
-    /// 宿主给的都是这一个值——它是 TSF 的一句通用惯用语，不是某个宿主的脏数据。
-    ///
-    /// ★ **丢弃它比采信它更糟**。其它输入法直接采信，候选窗于是都落在屏幕右下角任务栏
-    /// 之上；我们按「退化 ⇒ 宿主还没排完版」把它丢掉，回退链就跌到 [`GUI_CARET`] —— 那是
-    /// Illustrator 界面里某个无关控件的 Win32 光标 `(10,30)`，候选窗被钉死在屏幕左上角。
-    /// 采信之后无需任何「修正到屏幕内」的新代码：`place_window` 现有的「下方放不下则上翻
-    /// + 右溢出左移 + 钳到 rcWork」会把它落到右下角，与其它输入法一致。
-    ///
-    /// ⚠ **不属于 TSF 语义域**（[`is_tsf`] 返回 `false`），尽管它确实出自 TSF context。
-    /// 判据不是「来源在哪个域」而是「它是不是一个真插入点」：它明说这里没有插入点。
-    /// 实际拦住它的是两道看来源的闸：焦点气泡的权威坐标闸门、以及大偏移逃生阀重锁时
-    /// 「reported compStart 可不可信」那一支。
-    ///
-    /// ⚠⚠ 跟行（`pin_anchor_when_start_drifts` 把锚点 y 换成 `caret.y`）**不看来源**，
-    /// 本值一样会被它用上——这里如实记下，别把它当成已有保护。之所以不补一道来源闸：
-    /// 跟行只在 `pin_anchor_when_start_drifts` 的宿主上生效（per-app 显式声明，目前是
-    /// WPS 一类给不出组合矩形的），而本值只在「三者全同的退化矩形」指纹下产出、且此时
-    /// `caret.y` 恒等于已锁锚点的 y，换与不换结果相同。构造不出可达的失败，补闸属于
-    /// 无依据的行为变更。
-    ///
-    /// ⚠ 但「非 TSF」不等于「不能定位」。它**照常走首显**：`handle_caret_update` 的
-    /// `pending_first_show` 消费不看来源，正是这一点让首显立即发生，不再空等 600ms
-    /// （闸门 arm 了最长档，而到期时拿到的还是同一个退化矩形——没有东西可等）。
-    /// 组合起点锚定也照常锁上：它走的是「caret 非 TSF ⇒ 跳过 500px 同源校验」那一支，
-    /// 而此处 compStart 与 caret 本就同值，两支结果相同。
+    /// 要采信而不是丢弃（丢弃会跌到 [`GUI_CARET`] 的无关位置）。不属 TSF 语义域
+    /// （[`is_tsf`] 为 `false`，它不是真插入点），但照常走首显与组合起点锚定。跟行不看来源、
+    /// 也会用上它，已确认无害。详见 `docs/architecture/caret-position-host-compat-notes.md`
+    /// 的「非 TSF 坐标来源」。
     pub const TSF_DEFAULT_POS: i32 = 8;
 
     /// 宿主经 IMM32 `ImmSetCandidateWindow` 声明的候选窗位置（CANDIDATEFORM，DLL 已换成
-    /// 屏幕坐标）。DLL 只在选区、组合起点、组合整体矩形三次 TSF 查询给出**同一个**退化矩形
-    /// （即 [`TSF_DEFAULT_POS`] 那条指纹）时才取——宿主经 TSF 明说没有插入点，IMM32 是它剩下的
-    /// 唯一表态；取不到时 DLL 照旧按 [`TSF_DEFAULT_POS`] 报。
+    /// 屏幕坐标）。DLL 只在三次 TSF 查询给出同一个退化矩形（即 [`TSF_DEFAULT_POS`] 那条指纹）
+    /// 时才取，取不到时照旧按 [`TSF_DEFAULT_POS`] 报。典型宿主是走 CUAS 的 Java AWT/Swing。
     ///
-    /// 典型宿主是走 CUAS 的 Java AWT/Swing（医疗 HIS/LIS 客户端，2026-09-30）：`GetTextExt`
-    /// 三次查询恒为工作区右下角，而它按 `getTextLocation(leading(0))` 把组合起点下沿写进
-    /// CANDIDATEFORM——这是它唯一报位置的渠道，微软拼音在同一宿主上能跟随光标靠的也是它。
-    ///
-    /// ★ **属 TSF 语义域**（[`is_tsf`] 返回 `true`）。[`is_tsf`] 问的是「手上这个点是不是真
-    /// 插入点、能否与组合起点比较」：宿主就这一个 context 表态，点就是组合起点下沿。与
-    /// [`TSF_DEFAULT_POS`] 正相反——那个说「这里没有插入点」。
-    ///
-    /// ⚠ 本来源的帧**不带组合起点**（compStart=(0,0)）：宿主写 CANDIDATEFORM 是异步的，组合首帧
-    /// 多是上一次组合的旧值，带上就会被锁成本次组合的锚点、连打时整场偏一截（偏差小于逃生阀
-    /// 阈值）。不带，锚点就跟着逐帧的 caret 走，宿主写入新值的下一帧即纠正。
+    /// 属 TSF 语义域（[`is_tsf`] 为 `true`）：点就是组合起点下沿。本来源的帧不带组合起点
+    /// （compStart=(0,0)）：宿主写 CANDIDATEFORM 是异步的，首帧多是上次组合的旧值，带上会被
+    /// 锁成锚点、整场偏一截。详见 `docs/architecture/caret-position-host-compat-notes.md`。
     pub const IMM_CANDIDATE_FORM: i32 = 9;
 
     /// 是否属 TSF 语义域——即「这个坐标和组合起点出自同一个 context」。
     /// 只有这一类才可作权威坐标，也只有这一类才可与组合起点做距离比较。
     ///
-    /// ⚠ [`TSF_DEFAULT_POS`] 是**刻意的例外**：它出自 TSF context，却在这里返回 `false`。
-    /// 本函数问的从来不是「来源在哪个域」，而是「手上这个点是不是真插入点」——宿主用那个
-    /// 退化矩形回答的恰恰是「没有插入点」。放进来它就会被当权威坐标参与跟行与漂移校正，
-    /// 而它根本不随插入点移动（整场组合恒为同一个屏幕角落像素）。
+    /// [`TSF_DEFAULT_POS`] 是刻意的例外：出自 TSF context 却返回 `false`。本函数问的是「这个点
+    /// 是不是真插入点」，而它恒为同一个屏幕角落像素、不随插入点移动。
     pub fn is_tsf(source: i32) -> bool {
         matches!(
             source,
@@ -1004,15 +882,12 @@ impl CaretPayload {
 
     /// 整个组合 range 的包围矩形 `(left, top, right, bottom)`，v3（40 字节）载荷才有。
     ///
-    /// ★ 它与 `composition_start_*` 的区别只有「折不折叠」，答的却是两个不同的问题：
-    /// 后者答「组合从哪开始」，本字段答「组合占了多大一块」。组合一旦换行，两者分处
-    /// 不同行——**只有本字段能看出跨行发生了**。没有它时协调器只能拿两个孤立点的像素
-    /// 距离跟「3 倍行高」比大小来猜，而行高本身在宿主间、甚至同一宿主的首行与次行之间
-    /// 都会变（记事本实测 74/42），阈值随之在 126/222 之间跳，换行能否被跟上全看运气。
+    /// 与 `composition_start_*` 的区别是不折叠：后者答「组合从哪开始」，本字段答「组合占了多大
+    /// 一块」，只有它能看出组合跨行了。见 `docs/architecture/caret-position-host-compat-notes.md`
+    /// 的「组合矩形的三种形态」。
     ///
     /// 返回 `None` 表示本帧没有组合矩形：旧 DLL / macOS 短包，或宿主 `GetTextExt` 取不到
-    /// （含 `TS_E_NOLAYOUT`——那是「布局还没算完」，不是「不支持」）。四值全 0 同样按
-    /// `None` 处理，它是 DLL 侧「未取到」的编码。
+    /// （含 `TS_E_NOLAYOUT`，即布局还没算完）。四值全 0 同样按 `None` 处理，它是 DLL 侧「未取到」的编码。
     pub fn comp_rect_from_bytes(buf: &[u8]) -> Option<(i32, i32, i32, i32)> {
         if buf.len() < 40 {
             return None;
@@ -1054,51 +929,45 @@ pub struct FocusGainedPayload {
     pub reason: u8,
     /// 上面那个 `caret` 的来源（[`caret_source`] 之一）。
     ///
-    /// ⚠ 焦点 caret 一度被认为「只更新缓存、不参与显示决策」而无需来源信息。**「焦点切换时
-    /// 显示状态提示气泡」推翻了这个前提**——气泡就锚在这个坐标上。而 `OnSetFocus` 不是按键
-    /// 上下文，同步 edit session 必被宿主拒绝，回退链会交出**跨窗口的** Win32 光标却仍以成功
-    /// 返回；不带来源就无从分辨「拿到了一个坐标」和「拿到了**那个**坐标」。
+    /// 焦点气泡锚在这个坐标上，而 `OnSetFocus` 里同步 edit session 必被拒绝，回退链会交出
+    /// 跨窗口的 Win32 光标却仍以成功返回，故必须带来源。
     ///
     /// 旧 DLL 只发 38 字节，落 [`caret_source::UNKNOWN`]。
     pub caret_source: i32,
-    // ⚠ 第 39 字节起是**两个前后相接的变长段**，都不在本结构里（放进来会让 `Copy` 失效
-    // 并波及全部既有调用点），各由 `crate::codec` 的解码函数单独取：
+    // 第 39 字节起是前后相接的变长段，不在本结构里（放进来会让 `Copy` 失效），
+    // 各由 `crate::codec` 的解码函数单独取：
     //
     //   [0..39 定长][bundleIdLen:u32][bundleId][windowClassLen:u32][windowClass]
     //              [windowTitleLen:u32][windowTitle]
     //
     //   ① bundleId    darwin 专属：宿主 app 的 bundle id，服务端当「进程名」用于
     //                 compat.toml 匹配与 per-app 记忆。见 `decode_focus_gained_bundle_id`。
-    //   ② windowClass 焦点所在**顶层窗口**的类名（UTF-8）。服务端据此把 shell 的过渡型
+    //   ② windowClass 焦点所在顶层窗口的类名（UTF-8）。服务端据此把 shell 的过渡型
     //                 窗口（任务栏 / Alt+Tab 切换器）与停留型窗口（桌面 / 文件管理器）
     //                 分开——它们同属 explorer.exe，仅凭进程名无法区分。
     //                 见 `decode_focus_gained_window_class`。
     //   ③ windowTitle 同一个顶层窗口的标题（UTF-8，DLL 截断到 256 个 UTF-16 码元），供
-    //                 compat.toml 的 `title` 条件匹配。**仅当服务端经 `CONFIG_KEY_COMPAT_TITLE_MATCH`
-    //                 推开采集时才非空**（没有标题规则就不取用户的窗口标题）；旧 DLL 不发本段，
+    //                 compat.toml 的 `title` 条件匹配。仅当服务端经 `CONFIG_KEY_COMPAT_TITLE_MATCH`
+    //                 推开采集时才非空（没有标题规则就不取用户的窗口标题）；旧 DLL 不发本段，
     //                 解出空串。标题按用户数据处理：任何级别的日志只记长度。
     //                 见 `decode_focus_gained_window_title`。
     //
-    // ⚠ **窗口类段必须按顺序走，不能用固定偏移**：bundleId 是变长的，macOS 上非空。
-    // Windows DLL 因此要发 `bundleIdLen=0` 占位，让两个平台共用同一条线性走法。
-    // ⚠ **再追加新段一律接在最后**，且要在这张图上补一行——两个人同时往尾部加字段而
-    // 各自不知情时，字节偏移会互相错位，而逐段 `>=` 兼容的解码**不会报错，只会解出垃圾**。
+    // 各段必须按顺序线性走，不能用固定偏移（bundleId 在 macOS 上非空），故 Windows DLL
+    // 发 `bundleIdLen=0` 占位。新段一律接在最后并在这张图上补一行：错位时逐段 `>=` 兼容的
+    // 解码不会报错，只会解出垃圾。
 }
 
 impl FocusGainedPayload {
     pub const SIZE: usize = 39;
-    /// **变长段区的起点**（第一段是 `bundleIdLen:u32`，其后各段按顺序紧接）。
-    ///
-    /// 刻意不叫 `BUNDLE_ID_OFFSET`：段不止一个了，那个名字会让下一个加段的人以为
-    /// 「从 bundleId 的偏移开始走」是巧合而另找起点，而**所有段都必须从这里线性走过**
-    /// ——中间任何一段变长，后面全部错位。
+    /// 变长段区的起点（第一段是 `bundleIdLen:u32`，其后各段按顺序紧接）。
+    /// 所有段都必须从这里线性走过，中间任何一段变长，后面全部错位。
     pub const VAR_SECTION_OFFSET: usize = 39;
 
     pub fn from_bytes(buf: &[u8]) -> Option<Self> {
         // 向后兼容：至少要有旧 36 字节；disabled/reason/caret_source 缺省 0
         //
-        // ⚠ 长度判据刻意**不用 `Self::SIZE`**：那样每加一个尾部字段都会把旧 DLL 整体拒掉。
-        // 这里的每个 `>=` 分支对应协议史上的一次尾部追加，逐个补齐即可。
+        // 长度判据刻意不用 `Self::SIZE`，否则每加一个尾部字段都会把旧 DLL 整体拒掉；
+        // 每个 `>=` 分支对应一次尾部追加。
         if buf.len() < 36 {
             return None;
         }
@@ -1228,7 +1097,7 @@ impl UiElementStatePayload {
         })
     }
 
-    /// 宿主是否**声明**接管候选绘制（两位任一置位即视为接管，见各位注释）。
+    /// 宿主是否声明接管候选绘制（两位任一置位即视为接管，见各位注释）。
     pub fn host_draws(&self) -> bool {
         self.flags & (UIELEMENT_FLAG_HOST_DRAWS | UIELEMENT_FLAG_UI_LESS_THREAD) != 0
     }
@@ -1269,14 +1138,14 @@ impl UiElementActionPayload {
 
 /// `CMD_UIELEMENT_PAGE` 的内容：给宿主自绘用的候选快照。
 ///
-/// `items` 只是**当页**候选（上限 [`UIELEMENT_MAX_ITEMS`]），
-/// `ITfCandidateListUIElement::GetCount` 报的就是 `items.len()`——**对宿主而言列表就这么长**，
+/// `items` 只是当页候选（上限 [`UIELEMENT_MAX_ITEMS`]），
+/// `ITfCandidateListUIElement::GetCount` 报的就是 `items.len()`，对宿主而言列表就这么长：
 /// 页数恒 1、`selected` 为页内下标。翻页/移高亮后 DLL 重拉，宿主看到的就是新的一页。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct UiElementPage {
-    /// 候选文本（下标即绝对下标）。
+    /// 当页候选文本（下标即页内下标）。
     pub items: Vec<String>,
-    /// 当前高亮的**页内**下标；无候选时为 0（`GetSelection` 据 `items` 空与否回 S_FALSE）。
+    /// 当前高亮的页内下标；无候选时为 0（`GetSelection` 据 `items` 空与否回 S_FALSE）。
     pub selected: u32,
     /// 每页条数（≥1）。快照只带当页时它 ≥ `items.len()`，宿主据此算出页数恒 1。
     pub page_size: u32,
@@ -1290,11 +1159,9 @@ pub struct UiElementPage {
 
 /// 焦点窗口句柄的来源域（`DiagSnapshotPayload::focus_hwnd_source`）。
 ///
-/// ⚠ **三条通路给出的不是同一件东西**，压进一个字段而不标来源，下游就再也分不开了
-/// ——这与 [`caret_source`] 给 caret 坐标分域是同一个教训（曾让 `GetGUIThreadInfo` 的
-/// Win32 光标冒充 TSF 插入点，Word 非正文行错位 814px）。这里尤其要命：
-/// `Foreground` 域的窗口**可能根本不属于本进程**（Win10 任务栏搜索就是前台窗口归
-/// SearchUI、焦点在 explorer），拿它当"焦点窗口"去推 per-app 判据必然推错。
+/// 三条通路给出的不是同一件东西，不标来源下游就分不开（同 [`caret_source`] 分域的理由）。
+/// 尤其 `FOREGROUND` 域的窗口可能根本不属于本进程（如 Win10 任务栏搜索），拿它推 per-app
+/// 判据必然推错。
 pub mod window_source {
     /// 一个都没拿到（受限宿主可能三条全空）。
     pub const NONE: u8 = 0;
@@ -1302,7 +1169,7 @@ pub mod window_source {
     pub const TSF_VIEW: u8 = 1;
     /// `GetGUIThreadInfo().hwndFocus`——线程域，属于本进程但未必是 TSF 上下文所在窗口。
     pub const GUI_THREAD: u8 = 2;
-    /// `GetForegroundWindow()`——**跨进程**，最后兜底，判据价值最低。
+    /// `GetForegroundWindow()`——跨进程，最后兜底，判据价值最低。
     pub const FOREGROUND: u8 = 3;
 
     /// 来源的中文标签（HUD 展示用）。
@@ -1326,9 +1193,8 @@ pub const DIAG_FLAG_DOCMGR_CHANGED: u8 = 1 << 0;
 /// 布局＝64 字节定长头 + 三段 `len(u16 LE) + UTF-8` 类名（focus / root / foreground）。
 /// 定长头刻意留 `reserved`，加字段时优先吃它，避免又一次改动偏移量。
 ///
-/// **句柄一律按 u64 传**：DLL 可能是 32 位也可能是 64 位，`HWND` 宽度不同；统一
-/// 零扩展成 u64 后两侧偏移才是一个固定值。这些值只用于展示与同一性比较（"还是不是
-/// 刚才那个窗口/文档"），服务进程不会拿它去调任何 Win32 API——跨进程句柄无效。
+/// 句柄一律零扩展成 u64 传（DLL 有 32/64 位两种），两侧偏移才固定。这些值只用于展示与
+/// 同一性比较，服务进程不会拿它调任何 Win32 API。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DiagSnapshotPayload {
     /// 宿主进程 id（DLL 所在进程）。
@@ -1337,9 +1203,8 @@ pub struct DiagSnapshotPayload {
     pub fg_pid: u32,
     /// 焦点窗口句柄，来源见 `focus_hwnd_source`。
     pub focus_hwnd: u64,
-    /// 焦点窗口的顶层窗口（`GetAncestor(GA_ROOT)`）。**per-app 窗口级判据取这个**
-    /// ——控件自身类名（`Edit`/`DirectUIHWND`）跨版本不稳定，顶层类名
-    /// （`Shell_TrayWnd`/`CabinetWClass`/`Progman`）才是干净的判据。
+    /// 焦点窗口的顶层窗口（`GetAncestor(GA_ROOT)`）。per-app 窗口级判据取这个：
+    /// 控件自身类名跨版本不稳定，顶层类名（`Shell_TrayWnd`/`CabinetWClass`/`Progman`）才稳定。
     pub root_hwnd: u64,
     /// 前台窗口句柄（可能属于别的进程）。
     pub fg_hwnd: u64,
@@ -1393,8 +1258,8 @@ impl DiagSnapshotPayload {
         b
     }
 
-    /// 解析。头部不足即 `None`；变长区**残缺只让对应类名退化为空串**，不否掉整包
-    /// ——诊断数据宁可缺一格也要能显示其余部分（同 `de_initial_mode` 的爆炸半径思路）。
+    /// 解析。头部不足即 `None`；变长区残缺只让对应类名退化为空串，不否掉整包
+    /// （诊断数据宁可缺一格也要能显示其余部分）。
     pub fn from_bytes(buf: &[u8]) -> Option<Self> {
         if buf.len() < Self::HEAD_SIZE {
             return None;
@@ -1437,8 +1302,8 @@ impl DiagSnapshotPayload {
         self.flags & DIAG_FLAG_DOCMGR_CHANGED != 0
     }
 
-    /// 前台窗口是否属于**别的**进程。Win10 任务栏搜索的判据信号：焦点在 explorer，
-    /// 前台窗口却归 SearchUI/SearchApp——只看进程名永远看不出这件事。
+    /// 前台窗口是否属于别的进程（如 Win10 任务栏搜索：焦点在 explorer，前台窗口归
+    /// SearchUI/SearchApp，只看进程名看不出来）。
     pub fn foreground_is_other_process(&self) -> bool {
         self.fg_pid != 0 && self.pid != 0 && self.fg_pid != self.pid
     }
@@ -1537,12 +1402,10 @@ impl SharedRenderHeader {
     pub const FLAG_VISIBLE: u32 = 0x0001;
     pub const FLAG_CONTENT_READY: u32 = 0x0002;
     pub const FLAG_SOFTWARE_SHADOW: u32 = 0x0004;
-    /// 帧里的 `(x, y)` 是**用户固定位置**的绝对屏幕坐标，不是按光标推算出来的落点。
+    /// 帧里的 `(x, y)` 是用户固定位置的绝对屏幕坐标，不是按光标推算出来的落点。
     ///
-    /// 只对 macOS 的 host-render 路径有意义：`.app` 收到普通帧时会自己做「下方放不下就
-    /// 翻到光标上方」的兜底，那套逻辑在固定位置下是错的——窗口本来就不跟光标走，一旦
-    /// 固定点靠近屏幕底边就会被莫名弹到顶上。置本位即告诉 `.app`：照搬坐标，只做屏幕
-    /// 边界钳制，不要翻转。
+    /// 只对 macOS 的 host-render 路径有意义：置位即告诉 `.app` 照搬坐标、只做屏幕边界钳制，
+    /// 不做「下方放不下就翻到光标上方」的兜底（固定位置不跟光标走，翻转是错的）。
     pub const FLAG_ABSOLUTE_POS: u32 = 0x0008;
     /// 换帧：内容没变，只换了皮肤装饰的动画帧。外部宿主照原位贴图，不重新落位、不重排 z 序
     /// （X11 每帧 raise 会压住 tooltip 与菜单）。旧宿主不认这一位，按普通帧处理。
@@ -1587,53 +1450,33 @@ impl SharedRenderHeader {
 
 /// 图标 SHM 魔数 `'WICO'`（字节序 W,I,C,O，小端读作 `0x4F43_4957`）。
 pub const ICON_SHM_MAGIC: u32 = 0x4F43_4957;
-/// 布局版本。**本功能尚未随任何版本发布**，故开发期内改布局（补 40/48 两档、放大
-/// SHM）不占版本号——外面没有任何一代在跑，留着历史编号只会让人误以为存在兼容包袱。
-/// 首个发布版本即 1；发布之后再改布局才 bump。
+/// 布局版本，改布局须 bump。
 ///
-/// 版本不匹配时读端直接判失败、退回本地绘制，而不是硬读——DLL 与服务分属两个
-/// 部署单元，先更新哪个都可能。降级的表现是「图标还在、只是没有角标」，可接受；
-/// 硬读的表现是任务栏上出现一张错位的花屏。
+/// 版本不匹配时读端直接判失败、退回本地绘制（图标还在、只是没有角标），而不是硬读出
+/// 一张错位的花屏：DLL 与服务分属两个部署单元，先更新哪个都可能。
 pub const ICON_SHM_VERSION: u32 = 1;
 
 /// 图标 SHM 名（不走握手，两端各自按固定规则拼）。
 ///
-/// ⚠️ **跨仓命名契约，无编译期约束**：C++ 侧 `Globals.h` 的 `WIND_ICON_SHM_NAME`
-/// 必须与本函数结果逐字一致，否则 DLL 永远打不开 SHM、静默退回本地绘制
-/// （表现为「图标能显示但从不跟随标点变化」，没有任何报错）。
+/// 跨仓命名契约，无编译期约束：C++ 侧 `Globals.h` 的 `WIND_ICON_SHM_NAME` 必须与本函数
+/// 结果逐字一致，否则 DLL 静默退回本地绘制（图标从不跟随标点变化，没有任何报错）。
 ///
-/// `suffix` 取 `wind_config::variant::pipe_suffix()`（`""` / `"_dev"`），
-/// 与主/推送管道同源。**不要**改用 `app_dir_name()` 那套 `Dev` 风格后缀——
-/// macOS 侧曾因两种后缀风格混用，导致 dev 变体的 bridge/SHM 全程握不上手。
+/// `suffix` 取 `wind_config::variant::pipe_suffix()`（`""` / `"_dev"`），与主/推送管道同源；
+/// 不要改用 `app_dir_name()` 那套 `Dev` 风格后缀，两种风格混用会让 dev 变体握不上手。
+/// `Local\` 前缀提供会话级隔离，与 HostRender 的 SHM 同策略（不含 SID）。
 ///
-/// `Local\` 前缀提供终端服务会话级隔离，与 HostRender 的 SHM 同策略（不含 SID）。
-///
-/// ★ **名字里必须带版本，且要随 [`ICON_SHM_VERSION`] 走。** 命名 section 的名字一旦
-/// 存在，**尺寸也就被钉死了**：只要还有一个进程持着映射，内核对象就活着，此时以更大的
-/// view 大小去 `MapViewOfFile` 会返回 `ACCESS_DENIED`——一个指向权限、完全不指向真正
-/// 原因的错误码。开发期把 SHM 从 64 KiB 提到 128 KiB 时就是这样卡住的：几十个宿主
-/// 进程里的旧 DLL 各持一份 64 KiB 映射，新服务怎么也建不出 128 KiB，而持有者名单里有
-/// `explorer.exe` 与 `SearchHost.exe`，腾干净约等于注销一次。
-///
-/// 版本进名字之后，新旧两代用的是不同的内核对象，各自活到自己最后一个持有者退出为止，
-/// 互不阻塞。代价是跨版本的新服务 + 旧 DLL 会互相看不见 SHM——那正是想要的结果：
-/// 退回本地绘制（图标照常显示，只是没角标），而不是读出一张按旧布局解释的花屏。
-///
-/// 直接拼 [`ICON_SHM_VERSION`] 而不是写死 `_v1`，是为了让「改版本号」与「改名字」
-/// 变成同一个动作——两者分开写就一定会有一次只改其中一个。
+/// 名字里必须带 [`ICON_SHM_VERSION`]：命名 section 只要还有进程持着映射，尺寸就被钉死，
+/// 以更大的 view 去 `MapViewOfFile` 会返回 `ACCESS_DENIED`（持有者含 explorer 等常驻进程）。
+/// 版本进名字后新旧两代各用各的内核对象，跨版本时互相看不见、退回本地绘制，正是想要的结果。
+/// 直接拼常量是为了让「改版本号」与「改名字」是同一个动作。
 pub fn icon_shm_name(suffix: &str) -> String {
     format!("Local\\WindInput_IconShm_v{ICON_SHM_VERSION}{suffix}")
 }
 
 /// 预渲染的尺寸档，对应 100/125/150/175/200/250/300% DPI。
 ///
-/// 备多档而非按 DPI 现算一个，是因为 `ITfLangBarItemButton::GetIcon` **没有尺寸参数**：
-/// 图标多大由我们创建位图时决定，系统拿去后如何缩放不可见。备齐档位后，
-/// 选档逻辑将来若要修正，改的只是选择，不必重做渲染。
-///
-/// 40/48 两档是真机实测补的：300% 缩放下该给 48，而档位表原本止于 32，
-/// DLL 只能取最接近的 32 再由系统放大——放大正是最糊的那种情形
-/// （同机对照：原生无缩放的那档明显更清晰）。
+/// 备多档而非按 DPI 现算一个，是因为 `ITfLangBarItemButton::GetIcon` 没有尺寸参数，系统拿去后
+/// 如何缩放不可见；备齐档位后修正选档逻辑不必重做渲染。高 DPI 要有对应大档，否则系统放大会糊。
 pub const ICON_SIZES: [u16; 7] = [16, 20, 24, 28, 32, 40, 48];
 
 /// 主题档：亮色任务栏用深色图标，暗色任务栏用浅色图标。
@@ -1665,10 +1508,8 @@ pub const ICON_TABLE_OFFSET: usize = IconShmHeader::SIZE;
 
 /// slot 0 起点。表尾对齐到 512 边界，留出加变体档位的余量。
 ///
-/// ⚠ 加尺寸档时**必须一并复核本值**：变体表紧跟 64 B 的 header，可用空间是
-/// `ICON_SLOT0_OFFSET - ICON_TABLE_OFFSET`，每个变体 16 B。原来的 256 只放得下
-/// 12 个变体，而 7 档 × 2 主题 = 14 个已经装不下——`icon_shm_layout_fits_without_overlap`
-/// 正是为这一步准备的。
+/// 加尺寸档时必须一并复核本值：变体表紧跟 64 B 的 header，可用空间是
+/// `ICON_SLOT0_OFFSET - ICON_TABLE_OFFSET`，每个变体 16 B。见 `icon_shm_layout_fits_without_overlap`。
 pub const ICON_SLOT0_OFFSET: usize = 512;
 
 /// SHM 总大小，取 128 KiB 整（7 档双主题双缓冲实际用量约 109 KiB）。
@@ -1721,7 +1562,7 @@ impl Default for IconShmHeader {
     }
 }
 
-/// 变体表条目（16 B）。两个 slot 共用同一张表，`offset` 相对**所属 slot 起点**。
+/// 变体表条目（16 B）。两个 slot 共用同一张表，`offset` 相对所属 slot 起点。
 #[repr(C, packed)]
 #[derive(Clone, Copy, Debug)]
 pub struct IconVariant {
@@ -1780,34 +1621,26 @@ pub const MOD_LCTRL: u32 = 0x0040;
 pub const MOD_RCTRL: u32 = 0x0080;
 pub const MOD_CAPSLOCK: u32 = 0x0100;
 
-/// **宿主快捷键修饰位**：带上其中任意一位的键，未命中热键白名单就归宿主，输入法一概不碰。
+/// 宿主快捷键修饰位：带上其中任意一位的键，未命中热键白名单就归宿主，输入法一概不碰。
 ///
-/// 含 `MOD_WIN` 是 macOS 的刚需：那边 `MOD_WIN` 承载的是 **Command 键**（见
-/// `KeyHandler.toModifiers`），⌘C/⌘V/⌘A 全靠这条判据交还宿主。此前判据只掩
-/// `MOD_CTRL | MOD_ALT`（Win 键上没有快捷键语义，是 Windows 血统的遗留），于是中文模式下
-/// ⌘+字母一路走到字母臂被当成码元吃掉 —— 表现为「开着输入法就复制粘贴不了」（issue #64）。
-///
-/// Windows 侧无回归：Win+键由系统抢先处理，本就到不了 TSF。
+/// 含 `MOD_WIN` 是因为 macOS 上它承载 Command 键（见 `KeyHandler.toModifiers`），⌘C/⌘V 靠这条
+/// 交还宿主。Windows 上 Win+键由系统抢先处理，本就到不了 TSF。
 pub const MOD_SHORTCUT: u32 = MOD_CTRL | MOD_ALT | MOD_WIN;
 
 /// `KeyEventData::toggles` 的位（对齐 C++ `BinaryProtocol.h` 的 `TOGGLE_*`）。
 /// CapsLock/NumLock/ScrollLock 是真正的锁定态快照，每键实时采集。
 pub const TOGGLE_CAPSLOCK: u8 = 0x01;
 
-/// 自上一个 keydown 事件送达以来，**有键进了宿主**。
+/// 自上一个 keydown 事件送达以来，有键进了宿主。
 ///
-/// ⚠️ 语义就是字面这句，比「服务端没看见的输入」**更宽**：守卫在 `OnKeyDown` 出口按最终的
-/// `pfEaten` 判，而事件在函数中段就已发出，于是「发给了服务端**又**吐回给宿主」的键
-/// （`ipc_failed_*`、只读上下文、Ctrl/Alt 清理透传……）同样置位。那些置位都是对的——键确实
-/// 进了宿主、文档可能变了——而宽的这一侧恰好是安全方向（多报 = 用户重按一次 press1）。
+/// 语义就是字面这句，比「服务端没看见的输入」更宽：发给了服务端又吐回给宿主的键
+/// （`ipc_failed_*`、只读上下文、Ctrl/Alt 清理透传……）同样置位。宽的一侧是安全方向。
 ///
-/// 它不是锁定态，搭 `toggles` 的空闲位是为了不动 `KeyPayload` 的布局（两端各有
-/// static_assert，而真机上 DLL 与 core 会混搭版本；后来的 `seq_char` 只敢追加在末尾）。两个方向都安全：
-/// 旧 core 只读 bit0，旧 DLL 不置位 = 「没透传过」= 原行为。
+/// 它不是锁定态，搭 `toggles` 的空闲位是为了不动 `KeyPayload` 的布局（DLL 与 core 会混搭版本）。
+/// 旧 core 只读 bit0，旧 DLL 不置位 = 原行为。
 ///
-/// 唯一消费者是智能符号的武装态：英文半角下 TSF 只吃标点键，中间打的字母全透传，服务端
-/// 既收不到按键事件、又没有编码缓冲，两道既有判据都够不着，只能靠 DLL 报这个事实。
-/// 失效方向是安全的——多报一次只是让用户重按一次 press1，漏报则会删掉用户刚打的字。
+/// 唯一消费者是智能符号的武装态：英文半角下字母全透传，服务端看不见，只能靠 DLL 报。
+/// 多报只是让用户重按一次 press1，漏报则会删掉用户刚打的字。
 pub const TOGGLE_PASSTHROUGH_KEY: u8 = 0x08;
 
 /// `EVENT_MOD_UP` 上的「平台看见过别的输入」：这次按住期间有服务端看不见的键（透传给宿主的
@@ -1835,32 +1668,25 @@ pub const STATUS_TOOLBAR_VISIBLE: u32 = 0x0008;
 pub const STATUS_MODE_CHANGED: u32 = 0x0010;
 pub const STATUS_CAPS_LOCK: u32 = 0x0020;
 pub const STATUS_HOST_RENDER_AVAIL: u32 = 0x0040;
-/// 软键盘面板开着。**C++ 的吃键判定要用它**：中文模式无 input session 时数字键本是
+/// 软键盘面板开着。C++ 的吃键判定要用它：中文模式无 input session 时数字键本是
 /// 交还宿主的（`session_select_or_page` 那支只在有 session 时吃），而软键盘的数字行
 /// 需要它们被吃下来。位值必须与 `BinaryProtocol.h` 的 `STATUS_SOFT_KEYBOARD` 一致。
 pub const STATUS_SOFT_KEYBOARD: u32 = 0x0080;
-/// 当前面是**键盘面**（`send_keys`），不是符号面。
+/// 当前面是键盘面（`send_keys`），不是符号面。
 ///
-/// ★ 它决定 C++ 要不要启用软键盘总闸。键盘面把按键交还输入法：字母/数字/标点一律
-/// 落回常规判定链（中文模式吃并转发、英文模式放行），与没开面板时完全一致；只有
-/// Esc 与翻页仍归面板。少了这一位，键盘面在英文模式下会「吃了不发」——总闸吃掉键，
-/// 而常规链路在英文态返回 PassThrough，键彻底消失。
+/// 它决定 C++ 要不要启用软键盘总闸：键盘面的按键落回常规判定链（与没开面板时一致），
+/// 只有 Esc 与翻页仍归面板。少了这一位，键盘面在英文模式下总闸吃掉键、常规链路却返回
+/// PassThrough，键彻底消失。
 /// 位值必须与 `BinaryProtocol.h` 的 `STATUS_SOFT_KEYBOARD_KEYS` 一致。
 pub const STATUS_SOFT_KEYBOARD_KEYS: u32 = 0x0100;
 /// 热键激活的模式（加词 / 临拼 / 特殊 / 生僻字）当前活着。
 ///
-/// ★ C++ 侧 `_HasInputSession()` 的权威来源之一。这几个模式在
-/// `input.caret.*_via_composition = false` 时**根本不建 composition**，DLL 那边四个会话
-/// 来源全落空，Backspace/Enter/Escape 一律判「无会话」透传给宿主 —— 加词要靠 Enter 确认、
-/// Esc 取消，收不到就等于废了。
+/// C++ 侧 `_HasInputSession()` 的权威来源之一：这几个模式在 `input.caret.*_via_composition = false`
+/// 时不建 composition，否则 Backspace/Enter/Escape 会被判「无会话」透传给宿主。
+/// 由服务端告知而不是 DLL 自己判：DLL 只看得到热键 id 段，据它置位必然过宽。
 ///
-/// 为什么由服务端告知而不是 DLL 自己判：DLL 只有 `(vk, keymod)`，动作名在这边。它那条
-/// `WM_HOTKEY` 通路能看到的 id 段涵盖**所有** `HOTKEY_POLICY_GLOBAL` 热键（软键盘、
-/// `open_add_word_dialog` 也在内），据它置位必然过宽。
-///
-/// ⚠️ **level-triggered**：每次状态推送都带完整值，DLL 无条件镜像，漏一次推送由下一次
-/// 纠正。前一版是边沿驱动（某事件置、某事件清），漏一次清位就永久卡住——软键盘按一次
-/// 即可复现（它在那个 id 段内，却不产候选也不发 ClearComposition）。
+/// level-triggered：每次状态推送都带完整值，DLL 无条件镜像，漏一次推送由下一次纠正；
+/// 别改成边沿驱动（漏一次清位就永久卡住）。
 /// 位值必须与 `BinaryProtocol.h` 的 `STATUS_HOTKEY_SESSION` 一致。
 pub const STATUS_HOTKEY_SESSION: u32 = 0x0200;
 
@@ -1870,21 +1696,16 @@ pub const STATUS_HOTKEY_SESSION: u32 = 0x0200;
 
 /// 来源标签占 `flags` 的高 4 位，与 `STATUS_*`（低位）不重叠。
 ///
-/// 为什么要带来源：服务端的模式变更入口有三个（本地按键 toggle、菜单、DLL 送来的
-/// SystemModeSwitch），而 DLL 那条又混着「宿主/系统写 compartment」与「Ctrl+Space
-/// 按键兜底」两种完全不同的成因。只看服务端日志时它们长得一模一样，用户反馈
-/// 「某些应用里会自动变英文」时无法分辨是宿主关了 IME 还是我们自己切的——
-/// 2026-09-08 排查一份真机日志时正是卡在这里（21 次模式变化只有 2 次能溯源）。
+/// 带来源是为了在日志里分辨模式变化的成因：DLL 送来的 SystemModeSwitch 混着「宿主/系统写
+/// compartment」与「Ctrl+Space 按键兜底」两种成因，不标就无法判断是宿主关了 IME 还是我们自己切的。
 /// 位值必须与 `BinaryProtocol.h` 的同名常量一致。
 pub const MODE_SWITCH_SOURCE_SHIFT: u32 = 28;
 pub const MODE_SWITCH_SOURCE_MASK: u32 = 0xF000_0000;
 
-/// 这次 compartment 变化发生时 **Ctrl 正被按住**（由 DLL 现场取 `GetAsyncKeyState`）。
+/// 这次 compartment 变化发生时 Ctrl 正被按住（由 DLL 现场取 `GetAsyncKeyState`）。
 ///
-/// 用途只有一个：区分「用户按 Ctrl+Space」与「宿主自己写 compartment 切中英」。两者走
-/// 的是同一条通路、载荷完全相同，服务端无从分辨；而 `ignore_host_ime_switch` 必须放过
-/// 前者（否则该应用里系统热键彻底失灵）。判据由**发起方交代**，服务端不去猜——同款
-/// 判据已在 C++ 的 CapsLock 联动抑制窗用过并经真机验证。
+/// 用于区分「用户按 Ctrl+Space」与「宿主自己写 compartment 切中英」：两者载荷相同，而
+/// `ignore_host_ime_switch` 必须放过前者。判据由发起方交代，服务端不去猜。
 pub const MODE_SWITCH_CTRL_HELD: u32 = 0x0800_0000;
 
 /// 一次系统模式切换的发起方。
@@ -1941,7 +1762,7 @@ pub const COMMIT_FLAG_CHINESE_MODE: u16 = 0x0004;
 pub const COMMIT_FLAG_REPLACING_HELD: u16 = 0x0008;
 // bit4 曾用于「上屏后候选窗仍有内容」，已废弃勿复用（见 BinaryProtocol.h）。
 /// 本次上屏之后处于「无占位的联想会话」（compat `assoc_placeholder = "none"`）：宿主里没有
-/// 组合，DLL 须**同步**把它记成有输入会话，才能赢得下一次 `OnTestKeyDown` 的竞速。
+/// 组合，DLL 须同步把它记成有输入会话，才能赢得下一次 `OnTestKeyDown` 的竞速。
 pub const COMMIT_FLAG_ASSOC_SESSION: u16 = 0x0020;
 
 // ──────────────────────────────────────────────
@@ -1951,10 +1772,10 @@ pub const COMMIT_FLAG_ASSOC_SESSION: u16 = 0x0020;
 pub const EVENT_KEY_DOWN: u8 = 0;
 pub const EVENT_KEY_UP: u8 = 1;
 
-/// 候选窗显示时 Ctrl（0xA2 / 0xA3）的**如实上报**：按下与松开原样送来，单击由服务端判
+/// 候选窗显示时 Ctrl（0xA2 / 0xA3）的如实上报：按下与松开原样送来，单击由服务端判
 /// （`wind-coordinator` 的 `handle_ctrl_raw`）。平台不吃 Ctrl；回包只为同步状态，吃不吃不看它。
 ///
-/// 配对规则：平台在**按下那一刻**定这次按住走哪条路——有输入会话就发 `EVENT_MOD_DOWN`、松开发
+/// 配对规则：平台在按下那一刻定这次按住走哪条路——有输入会话就发 `EVENT_MOD_DOWN`、松开发
 /// `EVENT_MOD_UP`（哪怕那时候选已关），否则走原「平台判单击、只送确认过的 `EVENT_KEY_UP`」，
 /// 一次按住只走一条路，不会两边各报一次。
 ///

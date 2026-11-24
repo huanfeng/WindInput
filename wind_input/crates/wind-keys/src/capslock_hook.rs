@@ -1,41 +1,25 @@
 //! CapsLock 全局低级键盘钩子（`WH_KEYBOARD_LL`）。注释切换键选了 Alt 时同一个钩子兼管 Alt
-//! （判定见 [`crate::alt_tap`]）：**一个进程只装一个 LL 钩子**。
+//! （判定见 [`crate::alt_tap`]）：一个进程只装一个 LL 钩子。
 //!
-//! # 为什么非它不可
+//! CapsLock 的锁定态在 TSF key event sink 之前就已翻转，TSF 里吃键压不住；事后回敲复原在竞态下
+//! 无解。LL 钩子回调发生在按键异步状态更新之前，是用户态唯一拦得住的位置。背景见
+//! docs/design/session-key-actions.md 的「CapsLock：不走 TSF，走全局低级键盘钩子」。
 //!
-//! CapsLock / NumLock / ScrollLock 的锁定态由系统在**输入线程状态机**里维护，位置在 TSF
-//! key event sink **之前**——TSF 里 `pfEaten = TRUE` 只表示「这个键事件我处理了」，**不是**
-//! 「这个键没发生过」，压不住锁定态翻转（2026-08-11 真机实测）。
+//! # 三条硬约束（违反了都是无声故障）
 //!
-//! 先前尝试过「让它翻转，再 `SendInput` 回敲复原」，真机撞到两个无解的问题：快速连按时
-//! 物理事件与注入事件在队列里的相对顺序无法保证，大写会卡住；且那次真实的状态变化会被
-//! 厂商 OSD 工具（联想等）观测到并弹窗。**事后修正在竞态下没有正确解**，只能在它发生之前
-//! 阻止它发生。
-//!
-//! `LowLevelKeyboardProc` 是用户态唯一做得到的位置，MS 文档原文：
-//! > the callback function is called **before the asynchronous state of the key is updated**
-//! > ...it may return a nonzero value to prevent the system from passing the message to the
-//! > rest of the hook chain or the target window procedure.
-//!
-//! # 三条硬约束（都来自文档，违反了都是无声故障）
-//!
-//! 1. **回调必须极快返回**。超时后 Win7+ 会把钩子**静默移除**，且「there is no way for the
-//!    application to know whether the hook is removed」。故回调里只读一个原子量 + 一次
-//!    非阻塞 `send`，**不加锁、不分配、不做 IPC**。唯一例外是 Alt 松开时补发屏蔽键的那一次
-//!    `SendInput`（栈上数组、不阻塞）：屏蔽键必须排在 Alt 松开之前，只能在回调里补。
-//! 2. **安装线程必须有消息循环**（钩子是靠给该线程发消息来调用的）。故本模块自带专用线程。
-//! 3. ★ **专用线程，不能搭 UI 线程的便车**。UI 线程要渲染候选窗（LayeredWindow 位图合成），
-//!    某次渲染慢过 `LowLevelHooksTimeout`（Win10 1709+ 上限 1000ms）钩子就永久掉了，而且
-//!    没有任何信号——本仓最难排查的故障全是这一类。
+//! 1. 回调必须极快返回，超时后系统会静默移除钩子。故回调里只读原子量 + 一次非阻塞 `send`，
+//!    不加锁、不分配、不做 IPC。唯一例外是 Alt 松开时补发屏蔽键的那次 `SendInput`（栈上数组、
+//!    不阻塞）：屏蔽键必须排在 Alt 松开之前，只能在回调里补。
+//! 2. 安装线程必须有消息循环（钩子靠给该线程发消息来调用），故本模块自带专用线程。
+//! 3. 不能搭 UI 线程的便车：候选窗某次渲染慢过 `LowLevelHooksTimeout`，钩子就永久掉了且没有信号。
 //!
 //! # 安装门控
 //!
-//! ★ **只有用户在 `keys.session_actions` 里真的配了 `capslock`、或把它勾成中英切换键时才安装**
-//! （协调器侧判定）。
-//! 没配的用户进程里根本不存在全局键盘钩子——这是本功能首要的风险控制手段，不可省。
+//! 只有用户在 `keys.session_actions` 里配了 `capslock`、或把它勾成中英切换键时才安装（协调器侧
+//! 判定）。没配的用户进程里根本不存在全局键盘钩子，这是首要的风险控制，不可省。
 //!
-//! 勾成切换键时空闲也要吃（[`IDLE_PID`]），那道闸门另有两重保护：只在前台窗口属于
-//! 本输入法所在的那个进程时接管；按着 Shift / Ctrl / Alt / Win 时不接管。
+//! 勾成切换键时空闲也要吃（[`IDLE_PID`]），另有两重保护：只在前台窗口属于本输入法所在的
+//! 进程时接管；按着 Shift / Ctrl / Alt / Win 时不接管。
 //!
 //! Alt 那一份另算：`ui.comment.switch_mode != off` 且 `switch_key` 是 Alt 系才要。钩子 =
 //! CapsLock 要 ∪ Alt 要，协调器两边都不要时卸载。闸门 [`set_alt_gate`] 只在有候选时非 0；
@@ -54,17 +38,16 @@ pub use crate::alt_tap::AltEvent;
 
 /// 钩子此刻是否应当吃掉 CapsLock。
 ///
-/// 由协调器随「有没有输入会话」实时更新。★ 它为 true 的时间窗必须尽量短：钩子是**全局**的，
-/// 这个标志滞留就意味着用户在**别的应用**里按 CapsLock 也切不动大小写——那比功能不生效
-/// 糟糕得多，属于必须优先避免的故障方向。
+/// 由协调器随「有没有输入会话」实时更新。为 true 的时间窗必须尽量短：钩子是全局的，标志滞留
+/// 意味着用户在别的应用里按 CapsLock 也切不动大小写，比功能不生效糟糕得多。
 static SHOULD_EAT: AtomicBool = AtomicBool::new(false);
 
 /// 空闲时也吃 CapsLock：「切换按键」勾了 CapsLock 时，存本输入法激活所在的宿主进程 pid，
 /// 0 = 不吃。由协调器随激活态更新。
 ///
 /// 与 [`SHOULD_EAT`] 分开存：那个闸门在候选窗隐藏、失焦时被无条件归零（宁可少吃），
-/// 这个跟着激活态走。★ 激活态在宿主崩溃、切到不走 TSF 的程序时可能清不掉，故钩子吃键前
-/// 还要比对前台窗口的进程：对不上就放行，滞留的闸门也伤不到别的应用。
+/// 这个跟着激活态走。激活态在宿主崩溃、切到不走 TSF 的程序时可能清不掉，故吃键前还要比对
+/// 前台窗口的进程：对不上就放行，滞留的闸门也伤不到别的应用。
 static IDLE_PID: AtomicU32 = AtomicU32::new(0);
 
 /// 被吃掉的 CapsLock 事件。`Down` 含按住不放时的自动重复，`first` 标出这次按下的第一个；
@@ -119,39 +102,26 @@ pub fn should_eat() -> bool {
     SHOULD_EAT.load(Ordering::Relaxed)
 }
 
-/// 钩子对一次**非注入的** CapsLock 事件的裁决：`(要不要吃掉, 配对状态的新值)`。
+/// 钩子对一次非注入的 CapsLock 事件的裁决：`(要不要吃掉, 配对状态的新值)`。抽成纯函数是为了
+/// 脱离平台逐条断言：少吃只是「这次绑定没生效」，多吃是「用户在别的应用里 CapsLock 按不动」。
 ///
-/// 抽成纯函数有两个理由：钩子回调在单测里根本跑不到（要真装 LL 钩子，CI 的 Linux 上更没有），
-/// 而这段逻辑的两个方向后果**极不对称**——少吃只是「这次绑定没生效」，多吃是「用户在**别的
-/// 应用**里 CapsLock 按不动」。这种判据必须能脱离平台逐条断言。
-///
-/// 规则四条。**配对状态优先于闸门**——闸门管「这一次按下要不要接管」，一旦接管了，
-/// 这次物理按下的余下事件（重复的 down、最后的 up）就都归我们，中途闸门关掉不改变归属：
+/// 配对状态优先于闸门：闸门管「这次按下要不要接管」，一旦接管，这次物理按下的余下事件
+/// （重复的 down、最后的 up）都归我们，中途闸门关掉不改变归属。
 /// - down + 闸门开 → 吃，并记下「欠一个 up」；
-/// - down + 闸门关 + **已欠 up** → 照吃。这是同一次物理按下的 auto-repeat：按住不放时
-///   系统会重复发 keydown，而绑定动作自己就可能在首个 down 与 up 之间把闸门关掉
-///   （选词上屏 ⇒ 候选清空 ⇒ 无会话）。放行这些重复 down 的后果是**每一次都翻转一下
-///   真正的大写锁定**，而最后那个 up 仍被吃掉 ⇒ 绑定动作照常生效，CapsLock 状态却悄悄
-///   变了，用户完全看不出是什么导致的；
-/// - down + 闸门关 + 没欠 → 放行，配对状态保持为空；
-/// - up → 只看配对状态：欠着就吃并销账，没欠就放行。**刻意不问闸门**，理由同上。
+/// - down + 闸门关 + 已欠 up → 照吃（同一次按下的自动重复；绑定动作可能已把闸门关掉，放行会
+///   每次翻转一下真正的大写锁定）；
+/// - down + 闸门关 + 没欠 → 放行；
+/// - up → 只看配对状态：欠着就吃并销账，没欠就放行，不问闸门。
 ///
-/// ⚠️ 这一条确实**扩大**了吃键范围，与「宁可少吃」的取向反向，所以要说清代价边界：
-/// `eaten_down` 只可能由我们自己吃下的那个 down 置位，所以扩大的范围**始终限于我们
-/// 已经拥有的那一次按下**，不会波及一次全新的按下——除非低级钩子丢过一个 up（系统
-/// `LowLevelHooksTimeout` 超时会摘掉钩子），那时下一次按下会被多吃掉。代价是有界且
-/// 自愈的：多吃的那次按下，它的 up 走第四条销账，此后恢复正常，最多一次。
-/// 相比之下漏放行是**每一次重复 down 都翻转一次锁定态**，无界。
+/// 代价：钩子超时被摘而丢过一个 up 时，下一次按下会被多吃一次，其 up 销账后自愈。
+/// 背景见 docs/design/session-key-actions.md 的「一次按下吃到底」。
 ///
-/// ⚠️ 唯一的生产使用者在 `#[cfg(windows)] mod imp` 里，单测又只在 `cfg(test)` 下存在，
-/// 故非 Windows 目标编 **lib** target 时它确实无人调用（CI 的 darwin clippy 会拦）。
-/// ⛔ 别改成 `#[cfg(windows)]`：本函数抽成纯函数就是为了能脱离平台逐条断言。
+/// 生产调用只在 `#[cfg(windows)] mod imp` 里，非 Windows 编 lib 时无人调用；别改成
+/// `#[cfg(windows)]`，否则单测脱离不了平台。
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn decide_eat(is_down: bool, should_eat: bool, eaten_down: bool) -> (bool, bool) {
     if is_down {
-        // ⛔ 不能只问 `should_eat`：按住不放时系统重复发 keydown，而闸门可能已被绑定
-        // 动作自己关掉，那些重复 down 就会漏给系统、每次翻转一下真正的大写锁定。
-        // `eaten_down` 在这里的含义是「这次物理按下已经归我们了」，它优先。
+        // 不能只问 `should_eat`：闸门可能已被绑定动作关掉，重复 down 漏出去会翻转大写锁定。
         if should_eat || eaten_down {
             // 重复置位是幂等的，最后那次 up 一并销账。
             (true, true)
@@ -188,23 +158,13 @@ mod imp {
 
     /// 上一个被吃掉的 CapsLock keydown 是否还在等它的 keyup。
     ///
-    /// ★★ 与 [`SHOULD_EAT`] **正交**：闸门管「这一次按下要不要接管」，本标志管「已经接管
-    /// 的这一次要吃到底」。
+    /// 与 [`SHOULD_EAT`] 正交：闸门管「这一次按下要不要接管」，本标志管「已经接管的这一次
+    /// 要吃到底」。绑定动作（选词上屏 ⇒ 候选清空）会在用户松手前把闸门归零，keyup 漏出去
+    /// 就成了孤儿 up。
     ///
-    /// 模块文档那句「down 和 up 都要吃」是对的，但它默认了一个**没写出来的前提**——闸门在
-    /// down 与 up 之间不会变。而本功能的动作**自己就会破坏这个前提**：`select_candidate`
-    /// 选词上屏后候选清空 ⇒ `has_input_session` 为假 ⇒ `notify_ui_update` 把闸门归零，
-    /// 而那时用户还没松手。于是 keyup 漏出去，系统与宿主收到一个**没有 down 的孤儿 up**，
-    /// TSF 还会把它当成「用户切了大写」的状态通知转发给服务端。
-    ///
-    /// 真机现象（2026-08-31）：功能完全正常，却在第一次操作时闪一下状态提示泡——因为
-    /// 服务端的 `show_status()` 拿空的 `last_status_text` 去比，首次必然弹一次。翻页碰不到
-    /// 是因为翻完页候选还在，闸门不会归零。
-    ///
-    /// ⚠️ 只由 CapsLock 的 down 置位、up 清零，另在装钩子时清零（装卸之间若卡着一次未配对
-    /// 的 down，重装后第一个 keyup 会被误吃——那正是「用户在别的应用里 CapsLock 按不动」
-    /// 的方向，必须避免）。`notify_ui_hide` / `handle_focus_lost` 那类闸门归零**不得**碰它：
-    /// 它们要收回的是「接管新按下」的权限，不是撤销一次已经吃了一半的按键。
+    /// 只由 CapsLock 的 down 置位、up 清零，另在装卸钩子时清零（否则重装后第一个 keyup 被误吃）。
+    /// `notify_ui_hide` / `handle_focus_lost` 那类闸门归零不得碰它：它们收回的是接管新按下的
+    /// 权限，不是撤销一次吃了一半的按键。
     static EATEN_DOWN: AtomicBool = AtomicBool::new(false);
 
     /// 这次被接管的按下里第一个 down 的系统时间戳（`KBDLLHOOKSTRUCT::time`，毫秒）。
@@ -313,10 +273,8 @@ mod imp {
     }
 
     unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-        // 文档：nCode < 0 必须直接下传；这里连 HC_ACTION 之外的一律下传。
-        // 五个标志都为假时立刻下传——绝大多数按键走的是这条路径，必须最短（五次
-        // relaxed 原子读：CapsLock 三个、Alt 两个；不解引用 lParam）。闸门开着时每个键都要
-        // 进来看一眼键码，那也只是一次解引用加比较。
+        // nCode 非 HC_ACTION 一律下传。五个标志都为假时立刻下传：绝大多数按键走这条路，
+        // 只做五次 relaxed 原子读、不解引用 lParam。
         let caps_active = SHOULD_EAT.load(Ordering::Relaxed)
             || IDLE_PID.load(Ordering::Relaxed) != 0
             || EATEN_DOWN.load(Ordering::Relaxed);
@@ -341,13 +299,12 @@ mod imp {
                     INTERRUPTED.store(true, Ordering::Relaxed);
                 }
             } else {
-                // 注入事件一律放行。★ 协调器开关大写就靠注入一次 CapsLock（长按切换键），
-                // 放行注入是那条路的前提；AHK / 厂商热键程序的注入同理不该拦。
+                // 注入事件一律放行：协调器开关大写靠注入一次 CapsLock（长按切换键）；
+                // AHK / 厂商热键程序的注入同理不该拦。
                 if (info.flags & LLKHF_INJECTED).0 == 0 {
                     let msg = wparam.0 as u32;
                     let is_down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
-                    // 裁决抽成纯函数（见其文档）。load + store 不是原子对，但钩子回调由
-                    // 系统在**本模块自己的那一个线程**上串行调用，不存在并发进入；
+                    // load + store 不是原子对，但回调只在本模块的钩子线程上串行执行；
                     // `SHOULD_EAT` 是别的线程写的，这里只取一次快照。
                     let owed = EATEN_DOWN.load(Ordering::Relaxed);
                     // 空闲闸门只在一次按下的首个 down 上判（之后的事件靠配对状态归属）。
@@ -381,13 +338,12 @@ mod imp {
     }
 
     impl CapsLockHook {
-        /// 安装钩子。`on_press` 在钩子线程执行，**必须只做非阻塞投递**（见模块文档约束 1）。
+        /// 安装钩子。`on_press` 在钩子线程执行，必须只做非阻塞投递（见模块文档约束 1）。
         ///
         /// 回调只能设置一次（`OnceLock`）——钩子的装卸可以反复，回调本身是进程级常量。
         pub fn install(on_press: super::PressCallback) -> anyhow::Result<Self> {
             let _ = CALLBACK.set(on_press);
-            // 装卸之间若卡着一次未配对的 down（卸载恰好发生在用户按住 CapsLock 时），
-            // 重装后第一个 keyup 会被误吃 ⇒ 用户在别的应用里 CapsLock 按不动。清零。
+            // 卸载若恰在用户按住 CapsLock 时发生，残留的配对状态会让重装后第一个 keyup 被误吃。
             EATEN_DOWN.store(false, Ordering::Relaxed);
             ALT_OWED.store(false, Ordering::Relaxed);
 
@@ -479,9 +435,8 @@ mod tests {
         assert!(!eaten, "销账");
     }
 
-    /// ★ 回归 2026-08-31：动作**自己**在 down 与 up 之间把闸门关掉（选词上屏 ⇒ 候选清空
-    /// ⇒ 无会话）。up 必须照吃——否则系统与宿主收到孤儿 up，TSF 还会把它当成「用户切了
-    /// 大写」的状态通知转发给服务端（真机现象：功能正常，却闪一下状态提示泡）。
+    /// 动作自己在 down 与 up 之间把闸门关掉（选词上屏 ⇒ 候选清空）。up 必须照吃，
+    /// 否则宿主收到孤儿 up，TSF 会把它当成「用户切了大写」通知服务端。
     #[test]
     fn up_is_eaten_even_after_gate_closed_mid_press() {
         let (_, eaten) = decide_eat(true, true, false);
@@ -490,33 +445,22 @@ mod tests {
         assert!(!eaten_after);
     }
 
-    /// 反方向的守卫：没吃过 down 的 up 一律放行。多吃的后果是「用户在别的应用里
-    /// CapsLock 按不动」，比功能不生效严重得多，故这条不能有例外——闸门开着也不例外
-    /// （闸门刚在别处置位、而这次按下发生在置位之前，正是那个竞态窗口）。
+    /// 反方向的守卫：没吃过 down 的 up 一律放行，闸门开着也不例外（闸门置位前就按下的
+    /// 那次按下正是这个竞态窗口）。
     #[test]
     fn orphan_up_is_never_eaten() {
         assert_eq!(decide_eat(false, false, false), (false, false));
         assert_eq!(decide_eat(false, true, false), (false, false));
     }
 
-    /// 闸门关且**没有欠账**时 down 放行——这是本函数「宁可少吃」那一侧的主守卫：
-    /// 我们没接管过这次按下，就绝不能碰它。
+    /// 闸门关且没有欠账时 down 放行：没接管过的按下绝不能碰。
     #[test]
     fn down_with_gate_closed_and_nothing_owed_passes_through() {
         assert_eq!(decide_eat(true, false, false), (false, false));
     }
 
-    /// ★ 回归：按住 CapsLock 不放、闸门中途关掉，重复的 keydown 必须**继续吃**。
-    ///
-    /// 这是 0.120 周期查出的静默缺陷。原判据只问 `should_eat`，于是
-    /// `decide_eat(true, false, true) == (false, true)`：绑定动作自己把闸门关掉后
-    /// （选词上屏 ⇒ 候选清空 ⇒ 无会话），用户只要按住超过系统的自动重复延迟，重复的
-    /// keydown 就漏给系统，**每一次都翻转一下真正的大写锁定**，而最后那个 up 仍被吃掉。
-    /// 表现是：绑定动作照常生效，CapsLock 状态却悄悄变了，且无任何日志。
-    ///
-    /// 判据改成「配对状态优先于闸门」：`eaten_down` 为真即表示这次物理按下已归我们，
-    /// 余下事件一律吃到底。它扩大的范围始终限于**已经拥有的那一次按下**，见函数文档
-    /// 里关于代价边界的那段。
+    /// 按住 CapsLock 不放、闸门中途关掉，重复的 keydown 必须继续吃，否则每个重复 down
+    /// 都翻转一次真正的大写锁定，而最后的 up 仍被吃掉。
     #[test]
     fn repeated_down_is_still_eaten_after_gate_closed_mid_press() {
         let (eat, mut eaten) = decide_eat(true, true, false);

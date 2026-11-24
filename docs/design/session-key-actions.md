@@ -447,6 +447,23 @@ called before the asynchronous state of the key is updated」），返回非零�
 那个登记现在只用于让 `IsKeyUpSessionOnlyHotkey` 把它**排除在 toggle 语义之外**，
 否则服务端会把它的 keyup 当成模式切换请求。
 
+### 7.6 一次按下吃到底：配对状态优先于闸门
+
+闸门「这次按下要不要接管」并不在 down 与 up 之间保持不变：绑定动作自己就会关掉它（选词上屏
+⇒ 候选清空 ⇒ 无会话），而用户还没松手。于是钩子另记一个配对状态 `EATEN_DOWN`（「这次物理
+按下已归我们」），由 `decide_eat` 裁决：
+
+- 只看闸门放行 up：系统与宿主收到没有 down 的孤儿 up，TSF 把它当成「用户切了大写」转给服务端，
+  表现为功能正常却在首次操作时闪一下状态提示泡（`show_status()` 拿空的 `last_status_text`
+  比较，首次必弹）。翻页不触发，因为翻完页候选还在、闸门不归零。
+- 只看闸门放行重复 down：按住超过自动重复延迟后，每个重复 keydown 都翻转一次真正的大写锁定，
+  而最后的 up 仍被吃掉，CapsLock 状态悄悄变了且无日志。
+
+扩大的吃键范围限于已经拥有的那一次按下；唯一越界是钩子被 `LowLevelHooksTimeout` 摘掉而丢了
+一个 up，那时下一次按下会被多吃一次，其 up 销账后自愈。配对状态只由 CapsLock 的 down/up
+与钩子装卸清零，`notify_ui_hide` / `handle_focus_lost` 的闸门归零不碰它：它们收回的是接管
+新按下的权限，不是撤销一次吃了一半的按键。
+
 ## 8. 三条实施约束
 
 1. **`printable` 标志不能在收编时丢**。`-` `=` `[` `]` `,` `.` 作导航键时，在临英 / 快捷输入

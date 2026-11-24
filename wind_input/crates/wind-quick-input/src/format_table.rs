@@ -2,24 +2,23 @@
 //!
 //! 设计与约束见 `docs/design/quick-input-format-table.md`。三条要点：
 //!
-//! - **解析归代码、渲染归配置**：`kind` 是白名单（对应五个已有解析器），配置不能新增；
-//! - **组内顺序归 `position`，跨来源顺序仍归 `mix_modes.members`**（不设第二真相源）；
-//! - **坏掉也得能打字**：文件缺失/整份解析失败一律回落 [`FormatTable::builtin`]，
+//! - 解析归代码、渲染归配置：`kind` 是白名单（对应五个已有解析器），配置不能新增；
+//! - 组内顺序归 `position`，跨来源顺序仍归 `mix_modes.members`（不设第二真相源）；
+//! - 坏掉也得能打字：文件缺失/整份解析失败一律回落 [`FormatTable::builtin`]，
 //!   单条非法只剔除该条。
 
 use std::path::Path;
 use tracing::warn;
 
-/// 解析器类别。恰好对应五个已有解析器，**不可由配置新增**。
+/// 解析器类别。恰好对应五个已有解析器，不可由配置新增。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FormatKind {
     /// 完整日期 `2025.12.25`（用户明确给了年）
     Date,
     /// 月日 `12.25`（年由代码补当年）
     ///
-    /// 与 [`Self::Date`] 分开而不是共用一套模板：用户只打两段时想要的多半是
-    /// 「12月25日」这种不带年的短写法，而替他补上的年份在三段输入里才是他自己打的。
-    /// 变量集与 `Date` 相同（年可用，取当前年），差别只在**出厂条目**与用户调整各自记账。
+    /// 与 [`Self::Date`] 分开：只打两段时想要的多半是不带年的短写法。变量集与 `Date` 相同
+    /// （年取当前年），差别只在出厂条目与用户调整各自记账。
     MonthDay,
     /// 年月 `2025.12`
     YearMonth,
@@ -30,11 +29,7 @@ pub enum FormatKind {
 }
 
 impl FormatKind {
-    /// 全部类别，**按 [`Self::group_order`] 升序**。
-    ///
-    /// 设置页要列出全部类别（含一条候选都没有的），穷尽性测试也要它。此前枚举列表在三处
-    /// 各手写一遍，加 `MonthDay` 时漏掉了其中一处（`kind_parse_and_as_str_roundtrip`
-    /// 因此一直没覆盖新类别，且测试照绿）——单一真相源就是防这个。
+    /// 全部类别，按 [`Self::group_order`] 升序。设置页与穷尽性测试共用这一份，别另写枚举列表。
     pub const ALL: &'static [Self] = &[
         Self::Date,
         Self::MonthDay,
@@ -56,7 +51,7 @@ impl FormatKind {
         }
     }
 
-    /// 表内分组顺序。**不是**候选的呈现顺序（那由 `mix_modes.members` 决定），
+    /// 表内分组顺序。不是候选的呈现顺序（那由 `mix_modes.members` 决定），
     /// 只用来让 `entries()` 有个稳定的规范表示，好让「出厂文件 == 内置表」可比。
     fn group_order(self) -> u8 {
         match self {
@@ -81,9 +76,8 @@ impl FormatKind {
 
     /// 本类支持的变量名（校验用；取值实现见 `crate::vars`）。
     ///
-    /// ⚠️ 农历变量给 `Date` 与 `MonthDay`（两者都有确定的年月日），**不给 `YearMonth`**：
-    /// 农历月与公历月不是一一对应（闰月、且月首不在公历月初），`2026.12` 根本推不出唯一的
-    /// 农历月。放行了只会让用户拿到一个看似合理的错值。
+    /// 农历变量只给 `Date` 与 `MonthDay`，不给 `YearMonth`：农历月与公历月不一一对应，
+    /// `2026.12` 推不出唯一的农历月。
     pub fn supports_var(self, name: &str) -> bool {
         let common_year = matches!(name, "Y" | "YYYY" | "YY" | "YC");
         match self {
@@ -100,14 +94,11 @@ impl FormatKind {
         }
     }
 
-    /// 本类可用变量的**展示清单**（名字 + 一句话，含示例值），供设置页的模板输入框提示。
+    /// 本类可用变量的展示清单（名字 + 一句话，含示例值），供设置页的模板输入框提示。
+    /// 放在 core 是因为白名单是 [`Self::supports_var`] 的知识，设置页硬编码会静默过时。
     ///
-    /// ★ 放在 core 而不是设置仓：变量白名单是 [`Self::supports_var`] 的知识，设置页硬编码
-    /// 一份就会在加新变量时静默过时（用户照着提示写不出新变量，或提示里的变量已被删）。
-    ///
-    /// 与 `supports_var` 是**两份数据**（这里多了说明文字），故有两道测试钉住：
-    /// 名字必须都能通过 `supports_var`，且每类的条数写死——加变量时那个数字会红，
-    /// 提醒同步这里与文档站的变量表。
+    /// 与 `supports_var` 是两份数据，测试钉住名字都能通过 `supports_var` 且每类条数写死：
+    /// 加变量时那个数字会红，提醒同步这里与文档站的变量表。
     pub fn var_hints(self) -> &'static [(&'static str, &'static str)] {
         // 公历年月日（date / month_day / year_month 共用前几项）
         const YEAR: &[(&str, &str)] = &[
@@ -184,11 +175,8 @@ impl FormatEntry {
     }
 }
 
-/// 内置默认表。**必须与出厂 `data/system.quick.toml` 逐条一致**（有测试钉住），
-/// 它是文件缺失/损坏时的兜底，也是改造前硬编码行为的等价物。
-///
-/// 顺序即改造前 `generate_*_candidates` 里 `vec![]` 的字面顺序，不要随手调整——
-/// 首选变了就是用户可感的行为变更。
+/// 内置默认表。必须与出厂 `data/system.quick.toml` 逐条一致（有测试钉住），是文件缺失/损坏
+/// 时的兜底。顺序不要随手调整，首选变了就是用户可感的行为变更。
 const BUILTIN: &[(&str, FormatKind, &str)] = &[
     // 日期：中文 → 全汉字 → ISO 扩展 → ISO 基本 → 斜杠
     ("date.cn", FormatKind::Date, "$Y年$M月$D日"),
@@ -200,10 +188,8 @@ const BUILTIN: &[(&str, FormatKind, &str)] = &[
     // 超出 1900–2100 时这两条自动消失（变量取不到值 → 整条模板作废）。
     ("date.lunar", FormatKind::Date, "农历$LMD"),
     ("date.lunar_ganzhi", FormatKind::Date, "$LY年$LMD"),
-    // 月日（只打两段）：不带年的短写法在前——用户没打年份，首选就不该替他补一个。
-    // 农历紧随其后（它也不带公历年份），补年的两条垫底：「打 12.25 想要 2026年12月25日」
-    // 是真实用法，翻一下仍取得到。**改这里必须同步出厂 `data/system.quick.toml`**
-    // （`factory_file_matches_builtin_table` 逐条比对）。
+    // 月日（只打两段）：不带年的短写法在前，农历其次，补年的两条垫底。
+    // 改这里必须同步出厂 `data/system.quick.toml`（`factory_file_matches_builtin_table`）。
     ("month_day.cn", FormatKind::MonthDay, "$M月$D日"),
     ("month_day.cn_hans", FormatKind::MonthDay, "$MC月$DC日"),
     ("month_day.iso", FormatKind::MonthDay, "$MM-$DD"),
@@ -236,24 +222,21 @@ const BUILTIN: &[(&str, FormatKind, &str)] = &[
     ("calc.percent", FormatKind::Calc, "{pct()}"),
 ];
 
-/// 用户对某一类格式的调整（右键菜单产生，存在用户数据目录的 `quick_format.toml`，**不写回格式表文件**）。
+/// 用户对某一类格式的调整（右键菜单产生，存在用户数据目录的 `quick_format.toml`，不写回格式表文件）。
 ///
 /// 本类型是「中立数据」：`wind-store` 有自己的可序列化记录，协调器负责转换。
 /// 两处不合并是刻意的——store 不依赖业务类型，与 shadow 同一条纪律。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FormatAdjust {
     /// 被移动过的条目 `(格式 id, 组内目标下标)`。
-    /// **LIFO，index 0 = 最新**，应用时逆序遍历。
+    /// LIFO，index 0 = 最新，应用时逆序遍历。
     pub moved: Vec<(String, usize)>,
     /// 被停用的格式 id。
     pub disabled: Vec<String>,
-    /// 用户自己加的条目，排在基表条目**之后**（组内按 `position` 稳定排序）。
+    /// 用户自己加的条目，排在基表条目之后（组内按 `position` 稳定排序）。调序、停用与
+    /// 出厂条目共用 `moved` / `disabled`。
     ///
-    /// 之后要挪位置走 `moved` 那套现成规则——出厂条目与用户条目共用同一个调序机制，
-    /// 不给用户条目另开「它自己的顺序」。停用也一样（`disabled` 同时管两类）。
-    ///
-    /// ⚠️ 与 `moved`/`disabled` 不同，它是用户的**内容**而不是对出厂的**调整**：
-    /// [`Self::is_empty`] 要算上它，「恢复默认」不得清它。
+    /// 它是用户的内容而不是对出厂的调整：[`Self::is_empty`] 要算上它，「恢复默认」不得清它。
     pub added: Vec<FormatEntry>,
 }
 
@@ -269,9 +252,8 @@ impl FormatAdjust {
 
     /// 这条格式是否被用户调整过（移动或停用）。
     ///
-    /// 语义是「有没有用户规则」，不是「位置是否与出厂不同」——把某条移回原位也算调整过，
-    /// 因为那条规则确实在库里（将来出厂顺序变了它就会生效）。设置页据此决定
-    /// 「恢复此条」能不能点，与 `wind_store::QuickFormatRecord::has_rule` 同一口径。
+    /// 语义是「有没有用户规则」，不是「位置是否与出厂不同」：移回原位也算调整过（规则仍在库里）。
+    /// 设置页据此决定「恢复此条」能不能点，与 `wind_store::QuickFormatRecord::has_rule` 同口径。
     pub fn has_rule(&self, id: &str) -> bool {
         self.moved.iter().any(|(i, _)| i == id) || self.disabled.iter().any(|d| d == id)
     }
@@ -279,9 +261,8 @@ impl FormatAdjust {
 
 /// 设置页列表里的一行：条目 + 它当前的状态。
 ///
-/// 与候选生成的 [`FormatTable::entries_of_adjusted`] 是**两种口径**，刻意分开：
-/// 候选要的是「用户现在能看到什么」（停用项必须消失），设置页要的是「用户能管理什么」
-/// （停用项必须还在，否则再也开不回来——正是这个缺口让右键菜单只能提供「整类重置」）。
+/// 与候选生成的 [`FormatTable::entries_of_adjusted`] 刻意分开两种口径：候选里停用项消失，
+/// 设置页里停用项必须还在，否则再也开不回来。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FormatEntryView<'a> {
     pub entry: &'a FormatEntry,
@@ -291,8 +272,7 @@ pub struct FormatEntryView<'a> {
     pub adjusted: bool,
     /// 是不是用户自己加的条目（而非出厂表里的）。
     ///
-    /// 设置页据此分流三件事，**别拿 `adjusted` 当它用**：出厂条目被调序过也是 `adjusted`，
-    /// 但它不能删、能「恢复默认」；用户条目反过来——能删、能改模板，而它没有「默认」可回到。
+    /// 别拿 `adjusted` 当它用：出厂条目不能删、能恢复默认；用户条目能删、能改模板，没有默认可回。
     pub user: bool,
 }
 
@@ -311,9 +291,8 @@ impl Default for FormatTable {
 impl FormatTable {
     /// 代码内置的出厂表（兜底路径）。
     ///
-    /// `position` 按**组内** 1-based 计数，与出厂 TOML 的写法一致——两者要能直接比相等
-    /// （见 `tests/factory_table.rs`），全局序号的话每次给某一类加条目都会让另一类的
-    /// position 整体位移。
+    /// `position` 按组内 1-based 计数，与出厂 TOML 一致，两者要能直接比相等
+    /// （见 `tests/factory_table.rs`）。
     pub fn builtin() -> Self {
         let mut entries: Vec<FormatEntry> = Vec::with_capacity(BUILTIN.len());
         for (id, kind, text) in BUILTIN {
@@ -330,7 +309,7 @@ impl FormatTable {
     }
 
     /// 解析 TOML 文本。整份语法错误返回 `Err`（调用方回落 [`Self::builtin`]）；
-    /// **单条非法只剔除该条**并告警，其余照常——一条写错不该让整个快捷输入退回出厂。
+    /// 单条非法只剔除该条并告警，其余照常——一条写错不该让整个快捷输入退回出厂。
     pub fn parse(toml_text: &str) -> Result<Self, toml::de::Error> {
         let raw: RawFile = toml::from_str(toml_text)?;
         let mut entries: Vec<FormatEntry> = Vec::with_capacity(raw.formats.len());
@@ -372,7 +351,7 @@ impl FormatTable {
                 position: r.position.unwrap_or(i as i32),
             });
         }
-        // 先按 kind 分组、组内按 position。**稳定**排序，故同 position 保持文件出现序。
+        // 先按 kind 分组、组内按 position。稳定排序，故同 position 保持文件出现序。
         // position 是组内序号（出厂文件里每类都从 1 起），跨类比较没有意义，
         // 分组是为了让 `entries()` 有个规范表示。
         entries.sort_by_key(|e| (e.kind.group_order(), e.position));
@@ -424,26 +403,12 @@ impl FormatTable {
         self.entries.iter().filter(move |e| e.kind == kind)
     }
 
-    /// 某类的条目，**已应用用户调整**（停用剔除 + 移动重排）。
+    /// 某类的条目，已应用用户调整：取基表该类条目 → 剔除 `disabled` → 逆序（LIFO）遍历
+    /// `moved`，把该 id 插到目标下标。没被碰过的条目保持基表顺序，出厂新增的格式自然落在
+    /// 出厂位置；找不到的 id 静默忽略。见 docs/design/quick-input-format-table.md §11。
     ///
-    /// 算法与 `shadow` 的规则应用同构：
-    ///
-    /// 1. 取基表该类条目（已按 `position` 排序）；
-    /// 2. 剔除 `disabled`；
-    /// 3. **逆序**遍历 `moved`，每条：取出该 id，插入到目标下标。
-    ///
-    /// 逆序是 LIFO 语义——最新的操作最后应用，故优先级最高。
-    ///
-    /// **没被碰过的条目保持基表顺序**，所以将来出厂新增一条格式，它不在 `moved`/`disabled`
-    /// 里，会自然落在它的出厂位置；若改存完整 id 序列，就得再定一条「新增格式排哪」的
-    /// 规则，怎么定都会让人意外。
-    ///
-    /// 找不到的 id（高级用户改文件时删掉了那条）静默忽略，不清理——他可能过会儿又加回来。
-    ///
-    /// ## 用户自定义条目
-    ///
-    /// `adjust.added` 里的条目也在结果中（排在基表条目之后，再由 `moved` 决定最终位置），
-    /// 故返回的引用可能指向**表**也可能指向**调整**——两个入参因此共用生命周期 `'a`。
+    /// `adjust.added` 也在结果中（接在基表之后，再由 `moved` 定位），故返回的引用可能指向
+    /// 表也可能指向调整，两个入参共用生命周期 `'a`。
     pub fn entries_of_adjusted<'a>(
         &'a self,
         kind: FormatKind,
@@ -452,13 +417,9 @@ impl FormatTable {
         self.entries_with(kind, &adjust.moved, &adjust.disabled, &adjust.added)
     }
 
-    /// [`Self::entries_of_adjusted`] 的实现，三段规则**分开收**。
-    ///
-    /// ★ 拆参数不是为了好看，是为了让调用方能做**部分借用**：[`Self::entries_of_view`]
-    /// 需要「`moved` 与 `added` 照常生效、`disabled` 当作空」的一趟计算。若签名收整个
-    /// `&'a FormatAdjust`，那就得现造一个临时的 `FormatAdjust`——而它是局部变量，
-    /// 里面的 `added` 活不到 `'a`，返回的引用直接悬垂（编译不过，且没有不 clone 的绕法）。
-    /// 收三个切片就能各自借自真正的 `adjust`，生命周期天然成立。
+    /// [`Self::entries_of_adjusted`] 的实现，三段规则分开收，以便部分借用：
+    /// [`Self::entries_of_view`] 要算一趟「`disabled` 当作空」的结果，若收整个 `&'a FormatAdjust`
+    /// 就得现造临时值，其 `added` 活不到 `'a`。
     fn entries_with<'a>(
         &'a self,
         kind: FormatKind,
@@ -497,46 +458,15 @@ impl FormatTable {
         &self.entries
     }
 
-    /// 某类的条目，**设置页口径**：启用项按候选实际顺序，停用项**留在原位**。
+    /// 某类的条目，设置页口径：启用项按候选实际顺序，停用项留在原位。
     ///
-    /// ★ 启用项的顺序直接取 [`Self::entries_of_adjusted`] 的结果，**不重算**。同一个
-    /// 「第几位」由两段代码各算一遍，迟早漂移，而症状是「设置页显示的顺序与实际候选不符」
-    /// ——用户点了上移，列表动了、候选没动，且两边都没有报错。
+    /// 启用项顺序直接取 [`Self::entries_of_adjusted`] 的结果，不重算，否则两处会漂移。
+    /// 每个停用项插在锚点（它前面最近的启用条目）之后，锚点查的是「`disabled` 清空后重算」
+    /// 的顺序而非基表，这样先调序再停用的条目也不跳。不能改成「不剔除停用项、直接对全表套
+    /// `moved`」：`moved` 的下标是剔除停用项之后的位置。推导与反例见
+    /// docs/design/quick-input-format-table.md §11.1。
     ///
-    /// ## 停用项为什么必须留在原位
-    ///
-    /// 停用项不在候选里，看似「没有正确位置」，最初因此把它们沉到该类末尾。**实测被否**：
-    /// 停用是**可逆、反复试**的动作，沉底会让同一行在停用/启用之间来回跳——管理界面里
-    /// 「行不乱动」比「位置反映候选顺序」重要得多。
-    ///
-    /// 故给每个停用项找一个锚点（它前面最近的那个启用条目），插在锚点之后；前面没有启用
-    /// 条目时排到最前。于是**停用与启用的位置一致**，来回切一行都不动。
-    ///
-    /// ## 锚点的参照系是「假设全部启用」的顺序，不是基表
-    ///
-    /// 这一点决定了「先调序、再停用同一条」会不会跳。位置信息其实一直都在——**停用不清
-    /// `moved` 规则**（两者是独立字段），丢失只发生在计算环节：[`Self::entries_of_adjusted`]
-    /// 先剔除停用项，那条 `moved` 就找不到目标、成了孤儿规则被跳过。
-    ///
-    /// 所以锚点不查基表，而是查「把 `disabled` 清空后重算一遍」的顺序——那里每条的 `moved`
-    /// 都生效。于是被移到首位又停用的条目仍显示在首位。零新增状态，代价是每类多算一次
-    /// 排序（至多七条，可忽略）。
-    ///
-    /// ```text
-    /// 基表 [A,B,C]、moved=[(C,0)]、C 停用
-    ///   假设全启用  [C,A,B]   ← C 的 moved 生效
-    ///   真实候选    [A,B]     ← C 的 moved 成了孤儿
-    ///   C 的前驱: 无 → 插最前 ⇒ 视图 [C,A,B]，与停用前一致
-    /// ```
-    ///
-    /// ⚠️ 不能图省事写成「不剔除停用项、直接对全表应用 `moved`」：`moved` 的下标是
-    /// 「剔除停用项之后」的位置，把停用项留在列表里再套同一个下标，启用项之间的相对顺序
-    /// 就会与候选不一致。举例——基表 `[A,B,C,D]`、A 停用、`moved=[(D,1)]`：候选是
-    /// `[B,D,C]`，而直接套下标得到 `[A,D,B,C]`（启用项成了 `[D,B,C]`）。
-    ///
-    /// 用户自定义条目（`adjust.added`）与出厂条目在这里**同等对待**：一样能停用、调序，
-    /// 一样按上述规则保位。只有 [`FormatEntryView::user`] 标记出身，供设置页决定
-    /// 「删除」还是「停用」、「恢复此条」能不能点。
+    /// 用户条目与出厂条目同等对待，只由 [`FormatEntryView::user`] 标记出身。
     pub fn entries_of_view<'a>(
         &'a self,
         kind: FormatKind,
@@ -600,12 +530,8 @@ impl FormatTable {
 
     /// 本类里是否已有逐字相同的模板（基表与用户条目一起查），返回撞上的那条 id。
     ///
-    /// 两条完全一样的候选除了占位没有任何作用，还会让「候选里怎么有两个一样的」变成
-    /// 一个查不出原因的报障（用户看不到 id，两行长得一模一样）。故新增/改写时拒绝并
-    /// **指出撞的是哪一条**——只说「重复了」用户还得自己一行行找。
-    ///
-    /// 只比逐字相同：`$Y年` 与 `$YYYY年` 渲染结果可能一致，但那是两种不同写法，
-    /// 判「等价」需要真渲染一遍，且结果随输入而变，不是稳定判据。
+    /// 新增/改写时据此拒绝重复并指出撞的是哪一条。只比逐字相同：渲染等价随输入而变，
+    /// 不是稳定判据。
     pub fn duplicate_text_of(
         &self,
         kind: FormatKind,
@@ -623,9 +549,8 @@ impl FormatTable {
 
 /// 用户条目 id 的保留形态：`{kind}.u{序号}`（如 `date.u1`）。
 ///
-/// ★ 命名空间必须**有守门**，不能只靠约定：出厂表某天加一条 `date.u1`，就与用户条目
-/// 静默撞车（同 id 两条内容，行为取决于遍历顺序）。故 [`FormatTable::parse`] 拒绝
-/// 匹配本形态的出厂 id，把约定变成加载期检查。
+/// 命名空间靠加载期检查守住：[`FormatTable::parse`] 拒绝匹配本形态的出厂 id，
+/// 否则出厂条目会与用户条目静默撞 id。
 pub fn is_user_format_id(id: &str) -> bool {
     match id.rsplit_once(".u") {
         Some((head, n)) => {
@@ -637,9 +562,7 @@ pub fn is_user_format_id(id: &str) -> bool {
 
 /// 下一个可用的用户条目 id。
 ///
-/// ★ 取「已有最大序号 + 1」而不是「条数 + 1」：删掉中间一条后条数会回退，
-/// 下一个新条目就撞上仍然存在的那个 id（`u1,u2,u3` 删 `u2` 后条数 2 ⇒ 又生成 `u3`）。
-/// 症状是新加的条目「变成了」另一条的样子。
+/// 取「已有最大序号 + 1」而不是「条数 + 1」：删掉中间一条后条数回退，会撞上仍存在的 id。
 pub fn next_user_format_id(kind: FormatKind, adjust: &FormatAdjust) -> String {
     let prefix = format!("{}.u", kind.as_str());
     let max = adjust
@@ -655,13 +578,8 @@ pub fn next_user_format_id(kind: FormatKind, adjust: &FormatAdjust) -> String {
 
 /// 模板静态校验：变量名必须在本 kind 的白名单内。
 ///
-/// 在**加载期**做而不是渲染期：渲染是每次按键都走的热路径，把告警放那里会刷屏，
-/// 且用户改错一个变量名应当在启动日志里一次性看到。
-///
-/// 对外公开是给设置页用的：那里的容错策略与文件加载**相反**——加载遇到坏条目
-/// 「剔除该条 + 一条 warn」（坏文件也得能打字），而设置页必须在保存前**拒绝**并把
-/// 原因给用户看。同一份判据两处共用，否则设置页放行的模板会在下次启动时被静默剔除，
-/// 用户只看到「我加的格式没了」。
+/// 在加载期做而不是渲染期（热路径上告警会刷屏）。加载遇坏条目剔除并 warn，设置页则在保存前
+/// 拒绝；两处共用同一份判据，否则设置页放行的模板会在下次启动时被静默剔除。
 pub fn validate_format_text(kind: FormatKind, text: &str) -> Result<(), String> {
     // 用 trim 判空而不是 `is_empty`：纯空白模板会渲染出一条「看起来是空的」候选，
     // 选中它则上屏几个空格。设置页的输入框里这是最容易误提交的内容。
@@ -670,19 +588,15 @@ pub fn validate_format_text(kind: FormatKind, text: &str) -> Result<(), String> 
     }
     if crate::template::has_bare_brace(text) {
         // 表达式路径：函数名/参数由 cmdbar 在求值期校验（本 crate 不依赖它）。
-        // 这里只拒绝混用——两套语法在同一条模板里会让人以为 `${Y}年{month()}月` 能work，
-        // 实际上变量路径根本不认识 `{month()}`，会把它原样上屏。
+        // 这里只拒绝混用：变量路径不认识 `{month()}`，会把它原样上屏。
         if crate::template::has_variable(text) {
             return Err("不能在同一条模板里混用 $变量 与 {表达式}，二选一".into());
         }
         return Ok(());
     }
-    // 纯字面模板（既无 `$` 变量也无 `{}` 表达式）：渲染结果与所输内容无关，恒定输出
-    // 这段文字。快捷输入的候选是对**本次输入**的加工，恒定文本该配成短语而非格式。
-    //
-    // 拦在这里的真正理由是**漏花括号**：文档的函数表列的是 `amt()`，写进模板却必须是
-    // `{amt()}`，照着表抄极易漏掉外层那对。漏了之后一路绿灯——校验过、保存成功、候选
-    // 照出，只是出的是源码本身（`amt(zheng='false')`），用户只能在打字时才发现。
+    // 纯字面模板（既无 `$` 变量也无 `{}` 表达式）恒定输出，该配成短语而非格式。
+    // 拦它主要是防漏花括号：照文档函数表抄 `amt()` 而不是 `{amt()}`，否则会一路通过、
+    // 候选出的是源码本身。
     if !crate::template::has_variable(text) {
         return Err(if text.contains('(') && text.contains(')') {
             // 把用户写的原样包一层回显，比讲语法快

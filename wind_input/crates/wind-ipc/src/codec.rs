@@ -1,6 +1,4 @@
-//! 二进制协议编解码器
-//!
-//! 与 Go 版本 `wind_input/internal/ipc/binary_codec.go` 对齐。
+//! 二进制协议编解码器。线格式定义见 [`crate::protocol`]，与 C++ DLL / Swift `.app` 两侧解码器对齐。
 
 use crate::protocol::overlay::{OVERLAY_KIND_SOFTKEYBOARD, OVERLAY_KIND_TOOLBAR};
 use crate::protocol::*;
@@ -98,19 +96,11 @@ pub fn decode_ext(payload: &[u8]) -> Option<(&str, &[u8])> {
     Some((kind, body))
 }
 
-/// 解 CMD_FOCUS_GAINED 载荷尾部的 darwin bundleID 段（`bundleIdLen:u32 + utf8`，偏移 39）。
-///
-/// 该段是 macOS `.app` 专属：宿主 app 的 bundle id，服务端小写后当作「进程名」，供
-/// compat.toml 规则匹配与 per-app 中英记忆使用（macOS 上无法像 Windows 那样由服务进程
-/// `OpenProcess` 反查，只能由 `.app` 随焦点事件带上来）。
-///
-/// Windows DLL 不发该段；段缺失 / 长度越界 / 非法 UTF-8 一律返回空串——「取不到宿主名」
-/// 与「宿主名为空」在下游是同一语义（跳过按应用逻辑），不必区分。
 /// 读取 `off` 处的一个「`u32` 长度 + UTF-8 内容」变长段。
 ///
-/// 返回 `(内容, 下一段起始偏移)`；段残缺（长度域不全、内容不足、非法 UTF-8）一律
-/// 返回空串。**残缺不是错误**——变长段是纯追加的可选信息，旧 DLL 压根不发。
-/// 第二个返回值为 `None` 表示「本段都没走完，后面不可能有东西」，用于串联下一段。
+/// 返回 `(内容, 下一段起始偏移)`；段残缺（长度域不全、内容不足、非法 UTF-8）一律返回空串，
+/// 残缺不是错误：变长段是纯追加的可选信息，旧 DLL 不发。第二个返回值为 `None` 表示本段
+/// 都没走完、后面不可能有东西。
 fn read_len_prefixed(payload: &[u8], off: usize) -> (&str, Option<usize>) {
     // 偏移与长度都来自对端，全程 checked：32 位目标上 `start + n` 可能回绕成一个「合法」的
     // 小区间，解出错位的垃圾而不是空串。
@@ -130,14 +120,18 @@ fn read_len_prefixed(payload: &[u8], off: usize) -> (&str, Option<usize>) {
     }
 }
 
+/// 解 CMD_FOCUS_GAINED 载荷尾部的 darwin bundleID 段（`bundleIdLen:u32 + utf8`，偏移 39）。
+///
+/// macOS `.app` 专属：宿主 app 的 bundle id，服务端小写后当作「进程名」供 compat.toml 规则
+/// 与 per-app 中英记忆使用（macOS 无法由服务进程反查宿主）。Windows DLL 发长度 0 占位；
+/// 段缺失 / 越界 / 非法 UTF-8 一律返回空串，下游与「宿主名为空」同义。
 pub fn decode_focus_gained_bundle_id(payload: &[u8]) -> &str {
     read_len_prefixed(payload, FocusGainedPayload::VAR_SECTION_OFFSET).0
 }
 
-/// 焦点所在**顶层窗口**的类名；旧 DLL / 段缺失时返回空串。
+/// 焦点所在顶层窗口的类名；旧 DLL / 段缺失时返回空串。
 ///
-/// ⚠ 必须**顺序走过 bundleId 段**再读，不能用固定偏移：bundleId 变长，macOS 上非空。
-/// Windows DLL 发 `bundleIdLen=0` 占位，故两平台共用这一条走法。
+/// 必须顺序走过 bundleId 段再读，不能用固定偏移：bundleId 变长，macOS 上非空。
 ///
 /// 空串的语义是「不知道焦点在哪」而非「窗口不在清单里」——消费端
 /// (`AppCompat::initial_mode_applies_to_window`) 据此保持现状，不按 per-app 规则重算。
@@ -148,9 +142,9 @@ pub fn decode_focus_gained_window_class(payload: &[u8]) -> &str {
     }
 }
 
-/// 焦点所在**顶层窗口**的标题（变长段 ③）；旧 DLL / 服务端未推开采集 / 段缺失时返回空串。
+/// 焦点所在顶层窗口的标题（变长段 ③）；旧 DLL / 服务端未推开采集 / 段缺失时返回空串。
 ///
-/// 同样必须**顺序走过**前两段（bundleId、windowClass）再读。空串与「窗口没有标题」同义：
+/// 同样必须顺序走过前两段（bundleId、windowClass）再读。空串与「窗口没有标题」同义：
 /// 带 `title` 条件的规则一律不命中。
 pub fn decode_focus_gained_window_title(payload: &[u8]) -> &str {
     let Some(class_off) = read_len_prefixed(payload, FocusGainedPayload::VAR_SECTION_OFFSET).1
@@ -306,13 +300,11 @@ pub fn encode_commit_text_assoc_session(
 
 /// 编码带 replacingHeld 标志的 CommitText 响应 (CMD_COMMIT_TEXT 0x0101, flags bit3)。
 ///
-/// 语义：本次提交要**替换**掉 C++ 端 HoldComposition 里那个待定的中文符号，而不是追加在
-/// 它后面。只有智能符号 press2（超时窗口内重按同一符号，中文→英文）需要它。
+/// 本次提交要替换掉 C++ 端 HoldComposition 里待定的中文符号，而不是追加在它后面。只有
+/// 智能符号 press2（超时窗口内重按同一符号，中文→英文）需要它。
 ///
-/// 其余一切上屏路径都是追加语义——C++ 端 `CommitText` 默认走 `AbsorbHeldIntoPrefix`，把
-/// held 符号并进 prefix 一起提交。这个默认值是刻意选的：hold 期间可能触发提交的路径远不止
-/// 一处（全角空格/数字、临时英文、各独占模式出字……），把安全的那一侧设为默认，新增路径
-/// 自动正确；只有这一个真正要覆盖的点显式声明。
+/// 其余上屏路径都是追加语义（C++ 端 `AbsorbHeldIntoPrefix` 把 held 符号并进 prefix 提交）：
+/// hold 期间触发提交的路径很多，把安全的一侧设为默认，新增路径自动正确。
 pub fn encode_commit_text_replacing_held(text: &str, chinese_mode: bool) -> Vec<u8> {
     encode_commit_text_inner(text, None, false, chinese_mode, false, true, false)
 }
@@ -453,8 +445,7 @@ pub fn decode_commit_request(payload: &[u8]) -> Result<CommitRequestPayload, Cod
     let modifiers = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
 
     let input_buffer = if payload.len() > 8 {
-        // 剩余字节为 inputBuffer（可能有长度前缀，也可能直接是 UTF-8）
-        // Go 版 DecodeCommitRequestPayload 读取：barrierSeq(2) + triggerKey(2) + modifiers(4) + inputBufferLen(4) + inputBuffer
+        // inputBufferLen(4) + inputBuffer；长度域不全或内容不足时按空串处理。
         if payload.len() >= 12 {
             let buf_len =
                 u32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]) as usize;
@@ -502,10 +493,8 @@ pub fn encode_ack() -> Vec<u8> {
 /// 编码 ModePush 响应（FocusGained 同步路径）：4 字节 LE flags，携带中英 / 全半角 / 中英标点。
 /// DLL 收到后在首键前写好 `_bChineseMode` / `_bFullWidth` / `_bChinesePunct`。
 ///
-/// ⚠️ **标点位不可省**：DLL 的标点透传判据要按当下标点态在两份集合间二选一，而英文态那份
-/// 是超集。漏了这一位，`_bChinesePunct` 会在每次焦点切换后被清成 false，于是中文标点态下
-/// 误用英文态集合 —— `,` `.` `'` 这些本该转中文标点的键被直接透传成半角（B-9 的回归形态）。
-/// 旧版 DLL 忽略不认识的 bit，跨版本安全。
+/// 标点位不可省：DLL 的标点透传判据按标点态在两份集合间二选一（英文态那份是超集）。漏了它，
+/// 焦点切换后 `_bChinesePunct` 被清成 false，`,` `.` 等键会直接透传成半角。旧 DLL 忽略不认识的 bit。
 pub fn encode_mode_push(chinese_mode: bool, full_width: bool, chinese_punct: bool) -> Vec<u8> {
     let mut flags: u32 = 0;
     if chinese_mode {
@@ -534,15 +523,10 @@ pub fn encode_mode_push(chinese_mode: bool, full_width: bool, chinese_punct: boo
 /// - verb: ShellExecute 动词（`open` / `runas` / …），空串 = `open`
 /// - show: 初始窗口状态（`normal` / `min` / `max` / `hidden`），空串 = `normal`
 ///
-/// `verb` / `show` 传**语义名而非 SW_ 数值**：协议自描述（日志里 `show=min` 比
-/// `show=2` 好读），且 Windows API 常量留在 C++ 侧，跨平台的本 crate 不碰。
+/// `verb` / `show` 传语义名而非 SW_ 数值：协议自描述，Windows API 常量留在 C++ 侧。
 ///
-/// dir/verb/show 都是后加的段，两个方向都容错：旧 DLL 只读它认识的前几段、忽略
-/// 尾部（表现为新选项不生效，不会崩）；新 DLL 每读一段前先查剩余长度，遇旧服务
-/// 按空串处理。⚠️ 因此「装了新服务但宿主进程还挂着旧 DLL」时这些字段静默失效，
-/// 排查时服务端日志是唯一能证明"发过什么"的一侧。
-///
-/// ShellExecuteW 的入参到此已全部覆盖（hwnd 恒 null），这条协议不会再长。
+/// dir/verb/show 是追加段，两向容错：旧 DLL 只读前几段（新选项静默不生效），新 DLL 每段先查
+/// 剩余长度、遇旧服务按空串处理。ShellExecuteW 的入参已全部覆盖，这条协议不会再长。
 pub fn encode_shell_exec(target: &str, params: &str, dir: &str, verb: &str, show: &str) -> Vec<u8> {
     let segs = [target, params, dir, verb, show];
     let payload_len: usize = segs.iter().map(|s| 4 + s.len()).sum();
@@ -592,8 +576,7 @@ pub fn encode_clear_then_pass_through() -> Vec<u8> {
 ///
 /// 用于 bridge pipe 上的同步状态响应（如 ToggleMode、MenuCommand 等）。
 /// 与 EncodeActivationStatusPush 载荷格式一致，但 command 不同。
-// 状态位是**线协议的扁平字段**，逐个传即逐个写入报文；聚合成结构体只会在编码前多一层
-// 搬运，还要让 C++ 侧的字段顺序去对齐一个 Rust 结构体。故这几个 encode 函数一律豁免。
+// 状态位是线协议的扁平字段，逐个传即逐个写入报文；这几个 encode 函数一律豁免。
 #[allow(clippy::too_many_arguments)]
 pub fn encode_status_update(
     chinese_mode: bool,
@@ -700,17 +683,10 @@ pub fn encode_state_push(
 
 /// 状态编码公共逻辑（StatusUpdate / StatePush / ActivationStatusPush 共用）
 ///
-/// ⚠ **本消息不能再追加字段**：`icon_label` 是尾部不定长段，没有长度前缀，C++ 侧读的是
-/// 「structuredSize 到 payload 末尾」的全部字节（`IPCClient.cpp` 的 iconLabel 解析）。
-/// 在它后面加任何东西都会被当成标签内容——**不会报错，只会让标签变成一串垃圾**。
-///
-/// 真要加变长字段时，唯一正确的做法是先给 `icon_label` 补一个 `labelLen:u32` 前缀、
-/// 两侧同步改，再往后追加；这是破坏性变更，DLL 与服务端必须同版本发布（开发期混用
-/// 会解出垃圾，靠新旧 DLL 指纹辨认）。**不要为了绕开这一步而把状态塞进别的通道**——
-/// 除非那个字段本来就该走别的通道（如 `CONFIG_KEY_LANGBAR_TOOLTIP`：它需要广播，
-/// 而本消息是定向的，那是设计选择而非妥协）。
-///
-/// 加**布尔**字段则无此限制：`flags` 还有空位，加位不影响布局。
+/// 本消息不能再追加变长字段：`icon_label` 是无长度前缀的尾段，C++ 侧（`IPCClient.cpp`）把
+/// structuredSize 之后的全部字节当标签，追加内容只会静默变成标签垃圾。真要加，须先给
+/// `icon_label` 补 `labelLen:u32` 前缀、两侧同版本发布；别为绕开这一步把状态塞进别的通道。
+/// 加布尔字段无此限制：`flags` 还有空位。
 #[allow(clippy::too_many_arguments)]
 fn encode_status_update_ex(
     command: u16,
@@ -830,9 +806,8 @@ pub fn encode_commit_text_with_cursor(text: &str, cursor_offset: u32) -> Vec<u8>
 ///
 /// 格式: count(4) — 向右移动的格数（合成几次 VK_RIGHT）
 ///
-/// **语义变更**：该字段原名 `direction`（恒为 1，C++ 侧根本没读），现改为格数。
-/// 直通 `ime.pair` 的多字符右段要越过不止一格，才需要它真的携带信息。
-/// `0` 视同 1——协调器不发 0，但旧版 DLL 与新版 core 混搭时不该退化成「跳出没反应」。
+/// 直通 `ime.pair` 的多字符右段要越过不止一格。`0` 视同 1（协调器不发 0，防新旧混搭时
+/// 退化成「跳出没反应」）。
 pub fn encode_move_cursor(count: u32) -> Vec<u8> {
     let mut buf = Vec::with_capacity(IpcHeader::SIZE + 4);
 
@@ -931,7 +906,7 @@ pub fn encode_hold_composition(timeout_ms: u32, text: &str) -> Vec<u8> {
 
 /// 编码 HostRenderSetup 响应 (CMD_HOST_RENDER_SETUP 0x0501，Windows)
 ///
-/// 线格式（对齐 C++ IPCClient.cpp:1524 解码端 / BinaryProtocol.h HostRenderSetupEntryHeader）：
+/// 线格式（对齐 C++ `IPCClient.cpp` 解码端 / `BinaryProtocol.h` 的 HostRenderSetupEntryHeader）：
 /// instanceId(u32) + entryCount(u32) + N × { kind(u32) + maxBufferSize(u32)
 ///   + shmNameLen(u32) + eventNameLen(u32) + shmName(UTF-8) + eventName(UTF-8) }
 pub fn encode_host_render_setup(
@@ -962,11 +937,8 @@ pub fn encode_host_render_setup(
 mod refresh_icon_tests {
     use super::*;
 
-    /// 命令号在两个仓里各硬编码一份（本处与 `wind_tsf/include/BinaryProtocol.h` 的
-    /// `CMD_REFRESH_ICON`），没有任何编译期约束把它们绑在一起。写死期望值是为了让
-    /// **单侧改动**在这里失败——两侧漂移的症状是「推了没反应」：DLL 收到一个不认识的
-    /// 命令直接走完 else 链丢弃，两边日志都不会有错误。本仓已按同一形态栽过
-    /// （触发键名两仓拼写不一致，静默不匹配）。
+    /// 命令号在本处与 `wind_tsf/include/BinaryProtocol.h` 各硬编码一份，无编译期约束。写死
+    /// 期望值让单侧改动在这里失败：两侧漂移时 DLL 静默丢弃不认识的命令，两边都无错误日志。
     #[test]
     fn refresh_icon_command_id_is_frozen_at_0x0216() {
         assert_eq!(
@@ -975,8 +947,7 @@ mod refresh_icon_tests {
         );
     }
 
-    /// 无载荷是本命令的设计要点而非省事：图标内容的唯一真相在共享内存里，
-    /// 载荷里再放一份就是第二条真相通路。这条测试把「不许带载荷」钉住。
+    /// 无载荷是设计要点：图标内容的唯一真相在共享内存里，载荷里再放一份就是第二条真相通路。
     #[test]
     fn refresh_icon_frame_is_header_only() {
         let f = encode_refresh_icon();
@@ -1023,9 +994,7 @@ mod shell_exec_tests {
         assert_eq!(decode_segs(&buf, 5), vec!["d.exe", "", "", "", ""]);
     }
 
-    /// **向后兼容**：只认前两段的旧 DLL 读同一份新报文，仍应拿到正确的
-    /// target/params。新段追加在尾部，旧解析器读完就停，不会错位。
-    /// 这是「新服务 + 旧 DLL」组合下 proc.run 不至于整体失效的依据。
+    /// 向后兼容：只认前两段的旧 DLL 读新报文，仍拿到正确的 target/params。
     #[test]
     fn old_two_segment_reader_still_gets_target_and_params() {
         let buf = encode_shell_exec("d.exe", "a b", "D:/W", "runas", "min");
@@ -1052,7 +1021,7 @@ mod shell_exec_tests {
 #[path = "codec_tests.rs"]
 mod tests;
 
-// ── darwin host-render push 帧编码器 (W4) ──
+// ── darwin host-render push 帧编码器 ──
 // 字节布局对照 Swift wind_macos/.../BinaryCodec.swift decoder。均小端，返回完整帧。
 
 /// 追加一个长度前缀(u32 LE)的 UTF-8 字符串
@@ -1391,7 +1360,7 @@ pub fn encode_password_suppress_value(enabled: bool) -> Vec<u8> {
 
 /// 编码组合区兜底占位字符的值部分（对齐 TSF `OnSyncConfig` 的 CONFIG_KEY_COMPOSITION_PLACEHOLDER）。
 /// 格式：kind(u8)，取 `protocol::COMPOSITION_PLACEHOLDER_*`（0 = 空格 U+0020、1 = ZWSP U+200B、
-/// 2 = 盲文空白 U+2800）。旧 DLL 认不出的值回落空格。GH#175。
+/// 2 = 盲文空白 U+2800）。旧 DLL 认不出的值回落空格。
 pub fn encode_composition_placeholder_value(kind: u8) -> Vec<u8> {
     vec![kind]
 }
@@ -1453,7 +1422,7 @@ pub fn encode_pair_via_comp_value(enabled: bool) -> Vec<u8> {
 }
 
 /// 编码 Ctrl+空格 切换开关的值部分（对齐 TSF `OnSyncConfig` 的 CONFIG_KEY_CTRL_SPACE_TOGGLE）。
-/// 格式：enabled(u8)。GH#172。
+/// 格式：enabled(u8)。
 pub fn encode_ctrl_space_toggle_value(enabled: bool) -> Vec<u8> {
     vec![enabled as u8]
 }

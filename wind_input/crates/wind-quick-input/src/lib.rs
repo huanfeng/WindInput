@@ -5,26 +5,25 @@
 //!
 //! ## 来源与开关
 //!
-//! 三个来源各自是一个 **mix 成员 id**（`quick_input.date` / `.calc` / `.number`），
+//! 三个来源各自是一个 mix 成员 id（`quick_input.date` / `.calc` / `.number`），
 //! 连同协调器实现的 `quick_input.repeat`（重复上屏）一起，由 `mix_modes.members`
-//! 列表决定**有无与顺序**——开关即增删，优先级即排序，不再另设 bool 旁路开关
-//! （旧的 `schema.quick_input.enable_english` 曾与 `members` 构成双真相源）。
+//! 列表决定有无与顺序：开关即增删，优先级即排序，不另设 bool 开关（避免双真相源）。
 //!
 //! ## 格式取舍
 //!
 //! 候选格式按国标精简，冗余与不规范写法不再产出（见各来源函数文档）：
-//! - 日期：GB/T 7408（≡ISO 8601）+ GB/T 15835（中文数字用法，月日**不补前导零**）
+//! - 日期：GB/T 7408（≡ISO 8601）+ GB/T 15835（中文数字用法，月日不补前导零）
 //! - 金额：《会计基础工作规范》第五十二条（大写金额与「整」的写法）
 //!
 //! ## 格式表（自定义）
 //!
-//! 上述格式集是**出厂默认**，不是硬编码：候选的文本与组内顺序由 [`FormatTable`] 决定，
+//! 上述格式集是出厂默认，不是硬编码：候选的文本与组内顺序由 [`FormatTable`] 决定，
 //! 出厂表来自 `data/system.quick.toml`，用户可在配置目录放同名文件整份覆盖
 //! （高级特性，详见 `docs/design/quick-input-format-table.md`）。
 //!
-//! **解析归代码、渲染归配置**：`"2025.12.25"` 怎么切成年月日是本模块的文法，
+//! 解析归代码、渲染归配置：`"2025.12.25"` 怎么切成年月日是本模块的文法，
 //! 切出来之后长什么样才是格式表的事。不带表的 `generate*` 入口一律用
-//! [`FormatTable::builtin`]，与改造前逐条等价。
+//! [`FormatTable::builtin`]。
 
 use chrono::Datelike;
 use std::sync::OnceLock;
@@ -47,7 +46,7 @@ pub use vars::QuickValues;
 
 /// 表达式模板（`{amt(unit='圆')}`）的求值回调，由宿主提供。
 ///
-/// 本 crate **不依赖 `wind-cmdbar`**：求值器在上层（coordinator 同时依赖两者），
+/// 本 crate 不依赖 `wind-cmdbar`：求值器在上层（coordinator 同时依赖两者），
 /// 这里只把「模板 + 本次解析出的量」交出去。返回 `None` = 求值失败（未知函数、
 /// 参数错误…），该条候选被丢弃，宿主负责告警。
 pub type ExprEval<'a> = &'a dyn Fn(&str, &QuickValues) -> Option<String>;
@@ -62,8 +61,7 @@ fn builtin_table() -> &'static FormatTable {
 /// 按格式表渲染某一类的全部候选。
 ///
 /// 每条按 [`FormatEntry::is_expression`] 分流：变量模板本地展开，表达式模板交给
-/// 宿主的 `eval`（无 `eval` 时该条静默跳过——不带求值器的调用方拿不到表达式候选，
-/// 但绝不能把 `{amt()}` 当字面量上屏）。
+/// 宿主的 `eval`（无 `eval` 时该条静默跳过，绝不能把 `{amt()}` 当字面量上屏）。
 ///
 /// 两道过滤各有分工，都不能省：
 /// - 展开/求值返回 `None`：模板含本类不支持的变量、或表达式求值失败 → 整条作废；
@@ -71,16 +69,15 @@ fn builtin_table() -> &'static FormatTable {
 ///   这是格式表表达「条件」的唯一方式，配置里不写 if。
 ///
 /// 用户调整同样在这里生效（[`FormatTable::entries_of_adjusted`]）：停用的条目不渲染，
-/// 移动过的按新序输出。空调整时与改造前逐条等价。
+/// 移动过的按新序输出。
 fn render(
     table: &FormatTable,
     adjust: &FormatAdjustMap,
     values: &QuickValues,
     eval: Option<ExprEval>,
 ) -> Vec<Rendered> {
-    // ★ 按**实际渲染的类别**取调整，而不是按来源。`QuickSource::Date` 会产出 date
-    // 或 year_month 之一（视输入形态），只有到了这里才知道是哪个——在调用方按 src
-    // 猜类别，年月的调序就会静默不生效。
+    // 按实际渲染的类别取调整，而不是按来源：`QuickSource::Date` 视输入形态产出 date 或
+    // year_month，在调用方按 src 猜类别，年月的调序会静默不生效。
     let empty = FormatAdjust::default();
     let adjust = adjust.get(values.kind().as_str()).unwrap_or(&empty);
     table
@@ -100,10 +97,8 @@ fn render(
         .collect()
 }
 
-/// 一条渲染结果：**格式 id + 候选文本**。
-///
-/// id 是候选的稳定身份——右键调序要知道用户点的是哪条格式，而 `text` 逐次输入都不同
-/// （`2026年6月19日` / `2026年6月20日`），按文本认人必然失配。
+/// 一条渲染结果：格式 id + 候选文本。id 是候选的稳定身份（右键调序靠它认条目），
+/// `text` 随输入变化，不能按文本认人。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rendered {
     /// 格式表里的条目 id（如 `date.lunar`）。
@@ -117,8 +112,7 @@ pub struct Rendered {
 /// year_month（视输入形态），只有 `render` 内部才知道实际类别。
 pub type FormatAdjustMap = std::collections::HashMap<String, FormatAdjust>;
 
-/// 丢掉 id 只留文本。不带表/不带调整的公开入口用它保持原返回类型——
-/// 两种入口共用同一条渲染路径，不各写一份。
+/// 丢掉 id 只留文本。不带表/不带调整的公开入口用它保持原返回类型，与带调整的入口共用渲染路径。
 fn texts(v: Vec<Rendered>) -> Vec<String> {
     v.into_iter().map(|r| r.text).collect()
 }
@@ -133,22 +127,19 @@ pub const MEMBER_DATE: &str = "quick_input.date";
 pub const MEMBER_CALC: &str = "quick_input.calc";
 /// 数字 / 金额来源。
 pub const MEMBER_NUMBER: &str = "quick_input.number";
-/// 重复上屏来源（**由协调器实现**：候选取自上屏历史，本 crate 不产出）。
+/// 重复上屏来源（由协调器实现：候选取自上屏历史，本 crate 不产出）。
 pub const MEMBER_REPEAT: &str = "quick_input.repeat";
-/// 快捷输入历史来源（**由协调器实现**：候选取自快捷输入里上屏过的字面文本，t46）。
+/// 快捷输入历史来源（由协调器实现：候选取自快捷输入里上屏过的字面文本）。
 ///
 /// 与 [`MEMBER_REPEAT`] 的分工：那个只在空缓冲时给「上一次上屏」；本来源在有缓冲时按
-/// 前缀给历史。**出厂不在任何融合实例里**，由用户自己加进成员列表。
+/// 前缀给历史。出厂不在任何融合实例里，由用户自己加进成员列表。
 pub const MEMBER_HISTORY: &str = "quick_input.history";
 
 /// 旧值 `quick_input` 的展开序，同时是内置「快捷」融合的默认来源序。
 ///
-/// calc 在最前：它与 date 的输入形态互斥（表达式必含二元运算符，日期只有数字与点），
-/// 与 number 则**刻意共存**（`123*4` 先求值再转金额），而计算结果作首选是明确诉求。
-///
-/// ★ number 与 date **不会同时出候选**：小数点个数就是归属判据（见 [`has_second_dot`]），
-/// 一个点归数字、两个点归日期。故这两者的相对次序对任何一次输入都不再可观测，
-/// 此处保留原序只为不动 calc 与 number 的相对优先级。
+/// calc 在最前：它与 date 输入形态互斥，与 number 刻意共存（`123*4` 先求值再转金额），
+/// 计算结果作首选是明确诉求。number 与 date 不会同时出候选（见 [`has_second_dot`]），
+/// 两者相对次序不可观测。
 pub const LEGACY_EXPANSION: &[&str] = &[MEMBER_CALC, MEMBER_NUMBER, MEMBER_DATE, MEMBER_REPEAT];
 
 /// 是否为快捷输入家族的内置成员 id（含 `quick_input.repeat` 与旧值 `quick_input`）。
@@ -186,7 +177,7 @@ pub fn generate(src: QuickSource, buffer: &str, decimal_places: i32) -> Vec<Stri
     generate_with(src, buffer, decimal_places, builtin_table())
 }
 
-/// 按来源生成候选，指定格式表。**表达式模板会被跳过**（无求值器）。
+/// 按来源生成候选，指定格式表。表达式模板会被跳过（无求值器）。
 pub fn generate_with(
     src: QuickSource,
     buffer: &str,
@@ -198,8 +189,7 @@ pub fn generate_with(
 
 /// 按来源生成候选，指定格式表与表达式求值器。协调器走这个入口。
 ///
-/// `eval` 为 `None` 时表达式模板静默跳过——只有 `{...}` 那几条不出候选，
-/// 变量模板不受影响。
+/// `eval` 为 `None` 时表达式模板静默跳过，变量模板不受影响。
 pub fn generate_with_eval(
     src: QuickSource,
     buffer: &str,
@@ -220,10 +210,9 @@ pub fn generate_with_eval(
     .collect()
 }
 
-/// 按来源生成候选，**带格式 id 与用户调整**。协调器走这个入口。
+/// 按来源生成候选，带格式 id 与用户调整。协调器走这个入口。
 ///
-/// 与 [`generate_with_eval`] 同源（都经 `render`）：那边只是丢掉 id、按空调整渲染。
-/// 两条入口若各自实现，「右键看到的顺序」与「实际出的候选」就会分叉。
+/// 与 [`generate_with_eval`] 同经 `render`，否则「右键看到的顺序」与实际候选会分叉。
 pub fn generate_adjusted(
     src: QuickSource,
     buffer: &str,
@@ -243,8 +232,7 @@ pub fn generate_adjusted(
 /// 便捷入口，主要供测试与不读配置的调用方使用；协调器按 `members` 逐个调 [`generate`]。
 pub fn generate_quick_input_candidates(buffer: &str, decimal_places: i32) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    // 序取自 LEGACY_EXPANSION 而不是另写一份字面量：那是出厂来源序的单一真相源，
-    // 两处各写一遍的话，调整来源优先级时这个便捷入口会静默落后（`repeat` 无来源，被滤掉）。
+    // 序取自 LEGACY_EXPANSION（出厂来源序的单一真相源），别另写字面量；`repeat` 无来源，被滤掉。
     for src in LEGACY_EXPANSION
         .iter()
         .filter_map(|m| QuickSource::from_member(m))
@@ -269,28 +257,14 @@ fn trim_pending_tail(s: &str) -> &str {
     if t.is_empty() { s } else { t }
 }
 
-/// 原始缓冲里是否已经出现**第二个**小数点——**数字与日期的归属判据**。
+/// 原始缓冲里是否已经出现第二个小数点：数字与日期的归属判据。
 ///
-/// 一个小数点的输入（`12.25` / `2026.2`）在文法上是真歧义：既是合法小数，也是合法
-/// 月日 / 年月。本判据把它一刀切开——**一个点归数字，两个点归日期**，两组互斥：
+/// 一个点的输入（`12.25` / `2026.2`）既是合法小数也是合法月日/年月，这里一刀切开：
+/// 一个点归数字，两个点归日期（想要日期多打一个点，如 `2026.2.`），两组互斥。
 ///
-/// - 数字只容一个小数点，第二个点一出现就不再可能是数字（打 `2026.2.3` 的中途
-///   不该冒出一屏金额读法）；
-/// - 反过来，只打一个点的人多半在打金额（`12.25` 作金额远比作月日常见），
-///   此时日期整组让开，想要日期多打一个点即可（`12.25.` / `2026.2.`）。
-///
-/// 两个方向都有确定出口，不靠猜，也不必为一次输入翻两屏候选。三段完整日期
-/// （`2025.12.25`）天然带两个点，用户无需为它多做任何事。
-///
-/// ⚠️ 必须看**裁剪前**的串。[`trim_pending_tail`] 抹掉尾点是为了让 `123.`（小数位
-/// 还没打）仍出「壹佰贰拾叁元整」，但它连带抹掉了「用户已经打下第二个点」这一信号：
-/// `2026.2.` 被裁成合法小数 `2026.2`，判据当场反转，两侧同时失效。
-///
-/// ★ 判据只能是点的**个数**，不能是「首段像不像年份」：`5000.5`（伍仟元伍角整）与
-/// `2000.5`（贰仟元伍角整）和年月形态完全同构，按首段范围砍会静默吃掉常见金额——
-/// 多几条候选是可见噪音，金额消失是不可见失败，两侧代价不对称。
-///
-/// 算式形态不受影响（`1.5*2.5` 走求值那条路，不经这里）。
+/// 必须看裁剪前的串：[`trim_pending_tail`] 会把 `2026.2.` 裁成 `2026.2`，信号当场丢失。
+/// 判据只能是点的个数，不能是「首段像不像年份」：`2000.5` 这类金额与年月同构，按首段砍会
+/// 静默吃掉常见金额。算式形态（`1.5*2.5`）走求值那条路，不经这里。
 fn has_second_dot(buffer: &str) -> bool {
     buffer.matches('.').count() > 1
 }
@@ -326,14 +300,11 @@ fn parse_date_parts(s: &str) -> Option<(i32, u32, u32)> {
 
 /// 日期来源：完整日期优先，否则试年月。
 ///
-/// **要求缓冲里已有第二个小数点**（见 [`has_second_dot`]）：`"2026.3"` 归数字、
-/// `"2026.3."` 归日期。尾点因而同时是「小数位还没打完」与「我要的是日期」两个信号，
-/// 后者由本闸门解释，前者交给 [`trim_pending_tail`] 裁掉，故 `"2026.3."` 出的是
-/// 完整的「2026年3月」而非因第三段为空而全空。
+/// 要求缓冲里已有第二个小数点（见 [`has_second_dot`]）：`"2026.3"` 归数字、
+/// `"2026.3."` 归日期；尾点随后由 [`trim_pending_tail`] 裁掉，故出的是「2026年3月」。
 ///
 /// 格式集（按序）：中文 → 全汉字 → ISO 扩展 → ISO 基本 → 斜杠。
-/// **不产出**中文补零写法（`2025年03月05日`）——GB/T 15835 的中文日期不加前导零，
-/// 它与不补零的那条只在月/日 <10 时不同，属纯冗余。
+/// 不产出中文补零写法（`2025年03月05日`）：GB/T 15835 的中文日期不加前导零。
 pub fn generate_date_candidates(input: &str) -> Vec<String> {
     texts(render_date(
         input,
@@ -348,19 +319,15 @@ pub fn generate_date_candidates(input: &str) -> Vec<String> {
 /// 「为空再试」而非「解析成功即归属」：用户把 date 一组删空时，`2025.12` 这种
 /// 既可解析为完整日期也可解析为年月的输入仍应给出年月候选。
 ///
-/// ★ 闸门装在这里而不是 [`render_full_date`] / [`render_year_month`] 里：那两者是
-/// 纯解析，公开入口 [`generate_year_month_candidates`] 的语义就是「按年月渲染这串」，
-/// 不该被输入形态的归属判据管；只有 [`QuickSource::Date`] 这条**分派**路径才该管。
-/// 同理，设置页示例列走 [`generate_adjusted`]（受管），而 `quick_eval` 的示例值直接
-/// 构造 [`QuickValues`]（不受管）。
+/// 归属闸门装在这里而不是 [`render_full_date`] / [`render_year_month`] 里：那两者是纯解析，
+/// 只有 [`QuickSource::Date`] 这条分派路径才该受输入形态判据管。
 fn render_date(
     input: &str,
     table: &FormatTable,
     adjust: &FormatAdjustMap,
     eval: Option<ExprEval>,
 ) -> Vec<Rendered> {
-    // 归属判据（见 [`has_second_dot`]）：一个点归数字、两个点归日期。**必须在
-    // `trim_pending_tail` 之前问**——它会把 `2026.2.` 裁回 `2026.2`，信号当场丢失。
+    // 归属判据（见 [`has_second_dot`]）必须在 `trim_pending_tail` 之前问。
     if !has_second_dot(input) {
         return Vec::new();
     }
@@ -374,7 +341,7 @@ fn render_date(
 
 /// 年份的全汉字写法：逐位改写，`2025` → 「二〇二五」（GB/T 15835）。
 ///
-/// 与短语层的 `${YC}` 共用同一份实现——同一个写法在两处取值不同，用户无从分辨。
+/// 与短语层的 `${YC}` 共用同一份实现，两处取值必须一致。
 pub fn year_to_chinese(year: i32) -> String {
     digits_to_chinese_chars(&year.to_string())
 }
@@ -401,10 +368,8 @@ pub fn small_int_to_chinese(n: u32) -> String {
 
 /// 完整日期（`y.m.d`）或月日（`m.d`，年补当前年）。
 ///
-/// ★ 两者**分派到不同的格式类别**：用户只打两段时想要的多半是「12月25日」这种不带年的
-/// 短写法，而三段输入里的年份是他自己打的。同一套 `date` 条目伺候两种形态，就只能二选一
-/// ——要么两段输入被强行补年（改造前的行为），要么三段输入冒出不带年的候选。
-/// 变量集两类相同（月日的年 = 当前年），差别只在出厂条目与用户调整各自记账。
+/// 两者分派到不同的格式类别（见 [`FormatKind::MonthDay`]）：只打两段时想要的多半是不带年的
+/// 短写法，共用一套条目就只能二选一。
 fn render_full_date(
     input: &str,
     table: &FormatTable,
@@ -438,7 +403,7 @@ fn render_full_date(
 /// 首段 >31 是与「月.日」的分界：`12.25` 只可能是 12 月 25 日，`2025.12` 只可能是年月。
 /// 同样不产出中文补零写法（`2025年06月`）。格式集与完整日期同构：中文 → 全汉字 → ISO → 斜杠。
 ///
-/// 这是**按年月渲染**的直接入口，不经 [`has_second_dot`] 那道归属判据——传 `"2025.12"`
+/// 这是按年月渲染的直接入口，不经 [`has_second_dot`] 那道归属判据——传 `"2025.12"`
 /// 照常出候选。走 [`QuickSource::Date`] 的调用方才受判据管。
 pub fn generate_year_month_candidates(input: &str) -> Vec<String> {
     texts(render_year_month(
@@ -476,7 +441,7 @@ fn render_year_month(
 
 // ───────────────────────── 计算器 ─────────────────────────
 
-/// 是否含**二元**运算符：开头的、以及紧跟另一运算符或左括号的 `+`/`-` 是一元号，不算。
+/// 是否含二元运算符：开头的、以及紧跟另一运算符或左括号的 `+`/`-` 是一元号，不算。
 ///
 /// 这道区分让 `"-5"` 不被当成算式（它只是个负数，交给数字来源），而 `"-5+3"` 是。
 fn has_binary_operator(s: &str) -> bool {
@@ -499,9 +464,7 @@ fn has_binary_operator(s: &str) -> bool {
 
 /// 单个字符是否属于表达式字符集：数字、四则、幂、括号、点。
 ///
-/// **公开的 char 级谓词**：协调器的自由输入透镜要判断「这个字符还能不能算表达式编码」，
-/// 必须与本 crate 的求值器认同同一个字符集。抽出来是为了不让那份集合出现第二份拷贝——
-/// 两处各写一遍的话，日后给求值器加个 `%` 运算符就会静默地让透镜判据落后一个字符。
+/// 公开给协调器的自由输入透镜，使它与求值器认同同一个字符集，别另写一份拷贝。
 pub fn is_expr_char(c: char) -> bool {
     c.is_ascii_digit() || matches!(c, '+' | '-' | '*' | '/' | '^' | '.' | '(' | ')')
 }
@@ -511,7 +474,7 @@ fn is_expr_charset(s: &str) -> bool {
     s.chars().all(is_expr_char)
 }
 
-/// 计算来源：**结果作首候选**，完整等式次之。
+/// 计算来源：结果作首候选，完整等式次之。
 ///
 /// 用户打算式多半是为了拿结果，等式形态（`1+2*3=7`）留作次选，供需要留痕的场景。
 /// 用户手打的 `=` 及其右侧被忽略（取首个 `=` 前求值），使「再按 =」乃至续打答案时
@@ -719,7 +682,7 @@ pub fn format_calc_result_prec(val: f64, decimal_places: i32) -> String {
 const LOWER_DIGITS: [&str; 10] = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九"];
 /// 逐位改写专用数字表。
 ///
-/// 与 [`LOWER_DIGITS`] 只差首项：阿拉伯数字**逐位**改写为汉字时，0 写「〇」
+/// 与 [`LOWER_DIGITS`] 只差首项：阿拉伯数字逐位改写为汉字时，0 写「〇」
 /// （GB/T 15835，如「二〇二六年」）；而位值读法里表示数位空缺的是「零」
 /// （「一万零一」「二百零五」），财务大写同理（「壹仟零贰拾元」）。
 /// 两者不是一个字，故不能共用一份表。
@@ -933,7 +896,7 @@ fn format_thousands(int_part: &str, dec_part: &str) -> String {
     }
 }
 
-/// 数字来源的取值：纯数字直接用；**算式先求值再转**，使「算完顺手要金额」一步到位
+/// 数字来源的取值：纯数字直接用；算式先求值再转，使「算完顺手要金额」一步到位
 /// （`123*4` 也能出「肆佰玖拾贰元整」）。负数结果无金额读法，返回 None。
 fn number_subject(buffer: &str, decimal_places: i32) -> Option<String> {
     let s = trim_pending_tail(buffer);
@@ -953,7 +916,7 @@ fn number_subject(buffer: &str, decimal_places: i32) -> Option<String> {
 
 /// 数字来源：金额、中文数字、千分位。
 ///
-/// 格式集按规范精简，**不产出**：
+/// 格式集按规范精简，不产出：
 /// - 「一百二十三元整」——财务金额只有「大写壹佰贰拾叁元整」与「小写 ¥123.00」两种合法写法，
 ///   中文小写加「元整」不属任何规范；
 /// - 逐位大写「壹贰叁」——逐位读法用于念号码，与财务大写无关，无使用场景。

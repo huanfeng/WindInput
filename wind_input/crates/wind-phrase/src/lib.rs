@@ -3,14 +3,14 @@
 //! 与 Go 版本 `wind_input/internal/dict/phrase.go` + `internal/cmdbar` 对齐。
 //! 加载 `system.phrases.toml`，输入码命中短语 code 时生成候选。
 //!
-//! **双路径**（对齐 Go design §7.2）：
+//! 双路径（对齐 Go design §7.2）：
 //! - 短语 text 使用命令栏语法（含 `$CC(`/`$SS(`/`$AA(` marker 或顶层 `{expr}` 插值）→ 经
 //!   `wind-cmdbar` 解析求值（`{date()}`/`{calc(code)}`/`{upper(code)}`/`$SS` 字符串组/`$AA` 字符组等）。
 //! - 否则 → 旧的简单模板变量展开
 //!   （$Y/$YYYY/$YY/$M/$MM/$D/$DD/$HH/$mm/$ss/$WC/$YC/$MC/$DC/$ts/$tsms）。
 //!
-//! 命令栏 display 侧只用纯函数（无需宿主服务）；`$CC` 的副作用动作需平台服务（按键/剪贴板/
-//! 进程注入），Rust 端平台层尚缺，故当前仅显现 display 候选，动作执行待平台服务补齐。
+//! 本 crate 只做 display 侧求值（宿主能力经 [`PhraseHost`] 回调注入）；`$CC` 的副作用动作
+//! 由协调器在选中时执行（`handle_cmdbar.rs`）。
 
 use chrono::{DateTime, Datelike, Local, Timelike};
 use std::collections::HashMap;
@@ -35,19 +35,14 @@ pub struct PhraseEntry {
 
 /// 方案级短语作用域：一次查询里「哪些短语算数」。
 ///
-/// # ★ 为什么它是**必填参数**而不是 `Option` 或另开一族 `*_scoped` 方法
-///
-/// 短语查询有六个消费点（两处候选生成、两处「这个码位归短语管」的判据、临英两处）。
-/// **只漏掉 `phrase_owns_code` 的表现是：短语候选不出现了，但顶码与自动上屏仍被短语层
-/// 否决 ⇒ 打字卡住不上屏，且零日志。** 可选参数或并行方法族都把「别漏」变成自觉，
-/// 而这里必须是编译期强制——新增查询方法时同样躲不过。
-///
-/// 见 `docs/design/schema-scoped-behavior.md` §6.3。
+/// 它是必填参数而不是 `Option` 或另一族 `*_scoped` 方法：短语查询有六个消费点，漏接一处
+/// （如 `phrase_owns_code`）会让候选消失而顶码仍被短语层否决，打字卡住且零日志。必填参数
+/// 让新增查询方法也躲不过编译期检查。见 `docs/design/schema-scoped-behavior.md` §6.3。
 #[derive(Debug, Clone, Copy)]
 pub struct PhraseScope<'a> {
     /// 本方案是否加载短语。`false` ⇒ 所有查询直接短路。
     pub enabled: bool,
-    /// 白名单。**空 = 不施加这一项限制**（全部分类），不是「一条都不要」——
+    /// 白名单。空 = 不施加这一项限制（全部分类），不是「一条都不要」——
     /// 「一条都不要」由 `enabled = false` 表达。空串 `""` 匹配未分类短语。
     pub categories: &'a [String],
     /// 黑名单。空 = 不排除；在白名单之后再减。
@@ -57,7 +52,7 @@ pub struct PhraseScope<'a> {
 impl PhraseScope<'_> {
     /// 不施加任何限制。测试与「无方案上下文」的调用点用。
     ///
-    /// 它仍然是**显式写出来的**决定，与「忘了过滤」在代码里长得不一样——这正是必填参数
+    /// 它仍然是显式写出来的决定，与「忘了过滤」在代码里长得不一样——这正是必填参数
     /// 想要的效果。
     pub const ALL: PhraseScope<'static> = PhraseScope {
         enabled: true,
@@ -81,7 +76,7 @@ impl PhraseScope<'_> {
         !self.enabled
     }
 
-    /// 是否**完全不过滤**（只判 enabled，不看分类）——全表扫描的快路径判据。
+    /// 是否完全不过滤（只判 enabled，不看分类）——全表扫描的快路径判据。
     fn admits_everything(&self) -> bool {
         self.enabled && self.categories.is_empty() && self.exclude.is_empty()
     }
@@ -90,7 +85,7 @@ impl PhraseScope<'_> {
 /// 一条短语命中：展开后的候选文本 + 权重 + 可选命令源 / 前缀导航目标。
 /// - `command_src` 非空 → 这是 `$CC` 命令短语（选中时执行动作而非上屏 text），
 ///   其值为待重新求值/执行的命令源（如 `$CC("切简繁", ime.toggle("s2t"))`）。
-/// - `nav_code` 非空 → 这是**前缀导航候选**（敲 `zz`/`co` 列出的 `zzbd`/`coen` 等），
+/// - `nav_code` 非空 → 这是前缀导航候选（敲 `zz`/`co` 列出的 `zzbd`/`coen` 等），
 ///   `text` 为组名/命令显示名，`comment` 为码后缀（如 `bd`）。选中时补全输入到
 ///   `nav_code` 完整码并重查展开（见 coordinator commit_selected 的 is_group 臂）。
 #[derive(Debug, Clone, PartialEq)]
@@ -105,7 +100,7 @@ pub struct PhraseHit {
     pub source_text: String,
     /// 是否系统短语（`is_system=true`）；false=用户短语。调试提示区分来源用。
     pub is_system: bool,
-    /// `Some(组名)` = 这是 `$SS`/`$AA` 在**精确码**下炸开的成员（含嵌入 `$CC` 的命令成员）。
+    /// `Some(组名)` = 这是 `$SS`/`$AA` 在精确码下炸开的成员（含嵌入 `$CC` 的命令成员）。
     /// 宿主据此判「同码是否还有别的候选」，有重码时把整组折回一条组名候选，而不是自动展开。
     pub group: Option<String>,
 }
@@ -136,18 +131,16 @@ impl PhraseHit {
         self
     }
 
-    /// 附上注释（前缀命中时＝**剩余编码**）。
+    /// 附上注释（前缀命中时＝剩余编码）。
     ///
-    /// 只在 [`PhraseLayer::lookup_prefix_at`] 用：精确路径（`lookup_at`）没有剩余编码，
-    /// 填了就是假提示。marker 短语（`$SS`/`$AA`/`$CC`）经 `nav`/`command_nav` 早就带上了
-    /// 同一个 `suffix`，静态短语（Literal/Template）此前漏填——同一串码下，系统 `zz*` 分组
-    /// 看得见还差几个字母、用户自己加的静态短语却看不见。
+    /// 只在 [`PhraseLayer::lookup_prefix_at`] 用：精确路径没有剩余编码，填了就是假提示。
+    /// 静态短语与 marker 短语（经 `nav`/`command_nav` 带上 `suffix`）须一致地显示剩余编码。
     fn with_comment(mut self, comment: String) -> Self {
         self.comment = comment;
         self
     }
 
-    /// 前缀导航——**组**候选（`$SS`/`$AA`）：`code` 为补全目标完整码，选中后补全展开。
+    /// 前缀导航——组候选（`$SS`/`$AA`）：`code` 为补全目标完整码，选中后补全展开。
     fn nav(text: String, weight: i32, code: String, comment: String) -> Self {
         Self {
             text,
@@ -161,7 +154,7 @@ impl PhraseHit {
         }
     }
 
-    /// 前缀导航——**命令**候选（`$CC`）：选中后**直接执行** `src`（不二级展开），
+    /// 前缀导航——命令候选（`$CC`）：选中后直接执行 `src`（不二级展开），
     /// `code` 为完整码（执行时作输入上下文），`comment` 为码后缀。
     fn command_nav(text: String, weight: i32, src: String, code: String, comment: String) -> Self {
         Self {
@@ -235,8 +228,7 @@ fn canonical_platform(p: &str) -> String {
 /// 条目的 `platform` 是否适用于 `current`：缺省 / 空 / `"all"` = 全平台；`"desktop"` =
 /// 三种电脑（windows / macos / linux）；否则按名字比对（取值见 system.phrases.toml 文件头）。
 ///
-/// `desktop` 存在的理由：电脑专用的条目（打开网页、按键序列、时间戳……）在手机上要么执行
-/// 不了、要么没意义，但三种电脑上是同一条——不该为了让手机看不见而复制三份。
+/// `desktop` 让电脑专用的条目（打开网页、按键序列等）不必为了对手机隐藏而复制三份。
 fn platform_matches(platform: Option<&str>, current: &str) -> bool {
     let Some(p) = platform else {
         return true;
@@ -318,8 +310,7 @@ impl PhraseLayer {
 
     /// 同 [`Self::parse_system_entries`]，但按指定平台（`windows` / `macos` / `linux` / `android`）过滤。
     ///
-    /// 供测试在任一主机上核对**别的平台**看到的条目集——Windows 上的取舍是否与改动前逐条
-    /// 一致，不能只靠 Windows 机器上跑的那份 CI 来回答。
+    /// 供测试在任一主机上核对别的平台看到的条目集。
     pub fn parse_system_entries_for(
         path: &std::path::Path,
         platform: &str,
@@ -423,10 +414,8 @@ impl PhraseLayer {
                 };
                 match evaluate_phrase(&e.text, &ctx, default_registry()) {
                     // 无动作（literal/template，如 {date()}）→ 显示即上屏文本。
-                    //
-                    // 空展开不出空候选：与下方 `expand_template` 分支、以及 `lookup_prefix_at`
-                    // 同处置。求值型 display 落空是**常态**而非异常——`{dict.rev(clip(),2)}`
-                    // 在剪贴板只有 1 个字时就该什么都不出，而不是给一条点了没反应的空白候选。
+                    // 空展开不出空候选（与 `expand_template` 分支、`lookup_prefix_at` 同处置）：
+                    // 求值型 display 落空是常态，如 `{dict.rev(clip(),2)}` 在剪贴板只有 1 个字时。
                     Ok(PhraseEval::Single {
                         display, actions, ..
                     }) if actions.is_empty() && !display.is_empty() => {
@@ -447,13 +436,13 @@ impl PhraseLayer {
                     }),
                     Ok(PhraseEval::Array(arr)) => {
                         for el in arr.elements {
-                            // 空元素丢弃：`$SS` 的元素是**运行时**求值的，词条固定写 N 个
+                            // 空元素丢弃：`$SS` 的元素是运行时求值的，词条固定写 N 个
                             // 元素、各查第 1..N 个字时，剪贴板不足 N 字必然让尾部几条落空。
                             if el.display.is_empty() {
                                 continue;
                             }
                             match (el.actions.is_empty(), el.src) {
-                                // 带动作的嵌入 `$CC`：每个成员是独立的命令候选，携**元素级**
+                                // 带动作的嵌入 `$CC`：每个成员是独立的命令候选，携元素级
                                 // 命令源（不是整组的源），选中时只执行这一个成员的动作链。
                                 (false, Some(src)) => out.push(PhraseHit {
                                     text: el.display,
@@ -484,24 +473,16 @@ impl PhraseLayer {
                     }
                 }
             } else if let Some(text) = expand_template(&e.text, &now) {
-                // 短语文本按原样出候选：库里存的就是真实文本（含真换行）。
-                // 转义只在系统边界发生（文本文件读写、设置页 UI 进出），见
-                // `wind_store::store_layer::record_to_candidate` 的同源说明。
-                //
-                // 全空展开（如整条只有一个非节日的 `$LF`）不出空候选——
-                // 与前缀路径 `lookup_prefix_at` 同处置。
+                // 短语文本按原样出候选：库里存的就是真实文本（含真换行），转义只在系统边界
+                // 发生，见 `wind_store::store_layer::record_to_candidate`。全空展开（如非节日
+                // 的 `$LF`）不出空候选，与 `lookup_prefix_at` 同处置。
                 if !text.is_empty() {
                     out.push(PhraseHit::plain(text, e.weight).with_source(&e.text));
                 }
             } else {
-                // 含**不支持**的模板变量（写错了变量名）→ 整条跳过。前缀路径
-                // `lookup_prefix_at` 对同一失败同处置；两边曾经现象相反（打全码没反应、
-                // 打前缀反而看得见字面 `$xxx` 并原样上屏），已统一。
-                //
-                // 注意「变量取不到值」不走这里：`$LF` 在非节日返回**空串**，整条照常展开
-                // （见 `wind_quick_input::lunar::var` 的「`None` 与空串的分工」）。到得了
-                // 这里的只有真写错的变量名，故留 warn——不留日志就没人查得动。
-                // 隐私红线（docs/logging-convention.md）：warn 不得含词条明文，源文降到 debug。
+                // 含不支持的模板变量（写错变量名）→ 整条跳过，与 `lookup_prefix_at` 同处置。
+                // 「变量取不到值」不走这里（`$LF` 非节日返回空串，见 `wind_quick_input::lunar::var`），
+                // 故留 warn。warn 不得含词条明文（docs/logging-convention.md），源文降到 debug。
                 warn!(
                     "短语模板变量不支持，该条被跳过 (chars={})",
                     e.text.chars().count()
@@ -535,12 +516,10 @@ impl PhraseLayer {
         })
     }
 
-    /// 是否存在**码恰为** `code` 的短语（不含更长后继，那是 [`Self::has_longer_code`]）。
+    /// 是否存在码恰为 `code` 的短语（不含更长后继，那是 [`Self::has_longer_code`]）。
     ///
-    /// 供顶码上屏的「整串仍是精确匹配」判据补齐短语侧：引擎 `handle_top_code` 的
-    /// `has_full_input_match` 只问码表（`DictManager`），短语层归协调器持有、引擎够不着，
-    /// 于是码长超过满码长的短语（如 5 码短语在 4 码方案里）会被判成「溢出该顶字」，
-    /// 顶掉前 N 码首选、余码续打——那条短语永远打不出来。
+    /// 供顶码上屏的「整串仍是精确匹配」判据补齐短语侧：引擎的 `has_full_input_match` 只问
+    /// 码表，否则超过满码长的短语（如 4 码方案里的 5 码短语）会被顶掉，永远打不出来。
     pub fn has_exact_code(&self, code: &str, scope: &PhraseScope<'_>) -> bool {
         if code.is_empty() || scope.is_closed() {
             return false;
@@ -550,7 +529,7 @@ impl PhraseLayer {
             .is_some_and(|v| v.iter().any(|e| scope.admits(e)))
     }
 
-    /// 前缀导航：敲 `code`（长度 ≥ `min_len`）时，列出所有**码以 `code` 开头但更长**的
+    /// 前缀导航：敲 `code`（长度 ≥ `min_len`）时，列出所有码以 `code` 开头但更长的
     /// marker 短语（`$CC`/`$SS`/`$AA`，未显式 `{prefix: false}`），每条出一个导航候选——
     /// `text` 为组名/命令显示名，`comment` 为码后缀。选中后由 coordinator 补全到完整码再展开。
     /// 数据驱动：新增短语零配置自动列出（对齐 Go SearchCommand 情况 3）。
@@ -580,7 +559,7 @@ impl PhraseLayer {
             return Vec::new();
         }
         let reg = default_registry();
-        // 廉价上下文：clip/sel/app/title 返回空，**避免列举时读整个剪贴板**（如 coad 的
+        // 廉价上下文：clip/sel/app/title 返回空，避免列举时读整个剪贴板（如 coad 的
         // display `剪贴板加词:{clip()}` 会读全部剪贴板内容 → 内存暴涨）；last 仍取真实
         // 快照（仅 Vec 索引，廉价，coll/cozd 等可正常显示）。真正执行命令时才用完整上下文。
         let ctx = NavCtx {
@@ -606,17 +585,13 @@ impl PhraseLayer {
                 };
                 // prefix 语义：除非显式 `{prefix: false}` 否则都列。
                 // Literal/Template → 普通命中（command_src=None, nav_code=None）；
-                // $SS/$AA → **组** nav（选中补全到码再展开成员，二级选择）；
-                // $CC → **命令** nav（选中**直接执行**，不二级展开），display 经廉价上下文求值。
+                // $SS/$AA → 组 nav（选中补全到码再展开成员，二级选择）；
+                // $CC → 命令 nav（选中直接执行，不二级展开），display 经廉价上下文求值。
                 match &phrase {
                     Phrase::Literal(t) => {
                         // 旧式简单模板（$Y/$M/$D 等）不含 cmdbar marker/插值，parse 后为 Literal。
-                        //
-                        // ★ 展开失败 → **跳过该条**，与 [`Self::lookup_at`] 精确路径同处置。
-                        // 这里曾是 `unwrap_or_else(|| t.clone())`「失败退回原文」，后果是同一条
-                        // 短语在两条路径上现象相反：打全码一个候选都没有，打前缀反而看得见字面
-                        // `$LY$LZ$LMD$LF` 且选中即原样上屏。展开产物与模板源不是一回事，
-                        // 源里带着 `$` 语法，回退它等于把乱码当结果。
+                        // 展开失败 → 跳过该条，与 [`Self::lookup_at`] 同处置；别退回模板原文，
+                        // 那会把带 `$` 语法的源文当候选上屏。
                         let Some(display) = expand_template(t, &now) else {
                             continue;
                         };
@@ -636,10 +611,8 @@ impl PhraseLayer {
                             Ok(ev) => ev.display,
                             Err(_) => continue,
                         };
-                        // 全空求值不出空候选 —— 与上面 Literal 分支、及 `lookup_at` 同处置。
-                        // 这里原先无条件 push：`{clip()}` / `{dict.rev(clip())}` 这类依赖瞬时
-                        // 状态的模板，在**廉价的 NavCtx 下必然求值为空**（见 `NavCtx::clip` /
-                        // `reverse_lookup` 的说明），于是打前缀时会列出一条纯空白的候选。
+                        // 全空求值不出空候选，与 Literal 分支、`lookup_at` 同处置：依赖瞬时状态
+                        // 的模板在廉价的 NavCtx 下必然求值为空（见 `NavCtx::clip`）。
                         if display.is_empty() {
                             continue;
                         }
@@ -710,14 +683,10 @@ impl PhraseLayer {
 pub enum DictExpansion {
     /// 非特殊语法：候选保持原样。
     None,
-    /// **是**特殊语法，但求值结果为空 —— 该候选整条丢弃。
+    /// 是特殊语法，但求值结果为空 —— 该候选整条丢弃。
     ///
-    /// 与 [`Self::None`] 的区别是这条**必须**存在的理由：`None` 的语义是「这不是特殊语法，
-    /// 把原文当文本用」。求值成空时若返回 `None`，候选会显示成模板**源码字面**
-    /// （`{dict.rev(clip())}`）并原样上屏 —— 用户看到的是「配了没生效」，而真相是
-    /// 「语法没问题，只是这次查不到」。两者的正确呈现完全相反，故不能共用一个变体。
-    ///
-    /// 对齐短语层 `lookup_at` 对同一情形的处置（那边直接不 push）。
+    /// 不能与 [`Self::None`]（「不是特殊语法，原文当文本用」）合并：求值成空时返回 `None`
+    /// 会把模板源码字面（`{dict.rev(clip())}`）当候选上屏。对齐短语层 `lookup_at` 的处置。
     Drop,
     /// 单候选替换：`display` 替换候选文本；`command_src = Some` 表示 `$CC` 命令
     /// （选中 / 顶屏时执行动作，display 仅作展示）。
@@ -734,9 +703,9 @@ pub enum DictExpansion {
     },
 }
 
-/// 展开一条**词库候选 value**（对齐 Go `dict.ValueExpander.Expand`/`ExpandToCandidates`）：
+/// 展开一条词库候选 value（对齐 Go `dict.ValueExpander.Expand`/`ExpandToCandidates`）：
 /// 判定顺序——cmdbar marker（`$CC(`/`$SS(`/`$AA(` 或顶层 `{..}` 插值）优先，其次简单模板变量
-/// （`$Y/$M/$D/...`），都不含则 [`DictExpansion::None`]。让**普通用户 / 系统词库码表词条**也能
+/// （`$Y/$M/$D/...`），都不含则 [`DictExpansion::None`]。让普通用户 / 系统词库码表词条也能
 /// 像短语一样内嵌命令 / 模板 / 组，而非把 value 原文当文本上屏。
 ///
 /// `input` 供 cmdbar 语法内 `input()` 求值；`now/last/host` 为 display 上下文。
@@ -760,7 +729,7 @@ pub fn expand_dict_value(
         };
         match evaluate_phrase(text, &ctx, default_registry()) {
             // 纯 literal/template（如 {date()}）：display 即上屏文本。
-            // 空展开 → Drop（整条丢弃），**不是** None —— 见 `DictExpansion::Drop`。
+            // 空展开 → Drop（整条丢弃），不是 None —— 见 `DictExpansion::Drop`。
             Ok(PhraseEval::Single {
                 display, actions, ..
             }) if actions.is_empty() && display.is_empty() => DictExpansion::Drop,
@@ -822,21 +791,16 @@ pub fn expand_dict_value(
     }
 }
 
-/// 短语 display 求值所需的**宿主能力回调束**（剪贴板、反查）。
+/// 短语 display 求值所需的宿主能力回调束（剪贴板、反查）。
 ///
-/// # 为什么是结构体而不是继续加形参
-///
-/// 与 [`ProcSpawn`](wind_cmdbar::ProcSpawn) 同一理由：这些回调都是「宿主注入的能力」，
-/// 会随功能增长。加字段时每个构造点都会编译失败、被迫面对新能力；而多加一个形参
-/// 很容易被某个调用点原样漏掉——本 crate 的调用点分散在协调器的四条候选构建路径上，
-/// 漏掉一条的表现是「某个入口下这个功能就是不出来」，没有任何报错。
-///
+/// 做成结构体而不是形参（同 [`ProcSpawn`](wind_cmdbar::ProcSpawn)）：加字段时每个构造点都会
+/// 编译失败，而协调器四条候选构建路径里漏传一个形参只会让该入口下功能静默缺失。
 /// 本 crate 不依赖平台层，故一律以回调注入，不直接读剪贴板 / 词库。
 pub struct PhraseHost<'a> {
     /// 剪贴板读取：`n==0/1` 取当前，`n>1` 取历史第 n 条。
     /// 供命令栏 display 侧的 `clip(n)` 使用（如 `coad` 的 `剪贴板加词:{clip()}` 标签）。
     ///
-    /// ⚠️ 这条在**每次按键的候选构建期**都会被调用，实现方必须走非阻塞的缓存版读取
+    /// 这条在每次按键的候选构建期都会被调用，实现方必须走非阻塞的缓存版读取
     /// （见 `HostServices::clipboard_get_text_cached` 的行为契约）。
     pub clip: &'a dyn Fn(i64) -> String,
     /// 反查渲染：`(待查文本, format 模板) -> 渲染结果`；查不到返回空串。
@@ -901,7 +865,7 @@ impl wind_cmdbar::EvalContext for PhraseCtx<'_> {
     }
 }
 
-/// 前缀导航列举用的**廉价**求值上下文：`clip`/`sel`/`app`/`title` 一律返回空，
+/// 前缀导航列举用的廉价求值上下文：`clip`/`sel`/`app`/`title` 一律返回空，
 /// 避免列举多条命令时各自读整个剪贴板/前台窗口等昂贵副作用（内存暴涨根因）。
 /// `last` 仍取真实快照（仅 Vec 索引，廉价），`now`/`env` 廉价照常。命令真正执行时
 /// 由 coordinator 用完整 CmdbarCtx（含真实剪贴板）求值。
@@ -925,13 +889,9 @@ impl wind_cmdbar::EvalContext for NavCtx<'_> {
         String::new() // 列举阶段不读剪贴板
     }
     fn reverse_lookup(&self, _text: &str, _format: &str, _min_len: usize) -> String {
-        // 同 clip：列举阶段不查词库。前缀导航要为**每条**候选命令跑一次 display 求值，
-        // 在这里做整词反查等于把 N 次词库查询摊到按键线程上。
-        //
-        // 后果是 `cofc` 这类反查命令在**前缀列举**时求值为空，进而被 `lookup_prefix_at`
-        // 的空串守卫丢弃：它们打前缀时不出现在列表里，打全码才出。这是刻意取舍——
-        // 它们的 display 本就依赖剪贴板这类瞬时状态，列举阶段给不出真值，
-        // 与其列一条空白的不如不列。
+        // 同 clip：列举阶段不查词库，否则前缀导航会把 N 次词库查询摊到按键线程上。
+        // 代价是 `cofc` 这类反查命令前缀列举时求值为空被丢弃，只在打全码时出现；它们的
+        // display 本就依赖剪贴板等瞬时状态，列举阶段给不出真值。
         String::new()
     }
     fn sel(&self) -> String {
@@ -969,7 +929,7 @@ const WEEKDAY_CN: [&str; 7] = ["日", "一", "二", "三", "四", "五", "六"];
 fn expand_var(name: &str, now: &DateTime<Local>) -> Option<String> {
     Some(match name {
         "Y" => now.year().to_string(),
-        // `$YYYY`（补零四位）/ `$YY`（后两位）与快捷输入格式表的 `year_var` **同名同义**。
+        // `$YYYY`（补零四位）/ `$YY`（后两位）与快捷输入格式表的 `year_var` 同名同义。
         // 短语层绑系统当前时间，年份恒是四位，故 `$YYYY` 与 `$Y` 实际同值——但仍必须有：
         // 少一个名字，用户把格式表里的 `$YYYY-$MM-$DD` 抄进短语就会命中「未知变量」，
         // 整条短语静默作废（`expand_template` 的 `?`），症状是「这条短语打不出来」且日志干净。
@@ -989,15 +949,9 @@ fn expand_var(name: &str, now: &DateTime<Local>) -> Option<String> {
         "YC" => wind_quick_input::year_to_chinese(now.year()),
         "MC" => wind_quick_input::small_int_to_chinese(now.month()),
         "DC" => wind_quick_input::small_int_to_chinese(now.day()),
-        // 农历（`$LMD` `$LY` `$LZ` `$LM` `$LD` `$LF`）：与快捷输入的日期候选共用
-        // 同一份换算，差别只在数据源——这里绑当前时间，那边绑用户打进去的日期。
-        //
-        // 系统日期超出 1900–2100 时**换算不出**农历 → None（整条短语被跳过），
-        // 免得 `农历$LMD` 只剩「农历」二字上屏。
-        //
-        // 而 `$LF` 在非节日返回**空串**（不是 None）：`$LY年$LMD$LF` 平常日子应给出
-        // 「丙午年四月廿九」、端午当天给出「…端午节」——追加式写法是实际意图，
-        // 让整条消失没人想要。两种「没有值」的分工见 `wind_quick_input::lunar::var`。
+        // 农历变量：与快捷输入的日期候选共用同一份换算，这里绑当前时间。系统日期超出
+        // 1900–2100 时换算不出 → None（整条跳过）；`$LF` 非节日返回空串而非 None，让
+        // `$LY年$LMD$LF` 这类追加式写法平常日子照常出。分工见 `wind_quick_input::lunar::var`。
         n if wind_quick_input::lunar::is_var(n) => {
             let d = wind_quick_input::lunar::solar_to_lunar(now.year(), now.month(), now.day())?;
             wind_quick_input::lunar::var(n, &d)?
