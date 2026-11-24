@@ -1,13 +1,12 @@
-//! 联想两处缺口（论坛 t185）：
+//! 联想的两处接线：
 //!
-//! - **A**：词语联想只查系统词库的反查索引，用户词库 / 临时词在联想里永远不出现。
-//! - **B**：满码唯一自动上屏（`auto_commit_at_full`）走 `InputOutcome::AutoCommit` 出口，
-//!   绕过了 `commit_selected` 末尾的联想接线 ⇒ 开了自动上屏的五笔用户单字上屏后没有联想。
+//! - A：词语联想要查用户词库 / 临时词，不只系统词库的反查索引。
+//! - B：满码唯一自动上屏（`auto_commit_at_full`）走 `InputOutcome::AutoCommit` 出口，
+//!   不经 `commit_selected`，也要接上联想。
 //!
-//! 夹具取楼主真机场景：wubi86，`awsk` = 「荷」（全码唯一），用户词「荷载」（`awfa`，
-//! 系统词库里该码只有「花卉」）。
+//! 夹具：wubi86，`awsk` = 「荷」（全码唯一），用户词「荷载」（`awfa`，系统词库里该码只有「花卉」）。
 //!
-//! 词典缺失时自动跳过（`build_dev/data` 不存在时整族静默跳过而计数照绿，判据是耗时）。
+//! `build_dev/data` 不存在时整族静默跳过而计数照绿（判据是耗时）。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -56,7 +55,7 @@ fn committed(act: &KeyAction) -> Option<&str> {
     }
 }
 
-/// 上屏动作是否**带了占位组合**——联想态能收到后续按键的命门。
+/// 上屏动作是否带了占位组合——联想态能收到后续按键的命门。
 fn opened_composition(act: &KeyAction) -> bool {
     match act {
         KeyAction::CommitThenDeferComposition {
@@ -108,7 +107,7 @@ fn coord_with(
     (c, store)
 }
 
-/// ★ B：满码唯一自动上屏之后要进联想态（与手动选词上屏一致）。
+/// B：满码唯一自动上屏之后要进联想态（与手动选词上屏一致）。
 #[test]
 fn auto_commit_at_full_enters_assoc() {
     if !dict_ready() {
@@ -146,7 +145,7 @@ fn auto_commit_at_full_respects_assoc_off() {
     assert!(c.debug_assoc_texts().is_empty());
 }
 
-/// ★ A：用户词参与词语联想，且排在系统词之前。
+/// A：用户词参与词语联想，且排在系统词之前。
 #[test]
 fn user_word_joins_word_assoc_ahead_of_system() {
     if !dict_ready() {
@@ -170,7 +169,7 @@ fn user_word_joins_word_assoc_ahead_of_system() {
     );
 }
 
-/// ★ A：运行中新增的用户词不必重启就能进联想（写代次过期 → 后台重建）。
+/// A：运行中新增的用户词不必重启就能进联想（写代次过期 → 后台重建）。
 ///
 /// 过期时本次联想先用旧索引（不在按键线程上重建），重建完成后下一次上屏即可见。
 #[test]
@@ -197,7 +196,7 @@ fn user_word_added_at_runtime_joins_word_assoc() {
     }
 }
 
-/// ★ A：临时词也参与（排在系统词之后补位）。
+/// A：临时词也参与（排在系统词之后补位）。
 #[test]
 fn temp_word_joins_word_assoc() {
     if !dict_ready() {
@@ -233,7 +232,7 @@ fn assoc_after_he(c: &Coordinator) -> Vec<String> {
     c.debug_assoc_texts()
 }
 
-/// ★ 方案 A：选词次数（FREQ）在档内重排。系统序「荷兰(1633) > 荷花(1298)」，
+/// 方案 A：选词次数（FREQ）在档内重排。系统序「荷兰(1633) > 荷花(1298)」，
 /// 用户平时打过十次「荷花」⇒ 联想里「荷花」到「荷兰」前面。
 #[test]
 fn freq_reranks_system_words_within_tier() {
@@ -262,10 +261,8 @@ fn freq_reranks_system_words_within_tier() {
     assert!(got.iter().any(|t| t == "荷兰"), "荷兰仍在：{got:?}");
 }
 
-/// 反向对照：调频关、只记次数（`record_always`，论坛 t278）⇒ 次数**不得**改联想顺序。
-///
-/// 写端放开后库里就有了数据；联想打分若不查 `enabled`，用户「只想记、不想调」的
-/// 联想顺序会被悄悄改掉。
+/// 反向对照：调频关、只记次数（`record_always`）⇒ 次数不得改联想顺序；联想打分若不查
+/// `enabled`，用户「只想记、不想调」的联想顺序会被悄悄改掉。
 #[test]
 fn record_always_freq_does_not_rerank_assoc() {
     if !dict_ready() {
@@ -293,7 +290,7 @@ fn record_always_freq_does_not_rerank_assoc() {
     );
 }
 
-/// ★ 临时词门槛：count=1 只在系统词之后补位；count≥2 进个人档（用户词之后、系统词之前）。
+/// 临时词门槛：count=1 只在系统词之后补位；count≥2 进个人档（用户词之后、系统词之前）。
 #[test]
 fn temp_word_needs_reuse_to_enter_personal_tier() {
     if !dict_ready() {
@@ -326,7 +323,7 @@ fn temp_word_needs_reuse_to_enter_personal_tier() {
     );
 }
 
-/// ★ 自动造词噪声（一堆 count=1 的临时词）不挤掉系统词；个人档内按 count 而非字典序排。
+/// 自动造词噪声（一堆 count=1 的临时词）不挤掉系统词；个人档内按 count 而非字典序排。
 #[test]
 fn temp_noise_does_not_displace_system_words() {
     if !dict_ready() {
@@ -371,7 +368,7 @@ fn pick_assoc(c: &Coordinator, word: &str) -> String {
     committed(&act).unwrap_or_default().to_string()
 }
 
-/// ★ 方案 B（History）：在「荷」之后选过两次「荷枪实弹」，第三次上屏「荷」后它排第一，且不重复出现。
+/// 方案 B（History）：在「荷」之后选过两次「荷枪实弹」，第三次上屏「荷」后它排第一，且不重复出现。
 #[test]
 fn assoc_history_promotes_picked_word() {
     if !dict_ready() {
@@ -400,7 +397,7 @@ fn assoc_history_promotes_picked_word() {
     );
 }
 
-/// History 只记在**它的上文**下：「荷」之后选的，不影响别的上文。
+/// History 只记在它的上文下：「荷」之后选的，不影响别的上文。
 #[test]
 fn assoc_history_is_keyed_by_context() {
     if !dict_ready() {
@@ -420,7 +417,7 @@ fn assoc_history_is_keyed_by_context() {
     );
 }
 
-/// ★ History 读端过滤存在性：从补位档选过的临时词经 History 前置；删掉它之后不再出现
+/// History 读端过滤存在性：从补位档选过的临时词经 History 前置；删掉它之后不再出现
 /// （历史表本身不随删词级联清理）。
 #[test]
 fn assoc_history_drops_deleted_words() {
@@ -468,7 +465,7 @@ fn assoc_history_drops_deleted_words() {
     );
 }
 
-/// ★ History 先过滤存在性再截名额：一批已删掉（词库里没有）的高分历史词不得挤掉
+/// History 先过滤存在性再截名额：一批已删掉（词库里没有）的高分历史词不得挤掉
 /// 排在它们后面的有效历史。旧实现先按 limit 截断再过滤，名额被死词永久占住。
 #[test]
 fn assoc_history_deleted_words_do_not_hold_slots() {
@@ -496,7 +493,7 @@ fn assoc_history_deleted_words_do_not_hold_slots() {
     );
 }
 
-/// ★ 拼音方案：FREQ 的键是候选码（无分隔的全拼，如 `zhongguowenhua`），联想查 FREQ 用的
+/// 拼音方案：FREQ 的键是候选码（无分隔的全拼，如 `zhongguowenhua`），联想查 FREQ 用的
 /// 反查索引码与之同形 ⇒ 正常打字选过的词在联想里上浮。
 #[test]
 fn pinyin_freq_reranks_assoc() {

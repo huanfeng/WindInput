@@ -1,16 +1,15 @@
-//! 按应用方案（compat.toml `[[apps]] schema`，C0-7 / C3-3，GH#80）端到端：焦点切入切换、
-//! 手切分流、热重载交互、往返热键、菜单写盘。
+//! 按应用方案（compat.toml `[[apps]] schema`）端到端：焦点切入切换、手切分流、热重载交互、
+//! 往返热键、菜单写盘。
 //!
-//! 走真实的焦点事件、菜单分派、按键与 `reload_user_config`，而手切会写 `schema.active`，
-//! 故整棵目录树经**便携标记**重定向到临时目录（`WIND_INSTALL_ROOT` + `portable_mode`）：
-//! 用户层 = `<root>/userdata`、本机状态 = `<root>/localdata`，一个进程只能重定向一次，
-//! 故单开测试二进制；用例共用这棵树，用 `LOCK` 串行、每条开头重写 config.toml / compat.toml。
+//! 手切会写 `schema.active`，故整棵目录树经便携标记重定向到临时目录（`WIND_INSTALL_ROOT` +
+//! `portable_mode`）：用户层 = `<root>/userdata`、本机状态 = `<root>/localdata`。一个进程只能
+//! 重定向一次，故单开测试二进制；用例共用这棵树，用 `LOCK` 串行、每条开头重写 config.toml / compat.toml。
 //!
-//! ⚠️ 本用例**不依赖 `build_dev/data`**：三个码表方案 za / zb / zc 全部自造，不会静默跳过。
+//! 不依赖 `build_dev/data`：三个码表方案 za / zb / zc 全部自造，不会静默跳过。
 //! 焦点进程名经 `FocusData::bundle_id` 注入（Linux 下 `process_name` 恒空，这是 host 上
 //! 唯一够得着 `pid_names` 的公开入口；macOS 生产路径也正是它）。
 //!
-//! headless 构造不预热，非活跃方案都是**冷**的 ⇒ 焦点切入走「后台加载、完成后再切」那条路，
+//! headless 构造不预热，非活跃方案都是冷的 ⇒ 焦点切入走「后台加载、完成后再切」那条路，
 //! 每次切入后 `debug_wait_app_schema_load` 等它落定。
 
 use std::path::{Path, PathBuf};
@@ -27,7 +26,7 @@ static LOCK: Mutex<()> = Mutex::new(());
 fn root() -> &'static Path {
     static ROOT: OnceLock<PathBuf> = OnceLock::new();
     ROOT.get_or_init(|| {
-        // ⚠️ 目录名带 pid：多 worktree / 多会话并行跑测试时固定名会互删夹具。
+        // 目录名带 pid：多 worktree / 多会话并行跑测试时固定名会互删夹具。
         let root = std::env::temp_dir().join(format!("wind_app_schema-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let schemas = root.join("data/schemas");

@@ -4,12 +4,11 @@ use std::sync::Arc;
 use wind_config::config::Config;
 
 /// 三个方案的临时 data 目录：
-/// - `zzp_own`：自带表（`.`→`·`；`;` 的**英半列**→`#`）
+/// - `zzp_own`：自带表（`.`→`·`；`;` 的英半列→`#`）
 /// - `zzp_follow`：不写 `[punct]` ⇒ 跟随全局
-/// - `english`：临英的数据归属方案，自带**另一张**表（`.`→`!`）
+/// - `english`：临英的数据归属方案，自带另一张表（`.`→`!`）
 ///
-/// 三张表在同一个源字符 `.` 上取值**互不相同**——这是本组用例能测出差别的前提。
-/// 若让它们碰巧同值，「取错了方案」和「取对了」会给出一样的断言结果。
+/// 三张表在 `.` 上取值互不相同，「取错方案」与「取对」才给出不同的断言结果。
 fn data_dir(tag: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("wind_punct_scope_{}_{tag}", std::process::id()));
     let schemas = dir.join("schemas");
@@ -35,7 +34,7 @@ fn data_dir(tag: &str) -> std::path::PathBuf {
     dir
 }
 
-/// 全局表里有一行 `,`→`G`，且与三个方案表的键**不重叠**——于是「全局那行还在不在」
+/// 全局表里有一行 `,`→`G`，且与三个方案表的键不重叠——于是「全局那行还在不在」
 /// 就直接回答了「整表替换有没有真的整表」。
 fn coord_at(dir: &std::path::Path, active: &str) -> Arc<Coordinator> {
     let mut cfg = Config::default();
@@ -62,10 +61,9 @@ fn cn_half(c: &Coordinator, mode: Option<ModeKind>, ch: char) -> Option<String> 
     conv.peek_custom(&punct, ch, 0)
 }
 
-/// ★ 方案声明了表 ⇒ 全局表**整份**不参与。
+/// 方案声明了表 ⇒ 全局表整份不参与。
 ///
-/// 两条断言缺一不可：只断言「方案的行生效」的话，逐键合并的实现照样通过——
-/// 真正区分两种模型的是**全局那行还在不在**。
+/// 只断言「方案的行生效」的话，逐键合并的实现照样通过；区分两种模型的是全局那行还在不在。
 #[test]
 fn schema_table_replaces_global_table_wholesale() {
     let dir = data_dir("own");
@@ -99,11 +97,9 @@ fn schema_without_table_follows_global() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// ★★ 归属方案是 `effective_data_schema` 而**不是**活跃方案。
+/// 归属方案是 `effective_data_schema` 而不是活跃方案。
 ///
-/// 活跃方案是 `zzp_own`（`.`→`·`），进临英后必须换成 `english` 方案那张（`.`→`!`）。
-/// 三张表在 `.` 上各不相同，故「取错方案」与「取对」给出的值互不相同——若让 english
-/// 也写 `·`，把实现改成按活跃方案取，这条照样绿。
+/// 活跃方案是 `zzp_own`（`.`→`·`），进临英后必须换成 `english` 那张（`.`→`!`）。
 #[test]
 fn temp_english_takes_english_schema_table() {
     let dir = data_dir("temp");
@@ -124,11 +120,10 @@ fn temp_english_takes_english_schema_table() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// ★★ 推给 DLL 的吃键集是**跨方案并集**，不随活跃方案变。
+/// 推给 DLL 的吃键集是跨方案并集，不随活跃方案变。
 ///
-/// `;` 的英半列只有 `zzp_own` 配了，而这里的活跃方案是 `zzp_follow`。按活跃方案裁剪
-/// 的话它不在集合里 ⇒ 切到 `zzp_own` 后 DLL 手里还是旧表（`CONFIG_KEY_CUSTOM_EN_PUNCT`
-/// 只在握手与热重载时推），表现为「刚切完方案这个键不灵」。
+/// `;` 的英半列只有 `zzp_own` 配了，而活跃方案是 `zzp_follow`。按活跃方案裁剪的话，切到
+/// `zzp_own` 后 DLL 手里还是旧表（`CONFIG_KEY_CUSTOM_EN_PUNCT` 只在握手与热重载时推）。
 #[test]
 fn en_punct_eat_set_is_cross_schema_union() {
     let dir = data_dir("union");
@@ -145,9 +140,7 @@ fn en_punct_eat_set_is_cross_schema_union() {
 }
 
 /// 守门：`english_pairs_via_pipeline` 直调 `PunctuationConverter::peek_custom`（wind-transform），
-/// **绕过了 wind-punct 那层签名收窄** ⇒ 它漏接生效表时不会编译失败，只会静默按全局表
-/// 判定英文配对。这条测试补上那个缺口。
-///
+/// 绕过了 wind-punct 那层签名收窄，漏接生效表时不会编译失败，只会静默按全局表判定英文配对。
 /// 再出现这种直调时，要么收编进 wind-punct，要么照此加一条。
 #[test]
 fn english_pairs_pipeline_uses_effective_punct() {

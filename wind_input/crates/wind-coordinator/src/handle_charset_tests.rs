@@ -1,11 +1,10 @@
-//! 这些测试走的是**设置页会走的那条链**：
+//! 走设置页的那条链：
 //!
 //! ```text
 //! charset_edit / charset_import_file → store → rebuild_charsets（装配）→ verdict_of
 //! ```
 //!
-//! ⚠️ store 在**临时目录**里（`new_headless_with_ui_at`），绝不碰开发者真实的
-//! `%APPDATA%`——那样不仅留垃圾，留下的记录还会反过来影响下一次测试。
+//! store 在临时目录（`new_headless_with_ui_at`），不碰真实 `%APPDATA%`：残留记录会影响下一次测试。
 
 use super::*;
 use crate::Coordinator;
@@ -40,8 +39,8 @@ fn tmp_user_dir(tag: &str) -> PathBuf {
 
 /// 带出厂字符类 + 临时 store 的 headless coordinator。
 ///
-/// 返回的目录同时当导出落点（`charset_export_*_to`）：⛔ 测试不许调用不带 `_to`
-/// 的版本，那会写进真实的 `%TEMP%/WindInput/charsets/`，覆盖用户正在改的文件。
+/// 返回的目录兼作导出落点（`charset_export_*_to`）：测试不许调不带 `_to` 的版本，
+/// 那会写进真实的 `%TEMP%/WindInput/charsets/`。
 fn coord(tag: &str) -> (Arc<Coordinator>, PathBuf) {
     let user = tmp_user_dir(tag);
     let (c, _rx) =
@@ -63,10 +62,9 @@ fn stored(c: &Coordinator, key: &str) -> Option<String> {
     c.store.as_ref().unwrap().get_charset_doc(key).unwrap()
 }
 
-/// ★★ 改 emoji 类的 `default` 到候选判定生效，一条链走通。
+/// 改 emoji 类的 `default` 到候选判定生效，一条链走通。
 ///
-/// 出厂时 emoji 类**不表态**（`default` 空），故 `😀` 兜底判常用；用户把它设成生僻之后
-/// 立刻改判——不需要重启、不需要切方案。
+/// 出厂 emoji 类不表态（`default` 空），`😀` 兜底判常用；设成生僻后立刻改判，无需重启或切方案。
 #[test]
 fn setting_a_class_default_reaches_the_verdict() {
     let (c, user) = coord("default");
@@ -85,7 +83,7 @@ fn setting_a_class_default_reaches_the_verdict() {
     assert!(!is_common(&c, "😀"), "改完 default 应立即生效");
     assert!(is_common(&c, "我"), "常用汉字不该被带累");
 
-    // ⚠️ 真的落库了，而不是只改了内存镜像。
+    // 真的落库了，而不是只改了内存镜像。
     let text = stored(&c, "emoji").expect("改动必须落库，否则重启就没了");
     assert!(text.contains("default: rare"));
     assert!(
@@ -97,10 +95,9 @@ fn setting_a_class_default_reaches_the_verdict() {
     let _ = std::fs::remove_dir_all(&user);
 }
 
-/// `inherit` 是「本层不表态」，与显式设成常用**不是一回事**。
+/// `inherit` 是「本层不表态」，与显式设成常用不是一回事。
 ///
-/// 前者跟随出厂更新（出厂哪天给 emoji 定了调，用户跟着走），后者钉死。二者在 UI 上是
-/// 三个不同的档，判据是「库里还有没有 default 这一行」。
+/// 前者跟随出厂更新，后者钉死；判据是库里还有没有 default 这一行。
 #[test]
 fn inherit_removes_the_opinion_rather_than_pinning_it() {
     let (c, user) = coord("inherit");
@@ -202,10 +199,9 @@ fn disabling_a_class_removes_it_and_enabling_brings_it_back() {
     let _ = std::fs::remove_dir_all(&user);
 }
 
-/// ★★ 停用的类**仍要出现在列表里**，否则「停用」是不可逆的。
+/// 停用的类仍要出现在列表里，否则「停用」不可逆。
 ///
-/// 停用的类不在 registry 里（装配时就 remove 了）。只列 registry 的话，用户点完停用
-/// 那一行就从界面上消失了，再也没有入口把它启用回来——而库里它还在。
+/// 停用的类装配时已从 registry 移除；只列 registry 的话，那一行消失后就没有入口启用回来。
 #[test]
 fn a_disabled_class_stays_visible_so_it_can_be_re_enabled() {
     let (c, user) = coord("visible");
@@ -286,9 +282,7 @@ fn editing_an_unknown_class_fails_loudly() {
     let _ = std::fs::remove_dir_all(&user);
 }
 
-/// `default` 只认三个值，别的当场报错。
-///
-/// ⚠️ 静默忽略非法值的表现是「点了没反应」，而 RPC 调用方（设置页）拿不到任何线索。
+/// `default` 只认三个值，别的当场报错：静默忽略的表现是「点了没反应」，设置页拿不到线索。
 #[test]
 fn an_invalid_default_value_is_rejected() {
     let (c, user) = coord("badvalue");
@@ -405,7 +399,7 @@ fn creating_an_empty_class() {
     let _ = std::fs::remove_dir_all(&user);
 }
 
-/// ⛔ 出厂类不能删——删了会"恢复"而不是消失，用户以为删了、列表里还在。
+/// 出厂类不能删——删了会"恢复"而不是消失，用户以为删了、列表里还在。
 #[test]
 fn deleting_a_factory_class_is_refused() {
     let (c, user) = coord("nodelete");
@@ -416,13 +410,10 @@ fn deleting_a_factory_class_is_refused() {
     let _ = std::fs::remove_dir_all(&user);
 }
 
-/// ★★ 新建的类缺省 `order` 必须压过**所有出厂类**，且判据读的是仓里真实的
-/// `data/charsets/`，不是记在这里的一个数字。
+/// 新建类的缺省 `order` 必须压过所有出厂类，判据读仓里真实的 `data/charsets/`。
 ///
-/// 背景见 [`NEW_CLASS_ORDER`]：缺省的 100 压不过 `common_han`（10），用户新建一个类
-/// 想把几个生僻汉字设成常用会**一点反应都没有**，而这条路连 warn 都收不到
-/// （`shadowed_keys` 只比对区间型的 ranges）。出厂哪天把某个类的 order 调小，
-/// 这条测试当场红，而不是等用户来报「配了没反应」。
+/// 见 [`NEW_CLASS_ORDER`]：压不过 `common_han` 时，用户新建类把生僻字设成常用会毫无反应，
+/// 且没有 warn（`shadowed_keys` 只比对 ranges）。出厂调小某类 order 时这条当场红。
 #[test]
 fn a_new_class_outranks_every_factory_class() {
     let (c, user) = coord("new_order");

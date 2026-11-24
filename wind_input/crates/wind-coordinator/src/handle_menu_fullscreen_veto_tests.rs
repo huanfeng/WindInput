@@ -1,4 +1,4 @@
-//! 全屏否决项与**全屏复查线程的开销闸**（`coordinator/fullscreen_watch.rs`）。
+//! 全屏否决项与全屏复查线程的开销闸（`coordinator/fullscreen_watch.rs`）。
 //!
 //! 复查线程本身要问系统前台，跨平台跑不了；能锁住、也正是它依赖的两条性质在这里测：
 //! 缓存翻转的两个方向都会重算可见性，以及闸门与显示判据同源。
@@ -38,12 +38,10 @@ fn last_toolbar(rx: &std::sync::mpsc::Receiver<UiCommand>) -> Option<bool> {
     last
 }
 
-/// ★ 本次修的那条：全屏缓存翻转的**两个方向**都要重算可见性。
+/// 全屏缓存翻转的两个方向都要重算可见性：进全屏收走工具栏，退出全屏放回来。
 ///
-/// 复查线程的全部价值就在这两个方向上——进全屏要把工具栏收走（GH#134：浏览器全屏
-/// 播放视频时工具栏一直显示），退出全屏要把它放回来。只测进不测退的话，一个「进全屏
-/// 隐藏、此后永不恢复」的实现照样绿，而那种缺陷比原缺陷更难查：用户看到的是工具栏
-/// 莫名其妙消失了。
+/// 只测进不测退的话，「进全屏隐藏、此后永不恢复」的实现照样绿，而用户看到的是工具栏
+/// 莫名消失。
 #[test]
 fn fullscreen_hides_and_leaving_it_restores_the_toolbar() {
     let (c, rx) = coord();
@@ -60,7 +58,7 @@ fn fullscreen_hides_and_leaving_it_restores_the_toolbar() {
 }
 
 /// `ui.toolbar.hide_in_fullscreen=false` 时全屏不改变工具栏显隐——那是用户偏好，
-/// 探测照常进行（同一次探测还要给候选窗的独占全屏判据刷值），但**不作用于**工具栏。
+/// 探测照常进行（同一次探测还要给候选窗的独占全屏判据刷值），但不作用于工具栏。
 #[test]
 fn hide_in_fullscreen_off_keeps_the_toolbar_visible() {
     let mut cfg = Config::default();
@@ -82,7 +80,7 @@ fn hide_in_fullscreen_off_keeps_the_toolbar_visible() {
     );
 }
 
-/// 复查线程的开销闸必须与 `notify_toolbar` 的显示判据**同源**：三项里任一为假就关闸
+/// 复查线程的开销闸必须与 `notify_toolbar` 的显示判据同源：三项里任一为假就关闸
 /// （工具栏本就不显示，前台全不全屏无人关心）。闸比判据窄会让复查漏掉该管的场景。
 #[test]
 fn watch_gate_follows_the_three_way_conjunction() {
@@ -103,10 +101,9 @@ fn watch_gate_follows_the_three_way_conjunction() {
     }
 }
 
-/// ★ 单飞闸必须被归还——`ProbeGate` 的 `Drop` 是唯一的归还点。
+/// 单飞闸必须被归还——`ProbeGate` 的 `Drop` 是唯一的归还点。
 ///
-/// 攥死的后果不是少探一次，而是此后**所有**探测（焦点事件的与复查线程的）全部
-/// early return，全屏缓存永久冻结 —— 症状与 GH#134 一模一样，只是不可恢复。
+/// 攥死的后果是此后所有探测（焦点事件的与复查线程的）全部 early return，全屏缓存永久冻结。
 #[test]
 fn the_probe_gate_is_always_returned() {
     let (c, _rx) = coord();
@@ -119,10 +116,10 @@ fn the_probe_gate_is_always_returned() {
     assert!(c.try_take_probe_gate(), "析构后闸必须已归还");
 }
 
-/// ★ 提交一次探测结果：缓存翻转要落进去，并重算工具栏可见性。
+/// 提交一次探测结果：缓存翻转要落进去，并重算工具栏可见性。
 ///
-/// 非 Windows 上 `foreground_fullscreen_kind` 恒 `None`，故这里直接喂形态给
-/// `commit_fullscreen_kind`，测的正是复查线程与焦点探测线程共用的那段提交逻辑。
+/// 非 Windows 上 `foreground_fullscreen_kind` 恒 `None`，故直接喂形态给 `commit_fullscreen_kind`，
+/// 测复查线程与焦点探测线程共用的那段提交逻辑。
 #[test]
 fn commit_writes_the_cache_and_recomputes_the_toolbar() {
     let (c, rx) = coord();
@@ -138,11 +135,10 @@ fn commit_writes_the_cache_and_recomputes_the_toolbar() {
     assert_eq!(last_toolbar(&rx), Some(true), "退出全屏应把工具栏放回来");
 }
 
-/// ★ 复查线程那条提交**只动 `fullscreen_cached`**，不得碰独占位。
+/// 复查线程那条提交只动 `fullscreen_cached`，不得碰独占位。
 ///
-/// 它刻意不问判据①（那是跨进程 RPC，不能按拍反复发），所以手里根本没有独占位的
-/// 新值；顺手清掉的话，正在放 PPT / 跑独占全屏游戏的机器会被误判成「不独占」，
-/// 候选窗随即弹进独占全屏里——那是本仓有实测冻死记录的一格。
+/// 它刻意不问判据①（跨进程 RPC，不能按拍反复发），手里没有独占位的新值；顺手清掉的话，
+/// 放 PPT / 跑独占全屏游戏的机器会被误判成「不独占」，候选窗弹进独占全屏会冻死。
 #[test]
 fn the_periodic_commit_never_touches_the_exclusive_bit() {
     let (c, _rx) = coord();
@@ -159,12 +155,11 @@ fn the_periodic_commit_never_touches_the_exclusive_bit() {
     );
 }
 
-/// ★★ `Covering → D3dExclusive`：`is_fs` 两端都是真、**不翻转**，但工具栏必须重算。
+/// `Covering → D3dExclusive`：`is_fs` 两端都是真、不翻转，但工具栏必须重算。
 ///
-/// 独占全屏经 `ui_suppressed_by_host()` 单独否决工具栏，且不受 `hide_in_fullscreen`
-/// 开关管（工具栏弹在独占全屏上会把游戏踢出独占态，Dota 2 实测冻死）。只看 `is_fs`
-/// 翻转的实现在这一步什么都不做 —— 无边框全屏的游戏切独占、PPT 从最大化窗口进放映，
-/// 工具栏就留在上面；反向退出放映则是它再也回不来。
+/// 独占全屏经 `ui_suppressed_by_host()` 单独否决工具栏，不受 `hide_in_fullscreen` 管（弹在
+/// 独占全屏上会把游戏踢出独占态）。只看 `is_fs` 翻转的实现在此什么都不做：无边框切独占、
+/// PPT 进放映时工具栏留在上面，退出放映时它再也回不来。
 #[test]
 fn switching_from_covering_to_exclusive_still_recomputes() {
     let mut cfg = Config::default();
@@ -195,10 +190,10 @@ fn switching_from_covering_to_exclusive_still_recomputes() {
     );
 }
 
-/// ★★ 闸门**不含**全屏否决：工具栏正因全屏而隐藏时，复查必须继续跑。
+/// 闸门不含全屏否决：工具栏正因全屏而隐藏时，复查必须继续跑。
 ///
-/// 把全屏也写进闸门是这段逻辑最容易犯的错——一旦那样，进全屏 → 工具栏隐藏 → 闸门
-/// 关闭 → 再没人去看「用户退出全屏了没有」，工具栏就永远回不来了。
+/// 把全屏写进闸门的话：进全屏 → 工具栏隐藏 → 闸门关闭 → 再没人看用户退没退出全屏，
+/// 工具栏永远回不来。
 #[test]
 fn watch_gate_stays_open_while_hidden_by_fullscreen() {
     let (c, _rx) = coord();

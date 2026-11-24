@@ -38,10 +38,9 @@ fn auto_space_prefix_is_stripped_before_feeding_the_draft() {
     assert!(!feed(false), "用户自己打的空格照旧断流");
 }
 
-/// 单位换算：配置里是**小时**，存储层的 `ttl_secs` 要的是**秒**。
+/// 单位换算：配置里是小时，存储层的 `ttl_secs` 要的是秒。
 ///
-/// 漏掉 ×3600 不会让功能报错，只会让草稿在 24 **秒**后就被判过期——开关看着是开的，
-/// 用户却永远等不到一条草稿被用上。这类「只错在量纲上」的缺陷最难从行为上察觉，
+/// 漏掉 ×3600 不报错，只会让草稿 24 秒就过期——开关开着却永远用不上草稿；行为上难察觉，
 /// 故直接钉住换算本身。
 #[test]
 fn draft_ttl_is_hours_in_config_but_seconds_at_the_store() {
@@ -54,7 +53,7 @@ fn draft_ttl_is_hours_in_config_but_seconds_at_the_store() {
     assert_eq!(c.draft_ttl_secs(), 0);
 }
 
-/// 启动清理**不能误杀还没过期的草稿**。它跑在启动线程上、没有任何 UI 反馈，
+/// 启动清理不能误杀还没过期的草稿。它跑在启动线程上、没有任何 UI 反馈，
 /// 错删的表现是「昨天记下的词今天一条也召不回」，用户无从分辨是没记住还是被清了。
 #[test]
 fn startup_purge_keeps_drafts_that_are_still_fresh() {
@@ -71,7 +70,7 @@ fn startup_purge_keeps_drafts_that_are_still_fresh() {
     let _ = std::fs::remove_file(&db);
 }
 
-/// 两条早退：`TTL = 0`（永不过期）与**没有 store** 的宿主（测试 / 移动端裸构造）。
+/// 两条早退：`TTL = 0`（永不过期）与没有 store 的宿主（测试 / 移动端裸构造）。
 /// 它跑在启动线程上，这两条是它不会在那里 panic 的全部依据。
 #[test]
 fn startup_purge_is_a_quiet_noop_without_a_ttl_or_a_store() {
@@ -90,15 +89,11 @@ fn startup_purge_is_a_quiet_noop_without_a_ttl_or_a_store() {
     Coordinator::new_headless(cfg_with_ttl(24), None).purge_drafts_on_start();
 }
 
-/// **顶码也算「用过」**：顶码（打超满码长且整串无匹配）不是用户按选择键按出来的，
-/// 但词确实上屏了——少了这一跳，顶着草稿上屏的人永远打不出自己造的词。
+/// 顶码也算「用过」：顶码上屏不经选择键，但词确实上屏了；少了这一跳，顶着草稿上屏的人
+/// 永远打不出自己造的词（如双拼 `yivi` 空码造出「一直」，再打 `yivi` 由顶码上屏）。
 ///
-/// 症状原形（用户反馈）：双拼 `yivi` 是空码，滑窗造词把「一直」记进草稿；再打 `yivi`
-/// 由输入法自己上屏，走不到 `select_candidate` 那条手选路径，草稿于是永远停在草稿层。
-///
-/// 本条钉的是**出口那一步的接线**（`commit_top_text` 里对 `promote_draft_on_commit`
-/// 的调用）：lib 单测一律无词库、造不出真候选，故直接传 `draft_boundary: Some(_)`
-/// 模拟「顶出的首选是一条草稿候选」。
+/// 钉的是出口接线（`commit_top_text` 对 `promote_draft_on_commit` 的调用）：lib 单测无词库、
+/// 造不出真候选，故直接传 `draft_boundary: Some(_)` 模拟「顶出的首选是草稿候选」。
 #[test]
 fn auto_committed_top_candidate_promotes_the_draft() {
     let db = std::env::temp_dir().join("wind_draft_auto_commit_promote.redb");
@@ -157,11 +152,11 @@ fn auto_committed_top_candidate_promotes_the_draft() {
     let _ = std::fs::remove_file(&db);
 }
 
-/// **满码自动上屏 / 空码顶出**同样算「用过」：两条 `AutoCommit` 消费点都经过
+/// 满码自动上屏 / 空码顶出同样算「用过」：两条 `AutoCommit` 消费点都经过
 /// `promote_draft_on_auto_commit`，本条钉该 helper 的判据（按上屏文本找到草稿候选）。
 ///
-/// 这里不跑完整 `AutoCommit` 流程（那需要真词库与唯一码判定），只把手递到 helper：
-/// `state.candidates` 里放一条 `is_draft` 候选、文本与本次上屏一致。
+/// 不跑完整 `AutoCommit` 流程（需真词库与唯一码判定），只在 `state.candidates` 放一条
+/// 文本与本次上屏一致的 `is_draft` 候选，直接调 helper。
 #[test]
 fn auto_commit_outcome_promotes_the_draft_candidate() {
     let db = std::env::temp_dir().join("wind_draft_auto_commit_helper.redb");

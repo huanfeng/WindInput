@@ -1,11 +1,10 @@
-//! 出厂短语的**按平台取舍**与 Linux 上 `proc.any` 词条的端到端守门。
+//! 出厂短语的按平台取舍与 Linux 上 `proc.any` 词条的端到端守门。
 //!
 //! `system.phrases.toml` 里打开记事本 / 计算器 / 主目录这几条按平台各写一份
-//! （`platform = 'windows' / 'darwin' / 'linux'`）。过滤曾经写死只收 `windows`，于是
-//! Linux 与 macOS 上出的全是 `notepad.exe` / `calc.exe`——选中必然失败，而 darwin 那几条
-//! 从未生效过。
+//! （`platform = 'windows' / 'darwin' / 'linux'`），过滤须按当前平台收；只收 `windows` 时
+//! Linux 与 macOS 上出的全是 `notepad.exe` / `calc.exe`，选中必然失败。
 //!
-//! ⚠️ 短语读的是**仓库** `data/system.phrases.toml`，不是 `build_dev/data/` 那份部署产物
+//! 短语读的是仓库 `data/system.phrases.toml`，不是 `build_dev/data/` 那份部署产物
 //! （理由同 `builtin_reverse_phrase.rs`）；端到端那条（仅 `linux-host` 形态编译）另需
 //! `build_dev/data` 的五笔方案，缺失时带着备齐办法失败，不静默跳过。
 
@@ -139,10 +138,8 @@ fn raw_entries() -> Vec<RawPhrase> {
     toml::from_str::<RawFile>(&text).unwrap().phrases
 }
 
-/// ★ Windows 上的条目集与改动前**逐条一致**（含顺序、权重、位置、分类）。
-///
-/// 基准是旧过滤规则作用在同一份文件上：新加的 linux 条目在 Windows 上必须全被滤掉，
-/// 旧规则收的每一条新过滤也必须收。另在提交说明里记了一次与改动前那份文件的对拍。
+/// Windows 上的条目集与只收 `windows` 的旧过滤规则逐条一致（含顺序、权重、位置、分类）：
+/// 新加的 linux 条目在 Windows 上必须全被滤掉，旧规则收的每一条新过滤也必须收。
 #[test]
 fn windows_entries_are_identical_to_the_old_filter() {
     let old: Vec<_> = raw_entries()
@@ -165,11 +162,9 @@ fn windows_entries_are_identical_to_the_old_filter() {
     assert_eq!(new, old);
 }
 
-/// 出厂文件里**每个平台**的每条 `$CC` 都只调用已注册的函数、参数个数合法、具名参数在
-/// 白名单内。
+/// 出厂文件里每个平台的每条 `$CC` 都只调用已注册的函数、参数个数合法、具名参数在白名单内。
 ///
-/// darwin 条目此前从未在任何平台被加载过，这是它们第一次被检查；Linux / macOS 的
-/// 条目本机选不中（或选中也不跑），写错函数名的话用户侧只表现为「选了没反应」。
+/// 非本平台的条目本机选不中（或选中也不跑），写错函数名时用户侧只表现为「选了没反应」。
 #[test]
 fn every_platform_entry_calls_only_known_functions_with_valid_arity() {
     let reg = wind_cmdbar::Registry::full();
@@ -342,10 +337,10 @@ fn temp_root(tag: &str) -> PathBuf {
     d
 }
 
-/// ★ 非 Windows 用户升级：库里是旧过滤入库的 Windows 那一份（含 `notepad.exe`），
+/// 非 Windows 用户升级：库里是旧过滤入库的 Windows 那一份（含 `notepad.exe`），
 /// 协调器启动按新过滤重同步后，库里只剩本平台的条目，错平台的行一条不留。
 ///
-/// 走的是生产路径（构造期的哈希比对 + `sync_system_phrases`），不是直接调 store。
+/// 走生产路径（构造期的哈希比对 + `sync_system_phrases`），不是直接调 store。
 #[cfg(not(windows))]
 #[test]
 fn upgrade_resyncs_stale_windows_rows_off_windows() {
@@ -383,7 +378,7 @@ fn upgrade_resyncs_stale_windows_rows_off_windows() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// ★ Windows 用户升级：新过滤给出的条目集与旧库一致，重同步（无论是否触发）不增不删。
+/// Windows 用户升级：新过滤给出的条目集与旧库一致，重同步（无论是否触发）不增不删。
 #[test]
 fn windows_upgrade_keeps_every_row() {
     let root = temp_root("win_keep");
@@ -495,14 +490,13 @@ mod e2e {
     const THIS_TEST: &str = "e2e::typing_coca_launches_the_first_installed_calculator";
 
     /// PATH 里只有排第三、第四的两个计算器：打 `coca` 选中后，应当越过前两个（未安装）
-    /// 启动第三个，且**只**启动它。
+    /// 启动第三个，且只启动它。
     ///
-    /// 用例本体在**子进程**里跑（本测试二进制以 `--exact` 重新执行自己）：要换掉的 PATH 只
-    /// 设在子进程上，不碰本进程的全局环境——同一二进制里别的用例并行起协调器，进程内
-    /// `set_var` 与它们的 `getenv` 是数据竞争。
+    /// 用例本体在子进程里跑（本测试二进制以 `--exact` 重新执行自己）：PATH 只设在子进程上，
+    /// 进程内 `set_var` 与并行用例的 `getenv` 是数据竞争。
     ///
-    /// 变异判据：把 wind-phrase 的平台过滤改回只收 `windows`，候选变成 `calc.exe`、日志
-    /// 为空转红；把 `proc.any` 的首个成功即停去掉，日志多出 mate-calc 转红。
+    /// 变异判据：平台过滤改成只收 `windows` 时候选变成 `calc.exe`、日志为空转红；去掉
+    /// `proc.any` 的首个成功即停时日志多出 mate-calc 转红。
     #[test]
     fn typing_coca_launches_the_first_installed_calculator() {
         if let Some(root) = std::env::var_os(CHILD_ROOT_ENV) {

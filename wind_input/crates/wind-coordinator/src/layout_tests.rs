@@ -4,8 +4,8 @@ use wind_config::config::MixModeConfig;
 
 /// 造一份把各模式意图都设成指定值的配置。
 ///
-/// **不含特殊模式**——它的意图住在方案文件的 `[overlay]` 段，由 [`overlay_with`]
-/// 单独造出来经参数传入（见 `intent_for` 的 `overlay` 参数）。
+/// 不含特殊模式：它的意图住在方案文件的 `[overlay]` 段，由 [`overlay_with`] 单独造出、
+/// 经参数传入（见 `intent_for` 的 `overlay` 参数）。
 fn cfg_with(intent: LayoutIntent) -> Config {
     let mut c = Config::default();
     c.input.temp_pinyin.candidate_layout = intent;
@@ -25,8 +25,8 @@ fn cfg_with(intent: LayoutIntent) -> Config {
 /// 造一份 `[overlay]` 段快照（= 特殊模式那一路的配置来源）。
 /// 只考察「模式意图 + 全局基线」两层的简写：无手动值、方案无意见。
 ///
-/// 方案层与手动层是后加的（`docs/design/schema-scoped-behavior.md` §3），既有用例
-/// 考察的是模式层语义，用它保持原样可读——**不要**让每个既有断言都去写两个 `None`。
+/// 方案层与手动层见 `docs/design/schema-scoped-behavior.md` §3；用这个简写让模式层用例
+/// 不必每处都写两个 `None`。
 fn v_only_mode(mode: LayoutIntent, baseline: bool) -> bool {
     orientation_for(mode, None, LayoutIntent::Follow, bl(baseline)).vertical
 }
@@ -60,8 +60,7 @@ const MODES: &[ModeKind] = &[
 
 /// 全矩阵：每种模式 × 三种意图 × 两种基线。
 ///
-/// **`Follow` + 基线竖排是唯一能区分新旧语义的一格**（其余格三态与旧布尔表现相同）——
-/// 漏了它整个三态改造等于没测，故它在本用例里被显式断言而非顺带覆盖。
+/// `Follow` + 基线竖排是唯一能区分三态与旧布尔语义的一格，故显式断言而非顺带覆盖。
 #[test]
 fn every_mode_maps_intent_over_baseline() {
     for &mode in MODES {
@@ -114,7 +113,7 @@ fn add_word_outranks_active_mode() {
 }
 
 /// mix 下标越界（热重载删掉了该实例）回落 Follow，不猜方向、不 panic。
-/// 特殊模式侧的对应情形是**快照缺失**（该方案没有 `[overlay]` 段），同样回落。
+/// 特殊模式侧的对应情形是快照缺失（该方案没有 `[overlay]` 段），同样回落。
 #[test]
 fn out_of_range_instance_falls_back_to_follow() {
     let cfg = cfg_with(LayoutIntent::Vertical);
@@ -138,10 +137,7 @@ fn out_of_range_instance_falls_back_to_follow() {
     ));
 }
 
-/// 特殊模式的意图**只来自 `[overlay]` 快照**，与下标、与 `Config` 都无关。
-///
-/// 这条钉住的是本次下沉的核心：配置从 config.toml 的数组搬到了方案文件，
-/// 若有人把取值改回读 `cfg`，这里会红。
+/// 特殊模式的意图只来自 `[overlay]` 快照，与下标、与 `Config` 都无关；改回读 `cfg` 会红。
 #[test]
 fn special_mode_intent_comes_from_overlay_spec() {
     // cfg 里所有模式都是 Horizontal，快照是 Vertical——取值必须听快照的。
@@ -179,9 +175,9 @@ fn each_mode_reads_its_own_key() {
     }
 }
 
-/// 内置 quick_mix 出厂强制竖排（等价于旧 `quick_input.force_vertical = true`）。
-/// 守的是「默认值只能落在 default_mix_modes()、预置文件不写 mix_modes」这条约束——
-/// 若有人把默认改回 Follow，全局横排的用户会突然发现快捷输入变横排了。
+/// 内置 quick_mix 出厂强制竖排。
+/// 守「默认值只落在 default_mix_modes()、预置文件不写 mix_modes」：默认改成 Follow 的话，
+/// 全局横排的用户会发现快捷输入变横排了。
 #[test]
 fn builtin_quick_mix_defaults_to_vertical() {
     let cfg = Config::default();
@@ -197,10 +193,9 @@ fn add_word_defaults_to_vertical() {
     let cfg = Config::default();
     assert!(v_only_mode(intent_for(&cfg, None, None, true), false));
 }
-/// ★ 方案层：`Follow` 的语义是**「跟随下一层」**，不是「跟随全局基线」。
+/// 方案层：`Follow` 的语义是「跟随下一层」，不是「跟随全局基线」。
 ///
-/// 第一行是**唯一能区分新旧实现的一格**——旧实现里模式 `Follow` 直接取基线，
-/// 方案说了竖排也没用。漏了它，整个方案层等于没测。
+/// 第一行是唯一能区分的一格：模式 `Follow` 若直接取基线，方案说了竖排也没用。
 #[test]
 fn schema_layer_sits_between_manual_and_baseline() {
     use LayoutIntent::{Follow, Horizontal, Vertical};
@@ -268,8 +263,8 @@ fn schema_layer_sits_between_manual_and_baseline() {
 
 /// 方案层不得影响 `intent_for` 本身——它只回答「模式怎么想」。
 ///
-/// 分层的意义在于每层各答各的问题。若有人图省事把方案意图折进 `intent_for`，
-/// 「模式 Follow」与「模式没意见但方案有意见」就再也分不开，手动层无处插入。
+/// 若把方案意图折进 `intent_for`，「模式 Follow」与「模式没意见但方案有意见」就分不开，
+/// 手动层无处插入。
 #[test]
 fn intent_for_answers_mode_layer_only() {
     let cfg = cfg_with(LayoutIntent::Follow);
@@ -287,14 +282,10 @@ fn intent_for_answers_mode_layer_only() {
     }
 }
 
-/// ★★ 两根轴**真的正交**：切横竖不碰文字排列，改文字排列不碰横竖。
+/// 两根轴真的正交：切横竖不碰文字排列，改文字排列不碰横竖。
 ///
-/// 这是把旋转从 `LayoutIntent` 里拆出来的**主要收益**，也是唯一能证明它拆干净了的
-/// 断言。曾经旋转是 `LayoutIntent` 的第三个取值，于是「蒙古文用户想临时切一下竖排」
-/// 会把方案声明的旋转一并丢掉——切回来还是竖排，用户完全无法把它和刚才那次切换联系起来。
-///
-/// ⚠️ 断言必须比**整个** [`Orientation`]。只断言 `text` 没变的话，一个把 `vertical`
-/// 也一起写坏的实现照样通过。
+/// 旋转若混进 `LayoutIntent`，临时切一下竖排就会丢掉方案声明的旋转。
+/// 断言必须比整个 [`Orientation`]：只断言 `text` 没变，把 `vertical` 也写坏的实现照样通过。
 #[test]
 fn toggling_direction_never_touches_text_orientation() {
     use LayoutIntent::*;
@@ -329,8 +320,7 @@ fn toggling_direction_never_touches_text_orientation() {
 /// 竖排时文字排列必须归零——渲染端 `list_vertical` 同时看两位，
 /// `vertical && rotated` 是「既按竖排堆叠又整体转 90°」这种没有定义的状态。
 ///
-/// ★ 反向对照不可少：横排时**不得**归零，否则这条断言可以由「无条件清空」满足，
-/// 而那会让旋转功能整个失效。
+/// 反向对照不可少：横排时不得归零，否则「无条件清空」也能满足断言，而那会让旋转整个失效。
 #[test]
 fn vertical_normalizes_text_orientation_away() {
     for text in TextOrientation::ALL.iter().copied() {
@@ -353,9 +343,8 @@ fn vertical_normalizes_text_orientation_away() {
 
 /// 派生位的真值表。渲染端只看这两位，读侧一律走它们、不要自己判 `text != Normal`。
 ///
-/// ★ `upright` 必须蕴含 `rotated`：只有 `upright` 为真时，`list_vertical` 判的是
-/// `rotated` ⇒ 列表退回横排的 Row，而叶子已经被切成竖着的格，
-/// 候选会变成一行「每个字都躺倒」的乱码。
+/// `upright` 必须蕴含 `rotated`：否则 `list_vertical` 判 `rotated` 为假退回横排 Row，
+/// 而叶子已切成竖格，候选变成一行躺倒的字。
 #[test]
 fn derived_bits_match_the_axis() {
     let cases = [
@@ -376,9 +365,8 @@ fn derived_bits_match_the_axis() {
 
 /// 文字排列的字符串 round-trip（方案文件里手写的取值）。
 ///
-/// ★ 三个取值的字符串必须互不相同：只测 round-trip 的话，`as_str` 把直立也写成
-/// "rotated"、`from_str_or_normal` 再把 "rotated" 读成直立，两边一致、全绿，
-/// 而用户写的 rotated 会变成 upright。
+/// 三个取值的字符串必须互不相同：只测 round-trip 的话，`as_str` 与 `from_str_or_normal`
+/// 同时把直立错映成 "rotated" 也会全绿。
 #[test]
 fn text_orientation_string_round_trips() {
     for t in TextOrientation::ALL.iter().copied() {
@@ -403,13 +391,13 @@ fn text_orientation_string_round_trips() {
 /// `ui.candidate.layout`，两个方向对不上就会「重启后方向变了」。
 #[test]
 fn layout_string_round_trips() {
-    // ⚠️ 只有横竖两个：`ui.candidate.layout` 不承载文字排列那根轴
+    // 只有横竖两个：`ui.candidate.layout` 不承载文字排列那根轴
     // （承载了的话，`ime.toggle("layout")` 的写回会把方案意图覆盖掉）。
     const ALL: [Orientation; 2] = [Orientation::HORIZONTAL, Orientation::VERTICAL];
     for o in ALL {
         assert_eq!(Orientation::from_layout_str(o.layout_str()), o);
     }
-    // ★ 取值的字符串必须**互不相同**。只测 round-trip 的话，两个取值写成同一个串、
+    // 取值的字符串必须互不相同。只测 round-trip 的话，两个取值写成同一个串、
     // 再原样读回来，两边一致、round-trip 全绿——而用户选的方向会在重启后变成另一个。
     let names: std::collections::BTreeSet<&str> = ALL.iter().map(|o| o.layout_str()).collect();
     assert_eq!(names.len(), ALL.len(), "取值字符串撞了：{names:?}");
@@ -423,7 +411,7 @@ fn layout_string_round_trips() {
         Orientation::VERTICAL,
         "大小写不敏感"
     );
-    // ★ 旋转/直立**不从这个键来**：写进去也只当未知值按横排处理。
+    // 旋转/直立不从这个键来：写进去也只当未知值按横排处理。
     assert_eq!(
         Orientation::from_layout_str("rotated"),
         Orientation::HORIZONTAL,

@@ -25,11 +25,8 @@ fn texts(c: &[Candidate]) -> Vec<&str> {
     c.iter().map(|x| x.text.as_str()).collect()
 }
 
-/// 真机场景一：`hen`。很/恨/狠/痕 是常用精确解，佷/𬣳 是生僻字。
-/// 英文插在常用段之后、生僻字之前。
-///
-/// 修复前：英文靠 `is_exact_code`（码表域标志）在 `cmp_exact_first` 压过全部中文，
-/// 权重 500 的 hen 排在权重 86016 的「很」之前。
+/// `hen`：很/恨/狠/痕 是常用精确解，佷/𬣳 是生僻字。英文插在常用段之后、生僻字之前，
+/// 不能靠 `is_exact_code`（码表域标志）在 `cmp_exact_first` 压过全部中文。
 #[test]
 fn english_lands_after_common_exact_run() {
     let mut v = vec![
@@ -49,10 +46,9 @@ fn english_lands_after_common_exact_run() {
     );
 }
 
-/// 真机场景二：`hello`。中文侧只有 Viterbi 整句「和理论哦」消费了整串，
-/// 其余单字只消费 2 字节 ⇒ 不在精确档。英文因此排到第 2 位。
+/// `hello`：中文侧只有 Viterbi 整句「和理论哦」消费整串，其余单字不在精确档，英文排第 2。
 ///
-/// ★ 这条锁的是「中文解得差时英文自动上前」——不需要任何权重阈值。
+/// 钉住「中文解得差时英文自动上前」，不靠权重阈值。
 #[test]
 fn english_second_when_chinese_side_is_thin() {
     let mut v = vec![
@@ -199,11 +195,10 @@ fn english_first_when_no_chinese() {
     assert_eq!(texts(&v), vec!["GitHub"]);
 }
 
-/// ★★ 不得改变任何两条**非英文**候选的相对次序。
+/// 不得改变任何两条非英文候选的相对次序。
 ///
-/// 这是选择「后置定位」而不是「往 `candidate_display_order` 加比较键」的全部理由：
-/// 比较键对每一对候选生效，必然扰动中文之间的既有次序（`by_source_tier` 被 `mixed`
-/// 挡住正是同一个原因）。
+/// 这是选「后置定位」而不往 `candidate_display_order` 加比较键的理由：比较键对每一对候选
+/// 生效，必然扰动中文之间的既有次序（`by_source_tier` 被 `mixed` 挡住也是同一原因）。
 #[test]
 fn non_english_order_untouched() {
     // 刻意乱序：常用/生僻交替，且不按 tier 排好——后置定位不该「顺手」整理它们。
@@ -236,11 +231,10 @@ fn synth(text: &str, code: &str, consumed: usize) -> Candidate {
     }
 }
 
-/// ②b **混合简拼整句**：合成整句 + `is_abbrev`（`3934d5cc` 起与整串简拼词同层）。
+/// ②b 混合简拼整句：合成整句 + `is_abbrev`（与整串简拼词同层）。
 ///
-/// `hello` 的「和理论哦」、`hell` 的「哈额乐乐」都是这一种（he + l|l + o）。夹具曾不带
-/// `is_abbrev`，于是 `source_tier` 算出档 1；真实流水线里它在档 4——审查查出夹具与现实
-/// 脱节，真实行为已经变了而用例照绿。
+/// `hello` 的「和理论哦」、`hell` 的「哈额乐乐」都属此类（he + l|l + o）。须带 `is_abbrev`，
+/// 否则 `source_tier` 算出档 1，与真实流水线的档 4 脱节。
 fn mixed_sentence(text: &str, code: &str, consumed: usize) -> Candidate {
     Candidate {
         is_abbrev: true,
@@ -317,10 +311,10 @@ fn pinyin_head_word_needs_weight_or_user_dict() {
     assert_eq!(texts(&v)[0], "test");
 }
 
-/// ★ 整串是英文词时，引擎拼凑出来的整句让位给英文。
+/// 整串是英文词时，引擎拼凑的整句让位给英文。
 ///
-/// 真机现场：开简拼后打 `hello` 出「和理论哦」、`book` 出「波哦看」、`work` 出
-/// 「我人口」——都是 Viterbi 把常用单字凑起来的解读，词库里没有这个词。
+/// 如开简拼后 `hello` 出「和理论哦」、`book` 出「波哦看」、`work` 出「我人口」：
+/// 都是 Viterbi 把常用单字凑起来的解读，词库里没有这个词。
 #[test]
 fn synthesized_sentence_yields_to_an_exact_english_word() {
     let mut v = vec![
@@ -337,10 +331,10 @@ fn synthesized_sentence_yields_to_an_exact_english_word() {
     );
 }
 
-/// ★★ 反面：**词库真实词条**不让位——它有词库背书，不是拼凑。
+/// 反面：词库真实词条不让位，它有词库背书。
 ///
-/// `data` 的「打他」是词典整词（`is_synthesized == false`，实测 sent=true/syn=false）。
-/// 这条与上一条合起来才是完整判据：降的是「引擎自己编的」，不是「所有整句」。
+/// `data` 的「打他」是词典整词（`is_synthesized == false`）。与上一条合起来才是完整判据：
+/// 降的是引擎合成的整句，不是所有整句。
 #[test]
 fn dictionary_word_keeps_its_place_against_english() {
     let mut v = vec![
@@ -360,14 +354,11 @@ fn dictionary_word_keeps_its_place_against_english() {
     );
 }
 
-/// ★ 英文只是**前缀命中**（整串还不是英文词）时，合成整句照旧不让位。
+/// 英文只是前缀命中（整串还不是英文词）时，合成整句照旧不让位。
 ///
-/// 判据挂在「整串恰好是英文词」上：打到 `hell` 时用户可能正打 `hello`，也可能在打
-/// 拼音，没有理由此刻就认定他要英文。让位要等整串成词那一刻。
-///
-/// ⚠️ 整句必须**消费整串**（`consumed == input.len()`），否则它进不了 `source_tier<=1`、
-/// `take_while` 在第 0 位就停了——那样测到的是「整句本来就排不到前面」，
-/// 与本用例要验的让位判据无关。首版即栽于此。
+/// 打到 `hell` 时用户可能在打 `hello`，也可能在打拼音；让位要等整串成词那一刻。
+/// 夹具整句必须消费整串（`consumed == input.len()`），否则进不了 `source_tier<=1`，
+/// 测到的只是「整句本来排不到前面」。
 #[test]
 fn synthesized_sentence_keeps_its_place_when_english_is_only_a_prefix_hit() {
     let mut v = vec![
@@ -389,7 +380,7 @@ fn completion(text: &str, code: &str) -> Candidate {
     c
 }
 
-/// ★ 拼音「英文前缀补全」补出来的英文让位给**吃满整串的拼音真词**：`xiaom` 的「小米」是
+/// 拼音「英文前缀补全」补出来的英文让位给吃满整串的拼音真词：`xiaom` 的「小米」是
 /// 简拼残码命中，不在精确档，但它才是用户最可能要的；只消费一部分输入的「小」不算。
 #[test]
 fn prefix_completion_yields_to_whole_input_words() {
@@ -413,8 +404,8 @@ fn prefix_completion_yields_to_whole_input_words() {
 }
 
 /// 让位两头都要收窄：没带补全标记的前缀英文（英文方案 / 混输自己的）不挪；被让的只认
-/// 拼音真词——短语 `consumed` 为 0 会被当成吃满，不能因此把英文块拆开（审查查出：英文方案
-/// 开短语打 `da`，曾被拆成「精确英文 → 短语 → 前缀英文」）。
+/// 拼音真词——短语 `consumed` 为 0 会被当成吃满，不能因此把英文块拆成
+/// 「精确英文 → 短语 → 前缀英文」。
 #[test]
 fn unmarked_english_and_phrases_do_not_split_the_block() {
     let phrase = Candidate {

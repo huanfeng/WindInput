@@ -1,8 +1,7 @@
-//! 满码空码清空的**第三道门**（`clear_blocked_by_candidates`）。
+//! 满码空码清空的第三道门（`clear_blocked_by_candidates`）：哪些候选拦得住清空。
 //!
 //! 前两道在引擎内（码表 `clear_on_empty_max` → 混输 `should_clear` 的拼音守护），
 //! 见 `wind-engine` 的 `mixed_trailing_partial_pinyin` 与 `mixed::engine::tests`。
-//! 本模块只锁这一道：哪些候选**拦得住**清空。
 use super::*;
 
 fn pinyin(text: &str, consumed: usize) -> Candidate {
@@ -57,11 +56,10 @@ fn codetable_split_shows_only_on_highlighted_sentence() {
     assert!(!wants_codetable_split("aawt'aawt", Some(&pinyin_sentence)));
 }
 
-/// 逆切分候选走**同一条**组合区判据（同一个出口 `preedit_codetable`、同一个分隔符），
-/// 但身份标记是它自己的 `is_split_composed`。
+/// 逆切分候选走同一条组合区判据（同一出口 `preedit_codetable`、同一分隔符），
+/// 身份标记是它自己的 `is_split_composed`。
 ///
-/// ★ 反向对照不能省：只断言「切分候选显示切分」时，一个把判据写成无条件 true 的实现
-/// 同样会变绿 —— 高亮到别的候选时屏幕上就留着一个不对应它的切法。
+/// 反向对照不能省：只断言正向时，把判据写成无条件 true 的实现也会变绿。
 #[test]
 fn codetable_split_shows_on_highlighted_split_composition() {
     let composed = Candidate {
@@ -88,20 +86,20 @@ fn codetable_split_shows_on_highlighted_split_composition() {
     assert!(!wants_codetable_split("hf'kn", Some(&alien)));
 }
 
-/// 草稿候选**沉在一切真词之后**，且沉得比切分候选还靠后。
+/// 草稿候选沉在一切真词之后，且比切分候选还靠后。
 ///
-/// 这是草稿层敢参与召回的前提：它的杂词率极高（模型使然），必须保证无论权重如何
-/// 都挤不到用户本来打得出的候选前面。见 `docs/design/auto-phrase-draft-layer.md` §5。
+/// 草稿杂词率高，无论权重如何都不能挤到用户打得出的候选前面。
+/// 见 `docs/design/auto-phrase-draft-layer.md` §5。
 #[test]
 fn draft_sinks_below_everything_including_split_composed() {
     let mut ordinary = codetable("甲");
-    ordinary.weight = 10; // 故意给一个**低**权重
-    // ★ 同逆切分那条：必须带 `is_prefix`，否则两条候选在 `cmp_match_layers` 的
+    ordinary.weight = 10; // 故意给一个低权重
+    // 同逆切分那条：必须带 `is_prefix`，否则两条候选在 `cmp_match_layers` 的
     // `eff_prefix` 层就分出胜负，沉底层放在它之后也能变绿——那是假护栏。
     ordinary.is_prefix = true;
     let mut draft = codetable("甲乙丙");
     draft.is_draft = true;
-    draft.weight = 9999; // 故意给一个**高**权重
+    draft.weight = 9999; // 故意给一个高权重
 
     assert_eq!(
         candidate_display_order(&ordinary, &draft, false, false, "abcd"),
@@ -119,7 +117,7 @@ fn draft_sinks_below_everything_including_split_composed() {
         "草稿该沉在切分候选之后——切分是按码表规则拼的，草稿只是滑窗猜的"
     );
 
-    // ★ 反向对照：两条都不是草稿时，本层必须是**空操作**，权重照常说了算。
+    // 反向对照：两条都不是草稿时，本层必须是空操作，权重照常说了算。
     // 缺了它，一个「无条件把 a 排前」的实现也能让上面两句变绿。
     let mut other = codetable("乙");
     other.weight = 9999;
@@ -140,12 +138,8 @@ fn draft_sinks_below_everything_including_split_composed() {
     );
 }
 
-/// 沉底必须在**真实的整表重排**下成立，不只是两两比较成立。
-///
-/// `build_candidates` 对引擎候选做的是 `candidates.sort_by(candidate_display_order(..))`
-/// ——一次无条件全量重排。只断言两两比较的话，测不出「比较器不构成全序、`sort_by`
-/// 结果未指定」这类问题，而那正是本仓在 `place_english_after_common_exact` 那条
-/// 注释里反复告诫的坑。
+/// 沉底须在真实的整表重排（`build_candidates` 的 `sort_by(candidate_display_order(..))`）下成立；
+/// 只断言两两比较，测不出「比较器不构成全序、`sort_by` 结果未指定」。
 #[test]
 fn drafts_land_at_the_tail_after_a_full_resort() {
     let mut list = Vec::new();
@@ -159,10 +153,8 @@ fn drafts_land_at_the_tail_after_a_full_resort() {
         let mut c = codetable(text);
         c.weight = weight;
         c.is_draft = is_draft;
-        // ★ 真词带 `is_prefix`（用户词/临时词层前缀补全的形态），草稿不带。
-        // 两者若在这一维上相同，`cmp_match_layers` 的 `eff_prefix` 层就相等，
-        // 沉底键即便被错放到那一层**之后**也照样变绿 —— 那是假护栏。
-        // 同 `split_composed_sinks_below_ordinary_candidates` 的夹具告诫。
+        // 真词带 `is_prefix`、草稿不带：两者在 `eff_prefix` 层相同时，
+        // 沉底键错放到那一层之后也会变绿。
         c.is_prefix = !is_draft;
         list.push(c);
     }
@@ -179,21 +171,20 @@ fn drafts_land_at_the_tail_after_a_full_resort() {
     );
 }
 
-/// `split_trigger = "no_exact"` 档的立身之本：切分候选**沉在既有候选之后**。
+/// `split_trigger = "no_exact"` 档的前提：切分候选沉在既有候选之后。
 ///
-/// 引擎侧的 append 只保证入列序，本函数会无条件重排全部候选 —— 没有这一层，
-/// 一条高权重的组合候选会插进用户本来打得出的候选中间。
+/// 引擎侧 append 只保证入列序，本函数会重排全部候选；少了沉底，
+/// 高权重的组合候选会插进用户本来打得出的候选中间。
 #[test]
 fn split_composed_sinks_below_ordinary_candidates() {
     let mut ordinary = codetable("甲");
-    ordinary.weight = 10; // 故意给一个**低**权重
-    // ★ 必须带 `is_prefix`：用户词/临时词层的前缀补全就是这个形态，而 `cmp_match_layers`
-    // 的第三层正是 `eff_prefix`。夹具若留 false，两条候选在那一层相等、沉底层放在它
-    // 之后也能变绿 —— 那正是本用例第一版漏掉真缺陷的原因。
+    ordinary.weight = 10; // 故意给一个低权重
+    // 必须带 `is_prefix`（用户词/临时词层前缀补全的形态）：留 false 时两条在
+    // `eff_prefix` 层相等，沉底层放错位置也能变绿。
     ordinary.is_prefix = true;
     let mut composed = codetable("很可能");
     composed.is_split_composed = true;
-    composed.weight = 9999; // 故意给一个**高**权重
+    composed.weight = 9999; // 故意给一个高权重
 
     assert_eq!(
         candidate_display_order(&ordinary, &composed, false, false, "hfkn"),
@@ -201,7 +192,7 @@ fn split_composed_sinks_below_ordinary_candidates() {
         "权重再高的切分候选也须排在普通候选之后（沉底层先于 weight 生效）"
     );
 
-    // ★ 反向对照：两条都不是切分候选时，本层必须是**空操作**，权重照常说了算。
+    // 反向对照：两条都不是切分候选时，本层必须是空操作，权重照常说了算。
     // 缺了它，一个「无条件把 a 排前」的实现也能让上面那句变绿。
     let mut other = codetable("乙");
     other.weight = 9999;
@@ -268,7 +259,7 @@ fn non_pinyin_candidate_always_blocks() {
     );
 }
 
-/// 混合列表：只要有**一条**有效候选就拦住，部分匹配的拼音不参与计数。
+/// 混合列表：只要有一条有效候选就拦住，部分匹配的拼音不参与计数。
 #[test]
 fn mixed_list_blocks_only_on_effective_candidate() {
     let only_partial = vec![pinyin("嫩", 3), pinyin("女", 2)];

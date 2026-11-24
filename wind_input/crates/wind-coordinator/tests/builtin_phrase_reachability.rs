@@ -1,26 +1,14 @@
-//! 内置短语的**可达性守门**：系统短语必须打得出，不能被同码的码表候选压掉。
+//! 内置短语的可达性守门：系统短语必须打得出，不能被同码的码表候选压掉。
 //!
-//! ## 为什么需要这道门
-//!
-//! 协调器删除 `PHRASE_WEIGHT_BASE`(40M) 后，精确码短语与码表精确候选同属精确档、
-//! **先后完全由权重裁决**（见 `handle_candidate.rs` 的 `lookup` 分支）。这是有意的设计：
-//! 「谁排前面」交回给权重配置。代价是内置数据从此有了一条隐式契约——
-//! **系统短语的权重必须高于同码码表词条**，否则用户打 `datm` 得到的是「万花筒」。
-//!
-//! 这条契约靠人是守不住的：
+//! 精确码短语与码表精确候选同属精确档，先后完全由权重裁决（见 `handle_candidate.rs` 的
+//! `lookup` 分支）。因此内置数据有一条隐式契约：系统短语的权重必须高于同码码表词条，
+//! 否则用户打 `datm` 得到的是「万花筒」。这条契约靠人守不住：
 //! - 词库按词频重排时权重会整体变动（`wubi86_jidian.dict.yaml` 头部记录了重排历史）；
-//! - 新增系统短语时作者不会想到去查五笔里这个码是不是已有高频词；
-//! - 失效时**没有任何报错**，只是首选悄悄换了一个——正是最难被发现的那类回归。
+//! - 新增系统短语时作者不会想到去查这个码是否已有高频词；
+//! - 失效时没有任何报错，只是首选悄悄换了一个。
 //!
-//! 实际踩到的现场：删 40M 时全仓 54 个系统短语码里只有 `datm`（对手「万花筒」w=1080）
-//! 和 `tmts`（对手「身条」w=536）与五笔碰撞，前者短语权重 1000 反而更低。当时是靠手工
-//! 交叉扫描发现的，本测试把那次扫描固化下来。
-//!
-//! ## ⚠️ 这里检查的是**数据**，不是排序逻辑
-//!
-//! 排序侧的双向对照在 `input_flow.rs::phrase_and_codetable_exact_compete_by_weight`。
-//! 两者缺一不可：那个证明「权重确实在裁决」，本测试证明「内置数据配得对」。
-//! 排序全绿而数据配错，用户照样打不出短语。
+//! 这里检查的是数据，不是排序逻辑：排序侧的双向对照在
+//! `input_flow.rs::phrase_and_codetable_exact_compete_by_weight`，两者缺一不可。
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -30,24 +18,22 @@ fn data_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data")
 }
 
-/// 逐个内置**纯码表**方案检查：其全部词库里，是否存在权重不低于同码系统短语的精确条目。
+/// 逐个内置纯码表方案检查：其全部词库里，是否存在权重不低于同码系统短语的精确条目。
 ///
-/// 范围刻意只有纯码表，因为「按权重竞争」只在那里发生：
-/// - **拼音**：候选 `is_exact_code` 恒 false，短语靠 `cmp_exact_first` 就排在其上，不比权重；
-/// - **混输**：`source_tier` 档 0（码表精确）恒先于档 1（精确码短语），权重根本轮不到裁决，
-///   纳进来只会误报。
+/// 范围只有纯码表，因为「按权重竞争」只在那里发生：
+/// - 拼音：候选 `is_exact_code` 恒 false，短语靠 `cmp_exact_first` 排在其上，不比权重；
+/// - 混输：`source_tier` 档 0（码表精确）恒先于档 1（精确码短语），纳进来只会误报。
 ///
-/// ⚠️ 过滤用 `is_pinyin()`/`is_mixed()` 而非 `engine.engine_type == "codetable"`：
-/// `wubi86.schema.toml` **没写** engine_type（靠 `is_pinyin()` 的词典类型兜底推断），
-/// 按字面值筛会把唯一要查的方案整个排空、测试静默通过。下方 `checked_dicts > 0` 是这类
-/// 「过滤器把自己筛没了」的兜底断言。
+/// 过滤用 `is_pinyin()`/`is_mixed()` 而非 `engine.engine_type == "codetable"`：
+/// `wubi86.schema.toml` 没写 engine_type，按字面值筛会把唯一要查的方案排空、测试静默通过。
+/// 下方 `checked_dicts > 0` 兜底「过滤器把自己筛没了」。
 #[test]
 fn builtin_phrases_outweigh_same_code_codetable_entries() {
     let d = data_dir();
     let phrases_path = d.join("system.phrases.toml");
     let schemas_dir = d.join("schemas");
     if !phrases_path.is_file() || !schemas_dir.is_dir() {
-        // 与 input_flow 同约定：无 build_dev/data 时跳过。⚠️ 判据是耗时 0.00s。
+        // 与 input_flow 同约定：无 build_dev/data 时跳过。判据是耗时 0.00s。
         return;
     }
 

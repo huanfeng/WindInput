@@ -1,18 +1,12 @@
-//! 联想态下的**顶屏类按键**（标点 / 小键盘 / 非码元字符 / 进模式、开软键盘的引导键）
-//! 必须把联想态收干净——与空格选联想、Esc 取消之后的状态一致。
+//! 联想态下的顶屏类按键（标点 / 小键盘 / 非码元字符 / 进模式、开软键盘的引导键）
+//! 必须把联想态收干净，与空格选联想、Esc 取消之后的状态一致（走 `exit_assoc`）。
 //!
-//! 现场：有联想候选时按标点，联想态不退出，之后候选窗位置不再跟随光标。
+//! 联想态是「缓冲空、已转换段空、候选非空」：智能符号 `hold_composition` 的 press1 在无输入时
+//! 短路返回，标点臂清不到候选；候选残留时 `handle_caret_update` 把空闲光标上报当组合期间的上报，
+//! 候选窗钉在原处、UI 也收不到隐藏命令。只清候选不走 `exit_assoc` 则会留下「联想输入」标识与
+//! 自动隐藏计时。
 //!
-//! 根因：智能符号 `hold_composition` 方案的 press1 在「无输入」时**短路**返回
-//! `HoldComposition`，而联想态恰是「缓冲空、已转换段空、候选非空」——标点臂里那段
-//! 清候选的代码根本走不到。联想候选于是留在 `state.candidates` 里：
-//! `handle_caret_update` 按「候选非空」把此后的空闲光标上报都当成组合期间的上报，
-//! 锁住组合起点，候选窗就钉在原处；UI 那边也收不到隐藏命令。
-//!
-//! 其余顶屏出口（普通标点、小键盘、非码元字符）虽清了候选，但没走 `exit_assoc`：
-//! 编码栏的「联想输入」标识与自动隐藏计时都留着。进软键盘的引导键则连候选都不清。
-//!
-//! ⚠️ 依赖 `build_dev/data` 真实词库；缺失时**静默跳过**（判据是耗时）。
+//! 依赖 `build_dev/data` 真实词库；缺失时静默跳过（判据是耗时）。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -100,10 +94,8 @@ fn hid(rx: &std::sync::mpsc::Receiver<UiCommand>) -> bool {
 
 /// 下一次输入的组合状态与候选窗位置正常：不挂联想、候选下发、位置落在新光标处。
 ///
-/// ⚠️ 如实交代：headless 下没有真宿主的组合起点上报时序，这条位置断言**单独撤掉修复
-/// 并不会红**（实测）——缺陷的判据在各用例里「联想态已退出 / 收到隐藏命令」那两条上，
-/// 它们对应的正是 `handle_caret_update` 的「候选非空 = 组合中」判据。这里只守修复后
-/// 下一轮输入没有被带坏。
+/// headless 下没有真宿主的组合起点上报时序，这条位置断言单独撤掉修复并不会红；缺陷判据在
+/// 各用例的「联想态已退出 / 收到隐藏命令」上。这里只守下一轮输入没有被带坏。
 fn next_input_follows_caret(c: &Coordinator, rx: &std::sync::mpsc::Receiver<UiCommand>) {
     // 顶屏上屏后宿主重排：先报一帧 150（标点刚落地的位置），光标随后停在 400。
     // 残留联想态时前一帧会被当成「组合期间」的上报锁成组合起点，候选窗从此钉在 150。
@@ -132,7 +124,7 @@ fn next_input_follows_caret(c: &Coordinator, rx: &std::sync::mpsc::Receiver<UiCo
     );
 }
 
-/// ★ 现场复现：智能符号 `hold_composition` 下按标点，联想必须退出、候选窗必须隐藏，
+/// 现场复现：智能符号 `hold_composition` 下按标点，联想必须退出、候选窗必须隐藏，
 /// 下一次输入的候选窗位置跟随光标。
 #[test]
 fn smart_hold_punct_exits_assoc() {
@@ -205,9 +197,9 @@ fn numpad_clears_assoc_hint() {
     next_input_follows_caret(&c, &rx);
 }
 
-/// 论坛 t285 的边界：小键盘在「空闲 + 半角」时改为透传，但联想态**不算空闲**——
-/// 联想挂着占位组合与候选，透传会把组合悬在宿主里、联想也收不掉。必须仍由我们出字
-/// （联想态不顶屏，故上屏的只有数字本身）。判据见 message_handler 小键盘臂的 `has_comp`。
+/// 小键盘在「空闲 + 半角」时改为透传，但联想态不算空闲：联想挂着占位组合与候选，透传会把
+/// 组合悬在宿主里。必须仍由我们出字（联想态不顶屏，上屏的只有数字本身）。
+/// 判据见 message_handler 小键盘臂的 `has_comp`。
 #[test]
 fn numpad_in_assoc_is_not_passthrough() {
     if !dict_ready() {
@@ -250,7 +242,7 @@ fn softkeyboard_key_exits_assoc() {
     );
 }
 
-/// 联想态下按右括号**跳出**已插入的配对：跳出语义保留（`MoveCursorRight`），但占位组合
+/// 联想态下按右括号跳出已插入的配对：跳出语义保留（`MoveCursorRight`），但占位组合
 /// 不能被晾在宿主里——`MoveCursorRight` 不碰组合，必须另行收口：下一个透传键改判为
 /// 「收组合 + 交还按键」。
 #[test]
@@ -292,7 +284,7 @@ fn right_bracket_jump_out_in_assoc_releases_placeholder() {
 }
 
 /// 联想态 + CapsLock 开着按标点：占位组合不能被晾着——要么服务端出标点（结束组合），
-/// 要么按 CapsLock 的英文语义交还宿主时**顺带收组合**；绝不能是裸透传。联想退出。
+/// 要么按 CapsLock 的英文语义交还宿主时顺带收组合；绝不能是裸透传。联想退出。
 #[test]
 fn capslock_punct_in_assoc_is_committed_by_server() {
     if !dict_ready() {

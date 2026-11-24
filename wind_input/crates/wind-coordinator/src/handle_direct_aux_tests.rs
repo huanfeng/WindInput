@@ -171,7 +171,7 @@ fn fp_after(c: &Coordinator, input: &str) -> Vec<String> {
 /// （`uidu`+`p`、释 = pl）的老用例都跑在它下面：连续模式里那条规则已不做。
 const TAIL_ONLY: &str = "enabled = true\ndirect = true\ncontinuous = false\n";
 
-/// ★ 连续模式不生效的三种配置（`direct` 关 / `enabled` 关 / 全拼）：界面候选（文字 / 消费数 /
+/// 连续模式不生效的三种配置（`direct` 关 / `enabled` 关 / 全拼）：界面候选（文字 / 消费数 /
 /// code）与接入连续辅码之前逐字节相同。期望值是接入前用同一夹具录下的。
 #[test]
 fn continuous_off_is_byte_identical() {
@@ -255,7 +255,7 @@ fn continuous_off_is_byte_identical() {
     }
 }
 
-/// ★ 逃生口关掉连续模式：候选与接入前开着 `direct` 的串尾直接辅助逐字节相同（期望值同上，
+/// 逃生口关掉连续模式：候选与接入前开着 `direct` 的串尾直接辅助逐字节相同（期望值同上，
 /// 接入前录下）。
 #[test]
 fn continuous_escape_hatch_restores_tail() {
@@ -322,8 +322,8 @@ fn continuous_mid_sentence_aux() {
 }
 
 /// 整句切换键（露 2 算 3）：过闸的整串整句（`nihhc`：你 + 辅码 h + 好）是池里第 1 名、界面首选
-/// （整句块按名次摆，它不带名次时会被末槽整句「你航 / 你行」压到第 3）；切换键把它换走，
-/// 转到末一格时从池里换进来的那条照样消费整串，上屏后缓冲为空（辅码字母不滞留）。
+/// （它不带名次时会被末槽整句「你航 / 你行」压到第 3）；切换到末一格时换进来的那条照样消费
+/// 整串，上屏后缓冲为空（辅码字母不滞留）。
 #[test]
 fn continuous_sn_in_sentence_pool() {
     let (dir, _f) = fixture_with(
@@ -645,10 +645,9 @@ fn learn_code_has_no_aux_letters() {
     assert!(store.get_freq("pinyin", "haoni", "好你").unwrap().is_some());
 }
 
-/// 连续模式下串尾一步只认**末字**（辅码限定紧挨在它前面的那个字，与万象 Pro 同）：
-/// 末字 1 位（`uidu`+`y`，读 = yd）、单字 1 位（`xl`+`r` → 像）照旧提前，编码栏照旧；
-/// 「词组任一字」（`uidu`+`p` 的释 = pl、`goqk`+`k` 的国 = ky）与单字 2 位（`xl`+`rn`）不再提前
-/// （万象需 `/` 才提前）。
+/// 连续模式下串尾一步只认末字（辅码限定紧挨在它前面的字，与万象 Pro 同）：末字 1 位
+/// （`uidu`+`y`，读 = yd）、单字 1 位（`xl`+`r` → 像）照旧提前，编码栏照旧；「词组任一字」
+/// （`uidu`+`p` 的释 = pl、`goqk`+`k` 的国 = ky）与单字 2 位（`xl`+`rn`）不提前（万象需 `/`）。
 #[test]
 fn tail_rules_in_continuous_are_last_char() {
     let (dir, _f) = fixture("co_tail", "shuangpin", ON);
@@ -950,7 +949,7 @@ fn prefix_snapshot_and_fallback_decode_agree() {
     assert_eq!(via_snapshot.first().map(String::as_str), Some("释读"));
 }
 
-/// ★ 输入不变而词库变了：候选右键删掉一个是命中项的用户词，原地重建（输入没变）时
+/// 输入不变而词库变了：候选右键删掉一个是命中项的用户词，原地重建（输入没变）时
 /// 前缀快照还是删之前那份，不作废的话删掉的词照样顶在首位。
 #[test]
 fn deleting_user_word_hit_drops_prefix_snapshot() {
@@ -1000,7 +999,7 @@ fn store_write_mid_composition_invalidates_snapshot() {
     assert!(hit, "新加的用户词应是命中项：{t:?}");
 }
 
-/// ★ 输入不变而切了单字模式：命中项同样要过单字过滤。快照只按前缀串认的话，会拿
+/// 输入不变而切了单字模式：命中项同样要过单字过滤。快照只按前缀串认的话，会拿
 /// 切换前那份（含词）直接复用，「释读」照样顶在单字模式的首位。
 #[test]
 fn single_char_toggle_filters_hits_too() {
@@ -1165,7 +1164,7 @@ fn not_applicable_cases_leave_candidates_alone() {
     assert_eq!(texts(&c).first().map(String::as_str), Some("释读"));
 }
 
-/// ★ 方案来源（`schema:<id>`）的系统层没就绪：本键不做直接辅助、候选原样，派后台构建；
+/// 方案来源（`schema:<id>`）的系统层没就绪：本键不做直接辅助、候选原样，派后台构建；
 /// 建好后下一键即生效。按键线程绝不现建反查索引（与引导键进入同一处理）。
 #[test]
 fn schema_source_not_ready_is_noop_then_warms() {
@@ -1206,9 +1205,8 @@ fn schema_source_not_ready_is_noop_then_warms() {
     std::fs::write(&sp, swapped).unwrap();
     let (c, _) = coord("cold", &dir);
     type_str(&c, "uidup");
-    // 「未就绪 ⇒ 原样」只在后台索引**此刻确实还没建好**时才能断言：词库只有四行，
-    // 并行跑测试时后台线程偶尔抢在第一键之前建完（缓存构建路径少读一次源之后更常见），
-    // 那时候选已经是辅助后的，按「未就绪」断言就是假红。就绪与否要看事实，不能当前提。
+    // 「未就绪 ⇒ 原样」只在后台索引此刻确实没建好时才能断言：词库很小，并行跑测试时后台线程
+    // 可能抢在第一键前建完，按「未就绪」断言就是假红。
     if c.engine_mgr.reverse_index_if_ready(&id).is_none() {
         let st = c.state.lock().unwrap();
         assert!(
@@ -1236,7 +1234,7 @@ fn schema_source_not_ready_is_noop_then_warms() {
     );
 }
 
-/// ★ 方案来源的反查索引未就绪：本键**整条**回旧路径（不传击键图、不做串尾），候选与
+/// 方案来源的反查索引未就绪：本键整条回旧路径（不传击键图、不做串尾），候选与
 /// `direct` 关时相同，并派后台构建；建好后下一键走连续路径。
 #[test]
 fn continuous_unready_falls_back() {

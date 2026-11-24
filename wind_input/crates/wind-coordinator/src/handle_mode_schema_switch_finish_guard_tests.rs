@@ -1,10 +1,9 @@
 const SRC: &str = include_str!("handle_mode.rs");
 
-/// 截取 `fn <name>` 之后括号配平的函数体，**并剥掉整行注释**。
+/// 截取 `fn <name>` 之后括号配平的函数体，并剥掉整行注释。
 ///
-/// 剥注释不是洁癖：本文件的注释里就成段解释着「为什么不能读那个开关」，纯文本扫描
-/// 会把这段解释本身判成违规（初版守卫正是这样红的）。**判据要落在代码上，不能落在
-/// 讲述判据的文字上**——否则维护者只能靠删注释来让测试变绿。
+/// 本文件的注释里就在解释「为什么不能读那个开关」，纯文本扫描会把解释本身判成违规；
+/// 判据要落在代码上，不能落在讲述判据的文字上。
 fn body_of(name: &str) -> String {
     let at = SRC
         .find(&format!("fn {name}"))
@@ -36,18 +35,11 @@ fn body_of(name: &str) -> String {
     panic!("fn {name} 的花括号不配平");
 }
 
-/// ★★ 幂等分支**不得**绕过收尾。
+/// 幂等分支不得绕过收尾。
 ///
-/// 「切到某方案」的语义是「我要用这个方案打字」，不只是「把 active 改成它」。已是
-/// 目标方案时，需要发生的恰恰只剩收尾里那部分（归位中文、取消大写）——早退回去就是
-/// 「英文半角态/大写态下按方案热键毫无反应」，而那正是这个键最该生效的场景。
-///
-/// 真机上这个症状出现过**两次**：第一次是收尾里的归位被 CapsLock 开关门控（见
-/// `finish_user_schema_switch_is_not_gated_by_capslock_option`），修好之后**同一个
-/// 症状复发**，因为 `switch_schema_by_id` 还有一条 `if active == target { return; }`
-/// 的早退绕过了刚修好的收尾。
-///
-/// ⇒ 可复用判据：**修好一个动作的收尾之后，回头找它有没有提前返回的分支绕过那段收尾。**
+/// 「切到某方案」的语义是「我要用这个方案打字」。已是目标方案时，要发生的恰恰只剩收尾
+/// （归位中文、取消大写）；早退就是「英文半角态/大写态下按方案热键毫无反应」。
+/// 修好一个动作的收尾之后，要回头找有没有提前返回的分支绕过它。
 #[test]
 fn schema_switch_entries_do_not_early_return_past_the_finish() {
     for name in ["switch_schema_by_id", "select_schema"] {
@@ -56,11 +48,9 @@ fn schema_switch_entries_do_not_early_return_past_the_finish() {
             body.contains("finish_user_schema_switch"),
             "{name} 必须走统一收尾"
         );
-        // 幂等分支**不能是裸 return**：要么与切换尝试共用一个条件（都落到 finish），
-        // 要么单独做状态归位。两者都行，唯独「什么都不做」不行。
-        // 判据只认「幂等分支与切换尝试共用同一个条件」这半边（`active == id ||`）。
-        // 右半边写什么不参与——它已经从 `switch_schema` 换成 `ensure_schema`（为了把
-        // 编码处置插在真正切换之前），把实现细节写进守卫只会让守卫比被守的代码更脆。
+        // 幂等分支不能是裸 return：要么与切换尝试共用一个条件（都落到 finish），
+        // 要么单独做状态归位。判据只认 `active == id ||` 这半边，右半边写什么不参与，
+        // 免得守卫比被守的代码更脆。
         let idempotent_handled = body.contains("restore_state_for_same_schema")
             || body.contains("active_schema_id() == id ||");
         assert!(
@@ -71,17 +61,13 @@ fn schema_switch_entries_do_not_early_return_past_the_finish() {
     }
 }
 
-/// ★ 本次真机故障的直接守卫：切方案的状态归位**不得**受 CapsLock 那个开关门控。
+/// 切方案的状态归位不得受 CapsLock 那个开关（`input.capslock.cancel_on_mode_switch`）门控。
 ///
-/// 病理：`input.capslock.cancel_on_mode_switch` 出厂 `false`，而归位中文 + 取消大写
-/// 曾整个裹在 `if 该开关 {}` 里，于是出厂配置下英文半角态/大写态按方案直达热键，
-/// 方案真的换了、`schema.active` 也写了盘，用户却观察不到任何变化——那两种状态下
-/// 按键根本不进引擎（英文半角在 `handle_key_event` 的分水岭原样透传，大写被 C++ 的
-/// `capsLockLetterPassthrough` 同步透传）。用户报障原话即「热键在英文状态或大写状态
-/// 不生效」。
+/// 该开关出厂 `false`，被它门控时英文半角态/大写态按方案直达热键，方案换了用户却看不到
+/// 任何变化（那两种状态下按键不进引擎：英文半角在 `handle_key_event` 透传，大写被 C++ 的
+/// `capsLockLetterPassthrough` 透传）。
 ///
-/// 判据：**一个动作的语义前提不可配置，可配置的只能是副作用。**「我要用这个方案打字」
-/// 是切方案的语义前提；那个开关的正当作用域只有切中英模式（那里用户可能正想打大写英文）。
+/// 一个动作的语义前提不可配置，可配置的只能是副作用；那个开关的作用域只有切中英模式。
 #[test]
 fn finish_user_schema_switch_is_not_gated_by_capslock_option() {
     let body = body_of("finish_user_schema_switch");
@@ -106,9 +92,8 @@ fn finish_user_schema_switch_is_not_gated_by_capslock_option() {
 
 /// 三个方案切换入口（托盘 / 直达热键 / 循环键）必须共用同一条收尾。
 ///
-/// 这三处历史上各自漂移过（持久化、归位中文、取消大写、清 preedit 四件事的组合各不
-/// 相同），本次故障的可见形态正是「托盘切得动、热键切不动」——托盘那份手写收尾是
-/// **无条件**归位中文的，热键那份受开关门控。合并之后同一个 bug 不会再只修一半。
+/// 各自手写时持久化、归位中文、取消大写、清 preedit 四件事的组合会漂移，表现为
+/// 「托盘切得动、热键切不动」；共用之后同一个 bug 不会只修一半。
 #[test]
 fn all_schema_switch_entries_share_one_finish() {
     let body = body_of("select_schema");
@@ -128,13 +113,11 @@ fn all_schema_switch_entries_share_one_finish() {
     }
 }
 
-/// 「未上屏编码」的处置必须发生在收尾**之前**，且每个入口都得做。
+/// 「未上屏编码」的处置必须发生在收尾之前，且每个入口都得做。
 ///
-/// 两条判据各防一种失效：
-/// - **有没有做**：漏了就是用户报的原症状——切了方案，编码原样残留在宿主里；
-/// - **早不早于 finish**：`take_input_on_schema_switch` 里的上屏走 `record_commit`，
-///   而那里的 `schema_id` 取的是当前活跃方案。排在切换之后，这串码会记到新方案头上
-///   （统计静默错账，没有任何可见信号）。
+/// - 漏做：切了方案，编码原样残留在宿主里；
+/// - 晚于 finish：`take_input_on_schema_switch` 的上屏走 `record_commit`，取的是当前活跃方案，
+///   排在切换之后这串码会静默记到新方案头上。
 #[test]
 fn schema_switch_takes_input_before_finish() {
     for name in ["switch_schema_by_id", "cycle_schema", "select_schema"] {
@@ -152,10 +135,9 @@ fn schema_switch_takes_input_before_finish() {
     }
 }
 
-/// 收尾里**不得**再手写清缓冲：那是「上屏还是丢弃」策略的一部分，只能有一处真相。
+/// 收尾里不得再手写清缓冲：「上屏还是丢弃」只能有一处真相。
 ///
-/// 留一份裸 `clear()` 在这里看不出问题（清空是幂等的），直到有人给 finish 加了第四个
-/// 调用方而那条路没走 take —— 编码就静默丢了，且四处调用方全都「看起来清过了」。
+/// 裸 `clear()` 看着无害（幂等），但给 finish 加新调用方而那条路没走 take 时，编码会静默丢掉。
 #[test]
 fn finish_does_not_clear_input_itself() {
     let body = body_of("finish_user_schema_switch");

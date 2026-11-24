@@ -42,8 +42,7 @@ fn fixture_reverse() -> ReverseLookup {
 }
 
 /// 夹具取数的字面量锚：对拍的新旧两侧共用 `readings_of` / `radicals_of` /
-/// `chaizi_code_of`，这几个函数自己错了两侧会一起错、对拍照样绿。这里钉死它们在
-/// 典型字上的输出，取数层的回归由这条报出来。
+/// `chaizi_code_of`，它们错了两侧会一起错、对拍照样绿，故在典型字上钉死输出。
 #[test]
 fn fixture_lookups_are_pinned() {
     let rl = fixture_reverse();
@@ -122,7 +121,7 @@ fn render_new(rl: &ReverseLookup, sections: &[SectionConfig], c: &Cand) -> Strin
 // ───────────────── 参照实现：段列表引入前的气泡 ─────────────────
 
 /// 旧 `ReverseLookup::tooltip_for` + `merge_chaizi_pinyin` + 协调器追加调试段，逐行照搬
-/// （只把私有表访问换成等价的公开方法）。**对拍的基准，不要「顺手修」它。**
+/// （只把私有表访问换成等价的公开方法）。对拍的基准，不要「顺手修」它。
 fn legacy(rl: &ReverseLookup, f: LegacyTooltipFlags, c: &Cand) -> String {
     struct Sec {
         label: String,
@@ -366,7 +365,7 @@ fn expected(old: &str, f: LegacyTooltipFlags, c: &Cand) -> String {
     }
 }
 
-/// ★★★ 验收核心（设计 §8.2）：全部旧开关组合 × 夹具，「旧开关 → 迁移出的段列表 →
+/// 验收核心（设计 §8.2）：全部旧开关组合 × 夹具，「旧开关 → 迁移出的段列表 →
 /// 新渲染」与旧实现逐字节相同（唯一例外见 [`expected`]，每一例都单独计数并核对）。
 #[test]
 fn migrated_sections_reproduce_legacy_tooltip_byte_for_byte() {
@@ -396,9 +395,9 @@ fn migrated_sections_reproduce_legacy_tooltip_byte_for_byte() {
     assert!(deviations > 0);
 }
 
-/// ★ 已确认的唯一标题差异（2026-09-27 用户确认，设计 §8.3）：拆字、拼音同开而某一边
-/// 整段为空时，旧实现不合并、保留那一边的标题；合并段标题恒为「拆字 / 拼音」。
-/// 两种退化各断言一次：标题按新口径，**内容行仍须与旧实现逐字节一致**。
+/// 已确认的唯一标题差异（设计 §8.3）：拆字、拼音同开而某一边整段为空时，旧实现不合并、
+/// 保留那一边的标题；合并段标题恒为「拆字 / 拼音」。
+/// 两种退化各断言一次：标题按新口径，内容行仍须与旧实现逐字节一致。
 #[test]
 fn merged_section_degenerate_cases_differ_only_in_title() {
     let rl = fixture_reverse();

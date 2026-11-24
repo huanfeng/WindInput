@@ -149,7 +149,7 @@ fn shift_selects_the_second_layer() {
     );
 }
 
-/// 特殊键与布局外按键的处置**不是一条规则，而是「没被拦下」的自然结果**。
+/// 特殊键与布局外按键的处置不是一条规则，而是「没被拦下」的自然结果。
 /// 这条测的正是那个性质：不在布局表里 ⇒ 返回 None ⇒ 落回常规链路 ⇒ 透传。
 #[test]
 fn keys_outside_the_layout_are_not_taken() {
@@ -451,9 +451,8 @@ fn vk_map_covers_every_slot_in_the_layout() {
 
 /// 带 UI 通道的夹具：要验证「工具栏刷新了」只能读真实发出去的命令。
 ///
-/// ⚠️ 必须把 `notify_toolbar` 那道三项合取（本输入法在服务某宿主 / 焦点在可编辑控件里 /
-/// 用户开着工具栏）全部置真，否则它走的是隐藏分支、只发 `HideToolbar`，一条
-/// `UpdateToolbar` 也见不到——那样这个测试断言的就成了「工具栏没显示」，与要验的事无关。
+/// 必须把 `notify_toolbar` 的三项合取（在服务某宿主 / 焦点在可编辑控件 / 用户开着工具栏）
+/// 全部置真，否则它只发 `HideToolbar`，断言就与要验的事无关了。
 fn coord_with_ui() -> (
     Arc<Coordinator>,
     std::sync::mpsc::Receiver<wind_ui_types::UiCommand>,
@@ -480,14 +479,10 @@ fn last_toolbar_soft_kb(rx: &std::sync::mpsc::Receiver<wind_ui_types::UiCommand>
     last
 }
 
-/// ★ 本次修的那条：**每一条关闭路径都要把工具栏图标灭掉**。
+/// 每一条关闭路径（Esc、面板关闭按钮、热键、工具栏点击、菜单、失焦）都要把工具栏图标灭掉。
 ///
-/// 关闭软键盘有五条路（Esc、面板关闭按钮、热键、工具栏点击、菜单、失焦），此前只有
-/// 工具栏与菜单两条记得刷工具栏 ⇒ 用 Esc 或面板上的关闭按钮关掉后，**图标一直亮着**。
-///
-/// 断言读的是**真的发给 UI 的命令**而不是 `softkeyboard_is_open()`：后者是收口函数的
-/// 输入，收口写好而调用点漏接时它照样对——那正是这个 bug 的形态。逐条路径过一遍，
-/// 加第六条路而忘了收口就会红。
+/// 断言读真的发给 UI 的命令，而不是 `softkeyboard_is_open()`：后者是收口函数的输入，
+/// 调用点漏接收口时它照样对。加新的关闭路径而忘了收口就会红。
 #[test]
 fn every_close_path_clears_the_toolbar_icon() {
     // (路径名, 关闭动作)。开启一律走 open_softkeyboard，只变关闭这一侧。
@@ -557,13 +552,11 @@ fn every_close_path_clears_the_toolbar_icon() {
     }
 }
 
-/// 该记什么：记**面 id**（不是下标）、开着时不记、同一面不重复记。
+/// 该记什么：记面 id（不是下标）、开着时不记、同一面不重复记。
 ///
-/// 测的是 `softkeyboard_page_to_persist` 这个纯判据，而不是 `save_softkeyboard_page`——
-/// 后者要写进程外的全局 `state.toml`（`%LOCALAPPDATA%\WindInput[Dev]`），测试碰不得：
-/// 那会改掉开发者本机的记录，还会与**正在运行的服务**抢同一个文件（两边都是
-/// load-modify-save，一次丢更新就能吞掉刚存好的 `toolbar_positions`）。
-/// 判据与写盘因此分成两层，下面 `headless_never_touches_the_real_state_toml` 守另一半。
+/// 测纯判据 `softkeyboard_page_to_persist` 而非 `save_softkeyboard_page`：后者写进程外的全局
+/// `state.toml`，测试碰了会改掉本机记录，还会与正在运行的服务抢文件（load-modify-save 丢更新）。
+/// 写盘那一半由 `headless_never_touches_the_real_state_toml` 守。
 #[test]
 fn page_to_persist_uses_the_id_and_skips_redundant_writes() {
     let c = coord();
@@ -599,20 +592,14 @@ fn page_to_persist_uses_the_id_and_skips_redundant_writes() {
     assert_eq!(c.softkeyboard_page_to_persist(), None, "同一面不该重复记录");
 }
 
-/// ⚠️ **测试进程绝不写本机的 `state.toml`**。
+/// 测试进程绝不写本机的 `state.toml`。
 ///
-/// `Config::state_dir()` 是进程外的全局路径，而单测构造的协调器同样走得到落盘那条路。
-/// 门开着的后果有两个，都不像是测试的问题：跑一次 `cargo test` 改掉开发者自己机器上的
-/// `last_softkeyboard_page`；以及与正在运行的服务抢同一个文件，丢更新时连
-/// `toolbar_positions` 一起吞掉。
+/// `Config::state_dir()` 是进程外的全局路径，单测构造的协调器同样走得到落盘那条路；
+/// 门开着会改掉开发者本机的 `last_softkeyboard_page`，或与运行中的服务抢文件吞掉
+/// `toolbar_positions`。门收在 `StateWriter::new(store.is_some(), ..)` 里。
 ///
-/// 判据借 `store`（它的文档本来就写着「None = 无持久化（headless 测试）」），
-/// 那道门如今收在 `StateWriter::new(store.is_some(), ..)` 里，本条钉的是它还在。
-///
-/// ⚠️ **判据换过一次，别改回去**。原先问的是「`softkeyboard_page_saved` 镜像有没有变」，
-/// 拿副作用代理「写盘路径有没有走」。门下沉到写入器之后镜像会照常更新（进程内状态，
-/// 无害），那个代理就失效了——更糟的是它失效时报的错是「测试正在改开发者本机的
-/// state.toml」，把人引向一个根本不存在的问题。现在直接问写入器本身有没有落盘能力。
+/// 判据直接问写入器有没有落盘能力，别改回看 `softkeyboard_page_saved` 镜像：门下沉到写入器后
+/// 镜像照常更新，那个代理已失效。
 #[test]
 fn headless_never_touches_the_real_state_toml() {
     let c = coord();
@@ -643,21 +630,14 @@ fn headless_never_touches_the_real_state_toml() {
     );
 }
 
-/// ⛔ 小键盘**不能**进软键盘键位表——这条钉的是跨语言的不变量。
+/// 小键盘不能进软键盘键位表——跨语言不变量。
 ///
-/// # 它防的是什么
+/// C++ 侧 `_IsSoftKeyboardEatenKey` 在符号面上吃 `HotkeyType::Number`，而 `ClassifyInputKey`
+/// 把 VK_NUMPAD0-9 与 + - * / . 一并归成 `Number`；C++ 靠 `_IsSoftKeyboardOutOfLayoutKey`
+/// 放行小键盘，前提是这张表不含它们，否则「C++ 吃了、Rust 出不了字」，数字凭空消失且无日志。
 ///
-/// C++ 侧 `_IsSoftKeyboardEatenKey` 在符号面上吃 `HotkeyType::Number`，而
-/// `ClassifyInputKey` 把 VK_NUMPAD0-9 与 + - * / . 一并归成 `Number`。若这张表里也
-/// 没有小键盘，那就是「C++ 吃了、Rust 出不了字」——落回常规链路后英文半角态
-/// PassThrough，严格宿主（Chrome/Electron）不补合成 WM_CHAR ⇒ **数字凭空消失，
-/// 且两侧都没有日志**。0.120 周期真出过这个 bug。
-///
-/// 修法是让 C++ 放行小键盘（`_IsSoftKeyboardOutOfLayoutKey`），前提是这张表确实
-/// 不含它们。⇒ **哪天往布局里加了小键盘键位，本测试会红**：那时必须同步去掉 C++
-/// 侧那道放行，否则新加的键位敲下去没反应（这次是反方向的同一个坑）。
-///
-/// 判据写成「表里没有这些 vk」而不是「布局里没有这些键名」：真正决定吃不吃的是 vk。
+/// 往布局里加小键盘键位时本测试会红：须同步去掉 C++ 侧那道放行。判据写成「表里没有这些 vk」，
+/// 因为决定吃不吃的是 vk 而非键名。
 #[test]
 fn numpad_stays_out_of_the_slot_table_so_the_cpp_side_can_pass_it_through() {
     // VK_NUMPAD0-9 = 0x60..=0x69；VK_MULTIPLY/ADD/SUBTRACT/DECIMAL/DIVIDE = 0x6A..=0x6F。
@@ -736,7 +716,7 @@ mod linux_host {
         );
     }
 
-    /// 语义照 Windows：失焦（过了守卫期）**关闭**面板，而不是只藏起来——主键区接管跟着
+    /// 语义照 Windows：失焦（过了守卫期）关闭面板，而不是只藏起来——主键区接管跟着
     /// 解除，C++ 侧会话位清掉，物理键回到常规链路；切回来也不会自己弹出。
     #[test]
     fn softkeyboard_focus_lost_releases_keys() {

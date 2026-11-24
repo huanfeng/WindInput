@@ -49,17 +49,14 @@ fn candidate_delete_menu_labels() {
     assert_eq!(label(&member, false), ("删除词条", false));
 }
 
-/// ★★★ 锚点落盘查屏必须退 1px，否则贴右/下边缘时存到**邻屏**的 key 下。
+/// 锚点落盘查屏必须退 1px，否则贴右/下边缘时存到邻屏的 key 下。
 ///
-/// 用户实测症状：「工具栏不跟焦点窗口的显示器」。因果链是——
-/// `clamp_to_work_area` 把工具栏贴到 A 屏右边缘（`nx = br - w` ⇒ 窗口 right 恰好
-/// == A 屏工作区 right），落盘时拿这个**排他**边界去 `MonitorFromPoint`，该点落在
-/// B 屏第一列像素上（`DEFAULTTONEAREST` 不报错、只是答错）⇒ A 屏的坐标被存进 B 屏
-/// 的 key。于是回到 A 屏读不到记录（像"没记住"），切到 B 屏却读到 A 屏坐标 ⇒
-/// **工具栏跑回 A 屏**。
+/// `clamp_to_work_area` 把工具栏贴到 A 屏右边缘时窗口 right 恰等于 A 屏工作区 right，
+/// 拿这个排他边界去 `MonitorFromPoint` 会落在 B 屏（`DEFAULTTONEAREST` 不报错只答错），
+/// 于是回 A 屏读不到记录、切到 B 屏却读到 A 屏坐标，工具栏跑回 A 屏。
 ///
-/// 与 `wind-ui` 两个窗口的 `Placement::probe_point` 是同一个不变量，只是那边管
-/// 「按哪块屏排版」、这边管「存进哪块屏的 key」——两边都错就会互相掩盖。
+/// 与 `wind-ui` 两个窗口的 `Placement::probe_point` 是同一个不变量：那边管「按哪块屏排版」、
+/// 这边管「存进哪块屏的 key」，两边都错会互相掩盖。
 #[test]
 fn anchor_probe_point_steps_inside_the_exclusive_edge() {
     // A 屏工作区 (0, 0, 1920, 1040)，工具栏被钳到右下角 ⇒ 窗口 right/bottom 恰好贴界。
@@ -76,9 +73,8 @@ fn anchor_probe_point_steps_inside_the_exclusive_edge() {
 
 /// 「候选窗首显」四档表自身的自洽性：id 与档位都不得重复，且三个真实档位一个不少。
 ///
-/// ★ 这条钉的是**加档/改档时的漏改**。表本身已经消掉了「菜单项与 setter 写反」那类
-/// 缺陷（两处手写变一处），但表里写重一个 id、或漏掉某一档，仍然没有编译信号——
-/// 表现是「菜单里两项互相抢选中态」或「某一档在菜单里根本点不出来」。
+/// 钉的是加档/改档时的漏改：表里写重一个 id 或漏掉某一档没有编译信号，表现为
+/// 「菜单里两项互相抢选中态」或「某一档点不出来」。
 #[test]
 fn first_show_menu_table_is_self_consistent() {
     use crate::coordinator::Coordinator;
@@ -105,8 +101,7 @@ fn first_show_menu_table_is_self_consistent() {
 /// 输入诊断 HUD 整套在 macOS 未实现（`ShowInputDiag` 落在 forwarder 的兜底臂），
 /// 菜单里不该留一个点了没反应的项。
 ///
-/// 这条同时是 `#[cfg]` **确实作用到了 `vec![]` 元素上**的证据——属性写在数组元素前
-/// 是合法的，但写错位置（比如挂到 `M::leaf` 的某个实参上）照样能编过，只是不生效。
+/// 也证明 `#[cfg]` 确实作用到了 `vec![]` 元素上：挂错位置（如 `M::leaf` 的实参上）照样能编过，只是不生效。
 #[test]
 fn input_diag_hud_menu_item_is_platform_gated() {
     use crate::coordinator::Coordinator;
@@ -130,13 +125,10 @@ fn input_diag_hud_menu_item_is_platform_gated() {
     );
 }
 
-/// 工具栏分格右键：**每一格要么有定制、要么明确回落主菜单**，且回落这条路不可断。
+/// 工具栏分格右键：每一格要么有定制、要么明确回落主菜单，且回落这条路不可断。
 ///
-/// 隐藏了齿轮之后，右键工具栏是主菜单仅剩的鼠标入口（`toolbar-customization.md`
-/// §2.2 判据③）。若哪天给齿轮格也配了定制菜单而忘了在里面留一条通往主菜单的路，
-/// 用户就可能把自己锁在设置之外——这条断言钉的正是那个前提。
-///
-/// 用穷举而非逐个点名：`ToolbarAction` 加新变体时，新变体没被想过就会红。
+/// 隐藏齿轮后，右键工具栏是主菜单仅剩的鼠标入口（`toolbar-customization.md` §2.2 判据③）。
+/// 用穷举而非逐个点名：`ToolbarAction` 加新变体而没被想过时会红。
 #[test]
 fn every_toolbar_cell_either_customizes_or_falls_back() {
     use crate::coordinator::Coordinator;
@@ -168,14 +160,12 @@ fn every_toolbar_cell_either_customizes_or_falls_back() {
     }
 }
 
-/// ⛔ **每份分格菜单都必须留一条通往完整主菜单的路**。
+/// 每份分格菜单都必须留一条通往完整主菜单的路。
 ///
-/// 判据③（`toolbar-customization.md` §2.2）是「隐藏齿轮不会锁死用户——右键工具栏
-/// 任意位置同样弹主菜单」。分格右键把功能格的右键让给了精简菜单，若不补这一条，
-/// 隐藏了齿轮的用户就只剩 **12dp 的拖动柄**通向主菜单——一个要瞄准的目标。
+/// 判据③（`toolbar-customization.md` §2.2）：隐藏齿轮不会锁死用户。分格右键把功能格的右键
+/// 让给了精简菜单，不补这一条，隐藏齿轮的用户就只剩 12dp 的拖动柄通向主菜单。
 ///
-/// ⚠️ 上面那条穷举测试**证不了这件事**：它断言的恰恰是「这些格有自己的菜单」，
-/// 与本条方向相反。两条一起才把判据③钉住。
+/// 上面那条穷举测试证不了这件事（它断言的是「这些格有自己的菜单」），两条一起才钉住判据③。
 #[test]
 fn every_cell_menu_keeps_a_way_back_to_the_main_menu() {
     use crate::coordinator::Coordinator;
@@ -203,10 +193,8 @@ fn every_cell_menu_keeps_a_way_back_to_the_main_menu() {
     }
 }
 
-/// 分格菜单里的开关，文案与勾选态必须与主菜单里同一个开关**逐字相同**。
-///
-/// 同一个开关在两处叫不同的名字，用户会当成两件事；勾选态对不上则更糟——
-/// 两处菜单会互相"打脸"。这条把「复制了一份文案」这种改动挡在合并前。
+/// 分格菜单里的开关，文案与勾选态必须与主菜单里同一个开关逐字相同；
+/// 否则用户会当成两件事，或两处菜单的勾选态互相矛盾。
 #[test]
 fn cell_menu_labels_match_the_main_menu() {
     use crate::coordinator::Coordinator;
@@ -227,7 +215,7 @@ fn cell_menu_labels_match_the_main_menu() {
             "{label} 在分格菜单与主菜单里对不上（文案或勾选态）"
         );
     }
-    // ★ 顺序也要对齐，而按 label 查找对顺序是**盲的**——上面那个循环换成任意排列
+    // 顺序也要对齐，而按 label 查找对顺序是盲的——上面那个循环换成任意排列
     // 都照样绿。同一组开关在两处排得不一样，用户每次都得重新找。
     let order: Vec<&str> = cell
         .iter()
@@ -255,11 +243,10 @@ fn cell_menu_labels_match_the_main_menu() {
     );
 }
 
-/// 状态图标开关必须同时出现在 macOS 的**两棵**菜单树里，且文案一致。
+/// 状态图标开关必须同时出现在 macOS 的两棵菜单树里，且文案一致。
 ///
-/// 回归背景：IMK 输入源菜单走精简树 `build_menu_items_macos()`、候选框右键与状态指示器
-/// 走完整树 `build_main_menu_items()`，两棵树各自维护 → 精简树当初把这项砍了，同一个
-/// 输入法在两处菜单里表现不一。这条测试同时钉住「都在」和「同名」。
+/// IMK 输入源菜单走精简树 `build_menu_items_macos()`，候选框右键与状态指示器走完整树
+/// `build_main_menu_items()`，两棵树各自维护。
 // 只在 macOS：Linux 的文案是「显示工具栏」，由
 // `linux_panel_tests::main_menu_has_toolbar_and_softkeyboard_on_linux` 钉住。
 #[cfg(target_os = "macos")]
@@ -355,7 +342,7 @@ fn settings_argv_round_trips_quoting() {
         settings_argv(Some("dict"), &build_settings_args(&[("schema", "wubi86")])),
         vec!["--page=dict", "--schema=wubi86"]
     );
-    // 含空白的值：加引号 → 切词后必须仍是**一个** argv，且引号已剥掉。
+    // 含空白的值：加引号 → 切词后必须仍是一个 argv，且引号已剥掉。
     assert_eq!(
         settings_argv(
             Some("add-word"),

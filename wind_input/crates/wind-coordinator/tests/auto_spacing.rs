@@ -1,12 +1,12 @@
 //! 中英 / 中数切换处补空格（`input.spacing.*`）端到端测试。
 //!
-//! 设计见 `docs/design/auto-spacing-and-latin-smart-punct.md`。空格是**切换后那一笔上屏的前缀**，
+//! 设计见 `docs/design/auto-spacing-and-latin-smart-punct.md`。空格是切换后那一笔上屏的前缀，
 //! 「上一笔末字符」来自客户端的输入序列记账（`seq_char`），这里由 [`Host`] 模拟。按键一律经
 //! `handle_key_event_policed`——补空格在那个出口。
 //!
 //! 主方案取五笔：中文上屏一条键路就到，不依赖拼音整句的排序。
 //!
-//! ⚠️ 词典缺失时整族静默跳过（判据是**耗时 0.00s**，不是通过条数）。
+//! 词典缺失时整族静默跳过（判据是耗时 0.00s，不是通过条数）。
 
 use std::cell::Cell;
 use std::path::PathBuf;
@@ -190,7 +190,7 @@ fn user_typed_space_suppresses_auto_space() {
     assert_eq!(h.temp_english("Python"), "Python");
 }
 
-/// 客户端报不出光标前是什么时，中英交界**不**退回服务端记录（宁可少补）：焦点切换、
+/// 客户端报不出光标前是什么时，中英交界不退回服务端记录（宁可少补）：焦点切换、
 /// 鼠标挪过光标之后，上一笔是什么与这里无关。
 #[test]
 fn unknown_previous_char_gets_no_cjk_space() {

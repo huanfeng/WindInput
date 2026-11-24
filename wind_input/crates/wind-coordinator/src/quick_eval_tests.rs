@@ -8,10 +8,9 @@ fn date() -> QuickValues {
     }
 }
 
-/// ★ 端到端回归：打 `1/3` 出厂候选须含百分比档，且不是从已截断的 `$RESULT`
-/// 二次舍入出来的——`decimal_places=2` 时 `$RESULT` 是 "0.33"，若 `pct()` 从它
-/// 再算，`×100` 只会得到 "33%" 而非 "33.33%"。走真实出厂表 + 真实 eval，
-/// 而不是像 `funcs::quick` 单测那样手填 `$EXACT`，才盖得住整条接线。
+/// 端到端：打 `1/3` 出厂候选须含百分比档，且不是从已截断的 `$RESULT` 二次舍入出来的
+/// （`decimal_places=2` 时 `$RESULT` 是 "0.33"，从它再算只得 "33%" 而非 "33.33%"）。
+/// 走真实出厂表 + 真实 eval，才盖得住整条接线。
 #[test]
 fn calc_percent_uses_exact_not_rounded_result() {
     let got = wind_quick_input::generate_with_eval(
@@ -24,7 +23,7 @@ fn calc_percent_uses_exact_not_rounded_result() {
     assert_eq!(got, vec!["0.33", "1/3=0.33", "33.33%"]);
 }
 
-/// ★ 表达式路径与变量路径必须同源：无参函数 == 对应的 `$` 变量。
+/// 表达式路径与变量路径必须同源：无参函数 == 对应的 `$` 变量。
 #[test]
 fn bare_calls_match_variable_path() {
     let v = date();
@@ -73,8 +72,8 @@ fn literals_mix_with_calls() {
 
 /// 内置的通用文本函数照常可用，可与 quick 取值函数复合。
 ///
-/// ⚠️ `s2t` / `pinyin` 目前是 **stub（原样返回）**，繁体金额、数字读音这类需求
-/// 要等 cmdbar 补上实现，别在文档里承诺。
+/// `s2t` / `pinyin` 目前是 stub（原样返回），繁体金额、数字读音要等 cmdbar 补上实现，
+/// 别在文档里承诺。
 #[test]
 fn builtin_text_funcs_compose_with_quick_funcs() {
     let n = QuickValues::Number {
@@ -152,7 +151,7 @@ fn lunar_expression_parts() {
     assert!(eval_expr("{lunar(part='nope')}", &v).is_none());
 }
 
-/// ★ 农历取不到值时整条候选消失，而**不是**上屏半截的「农历」。
+/// 农历取不到值时整条候选消失，而不是上屏半截的「农历」。
 ///
 /// 这是 `lunar()` 取不到值时报错（而非给空串）的理由：表达式路径是整条插值，
 /// 字面前缀不会因为函数返回空串而消失。
@@ -169,10 +168,10 @@ fn lunar_out_of_range_kills_whole_template() {
     assert_eq!(eval_expr("{year()}年", &out).unwrap(), "1899年");
 }
 
-/// ★ 非节日当天 `{lunar(part='festival')}` 求值成**空串**，整条照常出。
+/// 非节日当天 `{lunar(part='festival')}` 求值成空串，整条照常出。
 ///
-/// 与 `$LF` 变量路径同语义（见 `wind_quick_input::lunar::var`）：表达式路径和
-/// 变量路径对同一天必须给出同一个答案，否则用户在两种写法间迁移会撞见行为差异。
+/// 与 `$LF` 变量路径同语义（见 `wind_quick_input::lunar::var`）：两种写法对同一天
+/// 必须给出同一个答案。
 #[test]
 fn lunar_festival_is_empty_on_ordinary_days() {
     let plain = QuickValues::Date {
@@ -211,10 +210,8 @@ fn lunar_festival_is_empty_on_ordinary_days() {
     );
 }
 
-/// ★ 预检样本取**平常日子**，全部 part 仍须取到值。
-///
-/// `$LF` 若回归成「非节日返回 None」，这里会立刻红——出厂配置被预检误报成
-/// 配置错误的回归，不该等用户发现。
+/// 预检样本取平常日子，全部 part 仍须取到值；`$LF` 回归成「非节日返回 None」时，
+/// 出厂配置会被预检误报成配置错误。
 #[test]
 fn precheck_sample_covers_all_lunar_parts() {
     let v = date_sample();

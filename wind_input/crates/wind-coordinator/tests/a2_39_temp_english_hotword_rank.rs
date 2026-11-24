@@ -1,7 +1,5 @@
 //! A2-39 观测：临时英文里用过 `translation` 后再键入 `t`，它排第几。
-//!
-//! 反馈（t202）：打完 `translation` 上屏，再进临英键入 `t`，`translation` 未置顶。
-//! 本文件**只量不判**（`#[ignore]`，手动跑）：
+//! 本文件只量不判（`#[ignore]`，手动跑）；成因与正式断言见 `temp_english_hotword_recall.rs`。
 //!
 //! ```text
 //! cargo test -p wind-coordinator --test a2_39_temp_english_hotword_rank -- --ignored --nocapture
@@ -10,23 +8,11 @@
 //! 量六组：英文调频 {出厂关, 开} × 打法 {打全按空格, 打全选小写那条, 打 `tran` 翻页选}，
 //! 各报选 0/1/3/5 次后 `t` 下 `translation` 的原序位次（0 起的全列表下标）与页号，末轮后
 //! `tr`/`tra`/`tran` 下的位次，以及英文桶里实际记下的词频行。
-//! 配置取出厂（`Config::load` = 代码默认 + `build_dev/data/config.toml` + 用户层；用例覆盖
-//! `schema.available/active` 与调频开关，用户层若另改了临英/英文段会混进来，读数前先看一眼）。
-//!
-//! 2026-09-25 修前实测结论：
-//! - 出厂调频关：不记、不排，位次恒不变——出厂值问题；
-//! - 调频开、打全再上屏（空格 / 选小写）：一条都不记。打全 `translation` 时词库那条被头部
-//!   原文 / 大小写变形吞掉，头部候选不是 `English` 来源，`record_temp_english_selection` 跳过；
-//! - 调频开、从词库段选中：`(translation, translation)` 记到 5 次，`tr`/`tra` 101→6、
-//!   `tran` 41→4；但 `t` 下它**根本不在取回的 300 条里**，重排只作用于已取回的候选，
-//!   用多少次都上不来——取数上限先于词频重排，是代码问题。
-//!
-//! 修后（②头部候选按对应词库词记、③调频开时从词频表召回池外的词，正式断言见
-//! `temp_english_hotword_recall.rs`）：调频开时三种打法一致——`t` 下 选 1/3/5 次后
-//! 下标 152/39/11（第 22/6/2 页），`tr`/`tra` 6、`tran` 4；调频关逐字不变。
 //! `observe_recall_other_entries_and_cost` 另量英文方案 / 快捷输入的位次与召回的每键耗时。
 //!
-//! ⚠️ 依赖 `build_dev/data` 真实词库；缺失时跳过。
+//! 配置取出厂（`Config::load` = 代码默认 + `build_dev/data/config.toml` + 用户层；用例覆盖
+//! `schema.available/active` 与调频开关，用户层若另改了临英/英文段会混进来，读数前先看一眼）。
+//! 依赖 `build_dev/data` 真实词库；缺失时跳过。
 
 use std::path::PathBuf;
 use std::sync::Arc;
