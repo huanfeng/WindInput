@@ -1,6 +1,6 @@
 use super::*;
 
-/// ★ `parse` 与 `as_str` 必须严格互逆——候选 id 靠这对函数往返，
+/// `parse` 与 `as_str` 必须严格互逆——候选 id 靠这对函数往返，
 /// 一侧改了名字另一侧没改，右键就会认不出这条候选（且没有任何报错）。
 #[test]
 fn kind_parse_and_as_str_roundtrip() {
@@ -95,7 +95,7 @@ text = "$M"
     assert_eq!(ids, vec!["first", "second"]);
 }
 
-/// ★ 单条非法只剔除该条，其余存活——否则用户改错一个变量名，整个快捷输入退回出厂。
+/// 单条非法只剔除该条，其余存活——否则用户改错一个变量名，整个快捷输入退回出厂。
 #[test]
 fn one_bad_entry_does_not_kill_the_rest() {
     let t = FormatTable::parse(
@@ -141,7 +141,7 @@ text = "${Y}年{month()}月"
 }
 
 /// 表达式模板的函数名/参数由 cmdbar 在求值期校验，加载期不认识它们——
-/// 但**混用两套语法**必须在加载期就拒绝：变量路径不认识 `{month()}`，
+/// 但混用两套语法必须在加载期就拒绝：变量路径不认识 `{month()}`，
 /// 放行的话会把它当字面量上屏。
 #[test]
 fn expression_entries_are_accepted_but_mixing_is_not() {
@@ -161,12 +161,8 @@ text = "{no_such_func()}"
     assert!(validate_format_text(FormatKind::Date, "$Y年{month()}月").is_err());
 }
 
-/// ★ 漏掉外层花括号必须在**保存时**就报错。
-///
-/// 这是真实用户反馈：照着文档的函数表（列的是 `amt()`）拼出 `amt(zheng='false')`
-/// 填进模板框，一路绿灯到打字时才发现候选出的是这段源码本身。
-/// 成因是它恰好是一条合法的**纯字面模板**——没有 `$` 变量要解析、没有裸 `{`
-/// 要求值，`expand` 原样返回、校验自然通过。
+/// 漏掉外层花括号（如 `amt(zheng='false')`）必须在保存时就报错：它恰好是一条合法的
+/// 纯字面模板，`expand` 原样返回，不拦的话候选出的就是这段源码本身。
 #[test]
 fn function_without_braces_is_rejected_with_a_pointed_hint() {
     let err = validate_format_text(FormatKind::Number, "amt(zheng='false')").unwrap_err();
@@ -244,12 +240,8 @@ fn date_ids(t: &FormatTable, a: &FormatAdjust) -> Vec<String> {
 
 // ───────── 设置页口径（entries_of_view）─────────
 
-/// ★★ 设置页里**启用项的顺序必须与候选完全一致**。
-///
-/// 这是本函数存在的全部风险所在：两处各算一遍「第几位」，漂移后的症状是
-/// 「用户在设置页点上移，列表动了、实际候选没动」，两边都不报错。故这里直接拿
-/// `entries_of_adjusted`（候选那条路径）的输出做基准，而不是另写一份期望顺序——
-/// 后者只能证明「视图等于我以为的顺序」，证明不了「视图等于候选」。
+/// 设置页里启用项的顺序必须与候选完全一致，否则「设置页点上移、实际候选没动」且两边都不报错。
+/// 故直接拿 `entries_of_adjusted`（候选那条路径）的输出做基准，而非另写一份期望顺序。
 #[test]
 fn view_enabled_order_equals_candidate_order() {
     let t = FormatTable::builtin();
@@ -272,7 +264,7 @@ fn view_enabled_order_equals_candidate_order() {
     assert_eq!(view_enabled, candidate);
 }
 
-/// 停用项**留在列表里**（这正是设置页存在的理由），且条数一条不少。
+/// 停用项留在列表里（这正是设置页存在的理由），且条数一条不少。
 #[test]
 fn view_keeps_disabled_entries_listed() {
     let t = FormatTable::builtin();
@@ -289,11 +281,8 @@ fn view_keeps_disabled_entries_listed() {
     assert_eq!(view.iter().filter(|v| !v.enabled).count(), 2);
 }
 
-/// ★★ **停用一行不该让它换位置**。
-///
-/// 停用是可逆、反复试的动作；让停用项沉到末尾（最初的做法）会使同一行在停用/启用之间
-/// 来回跳。这里对**每一条**都验一遍「停用前的下标 == 停用后的下标」，而不是只挑一条
-/// ——首条、末条、中间条走的是锚点算法的不同分支（锚点为 None / 锚点在末尾 / 一般情形）。
+/// 停用一行不该让它换位置，否则同一行会在停用/启用之间来回跳。对每一条都验，
+/// 因为首条、末条、中间条走锚点算法的不同分支（锚点为 None / 锚点在末尾 / 一般情形）。
 #[test]
 fn disabling_a_row_does_not_move_it() {
     let t = FormatTable::builtin();
@@ -323,11 +312,8 @@ fn disabling_a_row_does_not_move_it() {
     }
 }
 
-/// ★★ **先调序、再停用同一条，位置也不该变**。
-///
-/// 这条比 `disabling_a_row_does_not_move_it` 更严：那条测的是从未调序过的条目（锚点
-/// 落在基表位置即可），这条要求锚点参照「假设全部启用」的顺序，否则被移到首位的条目
-/// 一停用就跳回出厂位置。位置信息本就没丢（停用不清 `moved`），全靠参照系选对。
+/// 先调序、再停用同一条，位置也不该变：锚点须参照「假设全部启用」的顺序，
+/// 否则被移到首位的条目一停用就跳回出厂位置。
 #[test]
 fn disabling_a_reordered_row_keeps_its_new_position() {
     let t = FormatTable::builtin();
@@ -400,11 +386,8 @@ fn several_disabled_rows_each_stay_put() {
     assert_eq!(after, base, "四条同时停用，顺序仍与出厂一致");
 }
 
-/// 停用项夹在中间之后，**启用项的相对顺序仍须与候选完全一致**。
-///
-/// 这条与 `view_enabled_order_equals_candidate_order` 的区别在于：那条测的是纯调序，
-/// 这条测「调序 + 停用」混合——正是「不剔除就套 `moved` 下标」会算错的场景
-/// （见 `entries_of_view` 的 ⚠️ 段）。
+/// 「调序 + 停用」混合时启用项的相对顺序仍须与候选完全一致——「不剔除就套 `moved`
+/// 下标」会在这里算错（见 `entries_of_view`）。
 #[test]
 fn enabled_order_still_matches_candidates_with_disabled_in_between() {
     let t = FormatTable::builtin();
@@ -502,10 +485,8 @@ fn move_to_front() {
     assert_eq!(date_ids(&t, &a)[0], "date.lunar");
 }
 
-/// ★ 逆序遍历 = LIFO：后写入的规则（index 0）优先级最高。
-///
-/// 两条规则都想占 0 号位时，最新的那条赢。顺序搞反的话，用户会发现
-/// 「我刚调的那条被上一次的调整顶掉了」。
+/// 逆序遍历 = LIFO：后写入的规则（index 0）优先级最高，两条都想占 0 号位时最新的赢。
+/// 搞反的话「刚调的那条被上一次的调整顶掉」。
 #[test]
 fn newest_move_wins() {
     let t = FormatTable::builtin();
@@ -528,7 +509,7 @@ fn move_to_middle() {
     assert_eq!(date_ids(&t, &a)[2], "date.lunar");
 }
 
-/// ★ 越界下标不 panic，钳到末尾——条目可能因停用或用户改文件而变少。
+/// 越界下标不 panic，钳到末尾——条目可能因停用或用户改文件而变少。
 #[test]
 fn out_of_range_position_clamps() {
     let t = FormatTable::builtin();
@@ -541,9 +522,7 @@ fn out_of_range_position_clamps() {
     assert_eq!(ids.len(), t.entries_of(FormatKind::Date).count());
 }
 
-/// ★ 孤儿规则（基表里没有该 id）静默忽略，不影响其余条目。
-///
-/// 高级用户整份覆盖格式表、删掉了某条时就会这样。
+/// 孤儿规则（基表里没有该 id，如用户整份覆盖格式表删了某条）静默忽略，不影响其余条目。
 #[test]
 fn orphan_rule_is_ignored() {
     let t = FormatTable::builtin();
@@ -638,7 +617,7 @@ fn user_entry(id: &str, kind: FormatKind, text: &str, position: i32) -> FormatEn
     }
 }
 
-/// 新加的条目落在本类**末尾**：出厂条目的位置不因为用户加了东西而变。
+/// 新加的条目落在本类末尾：出厂条目的位置不因为用户加了东西而变。
 #[test]
 fn user_entries_come_after_factory_ones() {
     let t = FormatTable::builtin();
@@ -662,7 +641,7 @@ fn user_entries_come_after_factory_ones() {
     assert_eq!(&ids[base.len()..], &["date.u1", "date.u2"]);
 }
 
-/// 用户条目**只出现在它自己的类别**里——`added` 是一张跨类别的表，按 kind 过滤。
+/// 用户条目只出现在它自己的类别里——`added` 是一张跨类别的表，按 kind 过滤。
 #[test]
 fn user_entries_do_not_leak_across_kinds() {
     let t = FormatTable::builtin();
@@ -679,7 +658,7 @@ fn user_entries_do_not_leak_across_kinds() {
     }
 }
 
-/// ★ 用户条目与出厂条目共用同一套调序/停用机制，不另开一条路径。
+/// 用户条目与出厂条目共用同一套调序/停用机制，不另开一条路径。
 #[test]
 fn user_entry_obeys_move_and_disable() {
     let t = FormatTable::builtin();
@@ -709,10 +688,8 @@ fn user_entry_obeys_move_and_disable() {
     );
 }
 
-/// ★★ 停用保位对用户条目同样成立：移到首位再停用，视图里仍在首位。
-///
-/// 这条不是重复覆盖——`entries_of_view` 的「假设全部启用」那趟计算必须把 `added`
-/// 一起带上，漏了的话用户条目在那趟里根本不存在，锚点算法找不到它、只能垫到末尾。
+/// 停用保位对用户条目同样成立：`entries_of_view` 的「假设全部启用」那趟必须带上 `added`，
+/// 漏了的话用户条目找不到锚点、只能垫到末尾。
 #[test]
 fn disabled_user_entry_keeps_its_moved_position() {
     let t = FormatTable::builtin();
@@ -746,8 +723,7 @@ fn view_marks_user_entries() {
     }
 }
 
-/// ★ id 生成取「最大序号 + 1」。反向对照：换成「条数 + 1」这条就红——
-/// 删掉中间一条后条数回退，新条目会撞上仍然存在的那个 id。
+/// id 生成取「最大序号 + 1」：换成「条数 + 1」的话删掉中间一条后新条目会撞上仍存在的 id。
 #[test]
 fn next_user_id_survives_a_deletion_in_the_middle() {
     let mut a = FormatAdjust {
@@ -781,7 +757,7 @@ fn next_user_id_counts_per_kind() {
     assert_eq!(next_user_format_id(FormatKind::Number, &a), "number.u1");
 }
 
-/// ★ 提示清单里的每个名字都必须真的被 `supports_var` 接受——否则设置页照着提示写出的
+/// 提示清单里的每个名字都必须真的被 `supports_var` 接受——否则设置页照着提示写出的
 /// 模板会在保存时被拒，而提示本身看不出错。
 #[test]
 fn var_hints_are_all_actually_supported() {
@@ -802,7 +778,7 @@ fn var_hints_are_all_actually_supported() {
     }
 }
 
-/// 每类的变量条数写死。**加变量时这条会红**——那正是它的用途：提醒同步
+/// 每类的变量条数写死。加变量时这条会红——那正是它的用途：提醒同步
 /// `var_hints`（设置页提示）与文档站的变量表，那两处没有编译期约束。
 #[test]
 fn var_hint_counts_are_pinned() {
@@ -814,7 +790,7 @@ fn var_hint_counts_are_pinned() {
     assert_eq!(n(FormatKind::Calc), 3);
 }
 
-/// 农历变量给 date/month_day 而**不给 year_month**：这条分工在提示清单里也要成立，
+/// 农历变量给 date/month_day 而不给 year_month：这条分工在提示清单里也要成立，
 /// 否则用户照提示给年月写 `$LMD`，保存时才被拒。
 #[test]
 fn year_month_hints_offer_no_lunar_vars() {
@@ -847,8 +823,7 @@ fn user_id_shape_is_recognized() {
     assert!(!is_user_format_id(""));
 }
 
-/// ★ 加载期守门：出厂表/手写文件占用 `.u数字` 形态时跳过该条。
-/// 靠约定不够——真撞上了行为取决于遍历顺序，且完全没有报错。
+/// 加载期守门：出厂表/手写文件占用 `.u数字` 形态时跳过该条，否则撞上后行为取决于遍历顺序且无报错。
 #[test]
 fn parse_rejects_reserved_user_id_shape() {
     let t = FormatTable::parse(

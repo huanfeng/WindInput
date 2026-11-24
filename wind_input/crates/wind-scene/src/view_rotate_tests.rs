@@ -26,7 +26,7 @@ fn rotation_swaps_the_measured_size() {
     assert_eq!(root.measured_size(), (10.0, 40.0));
 }
 
-/// ★ 方向判据：局部左上角必须落到屏幕**右上角**。落到左下角就是逆时针，
+/// 方向判据：局部左上角必须落到屏幕右上角。落到左下角就是逆时针，
 /// 蒙古文会变成自下而上读。
 #[test]
 fn local_top_left_maps_to_screen_top_right() {
@@ -52,10 +52,7 @@ fn local_top_left_maps_to_screen_top_right() {
     assert_eq!((got.w, got.h), (3.0, 2.0), "宽高没交换");
 }
 
-/// 命中矩形必须跟着转。漏掉映射时画面完全正常、只有鼠标点错候选，从现象反推不出成因。
-///
-/// ★ 反向对照同样必要：不带旋转时矩形**不得**被映射。只测「转了」的话，
-/// 一个无条件映射的实现会让普通候选窗的命中全错，而那条路径没人测。
+/// 命中矩形必须跟着转，漏掉时画面正常、只有鼠标点错候选。反向对照：不带旋转时矩形不得被映射。
 #[test]
 fn hit_rects_follow_the_rotation() {
     let inner = View::container(Layout::Column)
@@ -78,9 +75,8 @@ fn hit_rects_follow_the_rotation() {
     assert_eq!(hit(&plain, 2).y, 10.0);
 }
 
-/// 像素方向：局部缓冲左上角那一点，搬到屏幕后必须在**右上角**。
-/// 这条与 `local_top_left_maps_to_screen_top_right` 是同一约定的两个层面
-/// （矩形 / 像素），必须一起钉——两处各写一遍映射正是最容易错开一格的地方。
+/// 像素方向：局部缓冲左上角那一点，搬到屏幕后必须在右上角。与
+/// `local_top_left_maps_to_screen_top_right` 是同一约定的矩形 / 像素两面，必须一起钉。
 #[test]
 fn pixel_blit_puts_local_origin_at_screen_top_right() {
     let (cw, ch) = (4u32, 3u32); // 局部 4×3 ⇒ 屏幕 3×4
@@ -108,10 +104,8 @@ fn blit_round_trip_is_identity() {
     assert_eq!(buf, orig, "往返不是恒等：底子会被搬歪");
 }
 
-/// 逆时针的方向判据：局部左上角落到屏幕**左下角**。
-///
-/// ★ 必须与顺时针那条一起看：两条只测「宽高交换了」的话，一个把 Ccw 也实现成
-/// 顺时针的版本能全绿——而那样对联式竖排的每个字会是倒的（转了 180°）。
+/// 逆时针的方向判据：局部左上角落到屏幕左下角。只测宽高交换的话，把 Ccw 实现成顺时针
+/// 也能全绿，对联式竖排的每个字会转 180°。
 #[test]
 fn ccw_puts_local_origin_at_screen_bottom_left() {
     let host = Rect {
@@ -146,12 +140,8 @@ fn ccw_puts_local_origin_at_screen_bottom_left() {
     assert_eq!(&buf[0..4], &[0, 0, 0, 0], "左上角不该有东西");
 }
 
-/// ★★ 对联式竖排的**全部数学**就是这一条：外层顺时针套内层逆时针 ≡ 什么都没做。
-///
-/// 它同时钉住三件事——两向的映射互为逆、嵌套时内层拿到的底子是对的、宽高交换两次
-/// 回到原值。任何一处方向写反，这里的像素就与直画不同（而单看某一向的测试都能全绿）。
-///
-/// 用左右异色的两块而不是单色：单色块转 180° 也一样，测不出方向。
+/// 对联式竖排的数学：外层顺时针套内层逆时针 ≡ 什么都没做。同时钉住两向映射互为逆、
+/// 嵌套时内层拿到的底子正确、宽高交换两次回到原值。用左右异色的两块，单色转 180° 测不出方向。
 #[test]
 fn cw_around_ccw_is_the_identity() {
     const RED: [u8; 4] = [0, 0, 255, 255];

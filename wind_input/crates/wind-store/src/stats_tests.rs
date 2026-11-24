@@ -91,8 +91,7 @@ fn test_speed_per_minute_ms() {
     );
     assert_eq!(speed_per_minute_ms(0, 60_000, 1.0), 0);
     assert_eq!(speed_per_minute_ms(100, 0, 1.0), 0);
-    // 亚秒间隔不再被截断成 0：v1 的 `num_seconds()` 会把这 900ms 记成 0 秒，
-    // 于是分母凭空消失、速度被外推——这正是 v1 偏高的头号来源。
+    // 亚秒间隔不得截断成 0（`num_seconds()` 会把 900ms 记成 0 秒），否则分母消失、速度被外推偏高。
     assert_eq!(speed_per_minute_ms(2, 900, 1.0), 24, "分母走 5s 下限");
 }
 
@@ -110,7 +109,7 @@ fn speed_factor_scales_result_and_tolerates_garbage() {
     }
 }
 
-/// 短码出长词/一键出一串：速度分子封顶，**实际字数不受影响**（那由调用方另计）。
+/// 短码出长词/一键出一串：速度分子封顶，实际字数不受影响（那由调用方另计）。
 #[test]
 fn speed_chars_capped_only_for_short_keystrokes() {
     // 4 键出 7 字（「中华人民共和国」）→ 只计 4。
@@ -157,11 +156,8 @@ fn speed_parts_falls_back_for_v1_records() {
     assert_eq!(v2b.speed_parts(), (180, 90_500));
 }
 
-/// 守护：小样本不得刷新「历史最快」。
-///
-/// 上面那几个用例正说明 `speed_per_minute` 在分母小时给的是**外推值**
-/// （252 字 / 6 秒 → 2520 字每分）。展示当日速度时无妨，写进永久的 max_speed
-/// 就是污染——现实中表现为「历史最快 1500 字/分」这种不可能的数字。
+/// 小样本不得刷新「历史最快」：`speed_per_minute` 在分母小时给的是外推值
+/// （252 字 / 6 秒 → 2520 字每分），展示当日速度无妨，写进永久的 max_speed 就是污染。
 #[test]
 fn small_samples_never_qualify_for_max_speed() {
     // 典型污染场景：当天开头，第一次上屏的字不计时间，第二次上屏才攒出几秒。
@@ -325,8 +321,7 @@ fn test_recalculate_stats_meta_after_prune() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// 重算时同样要挡掉小样本，且它是**修正历史污染值的入口**：
-/// 之前写进去的虚高 max_speed，重算一次即可回落到真实值。
+/// 重算时同样要挡掉小样本，且它是修正历史污染值的入口：虚高的 max_speed 重算一次即回落。
 #[test]
 fn recalculate_ignores_small_samples_for_max_speed() {
     let path = std::env::temp_dir().join("wind_recalc_speed_test.redb");
@@ -458,7 +453,7 @@ fn corrupt_month_is_rebuilt_and_writes_keep_working() {
     wind_userdata::issues::clear(&p);
 }
 
-/// M-3：元数据坏了且没有可用备份 ⇒ 由各月数据重算，不当成全 0 写回。
+/// 元数据坏了且没有可用备份 ⇒ 由各月数据重算，不当成全 0 写回。
 #[test]
 fn corrupt_stats_meta_is_recalculated_not_zeroed() {
     let s = Store::open(tmp("wind_stats_meta_recalc.redb")).unwrap();
@@ -501,7 +496,7 @@ fn range_query_skips_unreadable_month() {
     wind_userdata::issues::clear(&p);
 }
 
-/// 审查 I-1：非 ASCII / 畸形日期不得 panic（release 下 panic = abort 会带走整个服务）。
+/// 非 ASCII / 畸形日期不得 panic（release 下 panic = abort 会带走整个服务）。
 #[test]
 fn malformed_dates_never_panic() {
     let s = Store::open(tmp("wind_stats_bad_dates.redb")).unwrap();

@@ -290,10 +290,8 @@ fn row_reds(pm: &Pixmap, w: u32) -> Vec<u8> {
         .collect()
 }
 
-/// 编辑器发布的主题把图片内嵌在 theme.toml 里，必须一路解码到像素。
-///
-/// 这条是「市场主题导入后没有背景图」的回归护栏：曾经解码走的是
-/// `image::open(path)`，拿 data: URI 当文件名打开，必然失败且只留一行 warn。
+/// 编辑器发布的主题把图片以 data: URI 内嵌在 theme.toml 里，必须一路解码到像素，
+/// 不能当文件名去 `image::open`。
 #[test]
 fn fill_decodes_inline_png_data_uri() {
     let uri = png_data_uri(2, 2, [255, 0, 0, 255]);
@@ -391,8 +389,7 @@ fn data_uri_payload_tolerates_embedded_newlines() {
     assert_eq!(ImageCache::new().src_size(&folded), Some((2, 2)));
 }
 
-/// SVG 没有位图源，原始尺寸只能问文档自己。拿不到尺寸时 `view.rs` 的 layer
-/// 分支会整层不画——`.svg` 文件早先就是这样，内嵌 SVG 不能再走一遍。
+/// SVG 没有位图源，原始尺寸只能问文档自己；拿不到尺寸时 `view.rs` 的 layer 分支会整层不画。
 #[test]
 fn src_size_reads_svg_document_size() {
     let mut cache = ImageCache::new();
@@ -461,8 +458,7 @@ fn inline_svg_renders_embedded_data_uri_bitmap() {
     );
 }
 
-/// 候选窗宽度每变一个像素就是一条新的填充缓存条目，没有上界就只涨不落
-/// （实测宽 200→800、高 40 这一段是 45.9 MB）。超预算必须整体让位。
+/// 候选窗宽度每变一个像素就是一条新的填充缓存条目，没有上界就只涨不落。超预算必须整体让位。
 #[test]
 fn fills_stay_within_byte_budget() {
     let uri = png_data_uri(2, 2, [255, 0, 0, 255]);
@@ -482,11 +478,8 @@ fn fills_stay_within_byte_budget() {
     );
 
     // 命中路径不得再记一次账：记账一旦挪出 `if !contains_key`，每帧重绘都会给
-    // fill_bytes 充气，几帧就清一次表——正是这次改动要消灭的那种抖动。
-    //
-    // 特意用**不会触发清空**的小尺寸：拿上面那种 16 MiB 的大图重复命中的话，
-    // 重复记账会一次次撞上预算、清表、重建，十轮下来字节数可能恰好绕回原值，
-    // 断言就废了（这条起初正是这么写的，变异测试才照出来）。
+    // fill_bytes 充气，几帧就清一次表。
+    // 特意用不会触发清空的小尺寸：大图重复记账会清表重建，字节数可能恰好绕回原值、断言失效。
     let small = 64;
     cache
         .fill(&uri, FillSpec::stretch(), small, small, [0, 0, 0, 3])
@@ -517,7 +510,7 @@ fn decoded_sources_stay_within_byte_budget() {
     );
 }
 
-/// 打点必须在**命中时**也刷新。只在未命中时打点的话，连续打字的会话会在开始
+/// 打点必须在命中时也刷新。只在未命中时打点的话，连续打字的会话会在开始
 /// 后 30 秒被整个回收，紧接着全部重建——内存刚还回去就要回来。
 #[test]
 fn touch_refreshes_on_cache_hit_too() {
@@ -624,10 +617,8 @@ fn header_size_reads_header_without_decoding() {
     assert!(cache.header_sizes.is_empty(), "闲置回收一并清");
 }
 
-/// 九宫中段**平铺**：目标变宽只是多重复几次，纹理本身不缩放。
-///
-/// 对照组是拉伸——候选窗宽度每变一下中段就被重新压缩一次（用户看到的「呼吸」），
-/// 根源就在那条按比例映射上。
+/// 九宫中段平铺：目标变宽只是多重复几次，纹理本身不缩放（拉伸的话候选窗宽度每变一下
+/// 中段就被重新压缩一次，看起来在「呼吸」）。
 #[test]
 fn nine_slice_mid_repeats_instead_of_stretching() {
     let uri = png_stripes_data_uri(&[10, 20, 30, 40]);
@@ -695,9 +686,7 @@ fn nine_slice_repeat_applies_to_vertical_axis_too() {
     assert_eq!(col, vec![10, 20, 30, 40, 10, 20]);
 }
 
-/// 目标比切片还窄时同样退化为整体拉伸（`s0 + s1 >= dlen` 那条）。
-///
-/// 这条在实机够得着：编码条窄于左右切片之和（本例主题是 59+9=68px）并不稀奇。
+/// 目标比切片还窄时同样退化为整体拉伸（`s0 + s1 >= dlen` 那条）；编码条窄于左右切片之和并不稀奇。
 #[test]
 fn nine_slice_falls_back_when_target_narrower_than_slices() {
     let uri = png_stripes_data_uri(&[10, 20, 30, 40, 50, 60, 70, 80, 90, 100]);
@@ -739,8 +728,7 @@ fn svg_spec(mode: &str, scale_milli: u32) -> FillSpec {
     }
 }
 
-/// SVG `center`：单元 = 文档尺寸 × DPI，居中放进目标盒，四周透明（超出裁掉）。
-/// 此前 SVG 分支无视 mode 一律拉伸——整张盒被涂满。
+/// SVG `center`：单元 = 文档尺寸 × DPI，居中放进目标盒，四周透明（超出裁掉），不得无视 mode 拉伸。
 #[test]
 fn svg_center_places_document_sized_unit_in_the_middle() {
     let uri = svg_data_uri(4, 4, "#FF0000");

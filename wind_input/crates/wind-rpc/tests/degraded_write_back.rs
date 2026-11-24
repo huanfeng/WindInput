@@ -1,26 +1,12 @@
 //! 降级写盘闸的端到端验证：`config.applyPatch` 与 `config.setItems` 在段级降级时
-//! **不得**拿出厂残表覆盖用户的 Map 键。
+//! 不得拿出厂残表覆盖用户的 Map 键。
 //!
-//! # 被测的失效模式
+//! 两条路都以「当前生效配置」为 Map 键的合并/整表种子（`applyPatch` 并进当前表再整表写回；
+//! `setItems` 由设置端整表发送 base ⊕ 本次编辑）。降级后坏段处是出厂值，「加一条自定义标点」
+//! 就会抹掉用户整张映射表。定制者在 `data_custom/config.toml` 写错类型也会触发。
 //!
-//! 这两条路都以「当前生效配置」为 Map 键的合并/整表**种子**：
-//!
-//! - `applyPatch`：`patch::writes` 把片段条目并进当前表再整表写回；
-//! - `setItems`：设置端把 map 型键作原子叶子**整表发送**（wind-setting 的 `diff_config`），
-//!   其内容 = 它启动时经 `config.get` 读到的 base ⊕ 本次编辑。
-//!
-//! 段级降级之后，「当前生效配置」在坏段处是**出厂值**。于是「加一条自定义标点」这个
-//! 动作会把用户已有的**整张**映射表抹掉，永久且无痕。P1 之后这条路还可由第三方触发：
-//! 定制者在 `data_custom/config.toml` 里把该键写成错类型，该定制版的每个用户每次
-//! `load()` 都降级。
-//!
-//! # 为什么必须是集成测试（独立进程）
-//!
-//! 闸要真的生效，测试必须让 `Config::load()` 读到一份**真的会降级**的配置，也就必须
-//! 重定向用户目录（`WIND_DATADIR_CONF`）与安装根（`WIND_INSTALL_ROOT`）。这两个杠杆
-//! 都经 OnceLock，同一进程只认第一次——放进 `#[cfg(test)]` 单测模块的话，同二进制里
-//! 先跑的别的测试会把 OnceLock 定死，重定向**静默失效**，于是本测试转而去写用户真实的
-//! `%APPDATA%\WindInput\config.toml`。本仓已有这类前科，故只能独立成一个测试二进制。
+//! 必须是独立进程的集成测试：要重定向 `WIND_DATADIR_CONF` 与 `WIND_INSTALL_ROOT`，两者经
+//! OnceLock 只认第一次，放进单测模块会被同二进制里先跑的测试定死、转而写用户真实配置。
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -39,7 +25,7 @@ impl CoreRpc for StubCore {
     fn active_schema_id(&self) -> String {
         "wubi86".into()
     }
-    /// 落盘后的热重载：桩里什么都不做（本测试断言的是**磁盘内容**，不是生效状态）。
+    /// 落盘后的热重载：桩里什么都不做（本测试断言的是磁盘内容，不是生效状态）。
     fn apply_config(&self) -> bool {
         false
     }
@@ -95,7 +81,7 @@ fn degraded_section_blocks_map_write_back() {
         "前置条件：用户目录须已重定向，否则本测试会写真实 %APPDATA%"
     );
 
-    // 用户层：一条真实映射 + **同段**的一个类型错误键。
+    // 用户层：一条真实映射 + 同段的一个类型错误键。
     // 毒故意下在 `follow_mode`（Bool 收到字符串）而不是 `custom_mappings` 自己——
     // 要模拟的正是「用户数据完好无损，却因为同段另一个键而读不出来」这个形态。
     let poisoned = format!(

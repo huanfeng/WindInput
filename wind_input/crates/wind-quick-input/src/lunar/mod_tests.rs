@@ -4,10 +4,8 @@ fn lunar(y: i32, m: u32, d: u32) -> LunarDate {
     solar_to_lunar(y, m, d).unwrap_or_else(|| panic!("换算失败: {y}-{m}-{d}"))
 }
 
-/// ★ 春节锚点。跨 1900–2028，与独立来源（历表）逐年核对过。
-///
-/// 这是整套算法的总闸门：朔时刻、ΔT、东八区日界、冬至定月序，任何一处系数写错，
-/// 这里必然大面积飘红——而不是等到用户某天发现农历差一天。
+/// 春节锚点，跨 1900–2028，与独立来源（历表）逐年核对过。朔时刻、ΔT、东八区日界、
+/// 冬至定月序任何一处系数写错，这里都会大面积飘红。
 #[test]
 fn spring_festival_anchors() {
     let cases = [
@@ -54,7 +52,7 @@ fn spring_festival_anchors() {
     }
 }
 
-/// ★ 闰月分布。闰月是农历最易错的部分，且错了会连累其后整年的月号。
+/// 闰月分布。闰月是农历最易错的部分，且错了会连累其后整年的月号。
 #[test]
 fn leap_month_anchors() {
     // (公历年月日, 期望月号, 期望日)
@@ -72,7 +70,7 @@ fn leap_month_anchors() {
     }
 }
 
-/// ★ 平年不得出现闰月——只测「闰年有闰月」会漏掉「平年多算一个闰月」这一半。
+/// 平年不得出现闰月——只测「闰年有闰月」会漏掉「平年多算一个闰月」这一半。
 #[test]
 fn common_years_have_no_leap_month() {
     for y in [2021, 2022, 2024, 2026, 2027] {
@@ -93,7 +91,7 @@ fn common_years_have_no_leap_month() {
     }
 }
 
-/// ★ 农历年归属以正月初一为界，不是公历年——干支/生肖都挂在它上面。
+/// 农历年归属以正月初一为界，不是公历年——干支/生肖都挂在它上面。
 #[test]
 fn lunar_year_boundary_is_spring_festival() {
     // 2026 春节为 2/17
@@ -123,7 +121,7 @@ fn ganzhi_and_animal_cycle() {
     assert_eq!(lunar(2044, 6, 1).ganzhi(), "甲子", "60 年一轮回");
 }
 
-/// ★ 除夕是腊月最后一天，而腊月大小逐年不同——写死「腊月三十」会连错四年。
+/// 除夕是腊月最后一天，而腊月大小逐年不同——写死「腊月三十」会连错四年。
 #[test]
 fn new_year_eve_tracks_month_length() {
     assert_eq!(lunar(2024, 2, 9).day, 30, "2024 除夕是腊月三十");
@@ -154,10 +152,8 @@ fn leap_month_has_no_festival() {
     assert_eq!(l.festival, None);
 }
 
-/// ★ 范围外与非法公历日期一律 None，不 panic 也不给错值。
-///
-/// 非法日期尤其要挡：`2026-02-31` 若不挡，儒略日会照算成 3 月 3 日，
-/// 农历候选就会显示一个「看起来很对」的错值。
+/// 范围外与非法公历日期一律 None，不 panic 也不给错值。`2026-02-31` 若不挡，
+/// 儒略日会照算成 3 月 3 日，给出一个看起来很对的错值。
 #[test]
 fn out_of_range_and_invalid_dates_are_none() {
     assert!(solar_to_lunar(1899, 12, 31).is_none());
@@ -178,10 +174,8 @@ fn range_endpoints_work() {
     assert!(solar_to_lunar(MAX_YEAR, 12, 31).is_some());
 }
 
-/// ★ 全范围连续性：每一天都必须能换算，且日号在 1..=30、月号在 1..=12。
-///
-/// 抽样跑（每 7 天一次）以控制测试时长；连续性缺口（某个月定位不到）
-/// 是 cycle 边界最容易出的错。
+/// 全范围连续性：每一天都必须能换算，且日号在 1..=30、月号在 1..=12。
+/// 每 7 天抽样一次以控制时长；主要防 cycle 边界上某个月定位不到。
 #[test]
 fn every_day_in_range_converts() {
     let mut jd = jd_from_ymd(MIN_YEAR, 1, 1);
@@ -228,15 +222,12 @@ fn consecutive_days_are_continuous() {
     }
 }
 
-/// ★ [`is_var`] 与 [`var`] 的分支必须一一对应。
-///
-/// 只改一侧是这类「名字表 + 取值表」结构的典型错法：`is_var` 认而 `var` 不认，
-/// 该变量会退化成「本次取不到值」，与超出范围的症状完全一样，无从排查。
+/// [`is_var`] 与 [`var`] 的分支必须一一对应：`is_var` 认而 `var` 不认时，
+/// 该变量退化成「本次取不到值」，与超出范围的症状无法区分。
 #[test]
 fn vars_and_names_agree() {
-    // 样本取**平常日子**（非节日）：`$LF` 在非节日返回空串而非 None，
-    // 故七个变量在任意一天都该取到值。拿节日当天做样本会让
-    // 「$LF 在非节日退化成 None」的回归从这里溜过去。
+    // 样本取平常日子：`$LF` 在非节日返回空串而非 None，故七个变量都该取到值；
+    // 用节日当天会放过「$LF 在非节日退化成 None」。
     let l = lunar(2026, 6, 14);
     assert_eq!(l.festival, None, "样本必须是非节日，否则本测试压不住 $LF");
     for name in ["LY", "LYN", "LZ", "LM", "LD", "LMD", "LF"] {

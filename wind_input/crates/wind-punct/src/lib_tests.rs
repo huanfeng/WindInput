@@ -117,9 +117,8 @@ fn english_participates_by_source_char() {
     assert!(!english_participates(&c, '?'));
 }
 
-/// 空白不参与，与 `english_smart_source_chars` 的过滤同源：配了空格的用户在英文全角下
-/// 会用空格键武装，而解除武装那道判据按键问字符（空格键答 None）⇒ press1 自解武装、
-/// press2 永不到来且零日志。
+/// 空白不参与，与 `english_smart_source_chars` 的过滤同源：空格键在解除武装判据里答 None，
+/// 参与的话 press1 会自解武装、press2 永不到来。
 #[test]
 fn english_participates_never_matches_whitespace() {
     let mut c = cfg();
@@ -169,9 +168,8 @@ fn custom_lookup_empty_is_none() {
     assert_eq!(custom_lookup(&conv, &c.punct, '.', 0), None);
 }
 
-/// 回归锁（根因）：自定义映射来自**实时配置**，不是转换器里的启动快照。
-/// 同一个 conv 实例，配置里加上映射后下一次转换即生效——这正是「设置页改自定义标点
-/// 必须重启服务才生效」的病灶：曾把表存进转换器且只在 `Coordinator::new` 注入一次。
+/// 自定义映射来自实时配置而非转换器里的启动快照：同一个 conv 实例，配置加上映射后
+/// 下一次转换即生效。存快照的话设置页改自定义标点要重启服务才生效。
 #[test]
 fn convert_punct_follows_live_custom_mappings() {
     let mut conv = PunctuationConverter::new();
@@ -244,8 +242,7 @@ fn custom_english_punct_chars_only_covered_keys() {
     assert!(custom_english_punct_chars(&c.punct).is_empty());
 }
 
-/// `"1`/`"2` 两行 = 左形/右形：配对判定与插入都从这里取，两行都用得上
-/// （曾只按「第几次」取用，配对钉左后第二行永远取不到）。
+/// `"1`/`"2` 两行 = 左形/右形：配对判定与插入都从这里取，两行都用得上。
 #[test]
 fn quote_forms_maps_two_rows_to_left_and_right() {
     let mut c = cfg();
@@ -307,8 +304,7 @@ fn compute_pure_quote_uses_custom_mapping() {
 
 // ── chinese_passthrough_punct_chars ────────────────────────────────────────
 //
-// 判据的真值表锁在这里。漏掉任一条排除项的现场表现都是「某个键忽然不经引擎了」，
-// 且不报错 —— 靠真机复现的成本远高于这几条断言。
+// 判据的真值表锁在这里。漏掉任一条排除项的表现是「某个键忽然不经引擎了」且不报错。
 
 #[test]
 fn passthrough_default_is_the_unmapped_punct_set() {
@@ -317,10 +313,8 @@ fn passthrough_default_is_the_unmapped_punct_set() {
     // 默认配置下「标点层面产物不变」的全集，恰是中文标点表没有映射的那十个。
     // 这张表同时是撞码风险的全集（ASCII 码点 ≤0xFF 才可能撞 VK）：
     //   `#`→VK_END  `%`→VK_LEFT  `&`→VK_UP  `-`→VK_INSERT  `/`→VK_HELP  `|`→VK_F13
-    //   `@` `=` 落在未分配 VK 上，`*`→VK_PRINT、`+`→VK_EXECUTE 无默认绑定，侥幸无害。
-    //
-    // ⚠️ 这不是最终放行集：`-` `=` `/` 这些还可能被配成引导键或方案码元首码，
-    // 由 `ConfigBundle` 再滤一道（见本函数文档的职责边界说明）。
+    //   `@` `=` 落在未分配 VK 上，`*`→VK_PRINT、`+`→VK_EXECUTE 无默认绑定。
+    // 这不是最终放行集：`-` `=` `/` 还可能被配成引导键或方案码元首码，由 `ConfigBundle` 再滤一道。
     assert_eq!(
         chinese_passthrough_punct_chars(&conv, &c),
         vec!['#', '%', '&', '*', '+', '-', '/', '=', '@', '|']
@@ -331,10 +325,7 @@ fn passthrough_default_is_the_unmapped_punct_set() {
 fn english_passthrough_is_superset_of_chinese() {
     // 出厂配置下英文态是中文态的超集：英文态不走中文标点表，中文态能透传的它也能。
     // 反过来不成立——`,` `.` `;` 这些在中文态要转、在英文态却是原样。
-    //
-    // ⚠️ 只在**出厂配置**下成立，**不是不变量**。两态的智能符号判据来源不同，把无中文
-    // 映射的字符配进 `english_chars` 并开 `english_punct_mode`，就会出现「中文能透、
-    // 英文不能」——下面那条反例正是验它，免得后人把本条误当铁律去「修」判据。
+    // 只在出厂配置下成立，不是不变量：下面的反例说明配置可以打破它，别据此去「修」判据。
     let conv = PunctuationConverter::new();
     let c = cfg();
     let cn = chinese_passthrough_punct_chars(&conv, &c);
@@ -348,7 +339,7 @@ fn english_passthrough_is_superset_of_chinese() {
     );
 
     // 反例：`@` 无中文映射（中文态可透传），但配进英文智能符号并开开关后，英文态
-    // 必须把它留给引擎 ⇒ 超集关系被打破，而这是**正确**行为。
+    // 必须把它留给引擎 ⇒ 超集关系被打破，而这是正确行为。
     let mut c2 = cfg();
     c2.symbol.english_punct_mode = true;
     c2.symbol.english_chars = "@".into();
@@ -363,9 +354,8 @@ fn english_passthrough_default_set() {
     // 默认配置下被挡住的只有配对符一类：出厂 `english_punct_mode = false`，
     // 智能符号那条判据不成立。
     let en = english_passthrough_punct_chars(&cfg());
-    // ★ `.` 是这批里最危险的一个（撞 `VK_DELETE`，会吞掉光标后一个字符）。
-    //   它一度因为「只看 english_chars 不看开关」被挡在修复之外——凭一个出厂关闭的
-    //   功能否掉了一批键。这条锁住那个回归。
+    // `.` 撞 `VK_DELETE`（会吞掉光标后一个字符）。判据要看开关而非只看 `english_chars`，
+    // 否则出厂关闭的功能会把这批键挡在透传外。
     for ch in ['.', ',', '?', '!', ':', ';'] {
         assert!(
             en.contains(&ch),
@@ -382,9 +372,8 @@ fn english_passthrough_default_set() {
             "开了 english_punct_mode，`{ch}` 要留给引擎"
         );
     }
-    // ★ 出厂 `auto_pair.english = false`，配对没开 ⇒ 配对符也该透传。
-    //   `(`(0x28) 撞 `VK_DOWN`、`)`(0x29) 撞 `VK_SELECT`，实测就是打 `(` 光标下移、
-    //   字不上屏。早先只看配对表不看开关，把它们挡在了修复之外。
+    // 出厂 `auto_pair.english = false`，配对没开 ⇒ 配对符也该透传。
+    // `(`(0x28) 撞 `VK_DOWN`、`)`(0x29) 撞 `VK_SELECT`，挡住会表现为打 `(` 光标下移、字不上屏。
     for ch in ['(', ')', '[', ']', '{', '}'] {
         assert!(
             en.contains(&ch),
@@ -484,9 +473,8 @@ fn passthrough_excludes_smart_symbol_and_pair_chars() {
     c.symbol.smart_chars = "#".into();
     assert!(!chinese_passthrough_punct_chars(&conv, &c).contains(&'#'));
 
-    // ⛔ `smart_mode` 关着时智能符号不生效，光有 `smart_chars` 不该挡住透传。
-    // 出厂 `smart_mode = false` 而 `smart_chars` 有值——这是本文件第三次栽的同一个坑
-    // （前两次是 english_chars 与 auto_pair 两张表）。这条锁住那个方向。
+    // `smart_mode` 关着时智能符号不生效，光有 `smart_chars` 不该挡住透传
+    // （出厂 `smart_mode = false` 而 `smart_chars` 有值）。
     let mut c_off = cfg();
     c_off.symbol.smart_mode = false;
     c_off.symbol.smart_chars = "#".into();
@@ -495,9 +483,8 @@ fn passthrough_excludes_smart_symbol_and_pair_chars() {
         "smart_mode 关着，光有 smart_chars 不该挡住透传"
     );
 
-    // ⛔ 反过来，`english_chars` **不该**影响中文态：它归 english_punct_mode /
-    // english_mode 管，与中文标点态无关。早先在此按它排除，把出厂 `.,?!:;` 整排挡在
-    // 透传外——而那两个开关出厂都是关的。这条锁住那个回归。
+    // `english_chars` 不该影响中文态：它归 english_punct_mode / english_mode 管。
+    // 按它排除会把出厂 `.,?!:;` 整排挡在透传外。
     let mut c2 = cfg();
     c2.symbol.english_chars = "#".into();
     assert!(
@@ -513,9 +500,7 @@ fn passthrough_excludes_smart_symbol_and_pair_chars() {
     assert!(!got.contains(&'@'));
     assert!(!got.contains(&'&'));
 
-    // ⛔ 开关关着时配对不生效，光有表不该挡住透传。两个开关出厂都是 false，
-    // 只看表不看开关等于凭一个没开的功能否掉一批键——`(`(0x28) 撞 VK_DOWN 就是这么
-    // 被漏掉的。这条锁住那个回归。
+    // 开关关着时配对不生效，光有表不该挡住透传（两个开关出厂都是 false）。
     let mut c3 = cfg();
     c3.auto_pair.english = false;
     c3.auto_pair.english_pairs = vec!["@&".into()];

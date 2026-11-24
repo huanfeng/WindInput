@@ -4,10 +4,8 @@ fn w(s: &str) -> Vec<u16> {
     s.encode_utf16().collect()
 }
 
-/// ★ 键帽与 FE0F 序列必须整串落在 emoji 段里，连字才成得了。
-///
-/// 不改写时：基字「1」待继承（或 Digits）、FE0F 与 20E3 粘连，三格各归各家，回退永远
-/// 不触发（基准字体自己有「1」），画面上是普通的「1」加一个空框。
+/// 键帽与 FE0F 序列必须整串落在 emoji 段里，连字才成得了；否则三格各归各家，
+/// 画面上是普通的「1」加一个空框（基准字体自己有「1」，回退不触发）。
 #[test]
 fn keycap_and_fe0f_sequences_form_one_emoji_run() {
     let emoji = [ScriptClass::Emoji];
@@ -41,7 +39,7 @@ fn keycap_and_fe0f_sequences_form_one_emoji_run() {
 #[test]
 fn emoji_rewrite_leaves_text_selector_and_strong_bases_alone() {
     let emoji = [ScriptClass::Emoji];
-    // U+FE0E 是**文本**呈现选择符，语义与 FE0F 相反，不得提升。
+    // U+FE0E 是文本呈现选择符，语义与 FE0F 相反，不得提升。
     assert!(
         font_runs(&w("#\u{FE0E}"), &emoji)
             .iter()
@@ -60,8 +58,7 @@ fn emoji_rewrite_leaves_text_selector_and_strong_bases_alone() {
 
 /// 直立竖排切格：一个基字 + 粘着它的记号。
 ///
-/// ★ 第二条断言是重点：异体选择符若单独成格，那一格排出来是空的，而**前一格的字
-/// 还会退回默认写法**——两处同时错，从画面上看只像「字长得不对」。
+/// 第二条断言是重点：异体选择符若单独成格，那一格排出来是空的，前一格的字还会退回默认写法。
 #[test]
 fn upright_cells_keep_marks_with_their_base() {
     assert_eq!(upright_cells("你好世界"), ["你", "好", "世", "界"]);
@@ -139,8 +136,7 @@ fn table_is_sorted_and_disjoint() {
     assert!(last.0 <= last.1);
 }
 
-/// ★ 段必须无缝、不重叠地覆盖整个输入——切段错位的后果是「一部分文字根本没被渲染」
-/// 或「某段被渲染两次」，而这两种都不会报错。
+/// 段必须无缝、不重叠地覆盖整个输入，否则有文字没渲染或被渲染两次，且都不报错。
 #[test]
 fn runs_tile_the_input() {
     let samples = [
@@ -195,7 +191,7 @@ fn latin_is_split_out_when_declared() {
     );
 }
 
-/// ★★ 未声明的具名类必须并入默认链，**不能**变成中性——变成中性就会被邻居传染。
+/// 未声明的具名类必须并入默认链，不能变成中性——变成中性就会被邻居传染。
 /// 只声明 latin 时，汉字（Cjk 类）要老老实实待在默认链里。
 #[test]
 fn undeclared_class_joins_default_not_neutral() {
@@ -209,8 +205,7 @@ fn undeclared_class_joins_default_not_neutral() {
     );
 }
 
-/// ★★ 中性字符默认继承上下文：中文里的半角数字/标点**不得**跳到英文字体。
-/// 这是「朴素地写成 ASCII → 英文字体」最容易翻车的一条。
+/// 中性字符默认继承上下文：中文里的半角数字/标点不得跳到英文字体。
 #[test]
 fn neutrals_inherit_context_by_default() {
     assert_eq!(
@@ -236,7 +231,7 @@ fn declaring_digits_breaks_inheritance() {
     );
 }
 
-/// ★★★ 蒙古文数字 `U+1810..=U+1819` 绝不能被 `digits` 类切走——切走就是在蒙文词
+/// 蒙古文数字 `U+1810..=U+1819` 绝不能被 `digits` 类切走——切走就是在蒙文词
 /// 中间断开成形。这正是「分类轴必须是脚本、不能是字符功能」那条判据的落点。
 #[test]
 fn mongolian_digits_are_never_split_by_the_digits_class() {
@@ -316,8 +311,7 @@ fn surrogate_pairs_are_never_split() {
 
 /// 整串都是中性时用默认链（没有可继承的强归属）。
 ///
-/// ★ 单独这一条分不出「空格是中性」还是「空格是强归属」——两种实现结果都是单段 None。
-/// 故配一条对照：空格夹在已声明的类中间时必须被吸收进同一段。
+/// 单独这一条分不出空格是中性还是强归属，故配一条对照：空格夹在已声明的类中间时必须被吸收进同一段。
 #[test]
 fn all_neutral_falls_back_to_default() {
     assert_eq!(
@@ -342,8 +336,7 @@ fn leading_neutral_inherits_backward() {
 
 /// 硬换行 `\n` 必须中性——它若成为强归属就会把一行多行候选切成互不相干的段。
 ///
-/// ★ 样本两侧必须是**已声明的类**：写成 `seg("中\n文", &[Latin])` 的话，两侧的汉字
-/// 本身也是默认链，`\n` 无论中性还是强归属都并成单段 —— 测试名声称钉住的东西钉不住。
+/// 样本两侧必须是已声明的类：两侧都在默认链的话，`\n` 无论中性还是强归属都并成单段，钉不住。
 #[test]
 fn newline_is_neutral() {
     assert_eq!(
@@ -353,14 +346,9 @@ fn newline_is_neutral() {
     );
 }
 
-/// ★★ 表外的**强归属**必须真的是强归属：未列脚本（蒙古文）与已声明类（拉丁）相邻时
-/// 必须各自成段。
-///
-/// 这条守的是 `font_runs` 里 `Raw::StrongOther => Some(None)` 那一臂，与
-/// `undeclared_class_joins_default_not_neutral` 守的 `Raw::Class(c)` 臂是**两条独立
-/// 代码路径**。此前三条「纯蒙文/纯 PUA」的用例全是整串同类，把 `StrongOther` 改成
-/// `Neutral(None)` 它们照样全绿（全中性时没有强归属可继承，输出同样是单段）——
-/// 也就是说本模块的整个卖点「蒙文串不被拉丁指派打断」曾经没有任何断言在守。
+/// 表外的强归属必须真的是强归属：未列脚本（蒙古文）与已声明类（拉丁）相邻时必须各自成段。
+/// 守的是 `font_runs` 里 `Raw::StrongOther => Some(None)` 那一臂；整串同类的用例在它被改成
+/// `Neutral(None)` 时照样全绿。
 #[test]
 fn undeclared_script_stays_strong_next_to_a_declared_class() {
     let mongolian = "\u{1820}\u{1821}";
@@ -382,11 +370,8 @@ fn undeclared_script_stays_strong_next_to_a_declared_class() {
     );
 }
 
-/// ★ Common 符号块必须中性。它们曾整段落进「表外 = 强归属」，于是 `abc→def`
-/// 被切成三段、中间那段掉回默认链，宽度预算与实际排版对不上。
-///
-/// 这个失效在「只声明 latin」下也看得见（→ 自成一段），但 `第①条` 那种必须声明
-/// `cjk` 才暴露，故两种都测。
+/// Common 符号块必须中性，否则 `abc→def` 会被切成三段、中间那段掉回默认链。
+/// `第①条` 那种要声明 `cjk` 才暴露，故两种都测。
 #[test]
 fn common_symbols_are_neutral_and_do_not_split_runs() {
     // 箭头夹在拉丁中间：整串一段。
@@ -522,8 +507,7 @@ fn plan_normalizes_input() {
     );
 }
 
-/// ★ 书写顺序不同、内容相同的两份方案必须相等且同 hash——它要进测量缓存的键，
-/// 顺序敏感会让同一份配置换个写法就全 miss（缓存失效是静默的，只表现为掉帧）。
+/// 书写顺序不同、内容相同的两份方案必须相等且同 hash：它要进测量缓存的键，顺序敏感会全 miss。
 #[test]
 fn plan_equality_is_write_order_independent() {
     use std::collections::hash_map::DefaultHasher;
@@ -604,9 +588,8 @@ fn chains_enumerates_default_first_then_assignments() {
 
 /// 键名 round-trip：设置页与配置文件靠它对齐。
 ///
-/// ⚠️ 遍历 `ALL` 自己是**测不出 `ALL` 漏项**的：将来加一个变体却忘了写进 `ALL`，
-/// `key()`/`from_key()` 的 match 有穷尽性检查会拦，`ALL` 不会——设置页少一项、测试照绿。
-/// 故显式钉住条数，加变体时必须一并改这个数字。
+/// 遍历 `ALL` 测不出 `ALL` 漏项（match 有穷尽性检查，`ALL` 没有），故显式钉住条数，
+/// 加变体时必须一并改这个数字。
 #[test]
 fn class_keys_round_trip() {
     assert_eq!(ScriptClass::ALL.len(), 7, "加了变体却没写进 ALL");

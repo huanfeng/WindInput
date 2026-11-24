@@ -44,10 +44,8 @@ fn heteronym_rl() -> ReverseLookup {
     rl
 }
 
-/// ★★ 词条音节消歧多音字 —— 本函数存在的全部理由。
-///
-/// 「行长」逐字取首音会得到 `xíng cháng`，**两个字都错**。带上词库标注的音节
-/// `["hang","zhang"]` 后各自筛剩唯一读音，得 `háng zhǎng`。
+/// 词条音节消歧多音字：「行长」逐字取首音会得到 `xíng cháng`，两个字都错；
+/// 带上词库标注的音节 `["hang","zhang"]` 后各自筛剩唯一读音，得 `háng zhǎng`。
 #[test]
 fn syllables_disambiguate_heteronyms() {
     let rl = heteronym_rl();
@@ -76,9 +74,8 @@ fn same_syllable_different_tones_falls_back_to_most_common() {
     assert_eq!(rl.toned_pinyin_of("好", Some(&["hao"]), " "), "hǎo");
 }
 
-/// ★ 音节数与字数对不上时**整体放弃筛选**、退回逐字首音，而不是按位错配。
-///
-/// 错配比不筛更糟：它会给出一个看起来精确的错答案（把第 2 个字的音套到第 1 个字上）。
+/// 音节数与字数对不上时整体放弃筛选、退回逐字首音，而不是按位错配——错配会给出
+/// 一个看起来精确的错答案。
 #[test]
 fn mismatched_syllable_count_degrades_instead_of_misaligning() {
     let rl = heteronym_rl();
@@ -90,7 +87,7 @@ fn mismatched_syllable_count_degrades_instead_of_misaligning() {
     );
 }
 
-/// 音节与读音表全不匹配时**不回退首音**：不匹配意味着词库与读音表有一方过时，
+/// 音节与读音表全不匹配时不回退首音：不匹配意味着词库与读音表有一方过时，
 /// 此时首音同样没有依据，给出它只会掩盖数据问题。
 #[test]
 fn unmatched_syllable_yields_nothing_for_that_char() {
@@ -102,9 +99,8 @@ fn unmatched_syllable_yields_nothing_for_that_char() {
     );
 }
 
-/// ★ 简拼音节（t200「撒哈」只注出 `sā`）：以简拼造的词/整句，词条码里该字的音节只有
-/// 声母（`sa` + `h`），精确匹配必落空、那个字被整段吞掉。简拼段是读音的**前缀**，
-/// 仍是词条给的依据 —— 精确不中时退而取首个以它开头的读音。
+/// 简拼音节：以简拼造的词/整句，词条码里该字的音节只有声母（如「撒哈」的 `sa` + `h`），
+/// 精确匹配必落空。简拼段是读音的前缀，精确不中时退而取首个以它开头的读音。
 #[test]
 fn abbreviated_syllable_matches_by_prefix() {
     let mut rl = ReverseLookup::default();
@@ -166,11 +162,9 @@ fn write_libs(tag: &str, libs: &[&[(&str, &str, &str)]]) -> (PathBuf, Vec<(PathB
     (dir, paths)
 }
 
-/// 用给定的若干库建反查表，**两种后端各建一份**：内存降级（`cache_dir=None`）与
-/// mmap `.wcmt`。同一组断言跑两遍，两条路径的查找语义必须完全一致。
-///
-/// 断言了 mmap 那份确实走到 `CommentSource::Mmap` —— 少了这一句，缓存目录一旦不可写
-/// 就会静默降级成两份内存表，parity 测试照样全绿却什么都没验证到。
+/// 用给定的若干库建反查表，两种后端各建一份：内存降级（`cache_dir=None`）与 mmap `.wcmt`。
+/// 断言 mmap 那份确实走到 `CommentSource::Mmap`，否则缓存目录不可写时会静默降级成
+/// 两份内存表，parity 测试什么都没验到。
 fn rl_both(
     tag: &str,
     libs: &[&[(&str, &str, &str)]],
@@ -200,9 +194,8 @@ fn rl_both(
 fn declares_comment_column_needs_explicit_declaration() {
     //! 「自动把词库自带 comment 列当注释源」的准入判据。
     //!
-    //! ★ 与 `comment_columns` 的差别正是本测试的全部意义：那个在**无 `columns:` 声明**
-    //! 时回落默认 `[text, comment]`，若准入也照抄，绝大多数码表（`text\tcode\tweight`）
-    //! 都会被判成「自带注释」，然后把整列编码当注释显示出来——而没有任何一处会报错。
+    //! 与 `comment_columns` 不同：那个在无 `columns:` 声明时回落默认 `[text, comment]`，
+    //! 准入若照抄，多数码表（`text\tcode\tweight`）会被判成自带注释、把整列编码当注释显示。
     let dir = std::env::temp_dir().join(format!("wind-decl-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -279,10 +272,8 @@ fn comment_lookup_basic() {
     assert_eq!(t.lookup_first(""), None);
 }
 
-/// ★★ 两种后端（内存降级 / mmap `.wcmt`）的查找语义必须逐条一致。
-///
-/// mmap 是常态路径、内存是降级路径，二者分叉的话，用户只在缓存目录出问题时才会撞见
-/// 差异——那是最难复现也最难归因的一类故障。
+/// 两种后端（内存降级 / mmap `.wcmt`）的查找语义必须逐条一致，否则差异只在缓存目录
+/// 出问题时才暴露，难以复现。
 #[test]
 fn memory_and_mmap_backends_agree() {
     let (dir, both) = rl_both(
@@ -314,11 +305,8 @@ fn memory_and_mmap_backends_agree() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// ★★ 跨库仲裁：**code 精确匹配优先于库顺序**。
-///
-/// 靠前的库有这个词但 code 对不上时，不得就地回落——后面库里精确匹配的那条应当胜出。
-/// 合并单表时代这条由「组内先扫 code 再取首条」保证；改成每库独立后，若写成「逐库各自
-/// 先 code 后首条」，第一个库会截胡，这条语义就悄悄丢了。
+/// 跨库仲裁：code 精确匹配优先于库顺序。靠前的库有这个词但 code 对不上时不得就地回落，
+/// 写成「逐库各自先 code 后首条」的话第一个库会截胡。
 #[test]
 fn exact_code_wins_across_libraries() {
     let (dir, both) = rl_both(
@@ -349,11 +337,8 @@ fn exact_code_wins_across_libraries() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// ★ 源文件改动后必须读到新内容；未改动则复用缓存不重建。
-///
-/// 这是二进制缓存最容易出错的地方，而错法很隐蔽：缓存恒新鲜 → 「改了词库不生效，
-/// 重启也没用」。用 `.wcmt` 的 mtime 判断是否重建过 —— 直接断言查询结果不足以区分
-/// 「重建了」与「压根没缓存」。
+/// 源文件改动后必须读到新内容；未改动则复用缓存不重建。用 `.wcmt` 的 mtime 判断是否
+/// 重建过——只断言查询结果区分不了「重建了」与「压根没缓存」。
 #[test]
 fn cache_reused_until_source_changes() {
     let (dir, paths) = write_libs("fresh", &[&[("甲", "旧释义", "")]]);
@@ -460,7 +445,7 @@ fn comment_of_id_reads_one_library() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// ───────────── `${dict_all}`：全部适用库各出一条（论坛 t282） ─────────────
+// ───────────── `${dict_all}`：全部适用库各出一条 ─────────────
 
 /// 两库都有该词 → 按挂载顺序各出一条；`${dict}` 只回第一条。
 #[test]
@@ -631,16 +616,9 @@ fn comment_of_is_always_among_comments_of() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// ★ 重载时仍在列表里的库**原样复用**：不重新校验指纹，也就不再读源文件。
-///
-/// 这是切方案（`schemas` 字段）的高频路径——方案专属库开关的同时，全局库通常一字未改，
-/// 而校验指纹要读完整份源文件（十万条约 3.6MB）。
-///
-/// 判据是「把源文件删掉后仍能查」：复用路径压根不碰源文件，重新加载则会在
-/// `cache_is_fresh` 读源失败 → 重新解析 → 整库消失。
-///
-/// **`Arc::ptr_eq` 在这里是无效判据**（试过）：即使不复用，`reader_pool` 也会因为旧
-/// Arc 仍存活而交出同一个指针，测试照样全绿——那测的是 reader_pool，不是本函数。
+/// 重载时仍在列表里的库原样复用，不重新校验指纹、不读源文件（切方案的高频路径）。
+/// 判据是「把源文件删掉后仍能查」：重新加载会在 `cache_is_fresh` 读源失败而整库消失。
+/// `Arc::ptr_eq` 不能当判据：即使不复用，`reader_pool` 也会因旧 Arc 存活交出同一指针。
 #[test]
 fn unchanged_libraries_are_reused_without_rereading_source() {
     let (dir, paths) = write_libs("reuse", &[&[("甲", "全局库", "")], &[("乙", "专属库", "")]]);
@@ -684,10 +662,8 @@ fn removed_library_cache_is_pruned() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// ★ prune 递归下探时**不得碰词库缓存**：缓存根同住着 `.wdat`/`.wdb`。
-///
-/// 「这个目录归我管所以可以递归清理」是这类清理最容易写错的地方——注释库缓存与词库
-/// 缓存共用一个根（`comment_cache_path` 按 schemas 下的目录链分命名空间），扫到别人的文件必须原样放过。
+/// prune 递归下探时不得碰词库缓存：注释库缓存与词库缓存（`.wdat`/`.wdb`）共用一个根，
+/// 扫到别人的文件必须原样放过。
 #[test]
 fn prune_never_touches_other_cache_files() {
     let (dir, paths) = write_libs("prune-foreign", &[&[("甲", "一号库", "")]]);
@@ -731,10 +707,8 @@ fn find_wcmt(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// 同名但父目录不同的两个库：缓存靠命名空间隔离，不得互相覆盖。
-///
-/// 这是去掉路径哈希后唯一真正需要命名空间的场景——两份缓存若落到同一路径，
-/// 每次加载都会因内容指纹不符而互相重建，表现为启动变慢却查不出原因。
+/// 同名但父目录不同的两个库：缓存靠命名空间隔离，不得互相覆盖——落到同一路径的话
+/// 每次加载都会因指纹不符而互相重建。
 #[test]
 fn same_name_different_dirs_get_separate_caches() {
     let base = std::env::temp_dir().join(format!("wind_cmt_ns_{}", std::process::id()));
@@ -760,10 +734,8 @@ fn same_name_different_dirs_get_separate_caches() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
-/// ★★ 大小写回退必须**双向**：英文库里既有小写词条也有大写缩写。
-///
-/// 只做 `to_lowercase()` 的话 `Apple`→`apple` 能中，但 `abc`→`ABC` 不能——
-/// 而后者的失败表现为「有些词就是没注释」，从界面上看不出是哪一半漏了。
+/// 大小写回退必须双向：英文库里既有小写词条也有大写缩写，只做 `to_lowercase()` 的话
+/// `abc`→`ABC` 查不到。
 #[test]
 fn case_fallback_is_bidirectional() {
     let (dir, both) = rl_both(
@@ -814,11 +786,8 @@ fn case_fallback_is_bidirectional() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// ★★ `schemas` 白名单是**查询期**判据，不是挂载期判据。
-///
-/// 判据必须同时问两件事：① 两个库**都挂上了**（过滤若还在挂载层，这一条就红）；
-/// ② 查询按传入方案分流。只断言 ② 的话，「挂载时筛掉 + 查询时不筛」这种旧实现
-/// 在单方案用例下照样绿。
+/// `schemas` 白名单是查询期判据，不是挂载期判据。同时断言 ① 两个库都挂上了、
+/// ② 查询按传入方案分流；只断言 ② 的话「挂载时筛掉」在单方案用例下照样绿。
 #[test]
 fn schema_whitelist_filters_at_query_time() {
     let (dir, mut paths) = write_libs("wl", &[&[("甲", "英文库", "")], &[("乙", "通用库", "")]]);
@@ -849,11 +818,7 @@ fn schema_whitelist_filters_at_query_time() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// ★ 白名单必须施加到**三遍扫描的每一遍**。
-///
-/// 只在前两遍加过滤时，本用例的大小写回退那一遍会把被排除的库里的注释捞出来——
-/// 表现是「限定了方案，可有些词还是显示别的方案的注释」，且只在英文大小写不一致时
-/// 出现，是最难自查的那种漏。
+/// 白名单必须施加到三遍扫描的每一遍：漏了大小写回退那遍，会从被排除的库里捞出注释。
 #[test]
 fn schema_whitelist_applies_to_case_fallback_scan() {
     let (dir, mut paths) = write_libs("wl-case", &[&[("apple", "n.苹果", "")]]);
@@ -877,7 +842,7 @@ fn schema_whitelist_applies_to_case_fallback_scan() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// ★ 复用旧映射时必须**更新白名单**：只按路径认领会让改过 `schemas` 的库继续按旧
+/// 复用旧映射时必须更新白名单：只按路径认领会让改过 `schemas` 的库继续按旧
 /// 白名单查，表现是「设置里改了适用方案，重启才生效」。
 #[test]
 fn reload_refreshes_whitelist_on_reused_source() {
@@ -901,7 +866,7 @@ fn reload_refreshes_whitelist_on_reused_source() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// ★ 精确匹配**优先于**任何大小写回退：同时存在 `US`/`us` 时各取各的，不得互相顶替。
+/// 精确匹配优先于任何大小写回退：同时存在 `US`/`us` 时各取各的，不得互相顶替。
 #[test]
 fn exact_case_wins_over_fallback() {
     let (dir, both) = rl_both("case-exact", &[&[("US", "美国", ""), ("us", "我们", "")]]);
@@ -919,7 +884,7 @@ fn exact_case_wins_over_fallback() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// ★ `LowerOnly`（论坛 t281）：词的大小写已由词库确证时，回退只许把大写改小写，不许升格。
+/// `LowerOnly`：词的大小写已由词库确证时，回退只许把大写改小写，不许升格。
 ///
 /// 小写 `asp`（毒蛇）与大写缩写 `ASP`（Active Server Pages）是两个词；双向回退会让前者
 /// 贴上后者的释义。往小写走（`Configure` → `configure`）只是句首 / 大写锁定的形态差，
@@ -997,10 +962,7 @@ fn earlier_library_wins() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// 声明了 `code` 列、但某些行只写两列：这些行必须照常入表。
-///
-/// 曾把 code 列计入「最少列数」，于是这类行整行被丢弃 —— 表现为「库里明明有这个词
-/// 却没注释」，而库本身看起来完全正常。
+/// 声明了 `code` 列、但某些行只写两列：这些行必须照常入表，code 列不计入最少列数。
 #[test]
 fn rows_without_code_survive_when_code_column_declared() {
     let rows =
@@ -1014,10 +976,8 @@ fn rows_without_code_survive_when_code_column_declared() {
     );
 }
 
-/// ★ 挂载顺序即优先级：同词同码时**保留首次出现**的那条（先挂载的库覆盖后挂载的）。
-///
-/// 依赖 `build` 用稳定排序 —— 换成 `sort_unstable_by`，同 text 条目的相对顺序不再有
-/// 保证，优先级会随输入规模抖动（小输入下可能碰巧对，大输入下随机翻转）。
+/// 挂载顺序即优先级：同词同码时保留首次出现的那条。依赖 `build` 用稳定排序，
+/// 换成 `sort_unstable_by` 的话优先级会随输入规模随机翻转。
 #[test]
 fn earlier_source_wins_on_duplicate() {
     let t = ct(&[("行", "第一份", ""), ("行", "第二份", "")]);
@@ -1025,7 +985,7 @@ fn earlier_source_wins_on_duplicate() {
     assert_eq!(t.len(), 1, "同词同码只保留一条");
 }
 
-/// ★ code 消歧：同词不同码各存一条，按 code 精确匹配。
+/// code 消歧：同词不同码各存一条，按 code 精确匹配。
 #[test]
 fn code_disambiguates_same_text() {
     let t = ct(&[("行", "háng 行列", "tfhh"), ("行", "xíng 走路", "tfhx")]);
@@ -1034,10 +994,8 @@ fn code_disambiguates_same_text() {
     assert_eq!(t.lookup_by_code("行", "tfhx"), Some("xíng 走路"));
 }
 
-/// ★★ code 对不上时**回落该词首条**，而不是返回空。
-///
-/// 注释库里的 `tfhh` 是五笔码；拿拼音候选的 `hang` 去比对必然不匹配。跨方案挂同一份
-/// 注释库是常态，那里不该因为对不上 code 就什么都不显示。
+/// code 对不上时回落该词首条，而不是返回空：跨方案挂同一份注释库是常态
+/// （五笔码 `tfhh` 对拼音候选的 `hang` 必然不匹配）。
 #[test]
 fn unmatched_code_falls_back_to_first_entry() {
     let t = ct(&[("行", "háng 行列", "tfhh"), ("行", "xíng 走路", "tfhx")]);
@@ -1090,10 +1048,7 @@ fn multibyte_keys_are_sliced_safely() {
 // ---------------- 注释库解析 ----------------
 
 fn parse_str(content: &str) -> Vec<(String, String, String)> {
-    // 文件名必须**每次调用都唯一**。原先按内容哈希（len*31+首字节）取名，两个
-    // 用同样样本的测试就会撞到同一个路径，并行跑时互删对方的文件、随机读到空。
-    // 加了行尾那组用例后当场复现：它的 LF 样本与 parse_defaults_to_text_comment
-    // 一字不差。
+    // 文件名必须每次调用都唯一，不能按内容取名：样本相同的测试并行跑时会互删对方的文件。
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let p = std::env::temp_dir().join(format!(
@@ -1107,12 +1062,8 @@ fn parse_str(content: &str) -> Vec<(String, String, String)> {
     r
 }
 
-/// 行尾不挑食：注释库无论 LF / CRLF / 孤立 CR，解析结果一致。
-///
-/// 不规整的话孤立 `\r` 会让整份文件算成一行 → `content.find("\n...")` 找不到
-/// 正文起点 → 整个文件被当成正文再逐行解析 → 一条注释都出不来。
-///
-/// ⚠️ 样本在代码里构造，不要改用仓库 fixture（git core.autocrlf 会按平台改行尾）。
+/// 行尾不挑食：注释库无论 LF / CRLF / 孤立 CR，解析结果一致（孤立 `\r` 不规整的话
+/// 找不到正文起点、一条注释都出不来）。样本在代码里构造，别改用仓库 fixture（autocrlf 会改行尾）。
 #[test]
 fn line_endings_do_not_change_the_result() {
     let lf = "name: x\n...\n苹果\tapple\n香蕉\tbanana\n";
@@ -1230,7 +1181,7 @@ fn codes_of_joins_per_char() {
 
 #[test]
 fn test_chaizi_table_lookup_and_dup_last_wins() {
-    // 乱序输入 + 同字重复：查询按二分命中，重复取文件靠后者（对齐旧 HashMap 覆盖语义）。
+    // 乱序输入 + 同字重复：查询按二分命中，重复取文件靠后者。
     let t = ChaiziTable::build(vec![
         ('乙', "乙", "nnll"),
         ('甲', "田", "old"),
@@ -1264,7 +1215,7 @@ fn test_gen_pinyin_uses_first_reading() {
 }
 
 /// `readings_of`：读音按表内顺序（最常用在前）、`max` 截断、0 = 不限；查不到给空串。
-/// 悬停提示 `${readings[:N]}` 的全部口径都在这里，旧 `pinyin_heteronyms=false` 即 N=1。
+/// 悬停提示 `${readings[:N]}` 的全部口径都在这里。
 #[test]
 fn readings_of_orders_limits_and_joins() {
     let mut rl = ReverseLookup::default();

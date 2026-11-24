@@ -194,13 +194,11 @@ fn test_date_invalid() {
     assert!(generate_date_candidates("abc").is_empty());
 }
 
-/// ★ 归属判据：一个点归数字、两个点归日期，两组互斥。
-///
-/// 正反两向各要一例——只断言「一个点不出日期」的话，把 `render_date` 整个改成
-/// 返回空也能全绿。
+/// 归属判据：一个点归数字、两个点归日期，两组互斥。正反两向各要一例，
+/// 只断言「一个点不出日期」的话 `render_date` 返回空也能全绿。
 #[test]
 fn test_date_requires_second_dot() {
-    // 一个点：日期整组让开（此前 `2026.2` 会连带冒出 4 条年月）
+    // 一个点：日期整组让开
     assert!(
         generate_date_candidates("2026.2").is_empty(),
         "实际: {:?}",
@@ -215,7 +213,7 @@ fn test_date_requires_second_dot() {
     assert_eq!(generate_date_candidates("12.25.")[0], "12月25日");
     // 三段完整日期天然带两个点，用户无需多做任何事
     assert_eq!(generate_date_candidates("2025.12.25")[0], "2025年12月25日");
-    // 判据看的是**裁剪前**的串：尾点若先被 `trim_pending_tail` 吃掉，
+    // 判据看的是裁剪前的串：尾点若先被 `trim_pending_tail` 吃掉，
     // `2026.2.` 会退回一个点而被自己挡住。
     assert!(!generate_date_candidates("2026.2.").is_empty());
 }
@@ -229,7 +227,7 @@ fn test_year_month() {
 #[test]
 fn test_year_month_survives_trailing_dot() {
     // 「2026.3.」输入到一半：第三段为空不得让候选全空，仍应给出年月。
-    // ★ 尾点在这里担着两个身份——归属判据靠它认出「我要日期」，
+    // 尾点在这里担着两个身份——归属判据靠它认出「我要日期」，
     // `trim_pending_tail` 又要把它当「小数位还没打」裁掉。两者次序错了这条就红。
     let c = generate_date_candidates("2026.3.");
     assert_eq!(c, vec!["2026年3月", "二〇二六年三月", "2026-03", "2026/03"]);
@@ -314,16 +312,15 @@ fn test_number_amount_zheng_rules() {
 
 #[test]
 fn test_number_rejected_after_second_dot() {
-    // ★ 打日期到第三段（`2026.2.`）时不该再出金额：尾点被 `trim_pending_tail` 裁掉后
-    // 剩下的 `2026.2` 是合法小数，此前于是在这一步冒出一屏金额读法
-    // （年月 4 条 + 数字 5 条），而用户显然正在打 `2026.2.3`。
+    // 打日期到第三段（`2026.2.`）时不该再出金额：尾点裁掉后剩下的 `2026.2` 是合法小数，
+    // 但用户显然正在打 `2026.2.3`。
     assert!(
         generate_number_candidates("2026.2.", 6).is_empty(),
         "实际: {:?}",
         generate_number_candidates("2026.2.", 6)
     );
     assert!(generate_number_candidates("12.25.", 6).is_empty());
-    // ★ 反向对照：判据只能是「点的个数」，不能是「首段像不像年份」——
+    // 反向对照：判据只能是「点的个数」，不能是「首段像不像年份」——
     // `5000.5`/`2026.2` 与年月形态同构，按首段砍会砍掉常见金额。
     assert_eq!(generate_number_candidates("5000.5", 6)[0], "伍仟元伍角整");
     assert_eq!(
@@ -369,7 +366,7 @@ fn test_zero_char_only_in_per_digit_reading() {
     assert_eq!(digits_to_chinese_chars("100"), "一〇〇");
     assert_eq!(digits_to_chinese_chars("0"), "〇");
 
-    // ★ 反向对照：位值读法与财务大写仍必须是「零」，两者不可混用
+    // 反向对照：位值读法与财务大写仍必须是「零」，两者不可混用
     let c = generate_number_candidates("10001", 6);
     assert!(c.contains(&"一万零一".to_string()), "实际: {:?}", c);
     assert!(c.contains(&"壹万零壹元整".to_string()), "实际: {:?}", c);
@@ -401,8 +398,7 @@ fn test_pure_number_via_merge() {
 
 #[test]
 fn test_date_and_number_are_mutually_exclusive() {
-    // ★ "12.25" 既是金额也是月日，一个点是真歧义：归**数字**独占，
-    // 日期整组让开（此前两组同屏，日期垫在金额之后）。
+    // "12.25" 既是金额也是月日，一个点是真歧义：归数字独占，日期整组让开。
     let c = generate_quick_input_candidates("12.25", 6);
     assert_eq!(c[0], "壹拾贰元贰角伍分");
     assert!(

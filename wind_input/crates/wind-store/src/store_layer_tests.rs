@@ -7,7 +7,7 @@ fn store(name: &str) -> Arc<Store> {
     Arc::new(Store::open(&p).unwrap())
 }
 
-/// 用户层 / 临时层回答通配查询：字面前缀扫描后过滤（**不带 limit 进 redb**——先截断再
+/// 用户层 / 临时层回答通配查询：字面前缀扫描后过滤（不带 limit 进 redb——先截断再
 /// 过滤会把匹配项整批截掉），等长档在前；草稿层恒不参与。
 #[test]
 fn store_layers_answer_pattern_queries_and_drafts_stay_out() {
@@ -58,22 +58,15 @@ fn store_layers_answer_pattern_queries_and_drafts_stay_out() {
     );
 }
 
-/// ★ **草稿绝不能进前缀召回** —— 钉在 `CompositeDict` 这个跨层合并的消费点上。
-///
-/// 草稿层的杂词率极高（模型使然：先记一堆、用过的才留），而码表打字是前缀式的
-/// （w → wq → wqv…）。草稿若参与前缀召回，杂词会在**每一次按键**上涌进候选列表——
-/// 那会让整个功能不可用。只精确命中是设计的一部分，不是没实现完。
-///
-/// 判据刻意钉在 `CompositeDict::search_prefix` 而不是直接调 `StoreDraftLayer` 的方法：
-/// 层自己返回空、合并时却从别的路径把它捞回来，是本仓踩过的那类「护栏绕开消费点」
-/// 的故障形态。
+/// 草稿绝不能进前缀召回：草稿层杂词率极高，参与前缀召回会让杂词在每一次按键上涌进候选。
+/// 只精确命中是设计的一部分。判据钉在跨层合并的消费点 `CompositeDict::search_prefix`，
+/// 防止层自己返回空、合并时却从别的路径捞回来。
 #[test]
 fn drafts_never_surface_through_prefix_queries() {
     let s = store("draft_prefix");
     s.add_drafts("wb", &[("wqvb".to_string(), "你好".to_string())])
         .unwrap();
-    // 同时放一条**临时词**做对照组：同样的前缀，它必须照常召回。
-    // 没有这个对照，一个「前缀查询整个坏掉」的实现也能让本用例变绿。
+    // 临时词做对照组：同样的前缀它必须照常召回，否则「前缀查询整个坏掉」也能变绿。
     s.learn_temp_word("wb", "wqvb", "拟好", 800, 0).unwrap();
 
     let composite = CompositeDict::new();
@@ -108,13 +101,8 @@ fn drafts_never_surface_through_prefix_queries() {
     );
 }
 
-/// **边界必须穿过「记录 → 候选」这一层**（P2a 漏掉的第二条旁路，见 record_to_candidate 注释）。
-///
-/// 存储层一直存着边界（24B value），`search_user_words_prefix` 也一直读得出来，
-/// 但转候选时被 `..Default::default()` 吃掉 ⇒ 用户词候选 boundary 恒 0，
-/// 双拼校验 / 长词上浮 / 自动造词沿用边界一并静默失效。
-///
-/// 三条取候选的路径都要守（精确、前缀、临时层），漏一条就等于没修。
+/// 边界必须穿过「记录 → 候选」这一层，不能在转候选时被 `..Default::default()` 吃掉
+/// （否则双拼校验 / 长词上浮 / 自动造词沿用边界一并静默失效）。精确、前缀、临时层三条路径都要守。
 #[test]
 fn boundary_reaches_candidate_from_store() {
     let s = store("boundary_passthrough");
@@ -140,11 +128,8 @@ fn boundary_reaches_candidate_from_store() {
     assert_eq!(ul.search("abcd", 10)[0].boundary, 0);
 }
 
-/// 简拼召回走索引，且**跨层合并语义与改用索引之前一致**。
-///
-/// 此前这条路是 `search_prefix("", 0)` 全层枚举后由 merge_search 合并；换成索引后
-/// 仍必须经同一套合并——否则同一个词同时在用户层与临时层时会返回两条、
-/// 权重不再取 max，排序静默变化。索引换的是取候选的代价，不是候选本身。
+/// 简拼召回走索引，且仍经 merge_search 跨层合并：同一个词同时在用户层与临时层时只返回一条、
+/// 权重取 max。
 #[test]
 fn abbrev_recall_goes_through_the_index_and_merges_across_layers() {
     let s = store("abbrev_recall");
@@ -177,8 +162,8 @@ fn abbrev_recall_goes_through_the_index_and_merges_across_layers() {
     assert!(dm.search_abbrev("zg", 0).is_empty(), "无关声母串不该有产出");
 }
 
-/// 没有声母索引的层（系统词库层等）默认**不产出**，而非回退到全层枚举。
-/// 静默的全表扫正是简拼卡顿的根因，让它召不回、在测试里立刻暴露，好过悄悄慢下去。
+/// 没有声母索引的层（系统词库层等）默认不产出，而非回退到全层枚举：
+/// 召不回能在测试里立刻暴露，静默全表扫只会让简拼卡顿。
 #[test]
 fn layers_without_an_index_yield_nothing_rather_than_scanning() {
     use wind_dict::{DictLayer, LayerType};

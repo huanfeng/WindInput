@@ -101,7 +101,7 @@ fn clip_corners_trims_square_children_to_rounded_outline() {
     assert_eq!(rgb(&on, 60, 30, 0), [255, 0, 0], "直边不受影响");
 }
 
-/// 参照实现：整窗备份 + 整窗掩码（改成四角块之前的做法）。角块版必须与它逐字节一致，
+/// 参照实现：整窗备份 + 整窗掩码。角块版必须与它逐字节一致，
 /// 含奇数尺寸、胶囊形（半径被钳）、半径大于半边长。
 #[test]
 fn corner_save_matches_full_window_reference() {
@@ -237,7 +237,7 @@ fn clip_corners_also_trims_back_layers() {
     assert_eq!(rgb(&buf, 60, 30, 20), [255, 0, 0]);
 }
 
-/// 楼主的场景：候选窗最右侧钉一张小图。anchor=right + 向左 4px，落点之外不得被涂。
+/// 候选窗最右侧钉一张小图。anchor=right + 向左 4px，落点之外不得被涂。
 #[test]
 fn anchored_bg_image_lands_at_anchor_plus_offset() {
     let p = ImagePlace {
@@ -532,8 +532,7 @@ fn layer(path: String, z: i32, place: ImagePlace) -> ViewLayer {
     }
 }
 
-/// 图层 tint：语义同背景图（把图当 alpha 蒙版、RGB 换成 tint 色），此前 `paint_layer`
-/// 写死 `[0,0,0,0]`，主题里给图层配的 tint 一声不响地被丢掉。
+/// 图层 tint：语义同背景图（把图当 alpha 蒙版、RGB 换成 tint 色），`paint_layer` 不得丢掉它。
 #[test]
 fn layer_tint_recolors_like_bg_image() {
     let p = ImagePlace {
@@ -559,7 +558,7 @@ fn layer_tint_recolors_like_bg_image() {
     assert_eq!(rgb(&plain, 20, 5, 5), [255, 0, 0]);
 }
 
-/// 覆盖图超出节点的部分裁掉，裁到节点**矩形**（不带圆角）——对齐编辑器预览
+/// 覆盖图超出节点的部分裁掉，裁到节点矩形（不带圆角）——对齐编辑器预览
 /// `paintLayers` 的 `ctx.rect` 硬裁；内容上下两层同一口径。
 #[test]
 fn layer_overflow_is_clipped_to_node_rect() {

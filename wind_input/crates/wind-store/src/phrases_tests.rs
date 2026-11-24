@@ -315,12 +315,8 @@ fn import_duplicate_shadows_system_entry() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// 撞键归属：用户建一条与系统短语完全同款的短语 → **用户那条生效**，系统条目隐去。
-///
-/// ⚠️ 这个位置的行为被反转过两次，方向相反：早期转用户行但**不可自愈**（系统条目再也
-/// 回不来，现象是「系统短语莫名少一条」）；改成保留系统归属后变成反方向的
-/// 「用户新建的短语在用户列表看不到」。现在回到用户优先，本测试同时锁住**撤销路径**
-/// ——缺了它就会退回第一种毛病。
+/// 撞键归属：用户建一条与系统短语完全同款的短语 → 用户那条生效，系统条目隐去。
+/// 同时锁住撤销路径，否则系统条目一被遮蔽就再也回不来。
 #[test]
 fn user_phrase_shadows_system_entry() {
     let path = tmp("wind_phrases_shadow_sys.redb");
@@ -379,8 +375,8 @@ fn user_phrase_shadows_system_entry() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// 撤销路径二：「清空用户短语」删掉遮蔽行后，系统条目**立即**重新呈现（P3 叠加模型：系统条目
-/// 来自 TOML、只在内存，从不随用户行一起消失——当年「系统短语莫名少一条」的病根不复存在）。
+/// 撤销路径二：「清空用户短语」删掉遮蔽行后，系统条目立即重新呈现（系统条目来自 TOML、
+/// 只在内存，从不随用户行一起消失）。
 #[test]
 fn clearing_user_phrases_restores_shadowed_system_entry() {
     let path = tmp("wind_phrases_clear_restore.redb");
@@ -404,9 +400,8 @@ fn clearing_user_phrases_restores_shadowed_system_entry() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// `ensure_system_phrases` **绝不改动已存在的行**（用 sync 代替它，一次「清空用户短语」就会
-/// 把用户在系统短语列表里改过的权重/次序重置回 TOML 默认值）。P3 叠加模型下系统条目总在，
-/// 删掉修改行即恢复默认，没有「缺口」可补，返回 0。
+/// `ensure_system_phrases` 绝不改动已存在的行（用 sync 代替它会把用户对系统短语改过的
+/// 权重/次序重置回 TOML 默认值）。系统条目总在，删掉修改行即恢复默认，没有缺口可补，返回 0。
 #[test]
 fn ensure_system_phrases_only_fills_gaps() {
     let path = tmp("wind_phrases_ensure.redb");
@@ -457,7 +452,7 @@ fn ensure_system_phrases_only_fills_gaps() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// 对照：同样的场景下 `sync_system_phrases` **会**重置用户的编辑。
+/// 对照：同样的场景下 `sync_system_phrases` 会重置用户的编辑。
 /// 锁住这个差异，避免日后有人「顺手统一成 sync」。
 #[test]
 fn sync_overwrites_user_edits_on_system_rows() {
@@ -485,7 +480,7 @@ fn sync_overwrites_user_edits_on_system_rows() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// 编辑既有系统短语（改权重）**不**改归属——那是在系统列表里正常调整，不产生遮蔽关系。
+/// 编辑既有系统短语（改权重）不改归属——那是在系统列表里正常调整，不产生遮蔽关系。
 #[test]
 fn editing_system_phrase_keeps_system_ownership() {
     let path = tmp("wind_phrases_edit_no_mark.redb");
@@ -736,7 +731,7 @@ fn phrase_sys_hash_lives_beside_phrases_file() {
     assert_eq!(s.phrase_sys_hash().unwrap().as_deref(), Some("h1"));
 }
 
-/// 审查 I-4：系统短语同步哈希随用户目录走——本机状态目录是新的（换机 / 清 state）时不得丢失，
+/// 系统短语同步哈希随用户目录走——本机状态目录是新的（换机 / 清 state）时不得丢失，
 /// 否则会触发一次同步、把用户对系统短语的修改重置回出厂。
 #[test]
 fn phrase_sys_hash_roams_with_user_dir() {

@@ -1,17 +1,9 @@
 //! `config.degradation`：把段级降级记录暴露给设置页。
 //!
-//! # 这条 RPC 存在的理由
+//! 兑现不变量 6（`docs/design/data-custom-layer.md` §4）「段级降级必须 WARN 且在 UI 可见」的后一半。
 //!
-//! 不变量 6（`docs/design/data-custom-layer.md` §4）是「段级降级必须 WARN **且在 UI 可见**」。
-//! P0 只做了日志与内部写盘闸，于是「可见」这一半只对**读日志的人**成立——普通用户看到的
-//! 只是「我的按键设置怎么变回默认了」，而配置文件明明还在。这条 RPC 是那一半的兑现。
-//!
-//! # 为什么必须是集成测试（独立进程）
-//!
-//! 要让 `Config::load()` 真读到一份会降级的配置，就必须重定向用户目录
-//! （`WIND_DATADIR_CONF`）与安装根（`WIND_INSTALL_ROOT`）。两者都经 OnceLock，同一进程
-//! 只认第一次：放进 `#[cfg(test)]` 单测模块的话，同二进制里先跑的别的测试会把 OnceLock
-//! 定死、重定向**静默失效**，本测试转而去写用户真实的 `%APPDATA%\WindInput\config.toml`。
+//! 必须是独立进程的集成测试：要重定向 `WIND_DATADIR_CONF` 与 `WIND_INSTALL_ROOT`，两者经
+//! OnceLock 只认第一次，放进单测模块会被同二进制里先跑的测试定死、转而写用户真实配置。
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -132,18 +124,11 @@ fn degradation_is_readable_over_rpc_with_dotted_paths() {
         "健康态下语法故障列表须为空\n{d}"
     );
 
-    // ── ★★ 钉住一条**别处依赖的前提**：降级粒度对段内的标量/列表键同样成立 ──────
+    // ── 别处依赖的前提：降级粒度对段内的标量/列表键同样成立 ──────────────────
     //
-    // `wind-webdata` 的 `keys_overview` 判断「按键总览的全局层可不可信」时，靠的是一张
-    // 写死的来源路径表（`keys.page_keys` 等四个折算来源都在里面）。那张表存在的**唯一
-    // 理由**就是这条事实：`narrow_bad_section` 对坏段的每个直接子键都做探针，不分子表
-    // 还是标量/数组，于是 `page_keys` 出问题时记的是 `keys.page_keys` 而**不是** `keys`。
-    //
-    // 这条曾被想当然地写反过（「标量键定位不到子表、会整段记 keys」），据此推出「祖先
-    // 判据照样成立、不必列举来源」，于是那四个来源整片失去覆盖。把前提钉在这里，是因为
-    // 它住在另一个 crate 里：哪天降级粒度改成「标量键退回整段」，本用例先红，人才会想到
-    // 去回看那张表还对不对——否则 webdata 那侧只会静默地多判几次不可信（无害），或在反
-    // 方向的改动里静默地少判（有害且无声）。
+    // `narrow_bad_section` 对坏段的每个直接子键都做探针，不分子表还是标量，故 `page_keys`
+    // 出问题时记的是 `keys.page_keys` 而不是 `keys`。`wind-webdata` 的 `keys_overview` 那张
+    // 写死的来源路径表依赖这一点；降级粒度一改，本用例先红，提醒去回看那张表。
     std::fs::write(&file, "[keys]\npage_keys = 5\n").unwrap();
     let d = call(&state, "config.degradation").expect("config.degradation");
     assert_eq!(
@@ -154,12 +139,10 @@ fn degradation_is_readable_over_rpc_with_dotted_paths() {
     );
     assert_eq!(d["totalFallback"], json!(false), "{d}");
 
-    // ── ★★ 语法故障：与段级降级是**两个独立维度**，同一个 RPC 里各占一格 ─────────
+    // ── 语法故障：与段级降级是两个独立维度，同一个 RPC 里各占一格 ─────────────
     //
-    // 两者出错位置不同：段级降级在四层合并**之后**的类型检查，语法故障在合并**之前**的
-    // 单文件解析。此前 core 只有前一个维度，于是「文件里重复写了一个键」这种事
-    // `degraded` 恒为 false——设置端、写盘闸、CLI 一致判定「一切正常」，而那正是
-    // 用户配置被后台整表覆盖的时刻。这条用例钉住第二个维度确实到得了边界。
+    // 段级降级在四层合并之后的类型检查，语法故障在合并之前的单文件解析。只报前者的话，
+    // 「文件里重复写了一个键」时 `degraded` 恒为 false，写盘闸会放行整表覆盖。
     std::fs::write(&file, "[ui.candidate]\nper_page = 9\nper_page = 5\n").unwrap();
     let d = call(&state, "config.degradation").expect("config.degradation");
     assert_eq!(

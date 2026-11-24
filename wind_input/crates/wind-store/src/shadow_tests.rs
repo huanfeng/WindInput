@@ -97,8 +97,6 @@ fn clear_deleted_for_words_only_touches_matching_deletes() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// 命中按文件现状判：表已载入后文件被外部改过（这里拿另一份库生成的规则文件覆盖），
-/// 不先 sync 就看不见新写进去的删除规则。
 /// 屏蔽行（`code = *`）：进屏蔽集合、不当输入码匹配；单字不收；加词按文字撤、批量计数按文字算。
 #[test]
 fn block_word_rows() {
@@ -259,6 +257,8 @@ fn star_is_plain_code_outside_pinyin() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// 命中按文件现状判：表已载入后文件被外部改过（这里拿另一份库生成的规则文件覆盖），
+/// 不先 sync 就看不见新写进去的删除规则。
 #[test]
 fn clear_deleted_for_words_sees_hand_edited_file() {
     let path = tmp("wind_sh_clear_sync.redb");
@@ -348,12 +348,9 @@ fn test_redb_shadow_ops() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// 动态短语（`date`）的完整生命周期：**规则里的 word 是写入当天的求值文本**，
-/// 次日用户看到的候选文本已全变。去重 / 恢复默认 / 菜单灰显三处都必须按 cand_id 定位，
-/// 否则表现为「昨天调好今天被还原，且既清不掉也改不动」。
-///
-/// ⚠ 这个测试必须用**两个不同的 word**（昨天/今天）才有判别力——若前后都传同一个 word，
-/// 按 word 匹配的旧实现也会全绿。
+/// 动态短语（`date`）的完整生命周期：规则里的 word 是写入当天的求值文本，次日候选文本已变。
+/// 去重 / 恢复默认 / 菜单灰显三处都必须按 cand_id 定位。必须用两个不同的 word（昨天/今天），
+/// 否则按 word 匹配也会全绿。
 #[test]
 fn dynamic_phrase_rule_located_by_cand_id_across_days() {
     let path = tmp("wind_shadow_dyn_phrase.redb");
@@ -365,7 +362,7 @@ fn dynamic_phrase_rule_located_by_cand_id_across_days() {
         .unwrap();
 
     // 今天：候选文本已变成 2026-07-29，而规则里存的仍是昨天的 2026-07-28。
-    // 判别力全在这两行——按 id 查得到，只按今天的文本查不到（旧实现的失效点）。
+    // 判别力全在这两行——按 id 查得到，只按今天的文本查不到。
     let rec = s.get_shadow_rules("wb", "date").unwrap().unwrap();
     assert!(rec.has_target("2026-07-29", Some(id)), "按 id 应跨日命中");
     assert!(
@@ -373,7 +370,7 @@ fn dynamic_phrase_rule_located_by_cand_id_across_days() {
         "只按当日文本必失配——这正是「昨天调好今天被还原」的成因"
     );
 
-    // 今天：同一条短语再次置顶到别的位置 → 应**更新**原规则而非新增一条。
+    // 今天：同一条短语再次置顶到别的位置 → 应更新原规则而非新增一条。
     s.pin_shadow("wb", "date", "2026-07-29", Some(id), 2)
         .unwrap();
     let rec = s.get_shadow_rules("wb", "date").unwrap().unwrap();

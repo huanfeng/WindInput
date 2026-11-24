@@ -1,28 +1,14 @@
 //! 跨仓对账：邻仓 `wind-setting` 的三份检入产物不得与 core 漂移。
 //!
-//! # 为什么这份对账要在 core 这边再做一遍
+//! 邻仓 wind-setting 的守护测试（如 `snapshot_matches_core_generated_capabilities`）依赖
+//! `windui`，在 Linux 上编译不了；本文件把对账搬到改配置的 core 一侧，两个生成器的输入端
+//! （`wind_rpc::capabilities::generate` / `wind_config::Config::system_preset_value`）都在这里。
 //!
-//! wind-setting 自己有守护测试（`capabilities.rs` 的 `snapshot_matches_core_generated_capabilities`
-//! 等），但它**在 Linux 上跑不了**：那个 crate 依赖 `windui`，而 `windui` 对非 Windows/macOS
-//! 目标直接 `compile_error!`。于是日常在 Linux 上改了 core 的配置注册表，要等推到 Windows
-//! 编译机才发现设置端产物没跟上——那正是这三份文件反复漂移的原因。
+//! 不替代邻仓那三个守护测试：这里只对账 core 看得见的事实（键在不在、类型与默认值）。
+//! 值的策展偏离（`CURATED_MOCK_VALUES`）、控件类型、选项文案仍由邻仓把关。
 //!
-//! 本文件把对账搬到**改配置的那一侧**：两个生成器的输入端 API 都在 core
-//! （`wind_rpc::capabilities::generate` / `wind_config::Config::system_preset_value`），
-//! 在这里比对不需要编译 wind-setting，改完注册表当场就能跑。
-//!
-//! ⚠️ **不替代**邻仓那三个守护测试：这里只对账「core 这边看得见的事实」——
-//! 键在不在、类型与默认值对不对。值的策展偏离（`CURATED_MOCK_VALUES`）、控件类型是否合理、
-//! 选项文案这些只有 wind-setting 自己知道，仍由它的测试把关。
-//!
-//! # 找不到邻仓时跳过
-//!
-//! CI 与只检出 core 的工作树里没有 `../wind-setting`，那时整族跳过（打印一行说明）。
-//! ⚠️ 这是仓里踩过的坑（`codetable_filter_scope_consistency.rs` 的顶注）：跳过而计数照绿。
-//! 故每条跳过都**显式打印原因**，且判据只有「目录不存在」这一种——文件缺失、JSON 解析失败
-//! 一律当失败，不当跳过。
-//!
-//! 邻仓位置可用 `WIND_SETTING_DIR` 覆盖（worktree 里 `../wind-setting` 未必是想对账的那份）。
+//! 找不到 `../wind-setting` 时整族跳过，每条跳过都显式打印原因，且判据只有「目录不存在」
+//! 这一种——文件缺失、JSON 解析失败一律当失败。邻仓位置可用 `WIND_SETTING_DIR` 覆盖。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -69,10 +55,9 @@ fn index_config_keys(v: &serde_json::Value) -> BTreeMap<String, serde_json::Valu
 
 /// 检入的 `capabilities.snapshot.json` 必须等于 core 现场生成的 capability descriptor。
 ///
-/// 只比 `configKeys`：`appVersion` 跟着 `docs/VERSION` 走，每次发版都变，与配置契约无关
-/// （与邻仓那条守护测试同一口径）。
+/// 只比 `configKeys`：`appVersion` 跟着 `docs/VERSION` 走，与配置契约无关。
 ///
-/// 失败时**去邻仓重新生成**，别手改 JSON：
+/// 失败时去邻仓重新生成，别手改 JSON：
 /// `cd ../wind-setting && cargo test regenerate_capabilities_snapshot -- --ignored`
 /// （那条命令要 Windows/macOS，见 `wind-setting/src/capabilities.rs` 的说明）。
 #[test]
@@ -108,13 +93,8 @@ fn capabilities_snapshot_matches_core() {
     );
 }
 
-/// `mockdata/config.json`（设置页离线演示用的配置）必须**含有 core 预置里的每个键**。
-///
-/// # 为什么只比键、不比值
-///
-/// 邻仓有一份 `CURATED_MOCK_VALUES` 策展名单，里面的键**有意**偏离 core 预置（演示需要），
-/// 那份名单只有它自己知道。core 这边比值必然误报，比键则不会——策展改的是值，不会让键消失。
-/// 而「忘了给新增配置补一行」恰恰表现为键缺失，正是这条要挡的。值的对账仍归邻仓。
+/// `mockdata/config.json`（设置页离线演示用的配置）必须含有 core 预置里的每个键。
+/// 只比键不比值：邻仓 `CURATED_MOCK_VALUES` 有意偏离预置值，比值必然误报；值的对账归邻仓。
 #[test]
 fn mock_config_has_every_preset_key() {
     let Some(repo) = setting_repo() else {
@@ -128,7 +108,7 @@ fn mock_config_has_every_preset_key() {
         serde_json::from_str(&read(&repo.join("src/mockdata/config.json")))
             .expect("mockdata/config.json 不是合法 JSON");
 
-    // 注册表是配置键的单一真相源；用它而不是递归 JSON，免得把 map 型值的**用户键**
+    // 注册表是配置键的单一真相源；用它而不是递归 JSON，免得把 map 型值的用户键
     // （`input.punct.custom_mappings` 里那些标点）当成配置键要求 mockdata 一一对齐。
     let missing: Vec<&str> = wind_config::config_schema::registry()
         .iter()
@@ -146,15 +126,12 @@ fn mock_config_has_every_preset_key() {
     );
 }
 
-/// core 新增的配置键必须**要么进设置清单，要么进豁免名单**（no-silent-caps 的 core 侧半边）。
+/// core 新增的配置键必须要么进设置清单、要么进豁免名单（no-silent-caps 的 core 侧半边）。
+/// 只做单向：「core 有、清单没有、名单也没有」才报；反向的死条目留给邻仓的
+/// `uncovered_capability_keys_match_allowlist`。
 ///
-/// 邻仓的 `uncovered_capability_keys_match_allowlist` 做的是双向断言；这里只做**单向**：
-/// 「core 有、清单没有、名单也没有」才报。反向（名单里留着已被覆盖的死条目）要读懂它的
-/// Rust 结构才判得准，留给邻仓自己。
-///
-/// ⚠️ 豁免名单是从 `capabilities.rs` 的 `UNCOVERED_BY_DESIGN` **文本里抠出来的**——core 这边
-/// 没法 `use` 邻仓的常量（它编译不了）。抠法脆，故抠不到时**跳过而不是当成空名单**：
-/// 空名单会让这条测试把二十来个合理豁免的键全报成漂移，下一个人只会把它注释掉。
+/// 豁免名单是从 `capabilities.rs` 的 `UNCOVERED_BY_DESIGN` 源码文本里抠的（邻仓常量 use 不到）。
+/// 抠不到时跳过而不是当成空名单，否则合理豁免的键会全报成漂移。
 #[test]
 fn every_core_key_is_either_in_the_manifest_or_exempt() {
     let Some(repo) = setting_repo() else {
@@ -201,8 +178,7 @@ fn every_core_key_is_either_in_the_manifest_or_exempt() {
 
 /// 从 `capabilities.rs` 源码里抠 `UNCOVERED_BY_DESIGN` 的字符串字面量。
 ///
-/// 只取常量块内、**剥掉 `//` 注释之后**的 `"..."`：那段注释里满是键名（记着某键何时被撤出
-/// 名单），连注释一起抠会把已撤出的键又当成豁免，等于把这条测试悄悄放水。
+/// 只取常量块内、剥掉 `//` 注释之后的 `"..."`：注释里有已撤出名单的键名，连注释一起抠会放水。
 fn parse_uncovered_by_design(src: &str) -> Option<BTreeSet<String>> {
     let start = src.find("UNCOVERED_BY_DESIGN")?;
     let open = src[start..].find('[')? + start;

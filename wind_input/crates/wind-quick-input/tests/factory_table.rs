@@ -1,6 +1,4 @@
-//! 零回归闸门：出厂格式表与内置默认表、以及改造前的硬编码行为，三者必须一致。
-//!
-//! 「普通用户完全无感」是这次改造的前提，它必须可验证而不是一句声明。
+//! 零回归闸门：出厂格式表、内置默认表、以及格式表化之前的硬编码行为，三者必须一致。
 
 use wind_quick_input::{FormatTable, QuickSource, generate, generate_with};
 
@@ -9,10 +7,8 @@ fn factory_path() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../data/system.quick.toml")
 }
 
-/// ★ 出厂文件与代码内置表不得漂移。
-///
-/// 两者是同一张表的两份副本：文件给正常路径，`builtin()` 给「文件缺失/损坏」的兜底路径。
-/// 只改一处的话，兜底时用户会看到与平时不同的候选，且没有任何报错。
+/// 出厂文件与代码内置表不得漂移：文件给正常路径，`builtin()` 给文件缺失/损坏的兜底路径，
+/// 只改一处的话兜底时候选会变且无报错。
 #[test]
 fn factory_file_matches_builtin_table() {
     let path = factory_path();
@@ -26,10 +22,7 @@ fn factory_file_matches_builtin_table() {
     );
 }
 
-/// 出厂文件里的每一条都必须被接受。
-///
-/// 单条非法只会被静默剔除（设计如此，见 format_table.rs），因此「解析成功」不等于
-/// 「一条没丢」——必须比条数。
+/// 出厂文件里的每一条都必须被接受。单条非法只会被静默剔除，「解析成功」不等于一条没丢，故比条数。
 #[test]
 fn factory_file_loses_no_entry() {
     let text = std::fs::read_to_string(factory_path()).unwrap();
@@ -44,14 +37,11 @@ fn factory_file_loses_no_entry() {
     );
 }
 
-/// ★ 内置表渲染出的**公历**候选 == 改造前的硬编码输出，逐条逐序。
+/// 内置表渲染出的公历候选 == 格式表化之前的硬编码输出，逐条逐序。期望值是字面量，
+/// 不引用实现代码，否则闸门会随实现一起漂移。
 ///
-/// 期望值直接抄自改造前的 `vec![]` 字面量，不引用任何新代码——否则这道闸门会随着
-/// 实现一起漂移，测了个寂寞。
-///
-/// 农历是**有意新增**的两条，追加在公历之后，故这里比较前 5 条：把新值直接抄进
-/// 期望值会让这道闸门从「公历行为永不变」退化成「当前实现等于当前实现」。
-/// 农历那两条由 [`lunar_entries_are_appended_after_solar`] 单独把关。
+/// 农历两条是有意新增、追加在公历之后，故只比前 5 条；它们由
+/// [`lunar_entries_are_appended_after_solar`] 单独把关。
 #[test]
 fn builtin_output_equals_pre_refactor_hardcoding() {
     // 完整日期
@@ -76,17 +66,14 @@ fn builtin_output_equals_pre_refactor_hardcoding() {
             "2025/03/05"
         ]
     );
-    // 年月。⚠️ 尾点不是笔误：走 `QuickSource::Date` 的输入要有第二个点才归日期
+    // 年月。尾点不是笔误：走 `QuickSource::Date` 的输入要有第二个点才归日期
     // （一个点归数字），见 `has_second_dot`。
     assert_eq!(
         generate(QuickSource::Date, "2025.6.", 6),
         vec!["2025年6月", "二〇二五年六月", "2025-06", "2025/06"]
     );
-    // ⚠️ 两段日期（`12.25.`）**不在这道闸门里**：它已分出 `month_day` 类，首选由
-    // 「替用户补年的完整日期」改为不带年的 `12月25日`，是**有意的行为变更**。
-    // 把新值抄进这里会让闸门从「公历行为永不变」退化成「当前实现等于当前实现」
-    // ——与农历两条同一条纪律。正面覆盖见 lib.rs 的
-    // `test_month_day_forms_prefer_short_writing`。
+    // 两段日期（`12.25.`）不在这道闸门里：它分出了 `month_day` 类、首选改为不带年的
+    // `12月25日`，是有意的行为变更。正面覆盖见 `test_month_day_forms_prefer_short_writing`。
     // 整数：金额 → 中文小写 → 中文大写 → 逐位 → 千分位
     assert_eq!(
         generate(QuickSource::Number, "123", 6),
@@ -116,7 +103,7 @@ fn builtin_output_equals_pre_refactor_hardcoding() {
     );
 }
 
-/// ★ 农历两条追加在公历五条之后——顺序错了就会挤掉首选。
+/// 农历两条追加在公历五条之后——顺序错了就会挤掉首选。
 #[test]
 fn lunar_entries_are_appended_after_solar() {
     assert_eq!(
@@ -143,10 +130,8 @@ fn lunar_entries_are_appended_after_solar() {
     );
 }
 
-/// ★ 农历算不出时，那两条消失而公历五条照常——不能整个日期候选一起哑掉。
-///
-/// 这正是农历变量取不到值时返回 `None`（而非空串）的理由：空串会让
-/// `农历$LMD` 剩下「农历」二字上屏。
+/// 农历算不出时，那两条消失而公历五条照常。农历变量取不到值返回 `None` 而非空串，
+/// 否则 `农历$LMD` 会剩下「农历」二字上屏。
 #[test]
 fn out_of_range_date_keeps_solar_entries_only() {
     let got = generate(QuickSource::Date, "1899.12.31", 6);
@@ -174,10 +159,7 @@ fn year_month_has_no_lunar_candidate() {
     );
 }
 
-/// 三位小数无角分写法：那一条候选消失，其余不受影响。
-///
-/// 改造前这是 `generate_number_candidates` 里的一个 if；改造后是「$AMT 渲染为空串 → 丢弃」。
-/// 行为必须一模一样。
+/// 三位小数无角分写法：那一条候选消失（`$AMT` 渲染为空串 → 丢弃），其余不受影响。
 #[test]
 fn amount_entry_vanishes_beyond_two_decimals() {
     let got = generate(QuickSource::Number, "1.234", 6);
