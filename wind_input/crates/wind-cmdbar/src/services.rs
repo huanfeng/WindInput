@@ -1,7 +1,6 @@
 //! 命令栏服务依赖
 //!
-//! 对照 Go `wind_input/internal/cmdbar/services.go`。动作函数所需的宿主副作用能力，
-//! 全部以 trait 注入；任一字段可为 `None`，动作函数在缺失时返回
+//! 动作函数所需的宿主副作用能力，全部以 trait 注入；任一字段可为 `None`，动作函数在缺失时返回
 //! [`CmdbarError::ServiceUnavailable`](crate::error::CmdbarError)，供宿主降级。
 
 use std::sync::Arc;
@@ -30,12 +29,9 @@ pub trait UrlOpener: Send + Sync {
 
 /// 一次 `proc.run` 启动请求。
 ///
-/// **刻意用结构体而不是继续加形参**：这些选项都来自 `proc.run` 的具名参数，会随
-/// 需求增长。加字段时每个实现点都会编译失败、被迫面对新选项；而多加一个形参
-/// 很容易被某个实现原样忽略掉，表现为「参数写了不生效」且毫无痕迹。
+/// 用结构体而不是加形参：加字段时每个实现点都会编译失败、被迫处理新选项。
 ///
-/// 空串一律表示"未指定，用默认"。各字段的取值已在 cmdbar 层校验过白名单，
-/// 宿主收到的一定是合法值（或空串）。
+/// 空串表示「未指定，用默认」。取值已在 cmdbar 层校验过白名单，宿主收到的一定合法。
 #[derive(Debug, Clone, Copy)]
 pub struct ProcSpawn<'a> {
     /// 目标程序 / 文件 / URL。
@@ -67,10 +63,8 @@ impl<'a> ProcSpawn<'a> {
 
 /// 一次 `wind.cli` 执行请求：子命令 argv + 执行完的用户反馈策略。
 ///
-/// **反馈策略必须随请求一起下去，不能由宿主自己拍板**：同一个 `wind.cli` 既用来跑
-/// `dict import`（服务侧不会有任何提示，必须由这里报），也用来跑 `config set` /
-/// `restart`（服务侧本就会弹「设置已更新」/「服务已重启」，再报一次就是双提示）。
-/// 撞不撞车只有写词条的人当场知道，宿主无从判断，也不该去维护一张子命令名单。
+/// 反馈策略必须随请求下去、不由宿主决定：有的子命令服务侧不提示（`dict import`），有的
+/// 本就会弹提示（`config set` / `restart`），只有写词条的人知道会不会双提示。
 #[derive(Debug, Clone, Copy)]
 pub struct CliSpawn<'a> {
     /// 子命令 argv（不含 exe 自身）。
@@ -101,9 +95,7 @@ pub const DEFAULT_CLI_WAIT_MS: u64 = 10_000;
 
 /// 进程启动 / shell 执行：`proc.run` / `proc.shell` / `wind.cli`。
 ///
-/// `cwd` 不是可选形参：「忘了接工作目录」的宿主会静默把 CWD 继承给子进程
-/// （在 Windows 上就是前台应用的当前目录，且会随文件对话框漂移），没有任何
-/// 报错——这类半接线只能靠签名本身杜绝。
+/// `cwd` 不是可选形参：忘了接的宿主会静默把自身 CWD 继承给子进程，只能靠签名杜绝。
 pub trait ProcessRunner: Send + Sync {
     fn run(&self, spec: &ProcSpawn<'_>) -> anyhow::Result<()>;
     /// `flags` 为 `proc.shell(cmd, "flagA,flagB")` 拆出的标志集（可空）。
@@ -175,10 +167,8 @@ pub trait ImeController: Send + Sync {
     /// 打开设置窗口的指定页面。`page` 为规范页 id（schema/input/keys/ui/dict/
     /// advanced/about），空串打开默认页。未知 id 由设置端忽略并落到默认页。
     ///
-    /// `args` 是**原样直通**给设置程序的附加命令行参数（如
-    /// `--schema=wubi86 --type=shadow` 定位到五笔的候选调整），空串=无附加参数。
-    /// 宿主刻意不解析、不校验其内容：设置端每加一个新参数都要改一遍这里，
-    /// 才是真正难维护的地方。含空白的值请自行用引号包裹。
+    /// `args` 原样直通给设置程序（如 `--schema=wubi86 --type=shadow`），空串=无。宿主刻意
+    /// 不解析，以免设置端每加参数都要改这里。含空白的值请自行用引号包裹。
     fn open_setting(&self, page: &str, args: &str) -> anyhow::Result<()>;
     /// 以 --web 参数启动设置 Web 版。`args` 语义同 [`Self::open_setting`]。
     fn open_setting_web(&self, page: &str, args: &str) -> anyhow::Result<()>;
@@ -213,8 +203,7 @@ pub trait ConfigService: Send + Sync {
     /// 失败照常报。给 `$CC` 一条命令串多个动作、后面还有自己的自定义提示
     /// （如 `wind.cli(…, ok="已关闭")`）的词条用，避免双提示。
     ///
-    /// 默认实现忽略 `quiet` 直接转发 [`Self::set`]：宿主不区分时语义退化为
-    /// 「永远弹」，与改动前一致。
+    /// 默认实现忽略 `quiet` 直接转发 [`Self::set`]，即「永远弹」。
     fn set_quiet(&self, key: &str, value: &str, quiet: bool) -> anyhow::Result<()> {
         let _ = quiet;
         self.set(key, value)

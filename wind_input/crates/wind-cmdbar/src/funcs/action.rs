@@ -1,4 +1,4 @@
-//! §3.4 动作函数（对照 Go funcs/action.go）。`pure=false`，运行时从
+//! §3.4 动作函数。`pure=false`，运行时从
 //! [`EvalContext::services`](crate::context::EvalContext::services) 取服务；缺服务返回
 //! [`CmdbarError::ServiceUnavailable`](crate::error::CmdbarError)。
 //!
@@ -76,10 +76,8 @@ const RUN_SHOWS: &[&str] = &["normal", "min", "max", "hidden"];
 /// 校验枚举型具名参数的**值**。名字的合法性由 registry 白名单在调用前保证，
 /// 这里管的是值。
 ///
-/// 刻意**不带 `cfg(windows)`**：verb/show 只在 Windows 生效，但值校验必须跨平台
-/// 一致，否则同一条词条在 macOS 上写错值不报错、拿到 Windows 才失败——短语文件
-/// 是跟着用户跨机器走的，校验口径必须与平台无关。平台差异只体现在执行端
-/// （不支持的平台记 WARN 忽略），不体现在能不能写。
+/// 刻意不带 `cfg(windows)`：短语文件跟着用户跨机器走，校验口径必须与平台无关；
+/// 平台差异只体现在执行端（不支持的平台记 WARN 忽略）。
 pub(crate) fn check_enum(func: &str, key: &str, val: &str, allowed: &[&str]) -> Result<()> {
     if val.is_empty() || allowed.contains(&val) {
         return Ok(());
@@ -128,15 +126,9 @@ fn fn_run_named(
 /// 用途是跨桌面环境的内置词条：同一个「计算器」在 GNOME / KDE / Deepin / Xfce 下是不同的
 /// 程序，词条里列出常见的几个，装了哪个就开哪个。
 ///
-/// 「成功」只看 spawn：程序起来之后自己失败（窗口一闪退出）不回落——那要等它退出才知道，
-/// 而等待会卡住动作链。回落的依据是宿主 [`ProcessRunner::run`] 的返回值，它在各平台上
-/// 能说明的事不一样：
-/// - macOS / Linux（`ext_presenter`）进程内直接 spawn，「程序不存在」是
-///   `io::ErrorKind::NotFound`，与「存在但起不来」（权限不足等）可以分开报；
-/// - Windows 转给 TSF 侧 ShellExecute，这里拿不到结果、恒为成功，所以**只会启动第一个**。
-///   内置词条在 Windows 上用 `proc.run`，不用本函数。
-///
-/// 两类失败都继续试下一个：存在但起不来的程序，换一个能用的正是本函数的目的。
+/// 「成功」只看 spawn，起来后自己失败不回落（等它退出会卡住动作链）。不存在与起不来两类
+/// 失败都继续试下一个。Windows 转给 TSF 侧 ShellExecute、恒为成功，只会启动第一个，
+/// 故内置词条在 Windows 上用 `proc.run`。
 ///
 /// [`ProcessRunner::run`]: crate::services::ProcessRunner::run
 fn fn_any(ctx: &dyn EvalContext, args: &[String]) -> Result<String> {
@@ -219,10 +211,8 @@ fn parse_ms(func: &str, key: &str, val: &str, default: u64) -> Result<u64> {
 
 /// 校验 `ui.toast` 的 kind / color / pos 三个值（空串 = 未指定）。
 ///
-/// **公开**：toast 有两个入口——短语里的 `ui.toast(…)` 与 RPC `ui.toast`（CLI /
-/// 外部脚本）。若各校验各的，必然出现「短语里写错报错、命令行里写错静默降级」
-/// 这种按入口分裂的行为；渲染端的 `ToastKind::parse` / `ToastPosition::parse`
-/// 未知值降级成默认，是**对脏数据的兜底**，替代不了入口处的校验。
+/// 公开给 RPC `ui.toast` 共用，避免两个入口校验口径分裂；渲染端 `parse` 的未知值降级
+/// 只是脏数据兜底，替代不了入口校验。
 pub fn validate_toast_args(kind: &str, color: &str, position: &str) -> Result<()> {
     check_enum("ui.toast", "kind", kind, TOAST_KINDS)?;
     check_enum("ui.toast", "pos", position, TOAST_POSITIONS)?;
@@ -305,9 +295,7 @@ fn fn_ui_toast(ctx: &dyn EvalContext, args: &[String]) -> Result<String> {
 
 /// `ui.toast(文案, kind=…, color=…, pos=…, ms=…)`：弹一条桌面提示。
 ///
-/// 只有文案是位置参数，其余全具名、与顺序无关。底色/文字色/字号**刻意不开放**——
-/// 那些跟随主题（`toast_bg` / `toast_text` / `theme.views.toast`），在词条里硬写会与
-/// 用户主题打架；短语能定的只有「这条提示是什么性质」（kind/color）与何时何地出现。
+/// 只有文案是位置参数，其余全具名。底色/文字色/字号刻意不开放，跟随主题。
 fn fn_ui_toast_named(
     ctx: &dyn EvalContext,
     args: &[String],
@@ -446,15 +434,9 @@ fn fn_search(ctx: &dyn EvalContext, args: &[String]) -> Result<String> {
     let s = services("web.search", ctx)?;
     let engine = args[0].trim().to_lowercase();
     let query = &args[1];
-    // 空查询词直接报错，**不打开浏览器**。
-    //
-    // 这是「静默失败」最标准的形状：`web.search("baidu", sel())` 在取不到文本时照样开一个
-    // `baidu.com/s?wd=` 的空搜索页 —— 命令看上去执行了，结果什么也没搜到，用户能拿到的
-    // 唯一线索是「浏览器开了但搜索框是空的」，无从判断是取值没成、还是引擎名写错了、
-    // 还是命令压根没跑。报错会经 `show_command_error` 弹到屏幕上。
-    //
-    // ⚠️ `sel()` 在 Windows 上**恒为空串**（`front_ctx` 只有 macOS 的 `.app` 会写），
-    // 故 `web.search("baidu", sel())` 这一类写法在 Windows 上必然走进本分支。
+    // 空查询词直接报错、不打开浏览器：开一个空搜索页是静默失败，报错会经
+    // `show_command_error` 弹出。注意 `sel()` 在 Windows 上恒为空串（`front_ctx` 只有
+    // macOS 会写），`web.search("baidu", sel())` 在 Windows 上必然走进本分支。
     if query.trim().is_empty() {
         return Err(CmdbarError::runtime(
             "web.search",

@@ -1,7 +1,6 @@
 //! Named Pipe 请求-响应服务器
 //!
-//! 与 Go 版本 `wind_input/internal/bridge/server.go` 对齐。
-//! 每个客户端连接在独立线程中处理（对应 Go 的 goroutine）。
+//! 每个客户端连接在独立线程中处理。
 
 use crate::handler::*;
 #[cfg(windows)]
@@ -245,11 +244,8 @@ fn handle_client(
     use windows::Win32::Foundation::*;
     use windows::Win32::Storage::FileSystem::*;
 
-    // 打字线程提速：hybrid CPU（P 核 + E 核）下服务线程常被放 E 核化解负载，同核还有
-    // 其它常驻线程（WorkBuddy 等后台任务），实测 convert 慢键的 PageFaultCount 差值
-    // 只有正常键的 1/60 —— 大部分时间片在被抢占，直观感受就是出候选顿挫 50–200ms。
-    // 键处理线程提到 HIGHEST（进程保持 Normal），同核排队快得多。失败静默：提不上去
-    // 只影响延迟上限，不破坏功能。
+    // 键处理线程提到 HIGHEST（进程保持 Normal）：hybrid CPU 下同核常驻线程会抢占时间片，
+    // 表现为出候选顿挫。失败静默，只影响延迟上限。
     unsafe {
         let _ = windows::Win32::System::Threading::SetThreadPriority(
             windows::Win32::System::Threading::GetCurrentThread(),
@@ -257,11 +253,8 @@ fn handle_client(
         );
     }
 
-    // 连接建立即通知：`ctx.pid` 是本次唯一能免费拿到、还没被任何消息处理耽搁的对端 pid。
-    // 放在读循环之前——命名管道有内核缓冲（见上方 CreateNamedPipeA 的 64KB 收发缓冲区），
-    // 对端此刻发消息不会因为我们还没开始 ReadFile 而丢失或阻塞；本调用只影响*本连接*
-    // 读到*第一条*消息前那一小段时间（<1ms 级的 GetForegroundWindow / 按需 OpenProcess），
-    // 每条连接仅此一次，不会摊到后续每次按键往返上。
+    // 连接建立即通知（此时 `ctx.pid` 现成可用）。放在读循环之前不会丢消息：命名管道有内核
+    // 缓冲，本调用只推迟本连接读第一条消息，每连接一次。
     handler.handle_client_connected(ctx.pid);
 
     let pipe = pipe.0;
@@ -383,9 +376,8 @@ fn handle_client(
             }
         }
 
-        // FOCUS_GAINED 重型段延后到响应写出之后（对齐 Go runActivationHandlerAndPush）：
-        // 同步段已回 ModePush 解除 DLL 阻塞，此处再 build_status + push 完整激活状态
-        // （工具栏/热键/图标/active token），不占用 DLL 的同步等待窗口。
+        // FOCUS_GAINED 重型段延后到响应写出之后：同步段已回 ModePush 解除 DLL 阻塞，此处再
+        // build_status + push 完整激活状态，不占用 DLL 的同步等待窗口。
         if cmd == CMD_FOCUS_GAINED
             && let Ok(fg) = decode_focus_gained(payload)
         {
@@ -442,11 +434,9 @@ fn handle_client(
 
 /// 分发命令到处理器，返回响应字节
 ///
-/// 与 Go 版 `processRequest` 对齐：
-/// - 同步命令返回 Some(response_bytes)
-/// - 异步命令返回 None（不写响应）
-/// - FOCUS_GAINED：同步命令，回 CMD_MODE_PUSH（权威 chinese/full）；重型 push 延后到
-///   handle_client 写出响应之后（见该处）。IME_ACTIVATED 仍异步，状态由 handler 经 push pipe 回送。
+/// - 同步命令返回 Some(response_bytes)，异步命令返回 None（不写响应）
+/// - FOCUS_GAINED：同步，回 CMD_MODE_PUSH；重型 push 延后到 handle_client 写出响应之后。
+///   IME_ACTIVATED 仍异步，状态由 handler 经 push pipe 回送。
 pub(crate) fn dispatch_command(
     handler: &Arc<dyn MessageHandler>,
     command: u16,
@@ -468,7 +458,7 @@ pub(crate) fn dispatch_command(
             // 键事件是「该实例正在输入」的最强焦点证据：SearchHost 等 locked/transient
             // DocMgr 宿主二次聚焦时 DLL 会跳过 focus_gained（OnSetFocus 见 TextService.cpp），
             // IME_ACTIVATED 也不重发——若不在此刷新 active，host-render 目标会停留在
-            // 上一个前台进程，导致第二次在开始菜单输入时回退本地渲染（真机踩坑）。
+            // 上一个前台进程，导致第二次在开始菜单输入时回退本地渲染。
             #[cfg(windows)]
             if let Some(mgr) = host_render {
                 mgr.note_focus(ctx.conn_id, ctx.pid);
@@ -529,12 +519,10 @@ pub(crate) fn dispatch_command(
             }
         },
 
-        // ── 焦点获取（同步命令，对齐 Go fix(focus) 0acf860b） ──
-        // 两段式：本同步段只做纯内存轻量操作并**立即回 CMD_MODE_PUSH**（权威 chinese/full）：
-        //   DLL 现为同步发送，在 OnSetFocus 内阻塞等本响应，首键前写好 _bChineseMode，
-        //   根治"切到微信首键上屏英文"；并解除阻塞（旧实现返回 None → DLL 卡到超时，
-        //   表现为切应用卡顿）。重型 handle_focus_gained（build_status + push 完整激活状态）
-        //   延后到 handle_client 写出响应之后再跑，不在 DLL 阻塞路径上（见 handle_client）。
+        // ── 焦点获取（同步命令）──
+        // DLL 在 OnSetFocus 内阻塞等本响应，首键前要写好中英模式，故这里只做轻量操作并立即回
+        // CMD_MODE_PUSH；不回则 DLL 卡到超时。重型 handle_focus_gained 延后到 handle_client
+        // 写出响应之后，不在 DLL 阻塞路径上。
         CMD_FOCUS_GAINED => {
             // 记录最近焦点实例（host-render 写帧目标）。已 setup 才在 active_target 生效。
             #[cfg(windows)]
@@ -542,19 +530,17 @@ pub(crate) fn dispatch_command(
                 mgr.note_focus(ctx.conn_id, ctx.pid);
             }
             if let Ok(fg) = decode_focus_gained(payload) {
-                // 同步 caret（首键前必须就绪，纯字段写入，对齐 Go applyFocusGainedCaret）。
-                // ⚠ 必须走 handle_focus_gained_caret 而**不是** handle_caret_update：
-                // 后者带副作用（消费首显等待 → 立即显示候选），会让焦点事件那一刻的
-                // 非权威坐标抢在 reflow 之前把候选窗显示出来，造成"先在旧位置再跳走"。
+                // 同步 caret（首键前必须就绪）。必须走 handle_focus_gained_caret 而不是
+                // handle_caret_update：后者会消费首显等待，让非权威坐标抢在 reflow 之前把
+                // 候选窗显示出来，造成「先在旧位置再跳走」。
                 handler.handle_focus_gained_caret(&CaretData {
                     x: fg.caret.x,
                     y: fg.caret.y,
                     height: fg.caret.height,
                     composition_start_x: fg.caret.composition_start_x,
                     composition_start_y: fg.caret.composition_start_y,
-                    // 来源随焦点载荷尾部的第 39 字节到达（旧 DLL 落 UNKNOWN）。
-                    // 「这一帧只落缓存、没有来源信息的消费者」已不再成立——`ui.status.show_on_focus`
-                    // 让状态气泡直接锚在这组坐标上，来源是它唯一能据以判断可信度的东西。
+                    // 来源随焦点载荷第 39 字节到达（旧 DLL 落 UNKNOWN）。`ui.status.show_on_focus`
+                    // 的状态气泡直接锚在这组坐标上，靠来源判断可信度。
                     source: fg.caret_source,
                     composition_rect: None,
                 });
@@ -595,8 +581,7 @@ pub(crate) fn dispatch_command(
         }
 
         // ── IME 激活（异步） ──
-        // Go 的两阶段模式：Phase1 更新 activeProcessID/activeToken + 回 Ack，
-        // Phase2 调用 HandleIMEActivated 并推送 ActivationStatusPush。
+        // 两阶段：先更新活动进程/token，再调用 handle_ime_activated 并推送激活状态。
         CMD_IME_ACTIVATED => {
             let token = decode_client_token(payload);
             // 后台客户端的激活不是焦点转移：不动 host render 写帧目标与活动客户端，
@@ -719,11 +704,8 @@ pub(crate) fn dispatch_command(
                             return Some(encode_host_render_setup(instance_id, &entries));
                         }
                         Err(e) => {
-                            // `{e:#}` 展开整条 anyhow 链:`setup` 内部给失败套了
-                            // 「create SHM kind=N」这类 context,而底下那层才是
-                            // `io::Error::last_os_error()`——真正要看的 Windows 错误码
-                            // （拒绝访问 / 名称已存在）。用 `{}` 只打印最外层那句,
-                            // 等于把排查 host render 唯一的线索丢掉。
+                            // `{:#}` 展开整条 anyhow 链：底层的 Windows 错误码才是排查线索，
+                            // `{}` 只打印最外层 context。
                             debug!(
                                 "host_render setup 拒绝 conn_id={} pid={}: {:#}",
                                 ctx.conn_id, ctx.pid, e
@@ -754,8 +736,8 @@ pub(crate) fn dispatch_command(
 
         // ── 光标更新（异步） ──
         CMD_CARET_UPDATE => {
-            // 后台客户端的光标不是输入位置：它在 ActivateEx 里随手报的 Win32 光标曾吃掉
-            // 前台宿主的首显等待，把第一个字的候选摆到 (0,74)。
+            // 后台客户端的光标不是输入位置：它在 ActivateEx 里报的 Win32 光标会吃掉前台宿主的
+            // 首显等待，把候选摆到错误位置。
             if handler.is_background_client(ctx.pid) {
                 debug!("caret_update 来自后台客户端 pid={}，忽略", ctx.pid);
                 return if is_async { None } else { Some(encode_ack()) };
@@ -795,13 +777,8 @@ pub(crate) fn dispatch_command(
                     }
                 })
             {
-                // ⚠ 2026-09-05 探针阶段：组合矩形**只观察、不参与决策**，故不进 `CaretData`。
-                // 目的是先用真机日志看清各宿主对**跨行** range 的 `GetTextExt` 究竟返回什么
-                // （规范说返回包围矩形，实现可能只返回首行、可能 TS_E_NOLAYOUT）。看清之后
-                // 再决定锚点公式，并连同消费代码一起把字段加进 `CaretData`。
-                //
-                // 判读要点：`h ≈ 单行行高` ⇒ 组合在一行内，`left` 就是组合起点；
-                // `h ≈ n 倍行高` ⇒ 跨了 n 行，此时 `(left, bottom)` 才是最后一行的行首。
+                // 组合矩形日志判读：`h ≈ 单行行高` ⇒ 组合在一行内，`left` 即组合起点；
+                // `h ≈ n 倍行高` ⇒ 跨了 n 行，`(left, bottom)` 才是最后一行的行首。
                 let comp_rect = wind_ipc::protocol::CaretPayload::comp_rect_from_bytes(payload);
                 if let Some((l, t, r, b)) = comp_rect {
                     // `CaretPayload` 是 packed 布局，格式化宏会对字段取引用 ⇒ 未对齐引用是 UB。
@@ -852,8 +829,7 @@ pub(crate) fn dispatch_command(
         // ── 首显试探采样（异步）──
         // 载荷同 CaretPayload；长度不足直接丢弃：半截坐标定位候选窗比不定位更糟。
         CMD_CARET_PROBE => {
-            // 入口无条件记一条：本分支此前对「解码失败」是静默丢弃的，真机排查时
-            // 「一条日志都没有」既可能是没收到、也可能是收到但解码失败，无从区分。
+            // 入口无条件记一条，以区分「没收到」与「收到但解码失败」。
             debug!("CMD_CARET_PROBE 到达: payload={} 字节", payload.len());
             if let Some(p) = wind_ipc::protocol::CaretPayload::from_bytes(payload) {
                 handler.handle_caret_probe(&CaretData {
@@ -953,8 +929,7 @@ pub(crate) fn dispatch_command(
 
         // ── 鼠标点选候选（页内下标 i32 LE，上行；darwin .app 同步 / Windows host DLL SendAsync）──
         // 0x020D 双用途：下行 CMD_MODE_PUSH（仅编码），上行 CMD_CANDIDATE_SELECT（仅 dispatch）。
-        // 负值为翻页按钮（-1 上页 / -2 下页），对齐 Go handleHostCandidateSelect 的 int32 解码——
-        // 按 u32 解码会把翻页点击变成巨大下标被 coordinator 丢弃（真机踩坑：翻页点击无效）。
+        // 负值为翻页按钮（-1 上页 / -2 下页），必须按 i32 解码，按 u32 会让翻页点击失效。
         // Windows DLL fire-and-forget（is_async）不读响应，回 ack 会污染管道 → 仅 !is_async 回 ack。
         CMD_CANDIDATE_SELECT => {
             if payload.len() >= 4 {
@@ -1153,8 +1128,6 @@ fn decode_focus_lost_reason(payload: &[u8]) -> wind_ipc::protocol::FocusLostReas
 }
 
 /// 将 KeyAction 编码为响应字节
-///
-/// 与 Go 版 handleKeyEvent 的 switch 分支对齐
 fn encode_key_action(action: &KeyAction, assoc_session: bool) -> Vec<u8> {
     // 标志位只属于「不带新组合的普通上屏」：带新组合的上屏、其它动作一律不置位。
     // （见 tests::assoc_session_flag_only_on_plain_commit）

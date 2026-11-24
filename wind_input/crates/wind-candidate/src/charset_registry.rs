@@ -4,25 +4,23 @@
 //! 不认识 TOML——配置的读取与三层合并在 `wind-config` 的 `charset_def`，
 //! 由 coordinator 把解析结果转成 [`ClassSpec`] 喂进来。
 //!
-//! ⛔ 与 `wind-config` 的 `code_charset::CodeCharSet` 无关：那个是**码元**字符集
-//! （哪些按键算输入码，值域是 ASCII）。本模块的值域是全 Unicode。
+//! 与 `wind-config` 的 `code_charset::CodeCharSet` 无关：那个是码元字符集（值域 ASCII）。
 //!
-//! # ★★★ 两种性质，两种合成规则
+//! # 两种性质，两种合成规则
 //!
 //! | 性质 | 规则 | 为什么 |
 //! |---|---|---|
 //! | 常用性 [`verdict_of`](CharsetRegistry::verdict_of) | **仲裁**：`order` 最小且表态的类赢 | 二值判定，只能有一个答案 |
 //! | [`no_freq`](CharsetRegistry::no_freq) / [`in_rare`](CharsetRegistry::in_rare) | **并集**：任一命中的类为真即真 | 布尔能力，多给一个是安全方向 |
 //!
-//! ⚠️ 不得把并集那两项也改成仲裁：`▶` 同时命中 emoji 类与「符号」类，若两者的
-//! `no_freq` 相反，按并集它免词频（与既有 `exclude_blocks` 一致），按仲裁则取决于
-//! `order`——那是**静默的行为变更**，且方向不安全（一个本该免词频的字符会开始记词频）。
+//! 不得把并集那两项改成仲裁：`▶` 同时命中 emoji 类与「符号」类，`no_freq` 相反时按仲裁
+//! 会取决于 `order`，本该免词频的字符可能静默开始记词频。
 
 use std::collections::HashSet;
 
 /// 类的**作用域**：本类「管得着」谁。值域是闭集，见设计文档 §2.4。
 ///
-/// ⛔ 不接受用户自定义码位段：作用域背后是**判定域**，漏一段的后果是那批字恒判常用、
+/// 不接受用户自定义码位段：作用域背后是**判定域**，漏一段的后果是那批字恒判常用、
 /// 过滤静默失效（issue #83 就是差一个码位）。判定域的完整性必须由代码保证。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
@@ -43,9 +41,8 @@ impl Scope {
 
 /// 编译 registry 的输入：一个类的规格，**已解析**、与配置格式无关。
 ///
-/// 常用性用 `Option<bool>` 而不是三态枚举：`None` = 不表态（不参与仲裁），
-/// `Some(true)` = 常用。配置层那个带 serde 的枚举由 coordinator 转换过来，
-/// 逻辑层不引 serde（与 headless 解耦那条纪律同源）。
+/// 常用性 `None` = 不表态（不参与仲裁），`Some(true)` = 常用。配置层的 serde 枚举由
+/// coordinator 转换过来，逻辑层不引 serde。
 #[derive(Debug, Clone, Default)]
 pub struct ClassSpec {
     /// 稳定标识，配置里的键名，也是 `exclude_blocks` 等外部引用的取值。
@@ -58,7 +55,7 @@ pub struct ClassSpec {
     pub members: HashSet<String>,
     /// 成员的**配置顺序**，与 [`Self::members`] 同集合。设置页列全表按它排。
     ///
-    /// ⚠️ 单独留一份 Vec 而不是从 `members` 迭代：`HashSet` 的迭代序是随机的，
+    /// 单独留一份 Vec 而不是从 `members` 迭代：`HashSet` 的迭代序是随机的，
     /// 拿它列表会得到一份每次启动都不一样的清单，分页更是直接失效。
     pub member_order: Vec<String>,
     /// 排除的字素簇（`remove`），**优先于 `ranges` 与 `members`**。
@@ -92,11 +89,8 @@ struct Segment {
 
 /// 编译后的判定结构。
 ///
-/// # 为什么区间走分段表、离散走 HashSet
-///
-/// ⛔ **离散型不要切进分段表**。`common_han` 的 8104 字是离散点集，切进去会把 Han 域
-/// 打成约 16000 段、二分要 14 次比较——而现状是「几次区间比较 + 一次 HashSet 查询」，
-/// 改完**反而更慢**。区间型的段边界只有几百个，二分一次即可。
+/// 区间走分段表、离散走 HashSet。离散型不要切进分段表：`common_han` 会把 Han 域打成
+/// 上万段，反而比「区间比较 + 一次 HashSet 查询」慢。
 #[derive(Debug, Clone, Default)]
 pub struct CharsetRegistry {
     /// 按 `order` 升序（同 order 按 `key` 定序，保证编译结果可复现）。
@@ -105,10 +99,8 @@ pub struct CharsetRegistry {
     segments: Vec<Segment>,
     /// 开了 `no_freq` 的类的位集，**编译期算好**。
     ///
-    /// ★ 存成掩码而不是查询时现算，是因为这两个查询在按键热路径上（每次按键 × 每个
-    /// 候选）。现算意味着每次调用都要遍历类列表并**分配一个 `Vec`**——那正是
-    /// `BlockMask` 用 `is_empty()` 短路刻意避开的成本。掩码为 0 时判定直接恒假，
-    /// 与「没配过这个功能的用户零成本」那条路径对齐。
+    /// 存成掩码而不现算：查询在按键热路径上，现算要遍历类列表并分配 `Vec`。
+    /// 掩码为 0 时判定直接恒假，未配置的用户零成本。
     no_freq_mask: u128,
     /// 开了 `in_rare` 的类的位集，同上。
     in_rare_mask: u128,
@@ -202,7 +194,7 @@ impl CharsetRegistry {
 
     /// **常用性仲裁**：`order` 最小且表态的类说了算。`None` = 无人表态，由调用方兜底。
     ///
-    /// ★ 「命中但不表态」要继续往下让，不能就此返回 `None`——那 50 个内置区块类存在的
+    /// 「命中但不表态」要继续往下让，不能就此返回 `None`——那 50 个内置区块类存在的
     /// 理由只是给类型列一个标签，它们命中不该挡住后面真正表态的类。
     pub fn verdict_of(&self, cluster: &str) -> Option<bool> {
         let ch = cluster.chars().next()?;
@@ -228,9 +220,7 @@ impl CharsetRegistry {
 
     /// 单个 `char` 的常用性仲裁。
     ///
-    /// ⚠️ 存在的理由是**避免分配**：调用方多半手里只有一个 `char`
-    /// （`CommonChars` 的逐 char 判定路径），而 `ch.to_string()` 在按键热路径上是每字
-    /// 一次堆分配。栈上 4 字节缓冲即可。
+    /// 存在是为了避免热路径上 `ch.to_string()` 的堆分配，用栈上 4 字节缓冲。
     pub fn verdict_of_char(&self, ch: char) -> Option<bool> {
         let mut buf = [0u8; 4];
         self.verdict_of(ch.encode_utf8(&mut buf))
@@ -238,7 +228,7 @@ impl CharsetRegistry {
 
     /// 这个簇属于哪个类（类型列显示用）：优先给**仲裁赢家**，无人表态则给首个命中的类。
     ///
-    /// ★ 给仲裁赢家而不是首个命中，是因为用户看这一列是想知道「谁决定了它的常用性」。
+    /// 给仲裁赢家而不是首个命中，是因为用户看这一列是想知道「谁决定了它的常用性」。
     pub fn class_of(&self, cluster: &str) -> Option<&ClassSpec> {
         let ch = cluster.chars().next()?;
         let hits = self.range_hits(ch);
@@ -279,11 +269,8 @@ impl CharsetRegistry {
 
     /// 并集类查询的共同实现：逐字素簇看有没有命中 `wanted` 位集里的某个类。
     ///
-    /// 按**簇**而不是按 char 遍历，簇本身也要查一次：多码位的 emoji 序列
-    /// （`👨‍👩‍👧`、`1️⃣`）在字表里是一整条，按 char 拆开就查不到了。
-    ///
-    /// ⚠️ `wanted` 由调用方传编译期算好的掩码，**不在这里现算**——现算要遍历类列表并
-    /// 分配一个 `Vec`，而本函数在按键热路径上。
+    /// 按簇遍历：多码位 emoji 序列在字表里是一整条。`wanted` 由调用方传编译期算好的掩码，
+    /// 不在热路径上现算。
     fn any_char_in(&self, text: &str, wanted: u128) -> bool {
         if wanted == 0 {
             return false;
@@ -291,22 +278,10 @@ impl CharsetRegistry {
         crate::split_markable_clusters(text).any(|cluster| self.cluster_hits(cluster, wanted))
     }
 
-    /// ★★ 一个字素簇命中 `wanted` 里的某个类吗：**先查整簇，不中再逐 `char` 回落**。
+    /// 一个字素簇命中 `wanted` 里的某个类吗：先查整簇，不中再逐 `char` 回落。
     ///
-    /// # 两步都不能省
-    ///
-    /// 字表**不列**变体序列与 ZWJ 组合（生成 `emoji.yaml` 时的决定，设计文档 §5.3），
-    /// 理由是「逐 `char` 查表时首码位已命中」——那条推理的前提是逐 `char`。
-    ///
-    /// | 输入 | 只查整簇 | 只逐 `char` |
-    /// |---|---|---|
-    /// | `👨‍👩‍👧`（字表里是一整条） | ✅ | ✅ 首码位也在表里 |
-    /// | `⚽️` = `⚽` + `U+FE0F` | ⛔ **漏**，整簇不在表里 | ✅ 基字符在表里 |
-    /// | `1️⃣` = `1` + `FE0F` + `20E3` | ⛔ 漏 | ✅ `U+20E3` 在表里 |
-    ///
-    /// ⇒ 省掉逐 `char` 那一步，`⚽️` 这类**裸基字符 + 变体选择符**的写法全都漏判，而
-    /// 上游词库存的恰恰多是这种形态。这是接口两侧各自合理的假设失配出来的洞：
-    /// 生成器按「消费方逐 char」省略了组合序列，判定按簇遍历。
+    /// 两步都不能省：字表不列变体序列与 ZWJ 组合（设计文档 §5.3），只查整簇会漏掉上游词库
+    /// 里常见的「裸基字符 + 变体选择符」写法。见设计文档 §6.6。
     ///
     /// `excluded` 仍然优先：用户删掉 `⚽` 之后 `⚽️` 也不再命中（两步都会被它挡住）。
     fn cluster_hits(&self, cluster: &str, wanted: u128) -> bool {

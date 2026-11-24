@@ -72,23 +72,12 @@ pub fn classify(text: &str) -> Category {
 /// 把扩展库 CJK 桶的权重**线性压缩**进扩展带 `[weight_min, extra.weight_max]`，
 /// 使整库恒低于主库最低档，同时保留库内相对次序。
 ///
-/// ## 为什么是压缩而不是「配 default_weight 抹平」
+/// 不用 default_weight 整库抹平：那会丢掉库内的真实词频差异。必须在数据侧做：引擎排序链
+/// 是 `weight 降 → base_order 升 → natural_order 升`，`base_order` 只在等权时起作用，
+/// 压不住权重更高的扩展库词条（见 `docs/design/dict-weight-normalization.md`）。
 ///
-/// 抹平（整库同权）会丢掉这 1800+ 条的真实词频差异；线性压缩把这条信息保留下来，
-/// 只是整体平移到主库之下。上游对主库的编排本身就是设计顺序，扩展库是补充，
-/// 补充不该在同码竞争里盖过正编。
-///
-/// ## 为什么必须在数据侧做，而不是引擎侧调 base_order
-///
-/// 引擎排序链是 `weight 降 → base_order 升 → natural_order 升`，`base_order` 在 `weight`
-/// **之后**，只在等权时才起作用。扩展库「品」(1523) 对主库「又」(1318) 权重不等，
-/// `base_order = 1` 永远轮不到——仓库里已有同款翻车记录（欧莱雅反超葡萄牙）。
-///
-/// ## 分辨率损失不影响最终呈现
-///
-/// 压进 119 个档位后同权条目会增多，但引擎在等权时依次落到 `base_order` → `natural_order`
-/// （文件序），而写出前会按「code 升 → weight 降」排序，文件序恰好编码了压缩前的权重序。
-/// 即 schema 注释所说的「整库同权 ⟹ 库内自然序」，顺序信息由文件序继续承载。
+/// 压缩后同权条目增多不影响呈现：写出前按「code 升 → weight 降」排序，文件序即压缩前的
+/// 权重序，引擎等权时落到 `natural_order` 仍按它排。
 fn compress_into_extra_band(list: &mut [Entry], cfg: &Config) {
     let cap = cfg.extra.weight_max;
     if cap <= 0 || list.is_empty() {
@@ -198,9 +187,8 @@ pub fn load_custom_emoji(path: Option<&Path>) -> anyhow::Result<Vec<Entry>> {
 
 /// named emoji 的权重档位。
 ///
-/// 三档必须严格递减，且都高于 `extra.default_weight`(100)：同码内按权重降序输出，
-/// 所以 CLDR 主名 > CLDR 关键词 > 上游条目。tts 单独抬一档是因为它是每个 emoji
-/// 的唯一确定名称（实测 1584 个主名零共享），理应在同码里排第一。
+/// 三档必须严格递减且都高于 `extra.default_weight`(100)，使同码内 CLDR 主名 > CLDR
+/// 关键词 > 上游条目。tts 单独抬一档：它是每个 emoji 唯一的确定名称（主名之间不共享）。
 const NAMED_TTS_WEIGHT: i64 = 130;
 const NAMED_KEYWORD_WEIGHT: i64 = 110;
 
@@ -275,12 +263,10 @@ pub fn load_named_emoji(
 
 /// 按 (编码, emoji) 去重，同键保留权重最高的一条。
 ///
-/// 两个来源都需要它：上游 extra 本身就带 53 条完全重复的 emoji 条目（`ddkk 😭` 出现
-/// 两次），而 named 表与上游有 129 条重合。
+/// 上游 extra 自带完全重复的条目，named 表也与上游有重合，两者都要去重。
 ///
-/// 去重键剥掉 U+FE0F：`⚽`(U+26BD) 与 `⚽️`(U+26BD FE0F) 渲染完全一样，不归一化就会
-/// 留下两条肉眼无法区分的候选。**保留的条目仍用它自己的原文**，于是权重更高的 named
-/// 条目胜出后，写进词库的是 emoji-test.txt 的规范形态（带 VS16，宿主才渲染彩色字形）。
+/// 去重键剥掉 U+FE0F（`⚽` 与 `⚽️` 渲染相同），但保留条目仍用自己的原文：named 条目
+/// 胜出时写进词库的是带 VS16 的规范形态，宿主才渲染彩色字形。
 pub fn dedup_emoji_entries(list: &mut Vec<Entry>) -> usize {
     let mut best: std::collections::HashMap<(String, String), usize> = Default::default();
     let mut drop_flags = vec![false; list.len()];
@@ -504,7 +490,7 @@ mod tests {
 
     /// 分档本身（压缩关闭时的原始语义）。
     ///
-    /// ★ 必须单独验一次：开启压缩后所有权重都落进 `[1,119]`，档位差被压得只剩几个点，
+    /// 必须单独验一次：开启压缩后所有权重都落进 `[1,119]`，档位差被压得只剩几个点，
     /// 拿压缩后的值断言分档，等于让压缩掩盖掉分档写错——两件事要各测各的。
     #[test]
     fn cjk_bucket_falls_back_by_priority_when_unigram_misses() {
@@ -530,7 +516,7 @@ mod tests {
         assert_eq!(buckets[0].1[1].weight, 120, "无原始权重落 priority_10");
     }
 
-    /// ★ 扩展库整库必须落在主库最低档之下——这是「扩展库排在主库之后」的**唯一**保证。
+    /// 扩展库整库必须落在主库最低档之下——这是「扩展库排在主库之后」的**唯一**保证。
     /// 引擎侧的 `base_order` 排在 `weight` 之后，只是等权 tiebreaker，压不住高权重词条。
     #[test]
     fn cjk_bucket_compressed_below_main_dict_floor() {

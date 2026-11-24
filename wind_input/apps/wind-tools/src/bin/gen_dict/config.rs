@@ -105,10 +105,8 @@ pub struct UpstreamOrderConfig {
     pub enabled: bool,
     /// 护栏：`当前首选词频 / 上游首选词频` 超过此倍数则**不**回归上游序。
     ///
-    /// 上游序里混着大量作者随手排上去的低频词，纯回归会把它们顶回首选。
-    /// 阈值 26 由实测样本夹定（`生效` 24.7× 与 `梗概` 25.3× 回归、
-    /// `大路` 26.2× 与 `鸽子` 29.1× 拦下）。**该区间极不敏感**：24× 到 30× 只差 17 条，
-    /// 真正的分水岭在 3×（+169 条）与 10×（+49 条），调参先看那一段。
+    /// 上游序里混着大量低频词，纯回归会把它们顶回首选。阈值 26 由样本夹定（见
+    /// `upstream_order` 的测试）；24×～30× 区间很不敏感，调参先看 3×～10× 那一段。
     ///
     /// 另有一道无条件护栏：上游首选不在 unigram 里（生僻词）一律不回归。
     pub max_freq_ratio: i64,
@@ -122,28 +120,20 @@ pub struct ExtraConfig {
     pub default_weight: i64,
     /// 扩展库 CJK 桶的权重上限：补权后线性压缩到 `[weight_min, 本值]`。
     ///
-    /// **必须低于主库最低档 `fallback.priority_10`**（由 `validate` 强制），这是
-    /// 「扩展库整库排在主库之后」的唯一实现手段——引擎侧的 `base_order` 排在 `weight`
-    /// **之后**，只是等权时的 tiebreaker，压不住任何一条权重更高的扩展库词条
-    /// （见 `wind-config/src/schema.rs` 记的「欧莱雅反超葡萄牙」翻车）。
+    /// 必须低于主库最低档 `fallback.priority_10`（由 `validate` 强制）：这是「扩展库整库排在
+    /// 主库之后」的唯一手段，引擎侧 `base_order` 排在 `weight` 之后，只在等权时起作用
+    /// （见 `docs/design/dict-weight-normalization.md`）。
     ///
-    /// 0 = 不压缩（保留补权原值，即旧行为）。
+    /// 0 = 不压缩（保留补权原值）。
     pub weight_max: i64,
 }
 
-/// 上游特有的**编码约定保护**：这些码的条目整体跳过词频补权（以及已退役的简码降权），
-/// 权重改由极点原始优先级映射，从而完整保留上游设计的候选顺序。
+/// 上游特有的编码约定保护：这些码的条目跳过词频补权，权重改由极点原始优先级映射，
+/// 保留上游设计的候选顺序。词频补权按「这个词有多常用」赋权，而上游对某些码（如四叠码
+/// `aaaa`=工、`dddd`=大）表达的是「这个码位约定谁排第一」，两者不可通约。
 ///
-/// 为什么需要它：我们的词频补全是按「这个**词**有多常用」赋权的，而上游对某些码的
-/// 排序表达的是「这个**码位**约定谁该排第一」——两套语义不可通约。四叠码
-/// （`aaaa`=工 `cccc`=又 `dddd`=大…）就是典型：补权后 26 个里有 14 个的键名汉字
-/// 被同码词组反超，其中相当一部分还是 `apply_demotion` 主动降权造成的
-/// （「有简码的字让位给词组」这条规则对普通编码成立，对键位约定则是错的）。
-///
-/// ⚠️ **作用域已收窄为「词库权重」这一层**。上面那句「对键位约定是错的」是
-/// `[demotion]` 时代的判断，取代它的运行时出简让全**不设这层豁免**——规则统一，
-/// 见 `wind-coordinator/src/short_code_yield.rs`。故开启该功能后 `dddd` 首选是
-/// 「大厦」而非「大」。本段保住的是权重与上游序，不再保「谁排第一」。
+/// 作用域只到词库权重：运行时出简让全不设这层豁免（见
+/// `docs/design/codetable-short-code-yields-full.md`），开启后 `dddd` 首选是「大厦」而非「大」。
 #[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ProtectedCodesConfig {
@@ -153,8 +143,7 @@ pub struct ProtectedCodesConfig {
     /// 保护带基准权重：最终权重 = 本值 + 条目的极点原始优先级。
     ///
     /// 须高于扩展带与生僻字保底档、且加上原始优先级后仍低于简码带（由 `validate` 强制）。
-    /// 不要求高于 `regular_weight_max`——理由见 `validate` 里的说明（按码保护 ⇒ 同码内
-    /// 不存在未受保护的竞争者）。
+    /// 不要求高于 `regular_weight_max`，理由见 `validate`。
     pub base_weight: i64,
 }
 
@@ -239,13 +228,9 @@ impl Default for ShortcodeConfig {
 impl Default for DemotionConfig {
     fn default() -> Self {
         Self {
-            // ⛔ 已退役，默认关。取代者是运行时的「出简让全」
-            // （`schema.codetable.short_code_yield_level`）。
-            //
-            // 默认值必须与 gen_dict.toml 同为 false：这个结构体带 `#[serde(default)]`，
-            // 缺 `[demotion]` 段的配置文件会静默取到这里的值。留 true 的话，谁写一份
-            // 精简配置就会让词库层再让位一次——与算法层叠加，字被压到词后面两遍，
-            // 而产物里看不出异常，只有实际打字才发现。
+            // 已退役，取代者是运行时的出简让全（`schema.codetable.short_code_yield_level`）。
+            // 默认值必须与 gen_dict.toml 同为 false：缺 `[demotion]` 段的配置会静默取到这里，
+            // 留 true 会与运行时让位叠加，字被压到词后面两遍。
             enabled: false,
             // 以下参数仅为记录当初的标定值，enabled = false 时不参与计算。
             filter_threshold: 200,
@@ -395,10 +380,8 @@ impl Config {
         }
         // 保护带的两侧约束。
         //
-        // ⚠️ **不要求高于 `regular_weight_max`**：保护是**按码**施加的，受保护码的所有主库
-        // 条目整组进保护带，同码内不存在带着补权权重的未保护条目，跨码之间引擎又不比权重。
-        // 唯一的跨库同码竞争来自扩展库，已由 `extra.weight_max` 压到下方。把 base_weight
-        // 设在普通带高位只是额外保险（补权实际达不到那个量级）。
+        // 不要求高于 `regular_weight_max`：保护按码施加，同码内不存在未保护的主库条目，
+        // 跨码引擎不比权重；唯一的跨库同码竞争来自扩展库，已由 `extra.weight_max` 压到下方。
         if self.protected_codes.enabled && !self.protected_codes.codes.is_empty() {
             let base = self.protected_codes.base_weight;
             if self.extra.enabled && self.extra.weight_max > 0 && base <= self.extra.weight_max {

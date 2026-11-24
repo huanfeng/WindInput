@@ -7,18 +7,11 @@ use std::path::PathBuf;
 /// 把**管道后缀**（`""` / `"_dev"`，见 `wind_config::variant::pipe_suffix`）映射成
 /// **变体后缀**（`""` / `"Dev"`）。
 ///
-/// 这两种后缀是两套命名风格，混用会让 dev 变体的两端各说各话：
-/// 调用方一路传下来的是管道风格的 `_dev`（它给 `wind_input_ctrl_dev` 这类管道名用），
-/// 但 Application Support 下的目录名与 SHM 名走的是变体风格 `Dev` ——
-/// Swift `BridgeEndpoints.variantSuffix`、`wind_config::variant::app_dir_name()`
-/// 和 `scripts/mac/dev.sh` 三处都是 `WindInputDev`。
+/// 管道名用 `_dev`，而 Application Support 目录名与 SHM 名用 `Dev`；混用会让 dev 变体
+/// 两端连不上。Swift `BridgeEndpoints.variantSuffix`、`wind_config::variant::app_dir_name()`
+/// 和 `scripts/mac/dev.sh` 三处都是 `WindInputDev`，改名须同步。
 ///
-/// 曾经此处直接把 `_dev` 拼进目录名，于是服务把 socket bind 到 `WindInput_dev/`，
-/// 而 .app 去 `WindInputDev/` 连——dev 变体的 bridge/SHM 全程握不上手。
-/// 改名须三处同步。
-///
-/// 未知后缀（测试/临时场景的 `_debug` 等）原样透传：它们不是正式变体，
-/// 静默改名只会让排查现场更难看懂。
+/// 未知后缀（测试用的 `_debug` 等）原样透传，不静默改名。
 fn variant_suffix(pipe_suffix: &str) -> &str {
     match pipe_suffix {
         "_dev" => "Dev",
@@ -28,9 +21,8 @@ fn variant_suffix(pipe_suffix: &str) -> &str {
 
 /// runtime 目录：env 覆盖 → macOS: ~/Library/Application Support/WindInput{变体后缀} / Linux: $XDG_RUNTIME_DIR/WindInput{变体后缀} → /tmp 兜底（见 [`tmp_fallback_dir`]）
 ///
-/// 两段刻意用不同风格的后缀：Application Support 段是**面向用户的应用目录名**
-/// （与 .app、dev.sh、用户配置目录同名），/tmp 段是无 HOME 时的兜底，
-/// 沿用管道风格的 snake 命名。
+/// 两段刻意用不同风格的后缀：Application Support 段是面向用户的应用目录名，
+/// /tmp 兜底段沿用管道风格的 snake 命名。
 pub fn runtime_dir(suffix: &str) -> PathBuf {
     if let Ok(env) = std::env::var("WIND_INPUT_RUNTIME_DIR")
         && !env.is_empty()
@@ -79,8 +71,8 @@ pub fn tmp_fallback_dir(suffix: &str) -> PathBuf {
 /// - /tmp 兜底：建成 0700，再按 [`check_private_dir`] 校验（是目录、不是符号链接、属主是本用户、
 ///   组与其他人无权限），不合格返回错误，服务据此拒绝启动——绝不在别人的目录里 bind。
 ///
-/// 其余形态（macOS、不开 linux-host 的 Linux）：同原先的 `create_dir_all`、忽略失败，行为不变。
-/// 建不出来时照旧交给后面的 bind / 加锁去报错。
+/// 其余形态（macOS、不开 linux-host 的 Linux）：`create_dir_all` 并忽略失败，建不出来时
+/// 交给后面的 bind / 加锁去报错。
 #[cfg(unix)]
 pub fn ensure_runtime_dir(suffix: &str) -> std::io::Result<PathBuf> {
     let dir = runtime_dir(suffix);
@@ -173,12 +165,11 @@ pub fn push_socket_path(suffix: &str) -> PathBuf {
 
 /// POSIX shm 名（须以 '/' 开头，长度 <=31）。
 ///
-/// 后缀与 socket 目录同源（`variant_suffix`），对齐 Swift
-/// `CandidatePanelHost` 的 `"/WindInput_SHM\(BridgeEndpoints.variantSuffix)"`；
-/// 不一致的话 dev 变体开出的是两段互不相干的共享内存，候选框永远拿不到帧。
+/// 后缀与 socket 目录同源（`variant_suffix`），须与 Swift `CandidatePanelHost` 的
+/// `"/WindInput_SHM\(BridgeEndpoints.variantSuffix)"` 一致，否则候选框拿不到帧。
 ///
-/// Linux 外部宿主形态带 uid：`/WindInput{变体后缀}.<uid>`（见 [`shm_name_for_uid`]）。
-/// macOS 不变（Swift 写死了名字，且 `/dev/shm` 式的全系统共用问题在那边由沙箱规避）。
+/// Linux 外部宿主形态带 uid（见 [`shm_name_for_uid`]）；macOS 不带（Swift 写死了名字，
+/// 全系统共用问题由沙箱规避）。
 pub fn shm_name(suffix: &str) -> String {
     #[cfg(all(target_os = "linux", ext_presenter))]
     return shm_name_for_uid(suffix, current_uid());
@@ -194,13 +185,11 @@ pub fn shm_name(suffix: &str) -> String {
 /// Linux 的 SHM 名：`/WindInput{变体后缀}.<uid>`，与 addon `Bridge.cpp::shmNameForUid` 同一规则
 /// （两侧单测钉同一组样例）。
 ///
-/// 为什么带 uid：POSIX shm 落在全系统共用的 `/dev/shm`。不带的话同机第二个用户的服务
-/// 建不了段（上一个用户的同名段 `shm_unlink` 得 EPERM、`O_EXCL` 得 EEXIST），候选窗 / 气泡 /
-/// 菜单全失效；别的用户还能抢先建个同名段喂假帧（addon 另按属主拒收）。
+/// 带 uid：POSIX shm 落在全系统共用的 `/dev/shm`，不带的话同机第二个用户的服务建不了段，
+/// 别的用户还能抢先建同名段喂假帧（addon 另按属主拒收）。
 ///
-/// 长度：`/WindInput`(10) + `Dev`(3) + `.`(1) + uid（u32 至多 10 位）+ 层后缀（至多 `_MN5` 4）
-/// = 28 ≤ 31。31 是 macOS 的 PSHMNAMLEN（Linux 实际上限是 NAME_MAX 255），两平台守同一个数。
-/// 测试用的未知后缀原样透传（`_debug` 6 字节时最长 31，仍不越界）。
+/// 长度上限守 31（macOS PSHMNAMLEN）：最长形态 `/WindInputDev.<10 位 uid>_MN5` 为 28，
+/// 测试用的 `_debug` 后缀时也恰好 31。
 #[cfg(all(target_os = "linux", ext_presenter))]
 pub fn shm_name_for_uid(suffix: &str, uid: u32) -> String {
     let name = format!("/WindInput{}.{uid}", variant_suffix(suffix));

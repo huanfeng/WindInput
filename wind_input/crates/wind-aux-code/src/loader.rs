@@ -7,9 +7,8 @@
 //!
 //! ## 名称（唯一解析的元数据）
 //! 只从**文件第 1 行**读取方法名（`# name: 笔画` 或 `#name: 笔画`，`#` 后空格可有可无、
-//! value 两侧去空白）。第 1 行不是名字就整体不解析元数据，`load_from_file` 回落文件
-//! 主干名（`stroke.txt` → `stroke`）。version / source 等一律当普通注释，程序不读——
-//! 它们留给人类，未来若支持表自动更新再提为解析字段。
+//! value 两侧去空白）。第 1 行不是名字就不解析元数据，`load_from_file` 回落文件
+//! 主干名（`stroke.txt` → `stroke`）。version / source 等一律当普通注释。
 //!
 //! 本模块只负责把外部文本 / 文件变成 [`AuxCodeTable`]，不接触表的内存布局——
 //! 表的三段式存储、去重、合并语义全在 [`crate::table`]。
@@ -21,8 +20,7 @@ use crate::table::AuxCodeTable;
 /// 路径由调用方解析（用户目录同名文件优先），本 crate 不负责定位——与 `wind-reverse`
 /// 同一约定。文件读不出来（路径错、无权限、非 UTF-8）返回空表并告警，不 panic。
 ///
-/// 辅助码表普遍很小，直接整体读入即可，无需缓存 / mmap；懒加载（首次输入辅助码时才
-/// 读取）由调用方控制触发时机，本函数是一次性构造。
+/// 表很小，整体读入，不缓存 / mmap；懒加载时机由调用方控制。
 pub fn load_from_file(path: &std::path::Path) -> AuxCodeTable {
     match std::fs::read_to_string(path) {
         Ok(content) => {
@@ -53,10 +51,8 @@ pub fn load_from_file(path: &std::path::Path) -> AuxCodeTable {
 
 /// **合并加载多张码表**：`merge(paths.iter().map(load_from_file))`（先出现 = 高优）。
 ///
-/// 供协调器「首次辅助码输入时，把每段相邻的文件来源一次性坍缩成一张表」的懒加载调用
-/// （`aux_code_source.rs`；方案来源 `schema:<id>` 不经此处，见 [`crate::AuxCodeLookup`]）。
-/// 路径由调用方解析后整体传入，本函数只负责「逐张读入 + 跨表去重/优先级坍缩」，
-/// 空文件（读失败/空内容）经 `merge` 自动跳过。
+/// 供协调器懒加载时把相邻的文件来源坍缩成一张表（`aux_code_source.rs`；方案来源
+/// `schema:<id>` 不经此处，见 [`crate::AuxCodeLookup`]）。空文件经 `merge` 自动跳过。
 pub fn load_merged(paths: &[std::path::PathBuf]) -> AuxCodeTable {
     AuxCodeTable::merge(paths.iter().map(|p| load_from_file(p)))
 }
@@ -90,12 +86,10 @@ fn parse_name_from_first_line(first_line: &str) -> Option<String> {
 /// - 空行与 `#` 注释行跳过；无 `=`、左侧非单字或右侧为空码的行整行跳过
 /// - 右侧按空白拆成多个码（`七=a p` = `七=a` + `七=p`），行内 `#` 起的注释先剥掉
 /// - 开头剥掉 UTF-8 BOM、孤立 `\r` 行尾折成 `\n`（见 [`wind_utils::text::normalize_input`]）：
-///   前者避免首行字被当成非单字跳掉，后者避免整份文件被当成一行——带 `# name:` 头的
-///   出厂表在那种情况下会被整个当成一条注释，0 条且无任何提示
+///   否则首行字会被当成非单字跳掉，或整份文件被当成一行注释、静默得到 0 条
 /// - **第 1 行**提取方法名（`# name: 笔画`，见模块文档）；其余元数据一律当注释
 ///
-/// 内容来源（文件 / 网络 / 内嵌）由调用方决定，本函数只做纯解析，不接触文件系统。
-/// crate 内部用（`load_from_file`）；如需对外暴露纯解析入口再提升为 `pub`。
+/// 纯解析，不接触文件系统。
 pub(crate) fn parse_str(content: &str) -> AuxCodeTable {
     let normalized = wind_utils::text::normalize_input(content);
     let content = normalized.as_ref();

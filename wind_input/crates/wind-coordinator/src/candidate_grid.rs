@@ -109,10 +109,9 @@ impl Coordinator {
 
     /// 此刻是否处于展开态：有滚动位置**且有候选**。
     ///
-    /// ★ 只看 `grid_top` 不够：上屏 / 回车 / 标点顶屏这一批出口只清候选、不经
-    /// `reset_candidate_view`，`grid_top` 会留到下一次装填。展开态专属键要是只认它，组合
-    /// 结束后在编辑器里按 ←→ / Esc 都会被吞（Linux / macOS 每个键都进协调器）。下一次装填
-    /// 必经 `reset_candidate_view`，残值不会被新候选继承，所以判据收在这里即可。
+    /// 只看 `grid_top` 不够：上屏等出口只清候选、不经 `reset_candidate_view`，`grid_top`
+    /// 会残留，组合结束后 ←→ / Esc 会被吞。下一次装填必经 `reset_candidate_view`，故判据
+    /// 收在这里即可。
     pub(crate) fn grid_active(state: &State) -> bool {
         state.grid_top.is_some() && !state.candidates.is_empty()
     }

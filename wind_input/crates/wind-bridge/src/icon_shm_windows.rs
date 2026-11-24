@@ -6,11 +6,9 @@
 //!
 //! ## 与 host-render SHM 的区别
 //!
-//! host-render 是「服务端主动推帧、DLL 后台线程等 Event」；图标是**被动回调**——
-//! 系统什么时候调 `GetIcon` 由它决定，DLL 只在那一刻读一次。
-//! 因此这里**不需要 NamedEvent、也不需要 DLL 侧后台线程**：状态变化的通知走
-//! 既有的 push 通道（`push_state_update` → `OnUpdate(TF_LBI_ICON)`），
-//! 本模块只负责保证「任何时刻读到的都是一套完整位图」。
+//! host-render 是服务端主动推帧；图标是被动回调，DLL 只在系统调 `GetIcon` 时读一次。
+//! 故不需要 NamedEvent 与 DLL 侧后台线程：变化通知走既有 push 通道
+//! （`push_state_update` → `OnUpdate(TF_LBI_ICON)`），本模块只保证任何时刻读到完整位图。
 //!
 //! ## 并发协议：双缓冲 + seqlock
 //!
@@ -69,14 +67,9 @@ impl std::error::Error for IconPublishError {}
 
 /// 写者所有权令牌：持有期间本进程是图标 SHM 的唯一写者。
 ///
-/// ## 为什么不能用「SHM 对象是否已存在」当判据
-///
-/// 内核对象只要还有**任何**句柄持有就不销毁，而 DLL 打开 SHM 后会一直持有映射。
-/// 于是服务重启时：旧服务退出 → DLL 仍持有 → SHM 对象健在 → 新服务若据此判定
-/// 「已有写者」就会拒绝创建，**图标从此永久停在旧内容上**。
-///
-/// 用一个 DLL 完全不碰的命名互斥体表达写者身份就没有这个问题：它的句柄只有服务
-/// 持有，服务进程一退出（正常退出或崩溃）对象即销毁，下一个服务能干净地接手。
+/// 不能用「SHM 对象是否已存在」当判据：DLL 一直持有映射，服务重启后 SHM 对象依然健在，
+/// 新服务会被挡在门外、图标永久停在旧内容。改用 DLL 不碰的命名互斥体，服务进程一退出
+/// （含崩溃）即销毁。
 struct WriterLock(HANDLE);
 
 impl WriterLock {
@@ -131,16 +124,9 @@ impl IconShm {
     pub fn create(suffix: &str) -> io::Result<Self> {
         let name = icon_shm_name(suffix);
 
-        // 写者唯一性。
-        //
-        // 需要它，是因为 `CreateFileMappingW` 遇同名会**打开已有对象**而不是报错，
-        // 第二个写者会毫无察觉地往别人的图标里写。这不是理论风险：集成测试
-        // （`tests/input_flow.rs` 等）会调 toggle 类命令走到 `push_state_update`，
-        // 且集成测试独立编译、`cfg(test)` 拦不住——本机跑一次测试就会把正在使用的
-        // 输入法图标写成测试状态且无任何报错。
-        //
-        // 判据用互斥体而非「SHM 是否存在」，理由见 [`WriterLock`]：DLL 持有映射会让
-        // SHM 对象在服务重启后依然健在，用它当判据会导致新服务永远接不上。
+        // 写者唯一性：`CreateFileMappingW` 遇同名会打开已有对象而不报错，第二个写者（如走到
+        // `push_state_update` 的集成测试，`cfg(test)` 拦不住）会静默改写正在使用的图标。
+        // 判据用互斥体，理由见 [`WriterLock`]。
         let Some(writer) = WriterLock::acquire(&name) else {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -310,9 +296,7 @@ mod tests {
 
     /// 只读持有者（模拟 DLL）不得阻止写者重建。
     ///
-    /// 这条守的是「服务重启后图标永久失效」：DLL 打开 SHM 后会一直持有映射，
-    /// 于是旧服务退出后内核对象依然健在。若把「SHM 对象是否存在」当写者判据，
-    /// 新服务会被自己的检查挡在门外，图标从此停在旧内容上且无任何报错。
+    /// 钉住「服务重启后图标不失效」：DLL 持有映射使旧 SHM 对象健在，不能据此拒绝新写者。
     #[test]
     fn readonly_holder_does_not_block_writer_recreate() {
         use windows::Win32::System::Memory::{FILE_MAP_READ, OpenFileMappingW};

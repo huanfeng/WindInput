@@ -8,10 +8,9 @@
 //!
 //! # 为什么需要这个工具
 //!
-//! 辅助码表全部来自第三方仓库，按 `NOTICE.md` 的既定政策**不入版本库**——尤其
-//! `rime-stroke` 是 LGPL-3.0，与本仓 GPL-3.0 不同（同 rime-frost 的 GPL-3.0 处理方式：
-//! 构建时下载、产物随发行版分发并适用原许可）。本工具把 `.cache/aux-code/` 下的
-//! 上游原始档转成运行时格式，写进构建产物。
+//! 辅助码表全部来自第三方仓库，按 `NOTICE.md` 的政策不入版本库（`rime-stroke` 是
+//! LGPL-3.0）：构建时下载、产物随发行版分发并适用原许可。本工具把 `.cache/aux-code/`
+//! 下的上游原始档转成运行时格式。
 //!
 //! # 三张表的加工差异
 //!
@@ -24,27 +23,20 @@
 //! 前两张已是 `字=码` 行格式，逐行与上游一致（本工具只在首部补
 //! `# name/version/source/license`，供运行时显示码表名与追溯来源）。
 //!
-//! # ★ stroke 的字集裁剪：为什么必须由脚本定义
+//! # stroke 的字集裁剪
 //!
-//! 上游笔画表覆盖 11 万字（含扩展 B/C/…），全量入内存对一个默认关闭的功能过重。
-//! 故按常用字集裁剪——**但这个字集必须写在代码里、可复现**：
-//! PR #68 最初提交的 `stroke.txt` 是手工加工产物（14738 字），其裁剪规则既没有脚本
-//! 也没有记录，我们逐表比对过 hanzi-chars 的全部 81 个字表也**无法逆向复原**
-//! （任何单表与并集都对不上）。那份数据一旦上游更新就再没人能重做一遍。
-//!
-//! 本工具改用两个有名有姓的国标字表求并集（见 [`CHARSET_FILES`]），产物是 PR 版的
-//! **超集**——只会让更多字有笔画码，不会让任何字失去。
+//! 上游笔画表覆盖约 11 万字，全量入内存对默认关闭的功能过重，故按常用字集裁剪。
+//! 字集必须写在代码里、可复现（见 [`CHARSET_FILES`]）；背景见
+//! `docs/design/aux-code-schema-source.md` 的「笔画改为码表方案」。
 //!
 //! # 笔画方案词库（`--schema-out`）
 //!
-//! 与 `stroke.txt` 出自**同一份**解析结果（[`parse_stroke`]），字集与每字的码序逐一相同——
-//! 全拼默认辅助码改引用 `schema:stroke` 后，筛选结果必须与引用 `stroke.txt` 时一致。
-//! `stroke.txt` 仍照旧产出：用户 override 里写死的 `aux_code/stroke.txt` 不能失效。
+//! 与 `stroke.txt` 出自同一份解析结果（[`parse_stroke`]），字集与码序逐一相同，
+//! 引用 `schema:stroke` 与引用 `stroke.txt` 的筛选结果必须一致。`stroke.txt` 仍照旧产出：
+//! 用户 override 里写死的 `aux_code/stroke.txt` 不能失效。
 //!
-//! 唯一多出的是**权重**：上游笔画表不带权重，全 0 时码表引擎既排不出序（退化为文件序），
-//! wdat 的前缀检索也无从剪枝（打 `h` 要走完整棵子树）。权重取 rime-frost 单字表的字频
-//! （同字多音取最大），再按 [`scale_weight`] 对数压进约定值域 `0~10000`——原始字频最大
-//! 一千五百万，直接写进去每次加载都会触发越界告警，且会让「短语 vs 码表」的权重比较失真。
+//! 唯一多出的是权重：全 0 时既排不出序、wdat 前缀检索也无从剪枝。取 rime-frost 单字表
+//! 字频（同字多音取最大），按 [`scale_weight`] 对数压进约定值域 `0~10000`。
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
@@ -206,7 +198,7 @@ fn single_char(text: &str) -> Option<char> {
 
 /// 写 `stroke.txt`（`字=码`）。返回条目数。
 ///
-/// ⚠️ 产物须与引入方案词库之前**逐字节相同**：用户 override 里写死的 `aux_code/stroke.txt`
+/// 产物须与引入方案词库之前**逐字节相同**：用户 override 里写死的 `aux_code/stroke.txt`
 /// 要继续可用，且改它会让「方案来源 vs 文件来源筛选一致」失去对照基准。
 fn write_stroke_txt(rows: &StrokeRows, dst: &Path) -> anyhow::Result<usize> {
     let mut f = std::io::BufWriter::new(std::fs::File::create(dst)?);

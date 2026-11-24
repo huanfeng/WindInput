@@ -5,39 +5,16 @@
 //! 数据源：<https://www.unicode.org/Public/UCD/latest/ucd/emoji/emoji-data.txt>
 //! 产物格式与 `common_chars.txt` 一致（一行一个字素簇），**入库并进发行版**。
 //!
-//! # ★ 为什么是字表文件而不是内置判定函数
+//! # 为什么是字表文件而不是内置判定函数
 //!
-//! 判定「这个字符是不是 emoji」曾经用一张内置的 151 段区间表 + 一个判定函数。改成
-//! 字表的理由是 `[charset]` 字符类系统的核心诉求——**让判据可自定义**：字表走
-//! `resolve_schema_resource`，用户把同名文件放进配置目录即可整份换掉，还能用
-//! `charset.toml` 的 `add`/`remove` 做稀疏调整；内置函数是唯一用户碰不到的形态。
-//! 顺带查询更快（HashSet O(1) vs 二分 151 段）。论证见
-//! `docs/design/charset-classification.md` §5。
+//! 让判据可自定义：字表走 `resolve_schema_resource`，用户可整份替换，或用 `charset.toml`
+//! 的 `add`/`remove` 稀疏调整。论证见 `docs/design/charset-classification.md` §5。
 //!
-//! # ⛔ 属性选择：只用 `Emoji`
+//! # 属性选择：只用 `Emoji`
 //!
-//! | 属性 | 码位数 | 判断 |
-//! |---|---|---|
-//! | **`Emoji`** | 1438 | ✅ 本工具用它 |
-//! | `Emoji_Presentation` | 1219 | ⛔ **误伤 201 个**（`❤ ☀ ✈ ♠ 🕵 🖥`）——上游词库存的是**裸码位**，实测 1404 簇里只有 10 个带 `FE0F` |
-//! | `Extended_Pictographic` | 2848 | ⛔ **绝不用**：含**未分配码位**，是给 UAX #29 断簇用的，不是「是不是 emoji」的判据 |
-//!
-//! ★ Unicode 官方立场是 `© ® ™ ↔ ▶` **都是** emoji（RGI fully-qualified，只是归在
-//! `Symbols` 组）。「这是符号不算 emoji」那条线属性表里没有，只在 `emoji-test.txt` 的
-//! group 里；要它得引入 5225 条 RGI 全表，且会连 `✅ ❌ ⭕` 一起摘走——已否决。
-//!
-//! # ⛔ 为什么不能按 Unicode 块近似
-//!
-//! 实测一本五笔 emoji 码表（4132 条 / 1404 簇），旧的「五个块并集」口径**两个方向
-//! 同时不准**：漏 182 条（`⬅ ⬛ ⭐ ⭕ 🀄 🃏 🅰 🆚 🈚 🉐 ⤴ ⤵` 所在的块不在块表里；
-//! `▶ ◀ ↔ ↩ ‼ ™ ℹ ㊗ Ⓜ 〰 © ®` 所在的块大部分是非 emoji，整块搬会连 `← → ▲ ◆`
-//! 一起搬），又多收「杂项符号」块内的 `☰` 与「杂项技术符号」块内的 `⌘ ⌥`。
-//!
-//! ⚠️ 早期记录把 `♠ ☯` 也算进「多收」，**是错的**：这两个本身就有 `Emoji` 属性
-//! （`2660`/`262F` 在 emoji-data.txt 里明确列着），收进来是对的。2026-09-04 拿生成
-//! 出来的字表实证后更正——结论转述了几轮都没人验证，直到有产物可查。
-//!
-//! ⇒ **补块补不齐**：块是显示域的划分、emoji 是字符属性，两者正交。
+//! 不用 `Emoji_Presentation`（会漏掉上游以裸码位存的 `❤ ☀ ✈` 等），绝不用
+//! `Extended_Pictographic`（含未分配码位，是断簇用的）。也不能按 Unicode 块近似：块是显示域
+//! 划分、emoji 是字符属性，两个方向都不准。数据与反例见上述文档「数据源与属性选择」一节。
 
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -45,16 +22,13 @@ use std::path::{Path, PathBuf};
 
 /// keycap 序列（UTS #51 ED-13：`[0-9#*] FE0F? 20E3`）的基字符。
 ///
-/// # ★★★ 必须排除，否则四种后果全部静默
-///
-/// 这 12 个 ASCII 在 `Emoji` 属性里为真，但**独立时不是 emoji**——`1` 就是数字 1。
-/// 不排除的话：数字候选免词频、`0-9` 挤进生僻字候选、一次「整类设为生僻」把十个数字
-/// 一起判掉，而且全程无报错。
+/// 必须排除：这 12 个 ASCII 在 `Emoji` 属性里为真，但独立时不是 emoji。不排除的话数字
+/// 候选免词频、`0-9` 挤进生僻字候选、「整类设为生僻」会把数字一起判掉，且全程无报错。
 const KEYCAP_BASES: &[char] = &['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '#', '*'];
 
 /// 组合键帽符 `U+20E3`。
 ///
-/// ★ **要列进来**：`1️⃣` 这类 keycap 序列在逐字符的存在性判定里，基字符已被上面排除，
+/// **要列进来**：`1️⃣` 这类 keycap 序列在逐字符的存在性判定里，基字符已被上面排除，
 /// 唯一能命中的就是它。副作用是它单独也算 emoji，但组合符号不会单独成为候选，无害。
 const COMBINING_KEYCAP: char = '\u{20E3}';
 
@@ -142,14 +116,9 @@ fn collect(text: &str, want: &str) -> anyhow::Result<BTreeSet<u32>> {
 
 /// 写字符类文件：meta 头 + `...` + 列表体，与 `.dict.yaml` 同构。
 ///
-/// # ★★ 出厂 meta 只声明身份，**一个判定字段都不写**
-///
-/// `default` / `no_freq` / `in_rare` 全部留空 = **不表态**，于是本类只提供「这些字符
-/// 属于 emoji」这个事实，不改变任何既有行为：出厂 `exclude_blocks` 本就为空（emoji
-/// 参与词频）、`include_blocks` 也为空（emoji 不进生僻字模式）、域外字符兜底判常用。
-///
-/// ⛔ 别在出厂文件里替用户表态。一旦写上 `default: rare`，升级到本版的用户会**突然
-/// 发现 emoji 从候选里消失了**，而他们什么都没改。变更出厂行为得单独决策。
+/// 出厂 meta 只声明身份，不写任何判定字段：`default` / `no_freq` / `in_rare` 留空即不表态，
+/// 本类只提供「这些字符属于 emoji」这个事实，不改变既有行为。
+/// 别在出厂文件里替用户表态：写上 `default: rare` 会让升级用户的 emoji 候选突然消失。
 fn write_table(out: &Path, chars: &BTreeSet<char>, version: &str) -> anyhow::Result<()> {
     if let Some(dir) = out.parent() {
         std::fs::create_dir_all(dir)?;
@@ -240,7 +209,7 @@ mod tests {
         assert!(emoji.contains(&0x0023) && emoji.contains(&0x2B50));
     }
 
-    /// ★★★ 生成结果里 ASCII 区必须一个都不剩——keycap 基字符全部排除。
+    /// 生成结果里 ASCII 区必须一个都不剩——keycap 基字符全部排除。
     /// 这条同时防住上游属性变化时的静默漂移。
     #[test]
     fn ascii_keycap_bases_are_all_excluded() {

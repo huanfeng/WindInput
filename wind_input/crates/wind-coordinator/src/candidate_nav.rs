@@ -14,11 +14,8 @@ impl Coordinator {
         let cand = self.eff_candidate();
         // overlay 模式(临拼/快捷/短语/临英等,state.active 非空)用扩展档(配置>0 时)。
         //
-        // **辅助码除外**：它的候选就是主路径候选被筛过一轮，呈现形态应与主路径一致
-        // （`layout::intent_for` 的 AuxCode 臂返回 `None` 表达的正是这个意图）。
-        // 走扩展档会让候选窗在按下触发键的瞬间从 per_page 跳到 per_page_extended，
-        // 「只是筛选」的视觉承诺当场破功。出厂 `per_page_extended = 0` 时不可见，
-        // 配了扩展档的用户才会撞上——同一意图两处判据不一致，迟早漂移。
+        // 辅助码除外：它只是筛过一轮的主路径候选，呈现应与主路径一致（同
+        // `layout::intent_for` 的 AuxCode 臂），否则按下触发键时每页条数会跳变。
         if active.is_some_and(|m| m != ModeKind::AuxCode) && cand.per_page_extended > 0 {
             cand.per_page_extended.max(1)
         } else {
@@ -51,9 +48,8 @@ impl Coordinator {
 
     /// 清除鼠标悬停目标（无需 state 锁，见 [`Coordinator::hover_index`] 的说明）。
     ///
-    /// 调用点＝一切「悬停不再对应屏幕上任何东西」的时刻：候选窗隐藏、候选列表重新装填、
-    /// 键盘移动高亮/翻页。少接一处的后果是**静默的**——悬停高亮与 tooltip 会在下一次候选窗
-    /// 出现时凭空复现，且鼠标从未移动过。
+    /// 调用点＝一切「悬停不再对应屏幕上任何东西」的时刻：候选窗隐藏、重新装填、键盘移动
+    /// 高亮/翻页。少接一处，悬停高亮与 tooltip 会在下次候选窗出现时凭空复现。
     pub(crate) fn clear_hover(&self) {
         self.hover_index
             .store(-1, std::sync::atomic::Ordering::Relaxed);
@@ -66,14 +62,8 @@ impl Coordinator {
 
     /// 候选列表重新装填 / 组合清空后的**视图复位**：翻页归零、键盘高亮归零、鼠标悬停清除。
     ///
-    /// # ★★ 三件事必须一起做
-    ///
-    /// 此前只有主路径 `update_candidates` 三件齐全，特殊模式 / 临拼 / 混输 / 快捷输入的
-    /// 8 个装填点都只做了前两件——漏掉的第三件让悬停高亮与 tooltip 跨按键、跨组合、跨模式
-    /// 存活（2026-08-12 用户反馈）。而普通输入每敲一键都重走主路径把残留覆盖掉，
-    /// **该缺陷在主路径上物理不可观测**，只有 overlay 模式才露馅。
-    ///
-    /// 收进一处后，新增候选来源时能漏的只剩「忘了调用本函数」——比在三行里少写一行显眼得多。
+    /// 三件事必须一起做，所有装填点都走本函数。漏清悬停在主路径上不可观测（每键都会覆盖），
+    /// 只在 overlay 模式露馅。
     pub(crate) fn reset_candidate_view(&self, state: &mut State) {
         state.current_page = 0;
         // 翻页史随候选一起作废：新装填的是另一批候选，上一批翻到过第几页与它无关。
@@ -91,10 +81,8 @@ impl Coordinator {
 
     /// 候选列表**原地重建**（不复位视图）后，把页码 / 页内高亮夹回新列表的范围内。
     ///
-    /// 扩容（`expand_candidates`）保持当前页/高亮，但重建后的可见列表可能**变短**：智能档下
-    /// 一组先前只有生僻字（全部放行），新一批带来同组常用字后整组生僻字被滤走——通配结果
-    /// 是一整组时最容易撞上，按码分组的普通码表同样可能。不夹的话 `page_range` 的起点越过
-    /// 列表末尾，渲染按页切片当场越界。
+    /// 扩容（`expand_candidates`）保持当前页/高亮，但重建后的可见列表可能变短（智能档下新一批
+    /// 带来同组常用字，整组生僻字被滤走）。不夹的话按页切片会越界。
     ///
     /// 夹页不是翻页：不动 `paged`（页码只降不升，见 `turn_page` 文档里「往下降」那段）。
     /// 真夹了才清悬停——悬停下标指向的那一页已经不是屏幕上这页了。
@@ -120,24 +108,11 @@ impl Coordinator {
 
     /// 翻到第 `page` 页并记下「这批候选被翻过页」。
     ///
-    /// 存在的理由只有一个：`current_page` 有五个写点（页内回卷两个、翻页键两个、
-    /// 末页放宽一个），而 `paged` 必须与它们**每一个**同步。分散成五行 `paged = true`
-    /// 是在等着下一个新写点漏掉——漏掉的表现是 `-` 在用户明明翻过页之后又变回字符，
-    /// 只在某一条特定翻页路径上复现。
+    /// `current_page` 的所有翻页写点都走这里，保证 `paged` 与之同步（漏掉会让 `-` 在翻过页后
+    /// 又变回字符）。不含 `try_relax_scope_on_page_end` 里还原 `page_before` 那处：还原不是翻页。
     ///
-    /// ⚠️ 不含 `try_relax_scope_on_page_end` 里那处**还原** `page_before`：还原不是翻页，
-    /// 那一帧若置位会把「临拼下重建候选前本来就在第 0 页」误记成翻过页。
-    ///
-    /// # 五个写点里只有三个有独立效果，另两个是刻意的冗余
-    ///
-    /// 往**上**抬页码的三处（`move_down` 回卷 / `page_next` / 末页放宽）各自都能单独把
-    /// `paged` 从 false 翻成 true，删掉任一处都有用例变红。往**下**降的两处
-    /// （`move_up` 回卷 / `page_prev`）则永远只是重复置位——页码降得下去，就说明它先被
-    /// 抬上去过，那一帧已经置过了。
-    ///
-    /// 它们照样走这个函数，是因为**判据不该按写点分叉**：留两处裸赋值，下一个人照着最近
-    /// 的先例加第六个写点时，抄到的可能正是那两处。所以「删掉它们没有用例会红」是设计的
-    /// 一部分，不是漏测——别为此去补一条只能靠白盒读 `paged` 才写得出的用例。
+    /// 往下降的两处（`move_up` 回卷 / `page_prev`）只是重复置位，删掉也不会有用例红；它们照样
+    /// 走这里，是为了判据不按写点分叉，不是漏测。
     pub(crate) fn turn_page(state: &mut State, page: usize) {
         state.current_page = page;
         state.paged = true;
@@ -223,11 +198,8 @@ impl Coordinator {
         if !s.scope_relaxed {
             return;
         }
-        // ⚠️ 判据是「**当前模式的**输入缓冲已空」。临拼的码在 `temp_pinyin_buffer`，
-        // 而它的 `input_buffer` 恒为空——用 `input_buffer` 一刀切会让临拼刚放宽就在下一次
-        // 按键被清掉，且**静默**（用户只看到「按了没用」）。退出临拼后 `active` 已变回
-        // 非 TempPinyin，走 `input_buffer` 分支照常失效。
-        // 反查模式同理：码在 `special_buffer`。
+        // 判据是「当前模式的」输入缓冲已空：临拼的码在 `temp_pinyin_buffer`、反查在
+        // `special_buffer`，此时 `input_buffer` 恒为空，一刀切会让放宽在下一键就被静默清掉。
         let ended = match s.active {
             Some(ModeKind::TempPinyin) => s.temp_pinyin_buffer.is_empty(),
             Some(ModeKind::Reverse) => s.special_buffer.is_empty(),
@@ -260,11 +232,8 @@ impl Coordinator {
         if !self.rt().config.input.scope_relax.page_end_key {
             return false;
         }
-        // 已放宽过就不再重复。放宽是**智能档专属**的补偿：只有智能档会按「同码位有常用字」
-        // 滤掉生僻字，也只有它需要一条把被滤掉的放回来的出路（见上方引用的设计文档，全篇
-        // 以 `filter_mode = "smart"` 为前提）。常用字档若也能放宽，它与智能档的差异就被
-        // 抹平了——用户选「常用字」要的正是一个稳定只出常用字的列表；`Gb18030` 本就不过滤，
-        // 更无可放宽。
+        // 已放宽过就不再重复。放宽是智能档专属的补偿：常用字档要的就是稳定只出常用字，
+        // `Gb18030` 本就不过滤。
         if state.scope_relaxed || state.filter_mode != wind_candidate::FilterMode::Smart {
             return false;
         }
@@ -273,7 +242,7 @@ impl Coordinator {
         if matches!(state.active, Some(ModeKind::AuxCode)) {
             return false;
         }
-        // ⚠️ 临拼的码在 `temp_pinyin_buffer`，主路径的在 `input_buffer`——须按当前模式取。
+        // 临拼的码在 `temp_pinyin_buffer`，主路径的在 `input_buffer`——须按当前模式取。
         // 用 `input_buffer` 一刀切会让临拼**永远触发不了**（那边恒为空），且没有任何报错。
         // 反查模式同理，码在 `special_buffer`。
         let in_temp = matches!(state.active, Some(ModeKind::TempPinyin));
@@ -291,11 +260,8 @@ impl Coordinator {
         state.scope_relaxed = true;
         // 两条路径的候选重建函数不同：临拼走 overlay 的那套（主路径的 `build_candidates`
         // 读 `input_buffer`，在临拼下会构建出空列表）。
-        // `paged` 与 `current_page` 一起存还：下面 `update_temp_pinyin_candidates` 内部会经
-        // `reset_candidate_view` 把 `paged` 清成 false，只还原页码的话就留下
-        // 「`current_page > 0` 而 `paged == false`」这个错位，`turn_page` 文档里承诺的
-        // 「同生命周期」当场破功。今天无害（本状态位只有普通模式的符号闸门在读，而
-        // overlay 在按键分派处就 return 了），但不变式破一个口子就不再是不变式。
+        // `paged` 与 `current_page` 一起存还：`update_temp_pinyin_candidates` 会经
+        // `reset_candidate_view` 清掉 `paged`，只还原页码会破坏两者同步的不变式。
         let page_before = state.current_page;
         let paged_before = state.paged;
         // 网格滚动位置同理：重建会经 `reset_candidate_view` 收起网格，而用户此刻正在展开态里
@@ -308,7 +274,7 @@ impl Coordinator {
         // `candidates`。两种都在下面重套一次。
         let tab_before = state.grid_tab;
         if in_temp {
-            // ⚠️ `update_temp_pinyin_candidates` 会把 current_page/selected_index 归零，
+            // `update_temp_pinyin_candidates` 会把 current_page/selected_index 归零，
             // 重建后须还原，否则用户翻到的位置丢失。
             self.update_temp_pinyin_candidates(state);
             state.current_page = page_before;
@@ -330,7 +296,7 @@ impl Coordinator {
         }
         // 判据取「列表里有没有真的出现被滤候选」，而非「总数是否变多」——候选受 limit 截断时
         // 总数可能不变，那样会误判成「没放出东西」而撤销。
-        // ⚠️ 要在**完整**列表上判（重套分类筛选之前）：放出来的字不一定落在当前分类里。
+        // 要在**完整**列表上判（重套分类筛选之前）：放出来的字不一定落在当前分类里。
         let released = state.candidates.iter().any(|c| c.is_scope_filtered);
         state.grid_tab = tab_before;
         self.grid_reapply_filter(state);
@@ -339,9 +305,7 @@ impl Coordinator {
             state.scope_relaxed = false;
             return false;
         }
-        // 放宽出来的候选**追加在末尾**，所以照常翻到下一页就能看到，与「继续往后翻」的动作
-        // 语义完全一致。⚠️ 曾让放宽后的候选按真实顺序插入，结果 `dwi` 的新字（权重 8999 占
-        // 三简位）落到第 1 页第 2 位，视口只能跳回页首——翻页翻着翻着跳回开头，很突兀。
+        // 放宽出来的候选追加在末尾，照常翻到下一页就能看到；按真实顺序插入会让视口跳回页首。
         if state.current_page + 1 < self.total_pages(state) {
             Self::turn_page(state, state.current_page + 1);
             state.selected_index = 0;

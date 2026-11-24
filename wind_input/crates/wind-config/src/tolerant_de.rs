@@ -2,31 +2,20 @@
 //!
 //! # 与段级降级的分工
 //!
-//! [`crate::section_fallback`] 是结构层兜底：探不出别的办法时把**整段**回落出厂值。
-//! 它保证「不会整份失效」，但代价是用户只写错一个键、却丢了同段的其它设置。
+//! [`crate::section_fallback`] 是结构层兜底，把整段回落出厂值，代价是丢了同段其它设置。
+//! 本模块是值域层，只让写错的那个字段回落。两层都要有：值域层管得准，结构层管得全
+//! （覆盖没人记得挂容错的新字段）。
 //!
-//! 本模块是值域层：`text_orientation = "uprigth"`（拼错）只让这一个字段回落，
-//! `[candidate]` 段里的 `font_family`、注释模板等照常生效。**两层都要有**——
-//! 值域层管得准，结构层管得全（覆盖将来新增的、没人记得挂容错的字段）。
+//! # 泛型适配器，不手写映射表
 //!
-//! # ★ 为什么是泛型适配器，而不是给每个枚举手写映射表
-//!
-//! 本仓 6 个面向用户的字符串枚举里，只有 `TextOrientation` 有 `as_str()`；其余 5 个
-//! （`LayoutIntent` / `PunctIntent` / `TopCommitMode` / `FreeInputMode` / `SmartMethod`）
-//! 的值域**只存在于 `#[serde(rename_all)]` 生成的实现里**。手写一张 `"normal" => Normal`
-//! 的映射表就等于给值域造第二个真相源——改了枚举忘了改表，症状是「配置写对了却不生效」，
-//! 比现在这个 bug 更难查。
-//!
-//! 这里的做法是把字符串重新喂给 **derive 生成的那个实现**（`T::deserialize` +
-//! [`serde::de::value::StrDeserializer`]），失败才回落。值域始终只有一份。
+//! 把字符串重新喂给 derive 生成的 `T::deserialize`（经 [`serde::de::value::StrDeserializer`]），
+//! 失败才回落。手写映射表会给值域造第二个真相源，改了枚举忘了改表就「写对了却不生效」。
 //!
 //! # 只治「字符串写错」，不治「类型写错」
 //!
-//! `text_orientation = 3` 这类**类型**错误照旧返回 `Err`，交给段级降级处理。
-//! 例外是只服务 `compat.toml` 的几个函数（`tolerant_opt` / `tolerant_opt_bool` /
-//! `tolerant_bool` / `tolerant_i32`）：那个载体没有段级降级，类型错也只能在字段上吞。
-//! 分工清晰：值域层只回答「这个字符串在不在值域里」，把它扩张成「什么都吞」会连
-//! 真正的配置结构错误一起掩盖掉。
+//! 类型错误照旧返回 `Err`，交给段级降级，以免掩盖真正的结构错误。例外是只服务
+//! `compat.toml` 的 `tolerant_opt` / `tolerant_opt_bool` / `tolerant_bool` / `tolerant_i32`：
+//! 那个载体没有段级降级，类型错也只能在字段上吞。
 
 use serde::Deserialize;
 use serde::de::value::StrDeserializer;
@@ -37,19 +26,12 @@ use tracing::warn;
 thread_local! {
     /// 本线程**当前这次反序列化**里被回落的原值。
     ///
-    /// # 为什么必须收集，而不是只打日志
+    /// 必须收集而不只打日志：字段级容错不再触发段级降级，只有交给调用方
+    /// （`read_schema` → `Schema::degraded_sections` → toast）用户才看得到。
     ///
-    /// 字段级容错把爆炸半径缩到了一个字段，但也因此**不再触发段级降级**——于是用户的
-    /// 处境从「整个方案不工作」变成「这一项写了没反应」，日志里有一行 WARN，界面上
-    /// 什么都没有。那仍然是「完全没反应，但又不工作」，只是更安静。
-    /// 收集起来交给调用方（`read_schema` → `Schema::degraded_sections` → toast）才算闭环。
-    ///
-    /// # 为什么是 thread_local 而不是参数
-    ///
-    /// `deserialize_with` 的签名由 serde 定死，塞不进上下文；而一次 `try_into` 是同一个
-    /// 线程内同步跑完的，thread_local 的生命周期正好覆盖它。⚠️ 调用方必须
-    /// **先 [`clear_fallbacks`] 再反序列化，随后 [`take_fallbacks`]**——段级降级的探针会
-    /// 反复反序列化同一份数据，不清就会把探针产生的记录算进最终结果。
+    /// 用 thread_local 是因为 `deserialize_with` 的签名塞不进上下文。调用方必须先
+    /// [`clear_fallbacks`] 再反序列化、随后 [`take_fallbacks`]：段级降级的探针会反复反序列化
+    /// 同一份数据，不清就会混进探针的记录。
     static FALLBACKS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -106,14 +88,10 @@ where
 
 /// 容错反序列化 `Option<枚举>`：值域外的字符串回落 **`None`**，不是 `Some(默认值)`。
 ///
-/// ⚠️ 与 [`tolerant`] 的回落目标刻意不同，这个区别是语义性的。`Option` 在本仓的
-/// tri-state 字段里表示「**有没有配过**」：`None` = 不干预/跟随上一层。认不出的值回落成
-/// `Some(T::default())` 就等于**替用户显式配了一个默认档**——per-app 覆盖凭空长出来，
-/// 用户改全局默认时这些应用不跟着变，且他从没配过、无从撤销。
-/// 见 `AppCompatRule::first_show_mode` 的字段文档。
+/// `Option` 在 tri-state 字段里表示「有没有配过」，回落成 `Some(默认)` 会凭空长出 per-app
+/// 覆盖，用户改全局默认时这些应用不跟着变。
 ///
-/// ⚠️ 与 [`tolerant`] 不同，本函数**连类型错也吞**（`smart_method = true` 回落 `None`
-/// 并 WARN）：它只用在 `compat.toml` 上，那里没有段级降级可交，理由同 [`tolerant_opt_bool`]。
+/// 本函数连类型错也吞：它只用在 `compat.toml` 上，理由同 [`tolerant_opt_bool`]。
 pub fn tolerant_opt<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
 where
     D: Deserializer<'de>,
@@ -148,11 +126,9 @@ where
 
 /// 容错反序列化 `Option<bool>`：非布尔值（`"yes"`、`1`）回落 **`None`** 并 WARN。
 ///
-/// ⚠️ 这是模块头部「只治字符串写错，不治类型写错」的**例外**（连同其裸 `bool` 版
-/// [`tolerant_bool`]、整数版 [`tolerant_i32`]、[`tolerant_opt`]），只给没有段级降级的载体用（`compat.toml`：
-/// `load_file` 解析失败即整份丢弃）。在那里，类型错并没有下一层兜底可交——不在字段上吞掉，就是所有应用的所有
-/// 规则一起静默失效。
-/// 回落 `None` 而非 `Some(false)`，理由同 [`tolerant_opt`]：认不出 = 没配过。
+/// 这是「不治类型写错」的例外（连同 [`tolerant_bool`]、[`tolerant_i32`]、[`tolerant_opt`]），
+/// 只给 `compat.toml` 用：那里 `load_file` 解析失败即整份丢弃，不在字段上吞就是所有规则一起
+/// 静默失效。回落 `None` 而非 `Some(false)`：认不出 = 没配过。
 pub fn tolerant_opt_bool<'de, D>(d: D) -> Result<Option<bool>, D::Error>
 where
     D: Deserializer<'de>,
