@@ -20,6 +20,7 @@ mod user_dicts;
 
 use serde_json::{Value, json};
 use wind_coordinator::dict_transfer_api::{self, resolve_engine_type};
+use wind_coordinator::external_files;
 use wind_coordinator::handle_common_chars::CommonCharEdit;
 use wind_coordinator::handle_quick_format::QuickFormatEdit;
 use wind_coordinator::user_words_api;
@@ -1218,31 +1219,13 @@ pub trait WebDataRpc: WebDataHost {
 
     /// `dict.reload {paths?: [string]}` → `{reloaded: [schema]}`：不带 paths 全量扫描。
     fn web_dict_reload(&self, params: &Value) -> anyhow::Result<Value> {
-        let store = self
-            .user_store()
-            .ok_or_else(|| anyhow::anyhow!("无持久化存储"))?;
-        let reloaded = match params.get("paths").and_then(|v| v.as_array()) {
-            Some(arr) => {
-                let paths: Vec<String> = arr
-                    .iter()
+        let paths: Option<Vec<String>> =
+            params.get("paths").and_then(|v| v.as_array()).map(|arr| {
+                arr.iter()
                     .filter_map(|v| v.as_str().map(String::from))
-                    .collect();
-                store.reload_user_text_paths(&paths)?
-            }
-            None => {
-                let mut r = store.sync_user_texts();
-                // 用户分库：比对已建引擎记下的指纹，变了才失效
-                r.extend(
-                    self.engine_mgr()
-                        .user_dicts_changed()
-                        .into_iter()
-                        .map(|ds| format!("{}{ds}", wind_store::user_words::USER_DICTS_CHANGED)),
-                );
-                r
-            }
-        };
-        // 变了的项重建对应的内存镜像（短语层、快捷格式、常用字、字符集）
-        self.apply_user_text_changes(&reloaded);
+                    .collect()
+            });
+        let reloaded = external_files::reload_dict_files(self, paths.as_deref())?;
         Ok(json!({ "reloaded": reloaded }))
     }
 
@@ -1306,7 +1289,8 @@ pub trait WebDataRpc: WebDataHost {
         if params.get("kind").and_then(Value::as_str) == Some("charsets") {
             self.prepare_charset_edit(store, str_param(params, "key")?)?;
         }
-        let s = store.begin_edit(&self.edit_target_param(store, params)?)?;
+        let path = self.edit_target_param(store, params)?;
+        let s = external_files::begin_edit(self, &path)?;
         Ok(json!({
             "path": s.path.to_string_lossy(),
             "file": s.file,
@@ -1340,8 +1324,7 @@ pub trait WebDataRpc: WebDataHost {
         let store = self
             .user_store()
             .ok_or_else(|| anyhow::anyhow!("无持久化存储"))?;
-        let r = store.end_edit(&self.edit_target_param(store, params)?)?;
-        self.apply_user_text_changes(&r.reloaded);
+        let r = external_files::end_edit(self, &self.edit_target_param(store, params)?)?;
         let root = store.user_text_dir();
         let issues: Vec<Value> = store
             .data_issues()
@@ -1354,12 +1337,8 @@ pub trait WebDataRpc: WebDataHost {
 
     /// `data.editSessions` → `[{file, since_secs}]`（设置端重开窗口时恢复编辑条）。
     fn web_data_edit_sessions(&self) -> anyhow::Result<Value> {
-        let Some(store) = self.user_store() else {
-            return Ok(json!([]));
-        };
         Ok(Value::Array(
-            store
-                .edit_sessions()
+            external_files::edit_sessions(self)
                 .into_iter()
                 .map(|(file, d)| json!({ "file": file, "since_secs": d.as_secs() }))
                 .collect(),
@@ -4086,41 +4065,19 @@ pub trait WebDataRpc: WebDataHost {
     /// 失效这些方案的引擎与解析缓存，下次使用按新内容重建；缺省 `ids` = 全部已安装方案。
     /// 与 `schema.invalidate` 同一条路（先失效、再重建跨方案派生集合）。
     fn web_schema_reload_files(&self, params: &Value) -> anyhow::Result<Value> {
-        let ids = match optional_ids(params)? {
-            Some(ids) => ids,
-            None => self.engine_mgr().installed_schemas(),
-        };
-        for id in &ids {
-            self.engine_mgr().invalidate_schema(id);
-        }
-        self.refresh_schema_derived_config();
+        let ids = external_files::reload_schema_files(self, optional_ids(params)?);
         Ok(json!({ "ok": true, "reloaded": ids }))
     }
 
     /// `theme.reloadFiles {ids?}`：主题文件被外部改了之后，丢掉这些主题的预览图缓存；
     /// 当前生效主题在其中（或缺省 `ids`）时重读并下发。
     fn web_theme_reload_files(&self, params: &Value) -> anyhow::Result<Value> {
-        let current = self.current_theme_name();
-        let (ids, all) = match optional_ids(params)? {
-            Some(ids) => {
-                if let Some(bad) = ids.iter().find(|i| !wind_theme::is_plain_slug(i)) {
-                    anyhow::bail!("非法主题 id: {bad}");
-                }
-                (ids, false)
-            }
-            None => (
-                self.list_themes_full().into_iter().map(|t| t.0).collect(),
-                true,
-            ),
-        };
-        for id in &ids {
-            theme_render::forget_theme(id);
-        }
-        let repush = all || ids.contains(&current);
-        if repush {
-            self.push_theme(&current, self.current_theme_is_dark());
-        }
-        Ok(json!({ "ok": true, "reloaded": ids, "applied": repush }))
+        let (ids, applied) = external_files::reload_theme_files(
+            self,
+            optional_ids(params)?,
+            &theme_render::forget_theme,
+        )?;
+        Ok(json!({ "ok": true, "reloaded": ids, "applied": applied }))
     }
 
     fn web_theme_delete(&self, params: &Value) -> anyhow::Result<Value> {

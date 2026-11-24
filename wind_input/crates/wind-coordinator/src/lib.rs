@@ -31,6 +31,8 @@ pub mod edit_ops;
 mod email_mode_tests;
 pub(crate) mod english_candidates;
 pub(crate) mod english_learn;
+/// 外部改文件后让核心重读（数据同步、手改），桌面 RPC 与移动端共用，见模块文档。
+pub mod external_files;
 #[cfg(test)]
 mod freq_learn_tests;
 pub mod handle_addword;
