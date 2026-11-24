@@ -1,39 +1,26 @@
-//! 定制版减法（`custom.toml` 的 `[schemas] hide`）在 **wind-engine** 侧的端到端接线。
+//! 定制版减法（`custom.toml` 的 `[schemas] hide`）在 wind-engine 侧的端到端接线。
 //!
 //! 钉住六件事：
 //!
-//! 1. 主拦截点 `read_schema` 对被 hide 的方案返回 `None`（经 `ensure_schema` 观察——
-//!    它就是 mix 成员 / 特殊模式激活前的门卫，返回 false 即「引擎构建不出来」）；
+//! 1. 主拦截点 `read_schema` 对被 hide 的方案返回 `None`（经 `ensure_schema` 观察——它是 mix 成员 /
+//!    特殊模式激活前的门卫，返回 false 即「引擎构建不出来」）；
 //! 2. 上层列表双保险：`installed_schemas` / `available_schemas` 都不含它；
 //! 3. 被 hide 的 `[overlay]` 方案进不了特殊模式注册表（`special:<id>` 的分发源）；
-//! 4. **hide 是绝对的**：用户自己在 `%APPDATA%\WindInput\schemas\` 放一份同名方案文件，
-//!    它仍然不可见（见 `Config::custom_hides_schema` 的取舍说明）；
+//! 4. hide 是绝对的：用户在 `%APPDATA%\WindInput\schemas\` 放一份同名方案文件仍然不可见
+//!    （见 `Config::custom_hides_schema` 的取舍说明）；
 //! 5. `schema.active` 指向被 hide 的方案 ⇒ 降级到第一个可用方案；
-//! 6. ★ 降级**不改写用户配置**——本用例真读盘比对 `config.toml` 的字节，不是只断言内存值。
-//!    改写会让用户切回原版 / 卸掉定制包之后丢掉自己的选择。
-//!    ⚠️ 这一条的反事实**不是**「摘掉某个过滤」，而是「给降级分支加一句
-//!    `Config::set_user_string(&["schema","active"], …)`」——它防的是将来有人顺手把降级
-//!    持久化，那种改动不会让别的用例变红。实施时已按此手法验证过它会变红。
+//! 6. 降级不改写用户配置（真读盘比对 `config.toml` 的字节）：改写会让用户切回原版后丢掉自己的选择。
+//!    防的是将来有人给降级分支加一句 `Config::set_user_string(&["schema","active"], …)`。
 //!
-//! ⚠️ **依赖 `build_dev/data` 的真实词库**：第 1 条要求被 hide 的方案在**没有** hide 时
-//! 是真能构建出引擎的，否则「构建不出来」两侧同因异果——自造的空词库方案
-//! `ensure_schema` 恒 false，摘掉闸门用例照样绿（实施时先写成那样，反事实当场证伪）。
-//! 缺 `build_dev/data` 时本用例跳过、计数照绿。
+//! 依赖 `build_dev/data` 的真实词库：第 1 条要求被 hide 的方案在没有 hide 时真能构建出引擎，
+//! 自造的空词库方案 `ensure_schema` 恒 false，摘掉闸门照样绿。缺 `build_dev/data` 时跳过、计数照绿；
+//! 跳过判据不能用耗时（缓存热时整个用例只跑 0.0x 秒），要确认它真在跑，看
+//! `build_dev/data/schemas/wubi86.schema.toml` 在不在，或 `--nocapture` 看有没有「跳过：」。
 //!
-//! ⚠️ **这里的跳过判据不能用耗时**（本仓词库测试族的惯用判据在这条上不成立）：`.wdat`
-//! 缓存热的时候整个用例连构造带断言只跑 0.0x 秒，与跳过分支的耗时无从区分。要确认它
-//! 真在跑，直接看 `build_dev/data/schemas/wubi86.schema.toml` 在不在，或
-//! `cargo test … -- --nocapture` 看有没有那行「跳过：」。
-//!
-//! 为什么必须是集成测试（独立进程）：`Config::custom_manifest()` 用 OnceLock 缓存，
-//! 同一进程里只解析一次盘上状态。用 `WIND_INSTALL_ROOT` 把安装根（= custom 层的根）
-//! 重定向到临时目录，用 `WIND_DATADIR_CONF` 把用户目录重定向；data 层由构造参数给出
-//! （`build_dev/data` 是主仓 junction 共享的产物目录，**只读**，测试绝不写它）。
-//!
-//! ⚠️ 全文件仅此一个 `#[test]`：多个测试在同一二进制里并行会争抢这两个环境变量与
-//! OnceLock，先跑的那个会把层定死，后跑的静默测到错误的目标。
-//! ⚠️ 两个环境变量都**必须**设：漏掉 `WIND_DATADIR_CONF` 时用户层会指向真实的
-//! `%APPDATA%\WindInput`（本仓已有把测试写进真实用户目录的前科）。
+//! 必须是集成测试（独立进程）：`Config::custom_manifest()` 用 OnceLock 缓存。用 `WIND_INSTALL_ROOT`
+//! 把安装根（= custom 层的根）、`WIND_DATADIR_CONF` 把用户目录重定向到临时目录；data 层由构造参数给出
+//! （`build_dev/data` 只读，测试绝不写它）。全文件仅此一个 `#[test]`，否则并行会争抢环境变量与
+//! OnceLock。两个环境变量都必须设：漏掉 `WIND_DATADIR_CONF` 时用户层会指向真实的 `%APPDATA%\WindInput`。
 
 use std::path::{Path, PathBuf};
 use wind_config::Config;
@@ -72,8 +59,7 @@ fn hidden_schemas_are_absent_from_every_layer_and_active_falls_back() {
         return;
     }
 
-    // ⚠️ 目录名带 pid：本仓常态是多 worktree / 多会话并行跑测试，固定名 + 开头的
-    // `remove_dir_all` 会让两个 cargo test 互删夹具。
+    // 目录名带 pid：多 worktree / 多会话并行跑测试时，固定名 + 开头的 `remove_dir_all` 会互删夹具。
     let tmp = std::env::temp_dir().join(format!(
         "wind_engine_custom_hide_e2e-{}",
         std::process::id()
@@ -86,7 +72,7 @@ fn hidden_schemas_are_absent_from_every_layer_and_active_falls_back() {
     std::fs::create_dir_all(&tmp).unwrap();
     std::fs::write(&conf, user.to_string_lossy().as_bytes()).unwrap();
 
-    // 清单必须在**任何** OnceLock 初始化之前就位，否则本次进程里定制层恒为关闭。
+    // 清单必须在任何 OnceLock 初始化之前就位，否则本次进程里定制层恒为关闭。
     // 定制者的典型意图：删掉出厂五笔，换成自带的虎码。
     write_at(
         &custom,
@@ -113,14 +99,10 @@ fn hidden_schemas_are_absent_from_every_layer_and_active_falls_back() {
 
     // custom 层：定制版自带的替代方案（加法不需要声明，直接放文件）。
     //
-    // ★ **id 是刻意挑的，别顺手改成 `huma`**：降级落点的挑法有三条独立判据（层序 /
-    // overlay 排除 / english 排最后），而它们**互相兜底**——三条里任意一条单独失效，
-    // 落点往往仍然正确，于是用例察觉不到。夹具因此要让每一条都成为唯一屏障：
-    //
-    // - `zz_huma` 排在**所有** data 层 id 之后（english/pinyin/shuangpin/wubi86_pinyin）
-    //   ⇒ 只有「层序」能让它赢。把它改回 `huma` 的话，字典序也会把它排在 pinyin 前面，
-    //   层序那条判据就测不出来了。
-    // - `aa_ov_kept` 排在 custom 层最前 ⇒ 只有「overlay 排除」能挡住它。
+    // id 是刻意挑的，别改成 `huma`：降级落点的三条判据（层序 / overlay 排除 / english 排最后）
+    // 互相兜底，夹具要让每一条都成为唯一屏障：
+    // - `zz_huma` 排在所有 data 层 id 之后 ⇒ 只有「层序」能让它赢；
+    // - `aa_ov_kept` 排在 custom 层最前 ⇒ 只有「overlay 排除」能挡住它；
     // - english 由下面 `cfg_en` 那个子场景负责（它在用户自己的 available 里排第一）。
     write_at(
         &custom,
@@ -138,14 +120,14 @@ fn hidden_schemas_are_absent_from_every_layer_and_active_falls_back() {
         "schemas/aa_ov_kept.schema.toml",
         &overlay_schema_toml("aa_ov_kept"),
     );
-    // 用户层：用户拿被 hide 的 id 命名了自己的方案——**仍然不可见**（hide 是绝对的）。
+    // 用户层：用户拿被 hide 的 id 命名了自己的方案——仍然不可见（hide 是绝对的）。
     write_at(
         &user,
         "schemas/user_named.schema.toml",
         &schema_toml("user_named"),
     );
 
-    // ★ 用户配置：active 还指着被删掉的 wubi86（原版用户升级到定制版的必然状态）。
+    // 用户配置：active 还指着被删掉的 wubi86（原版用户升级到定制版的必然状态）。
     // 真写一份 config.toml，稍后按字节比对它有没有被程序改写。
     let user_config = user.join("config.toml");
     let user_config_text = "[schema]\nactive = \"wubi86\"\navailable = [\"wubi86\", \"pinyin\"]\n";
@@ -193,9 +175,8 @@ fn hidden_schemas_are_absent_from_every_layer_and_active_falls_back() {
 
     // ── 2b. 特殊模式注册表（`special:<id>` 的分发源）─────────────────────────
     //
-    // ⚠️ 本条的反事实要**同时**摘掉 `read_schema` 与 `scan_layer_schema_ids` 两处才变红
-    // （注册表建自 `installed_schemas`，两道都能拦住它）——这正是双保险该有的样子，
-    // 实施时按「两处一起摘」验证过它会变红。
+    // 注册表建自 `installed_schemas`，`read_schema` 与 `scan_layer_schema_ids` 两道都能拦住它，
+    // 要同时摘掉两处本条才变红。
     assert!(
         mgr.overlay_index_of("aa_ov_kept").is_some(),
         "前置条件：没被 hide 的 overlay 方案必须在特殊模式注册表里，否则下一条恒真"
@@ -222,7 +203,7 @@ fn hidden_schemas_are_absent_from_every_layer_and_active_falls_back() {
         "active 被 hide 时应降级到 schema.available 里第一个可用方案"
     );
 
-    // ── 5. ★ 降级不改写用户配置（真读盘比对字节）─────────────────────────────
+    // ── 5. 降级不改写用户配置（真读盘比对字节）─────────────────────────────
     let after = std::fs::read(&user_config).unwrap();
     assert_eq!(
         before, after,
@@ -235,14 +216,11 @@ fn hidden_schemas_are_absent_from_every_layer_and_active_falls_back() {
         "内容也要与写进去的原文一致（防止 before/after 同时被改成同一个错值）"
     );
 
-    // ── 5b. ★ 降级落点必须是定制版自带的替代品，不能是 english ────────────────
+    // ── 5b. 降级落点必须是定制版自带的替代品，不能是 english ────────────────
     //
-    // 复现的是审查退回的那个真实故障：**单方案用户**（`schema.available` 只有五笔）装上
-    // 虎码定制版。第一版实现「候选表过一遍 is_supported 取第一个」+ 候选表按字典序
-    // ⇒ 落点是 `english`（`'e' < 'h'`），首启工具栏显「英」、一个汉字都打不出。
-    //
-    // ⚠️ `build_dev/data` 里**一个方案都没标 `[schema] hidden`**（english 也没标），
-    // 所以「加一道 hidden 过滤」挡不住它——本用例钉的是排序 + 类型档位。
+    // 单方案用户（`schema.available` 只有五笔）装上虎码定制版：候选表若按字典序取第一个受支持的，
+    // 落点是 `english`，首启一个汉字都打不出。`build_dev/data` 里没有方案标 `[schema] hidden`，
+    // 加 hidden 过滤挡不住它——本用例钉的是排序 + 类型档位。
     assert!(
         installed.contains(&"english".to_string()),
         "前置条件：english 必须确实在候选范围内，否则「没落到 english」恒真，实际={installed:?}"
@@ -257,16 +235,14 @@ fn hidden_schemas_are_absent_from_every_layer_and_active_falls_back() {
         "单方案用户的降级落点必须是定制版自带的方案（custom 层优先于 data 层），\
          不是字典序或 data 层里碰巧排在前面的 english"
     );
-    // available 曾在这个场景下变成**空表**：retain 的两条判据——「等于活跃方案」
-    // （已降级成 zz_huma）与「受支持」（wubi86 被 hide、读不出来）——双双落空。
-    // 空表 = 方案菜单空白 + 循环切换键毫无反应，用户只能进设置页手动选。
+    // available 不得变成空表：retain 的两条判据「等于活跃方案」（已降级成 zz_huma）与「受支持」
+    // （wubi86 被 hide）在这个场景下双双落空，空表 = 方案菜单空白 + 循环切换键毫无反应。
     assert_eq!(
         mgr_solo.available_schemas(),
         vec!["zz_huma".to_string()],
         "降级目标必须进 available，否则方案菜单与循环切换都拿到空表"
     );
-    // 注：这个场景里循环切换**确实无处可去**，那是对的——用户本来就只启用了一个方案。
-    // 「循环切换可用」由下面这个双方案变体钉住。
+    // 这个场景里循环切换确实无处可去（用户只启用了一个方案）；「循环切换可用」由下面的双方案变体钉住。
 
     // 用户的 available 里就有 english 时，english 也不该赢——档位优先于列表顺序。
     // 同时这是 `ensure_fallback_listed` 生效后循环切换真的有得可去的场景。
@@ -286,20 +262,15 @@ fn hidden_schemas_are_absent_from_every_layer_and_active_falls_back() {
         "降级目标插到表头，用户原有的 english 保留 ⇒ 循环切换有得可去，实际={av_en:?}"
     );
 
-    // ── 6. available_schemas 那道过滤**唯一**独立生效的场合 ───────────────────
+    // ── 6. available_schemas 那道过滤唯一独立生效的场合 ───────────────────
     //
-    // 老实说：上面第 2 条里 `available_schemas` 的断言并不能单独判 `available_schemas`
-    // 有没有过滤——构造期的 `retain` 用 `schema_supported`（→ `read_schema` → None）
-    // 已经把被 hide 的方案筛掉了。那道过滤真正生效的是**活跃方案被无条件保留**
-    // （`sid == &active_id`）这一条旁路，而它只在「降级也找不到可用方案」时才留下一个
-    // 被 hide 的 active。这里把那个角落造出来：data 层是空目录 ⇒ 无处可降级。
-    //
-    // 不造这一段的话，摘掉 `available_schemas` 的过滤本用例照样全绿（实施时实测）。
+    // 第 2 条里构造期的 `retain`（`schema_supported` → `read_schema` → None）已筛掉被 hide 的方案，
+    // 那道过滤真正生效的是「活跃方案被无条件保留」（`sid == &active_id`）这条旁路，只在降级也找不到
+    // 可用方案时才留下被 hide 的 active。这里造出那个角落：data 层是空目录 ⇒ 无处可降级。
     let empty_data = tmp.join("empty_data");
     std::fs::create_dir_all(&empty_data).unwrap();
-    // 降级的兜底扫描看的是**全部层**（user / custom / data），不只是 data_dir——
-    // 故 custom 层那几个方案也得挪走，否则它们会成为可降级目标（这一点本身就说明
-    // 降级比「只看 schema.available」更耐操，是好事，只是挡了本段要造的角落）。
+    // 降级的兜底扫描看全部层（user / custom / data），故 custom 层那几个方案也得挪走，
+    // 否则它们会成为可降级目标。
     for rel in [
         "schemas/zz_huma.schema.toml",
         "schemas/aa_ov_kept.schema.toml",

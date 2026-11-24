@@ -12,12 +12,11 @@ fn cand(code: &str, text: &str) -> Candidate {
     }
 }
 
-/// ★ 护栏：检索范围放宽补回的候选**不得**影响满码自动上屏。
+/// 护栏：检索范围放宽补回的候选不得影响满码自动上屏。
 ///
-/// 今天的自动上屏有一部分是靠智能过滤滤掉同码生僻字才成立的（见
-/// `recheck_auto_commit_unique_after_filter`）。放宽（自动补充 / 手动临时切换）会把这些字
-/// 补回候选列表，若不在计数时排除，一批原本满码即上屏的字会**静默退化**成要多按一次空格，
-/// 用户只感到「上屏时灵时不灵」。设计见 docs/design/smart-filter-scope-relax.md §2.1。
+/// 部分自动上屏靠智能过滤滤掉同码生僻字才成立（见 `recheck_auto_commit_unique_after_filter`），
+/// 放宽补回这些字时若不在计数时排除，满码即上屏会静默退化成要多按一次空格。
+/// 设计见 docs/design/smart-filter-scope-relax.md §2.1。
 #[test]
 fn scope_filtered_candidates_do_not_block_auto_commit() {
     let mut relaxed = cand("hhnu", "愳");
@@ -29,8 +28,7 @@ fn scope_filtered_candidates_do_not_block_auto_commit() {
         "放宽补回的同码生僻字不该否决满码自动上屏"
     );
 
-    // ★ 反向对照：同样两条候选，只是不带放宽标记（即它本就通过了过滤）→ 仍须照旧否决。
-    // 没有这条，一个「无条件放行」的错误实现同样能让上面那句变绿。
+    // 反向对照：同样两条候选、不带放宽标记 → 仍须照旧否决，防「无条件放行」的实现假绿。
     let both_normal = [cand("hhnu", "X"), cand("hhnu", "愳")];
     assert_eq!(
         decide_auto_commit(true, 4, "hhnu", &both_normal, false),
@@ -108,18 +106,14 @@ fn engine_two_dicts(
     (e, dm)
 }
 
-/// `set_dict_enabled` 必须先分辨「这个 id 是不是我的」，再谈处理（t107 的回归守门）。
+/// `set_dict_enabled` 必须先分辨「这个 id 是不是我的」，再谈处理。
 ///
-/// # 为什么这一步不能省
+/// `MixedEngine::set_dict_enabled` 把调用转发给 primary / secondary / english 三个子引擎并取
+/// `a || b || c`，码表子引擎也会收到拼音库的 id。若它对任何 id 都回 true，或运算恒真，
+/// 不支持热插拔的拼音子引擎所需的失效重建被吞掉，混输里会继续出已禁用库的候选直到重启。
 ///
-/// `MixedEngine::set_dict_enabled` 把同一次调用转发给 primary / secondary / english
-/// 三个子引擎并取 `a || b || c`。码表子引擎因此照样会收到**拼音库**的 id。若它对任何
-/// id 都回 true（早先的写法就是这样），那个或运算恒真 ⇒ 调用方判定「已生效」⇒
-/// 真正承载该库、且**不支持**热插拔的拼音子引擎所需要的失效重建被整个吞掉：
-/// 用户禁用拼音方案的扩展库，独立方案下次生效，混输里却继续出该库的候选，直到重启。
-///
-/// 启用方向一律回 false：惰性加载之后未启用的库根本没建层，这里无从恢复，
-/// 必须交调用方失效重建 —— 这也是为什么调用方**不能**再拿返回值给启用路径做路由。
+/// 启用方向一律回 false：惰性加载后未启用的库没建层，必须交调用方失效重建，
+/// 故调用方不能拿返回值给启用路径做路由。
 #[test]
 fn set_dict_enabled_only_claims_own_dicts() {
     let (e, _dm) = engine_two_dicts(&[("a", "工", 100)], &[("a", "工", 5000)]);
@@ -152,18 +146,13 @@ fn set_dict_enabled_defaults_to_disowning_everything() {
     assert!(!e.set_dict_enabled("ext", true));
 }
 
-/// ★★★ 跨词库同词条合并的主键是 `(code, text)`，不是 `text`。
+/// 跨词库同词条合并的主键是 `(code, text)`，不是 `text`。
 ///
-/// ① 两库收录**同一条**（码相同）→ 按最高权重算，这是「多个词库有同一个 code+词、
-///    权重不同时以最高者为准」那条用户可见语义；关掉出该权重的库即回退。
-/// ② 两库里该词**码不同** → 那是**两个词条**，权重各归各的码位，不得互相继承。
+/// ① 两库收录同一条（码相同）→ 按最高权重算，关掉出该权重的库即回退。
+/// ② 两库里该词码不同 → 是两个词条，权重各归各的码位：简码条目若继承全码条目的高权重，
+///    会直接改掉首选。
 ///
-/// ② 尤其要钉住：曾经按 text 无条件取 max，于是打 `a` 时精确候选「工」带上了扩展库
-/// 全码 `ab` 那条的权重。码表方案里码长本身就是分档依据，简码条目凭空拿到全码条目的
-/// 高权重会直接改掉首选。
-///
-/// 两条必须并存：只有 ① 时，一个「无条件跨码位取 max」的实现照样全绿；只有 ② 时，
-/// 一个「永不继承」的实现也全绿。
+/// 两条必须并存：只有 ① 时「无条件跨码位取 max」照样全绿；只有 ② 时「永不继承」也全绿。
 #[test]
 fn cross_dict_weight_merges_by_code_and_text() {
     // ① 同码：主库 100 / 扩展库 5000 → 取 5000，来源标注指向扩展库。
@@ -345,14 +334,14 @@ fn single_code_complete_fills_from_longer_code() {
         },
     );
     let r = e.convert("ab", 50).unwrap();
-    // 补全候选走 `completion_hints` 旁路而**不入** `candidates`：该不该补取决于最终屏幕上
-    // 有没有候选，而引擎看不见协调器随后叠加的短语，无权就地拍板（见 ConvertResult 文档）。
+    // 补全候选走 `completion_hints` 旁路而不入 `candidates`：该不该补取决于最终屏幕上有没有
+    // 候选，引擎看不见协调器随后叠加的短语，无权就地拍板（见 ConvertResult 文档）。
     assert!(r.candidates.is_empty(), "补全候选不应入引擎候选列表");
     let hint = r.completion_hints.first().expect("应备好空码补全候选");
     assert_eq!(hint.text, "你", "空码补全首选取更长编码首条");
     assert_eq!(hint.comment, "c", "补全候选应标注剩余编码");
-    // 备的是**池**不是单条：协调器要在 shadow/检索范围过滤之后才择一，只备一条的话
-    // 用户隐藏掉首条就无货可补、屏幕全空。
+    // 备的是池不是单条：协调器在 shadow/检索范围过滤之后才择一，只备一条的话
+    // 用户隐藏掉首条就无货可补。
     assert!(
         r.completion_hints.iter().any(|c| c.text == "他"),
         "补全池应含次条 abd→他，实际: {:?}",
@@ -364,7 +353,7 @@ fn single_code_complete_fills_from_longer_code() {
     assert!(!r.should_commit, "补全候选不应触发自动上屏");
 }
 
-/// 论坛 t302：满码长空码、码表另有超码长词条 ⇒ 照样备补全（曾被 `< max_code_length` 截断）。
+/// 满码长空码、码表另有超码长词条 ⇒ 照样备补全（不被 `< max_code_length` 截断）。
 /// 同开逆切分时，切分须让位给这条后续（见 `decode_split` 的后继判据）。
 #[test]
 fn single_code_complete_fills_at_full_length() {
@@ -388,7 +377,7 @@ fn single_code_complete_fills_at_full_length() {
     }
 }
 
-/// 论坛 t302：超码长空码（第 5 码起）仍有更长后续 ⇒ 照样备补全并标剩余编码，直到打全。
+/// 超码长空码（第 5 码起）仍有更长后续 ⇒ 照样备补全并标剩余编码，直到打全。
 #[test]
 fn single_code_complete_fills_beyond_full_length() {
     let e = engine_opts(
@@ -557,9 +546,9 @@ fn base_sort_parse_maps_strings() {
 }
 
 /// 构造双层码表引擎（贴近真实多词库方案）：
-/// - 主库 `codetable-system`（base_order 0，**带权重**）：同码 "aa" 两条——"主低"(w10,出现序0)、
-///   "主高"(w100,出现序1)，故权重序与出现序**相反**（用于区分 weight/natural）。
-/// - 扩展库 `codetable-extra-x`（base_order 1，**无权重**，default_weight=50）：同码 "aa" 一条 "扩"。
+/// - 主库 `codetable-system`（base_order 0，带权重）：同码 "aa" 两条——"主低"(w10,出现序0)、
+///   "主高"(w100,出现序1)，权重序与出现序相反（用于区分 weight/natural）。
+/// - 扩展库 `codetable-extra-x`（base_order 1，无权重，default_weight=50）：同码 "aa" 一条 "扩"。
 fn engine_two_layers(opts: CommitOptions) -> CodeTableEngine {
     let mut main = CodetableDict::empty();
     main.merge_single("aa".into(), "主低".into(), 10, 0);
@@ -709,9 +698,8 @@ fn sentence_input_disables_full_auto_commit_and_clear() {
 
 #[test]
 fn sentence_consumes_whole_input_and_marks_synthesized() {
-    // ★ 锁住「码表候选 consumed_length 恒 0」这条全仓约定：整句只在覆盖整串时产出，
-    //   故仍然消费整串。清空守护 / 词频记账 / 自动造词缓冲三处都依赖它，
-    //   一旦这里改成分段上屏，那三处必须同时改（见设计文档 §7.1）。
+    // 锁住「码表候选 consumed_length 恒 0」这条全仓约定：整句只在覆盖整串时产出。
+    // 清空守护 / 词频记账 / 自动造词缓冲三处都依赖它，改成分段上屏须三处同改（见设计文档 §7.1）。
     let e = sentence_engine(&[], sentence_opts());
     let first = e.convert("aawtaawt", 50).unwrap().candidates.remove(0);
     assert_eq!(first.consumed_length, 0, "整句须消费整串");
@@ -720,16 +708,15 @@ fn sentence_consumes_whole_input_and_marks_synthesized() {
         first.is_synthesized,
         "词库里没有这个词条，自动造词据此判值不值得学"
     );
-    // boundary 是**音节**边界（拼音域）；码表码无音节语义，必须留 0，
+    // boundary 是音节边界（拼音域）；码表码无音节语义，必须留 0，
     // 否则整句被学进用户词库时会带一份假的音节真值。
     assert_eq!(first.boundary, 0, "码表整句不得填 boundary");
 }
 
 #[test]
 fn sentence_not_produced_within_code_length() {
-    // ★ 真机翻车现场（`mixed/engine.rs` 有记录）：`aaw` 本意是 `aawt`→「工作」，
-    //   若让它进整句路径会被读成「工工人」之类抢走首位。
-    //   码长内的串本就是一个编码单元，切它没有意义。
+    // 码长内的串本就是一个编码单元：`aaw` 本意是 `aawt`→「工作」，进整句路径会被读成
+    // 「工工人」之类抢走首位（见 `mixed/engine.rs`）。
     let e = sentence_engine(&[], sentence_opts());
     let r = e.convert("aaw", 50).unwrap();
     assert!(
@@ -772,7 +759,7 @@ fn sentence_nbest_shows_count_and_fills_pool() {
 
 #[test]
 fn sentence_single_by_default_with_empty_pool() {
-    // 出厂 1/1：只出一条、池子恒空——切换键据此不吃键（改动前的行为）。
+    // 出厂 1/1：只出一条、池子恒空——切换键据此不吃键。
     let r = sentence_engine(&[], sentence_opts())
         .convert("aawtaawt", 50)
         .unwrap();
@@ -888,12 +875,10 @@ fn sentence_uses_three_code_full_entry_end_to_end() {
 // ───────────────────────── 逆切分（split_input） ─────────────────────────
 
 /// 音形结构的缩微模型：二简字/词 + 一个四码精确条目（对照组）。
+/// 原例 `hf'kn` →「很可能」，后段 `kn` 故意留两个重码。
 ///
-/// 取自论坛 t11 的原例 `hf'kn` →「很可能」，后段 `kn` 故意留两个重码。
-///
-/// ⚠️ **不在这里放 `hfkn` 的五码扩展**：那会给 `hfkn` 添一条前缀候选，默认档的
-/// 「有候选就不切」随即把所有基本盘用例挡掉。需要它的只有 `no_exact` 档那一条用例，
-/// 由该用例自己经 `extra` 加入（[`PREFIX_ONLY_ENTRY`]）。
+/// 不在这里放 `hfkn` 的五码扩展：那会给 `hfkn` 添一条前缀候选，默认档「有候选就不切」会挡掉
+/// 所有基本盘用例。只有 `no_exact` 档那条用例需要，经 `extra` 加入（[`PREFIX_ONLY_ENTRY`]）。
 const SPLIT_ENTRIES: &[(&str, &str, i32)] = &[
     ("hf", "很可", 900),
     ("kn", "能", 800),
@@ -904,15 +889,14 @@ const SPLIT_ENTRIES: &[(&str, &str, i32)] = &[
     ("aaaa", "工", 100),
     // 一简：三码切分（2+1）的后段落点。
     ("a", "啊", 950),
-    // ★ 二简位被**符号**占着（论坛 t11：「无字词可编也编成了符号」）。
-    // 有编码就切，符号照样参与（需求方 2026-09-20 澄清）。
+    // 二简位被符号占着：有编码就切，符号照样参与。
     ("qw", "→", 700),
-    // 二简位是**特殊语法**值：要到协调器才展开，拼进组合就是源码上屏 ⇒ 须剔除。
+    // 二简位是特殊语法值：要到协调器才展开，拼进组合就是源码上屏 ⇒ 须剔除。
     ("zx", "$CC(ime.x)", 700),
     ("zy", "{date}", 700),
 ];
 
-/// 让 `hfkn` **有前缀候选却仍无精确解** —— 构造 `no_exact` 档场景的唯一条目。
+/// 让 `hfkn` 有前缀候选却仍无精确解——构造 `no_exact` 档场景的唯一条目。
 const PREFIX_ONLY_ENTRY: (&str, &str, i32) = ("hfknq", "甲", 1000);
 
 fn split_engine(extra: &[(&str, &str, i32)], opts: CommitOptions) -> CodeTableEngine {
@@ -949,7 +933,7 @@ fn split_composes_two_segments_on_full_length_empty_code() {
     assert!(!r.is_empty, "产出了候选，is_empty 必须为假");
 }
 
-/// ★ 组合候选的四条字段约定，每一条都有下游依赖，改动即回归。
+/// 组合候选的四条字段约定，每一条都有下游依赖，改动即回归。
 #[test]
 fn split_candidate_field_contract() {
     let e = split_engine(&[], split_opts());
@@ -990,7 +974,7 @@ fn split_fills_preedit_codetable() {
     assert!(r2.preedit_codetable.is_empty());
 }
 
-/// 关闭时**零行为变化** —— 这是本功能能默认关着发布的全部依据。
+/// 关闭时零行为变化——这是本功能能默认关着发布的依据。
 #[test]
 fn split_disabled_changes_nothing() {
     let e = split_engine(&[], CommitOptions::default());
@@ -1027,10 +1011,8 @@ fn split_range_is_front_len_exclusive_to_full_length() {
     );
 }
 
-/// ★ 三码空码 + **无更长后继** → 切成 2+1（论坛 t11 补充，2026-09-19）。
-///
-/// 需求方的实机形态是 `sm'a` →「什么啊」：前段仍是**二简**，后段是剩下的一简，
-/// 而不是把三码对半分。
+/// 三码空码 + 无更长后继 → 切成 2+1（`sm'a` →「什么啊」）：前段仍是二简，后段是剩下的一简，
+/// 不是把三码对半分。
 #[test]
 fn split_three_code_when_no_longer_code() {
     let e = split_engine(&[], split_opts());
@@ -1040,8 +1022,7 @@ fn split_three_code_when_no_longer_code() {
     assert_eq!(r.preedit_codetable, format!("hf{SEPS}a"));
 }
 
-/// ★ 反向对照：三码**有**更长后继时不得切分 —— 用户还能继续打，切了就是替他
-/// 提前认定「这串到此为止」。缺了这条，一个「未满码一律切」的实现同样会让上一条变绿。
+/// 反向对照：三码有更长后继时不得切分——用户还能继续打。防「未满码一律切」的实现让上一条变绿。
 #[test]
 fn split_three_code_yields_when_longer_code_exists() {
     // `hfk` 有 `hfknq` 这个更长后继。
@@ -1054,11 +1035,10 @@ fn split_three_code_yields_when_longer_code_exists() {
     );
 }
 
-/// ★ 论坛 t302：**精确匹配模式**下满码长空码、但码表收了更长编码 ⇒ 默认档不切。
+/// 精确匹配模式下满码长空码、但码表收了更长编码 ⇒ 默认档不切。
 ///
-/// 前缀匹配下这串会带出前缀候选、空度判据就拦了；精确模式关掉前缀枚举后列表是空的，
-/// 只剩后继查询能认出「还没到头」。反向对照：同一串去掉更长条目就照切——证明拦下它的
-/// 是后继而不是精确模式本身。
+/// 精确模式关掉前缀枚举后列表是空的，只剩后继查询能认出「还没到头」。反向对照：同一串去掉
+/// 更长条目就照切，证明拦下它的是后继而不是精确模式本身。
 #[test]
 fn split_full_length_yields_to_longer_code_in_exact_mode() {
     let exact = || CommitOptions {
@@ -1082,12 +1062,11 @@ fn split_full_length_yields_to_longer_code_in_exact_mode() {
     );
 }
 
-/// ★ 段候选是**符号**也照样切（论坛 t11，需求方 2026-09-20：「有实际编码就切，不论字、
-/// 词、符」）。0.122 曾把符号段视同空码，是误读了 09-19 那条。
+/// 段候选是符号也照样切：有实际编码就切，不论字、词、符。
 #[test]
 fn split_symbol_segment_participates() {
     let e = split_engine(&[], split_opts());
-    // `qw` 只有符号「→」：有编码就切（论坛 t11，`xkok` → 行👌 同形）。
+    // `qw` 只有符号「→」：有编码就切（`xkok` → 行👌 同形）。
     let r = e.convert("qwkn", 50).unwrap();
     assert_eq!(texts(&r), vec!["→能", "→难"]);
     let r = e.convert("hfqw", 50).unwrap();
@@ -1115,7 +1094,7 @@ fn split_skips_special_syntax_segment() {
     }
 }
 
-/// 次选显示形态（论坛 t231）：默认 `Back` —— 同前段的每一行都带后段文本作显示，
+/// 次选显示形态：默认 `Back`——同前段的每一行都带后段文本作显示，
 /// 首条整串显示由协调器的显示出口判定（`cand_display_text`）；`Full` 一条都不填。
 #[test]
 fn split_alt_display_back_fills_back_text() {
@@ -1140,7 +1119,7 @@ fn split_alt_display_back_fills_back_text() {
     assert!(r.candidates.iter().all(|c| c.display_text.is_empty()));
 }
 
-/// 前段多取时，前段**非首选**的行照样整串显示——否则两行显示同一个后段、分不出差别。
+/// 前段多取时，前段非首选的行照样整串显示——否则两行显示同一个后段、分不出差别。
 #[test]
 fn split_alt_display_only_for_front_top() {
     let e = split_engine(
@@ -1196,7 +1175,7 @@ fn split_store(tag: &str) -> (TempRoot, Arc<wind_store::Store>) {
     (TempRoot(root), store)
 }
 
-/// 论坛 t231：候选调整里删掉的词不得被拼进组合（`n` 删「内容」后 `kpn` 出了「恐怕内容」）。
+/// 候选调整里删掉的词不得被拼进组合（`n` 删「内容」后 `kpn` 不得出「恐怕内容」）。
 #[test]
 fn split_segment_respects_shadow_delete() {
     let (_dir, store) = split_store("del");
@@ -1204,13 +1183,13 @@ fn split_segment_respects_shadow_delete() {
     let e = split_engine(&[], split_opts()).with_segment_shadow(store.clone(), "xh");
     assert_eq!(texts(&e.convert("hfkn", 50).unwrap()), vec!["很可难"]);
 
-    // 删掉的恰是**前段首选**：由前段次选补位，而不是整个组合消失（先多取再截的理由）。
+    // 删掉的恰是前段首选：由前段次选补位，而不是整个组合消失（先多取再截的理由）。
     store.delete_shadow("xh", "hf", "很可").unwrap();
     let e =
         split_engine(&[("hf", "很", 800)], split_opts()).with_segment_shadow(store.clone(), "xh");
     assert_eq!(texts(&e.convert("hfkn", 50).unwrap()), vec!["很难"]);
 
-    // ★ 反向对照：别的方案的规则不串味 —— 证明生效的是按 (方案, 段码) 取的那条规则。
+    // 反向对照：别的方案的规则不串味——证明生效的是按 (方案, 段码) 取的那条规则。
     let other = split_engine(&[], split_opts()).with_segment_shadow(store, "other");
     assert_eq!(
         texts(&other.convert("hfkn", 50).unwrap()),
@@ -1271,7 +1250,7 @@ fn split_needs_both_segments() {
     }
 }
 
-/// 默认档（`Empty`）**不抢任何现有候选**：有精确解时一条切分候选都不出。
+/// 默认档（`Empty`）不抢任何现有候选：有精确解时一条切分候选都不出。
 #[test]
 fn split_empty_trigger_yields_to_existing_candidates() {
     let e = split_engine(&[], split_opts());
@@ -1279,10 +1258,8 @@ fn split_empty_trigger_yields_to_existing_candidates() {
     assert_eq!(texts(&r), vec!["工"], "有精确候选时默认档不切分");
 }
 
-/// `no_exact` 档：无精确解即切，但切分候选**排在既有候选之后**。
-///
-/// 反向对照同在本用例里 —— 同一串码在默认档下必须一条都不产，
-/// 缺了它，一个「两档都照切」的实现同样能让上半段变绿。
+/// `no_exact` 档：无精确解即切，但切分候选排在既有候选之后。
+/// 反向对照：同一串码在默认档下必须一条都不产，防「两档都照切」的实现假绿。
 #[test]
 fn split_no_exact_trigger_appends_after_existing() {
     // `hfkn` 无精确解，但 `hfknq`（甲）是它的前缀扩展 ⇒ 有候选、无精确。
@@ -1310,9 +1287,7 @@ fn split_no_exact_trigger_appends_after_existing() {
 }
 
 /// 原帖规则一/二：前后两段都唯一（或前段有重码但恒取首选）→ 适配四码唯一自动上屏。
-///
-/// 靠的是既有 `decide_auto_commit` 的「恰一个 `code == input` 的候选」判据，
-/// 本功能**没有**为此新增任何上屏判据。
+/// 靠既有 `decide_auto_commit` 的「恰一个 `code == input` 的候选」判据，本功能没有新增上屏判据。
 #[test]
 fn split_unique_composition_triggers_auto_commit() {
     let e = split_engine(
@@ -1342,10 +1317,9 @@ fn split_ambiguous_back_segment_blocks_auto_commit() {
     assert_eq!(texts(&r), vec!["很可能", "很可难"]);
 }
 
-/// ★ 原帖规则三后半：「想要①就直接往后打」—— 第 5 个字母触发顶码，顶的是切分首选。
-///
-/// 这条能成立是因为 `handle_top_code` 取首选走的是 `self.convert(&prefix, 1)`，
-/// 而 prefix 恰好是满码长 ⇒ 切分在那次 convert 里照常触发。**没有第四条上屏通路**。
+/// 原帖规则三后半：「想要①就直接往后打」——第 5 个字母触发顶码，顶的是切分首选。
+/// `handle_top_code` 取首选走 `self.convert(&prefix, 1)`，prefix 恰是满码长 ⇒ 切分照常触发，
+/// 没有第四条上屏通路。
 #[test]
 fn split_top_code_commits_first_composition() {
     use crate::engine::Engine;
@@ -1365,12 +1339,9 @@ fn split_top_code_commits_first_composition() {
 
 /// `split_front_candidates = 2`：前段也列举，得到原帖配图那种效果。
 ///
-/// ⚠️ 这里断言的是**引擎内的构造序**（前段外层、后段内层）。**屏幕序不一定是它**：
-/// 协调器的 `candidate_display_order` 会无条件全量重排，而 `by_weight` 排在
-/// `natural_order` 之前 ⇒ 实际呈现按 `min(前,后)` 权重降序、**按后段分组**。
-/// `split_front_candidates = 1`（默认）时 `min` 退化为「按后段权重序」，两者重合；
-/// 取 2 以上才会分叉。夹具的权重（很可 900 / 困 300、能 800 / 难 500）恰好让两种序
-/// 一致，所以本用例测不出那个分叉 —— 那是 §4.2 记着的已知取舍，不是缺陷。
+/// 断言的是引擎内的构造序（前段外层、后段内层），屏幕序不一定是它：协调器的
+/// `candidate_display_order` 会全量重排，实际按 `min(前,后)` 权重降序、按后段分组。取 2 以上
+/// 两种序才会分叉，本夹具权重恰好让两者一致，测不出那个分叉（§4.2 记着的已知取舍）。
 #[test]
 fn split_front_candidates_expands_combinations() {
     let e = split_engine(
@@ -1403,8 +1374,7 @@ fn split_disabled_on_unsupported_code_length() {
         "codetable-system",
     )));
     // 码长 2：前段就占满了，后段无码可分 ⇒ `new` 就地关掉。
-    // ⚠️ 这里曾用码长 5 —— 那时切点取码长的一半，奇数无解；改成恒切二简后
-    // 5 码是**合法**的（2+3），拿它当反例就测不到东西了。
+    // 别换成码长 5：恒切二简后 5 码是合法的（2+3），当反例测不到东西。
     let e = CodeTableEngine::new(2, split_opts(), Arc::new(dm));
     let r = e.convert("hf", 50).unwrap();
     // 只看「有没有切分候选」——列表里还会有词库自带的前缀候选，那与本判据无关。
@@ -1415,17 +1385,15 @@ fn split_disabled_on_unsupported_code_length() {
     );
 }
 
-/// ★ `no_exact` 档**不会自动上屏**，而挡住它的是 `has_longer` 而非「恰一个精确匹配」。
+/// `no_exact` 档不会自动上屏，挡住它的是 `has_longer` 而非「恰一个精确匹配」。
 ///
-/// 这条判据的位置很容易记错（注释一度就写错了）：切分候选的 `code` 就是整串，后段唯一时
-/// 它恰好**是**唯一一条 `code == input` ⇒ 「恰一个精确匹配」是**成立**的。真正挡住它的是
-/// `decide_auto_commit` 最后那道 `has_longer` —— 本档能放行就意味着有前缀候选，
-/// 也就必然有更长后继。⇒ 谁放宽了 `has_longer`，本档就会静默开始自动上屏。
+/// 切分候选的 `code` 就是整串，后段唯一时它恰好是唯一一条 `code == input`，所以真正挡住它的是
+/// `decide_auto_commit` 最后那道 `has_longer`（本档能放行就意味着有前缀候选，必然有更长后继）。
+/// 谁放宽了 `has_longer`，本档就会静默开始自动上屏。
 #[test]
 fn split_no_exact_never_auto_commits() {
-    // 夹具要同时满足三条才测得到这条判据：`xtup` 无精确解、**有**前缀候选（否则
-    // no_exact 退化成 empty 档）、后段 `up` 唯一（否则「恰一个」本就不成立）。
-    // `xtupq` 一条把后两条一起给了：它既是前缀候选，又是 `xtup` 的更长后继。
+    // 夹具要同时满足三条：`xtup` 无精确解、有前缀候选（否则 no_exact 退化成 empty 档）、
+    // 后段 `up` 唯一。`xtupq` 一条把后两条一起给了：既是前缀候选，又是更长后继。
     let e = split_engine(
         &[("xtupq", "乙", 1000)],
         CommitOptions {
@@ -1445,8 +1413,7 @@ fn split_no_exact_never_auto_commits() {
         "no_exact 档不得自动上屏（挡它的是 has_longer）"
     );
 
-    // ★ 反向对照：同一串码在默认档下**会**自动上屏 —— 证明「不上屏」是本档特有的，
-    // 不是这批候选天生上不了屏。
+    // 反向对照：同一串码在默认档下会自动上屏——证明「不上屏」是本档特有的。
     let dflt = split_engine(
         &[],
         CommitOptions {
@@ -1458,11 +1425,10 @@ fn split_no_exact_never_auto_commits() {
     assert!(r2.should_commit && r2.commit_text == "学双拼");
 }
 
-/// ★ 与整句同开时，原帖规则三（继续打字母顶首选）**会失效** —— 整句让顶码整体让位。
+/// 与整句同开时，原帖规则三（继续打字母顶首选）会失效——整句让顶码整体让位。
 ///
-/// 功能本身仍可用（候选窗选词不受影响），只是少了那一条交互。构建时有 warn 说明。
-/// 锁住它是因为：将来若有人调整 `handle_top_code` 的让位判据，逆切分的这条交互会跟着
-/// 静默改变，而两个功能看起来毫不相干。
+/// 候选窗选词不受影响，构建时有 warn 说明。锁住它是因为调整 `handle_top_code` 的让位判据时，
+/// 这条交互会跟着静默改变，而两个功能看起来毫不相干。
 #[test]
 fn split_top_code_yields_to_sentence_when_both_on() {
     use crate::engine::Engine;
@@ -1499,7 +1465,7 @@ fn split_top_code_yields_to_sentence_when_both_on() {
     );
 }
 
-/// 逆切分与整句**占不同区间**，可以同开、互不干扰。
+/// 逆切分与整句占不同区间，可以同开、互不干扰。
 #[test]
 fn split_and_sentence_cover_different_ranges() {
     let mut entries: Vec<(&str, &str, i32)> = SPLIT_ENTRIES.to_vec();
@@ -1692,7 +1658,7 @@ fn wildcard_results_carry_is_wildcard_and_literal_does_not() {
     );
 }
 
-/// 通配硬上限与翻页扩容上限是**同一个**常量；`max_candidates = 0` 回空，
+/// 通配硬上限与翻页扩容上限是同一个常量；`max_candidates = 0` 回空，
 /// 且不把 0 传给 `search_pattern`（Composite 把 0 当不限、各层把 0 当空）。
 #[test]
 fn wildcard_hard_cap_matches_expansion_cap_and_zero_is_empty() {
@@ -1771,7 +1737,7 @@ fn wildcard_single_only_filters_before_truncation() {
     assert_eq!(r.candidates.len(), 120, "词库取尽即停，不死循环");
 }
 
-/// 单字判据是字素簇（UAX #29），不是 `chars().count()`：ZWJ 序列、国旗算一个字（issue #83）。
+/// 单字判据是字素簇（UAX #29），不是 `chars().count()`：ZWJ 序列、国旗算一个字。
 #[test]
 fn wildcard_single_only_counts_grapheme_clusters() {
     let e = engine_opts(
@@ -1818,7 +1784,7 @@ fn with_xz(e: CodeTableEngine) -> CodeTableEngine {
     ))
 }
 
-/// ★ Review Focus 1：普通 convert（精确 / 前缀 / 活码探针同一入口）永不读影子层，连加载都不触发。
+/// 普通 convert（精确 / 前缀 / 活码探针同一入口）永不读影子层，连加载都不触发。
 #[test]
 fn plain_convert_never_touches_disabled_layers() {
     let e = with_xz(engine_opts(
@@ -1875,9 +1841,8 @@ fn wildcard_and_reverse_both_read_disabled_layers_with_marker() {
     }
 }
 
-/// 仅单字 + 影子层。影子层的词组同样被滤掉；取尽判据是**双边**的——
-/// 首轮影子层没取满（35 < 100）但主层取满了（100 条全是词组），必须再取一轮才能把主层
-/// 被截掉的 10 个单字捞回来。若只看任一边就判取尽，结果会只剩影子层那 30 个。
+/// 仅单字 + 影子层。影子层的词组同样被滤掉；取尽判据是双边的：首轮影子层没取满（35 < 100）
+/// 但主层取满了（100 条全是词组），必须再取一轮才能把主层被截掉的 10 个单字捞回来。
 #[test]
 fn reverse_single_only_filters_disabled_hits_and_exhausts_on_both_sides() {
     let code = |i: u32| {

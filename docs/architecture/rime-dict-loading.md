@@ -427,6 +427,10 @@ derived_fingerprint(digests, tag) =
 - **池存 `Weak`**：最后一个引擎释放即解除映射。Windows 上被 mmap 的文件不能删除；内容寻址之后
   重建虽不再覆盖旧文件，旧文件仍要等最后的持有者放手才能被 `prune_slot` 删掉。`EngineManager`
   的 `engines.clear()` / `remove()` 因此仍是有效释放点，不必再叠手工引用计数。
+  「被映射即删不掉」并非处处成立：有的 Windows 环境（版本 / 文件系统 / 账户）下 `DeleteFileW`、
+  `MoveFileEx` 对被映射的文件照样成功；`std::fs::remove_file` 走 POSIX 删除语义，恒测不出占用。
+  测占用要用 `DeleteFileW`（资源管理器走它，被映射时返回 `ERROR_USER_MAPPED_FILE`），并拿必被映射的
+  主库做对照，见 `wind-engine/tests/engine_manager.rs` 的 Windows 专属用例。
 - **key 不 canonicalize**：缓存路径都由 `cache_path`（纯函数）生成，同一文件必得同一字符串；
   万一出现不同写法只会退化成各开一份，不会取错 reader。
 - **复用前比对 `(大小, mtime, 替换代数)`**：tmp + rename 在 Windows 上对正被 mmap 的目标也会

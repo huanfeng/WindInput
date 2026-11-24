@@ -9,9 +9,7 @@ use wind_engine::EngineManager;
 
 fn data_dir() -> PathBuf {
     // 三级：crates/wind-engine → crates → wind_input → 仓库根（build_dev 在仓库根）。
-    // 曾误写成两级，解析到 wind_input/build_dev/data —— 该目录不存在，于是 schema_exists()
-    // 判假、**本文件所有依赖真实词库的测试静默走「跳过」分支通过**。判据是耗时 0.00s。
-    // 同款坑见 wind-coordinator/tests/input_flow.rs 的同名函数（那边早已修正）。
+    // 写错层级时 schema_exists() 判假，所有依赖真实词库的测试静默走「跳过」分支（判据是耗时 0.00s）。
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data")
 }
 
@@ -19,9 +17,8 @@ fn make_config(schemas: &[&str]) -> Config {
     let mut cfg = Config::default();
     cfg.schema.available = schemas.iter().map(|s| s.to_string()).collect();
     cfg.schema.active = schemas[0].to_string();
-    // ⚠️ 召回门槛设回旧出厂值 2 / 3（现出厂为 4 / 5）。本文件有用例以 `qingfengs`
-    // （3 音节）验用户长词上浮，出厂门槛下该候选在召回层就没了。门槛本身的出厂行为由
-    // `wind-coordinator` 的 `pinyin_completion_recall_gate` 守，这里不重复。
+    // 召回门槛设回 2 / 3（出厂为 4 / 5）：本文件有用例以 `qingfengs`（3 音节）验用户长词上浮，
+    // 出厂门槛下该候选在召回层就没了。出厂行为由 `wind-coordinator` 的 `pinyin_completion_recall_gate` 守。
     cfg.schema.pinyin.completion.min_syllables = 2;
     cfg.schema.pinyin.completion.max_extra_syllables = 3;
     cfg
@@ -153,11 +150,10 @@ fn has_english_text(r: &wind_engine::ConvertResult, want: &str) -> bool {
     })
 }
 
-/// 英文候选混入（`[schema.pinyin.english_merge]`）：**全拼**方案下打 `hello` 也该能选到 hello。
+/// 英文候选混入（`[schema.pinyin.english_merge]`）：全拼方案下打 `hello` 也该能选到 hello。
 ///
-/// ★ 反向对照必须成对立：开关关着时英文**不在场**。缺了它，「在场」可能只是因为拼音词库
-/// 里恰好有个同形词条，或者来源标记串了，断言变成空转（同 `MixedEngine` 那条
-/// `english_has_no_quota_under_codetable_flood` 的教训）。
+/// 反向对照必须成对：开关关着时英文不在场。否则「在场」可能只是拼音词库里恰好有同形词条或来源
+/// 标记串了（同 `MixedEngine` 的 `english_has_no_quota_under_codetable_flood`）。
 #[test]
 fn english_merge_into_pinyin_candidates() {
     let dir = data_dir();
@@ -189,10 +185,9 @@ fn english_merge_into_pinyin_candidates() {
     );
 }
 
-/// 拼音吐满配额时英文仍须在场——这是 `english_merge` 的保底席位在**真实词库**下的验证。
-///
-/// 单元测试用假引擎验过同一条（`english_merge::tests::english_survives_pinyin_flood`），
-/// 但那里的「洪水」是构造的；这里用真实拼音词库确认 `max_candidates` 确实会被装满。
+/// 拼音吐满配额时英文仍须在场——`english_merge` 的保底席位在真实词库下的验证。
+/// 单元测试（`english_merge::tests::english_survives_pinyin_flood`）的「洪水」是构造的，这里确认
+/// 真实拼音词库确实会装满 `max_candidates`。
 #[test]
 fn english_survives_real_pinyin_flood() {
     let dir = data_dir();
@@ -225,7 +220,7 @@ fn english_survives_real_pinyin_flood() {
     );
 }
 
-/// 混输方案**不读**本段：它有自带的 `schema.mix.enable_english`（带三方档位仲裁），
+/// 混输方案不读本段：它有自带的 `schema.mix.enable_english`（带三方档位仲裁），
 /// 两套各混一遍会让档位与配额双重失真。
 #[test]
 fn english_merge_skips_mixed_schema() {
@@ -235,8 +230,7 @@ fn english_merge_skips_mixed_schema() {
         return;
     }
     let mut cfg = make_config(&["wubi86_pinyin"]);
-    // ★ 两份**都**开：混输既不读码表那份也不读拼音那份，只认自己的
-    // schema.mix.enable_english。只开一份的话，另一份没生效可能只是碰巧。
+    // 两份都开：混输只认自己的 schema.mix.enable_english。只开一份的话，另一份没生效可能只是碰巧。
     cfg.schema.codetable.english_merge.enable = true;
     cfg.schema.pinyin.english_merge.enable = true;
     // 混输自带的英文开关保持关闭：若混入错误地生效，英文候选会凭空出现。
@@ -253,9 +247,7 @@ fn english_merge_skips_mixed_schema() {
 }
 
 /// 通路③（顶码）的英文守护：五笔下打英文词时，顶码不得把中文顶上屏。
-///
-/// ★ 先立「不否决时确实会顶码」的前提，否则 `is_none()` 可能只是因为这串本就不顶码，
-/// 断言变成空转。
+/// 先立「不否决时确实会顶码」的前提，否则 `is_none()` 可能只是因为这串本就不顶码。
 #[test]
 fn english_merge_vetoes_top_code_on_codetable() {
     let dir = data_dir();
@@ -265,9 +257,8 @@ fn english_merge_vetoes_top_code_on_codetable() {
     }
     let build = |block: bool, word: bool| {
         let mut cfg = make_config(&["wubi86"]);
-        // ⚠️ 顶码开关必须显式打开：出厂值 true 在 **L2**（data/config.toml），而
-        // `Config::default()` 是 L1，那里是 false。不设这行，`handle_top_code` 在第一行
-        // 就 return None，本用例连同它要守的否决逻辑一起变成空转。
+        // 顶码开关必须显式打开：出厂值 true 在 L2（data/config.toml），`Config::default()` 是 L1
+        // 的 false。不设的话 `handle_top_code` 第一行就 return None，本用例变成空转。
         cfg.schema.codetable.top_code_commit = true;
         cfg.schema.codetable.english_merge.enable = true;
         cfg.schema.codetable.english_merge.block_commit = block;
@@ -310,13 +301,11 @@ fn cand(code: &str, text: &str) -> wind_candidate::Candidate {
     }
 }
 
-/// `recheck_auto_commit_for`（overlay/特殊模式自动上屏复评的按方案版本，供快符等特殊模式
-/// 使用）必须应用英文否决，且要按**它复评的那个方案**取 `english_merge` 配置，而不是当前
-/// 活跃方案的——否则要么否决对这条通路完全失效（回归审查发现：新增时漏接），要么读错方案
-/// （活跃方案是 pinyin，否决却按 pinyin 的配置去判特殊模式引用的 wubi86）。
+/// `recheck_auto_commit_for`（特殊模式自动上屏复评的按方案版本）必须应用英文否决，且按它复评的
+/// 那个方案取 `english_merge` 配置，而不是当前活跃方案的。
 ///
-/// ★ 活跃方案故意选 pinyin 而非 wubi86：复现「特殊模式引用的方案不是活跃方案」这个现场——
-/// 若代码退化成读 `active_schema_id()` 的配置，本用例「否决生效」的断言应失败。
+/// 活跃方案故意选 pinyin 而非 wubi86：复现「特殊模式引用的方案不是活跃方案」，代码退化成读
+/// `active_schema_id()` 的配置时「否决生效」的断言应失败。
 #[test]
 fn recheck_auto_commit_for_applies_schema_scoped_english_veto() {
     let dir = data_dir();
@@ -410,13 +399,9 @@ fn test_wubi_extra_dict_loaded() {
         eprintln!("跳过：wubi86 schema 不存在");
         return;
     }
-    // 尝试删除**源旁**的旧 combined 缓存（扩展名此前还写着 .wdb，格式迁移后已是 .wdat）。
-    //
-    // 注意这行够不到真正的缓存：EngineManager::new 会把 CACHE_DIR 初始化成
-    // %LOCALAPPDATA%\...\cache，cache_path 届时返回 <cache>/wubi86/wubi86_jidian.combined.wdat
-    // （还会剥掉 .dict 中缀），本测试因此实际可能走缓存命中而非重新合并。
-    // 核心断言（扩展库独有的词能查到）不依赖是否重合并，故不阻塞；要真正覆盖合并路径，
-    // 需让 CACHE_DIR 可注入——它现在是进程级 OnceLock，测试无法重设。
+    // 尝试删除源旁的旧 combined 缓存。这行够不到真正的缓存（`CACHE_DIR` 是进程级 OnceLock，
+    // 运行时缓存在 <cache>/wubi86/ 下），本测试可能走缓存命中而非重新合并；核心断言（扩展库独有的
+    // 词能查到）不依赖是否重合并。要真正覆盖合并路径需让 CACHE_DIR 可注入。
     let _ = std::fs::remove_file(dir.join("schemas/wubi86/wubi86_jidian.dict.combined.wdat"));
     let cfg = make_config(&["wubi86"]);
     let mgr = EngineManager::new(&cfg, Some(&dir));
@@ -470,7 +455,7 @@ fn test_prewarm_single_flight() {
     assert!(!mgr.is_building("pinyin"), "加载完成后不应再报构建中");
 }
 
-/// 扩展词库 **live 热插拔**：对已加载引擎翻 enabled 标志即时改候选，无需重建。
+/// 扩展词库热插拔：对已加载引擎翻 enabled 即时改候选，无需重启。
 #[test]
 fn test_codetable_extra_hot_toggle() {
     let dir = data_dir();
@@ -530,29 +515,23 @@ fn test_codetable_extra_hot_toggle() {
 
     // 重新开启 → '甘蓝菜' 回来。
     //
-    // ⚠️ 这里的 `assert!` 自 t107 起已是**空转**：`set_dict_enabled_live` 现在恒返回 true
-    // （每条路都以「无需重启即可生效」收尾，见该函数末尾注释）。真正的判据是下面那句
-    // `has_extra` —— 开启走的是「失效整方案 + 下次使用重建」，不再是热翻标志位，
-    // 所以它验的是「重建后该库回到候选里」。断言留着只为将来真出现「必须重启」的分支。
+    // 这里的 `assert!` 是空转：`set_dict_enabled_live` 恒返回 true（见该函数末尾注释）。真正的判据是
+    // 下面的 `has_extra`——开启走「失效整方案 + 下次使用重建」，验的是重建后该库回到候选里。
     for id in &extra_ids {
         assert!(mgr.set_dict_enabled_live("wubi86", id, true));
     }
     assert!(has_extra(&mgr), "热开启扩展后 '甘蓝菜' 应回来");
 }
 
-/// 下面两条测试都动**真实缓存目录**（`%LOCALAPPDATA%/WindInput/cache`，与生产 `CACHE_DIR`
-/// 同源，**不是**临时目录 —— `CACHE_DIR` 是进程级 `OnceLock`，测试无从改写它）。
-/// 一条会删 district 的 wdat，另一条的前提探测在「不阻止删除」的机器上会删掉主库 wdat，
-/// 而前一条正好拿「主库 wdat 存在」当前提 —— 同一个测试二进制内多线程并发时会概率性红，
-/// 还会报成「加载链整个坏了」。串行化，窗口窄的竞态最难查。
+/// 下面两条测试都动真实缓存目录（`%LOCALAPPDATA%/WindInput/cache`，`CACHE_DIR` 是进程级 `OnceLock`，
+/// 测试无从改写）：一条会删 district 的 wdat，另一条的前提探测可能删掉主库 wdat，而前一条拿
+/// 「主库 wdat 存在」当前提。同一二进制内并发会概率性红，故串行化。
 static CACHE_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// 运行时缓存路径 —— 与生产同源（`EngineManager::cache_path` 走的就是这两个函数）。
+/// 运行时缓存路径——与生产同源（`EngineManager::cache_path` 走的就是这两个函数）。
 ///
-/// ⚠️ **不要用 `src.with_extension("wdat")`**：那是 assemble 时随包分发的产物
-/// （`<源>.dict.wdat`，供 wdat-only 模式），与运行时缓存是两回事。运行时缓存在
-/// `%LOCALAPPDATA%/WindInput/cache/<namespace>/<stem>.wdat`。这里踩过一次：查错了路径，
-/// 于是「去掉惰性加载」的变异下测试照样绿 —— 测了个空。
+/// 不要用 `src.with_extension("wdat")`：那是 assemble 时随包分发的产物（供 wdat-only 模式），
+/// 运行时缓存在 `%LOCALAPPDATA%/WindInput/cache/<namespace>/<stem>.wdat`，查错路径就测了个空。
 fn runtime_wdat(src: &std::path::Path) -> Option<PathBuf> {
     let root = wind_config::Config::cache_dir()?;
     let stem = wind_dict::cache_ns::cache_stem(src);
@@ -563,8 +542,8 @@ fn runtime_wdat(src: &std::path::Path) -> Option<PathBuf> {
     ))
 }
 
-/// 槽位的**内容寻址变体**（`<stem>-<指纹12位>.wdat`，缓存是按内容命名的，见
-/// `cache_fp` S2）。多份时取最新的；一份都没有 ⇒ None。
+/// 槽位的内容寻址变体（`<stem>-<指纹12位>.wdat`，缓存按内容命名，见 `cache_fp` S2）。
+/// 多份时取最新的；一份都没有 ⇒ None。
 fn runtime_wdat_actual(src: &std::path::Path) -> Option<PathBuf> {
     let slot = runtime_wdat(src)?;
     let dir = slot.parent()?;
@@ -594,16 +573,12 @@ fn purge_runtime_wdat(slot: &std::path::Path) {
     wind_dict::cache_fp::prune_slot(slot, std::path::Path::new("/nonexistent"), 0);
 }
 
-/// 未启用的扩展词库**不该被加载**，于是也不该在缓存里留下 wdat（t107）。
+/// 未启用的扩展词库不该被加载，于是也不该在缓存里留下 wdat。
 ///
-/// 缺陷期 `load_codetable_layers` 无条件加载全部扩展库（注释写着「含禁用的，全部加载常驻，
-/// 供运行时热插拔」），于是用户关掉的码表照样读盘、照样建出 wdat、照样被 mmap 占着 ——
-/// 既看不见它，又删不掉它的缓存文件。
+/// 否则用户关掉的码表照样读盘、建 wdat、被 mmap 占着，既看不见又删不掉。材料是现成的：
+/// wubi86 的「行政区域」库出厂 `default_enabled = false`。
 ///
-/// 材料是现成的：wubi86 的「行政区域」库出厂 `default_enabled = false`。
-///
-/// ⚠️ 必须同时断言**主库缓存仍在、且主库出得了候选**：否则「整条加载链坏掉」也能让
-/// 后面那个断言通过，那是最坏的一种假绿。
+/// 必须同时断言主库缓存仍在、且主库出得了候选：否则「整条加载链坏掉」也能让后面那个断言通过。
 #[test]
 fn disabled_extra_dict_leaves_no_wdat_cache() {
     let _serial = CACHE_TESTS.lock().unwrap_or_else(|e| e.into_inner());
@@ -647,10 +622,8 @@ fn disabled_extra_dict_leaves_no_wdat_cache() {
     );
 }
 
-/// 用 `DeleteFileW` 删文件 —— 与用户在资源管理器里删走的是同一个调用。
-///
-/// 不能用 `std::fs::remove_file`：它在新版 Windows 上走 POSIX 删除语义，对仍被 mmap 的
-/// 文件照样成功，「文件被占用」这件事根本测不出来。
+/// 用 `DeleteFileW` 删文件——与用户在资源管理器里删走的是同一个调用。
+/// 不能用 `std::fs::remove_file`：它在新版 Windows 上走 POSIX 删除语义，对仍被 mmap 的文件照样成功。
 #[cfg(windows)]
 fn delete_file_win32(p: &std::path::Path) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
@@ -664,18 +637,14 @@ fn delete_file_win32(p: &std::path::Path) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// **Windows 专属**：禁用扩展词库后，它的 wdat 缓存必须能被删掉（t107 的核心诉求）。
+/// Windows 专属：禁用扩展词库后，它的 wdat 缓存必须能被删掉（「文件被占用删不掉」）。
+/// Linux 上 mmap 不阻止 unlink，测不出任何东西，故 `cfg(windows)`。
 ///
-/// 楼主报的原话就是「文件被占用删不掉」。Linux 上 mmap 不阻止 unlink，删除恒成功，
-/// 这条在那里测不出任何东西 —— 故 `cfg(windows)`，只在真机/编译机上跑。
+/// ① 引擎持有该库期间删除应当失败；若竟成功，须显式区分原因，不能假绿；
+/// ② 禁用 → `set_dict_enabled` 把层从 composite 摘掉 → `Arc` 归零 → mmap 解除；
+/// ③ 此时删除应当成功。
 ///
-/// 三步各自带判据，尤其第 ① 步**不能跳过**：
-/// ① 引擎持有该库期间删除**应当失败**。若这一步竟成功，说明该库压根没走 mmap（或本机
-///    行为不同），后两步就失去意义 —— 那时必须显式失败，而不是让测试假绿。
-/// ② 禁用 → `set_dict_enabled` 把层从 composite 摘掉 → `Arc` 归零 → mmap 解除。
-/// ③ 此时删除**应当成功**。这一步才是用户真正要的东西。
-///
-/// 反向验证：把 `CodeTableEngine::set_dict_enabled` 的禁用分支换回
+/// 变异验证：把 `CodeTableEngine::set_dict_enabled` 的禁用分支换回
 /// `self.dm.set_layer_enabled(&nm, false)`（只翻标志、不摘层），③ 即变红。
 #[cfg(windows)]
 #[test]
@@ -686,7 +655,7 @@ fn disabling_dict_releases_wdat_file_lock() {
         eprintln!("跳过：无 wubi86 schema");
         return;
     }
-    // 取**启用**的扩展库（emoji 出厂启用且体积小）。
+    // 取启用的扩展库（emoji 出厂启用且体积小）。
     let src = dir.join("schemas/wubi86/wubi86_jidian_emoji.dict.yaml");
     if !src.exists() {
         eprintln!("跳过：该数据集无 emoji 扩展库");
@@ -708,25 +677,14 @@ fn disabling_dict_releases_wdat_file_lock() {
         panic!("前提：启用的扩展库与主库应已建出缓存: {}", src.display());
     };
 
-    // ⚠️ 判据必须走 **`DeleteFileW`**，不能用 Rust std（实测踩过两次）：
-    // `remove_file` 在新版 Windows 上走 POSIX 删除语义（`FileDispositionInfoEx`），
-    // `rename` 走的 `MoveFileEx` 在本机同样不被映射阻止 —— 加了「主库对照」才看清：
-    // 连必定被 mmap 的主库 wdat 都能被 std 改名。两个 API 都测不出用户遇到的占用。
-    // 用户是在资源管理器里删，走的正是 `DeleteFileW`，被映射时返回 ERROR_USER_MAPPED_FILE。
+    // 判据必须走 `DeleteFileW`：`remove_file`（POSIX 删除语义）与 `rename`（`MoveFileEx`）都可能不被
+    // 映射阻止，测不出用户在资源管理器里遇到的占用（见 docs/architecture/rime-dict-loading.md）。
 
     // ① 被 mmap 占着，应当删不掉。
     //
-    // ⚠️ 若这一步竟然删成功了，有两种截然不同的可能，**必须当场区分**，否则要么假绿、
-    // 要么把环境问题误报成我们的 bug：
-    //   (a) 我们确实没释放 —— 真 bug；
-    //   (b) 本机的 mmap 压根不阻止删除 —— 判据没有前提。
-    // 用主库做对照来分辨（它必定被映射）。对照本身有破坏性（会删掉主库缓存，5MB，
-    // 下次构建重建），所以**只在走到这条岔路时才做**，正常机器上一次都不碰主库。
-    //
-    // 2026-09-14 在编译机（Windows，admin 账户）实测走的正是 (b)：主库 wdat 被引擎映射着，
-    // `DeleteFileW` 照样成功，`MoveFileEx` 与 `std::fs::remove_file` 亦然。也就是说
-    // `wind_dict::reader_pool` 模块注释里那句「文件被 mmap 期间 rename/删除会 Access Denied」
-    // 在那台机器上**不成立** —— 具体取决于 Windows 版本 / 文件系统 / 账户。
+    // 若竟然删成功了，要当场区分：(a) 我们确实没释放——真 bug；(b) 本机的 mmap 压根不阻止删除——
+    // 判据没有前提（某些 Windows 环境确实如此）。用必被映射的主库做对照来分辨；对照会删掉主库缓存
+    // （下次构建重建），所以只在走到这条岔路时才做。
     if delete_file_win32(&wdat).is_ok() {
         if delete_file_win32(&main_wdat).is_ok() {
             eprintln!(
@@ -757,11 +715,10 @@ fn disabling_dict_releases_wdat_file_lock() {
     });
 }
 
-/// ★ 热插拔必须打到**混输方案内部**那份子引擎，不只是同名的独立方案。
+/// 热插拔必须打到混输方案内部那份子引擎，不只是同名的独立方案。
 ///
-/// 混输的成员子引擎在 `build_engine` 里内联构造、不入 `engines` 表；用户 `available` 同时含
-/// `wubi86` 与 `wubi86_pinyin` 时，预热会把两份 wubi86 词库都建出来。上面那条测试全程只用
-/// 纯 wubi86，恰好绕过了这个洞——真机上五笔拼音混输下关扩展库「要重启才生效」就是它。
+/// 混输的成员子引擎在 `build_engine` 里内联构造、不入 `engines` 表；`available` 同时含 `wubi86` 与
+/// `wubi86_pinyin` 时，预热会把两份 wubi86 词库都建出来，只关独立方案那份会「要重启才生效」。
 #[test]
 fn test_codetable_extra_hot_toggle_reaches_mixed_member() {
     let dir = data_dir();
@@ -958,23 +915,13 @@ fn test_pinyin_trailing_partial_keeps_sentence() {
     let cfg = make_config(&["pinyin"]);
     let mgr = EngineManager::new(&cfg, Some(&dir));
 
-    // 尾部多打一个不成音节的残码「m」：整句「你好」**不得被残码破坏**（bug①），
+    // 尾部多打一个不成音节的残码「m」：整句「你好」不得被残码破坏，
     // 残码不计入消费（consumed_length=5，留「m」在缓冲续输）。
     //
-    // ⚠️ 本测试**两度**收窄过断言，两次都是因为它在测别的层的事：
-    //
-    // ① 原先断言「整句排首位」。那是 bug① 修复时顺手写下的实现细节，它真正要守的是
-    //    「整句没被残码毁掉」——当年的故障形态是整句**消失/退化**，不是排序。
-    // ② 后改断言「首选是你好吗」（step 6.5b 让位的结果）。step 2c 落地后这条也不成立了：
-    //    Viterbi 现在**直接产出**「你好吗」作为残码整句（`prefix=0`、`code=nihaom`），
-    //    它不再是「让位的受益者」而就是整句本身，6.5b 自然不触发（`is_sentence_demoted=0`）。
-    //    此时引擎层首选回到消费更少但 log_prob 更高的「你好」（少一个词），**这没有错**：
-    //    引擎侧刻意不按 `consumed_length` 排序（那会让消费少的候选被 truncate 整批丢弃，
-    //    见 `handle_candidate.rs` 比较链 ⓪ 的注释）。
-    //
-    // ⇒ 「谁排首位」是**协调器**的事，由 `wind-coordinator/tests/pinyin_trailing_partial_order.rs`
-    //    守着（那里断言 nihaom 首选是「你好吗」）。本测试只守引擎层的不变量：
-    //    两个候选都在、身份正确、consumed_length 各自正确。
+    // 只守引擎层的不变量：两个候选都在、身份正确、consumed_length 各自正确。别断言谁排首位：
+    // Viterbi 直接产出残码整句「你好吗」（`code=nihaom`），引擎层首选可以是 log_prob 更高的「你好」，
+    // 引擎侧刻意不按 `consumed_length` 排序（否则消费少的候选会被 truncate 整批丢弃）。界面首选由
+    // `wind-coordinator/tests/pinyin_trailing_partial_order.rs` 守。
     let r = mgr.convert("nihaom", 9);
     let top: Vec<&str> = r
         .candidates
@@ -1053,10 +1000,8 @@ fn test_pinyin_trailing_partial_prefix_floats_above_exact() {
         eprintln!("跳过：pinyin schema 不存在");
         return;
     }
-    // ⚠️ **本用例必须用出厂 completion 门槛**，不能沿用 `make_config` 那套旧值(2/3)。
-    // 那套是为本文件另外几个用例设的（`qingfengs` 验用户长词上浮，出厂门槛下召回层就没了），
-    // 而 `min_syllables = 2` 会让 `meiy`(2 音节)**达标启用词组补全**，放进大量 3+ 音节词，
-    // 单字被挤出 limit —— 那是「把门槛调宽」的代价，不是本用例要守的东西。
+    // 本用例必须用出厂 completion 门槛，不能沿用 `make_config` 的 2/3：`min_syllables = 2` 会让
+    // `meiy`(2 音节)启用词组补全、放进大量 3+ 音节词把单字挤出 limit。
     // 本用例守的是出厂配置下「前缀补全上浮、但不把单字整批压没」。
     let mut cfg = make_config(&["pinyin"]);
     cfg.schema.pinyin.completion = Default::default();
@@ -1090,9 +1035,9 @@ fn test_pinyin_trailing_partial_prefix_floats_above_exact() {
 }
 
 /// 长用户词上浮的端到端回归（真实拼音词库 + store 学习词）：
-/// ① 全拼精确命中恒居首，且**不被错误整句挤下**（step6.5 降级配合）；
+/// ① 全拼精确命中恒居首，且不被错误整句挤下（step6.5 降级配合）；
 /// ② 打到第 3 个音节（含「整音节 + 残码」如 qingfengs）用户长词应上浮显现；
-/// ③ 只打 2 音节（qingfeng，无残码）时精确整句仍居首；距词尾超出 `max_extra` 才不上浮。
+/// ③ 只打 2 音节（qingfeng，无残码）时精确整句仍居首（上浮不等于夺首选）。
 /// weight=0 模拟「学习词」（词频另在协调器算），是最易触发上浮边界的场景。
 #[test]
 fn user_long_word_promotion_end_to_end() {
@@ -1152,14 +1097,8 @@ fn user_long_word_promotion_end_to_end() {
 
     // ③ 仅 2 音节无残码（qingfeng）：精确整句「清风」必须居首。
     //
-    // ⚠️ 这里**不再**断言「不上浮」。本用例的 `max_extra = 3`，而「清风输入法」5 音节、
-    // started 2 ⇒ 剩 3 ≤ 3 ⇒ 判据说该上浮，这是配置想要的行为。
-    //
-    // 旧版本之所以能断言「不上浮」，是因为夹具的用户词 `boundary = 0` 落进了
-    // `started >= 3` 那条退化分支 —— 钉住的是漏网口本身，而非任何配置语义。
-    // 该分支修掉后（`boundary == 0` 统一过 `effective_boundary` 现切），这里守的
-    // 应当是**上浮不等于夺首选**：`promotion_cap` 把提升后的权重封在「本次输入的
-    // 最佳完整解 - 1」，精确整句因此稳居第 0 位。
+    // 不断言「不上浮」：`max_extra = 3`、「清风输入法」5 音节、started 2 ⇒ 剩 3 ≤ 3，按配置该上浮。
+    // 守的是上浮不等于夺首选：`promotion_cap` 把提升后的权重封在「本次输入的最佳完整解 - 1」。
     let r = mgr.convert("qingfeng", 400);
     assert_eq!(
         r.candidates.first().map(|c| c.text.as_str()),
@@ -1167,11 +1106,9 @@ fn user_long_word_promotion_end_to_end() {
         "qingfeng 首选应是精确整句「清风」（上浮受 promotion_cap 封顶）"
     );
 
-    // ⚠️ **不要在这里补一段「收紧 max_extra ⇒ 不该上浮」的对照**。试过，它恒空过：
-    // step 6.3 的 `retain` 用 `syllable_cap = started + max_extra` 裁 `is_prefix` 候选，
-    // 与判据的 `remaining <= max_extra` 是同一个不等式 —— 收紧只会让词在召回层就没了。
-    // 实测把 `should_promote_user_completion` 整个改成 `return true`，那段照样绿。
-    // 该命题唯一可观测的位置是 step 6.7 支路，护栏在
+    // 别补「收紧 max_extra ⇒ 不该上浮」的对照，它恒空过：step 6.3 的 `retain` 用
+    // `syllable_cap = started + max_extra` 裁 `is_prefix` 候选，与判据的 `remaining <= max_extra`
+    // 是同一个不等式。该命题唯一可观测的位置是 step 6.7 支路，护栏在
     // `pinyin_user_word_no_boundary_tier.rs::fallback_branch_far_word_promotes_for_neither`。
 }
 
@@ -1212,12 +1149,10 @@ fn test_schema_cycle_skips_unloaded() {
     );
 }
 
-/// 直达热键可切到**未启用**方案（不在 available 里），且之后循环键能切回来。
+/// 直达热键可切到未启用方案（不在 available 里），且之后循环键能切回来。
 ///
-/// 英文方案的典型用法：不放进 available（省得占循环位），靠热键切过去打一段再切回。
-/// 从这种状态循环时**不得跳过 available[0]**——原实现把「当前方案不在列表」当成
-/// 「在第 0 个」，于是恰好漏掉第一个方案；那条兜底以前几乎不触发，能切到未启用方案
-/// 之后就成了常规路径。
+/// 英文方案的典型用法：不放进 available，靠热键切过去打一段再切回。从这种状态循环时不得跳过
+/// available[0]——不能把「当前方案不在列表」当成「在第 0 个」。
 #[test]
 fn test_switch_to_unavailable_schema_then_cycle_back() {
     let dir = data_dir();
@@ -1321,11 +1256,10 @@ fn test_pinyin_abbrev() {
     assert!(has("nihao", "你好"), "全拼 nihao 应含 你好");
 }
 
-/// 回归：整句「苍茫的天涯是我的爱」不被低频 3 字词「填鸭式」挤掉首选。
+/// 整句「苍茫的天涯是我的爱」不被低频 3 字词「填鸭式」挤掉首选。
 ///
-/// 根因＝unigram 独立性假设让 `P(天涯)·P(是)` 双重扣 `ln(total)`，加上每词罚 WORD_PENALTY，
-/// 一个低频整词（填鸭式 w=152）便压过 2 词正解。修法＝虚词（是/的/了…）豁免每词罚
-/// （见 `lattice::score_node`）。真正的解是 bigram，此为近似补偿。
+/// unigram 独立性假设让 `P(天涯)·P(是)` 双重扣 `ln(total)`，加上每词罚 WORD_PENALTY，低频整词
+/// 便压过 2 词正解。虚词（是/的/了…）豁免每词罚（见 `lattice::score_node`），是 bigram 之外的近似补偿。
 #[test]
 fn sentence_function_word_not_penalized_as_fragment() {
     let dir = data_dir();
@@ -1350,10 +1284,9 @@ fn sentence_function_word_not_penalized_as_fragment() {
 
 // ───────────────────── 批量出码（纯词列表导入）─────────────────────
 //
-// 批量入口存在的唯一理由是把「读方案」提到循环外：`read_schema` 无缓存，每次调用都要
-// 读盘 + 解析 TOML + 合并 override，逐词调 `encode_word` 在万级词表上会退化成万次文件
-// 解析。既然是为性能分出的第二条路，就必须证明它与原路**结果完全一致**——否则单条加词
-// 与批量导入会给同一个词出两种码，词库里留下打不出来的条目。
+// 批量入口的唯一理由是把「读方案」提到循环外（`read_schema` 无缓存，逐词调 `encode_word` 在万级
+// 词表上会退化成万次文件解析）。它必须与原路结果完全一致，否则单条加词与批量导入会给同一个词出
+// 两种码。
 
 /// 批量与逐个必须逐位相同。这是批量入口的正当性所在：它只改准备时机，不改规则。
 #[test]
@@ -1383,14 +1316,10 @@ fn encode_words_matches_encode_word_one_by_one() {
     );
 }
 
-/// 单字必须**真的出得来码**，两个入口都是。
+/// 单字必须真的出得来码，两个入口都是。
 ///
-/// 上面那条等价性断言盖不住这个缺陷：词表里本就有单字「王」，而缺陷期两条路**都**返回
-/// 空串——「一样错」同样满足「逐位一致」，测试照绿。根因是两个入口都把单字丢给
-/// `calc_word_code`（词组公式，`chars.len() < 2` 即 `TooShort`），可单字要的码是它自己的
-/// 全码。缺陷面是「给某个字补一条编码」这个加词界面上最常见的输入在码表方案下恒定失败。
-///
-/// 故这里断言的是**非空**，而不只是两边相等。
+/// 等价性断言盖不住「两边一样错」（都返回空串）。单字要的码是它自己的全码，不能丢给
+/// `calc_word_code`（词组公式，`chars.len() < 2` 即 `TooShort`）。故这里断言非空，不只是两边相等。
 #[test]
 fn single_char_encodes_from_both_entries() {
     let dir = data_dir();
@@ -1446,7 +1375,7 @@ fn encode_words_keeps_position_for_unencodable() {
     );
 }
 
-/// GH#171：码表方案加「汉字+数字」（姓名+手机号）时只用中文部分取码。
+/// 码表方案加「汉字+数字」（姓名+手机号）时只用中文部分取码。
 /// 单条、批量（设置端出码 / 导入词表）两个入口都要放行，且与纯中文那部分同码。
 #[test]
 fn encode_skips_non_han_like_phone_number() {
@@ -1501,18 +1430,17 @@ fn encode_skips_non_han_like_phone_number() {
         mgr.encode_word("wubi86", "二二六"),
         "〇 不该被跳过"
     );
-    // 生僻字（码表里没码的**汉字**）不能被当成可跳过的字符。
+    // 生僻字（码表里没码的汉字）不能被当成可跳过的字符。
     assert_eq!(
         mgr.encode_word("wubi86", "张\u{20000}三1"),
         Err(wind_engine::encoder::EncodeError::MissingCode { ch: '\u{20000}' })
     );
 }
 
-/// GH#181①：自动造词按**用户实际打的码**取位。
+/// 自动造词按用户实际打的码取位。
 ///
-/// 真实 wubi86 词库里「彧」有两条同长全码 `akge`(1247) / `gkgy`(978)，单字全码表按权重
-/// 挑 `akge`。用户若是打 `gkgy` 上屏的，造出的「彧幻」就该是 `gk`+`xn`，否则草稿落在
-/// `akxn` 下，他回打 `gkxn` 永远召不回。
+/// 真实 wubi86 词库里「彧」有两条同长全码 `akge`(1247) / `gkgy`(978)，单字全码表按权重挑 `akge`。
+/// 用户打 `gkgy` 上屏的，造出的「彧幻」就该是 `gk`+`xn`，否则他回打 `gkxn` 永远召不回。
 #[test]
 fn hinted_encode_follows_the_code_user_typed() {
     let dir = data_dir();
@@ -1583,13 +1511,11 @@ fn generate_words_pinyin_matches_one_by_one() {
     assert_eq!(batch, one_by_one, "批量与逐个生成必须逐位一致");
 }
 
-/// 批量入口的**存在理由**本身的对照：批量必须显著快于逐个。
+/// 批量入口存在理由本身的对照：批量必须显著快于逐个。
 ///
-/// 默认 `#[ignore]`（性能数字随机器波动，不适合当门禁），需要时手动跑：
+/// 默认 `#[ignore]`（性能数字随机器波动），需要时手动跑：
 /// `cargo test -p wind-engine --test engine_manager encode_words_batch_is_faster -- --ignored --nocapture`
-///
-/// 若有人日后把 `encode_words` 改回内部循环调用 `encode_word`，这个对照会立刻塌回 1x ——
-/// 那正是本入口要防的退化（`read_schema` 无缓存，逐词调用 = 逐词读盘解析 TOML）。
+/// `encode_words` 若改回内部循环调用 `encode_word`，这个对照会塌回 1x。
 #[test]
 #[ignore]
 fn encode_words_batch_is_faster_than_one_by_one() {

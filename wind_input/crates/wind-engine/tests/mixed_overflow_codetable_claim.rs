@@ -1,19 +1,13 @@
 //! 混输超码长归属：`pinyin_only_overflow`（⓪）的例外口 `codetable_owns_overflow`。
 //!
-//! 真机现象：五笔混输下 `yijg`（唯一全码「就是」）**再打任何一个字母**，候选里「就是」整条
-//! 消失、只剩拼音「以」——且把上屏否决开关（①`auto_commit_block_on_pinyin` /
-//! ②`block_commit_on_pinyin_word` / ③`auto_commit_block_on_english`）全关也无济于事。
+//! 五笔混输下 `yijg`（唯一全码「就是」）再打任何一个字母，「就是」不得消失只剩拼音「以」。
+//! 超码长由 ⓪ 裁决，五笔 4 码封顶，问整串的逃生口（`has_full_input_match || has_longer_code`）恒假；
+//! 候选回捞与顶码两处共用 `codetable_owns_overflow`（「前 N 码是精确全码」且「拼音主张不了整串」等
+//! 四条判据），详见 docs/architecture/engine-candidate-pipeline.md 的「`codetable_owns_overflow` 的
+//! 四条判据」。
 //!
-//! 根因是超码长走了另一套逻辑，由 ⓪ 独占裁决，卡死两个出口：
-//! - `handle_top_code` 的 ⓪ 判据只看「拼音有没有候选」，不读任何否决开关；
-//! - `convert_overflow` 里唯一能捞回码表候选的逃生口 `has_full_input_match(input) ||
-//!   has_longer_code(input)` 问的是**整串**，而五笔 4 码封顶、不存在 5 码词条 ⇒ 恒假。
-//!
-//! 修法：两处共用 `codetable_owns_overflow` = 「前 N 码是精确全码」且「拼音主张不了整串」。
-//!
-//! ⚠️ 全部用例走**真 `PinyinEngine`**（不用 fake）：本判据的分水岭是
-//! `is_possible_pinyin_sequence` 与候选 `consumed_length` 的真实取值，fake 引擎给什么就是什么，
-//! 用 fake 锁不住真机行为（`youyo` 在 fake 下靠「消费整串」偶然通过，真机靠的是「还没打完」）。
+//! 全部用例走真 `PinyinEngine`（不用 fake）：判据的分水岭是 `is_possible_pinyin_sequence` 与候选
+//! `consumed_length` 的真实取值，fake 引擎锁不住真机行为。
 
 use std::sync::Arc;
 use wind_dict::cached::CachedDict;
@@ -25,17 +19,16 @@ use wind_engine::mixed::{MixConfig, MixedEngine};
 use wind_engine::pinyin::Config as PinyinConfig;
 use wind_engine::{Engine, PinyinEngine};
 
-/// 五笔侧（4 码封顶）：`yijg`=就是（本例主角）、`youy`=变凉（youyoud 回归对照）、
-/// `gith`=不算（github 回归对照，取自真词库 `wubi86_jidian.dict.yaml` 的真实条目与权重）。
-/// 三者都是**精确全码**，故「前缀是精确全码」这一条对所有用例同时成立 —— 变量只剩
-/// 「拼音/英文主张不主张整串」。
+/// 五笔侧（4 码封顶）：`yijg`=就是（本例主角）、`youy`=变凉（youyoud 对照）、`gith`=不算（github
+/// 对照，取自 `wubi86_jidian.dict.yaml` 的真实条目与权重）。三者都是精确全码，「前缀是精确全码」
+/// 对所有用例同时成立，变量只剩「拼音/英文主张不主张整串」。
 fn wubi() -> Box<dyn Engine> {
     let mut d = CodetableDict::empty();
     d.merge_single("yijg".into(), "就是".into(), 5000, 0);
     d.merge_single("youy".into(), "变凉".into(), 864, 1);
     d.merge_single("gith".into(), "不算".into(), 1822, 2);
-    // `word`：英文用例主角。选它是因为 `words` 的拼音**交得出候选**（`wo`→我）却**主张不了整串**
-    // （`rds` 不成音节），三条判据里只有「英文主张」那条会否决 —— 唯一变量得以隔离。
+    // `word`：英文用例主角。`words` 的拼音交得出候选（`wo`→我）却主张不了整串（`rds` 不成音节），
+    // 三条判据里只有「英文主张」那条会否决，唯一变量得以隔离。
     d.merge_single("word".into(), "叉".into(), 900, 3);
     // `cety`＝真机主角「通往」（`wubi86_jidian.dict.yaml:7013`，全库唯一该码）。
     // 选它是因为拼音侧 `ce` 是合法音节、`ty` 连音节前缀都不是 —— 与 `yijg` 同侧但更贴真机。
@@ -81,8 +74,8 @@ fn all_vetoes_off() -> MixConfig {
 }
 
 /// 英文侧（独立 `english` 方案，`type = "english"` 词库 → `CandidateSource::English`）：
-/// - `words` 是**精确整串**词条（第三条判据的正例，选它是为了隔离变量，见该用例文档）；
-/// - `yijgatron` 只让 `yijga` 命中**前缀**（反向锁：前缀不足以夺走归属）；
+/// - `words` 是精确整串词条（第三条判据的正例，见该用例文档）；
+/// - `yijgatron` 只让 `yijga` 命中前缀（反向锁：前缀不足以夺走归属）；
 /// - `github` 供顶码分工用例（③ 开/关的对照）。
 fn english() -> Arc<dyn Engine> {
     let mut d = CodetableDict::empty();
@@ -101,8 +94,7 @@ fn mixed(cfg: MixConfig) -> MixedEngine {
 }
 
 /// 带英文子引擎的混输（`schema.mix.enable_english` 开）。
-///
-/// ⚠️ 本文件其余用例一律 `english=None` —— 英文维度整个缺席，正是 `github` 回归漏网的原因。
+/// 本文件其余用例一律 `english=None`，英文维度的判据只能靠这里覆盖。
 fn mixed_en(cfg: MixConfig) -> MixedEngine {
     MixedEngine::new(wubi(), Some(Box::new(pinyin())), Some(english()), cfg)
 }
@@ -160,7 +152,7 @@ fn codetable_reclaims_overflow_when_pinyin_cannot_explain() {
     assert!(c.iter().any(|t| t == "以"), "拼音候选仍应保留供选择：{c:?}");
 }
 
-/// 「+**任何**字母」都成立（用户原话）：拼音切分只认开头的 `yi`，与后续字母无关。
+/// 「+任何字母」都成立：拼音切分只认开头的 `yi`，与后续字母无关。
 #[test]
 fn holds_for_every_trailing_letter() {
     let e = mixed(all_vetoes_off());
@@ -175,9 +167,8 @@ fn holds_for_every_trailing_letter() {
     }
 }
 
-/// 反向锁（youyoud 回归）：`youyo` 与 `yijga` **只差一个变量**——两者前 N 码（`youy`/`yijg`）
-/// 都是精确全码，但 `youyo` = you + `yo`，`yo` 是合法音节前缀 ⇒ 拼音还没打完、主张整串。
-/// 此时 ⓪ 必须继续拦，否则第 5 键就把「悠悠的」顶成「变凉」。
+/// 反向锁（youyoud）：`youyo` 与 `yijga` 只差一个变量——前 N 码都是精确全码，但 `youyo` = you + `yo`，
+/// `yo` 是合法音节前缀 ⇒ 拼音还没打完、主张整串。此时 ⓪ 必须继续拦，否则第 5 键就把「悠悠的」顶成「变凉」。
 #[test]
 fn pinyin_still_owns_overflow_when_it_may_continue() {
     // 前提：拦截必须来自「拼音还没打完」这一位，而不是「前缀不是精确全码」——否则本例
@@ -206,8 +197,7 @@ fn pinyin_still_owns_overflow_when_it_may_continue() {
 }
 
 /// 反向锁（拼音打错字母）：`nihxo` 的拼音同样主张不了整串（`hx` 不是音节前缀），
-/// 但前 N 码 `nihx` 在码表**没有精确全码** ⇒ 例外口不成立，仍归拼音。
-/// 这一条保证「打错一个字母就被五笔顶码截胡」不会发生。
+/// 但前 N 码 `nihx` 在码表没有精确全码 ⇒ 例外口不成立，仍归拼音，不被五笔顶码截胡。
 #[test]
 fn no_reclaim_when_prefix_is_not_an_exact_code() {
     // 前提：拦截必须来自「前缀不是精确全码」这一位。若拼音其实主张得了这串，本例就退化成
@@ -238,8 +228,8 @@ fn no_reclaim_when_prefix_is_not_an_exact_code() {
     );
 }
 
-/// 回捞的前缀候选不得被当成**本次输入**的精确匹配：`is_exact_code` 归一到完整输入。
-/// 下游（协调器 `candidate_display_order` / `freq_rerank::freq_tier`）一律以完整输入为准，
+/// 回捞的前缀候选不得被当成本次输入的精确匹配：`is_exact_code` 归一到完整输入。
+/// 下游（`candidate_display_order` / `freq_rerank::freq_tier`）一律以完整输入为准，
 /// 不归一会把只匹配前缀的候选提拔进精确档。
 #[test]
 fn reclaimed_prefix_candidate_is_not_marked_exact() {
@@ -257,13 +247,10 @@ fn reclaimed_prefix_candidate_is_not_marked_exact() {
     );
 }
 
-/// ★ 回捞的前缀候选必须**如实标注 `consumed_length`**（= 前 N 码），否则协调器
+/// 回捞的前缀候选必须如实标注 `consumed_length`（= 前 N 码），否则协调器
 /// （`commit_selected` 的 `partial = consumed > 0 && consumed < total`）按「消费整串」处理，
-/// 选中即把没解释的尾码一并吃掉 —— `yijga` 选「就是」，尾巴上的 `a` 凭空消失。
-///
-/// 这是码表候选带 `consumed_length` 的唯一出口（其余路径恒 0），协调器侧两处依赖
-/// 「码表恒 0 ⇒ 永不部分匹配」的判据已随之对齐，见 `build_candidates` /
-/// `learn_phrase_on_commit`。端到端对照见 `wind-coordinator` 的 `input_flow.rs`。
+/// `yijga` 选「就是」时尾巴上的 `a` 凭空消失。这是码表候选带 `consumed_length` 的唯一出口，
+/// 端到端对照见 `wind-coordinator` 的 `input_flow.rs`。
 #[test]
 fn reclaimed_prefix_candidate_reports_partial_consumption() {
     let e = mixed(all_vetoes_off());
@@ -301,22 +288,14 @@ fn overflow_off_path_unchanged() {
     assert_eq!(texts(&e, "yijga").first().map(String::as_str), Some("就是"));
 }
 
-/// ★ 出厂默认下的完整表现：**候选回捞 + 顶码放行**。归属结论 ⓪① 共用后的新语义。
+/// 出厂默认下的完整表现：候选回捞 + 顶码放行（归属结论 ⓪① 共用）。
 ///
-/// ⚠️⚠️ **本用例反转了一条旧决定，别当回归修回去。** 它原名
-/// `default_guards_reclaim_candidates_but_still_block_commit`，断言的是「① 出厂即开 ⇒ 顶码
-/// 仍被拦」，并在注释里把「⓪ 的例外口不是上屏放行口」写成红线。那条红线的依据是「默认安全」，
-/// 但真机反馈证明这一格恰恰是缺陷：`cety`（唯一全码「通往」）+ 第 5 键在**出厂配置**下不顶码，
-/// 而 `ty` 根本构不成音节 —— 顶码在默认配置下等于失效，用户在设置页里也关不掉 ⓪（`hidden`）。
+/// 别改回「① 出厂即开 ⇒ 顶码仍被拦」：① 的含义是让路给拼音，前提是拼音接得住这一串，而
+/// `codetable_owns_overflow` 已判定它接不住；候选侧把「就是」回捞到首位、顶码侧却拦下，是两处对
+/// 同一个归属问题给出相反处置（⓪ 的设置项又是 `hidden`，用户关不掉）。
 ///
-/// 反转依据是语义而非「让五笔更爽快」：① 的含义是**让路给拼音**，让路的前提是拼音接得住
-/// 这一串；`codetable_owns_overflow` 的四条判据已经判定它接不住（前 N 码是码表精确全码、
-/// 拼音与英文都主张不了整串、拼音尚能交出候选）。同一次按键里候选侧已把「就是」回捞到首位，
-/// 顶码侧却仍拦下 —— 那是两处对同一个归属问题给出相反处置，本就是缺陷形态。
-///
-/// ⚠️ 边界仍然由下面两条对照守住：拼音**主张得了**整串时 ① 照拦
-/// （`pinyin_veto_still_applies_when_pinyin_claims_the_string`）、② 完全不受豁免
-/// （`pinyin_word_veto_is_not_exempted_by_the_claim`）。
+/// 边界由两条对照守住：拼音主张得了整串时 ① 照拦（`pinyin_veto_still_applies_when_pinyin_claims_the_string`）、
+/// ② 完全不受豁免（`pinyin_word_veto_is_not_exempted_by_the_claim`）。
 #[test]
 fn default_guards_reclaim_and_now_also_commit() {
     let e = mixed(MixConfig::default());
@@ -336,11 +315,10 @@ fn default_guards_reclaim_and_now_also_commit() {
     );
 }
 
-/// 真机主角（内存复刻）：`cety` = 唯一全码「通往」，第 5 键应顶码上屏 —— **出厂配置下**。
+/// `cety` = 唯一全码「通往」，第 5 键应顶码上屏——出厂配置下。
 ///
-/// 与 `yijga` 是同一条判据的两个实例，分开写是因为它们的拼音形状不同：`yijg` 的 `jg` 从第 3 键
-/// 起就不成音节，而 `cety` 的 `ce` 是**完整音节**、`ty` 才断掉。后者更贴近用户直觉里的
-/// 「前面像拼音、后面不像」，也是 ① 那个粗粒度 `has_pinyin` 最容易误判的形状。
+/// 与 `yijga` 是同一判据的两个实例：`yijg` 的 `jg` 从第 3 键起就不成音节，`cety` 的 `ce` 是完整音节、
+/// `ty` 才断掉——「前面像拼音、后面不像」，也是粗粒度 `has_pinyin` 最容易误判的形状。
 #[test]
 fn cety_top_commits_under_factory_defaults() {
     let py = pinyin();
@@ -368,11 +346,10 @@ fn cety_top_commits_under_factory_defaults() {
     );
 }
 
-/// 反向锁 ①：拼音**主张得了**整串时，① 照旧否决顶码 —— 豁免只覆盖归属判给码表的那条窄带。
+/// 反向锁 ①：拼音主张得了整串时，① 照旧否决顶码——豁免只覆盖归属判给码表的那条窄带。
 ///
-/// 单一变量：⓪ 显式关（否则拦截来自 ⓪，测不到 ①），① 显式开，串用 `youyo`
-/// （`you` + `yo`，`yo` 是合法音节前缀 ⇒ 拼音还在打）。前 N 码 `youy` 同样是精确全码，
-/// 与 `yijga` 只差「拼音主张与否」这一位。
+/// 单一变量：⓪ 显式关（否则拦截来自 ⓪），① 显式开，串用 `youyo`（`yo` 是合法音节前缀）。
+/// 前 N 码 `youy` 同样是精确全码，与 `yijga` 只差「拼音主张与否」这一位。
 #[test]
 fn pinyin_veto_still_applies_when_pinyin_claims_the_string() {
     assert!(
@@ -397,15 +374,11 @@ fn pinyin_veto_still_applies_when_pinyin_claims_the_string() {
     );
 }
 
-/// 反向锁 ②：`block_commit_on_pinyin_word` **不**享受豁免 —— 它判「整串是强拼音词」（词强度），
-/// 与「归属」正交，只有 ① 那一半被削弱。
+/// 反向锁 ②：`block_commit_on_pinyin_word` 不享受豁免——它判「整串是强拼音词」，与归属正交。
 ///
-/// `wangjg` 是唯一能把 ② 单独测出来的形状：前 N 码 `wang` 既是码表精确全码（例外口第一条成立）
-/// 又恰是 1 个完整拼音音节（② 的判据 b 命中），而尾巴 `jg` 不成音节前缀 ⇒ 拼音主张不了整串
-/// （例外口第二条成立）。⓪ 与 ① 都会被豁免放行，拦下它的只可能是 ②。
-///
-/// ⚠️ 尾巴必须 ≥2 个不成前缀的字母：只多**一个**字母时（`wangb`）该字母恒是某音节的合法前缀，
-/// 拼音就主张得了整串，例外口不成立，拦截来源退回 ⓪/① —— 那样本用例就变成假绿。
+/// `wangjg`：前 N 码 `wang` 既是码表精确全码又恰是 1 个完整拼音音节（② 的判据 b），尾巴 `jg`
+/// 不成音节前缀 ⇒ 拼音主张不了整串。⓪ 与 ① 都被豁免，拦下它的只可能是 ②。
+/// 尾巴必须 ≥2 个不成前缀的字母：只多一个字母时（`wangb`）它恒是某音节的合法前缀，本用例会假绿。
 #[test]
 fn pinyin_word_veto_is_not_exempted_by_the_claim() {
     let py = pinyin();
@@ -449,17 +422,14 @@ fn pinyin_word_veto_is_not_exempted_by_the_claim() {
 
 // ── 第三条判据：英文主张整串时，码表不得夺走归属 ──
 
-/// ★ 英文词库开启时打 `words`：前 4 码 `word` 在码表是精确全码，码表精确 `+1e7` 会把英文精确
-/// `+500K` 整层压掉，首选变成码表词、空格上屏还把尾码 `s` 一并吃掉。判据补上「英文主张整串」
-/// 后归属回到英文。
+/// 英文词库开启时打 `words`：前 4 码 `word` 是码表精确全码，码表精确档会把英文精确整层压掉，
+/// 首选变成码表词、空格上屏还吃掉尾码 `s`。判据「英文主张整串」让归属回到英文。
 ///
-/// ⚠️ 选 `words` 而非 `github` 是为了**隔离变量**：`github` 的拼音一条候选都交不出，会被第四条
-/// 判据（拼音须交得出候选，见 `codetable_does_not_claim_when_pinyin_yields_nothing`）**提前**
-/// 挡下，英文判据根本走不到 —— 那样本测试就退化成假绿。`words` 的拼音出得来「我」（`wo`）却
-/// 主张不了整串（`rds` 不成音节），三条判据里只有英文那条会否决。
+/// 选 `words` 而非 `github` 是为了隔离变量：`github` 的拼音交不出候选，会被第四条判据
+/// （见 `codetable_does_not_claim_when_pinyin_yields_nothing`）提前挡下，英文判据走不到。
 #[test]
 fn english_owns_overflow_when_it_matches_whole_input() {
-    // 前置：另外三条判据都**不**否决，否则测的是别的分支。
+    // 前置：另外三条判据都不否决，否则测的是别的分支。
     assert!(
         wubi().has_full_input_match("word"),
         "前置：前 N 码 word 确是精确全码（与 yijg 同侧）"
@@ -493,17 +463,12 @@ fn english_owns_overflow_when_it_matches_whole_input() {
 
 // ── 第四条判据：拼音一条候选都交不出的串，码表也不该主张 ──
 
-/// ★ 真机回归（用户报告的原始现象）：**没开英文词库**时打 `github`，首选是五笔词「不算」，
-/// 空格上屏把整个缓冲吃掉。
+/// 没开英文词库时打 `github`，首选不得是五笔词「不算」（空格上屏会把整个缓冲吃掉）。
 ///
-/// 前三条判据在此全部放行 —— 前 4 码 `gith` 是精确全码、`gi` 不成音节所以拼音主张不了整串、
-/// 英文引擎压根不在场。可这串**连开头都不像中文**（拼音一条候选都交不出），把它判给码表并无
-/// 依据：`yijga` 至少解释得出「以」，`github` 什么都解释不出。此时应保持候选为空，让用户按
-/// 空格/回车直接上屏原码 `github` —— 这正是 249f486 之前的行为。
-///
-/// 与顶码 ⓪ 天然一致：⓪ 的判据本就是 `pinyin_only_overflow && has_pinyin && !ct_owns`，
-/// `has_pinyin=false` 时它整条不成立，故本判据对顶码通路无影响（顶码另由 ③ 管，见
-/// `topcode_on_english_word_is_still_governed_by_the_english_guard`）。
+/// 前三条判据在此全部放行，但拼音一条候选都交不出，这串连开头都不像中文，判给码表没有依据。
+/// 应保持候选为空，让用户按空格/回车直接上屏原码 `github`。
+/// 本判据对顶码通路无影响：⓪ 是 `pinyin_only_overflow && has_pinyin && !ct_owns`，`has_pinyin=false`
+/// 时整条不成立（顶码另由 ③ 管，见 `topcode_on_english_word_is_still_governed_by_the_english_guard`）。
 #[test]
 fn codetable_does_not_claim_when_pinyin_yields_nothing() {
     // 前置：前三条判据确实都放行 —— 否则拦截来自别处，本判据无人看守。
@@ -530,9 +495,9 @@ fn codetable_does_not_claim_when_pinyin_yields_nothing() {
     );
 }
 
-/// 反向锁：拼音**交得出**候选时照常回捞（`yijga` 的「以」）—— 第四条判据不得误伤主场景。
-/// 与 `codetable_reclaims_overflow_when_pinyin_cannot_explain` 的分工：那条锁「拼音主张不了
-/// 整串」，这条锁「拼音至少交得出点什么」。两个条件方向相反，必须同时成立。
+/// 反向锁：拼音交得出候选时照常回捞（`yijga` 的「以」）——第四条判据不得误伤主场景。
+/// 与 `codetable_reclaims_overflow_when_pinyin_cannot_explain`（锁「拼音主张不了整串」）方向相反，
+/// 必须同时成立。
 #[test]
 fn partial_pinyin_candidate_is_enough_to_keep_the_claim() {
     let py = pinyin();
@@ -548,7 +513,7 @@ fn partial_pinyin_candidate_is_enough_to_keep_the_claim() {
     );
 }
 
-/// 反向锁：英文只有**前缀**匹配（`yijgatron`）不足以夺走归属 —— 否则英文库 21918 条的前缀面
+/// 反向锁：英文只有前缀匹配（`yijgatron`）不足以夺走归属——否则英文库庞大的前缀面
 /// 会让一堆恰好撞上某英文词开头的五笔全码平白丢掉候选。
 #[test]
 fn english_prefix_alone_does_not_take_overflow() {
@@ -569,22 +534,19 @@ fn english_prefix_alone_does_not_take_overflow() {
         Some("就是"),
         "英文仅前缀命中 ⇒ 归属仍归码表，「就是」应排第一，实际 {c:?}"
     );
-    // ★ 前缀扩展**不再入列**（此前这里断言的是「仍应混入供选择」）。
-    // 显示侧已收窄为只收精确命中（`MixedEngine::english_display_candidates`）：
-    // `yijga` 在英文库无精确整串，故 `Yijgatron` 这条前缀候选不该出现在候选面上。
-    // 归属判据（上面那条 assert_eq）不受影响——它问的是「谁主张这一串」，
-    // 走的是 `english_claims_overflow` 的精确整串判据，与显示侧本就是两回事。
+    // 前缀扩展不入列：显示侧只收精确命中（`MixedEngine::english_display_candidates`），`yijga`
+    // 在英文库无精确整串。归属判据（上面的 assert_eq）走 `english_claims_overflow` 的精确整串判据，
+    // 与显示侧是两回事。
     assert!(
         !c.iter().any(|t| t == "Yijgatron"),
         "前缀扩展不得入列（只收精确命中）：{c:?}"
     );
 }
 
-/// 分工锁：本修复只改**候选归属**，顶码是另一条通路。
+/// 分工锁：本判据只管候选归属，顶码是另一条通路。
 ///
-/// `github` 拼音一条候选都没有 ⇒ ⓪① 的 `has_pinyin` 前提不成立、② 的整串强拼音词也不成立，
-/// 于是关掉 ③ 时顶码照旧顶出「不算」+ 余码 `ub`。**这是 249f486 之前就有的既有行为**
-/// （见 memory 案例二），由 `auto_commit_block_on_english` 负责，不该误以为本次一并修了。
+/// `github` 拼音一条候选都没有 ⇒ ⓪① 的 `has_pinyin` 前提不成立、② 也不成立，关掉 ③ 时顶码照旧
+/// 顶出「不算」+ 余码 `ub`。这由 `auto_commit_block_on_english` 负责。
 #[test]
 fn topcode_on_english_word_is_still_governed_by_the_english_guard() {
     let off = mixed_en(all_vetoes_off());
@@ -620,21 +582,16 @@ fn topcode_on_english_word_is_still_governed_by_the_english_guard() {
     );
 }
 
-/// 真实词库端到端验收（用户诉求的落点）：内存 fixture 测得了判据，测不出真机首选与真机词库。
+/// 真实词库端到端验收：内存 fixture 测得了判据，测不出真机首选与真机词库。
 ///
-/// 真机数据：`cety` 在 `wubi86_jidian.dict.yaml:7013` 是 `cety 通往 1442`、**全库唯一**该码；
-/// 拼音侧 `ce` 有 6 个同音单字（侧/测/册/策/厕/…），`ty` 不成音节前缀。改动前第 5 键
-/// `handle_top_code` 恒返回 `None`，改动后顶出「通往」+ 余码。
+/// `cety` 在 `wubi86_jidian.dict.yaml` 是 `cety 通往 1442`、全库唯一该码；拼音侧 `ce` 有多个同音单字，
+/// `ty` 不成音节前缀。第 5 键应顶出「通往」+ 余码。
 ///
-/// ⚠️ **简拼必须是关的**（`enable_pinyin_abbrev`，出厂已改为 `false`，这里仍显式写出以免
-/// 出厂值再变时本用例静默换了被测分支）。简拼**开**时 `cetya` 的拼音首选是简拼整句
-/// 「从而同样啊」（`consumed_length = 5` = 整串）⇒ `pinyin_claims_overflow` 成立 ⇒ 例外口第二条
-/// 不成立 ⇒ **⓪ 独立拦下顶码，本修复够不着**。这是一个**已知且有意保留**的边界：简拼几乎能
-/// 主张任何字母串，若让它不算「主张」，长简拼词（`zgrmghg` 之类）会被前 4 码的五笔全码顶码
-/// 截胡 —— 取舍为「默认关简拼让顶码可用，需要简拼的用户显式打开并接受失去顶码」。
-/// 勿把本用例的 `enable_pinyin_abbrev = false` 当成可有可无的样板照抄删掉。
+/// 简拼必须是关的（`enable_pinyin_abbrev`，出厂已是 `false`，显式写出以免出厂值变了静默换分支）：
+/// 简拼开时 `cetya` 的简拼整句消费整串 ⇒ `pinyin_claims_overflow` 成立 ⇒ ⓪ 独立拦下顶码。这是有意
+/// 保留的边界（见 docs/architecture/engine-candidate-pipeline.md），别把这行当样板删掉。
 ///
-/// ⚠️ 缺 `build_dev/data` 时静默跳过（全仓惯例）。判据是耗时与下方 eprintln。
+/// 缺 `build_dev/data` 时静默跳过（全仓惯例），判据是耗时与下方 eprintln。
 #[test]
 fn real_dict_cety_top_commits_on_the_fifth_key() {
     use std::path::PathBuf;
@@ -703,15 +660,11 @@ fn real_dict_cety_top_commits_on_the_fifth_key() {
     }
 }
 
-/// ★ 默认值守门（行为层）：**不碰任何 `schema.mix` 开关**，仅靠出厂默认，`cety` 第 5 键就该顶码。
+/// 默认值守门（行为层）：不碰任何 `schema.mix` 开关，仅靠出厂默认，`cety` 第 5 键就该顶码。
 ///
-/// 与上一条的分工：上一条显式关简拼、测的是**判据**；本条刻意**什么都不设**、测的是
-/// **出厂默认值本身**（`enable_pinyin_abbrev` 出厂改为 `false` 正是为了让顶码可用）。
-/// 把简拼默认值翻回 `true`，本用例即红——`wind-config` 那两条（`mix_pinyin_abbrev_defaults_off`
-/// / `..._l1_and_l2_agree`）只钉取值，钉不住「这个取值换来了什么行为」。
-///
-/// ⚠️ `top_code_commit` 仍须显式对齐 L2：它在 `Config::default()`（L1）里是 `false`，
-/// 不设的话顶码通路整个不启用，断言会退化成假绿。
+/// 上一条显式关简拼、测判据；本条什么都不设、测出厂默认值本身。简拼默认值翻回 `true` 本用例即红——
+/// `wind-config` 那两条（`mix_pinyin_abbrev_defaults_off` / `..._l1_and_l2_agree`）只钉取值。
+/// `top_code_commit` 仍须显式对齐 L2：它在 `Config::default()`（L1）里是 `false`，不设会假绿。
 #[test]
 fn factory_defaults_alone_are_enough_for_cety_topcode() {
     use std::path::PathBuf;

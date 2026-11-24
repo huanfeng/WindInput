@@ -1,11 +1,11 @@
 //! 智能符号（同键连按切换中/英标点）端到端测试
 //!
-//! 覆盖两条新增通路：
-//!   1. **反向**（数字后智能标点）：`3.` 的 press1 照旧出英文 `.`，press2 换回中文 `。`。
-//!   2. **模式进入键**：`;` 被快捷输入占用，模式内二次按下出 `；` 并武装，第三次按下换 `;`。
+//! 覆盖两条通路：
+//!   1. 反向（数字后智能标点）：`3.` 的 press1 照旧出英文 `.`，press2 换回中文 `。`。
+//!   2. 模式进入键：`;` 被快捷输入占用，模式内二次按下出 `；` 并武装，第三次按下换 `;`。
 //!
-//! 这里的每条用例都**先断言 press1 的产物**再断言 press2——press1 走错分支（如反向用例里
-//! 出了中文 `。`）时必须当场炸，否则 press2 的断言会在「其实是正向流程」上侥幸通过，成为假绿。
+//! 每条用例都先断言 press1 的产物再断言 press2：press1 走错分支时必须当场红，
+//! 否则 press2 的断言可能在「其实是正向流程」上假绿。
 
 use std::path::PathBuf;
 use wind_bridge::handler::{KeyAction, KeyEventData, MessageHandler};
@@ -83,14 +83,10 @@ fn after_digit_press1_english_then_press2_back_to_chinese() {
     );
 }
 
-/// 回归锁：`1.1.` 快打时中间那个 `1` 不许被 press2 吃掉。
+/// `1.1.` 快打时中间那个 `1` 不许被 press2 吃掉。
 ///
-/// 现场（macOS，`prev_char` 恒 0 的旧客户端）：两个 `.` 落在 500ms 内、同键、模式没变，
-/// `smart_symbol_press2` 的 `prev_char != 0 &&` 短路让「光标前须等于武装串末位」这道守卫
-/// 形同虚设 → 判成 press2 → `ReplaceBackward{count:1}` 把中间的 `1` 删掉换成 `.`。
-///
-/// 客户端如实上报 prev_char 后，第二个 `.` 的光标前是 `1` 而武装串末位是 `.`，守卫生效。
-/// 这条锁的是**服务端**这一侧：只要 prev_char 送到了，误删就不该发生。
+/// 两个 `.` 同键且在时限内，但第二个 `.` 的光标前是 `1` 而武装串末位是 `.`，
+/// 只要客户端送了 `prev_char`，这道守卫就必须挡住 `ReplaceBackward`。
 #[test]
 fn digit_between_two_periods_is_not_eaten_by_press2() {
     let coord = Coordinator::new_headless(cfg_smart(), Some(&data_dir()));
@@ -122,9 +118,8 @@ fn normal_press1_chinese_then_press2_english() {
     assert_eq!(replaced(&a2), Some((1, ".")), "实际: {:?}", a2);
 }
 
-/// 总开关关闭时数字后行为**完全维持改造前**：press1 出英文 `.`，第二次按下只是普通标点追加
-/// （此时光标前已是 `.` 而非数字，故出中文 `。`），**不得**出现任何 `ReplaceBackward`。
-/// 屏上因此是 `3.。`——与开着开关时的 `3。`（替换）恰成对照，这正是该开关的全部差别。
+/// 总开关关闭时数字后行为不变：press1 出英文 `.`，第二次按下是普通标点追加（光标前已是 `.`，
+/// 故出中文 `。`），不得出现任何 `ReplaceBackward`。
 #[test]
 fn after_digit_without_smart_mode_never_replaces() {
     let mut cfg = cfg_smart();
@@ -142,7 +137,7 @@ fn after_digit_without_smart_mode_never_replaces() {
     assert_eq!(inserted(&a2), Some("。"), "实际: {:?}", a2);
 }
 
-/// 反向只认 `punct.smart_list` 里的标点：把列表收窄成 "."，同样在数字后的 `,` 应走**正向**
+/// 反向只认 `punct.smart_list` 里的标点：列表收窄成 "." 后，数字后的 `,` 应走正向
 /// （press1 中文 `，` → press2 英文 `,`）。锁住「方向由数字后智能判定，而非由 prev_char 是数字」。
 #[test]
 fn digit_context_outside_smart_list_stays_forward() {
@@ -243,7 +238,7 @@ fn english_punct_press1_english_then_press2_chinese() {
     );
 }
 
-/// 中文侧总开关与英文侧**互不影响**：只开 `smart_mode`（中文侧）时英文标点状态不该有替换。
+/// 中文侧总开关与英文侧互不影响：只开 `smart_mode`（中文侧）时英文标点状态不该有替换。
 #[test]
 fn english_punct_requires_its_own_switch() {
     let mut cfg = cfg_en_punct();
@@ -261,7 +256,7 @@ fn english_punct_requires_its_own_switch() {
     );
 }
 
-/// 参与集合按**源字符**判定：把 `english_chars` 收窄成 ","，`.` 就不再参与。
+/// 参与集合按源字符判定：把 `english_chars` 收窄成 ","，`.` 就不再参与。
 #[test]
 fn english_punct_outside_english_chars_not_armed() {
     let mut cfg = cfg_en_punct();
@@ -306,8 +301,7 @@ fn english_mode_press1_english_then_press2_chinese() {
     );
 }
 
-/// 关掉 `english_mode`：标点键回到**透传**（吃键集为空，DLL 压根不吃、core 也不接手）。
-/// 这条同时锁住「开关关闭 = 与历史行为完全一致」，是本功能不惊扰纯英文用户的底线。
+/// 关掉 `english_mode`：标点键回到透传（吃键集为空），开关关闭须与无此功能时一致。
 #[test]
 fn english_mode_off_passes_through() {
     let mut cfg = cfg_en_mode();
@@ -323,7 +317,7 @@ fn english_mode_off_passes_through() {
     );
 }
 
-/// 超时后模式进入键必须**交还**给模式激活链：武装是有时限的劫持，不是永久接管。
+/// 超时后模式进入键必须交还给模式激活链：武装是有时限的劫持，不是永久接管。
 #[test]
 fn mode_trigger_after_timeout_enters_mode_again() {
     if !has_data() {
@@ -347,10 +341,8 @@ fn mode_trigger_after_timeout_enters_mode_again() {
 
 // ── HoldComposition（组合态预览）方案：held 符号的去向只由宿主端交代 ────────────────
 //
-// 本组用例守的是一条**跨进程**的不变量：press1 的符号此刻只活在宿主的组合态里
-// （TSF/macOS 的 `_pendingCommitPrefix`、薄宿主上则已 `EditOp::Commit` 真上屏），
-// 服务端后续任何一次上屏都**不得再把它拼进文本**——拼了就是双写，真机表现为
-// 「。」+「。%」＝「。。%」。此前这条通路一个测试都没有，双写活了下来。
+// 跨进程不变量：press1 的符号此刻只活在宿主的组合态里（TSF/macOS 的 `_pendingCommitPrefix`，
+// 薄宿主上已 `EditOp::Commit` 真上屏），服务端后续任何上屏都不得再把它拼进文本，否则双写成「。。%」。
 
 const VK_5: u32 = 0x35; // Shift+5 → '%'
 const MOD_SHIFT: u32 = 0x0001; // 与 wind_ipc::protocol::MOD_SHIFT 同值
@@ -381,11 +373,8 @@ fn held(a: &KeyAction) -> Option<&str> {
     }
 }
 
-/// 主用例：`。` 挂在组合态里，时限内打一个**不在 `smart_chars` 参与集合**里的标点
-/// （Shift+5 → `%`）。上屏文本必须只有 `%`。
-///
-/// 出厂 `smart_chars = "。，？！：；、～￥·……——"` 不含 Shift+数字那族符号，用户正是
-/// 从 `%` 上发现的；`=` `-` `/` `[` 同理，故下面另有一条同族断言。
+/// `。` 挂在组合态里，时限内打一个不在 `smart_chars` 参与集合里的标点（Shift+5 → `%`），
+/// 上屏文本必须只有 `%`。出厂 `smart_chars` 不含 Shift+数字那族符号，下面另有一条同族断言。
 #[test]
 fn hold_then_non_member_punct_commits_symbol_only_once() {
     let coord = Coordinator::new_headless(cfg_hold(), Some(&data_dir()));
@@ -420,8 +409,8 @@ fn hold_then_equals_commits_symbol_only_once() {
     );
 }
 
-/// 反向守卫：**参与集合内**的另一个标点走的是另一条短路（新的 HoldComposition），
-/// 它同样只出自己那一份。少了这条，上面两条可能在「所有标点都不出 held」的错误实现上假绿。
+/// 反向守卫：参与集合内的另一个标点走新的 HoldComposition 短路，同样只出自己那一份。
+/// 少了这条，上面两条可能在「所有标点都不出 held」的错误实现上假绿。
 #[test]
 fn hold_then_member_punct_holds_new_symbol_only() {
     let coord = Coordinator::new_headless(cfg_hold(), Some(&data_dir()));
@@ -450,10 +439,9 @@ fn hold_press2_still_replaces_held() {
     }
 }
 
-/// A2-65 / t263：hold 预览期间的 Ctrl/Alt 组合键（Ctrl+V 粘贴等宿主快捷键），服务端必须回
-/// `PassThrough`——TSF 侧「吃键 → 收口 → 重放」那条分支（`KeyEventSink.cpp` 的
-/// `hold_commit_then_replay`）只在 PassThrough 时触发。服务端一旦改成吃掉或回别的动作，
-/// DLL 就既不重放也不放行，粘贴在所有宿主上都会消失。
+/// hold 预览期间的 Ctrl/Alt 组合键（Ctrl+V 等宿主快捷键）服务端必须回 `PassThrough`：
+/// TSF 侧「吃键 → 收口 → 重放」（`KeyEventSink.cpp` 的 `hold_commit_then_replay`）只在 PassThrough 时触发，
+/// 改成吃掉或别的动作，粘贴在所有宿主上都会消失。
 #[test]
 fn hold_then_ctrl_combo_passes_through() {
     const VK_V: u32 = 0x56;
@@ -474,23 +462,17 @@ fn hold_then_ctrl_combo_passes_through() {
 
 // ── 武装态失效：press1 之后中间夹了别的输入 ─────────────────────────────────────────
 //
-// 本组守的是「press1 与 press2 之间必须什么都没发生」这条前提。此前判据只有「同键 + 时限 +
-// 中英模式没变」三条，对「中间敲了字母出了候选」完全失明，于是 press2 的
-// `ReplaceBackward` / `CommitReplacingHeld` 落在**组合区**上，把用户正在看的候选削成了
-// 一个英文标点（用户报障原话：「先输入。然后快速的输入字母（有候选）再输入。，会出现这个
-// 候选被替换为 . 的问题」）。
+// 前提：press1 与 press2 之间什么都没发生。中间打字母出了候选时，press2 的
+// `ReplaceBackward` / `CommitReplacingHeld` 会落在组合区上，把候选削成一个英文标点。
 //
-// 缺陷由两道判据合力堵上，各守一族宿主，故本组的入口不是一刀切：
+// 两道判据各守一族宿主：
 //   - `smart_symbol_press2` 的「press1 之后又打了编码」——所有入口都经过它；
-//   - `handle_key_event_policed` 的「非同键按键解除武装」——**只有 bridge 那条按键出口**
-//     （`server.rs:470` 调的就是它，桌面 Windows/macOS 客户端都走这里）。
+//   - `handle_key_event_policed` 的「非同键按键解除武装」——只在 bridge 按键出口（桌面客户端）。
 //
-// ⚠️ 因此：`intervening_passthrough_key_disarms` 与 `numpad_punct_press2_survives_the_disarm_guard`
-// 是**唯二**只有 policed 入口才测得到的（前者中间那一键不进缓冲、后者要的就是出口那道判据
-// 别误伤），拿内层 `handle_key_event` 测会得到假绿；
-// `intervening_letters_do_not_trigger_press2_mobile_entry` 则**刻意**用内层入口——那正是
-// `wind-mobile` 的走法，用它盯住第一道判据；其余几条两道判据都能挡住，走 policed 是为了贴近
-// 桌面真实路径。
+// 因此 `intervening_passthrough_key_disarms` 与 `numpad_punct_press2_survives_the_disarm_guard`
+// 必须走 policed 入口，拿内层 `handle_key_event` 测会假绿；
+// `intervening_letters_do_not_trigger_press2_mobile_entry` 刻意用内层入口（`wind-mobile` 的走法）
+// 盯住第一道判据；其余几条走 policed 是为了贴近桌面真实路径。
 
 const VK_N: u32 = 0x4E;
 const VK_I: u32 = 0x49;
@@ -509,11 +491,10 @@ fn press_policed(coord: &Coordinator, vk: u32, prev_char: u16) -> KeyAction {
     })
 }
 
-/// 主用例（出厂 `DeleteReplace` 方案 + 宿主读不回文档）：`。` → 字母 `ni`（有候选）→ `.`。
+/// 出厂 `DeleteReplace` 方案 + 宿主读不回文档：`。` → 字母 `ni`（有候选）→ `.`。
 ///
-/// `prev_char == 0` 是 press2 判定里刻意留的「宿主读不回文档」兜底口（微信/Terminal 那族），
-/// 它让光标前字符那道对照形同虚设 ⇒ 缺陷期这一按返回 `ReplaceBackward{1, "."}`，而光标此刻
-/// 在组合区里，删掉的是候选本身。
+/// `prev_char == 0` 是 press2 判定给「宿主读不回文档」留的兜底口，光标前字符对照因此失效；
+/// 此时光标在组合区里，若返回 `ReplaceBackward{1, "."}` 删掉的就是候选本身。
 #[test]
 fn intervening_letters_do_not_trigger_press2() {
     if !has_data() {
@@ -544,9 +525,8 @@ fn intervening_letters_do_not_trigger_press2() {
         "中间打过编码 ⇒ 这一按不是 press2，替换会削掉组合区里的候选，实际: {:?}",
         a2
     );
-    // 反面断言不够强：`PassThrough` / `Consumed` / `ClearComposition` 也都满足它。这一按**该**
-    // 做的是落普通标点流程——顶屏候选 + 追加中文句号。不钉住正面产物，哪天这一按整个变成
-    // 吞键，上面那条照样绿。
+    // 反面断言不够强：`PassThrough` / `Consumed` / `ClearComposition` 也满足它。这一按该落普通
+    // 标点流程（顶屏候选 + 追加中文句号），不钉住正面产物，变成吞键时上面那条照样绿。
     assert!(
         inserted(&a2).is_some_and(|t| t.ends_with('。')),
         "应落普通标点流程：顶屏候选后追加中文句号，实际: {:?}",
@@ -554,12 +534,10 @@ fn intervening_letters_do_not_trigger_press2() {
     );
 }
 
-/// 同一场景，但宿主**读得回**文档：候选窗自显 preedit（`candidate_top`）时应用侧组合是
-/// 「占位空格 + 光标置前」（`UpdateComposition { text: " ", caret_pos: 0 }`），宿主如实读回的
-/// 光标前一字符恰好就是 press1 上屏的 `。`，与武装串末位**完美匹配**。
+/// 同一场景，但宿主读得回文档：候选窗自显 preedit 时应用侧组合是「占位空格 + 光标置前」，
+/// 读回的光标前一字符恰好是 press1 上屏的 `。`，与武装串末位匹配。
 ///
-/// 这条与上一条是同一个缺陷的两条**互不重叠**的触发路径：上一条靠 `prev_char == 0` 绕过对照，
-/// 这一条靠「对照本身就成立」。只修其中一条，另一条照样复现。
+/// 与上一条是同一缺陷互不重叠的两条触发路径（绕过对照 / 对照本身成立），只修一条另一条照样复现。
 #[test]
 fn placeholder_preedit_intervening_letters_do_not_trigger_press2() {
     if !has_data() {
@@ -590,12 +568,11 @@ fn placeholder_preedit_intervening_letters_do_not_trigger_press2() {
     );
 }
 
-/// `HoldComposition` 方案下的同一场景：press2 会发 `CommitReplacingHeld`，语义是**覆盖**当前
-/// 组合——而组合此刻装的是拼音候选，覆盖掉就是整条候选没了。
+/// `HoldComposition` 方案下的同一场景：press2 发 `CommitReplacingHeld`，语义是覆盖当前组合，
+/// 而组合此刻装的是拼音候选。
 ///
-/// 这条在修复前**恰好**不会红：出口处那段「C++ 已 flush 掉 hold」的清理按
-/// `held_text.is_some()` 开门，HoldComposition 正好满足。锁在这里是防它哪天被收窄
-/// （`DeleteReplace` 的 `held_text` 恒为 None，当年正是这样对出厂方案整段惰性的）。
+/// 出口处「C++ 已 flush 掉 hold」的清理按 `held_text.is_some()` 开门，HoldComposition 恰好满足；
+/// 锁在这里防它被收窄（`DeleteReplace` 的 `held_text` 恒为 None）。
 #[test]
 fn hold_composition_intervening_letters_do_not_replace_composition() {
     if !has_data() {
@@ -619,11 +596,10 @@ fn hold_composition_intervening_letters_do_not_replace_composition() {
     );
 }
 
-/// 中间那一键**不进编码缓冲**时同样要解除武装——这一条单独锁「非同键按键即失效」那道判据。
+/// 中间那一键不进编码缓冲时同样要解除武装——单独锁「非同键按键即失效」那道判据。
 ///
-/// 上面三条靠的是「缓冲非空」，把那道判据删掉它们仍然红；本条走数字键（中文模式空缓冲下透传，
-/// 不留任何缓冲痕迹），缓冲前后都是空的 ⇒ 只有出口处那道「非同键解除武装」能挡住。两道判据
-/// 各自被至少一条用例单独盯住，删任意一道都有红。
+/// 本条走数字键（中文模式空缓冲下透传），缓冲前后都是空的，只有出口处那道判据能挡住；
+/// 两道判据各有用例单独盯住，删任意一道都有红。
 #[test]
 fn intervening_passthrough_key_disarms() {
     let coord = Coordinator::new_headless(cfg_smart(), Some(&data_dir()));
@@ -634,9 +610,8 @@ fn intervening_passthrough_key_disarms() {
         "press1 应出中文句号，实际: {:?}",
         a1
     );
-    // 数字键透传（不经服务端出字），缓冲仍为空。这一按的产物必须断言：「缓冲不留痕」是本用例
-    // 区别于上面三条的**唯一**前提，也是判据 2 在桌面侧唯一的独立哨兵。哪天数字键进了缓冲
-    // （空码补全、方案把数字当码元……），本条会靠判据 1 继续绿，判据 2 从此零覆盖零告警。
+    // 数字键透传，缓冲仍为空。「缓冲不留痕」是本用例的唯一前提：哪天数字键进了缓冲，
+    // 本条会靠判据 1 继续绿，判据 2 就再无覆盖。
     let ad = press_policed(&coord, VK_1, '。' as u16);
     assert!(
         matches!(ad, KeyAction::PassThrough | KeyAction::NotHandled),
@@ -652,12 +627,10 @@ fn intervening_passthrough_key_disarms() {
     );
 }
 
-/// 同一场景，**移动端入口**（`wind-mobile` 的 `MobileCore::key_down` 直接调内层
+/// 同一场景，移动端入口（`wind-mobile` 的 `MobileCore::key_down` 直接调内层
 /// `Coordinator::handle_key_event`，见 `crates/wind-mobile/src/lib.rs`）。
 ///
-/// 那条路不经 bridge 出口，也就拿不到「非同键按键解除武装」那道判据 ⇒ press2 判定里那条
-/// 「press1 之后又打了编码」的前置条件在移动端是**唯一**防线。本用例因此刻意用非 policed
-/// 的 `press`：两个宿主族各有一条独立可观测的用例，删掉任一道判据都有红。
+/// 这条路不经 bridge 出口，「press1 之后又打了编码」是唯一防线，故刻意用非 policed 的 `press`。
 #[test]
 fn intervening_letters_do_not_trigger_press2_mobile_entry() {
     if !has_data() {
@@ -681,12 +654,9 @@ fn intervening_letters_do_not_trigger_press2_mobile_entry() {
     );
 }
 
-/// 小键盘标点（英文模式 + 全角，键经 `full_width_source_char` 吃下）的 press2 不得被
-/// 「非同键按键解除武装」那道判据误伤。
-///
-/// `punct_char` 只认主键盘那 21 个键，小键盘 `.`（VK_DECIMAL）在它那里是 `None`——若出口
-/// 判据只问 `punct_char`，press1 那一按会把自己刚武装的状态当成「别的键」立刻解除，press2
-/// 永远不来，且全程零日志。
+/// 小键盘标点（英文模式 + 全角，经 `full_width_source_char` 吃下）的 press2 不得被
+/// 「非同键按键解除武装」误伤：`punct_char` 不认小键盘 `.`（VK_DECIMAL），出口判据若只问它，
+/// press1 会把自己刚武装的状态立刻解除。
 #[test]
 fn numpad_punct_press2_survives_the_disarm_guard() {
     const VK_DECIMAL: u32 = 0x6E;
@@ -711,13 +681,10 @@ fn numpad_punct_press2_survives_the_disarm_guard() {
 
 // ── 英文半角：中间输入被 DLL 直接透传，服务端靠 toggles 位得知 ─────────────────────
 //
-// 英文输入模式 + 半角下 TSF 只吃标点键（`_IsCustomEnglishPunctKey` → `IsPunctuationKey`，
-// 11 个 OEM 键），中间打的字母**不产生按键事件**；英文模式又没有编码缓冲。于是另外两道
-// 判据（`smart_symbol_press2` 的「缓冲非空」、出口的「非同键按键」）在这条路上同时失明，
-// `prev_char` 读不回的宿主里表现为：`.` → 快打 `abc` → 再按 `.` ⇒ `c` 被换成 `。`。
-//
-// 补法是让 DLL 如实上报「上一次按键送达之后有键被透传」（`TOGGLE_PASSTHROUGH_KEY`，搭
-// `toggles` 的空闲位，不动 18 字节的 KeyPayload 布局）。服务端只在这一位为真时解除武装。
+// 英文模式 + 半角下 TSF 只吃标点键（`_IsCustomEnglishPunctKey` → `IsPunctuationKey`），中间的
+// 字母不产生按键事件，英文模式又没有编码缓冲，前两道判据同时失明：`.` → 快打 `abc` → `.`
+// 会把 `c` 换成 `。`。DLL 用 `toggles` 的空闲位 `TOGGLE_PASSTHROUGH_KEY` 上报「上次按键之后
+// 有键被透传」（不动 KeyPayload 布局），服务端只在这一位为真时解除武装。
 
 /// C++ `TOGGLE_PASSTHROUGH_KEY` 的值。刻意写字面量而不是引常量——引了就会跟着一起漂，
 /// 本组用例便再也证明不了「服务端读的确实是 DLL 写的那一位」。
@@ -764,10 +731,8 @@ fn english_mode_passthrough_flag_disarms_press2() {
     );
 }
 
-/// 对照：同一时序、这一位为 0（没有透传，或旧版 DLL 压根不报）⇒ press2 **必须照常触发**。
-///
-/// 这条是「不影响正常流程」的守卫：新判据若写成恒真（比如误把别的位也算进去、或忘了判位
-/// 直接解除），本条立刻红。旧 DLL + 新 core 的混搭也由它代表——不置位即原行为。
+/// 对照：同一时序、这一位为 0（没有透传或旧版 DLL 不报）⇒ press2 必须照常触发。
+/// 新判据写成恒真时本条立刻红。
 #[test]
 fn english_mode_without_passthrough_flag_still_replaces() {
     let coord = Coordinator::new_headless(cfg_en_mode(), Some(&data_dir()));
@@ -803,11 +768,9 @@ fn passthrough_flag_does_not_disturb_capslock_bit() {
     );
 }
 
-/// keyup 带着这一位不得解除武装 —— 从服务端这侧钉住 C++「只在 keydown 那一发消费」的设计。
-///
-/// 补这条的由来：判据里 `data.event_type == EVENT_KEY_DOWN` 原本没有任何用例盯着（上面三条
-/// 全用 keydown，删掉它照样全绿）。而 toggle 键（Shift/Ctrl/CapsLock）的 keyup **会**发到
-/// 服务端，若那一发也消费该位，「中间按过 Shift」就会把事实吃掉，press2 又能误删一次。
+/// keyup 带着这一位不得解除武装——钉住 C++「只在 keydown 那一发消费」的设计。
+/// toggle 键（Shift/Ctrl/CapsLock）的 keyup 会发到服务端，若也消费该位，「中间按过 Shift」
+/// 就会被吃掉，press2 又能误删一次。
 #[test]
 fn passthrough_flag_on_keyup_does_not_disarm() {
     let coord = Coordinator::new_headless(cfg_en_mode(), Some(&data_dir()));

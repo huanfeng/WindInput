@@ -27,15 +27,11 @@ fn texts(e: &EnglishEngine, input: &str) -> Vec<String> {
         .collect()
 }
 
-/// ★★ 撇号词的编码在词库之间不统一，两种方案都得能打出来。
+/// 撇号词的编码在词库之间不统一，两种方案都得能打出来。
 ///
-/// 出厂英文词库**保留**撇号（`o'clock` 的 code 就是 `o'clock`，57 条如此），而用户
-/// 自制/第三方词库常把它**去掉**（实测靶机那份 3.8 MB 词库里是 `o'clock → oclock`）。
-///
-/// 用户打 `o'clock` 时脑子里想的是那个词，不该被要求先知道自己这份词库是哪种编码。
-/// 只查原串的话，去撇号那种词库下从第 4 个键（`o'cl`）起就是零候选——这条护栏就是
-/// 那次实测反馈的固化。**出厂词库表达不了这个场景**（它只有保留撇号那一种），
-/// 所以必须在这里用自造词库测。
+/// 出厂英文词库保留撇号（`o'clock` 的 code 就是 `o'clock`），用户自制/第三方词库常把它去掉
+/// （`o'clock → oclock`）；只查原串的话，去撇号的词库下从 `o'cl` 起就是零候选。
+/// 出厂词库表达不了这个场景，所以必须用自造词库测。
 #[test]
 fn apostrophe_word_found_under_both_encoding_schemes() {
     // 方案一：code 保留撇号（出厂英文词库的形态）
@@ -62,13 +58,10 @@ fn stripped_query_does_not_duplicate() {
     );
 }
 
-/// ★★ 剥离查询不得把**普通单词的前缀补全**灌进来。
+/// 剥离查询不得把普通单词的前缀补全灌进来。
 ///
-/// 真机反馈（本组用例的由来）：开着词组分词打 `p'o`，候选窗整屏是 pocket / pod / poem
-/// 一类与分词符毫无关系的单词——它们由剥离串 `po` 的前缀匹配召回，按词库权重铺满
-/// `max_candidates`，真正被请求的词组一条都挤不进来。
-///
-/// 这些词**不打分词符时本来就查得到**，打了还出它们没有任何新增信息。
+/// 打 `p'o` 时剥离串 `po` 的前缀匹配会召回 pocket / pod / poem 一类单词，按权重铺满
+/// `max_candidates`，挤掉真正被请求的词组；这些词不打分词符本来就查得到。
 #[test]
 fn stripped_query_drops_plain_word_completions() {
     let e = engine(&[
@@ -87,37 +80,31 @@ fn stripped_query_drops_plain_word_completions() {
     assert!(plain.contains(&"pocket".to_string()) && plain.len() == 4);
 }
 
-/// ★ 但剥离命中的**多词条目**必须留下：分段路径够不着它们。
+/// 但剥离命中的多词条目必须留下：分段路径够不着它们。
 ///
-/// `macOS Tahoe` 的 text 里 `macOS` 是**一个**词，`mac'os` 的第二段 `os` 无词可配，
-/// 分段路径恒空；它只能靠剥离串 `macos` 前缀命中拼接式编码。把剥离查询整个关掉、
-/// 或只保留撇号词，这一族就没了。
+/// `macOS Tahoe` 的 text 里 `macOS` 是一个词，`mac'os` 的第二段 `os` 无词可配，分段路径恒空，
+/// 只能靠剥离串 `macos` 前缀命中拼接式编码。
 #[test]
 fn stripped_query_keeps_multi_word_hits() {
     let e = engine(&[("macos", "macOS Tahoe", 9)]);
     assert_eq!(texts(&e, "mac'os"), vec!["macOS Tahoe"]);
 }
 
-/// ★★ 分段路径与剥离路径撞同一条 text 时只出一条。
+/// 分段路径与剥离路径撞同一条 text 时只出一条。
 ///
-/// `mac'os`：`Mac OS X`（code `macosx`）既被分段路径召回（段 `mac` / `os` 各配上一个
-/// 词），又被剥离串 `macos` 前缀命中。旧注释断言「两侧重复可以忽略」——那是在剥离查询
-/// 加进来之前写的，两路一碰就不成立了。
-///
-/// ⚠️ 判据只能落在**引擎层**：协调器那道按 text 的通用去重会在用户端接住重复，端到端
-/// 断言（连按整表）实测恒绿。这里要挡的是重复白占 `truncate(max_candidates)` 的名额——
-/// 挤掉的那条词组，协调器再去重也变不回来。
+/// `mac'os`：`Mac OS X`（code `macosx`）既被分段路径召回，又被剥离串 `macos` 前缀命中。
+/// 判据只能落在引擎层：协调器按 text 的通用去重会在用户端接住重复，端到端断言恒绿；
+/// 这里挡的是重复白占 `truncate(max_candidates)` 的名额，被挤掉的词组协调器去重也变不回来。
 #[test]
 fn phrase_and_stripped_hits_are_deduped() {
     let e = engine(&[("macosx", "Mac OS X", 999)]);
     assert_eq!(texts(&e, "mac'os"), vec!["Mac OS X"]);
 }
 
-/// ★ 同权重时分段候选排在剥离候选**之前**。
+/// 同权重时分段候选排在剥离候选之前。
 ///
-/// 按下分词符就是在表达「我要按段找词组」，那条路的结果理应压过「把分词符当没打过」
-/// 的剥离结果。词库里 weight 相同的条目成片存在（出厂词组大量 weight = 0），这个次序
-/// 在实际候选窗里说了算。两条 weight 必须**相等**，本用例才测得到顺序本身。
+/// 按下分词符就是在表达「我要按段找词组」。词库里同 weight 条目成片存在（出厂词组大量 weight = 0），
+/// 这个次序在实际候选窗里说了算。两条 weight 必须相等才测得到顺序本身。
 #[test]
 fn phrase_candidates_come_before_stripped_ones() {
     let e = engine(&[
@@ -129,8 +116,7 @@ fn phrase_candidates_come_before_stripped_ones() {
     assert_eq!(texts(&e, "mac'os"), vec!["Mac OS X", "macOS Tahoe"]);
 }
 
-/// ★ 反向对照：不含分词符时**不做**剥离查询，行为逐字节不变。
-///
+/// 反向对照：不含分词符时不做剥离查询，行为逐字节不变。
 /// 没有这条，「恒查两次」与「只在含分词符时查两次」都能过上面几条。
 #[test]
 fn plain_input_does_not_trigger_stripped_query() {
@@ -142,27 +128,20 @@ fn plain_input_does_not_trigger_stripped_query() {
     assert_eq!(got.len(), 2, "不含分词符时不该有额外查询，实际: {got:?}");
 }
 
-/// ★ 词组分词关着时，那张索引一个字节都不许建。
+/// 词组分词关着时，那张索引一个字节都不许建（大词库下它是进程 Private 的最大单块）。
 ///
-/// 真机上这张表 **12.7 MB**（18 万条用户英文词组），是进程 Private 的最大单块。
-/// 它存不存在只取决于 `schema.english.phrase_seg || input.temp_english.phrase_seg`
-/// ——两处**都**关才不建（全局 OR，只关一处无效，2026-09-22 我就为此白验了一轮）。
+/// 它存不存在取决于 `schema.english.phrase_seg || input.temp_english.phrase_seg`，两处都关才不建。
+/// 三个层次各断言一次：
 ///
-/// 这条守的是「关着等于不付钱」这个承诺，三个层次各断言一次：
+/// 1. 装配期：`with_phrase_seg(None)` 之后索引不存在。
+/// 2. `convert` 整条路不把它勾出来——用户真正走的入口。
+/// 3. `phrase_candidates` 自己早退。
 ///
-/// 1. **装配期**：`with_phrase_seg(None)` 之后索引不存在。
-/// 2. **`convert`** 整条路不把它勾出来——这是用户真正走的入口。
-/// 3. **`phrase_candidates`** 自己早退。
+/// 第 3 条不能省：`convert` 外面还有一道 `if let Some(sep) = self.seg_sep`，只测 `convert` 时
+/// 第二道闸破了照样绿；而 `LazyPhraseIndex::get` 自带懒建，在早退之前多调一次索引就静默回来了。
 ///
-/// 第 3 条不能省，虽然 2 看着已经覆盖它：`convert` 外面还有一道
-/// `if let Some(sep) = self.seg_sep` 挡着，只测 `convert` 的话第二道闸破了也照样绿
-/// （实测如此）。而 `LazyPhraseIndex::get` 自带懒建，谁在 `phrase_candidates` 的早退
-/// 之前多调它一次，12.7 MB 就静默回来了——那才是会被改坏的地方。
-///
-/// ⚠️ **第 1 条守不住「`with_phrase_seg` 里那道 `if sep.is_some()`」**。把它改成无条件
-/// `prewarm`，本用例仍会绿：`prewarm` 是后台线程，断言跑到时它多半还没建完。要真守住
-/// 得让 `prewarm` 可 join，那是给测试改生产接口，与这一行的收益不相称。第 1 条实际
-/// 断言的是「装配完成的那一刻索引不在」，仅此而已。
+/// 第 1 条守不住 `with_phrase_seg` 里那道 `if sep.is_some()`：改成无条件 `prewarm` 仍会绿
+/// （后台线程，断言时多半还没建完）。要守住得让 `prewarm` 可 join，收益不相称。
 #[test]
 fn a_disabled_feature_never_builds_the_index() {
     let mut d = CodetableDict::empty();
@@ -189,11 +168,11 @@ fn a_disabled_feature_never_builds_the_index() {
     );
 }
 
-/// ★ 端到端：真 wdat 词库 + 缓存目录 + **真热摘**（`set_dict_enabled` →
-/// `unregister_layer`）。摘掉扩展库后换用另一份落盘文件，且不再召回被摘库的词组。
+/// 端到端：真 wdat 词库 + 缓存目录 + 真热摘（`set_dict_enabled` → `unregister_layer`）。
+/// 摘掉扩展库后换用另一份落盘文件，且不再召回被摘库的词组。
 ///
-/// `tests/english_phrase_index.rs` 走 `EngineManager`，缓存根是进程级 `CACHE_DIR`、测试
-/// 改不了，也就断言不了「换了哪份文件」；这里用引擎的缓存目录注入口补上这一半。
+/// `tests/english_phrase_index.rs` 走 `EngineManager`，缓存根是进程级 `CACHE_DIR`、断言不了
+/// 「换了哪份文件」；这里用引擎的缓存目录注入口补上这一半。
 #[test]
 fn hot_unplugging_a_dictionary_switches_to_another_cache_file() {
     let dir = std::env::temp_dir().join(format!("wind_en_unplug_{}", std::process::id()));

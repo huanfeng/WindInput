@@ -10,15 +10,12 @@ fn empty_engine() -> PinyinEngine {
     )
 }
 
-/// 把补全召回门槛设回旧出厂值 2 / 3 的配置。
+/// 把补全召回门槛设回 2 / 3 的配置。
 ///
-/// 出厂 `completion_min_syllables` 现为 4（对齐 librime/fcitx5），语义是「输入不足
-/// 4 个音节时上限收紧到 `started` 本身，不预测用户没打的内容」。用 2~3 音节输入验证
-/// **排序 / 上浮**的用例因此会在召回层就拿不到样本，断言以「候选缺失」失败，而要验
-/// 的逻辑一次都没执行到。
-///
-/// ⇒ 凡是「已召回之后谁排前面」的用例都该用本函数，把门槛这个变量从用例里摘掉。
-/// 门槛自身的出厂行为由 `wind-coordinator` 的 `pinyin_completion_recall_gate` 守。
+/// 出厂 `completion_min_syllables` 为 4：输入不足 4 个音节时上限收紧到 `started` 本身。用 2~3
+/// 音节输入验证排序 / 上浮的用例会在召回层就拿不到样本，要验的逻辑一次都没执行到。凡是
+/// 「已召回之后谁排前面」的用例都该用本函数；门槛自身由 `wind-coordinator` 的
+/// `pinyin_completion_recall_gate` 守。
 fn relaxed_completion_config() -> Config {
     Config {
         completion_min_syllables: 2,
@@ -74,10 +71,10 @@ fn engine_with_words(words: &[(&str, &str)]) -> PinyinEngine {
 
 // ── ü 拼写归一化（`xv` → `xu`、`nue` → `nve`）。规则与安全性论证见 `spelling` 模块。──
 
-/// jqxy 后的 `v` 打通到词典查询：这是本特性的主诉求（`xv` 原本空码）。
+/// jqxy 后的 `v` 打通到词典查询（`xv` 召回 `xu` 的词）。
 ///
-/// ⚠️ 断言必须落在**召回结果**上而不是 `normalize_u_umlaut` 的返回值——后者在
-/// `spelling` 的单测里已经验过，这里要证的是归一化确实接在了 `convert` 的链路上。
+/// 断言落在召回结果上而不是 `normalize_u_umlaut` 的返回值：后者在 `spelling` 单测里已验过，
+/// 这里要证归一化确实接在了 `convert` 的链路上。
 #[test]
 fn umlaut_v_after_jqxy_recalls_u_words() {
     let e = engine_with_words(&[("xu", "需"), ("ju", "居"), ("qun", "群"), ("yuan", "元")]);
@@ -124,7 +121,7 @@ fn umlaut_keeps_nl_v_spelling_intact() {
     );
 }
 
-/// 归一化是**等长**替换 ⇒ 编码栏与 `consumed_length` 不得错位。
+/// 归一化是等长替换 ⇒ 编码栏与 `consumed_length` 不得错位。
 /// 用户打 `xv` 看到的是归一化形态 `xu`（与主流输入法一致）。
 #[test]
 fn umlaut_normalization_preserves_preedit_length() {
@@ -245,7 +242,7 @@ fn shuangpin_drops_correction() {
     assert!(b.fuzzy_config.correction.is_empty());
 }
 
-/// ⚠️ 双拼下 `v` 是**布局键**（小鹤 `v` = zh 声母），归一化绝不能触及。
+/// 双拼下 `v` 是布局键（小鹤 `v` = zh 声母），归一化绝不能触及。
 /// 这条守的是 `convert_with_opts` 与 `normalize_gate_input` 两处的 `shuangpin` 短路。
 #[test]
 fn umlaut_normalization_never_touches_shuangpin() {
@@ -393,13 +390,11 @@ fn store_layer_words_appear_in_candidates() {
     );
 }
 
-/// 同文合并**不得抹掉来源归属**。
+/// 同文合并不得抹掉来源归属。
 ///
-/// 右键删除按 `is_user_dict`/`is_temp_dict` 选表、按码拼 key，`redb` 的 `remove` 对不
-/// 存在的 key 静默成功——标记盖错的代价不是报错而是「点多少次都无作用」。
-/// 2026-09-03 用户实测：自动造词写进**临时**层的「再也不好」与整句层同文，合并时被
-/// 无条件盖成 `is_user_dict=true`，删除跑去 `user_words` 删了个空。
-///（此处用同文的系统词条代替整句候选，对合并分支而言二者等价。）
+/// 右键删除按 `is_user_dict`/`is_temp_dict` 选表、按码拼 key，`redb` 的 `remove` 对不存在的
+/// key 静默成功——临时层的词与整句层同文时若被盖成 `is_user_dict=true`，删除就点多少次都无作用。
+/// （此处用同文的系统词条代替整句候选，对合并分支而言二者等价。）
 #[test]
 fn merged_store_candidate_keeps_source_flags() {
     let store = tmp_store("merge_flags");
@@ -434,7 +429,7 @@ fn merged_store_candidate_keeps_source_flags() {
     );
 }
 
-/// 存储码 ≠ 候选码时（用户词经前缀补全命中），`store_code` 必须给出**记录**的那个码。
+/// 存储码 ≠ 候选码时（用户词经前缀补全命中），`store_code` 必须给出记录的那个码。
 /// `code` 字段仍归已有候选（边界语义，见合并分支注释），故删除只能靠本字段。
 #[test]
 fn merged_store_candidate_carries_real_store_code() {
@@ -503,12 +498,11 @@ fn store_word_prefix_marks_partial_consumption() {
     );
 }
 
-// ── 模糊音召回用户/临时词（t215 / A2-44）。
+// ── 模糊音召回用户/临时词。
 //
-// 用户词落库的是**规范读音码**（模糊命中造词走 `learn_code`，见 `pinyin_learn_code`），
-// 而 step 6 此前只拿用户实际敲的码去查 store —— 系统词库那条路有 `lookup_with_fuzzy`
-// 展开，用户词这条路没有，于是开了 c=ch 后 `chaijiuduolian` 打不出自己加的
-// 「菜就多练 / caijiuduolian」，多打几遍（学进去的仍是 `caijiuduolian`）也没用。
+// 用户词落库的是规范读音码（模糊命中造词走 `learn_code`，见 `pinyin_learn_code`），
+// step 6 查 store 时须和系统词库的 `lookup_with_fuzzy` 一样展开模糊变体：开了 c=ch 后
+// `chaijiuduolian` 要能打出自己加的「菜就多练 / caijiuduolian」。
 
 /// 挂上只含给定用户词的 store 层，模糊音按 `fz` 配置。系统词典为空，
 /// 故候选只可能来自用户层。
@@ -580,7 +574,7 @@ fn fuzzy_input_recalls_user_word_stored_under_canonical_code() {
     );
 }
 
-/// step 6 的模糊变体同样按所打码的**全部**切分展开：`jinan` 的 maximum_match 是 `ji|nan`，
+/// step 6 的模糊变体同样按所打码的全部切分展开：`jinan` 的 maximum_match 是 `ji|nan`，
 /// 用户词「静安」在 `jin|an → jing|an` 上。记录边界与变体边界同域，对不上的不收：只开
 /// an=ang 时 `xi|an|fa → xi|ang|fa` 拼出的 `xiangfa` 不该借来 `xiang|fa` 的「想法」。
 /// 关掉整句：那一路另有用户词模糊节点，会以整句身份先占住同文，不是本测试要钉的。
@@ -803,7 +797,6 @@ fn exact_user_word_wins_over_fuzzy_duplicate() {
 
 /// 简拼合并同 step 6 的守卫：同层同文两条记录（所打码精确那条 + 模糊键那条），模糊那条
 /// 后到时不得改写存储码——否则右键删除删掉的是它，用户指向的精确记录原样留着。
-///
 /// n=l 下打 `lh`：`lihao` 的简拼键就是 `lh`（0 处改动），`nihao` 经变体键 `nh` 捞回（1 处）。
 #[test]
 fn abbrev_fuzzy_duplicate_does_not_steal_store_code() {
@@ -824,7 +817,7 @@ fn abbrev_fuzzy_duplicate_does_not_steal_store_code() {
     );
 }
 
-/// 同上，走简拼**前缀回退**（`recall_abbrev_prefix`）：`lhx` 整串无产出，退到切点 `lh`，
+/// 同上，走简拼前缀回退（`recall_abbrev_prefix`）：`lhx` 整串无产出，退到切点 `lh`，
 /// 尾部 `x` 留作残码。两条同文记录在那里合并，模糊那条同样不得改写存储码。
 #[test]
 fn abbrev_prefix_fallback_fuzzy_duplicate_does_not_steal_store_code() {
@@ -873,9 +866,8 @@ fn fuzzy_off_user_word_recall_unchanged() {
 
 // ── 整句建图 S2 的用户词节点同样走模糊（`lattice::add_store_nodes`）。
 //
-// 记录存的是规范码 + 规范码坐标下的边界；整句按所打码的跨度点查，翘舌打法
-// `chaijiu` 撞不上 `caijiu` ⇒ 整句里永远认不出自造的「菜就」，只能靠 step 6 的
-// 子短语候选一段段选。系统词节点在 `build` 里早就做了模糊，用户词节点是缺的那一半。
+// 记录存的是规范码 + 规范码坐标下的边界；整句按所打码的跨度点查，不展开模糊的话翘舌打法
+// `chaijiu` 撞不上 `caijiu`，整句里认不出自造的「菜就」。
 
 /// [`engine_with_user_words_fuzzy`] + 打开 `sentence_uses_user_words`（`on`）。
 fn sentence_engine_with_user_words_fuzzy(
@@ -1001,7 +993,7 @@ fn sentence_of(eng: &PinyinEngine, input: &str) -> Option<Candidate> {
 const CAIJIU_DUOLIAN: &[(&str, &str, u64)] =
     &[("caijiu", "菜就", 0b1001), ("duolian", "多练", 0b1001)];
 
-/// 主诉求：c=ch 下翘舌打法，整句由两个用户词拼出，且节点落在**所打码**域
+/// 主诉求：c=ch 下翘舌打法，整句由两个用户词拼出，且节点落在所打码域
 /// （整句的码与消费长度都是用户敲的那串，分步上屏按它走）。
 #[test]
 fn fuzzy_sentence_joins_user_words_under_retroflex_typing() {
@@ -1015,7 +1007,7 @@ fn fuzzy_sentence_joins_user_words_under_retroflex_typing() {
     assert_eq!(s.text, "菜就多练");
 }
 
-/// 记录边界必须**逐音节**对上变体码的切分：`ca|ijiu` 这种边界的记录不进图，
+/// 记录边界必须逐音节对上变体码的切分：`ca|ijiu` 这种边界的记录不进图，
 /// `boundary == 0` 的也不进（同精确路径的约束 2）。
 #[test]
 fn fuzzy_sentence_rejects_user_word_with_mismatched_boundary() {
@@ -1046,9 +1038,7 @@ fn sentence_ranked(eng: &PinyinEngine, input: &str, rank: u8) -> Option<String> 
 }
 
 /// 精确优先：同一跨度上所打码精确命中「柴旧」、模糊命中「菜就」，同权重时整句取精确那条。
-///
-/// 开 N-best（露 2）看第二名：「菜就多练」必须**在图里**且输掉，才证明是罚分压住了它，
-/// 而不是模糊分支根本没把它放进来。
+/// 开 N-best（露 2）看第二名：「菜就多练」必须在图里且输掉，才证明是罚分压住了它。
 #[test]
 fn fuzzy_sentence_prefers_exact_user_word() {
     let mut eng = sentence_engine_with_user_words_fuzzy(
@@ -1075,11 +1065,10 @@ fn fuzzy_sentence_prefers_exact_user_word() {
     );
 }
 
-/// 记录边界对应的**不是**最短 / 最先遍历到的那条切分，模糊打法仍能进整句。
+/// 记录边界对应的不是最短 / 最先遍历到的那条切分，模糊打法仍能进整句。
 ///
-/// f=h 下打 `hanganhanganhangan`：每 6 字母一段有 `han|gan`、`hang|an` 两种切法，三段共
-/// 8 条 6 音节切分。记录「方案方案方案」的边界是 `fang|an` ×3——按图边升序遍历它是**最后**
-/// 一条；先枚举路径再按条数截断（旧实现取前 4 条）会恰好把它截掉。
+/// f=h 下打 `hanganhanganhangan`：每 6 字母有 `han|gan`、`hang|an` 两种切法，三段共 8 条切分；
+/// 记录「方案方案方案」的边界 `fang|an` ×3 按图边升序是最后一条，先枚举路径再按条数截断会把它截掉。
 #[test]
 fn fuzzy_sentence_matches_record_on_non_first_segmentation() {
     let mut code = String::new();
@@ -1109,11 +1098,10 @@ fn fuzzy_sentence_matches_record_on_non_first_segmentation() {
     assert_eq!(s.boundary, want);
 }
 
-/// 模糊用户节点赢下同词同跨度的**系统词模糊节点**时，切分一起换成用户记录对应的那条。
+/// 模糊用户节点赢下同词同跨度的系统词模糊节点时，切分一起换成用户记录对应的那条。
 ///
 /// 系统词「西昂」码 `xiang`，ian=iang 下 `xian` 的系统模糊节点切分取 `any_path`（最少音节）
-/// = `xian` 一个音节——两个字配一个音节。用户记录「西昂」边界 `xi|ang`，对应所打码
-/// `xi|an`；它带用户加成赢下该节点后，整句边界应是 `xi|an|duo|lian`。
+/// = 一个音节；用户记录「西昂」边界 `xi|ang`（所打码 `xi|an`）赢下后，整句边界应是 `xi|an|duo|lian`。
 #[test]
 fn fuzzy_user_node_win_replaces_segmentation() {
     let mut raw = CodetableDict::empty();
@@ -1151,11 +1139,10 @@ fn fuzzy_user_node_win_replaces_segmentation() {
     );
 }
 
-/// 用户**精确**记录赢下同词的系统**模糊**节点时，规范码清回 `None`（所打码即规范码）。
+/// 用户精确记录赢下同词的系统模糊节点时，规范码清回 `None`（所打码即规范码）。
 ///
-/// 系统词「西昂」码 `xiang`，ian=iang 下以 `xian` 模糊命中（带规范码 `xiang`）；用户
-/// 记录「西昂」就登记在所打码 `xian`（xi|an）上、带加成赢下该节点。整句全是精确节点，
-/// 造词码应为 `None`——若还挂着系统节点的 `xiang`，学进去的是 `xiangduolian`。
+/// 系统词「西昂」码 `xiang`，ian=iang 下以 `xian` 模糊命中；用户记录「西昂」就登记在 `xian`
+/// 上、带加成赢下该节点。还挂着系统节点的 `xiang` 的话，学进去的是 `xiangduolian`。
 #[test]
 fn exact_user_node_win_clears_canon() {
     let mut raw = CodetableDict::empty();
@@ -1185,11 +1172,10 @@ fn exact_user_node_win_clears_canon() {
     assert_eq!(s.meta.learn_code, None);
 }
 
-/// 精确分支同理：用户**精确**记录赢下同词同跨度的系统词节点时，切分换成用户记录那条。
+/// 精确分支同理：用户精确记录赢下同词同跨度的系统词节点时，切分换成用户记录那条。
 ///
-/// 系统词「西安」码 `xian` 无边界（`boundary == 0` 降级放行），`build` 取 `any_path`
-/// （最少音节）= `xian` 一个音节；用户记录「西安」边界 `xi|an`，带用户加成赢下该节点后，
-/// 整句边界应是 `xi|an|duo|lian`。
+/// 系统词「西安」码 `xian` 无边界，`build` 取 `any_path` = 一个音节；用户记录「西安」边界
+/// `xi|an` 赢下后，整句边界应是 `xi|an|duo|lian`。
 #[test]
 fn exact_user_node_win_replaces_segmentation() {
     let mut raw = CodetableDict::empty();
@@ -1216,11 +1202,11 @@ fn exact_user_node_win_replaces_segmentation() {
     assert_eq!(s.boundary, 0b1001_0101, "应换成用户记录对应的切分");
 }
 
-// ── 模糊整句的**造词码**（`Candidate::meta.learn_code`）。
+// ── 模糊整句的造词码（`Candidate::meta.learn_code`）。
 //
-// 整句候选的 `code` 是所打码（`consumed_length` / 分步上屏绑在它上面），单段整句上屏时
-// 协调层 `learn_phrase_on_commit` 优先取 `learn_code`、缺省才用 `code`。模糊整句若不带
-// 规范码，学进去的就是 `chaijiuduolian` 这种非规范码，下次同样打法零罚精确命中它。
+// 整句候选的 `code` 是所打码（`consumed_length` / 分步上屏绑在它上面），协调层
+// `learn_phrase_on_commit` 优先取 `learn_code`。模糊整句若不带规范码，学进去的就是
+// `chaijiuduolian` 这种非规范码，下次同样打法零罚精确命中它。
 
 /// 由音节序列算 (码, 边界)。
 fn code_and_mask(syls: &[&str]) -> (String, u64) {
@@ -1289,14 +1275,10 @@ fn fuzzy_sentence_user_word_needs_both_switches() {
 }
 
 /// 构造「带 qing 同音字洪泛的系统词典 + 用户长词」的引擎（复用于长词上浮系列测试）。
-/// `max_extra` 与 `boundary` 都参数化：
 ///
-/// - `boundary` 让同一夹具能造出「带音节真值」与「手输码(=0)」两种用户词。
-///   `boundary == 0` 漏网口修掉后，两者的上浮判据必须**完全一致** —— 这是
-///   `user_long_word_promotion_ignores_missing_boundary` 里对称性断言的抓手。
-/// - `max_extra` 因此成了唯一的门槛来源。旧版本这里写死用 `relaxed_completion_config`
-///   的 3，而「够不够得着」实际是由 `boundary == 0` 那条退化分支决定的，
-///   配置调了也没用。
+/// - `boundary` 让同一夹具能造出「带音节真值」与「手输码(=0)」两种用户词，两者的上浮判据必须
+///   完全一致（`user_long_word_promotion_ignores_missing_boundary` 的对称性断言）。
+/// - `max_extra` 是唯一的门槛来源。
 fn engine_with_qing_flood_and_user_word(
     store_name: &str,
     max_extra: u32,
@@ -1398,28 +1380,15 @@ fn user_long_word_surfaces_at_partial_pinyin() {
     );
 }
 
-/// 【边界守卫】短输入下的两件事：**上浮与否不看词条填没填 boundary**，
-/// 且**上浮不等于夺位**（精确词仍在前）。
+/// 边界守卫：短输入下上浮与否不看词条填没填 boundary，且上浮不等于夺位（精确词仍在前）。
 ///
 /// `max_extra = 3`、用户词 5 音节：
 /// - `qing`(started 1)：召回门 `cap = 1 + 3 = 4 < 5` ⇒ 词根本进不来；
-/// - `qingfeng`(started 2)：`cap = 5` ⇒ 在场，剩 3 ≤ 3 ⇒ 上浮，但被
-///   `promotion_cap` 封在精确词之后。
+/// - `qingfeng`(started 2)：`cap = 5` ⇒ 在场，剩 3 ≤ 3 ⇒ 上浮，但被 `promotion_cap` 封在精确词之后。
 ///
-/// ## 这条用例改过两次，两次都是断言钉错了东西
-///
-/// **第一版**夹具写死 `boundary = 0`，注释直言「走 completed_syls>=3 兜底门槛」，
-/// 用例名承诺「音节太少不上浮」—— 它钉住的其实是**退化分支本身**。同一个词带上
-/// 音节真值后行为就变了（`started >= 2 && 剩 3 ≤ 3` ⇒ 上浮），而用例察觉不到。
-///
-/// **第二版**（`boundary == 0` 漏网口修掉后）为了保住「太少不上浮」这个名字，
-/// 把 `max_extra` 收到 2 —— 于是 `cap = 4 < 5`，用户词被召回门整个删掉，
-/// 四处上浮断言**全部空过**，真正执行的只剩「清风在候选里」。
-///
-/// **根因**：`remaining <= max_extra` 与召回门的 `word_syls <= started + max_extra`
-/// 是同一个不等式，「距词尾太远所以不上浮」在主路径上**不可观测**
-/// （详见 [`should_promote_user_completion`] 的文档）。本用例遂不再承诺那件事，
-/// 改钉真正可观测的两条。
+/// 别承诺「音节太少不上浮」：`remaining <= max_extra` 与召回门的 `word_syls <= started + max_extra`
+/// 是同一个不等式，这件事在主路径上不可观测（见 [`should_promote_user_completion`]）；为保住它
+/// 收紧 `max_extra` 只会让用户词被召回门删掉、上浮断言全部空过。
 #[test]
 fn user_long_word_promotion_ignores_missing_boundary() {
     for (tag, boundary) in [
@@ -1438,7 +1407,7 @@ fn user_long_word_promotion_ignores_missing_boundary() {
             "[{tag}] qing(started 1，cap=4)下 5 音节用户词应被召回门挡在外面"
         );
 
-        // qingfeng：started 2 ⇒ cap = 5 ⇒ 在场。★ 本用例的要害在这一档。
+        // qingfeng：started 2 ⇒ cap = 5 ⇒ 在场。本用例的要害在这一档。
         let r2 = engine.convert("qingfeng", 300).unwrap();
         let pw = r2
             .candidates
@@ -1464,9 +1433,8 @@ fn user_long_word_promotion_ignores_missing_boundary() {
 }
 
 /// 上浮判据单测：距词尾 ≤ `max_extra`（音节数已知）/ 已打 ≥3 音节（算不出）才上浮。
-///
-/// 入参是**算好的音节数**，故 `boundary != 0` 的那批直接传 `count_ones()`；
-/// `boundary == 0` 那批要先过 `effective_boundary` 才有意义，见组内注释。
+/// 入参是算好的音节数，`boundary != 0` 的直接传 `count_ones()`；`boundary == 0` 的要先过
+/// `effective_boundary`，见组内注释。
 #[test]
 fn promote_user_completion_thresholds() {
     let trie = SyllableTrie::new();
@@ -1500,12 +1468,10 @@ fn promote_user_completion_thresholds() {
         !should_promote_user_completion(1, true, b5.count_ones(), 2),
         "1 完整音节 + 残码（started 2, 剩 3 > 2）不上浮"
     );
-    // ===== boundary == 0 的两种处境，判据**不同** =====
+    // ===== boundary == 0 的两种处境，判据不同 =====
 
-    // ① 码切得出音节（手输码用户词的常态）：DAG 现切即得音节数，
-    //    与带边界的同码词**走同一条路**，不再退化。
-    //    这是 `boundary == 0` 漏网口的单元级护栏，端到端那条在
-    //    `tests/pinyin_user_word_no_boundary_tier.rs`。
+    // ① 码切得出音节（手输码用户词的常态）：DAG 现切即得音节数，与带边界的同码词走同一条路。
+    //    端到端护栏在 `tests/pinyin_user_word_no_boundary_tier.rs`。
     let code5 = "qingfengshurufa"; // qing|feng|shu|ru|fa
     assert_eq!(
         effective_boundary(code5, 0, &trie).count_ones(),
@@ -1544,14 +1510,11 @@ fn promote_user_completion_thresholds() {
     }
 }
 
-/// 距词尾上限**跟着配置走**：这是「设置对用户词库长词无效」那条报障的判据。
+/// 距词尾上限跟着配置走：11 音节用户词、`max_extra_syllables = 10`，打 `qingfengshurufa`
+/// （started 5，剩 6）必须上浮。
 ///
-/// 真机现场：11 音节的用户词、`max_extra_syllables = 10`，打 `qingfengshurufa`
-/// （started 5，剩 6）翻遍 16 页找不到，必须打到剩 2 才出现 —— 分界点正是旧的
-/// 硬编码 2。剩 6 在 `max_extra = 10` 下必须上浮。
-///
-/// ⚠️ 不上浮的后果不止「排在后面」：引擎 `sort_by` 紧跟 `truncate`，沉到最底
-/// 在候选数超上限时**等于被丢弃**。所以这条断言守的是可见性，不是次序。
+/// 不上浮不止「排在后面」：引擎 `sort_by` 紧跟 `truncate`，沉到最底在候选数超上限时等于被丢弃，
+/// 所以这条断言守的是可见性，不是次序。
 #[test]
 fn promote_user_completion_follows_max_extra_config() {
     // 11 音节词（count_ones = 11）。
@@ -1789,7 +1752,7 @@ fn pinyin_engine_shuangpin_multisyllable_consumed_length() {
     );
 }
 
-/// `require_full_match` 在双拼下按**击键数**判「吃满整串」：`consumed_length` 已回映射到
+/// `require_full_match` 在双拼下按击键数判「吃满整串」：`consumed_length` 已回映射到
 /// 击键域（`nihc` 的「你好」= 4），基准若取转换后的全拼（`nihao` = 5）会把整串候选
 /// 全部当成半截丢光。直接辅助码对前缀单独解码时依赖这一条（`docs/design/aux-code-direct.md`）。
 #[test]
@@ -1817,11 +1780,8 @@ fn require_full_match_uses_keystroke_length_under_shuangpin() {
 
 /// 构造「小鹤双拼 + 可控开关」的引擎。`entries` 为 `(文本, 空格分隔的音节码, 权重)`。
 ///
-/// ⚠️⚠️ **必须走 rime 源格式，不可用 `merge_single`**：后者造出的条目 `boundary` 恒 0，
-/// 而双拼边界校验遇 0 一律放行 —— 拿它做夹具等于把本组用例要验的那道校验整个关掉。
-/// 首版即栽于此：`nihao` 在开关**关闭**时照样出「你好」（双拼流的命中没被校验拦下），
-/// 于是「支路补上了被校验删掉的候选」这件事根本没被测到，4 条用例全是假前提。
-///
+/// 必须走 rime 源格式，不可用 `merge_single`：后者造出的条目 `boundary` 恒 0，而双拼边界校验
+/// 遇 0 一律放行，等于把本组用例要验的那道校验整个关掉。
 /// `tag` 用于隔离临时文件名——多个用例并发跑，共用一个文件名会互相截断。
 fn sp_fp_engine(tag: &str, entries: &[(&str, &str, i32)], allow: bool) -> PinyinEngine {
     sp_fp_engine_cfg(
@@ -2582,8 +2542,8 @@ fn aux_ui(eng: &PinyinEngine, input: &str, aux: Option<FakeAux>) -> Vec<(String,
 
 /// 不过闸的整串整句在界面序下不抢首选：`qiddn`（漆 + 辅码 d + 雕，与「期待 + 残码 n」
 /// 等价歧义）、`nikeyig`（你 + 课程，课后夹辅码 y）。界面首选与不给辅码表时相同。
-/// 引擎序的首选本就相同：6.5d 把它压到末槽整句（消费 e < n）之下，而界面先按消费数分档，
-/// 它与残码整句同在消费 n 那一档里比权重（`nikeyig` 的「你课程」原本压过「你可以个」）。
+/// 引擎序里 6.5d 把它压到末槽整句（消费 e < n）之下；界面先按消费数分档，它与残码整句同在
+/// 消费 n 那一档里比权重。
 #[test]
 fn ui_gate_blocks_failed_sn() {
     let nikeyig: &[(&str, &str, i32)] = &[
@@ -3198,11 +3158,9 @@ fn store_abbrev_node_win_replaces_segmentation_and_canon() {
     );
 }
 
-/// 全拼降级支路的**单词**候选同样带造词码与来源（与主路径 step 1/3/6 同口径）：
+/// 全拼降级支路的单词候选同样带造词码与来源（与主路径 step 1/3/6 同口径）：
 /// 系统词模糊命中带词典码，用户词模糊命中带记录码、来源标记与存储码。
-///
-/// 此前本支路经 `push` 重建候选时 meta 整个丢掉：分步选「中国」再选别的词，造出来的
-/// 是 `zongguo…` 这种模糊原码（f8707f74 在主路径修过的那一类），用户词还删不掉。
+/// 丢了 meta 的话，分步上屏造出的是 `zongguo…` 这种模糊原码，用户词也删不掉。
 #[test]
 fn full_pinyin_fallback_fuzzy_words_carry_learn_code() {
     let store = tmp_store("sp_fp_fuzzy_words");
@@ -3244,7 +3202,7 @@ fn full_pinyin_fallback_fuzzy_words_carry_learn_code() {
     assert_eq!(c.meta.store_code.as_deref(), Some("caijiu"), "删除按记录码");
 }
 
-/// 降级支路同文去重时，后到的 store 命中虽然整条让位，**来源标记与存储码要并入**
+/// 降级支路同文去重时，后到的 store 命中虽然整条让位，来源标记与存储码要并入
 /// 先占位的那条（同主路径 step 6）：系统词「菜就」先在 ① 占位、用户也收录了它，
 /// 否则右键删除找不到用户那条记录。
 #[test]
@@ -3294,12 +3252,11 @@ fn full_pinyin_fallback_fuzzy_sentence_learn_code() {
     );
 }
 
-/// ★★ 核心用例，同时**锁住支路的位置**。
+/// 核心用例，同时锁住支路的位置。
 ///
-/// 双拼下按全拼打 `nihao`（5 键）应出「你好」。这条之所以是位置的守卫：`nihao` 的双拼
-/// 解释 ni|ha|o 拼起来**与击键同形**，step1 早就精确命中了「你好」，只是随后被边界校验
-/// 删掉。支路若排在校验之前，会因同文查重让位给那条注定被删的候选 ⇒ 最终一条都不剩，
-/// 且现象是「开关像没生效」。
+/// 双拼下按全拼打 `nihao`（5 键）应出「你好」。`nihao` 的双拼解释 ni|ha|o 与击键同形，step1
+/// 会精确命中「你好」、随后被边界校验删掉；支路若排在校验之前，会因同文查重让位给那条注定被删
+/// 的候选，最终一条都不剩，现象是「开关像没生效」。
 #[test]
 fn full_pinyin_recalls_word_that_shuangpin_boundary_check_rejects() {
     let eng = sp_fp_engine(
@@ -3320,7 +3277,7 @@ fn full_pinyin_recalls_word_that_shuangpin_boundary_check_rejects() {
     );
 }
 
-/// 反向对照：开关关闭时行为与改动前完全一致（`nihao` 的正确双拼打法是 `nihc`）。
+/// 反向对照：开关关闭时 `nihao` 不出全拼候选（正确的双拼打法是 `nihc`）。
 #[test]
 fn full_pinyin_off_keeps_shuangpin_only_behavior() {
     let eng = sp_fp_engine("off", &[("你好", "ni hao", 200), ("你", "ni", 100)], false);
@@ -3377,7 +3334,7 @@ fn full_pinyin_branch_does_not_disturb_shuangpin_path() {
     assert_eq!(c.consumed_length, 4, "双拼流的 consumed 仍是键数 4");
 }
 
-/// 两条流都解释得出同一个词时，**留下双拼那条**（不带降级标志、不沉底）。
+/// 两条流都解释得出同一个词时，留下双拼那条（不带降级标志、不沉底）。
 /// `nini`：双拼 n+i / n+i → "nini"，全拼 ni|ni 也是 "nini"，两域同形同码。
 #[test]
 fn shuangpin_candidate_wins_when_both_domains_agree() {
@@ -3391,11 +3348,10 @@ fn shuangpin_candidate_wins_when_both_domains_agree() {
     );
 }
 
-/// 层级：**低置信**全拼候选（前缀补全）沉底，**高置信**（精确整词 + 消费整串）不沉底。
+/// 层级：低置信全拼候选（前缀补全）沉底，高置信（精确整词 + 消费整串）不沉底。
 ///
-/// ⚠️ 这条曾断言「全拼候选一律排在双拼候选之后」，随真机反馈反转 —— `zaijian` 的正解
-/// 「再见」当时被整层压到第 8 位，沉底沉掉的不是噪音而是答案本身。「双拼优先」现由
-/// 同文去重那一层保住（consumed 相同则留双拼那条），不再靠层级键一刀切。
+/// 别改成「全拼候选一律排在双拼候选之后」：`zaijian` 的正解「再见」会被整层压到第 8 位。
+/// 「双拼优先」由同文去重那一层保住（consumed 相同则留双拼那条），不靠层级键一刀切。
 #[test]
 fn full_pinyin_low_confidence_sinks_but_exact_word_does_not() {
     let eng = sp_fp_engine(
@@ -3442,8 +3398,8 @@ fn full_pinyin_low_confidence_sinks_but_exact_word_does_not() {
 
 /// 同文去重取「解释得更多的那条」，而非无条件保留先到者。
 ///
-/// 真机 `zaijian`：双拼流的简拼前缀回退先以 `consumed=4` 放入「再见」，支路随后以
-/// `consumed=7` 完整解释同一个词——若让位给先到者，用户选中后缓冲会凭空剩下 `ian`。
+/// `zaijian`：双拼流的简拼前缀回退先以 `consumed=4` 放入「再见」，支路随后以 `consumed=7`
+/// 完整解释同一个词——若让位给先到者，用户选中后缓冲会凭空剩下 `ian`。
 #[test]
 fn full_pinyin_replaces_partial_duplicate_with_complete_one() {
     let eng = sp_fp_engine("dedup", &[("再见", "zai jian", 2837)], true);
@@ -3465,10 +3421,8 @@ fn full_pinyin_replaces_partial_duplicate_with_complete_one() {
     );
 }
 
-/// 模糊音：支路与双拼流吃同一套 `[schema.pinyin.fuzzy]` 设置。
-///
-/// 首版刻意不做（「降级通道不做二次放大」），被真机反馈否掉——同一个人同一套模糊音配置
-/// 在两条流下表现不一致本身就是缺陷。惩罚由 `lookup_with_fuzzy` 的 `fuzzy_penalized` 施加。
+/// 模糊音：支路与双拼流吃同一套 `[schema.pinyin.fuzzy]` 设置——同一套配置在两条流下表现
+/// 不一致本身就是缺陷。惩罚由 `lookup_with_fuzzy` 的 `fuzzy_penalized` 施加。
 #[test]
 fn full_pinyin_honors_fuzzy_settings() {
     let mut eng = sp_fp_engine("fuzzy", &[("中国", "zhong guo", 9000)], true);
@@ -3483,7 +3437,7 @@ fn full_pinyin_honors_fuzzy_settings() {
     assert!(c.is_fuzzy, "应标记为模糊命中（据此施加权重折扣）");
 }
 
-/// preedit 跟随首选：首选是全拼候选时，编码栏按**全拼**切分显示。
+/// preedit 跟随首选：首选是全拼候选时，编码栏按全拼切分显示。
 /// 词典只留 `nihao`，双拼流一条候选都产不出，支路的「你好」即首选。
 #[test]
 fn engine_exposes_both_preedit_forms() {
@@ -3543,9 +3497,8 @@ fn full_pinyin_composes_sentence() {
 /// 整句让位于精确整词：支路自带一份判据，因为主路径 6.5/6.5b 跑在双拼边界校验之前、
 /// 够不着本支路的候选。
 ///
-/// `nihao` 下词典既有精确整词「你好」(w=200)，Viterbi 又能用「你」+「好」拼出「你好」——
-/// 同文会被查重挡掉。故改用一个**词典没有的**组合：`nihen` → 「你很」由两个单字拼出，
-/// 而 `ni hen` 这个码上另有精确词「妮痕」压着，整句须排在它之后。
+/// `nihao` 下 Viterbi 拼出的「你好」会被同文查重挡掉，故改用词典没有的组合：`nihen` →「你很」
+/// 由两个单字拼出，而 `ni hen` 码上另有精确词「妮痕」压着，整句须排在它之后。
 #[test]
 fn full_pinyin_sentence_yields_to_exact_word() {
     let eng = sp_fp_engine(
@@ -3629,7 +3582,7 @@ fn boundary_compatible_rules() {
     assert!(boundary_compatible(0b101, 0, 5, 5));
 }
 
-/// 双拼分段边界：音节、尾部 partial、**以及无匹配键对回写段**，各开一个段起点。
+/// 双拼分段边界：音节、尾部 partial、以及无匹配键对回写段，各开一个段起点。
 #[test]
 fn sp_boundary_mask_rules() {
     use crate::pinyin::shuangpin::{SpConvertResult, SylSpan};
@@ -3660,7 +3613,7 @@ fn sp_boundary_mask_rules() {
         ..Default::default()
     };
     assert_eq!(sp_boundary_mask(&sp2), 0b101);
-    // 回写段夹在音节**中间**（omni 的 om 占 0..2）：其起点同样是段边界 → {0,2}
+    // 回写段夹在音节中间（omni 的 om 占 0..2）：其起点同样是段边界 → {0,2}
     let sp3 = SpConvertResult {
         syllables: vec![syl("ni", 2, 4)],
         full_pinyin: "omni".into(),
@@ -3671,9 +3624,8 @@ fn sp_boundary_mask_rules() {
         0b101,
         "回写段在中间时其起点也是边界"
     );
-    // 回写段在**尾部**（nihaoya 的 oy+a 占 4..7）→ {0,2,4}。
-    // 位 4 的存在正是关键：它让词典的 ni|hao|ya({0,2,5}) 失配。曾在此弃用为 0
-    // （以为回写段"无从表达"），校验被整个关掉，「你好呀」就从 step4 前缀补全漏网。
+    // 回写段在尾部（nihaoya 的 oy+a 占 4..7）→ {0,2,4}。
+    // 位 4 是关键：它让词典的 ni|hao|ya({0,2,5}) 失配；置 0 等于关掉校验，「你好呀」会从 step4 漏网。
     let sp4 = SpConvertResult {
         syllables: vec![syl("ni", 0, 2), syl("ha", 2, 4)],
         has_partial: true,
@@ -3753,14 +3705,11 @@ fn build_raw_preedit_covers_unmatched_pairs() {
     assert_eq!(build_raw_preedit("", &sp), "");
 }
 
-/// **双拼真值边界校验（本功能的验收点）**：双拼把音节边界定死了，候选的词典边界必须吻合。
+/// 双拼真值边界校验：双拼把音节边界定死了，候选的词典边界必须吻合。
 ///
-/// 真机现象：双拼下打 5 键 `nihao` 出「你好」。那是巧合——双拼解释为 `ni|ha|o`，拼成
-/// `full_pinyin="nihao"` 恰好撞上全拼的 nihao，DAG 再把它重切成 `ni|hao` 查到「你好」。
-/// 而「你好」的正确双拼是 4 键（`nihc`）。
-///
-/// 注意必须用 rime 源构造词典：`merge_single` 造的条目 boundary 恒 0（无信息→放行），
-/// 用它根本测不出校验。
+/// 双拼下打 5 键 `nihao` 被解释为 `ni|ha|o`，拼成 `full_pinyin="nihao"` 恰好撞上全拼，DAG 若重切成
+/// `ni|hao` 就会查到「你好」；而「你好」的正确双拼是 4 键（`nihc`）。
+/// 必须用 rime 源构造词典：`merge_single` 造的条目 boundary 恒 0（无信息→放行），测不出校验。
 #[test]
 fn shuangpin_rejects_mismatched_syllable_split() {
     use crate::pinyin::shuangpin::{Layout, ShuangpinConverter};
@@ -3805,12 +3754,10 @@ fn shuangpin_rejects_mismatched_syllable_split() {
     );
 }
 
-/// 回归（真机报告）：双拼下 `nihao` 选「你」后，剩余 `hao`(3键) 变成空候选。
+/// 双拼下 `nihao` 选「你」后，剩余 `hao`(3键) 不得变成空候选。
 ///
-/// 病灶不在校验本身，而在「查询仍按 DAG 的猜测、校验却按双拼的真值」——两套切分打架：
-/// 双拼解释 `hao` = `ha`+`o`(partial)，而 DAG 把 `full="hao"` 重切成 `[hao]` 只查了
-/// 「好」，随后被真值 {0,2} 拒掉；而双拼真正该查的 `ha`（→「哈」）压根没被查。
-/// 于是 DAG 查来的被拒、双拼该查的没查 → 空。
+/// 查询与校验必须用同一套切分：双拼解释 `hao` = `ha`+`o`(partial)，若查询仍按 DAG 重切的 `[hao]`
+/// 只查「好」，会被真值 {0,2} 拒掉，而双拼该查的 `ha`（→「哈」）又没查。
 #[test]
 fn shuangpin_uses_own_split_for_lookup_not_dag() {
     use crate::pinyin::shuangpin::{Layout, ShuangpinConverter};
@@ -3832,7 +3779,7 @@ fn shuangpin_uses_own_split_for_lookup_not_dag() {
     let eng =
         PinyinEngine::new(Config::default(), dict).with_shuangpin(ShuangpinConverter::new(layout));
 
-    // 3 键 hao → 双拼 ha|o：应按**双拼自己的切分**去查，出「哈」(ha)。
+    // 3 键 hao → 双拼 ha|o：应按双拼自己的切分去查，出「哈」(ha)。
     let r = eng.convert("hao", 20).unwrap();
     let texts: Vec<&String> = r.candidates.iter().map(|c| &c.text).collect();
     assert!(
@@ -3854,15 +3801,11 @@ fn shuangpin_uses_own_split_for_lookup_not_dag() {
     );
 }
 
-/// 含「无匹配键对」时**仍按双拼语义**：取从 0 起连续的音节前缀，断裂处之后不解释。
+/// 含「无匹配键对」时仍按双拼语义：取从 0 起连续的音节前缀，断裂处之后不解释。
 ///
-/// `oy`（o 非声母，拼不出音节）属 convert 注释里的「无效键对」——用户打错了，
-/// 它及其后的内容不该产生候选。曾误把这里当成「整串降级回全拼 DAG」，于是 `nihaoya`
-/// 出了「你好呀」——那与 `nihao`(5键) 不出「你好」自相矛盾：同是双拼下打全拼串，
-/// 一个拒一个收，反倒是**打错一个键对就解锁了全拼**。
-///
-/// 注释里的「简拼」指的是另一半：`nh` 这种 per-串简拼由 AbbrevMatcher 兜底（走 query，
-/// 不依赖 syllables），无需退回 DAG 也照常工作——见 shuangpin_abbrev_still_works。
+/// `oy`（o 非声母，拼不出音节）是用户打错的无效键对，它及其后的内容不该产生候选。别把这里做成
+/// 「整串降级回全拼 DAG」：那样 `nihaoya` 会出「你好呀」，与 `nihao`(5键) 不出「你好」自相矛盾。
+/// `nh` 这种简拼由 AbbrevMatcher 兜底（走 query，不依赖 syllables），见 shuangpin_abbrev_still_works。
 #[test]
 fn shuangpin_keeps_own_semantics_with_unmatched_pair() {
     use crate::pinyin::shuangpin::{Layout, ShuangpinConverter};
@@ -3911,11 +3854,8 @@ fn shuangpin_keeps_own_semantics_with_unmatched_pair() {
     );
 }
 
-/// 无匹配键对**原样回写**进 full_pinyin（不产 SylSpan），输入不被吞——
-/// 这是简拼兜底的前提：AbbrevMatcher 走 `query`（即 full_pinyin），**不看音节切分**，
-/// 故双拼真值切分不影响它。
-///
-/// 这也是「含回写段须退回 DAG」的反证：保住简拼根本不需要退回 DAG。
+/// 无匹配键对原样回写进 full_pinyin（不产 SylSpan），输入不被吞——这是简拼兜底的前提：
+/// AbbrevMatcher 走 `query`（即 full_pinyin），不看音节切分，故保住简拼不需要退回 DAG。
 /// （简拼表只存在于 wdat AbbrevSection，端到端查询由 wind-dict 侧覆盖。）
 #[test]
 fn shuangpin_writeback_keeps_input_intact() {
@@ -4013,19 +3953,11 @@ fn fuzzy_lookup_single_syllable() {
     );
 }
 
-/// 模糊命中受 `×0.5` 折扣，但**不是硬闸门**：词频差距足够大时模糊仍可胜出。
+/// 模糊命中受 `×0.5` 折扣，但不是硬闸门：词频差距足够大时模糊仍可胜出。
 ///
-/// ## ⚠️ 断言方向已随「对齐 librime/fcitx5」反转
-///
-/// 原语义是「精确必须排在模糊之前，即便模糊词词频更高」，靠 `FUZZY_WEIGHT_SCALE=0.01`
-/// 实现——那个取值是为「让精确守住首选位」标定的（汉语同音字词频常差 1~2 个量级，
-/// 折扣必须 < 1/80 才压得住），**不是参考实现的做法**。
-///
-/// 两个参考实现都用 `log(0.5)`：librime `kFuzzySpellingPenalty`、libime `fuzzyCost`。
-/// 折扣只表达「模糊召回的置信度低一档」，压不压得住由词频差距自己决定 ——
-/// 「是」(1799848) 打 `si` 时排在「四」(22625) 前面，正是这两个实现的行为。
-///
-/// 本用例改为守**折扣本身存在且按音节累乘**，那才是与实现无关的不变量。
+/// 对齐 librime `kFuzzySpellingPenalty` / libime `fuzzyCost`（都是 `log(0.5)`）：折扣只表达
+/// 「模糊召回的置信度低一档」，压不压得住由词频差距决定——「是」(1799848) 打 `si` 时排在
+/// 「四」(22625) 前面。本用例守折扣本身存在且按音节累乘。
 #[test]
 fn fuzzy_hit_is_discounted_but_not_gated() {
     let mut raw = CodetableDict::empty();
@@ -4058,9 +3990,8 @@ fn fuzzy_hit_is_discounted_but_not_gated() {
     assert_eq!(r.candidates[0].text, "是", "实际: {texts:?}");
 }
 
-/// 配对：**词频相当时折扣说了算**，精确胜出。
-///
-/// 与上一条合看才说明 0.5 是个真折扣：少了这条，「模糊完全不打折」也能让上一条通过。
+/// 配对：词频相当时折扣说了算，精确胜出。
+/// 少了这条，「模糊完全不打折」也能让上一条通过。
 #[test]
 fn fuzzy_loses_to_exact_at_equal_weight() {
     let mut raw = CodetableDict::empty();
@@ -4080,16 +4011,11 @@ fn fuzzy_loses_to_exact_at_equal_weight() {
     );
 }
 
-/// 回归守卫：**用户打出来的那一端本身不是合法音节**时，模糊音必须仍然生效。
+/// 用户打出来的那一端本身不是合法音节时，模糊音必须仍然生效。
 ///
-/// `tin` 不在标准音节表里（普通话只有 `ting`）。模糊变体是在切分**之后**逐音节展开的，
-/// 于是修复前 `tinzhi` 的 DAG 最远只走到 `ti`、`nzhi` 全成残码，逐音节的模糊展开
-/// 一次都轮不到执行 —— 候选里**压根没有**「停止」，不是排在后面。
-///
-/// ⚠️ 此前的模糊音用例全部落在「打的那端也是合法音节」上（`si`→`shi`、`beijin`→`beijing`
-/// 的 `jin`），恰好整片绕开了这个缺口。**测试输入的形态本身就是被测条件的一部分**
-/// ——同一条教训在模糊音上已是第二次（上一次是「单测用迷你词典，真实词库前面堵着
-/// 230 条前缀补全」）。
+/// `tin` 不在标准音节表里，模糊变体又是在切分之后逐音节展开的；若切分不认 `tin`，`tinzhi` 的
+/// DAG 只走到 `ti`、`nzhi` 全成残码，候选里压根没有「停止」。测试输入的形态是被测条件的一部分：
+/// 只用「打的那端也是合法音节」的例子（`si`→`shi`）会整片绕开这个缺口。
 #[test]
 fn fuzzy_hits_when_typed_spelling_is_not_a_valid_syllable() {
     let mut raw = CodetableDict::empty();
@@ -4151,16 +4077,11 @@ fn fuzzy_spelling_layer_is_gated_by_config() {
     );
 }
 
-/// 层级 TDD：精确词应优先于高频前缀补全词。词典 "sikao"→"思考"(weight 100,精确) 与
-/// "sikaozhe"→"思考者"(weight 9000,补全词，code 比输入长)。输入 "sikao" 时「思考」
-/// (精确,code==输入) 必须排在「思考者」(前缀补全)之前——即便后者词频高得多。
-/// 对齐 Go Exact>>Partial。
+/// 层级：精确词应优先于高频前缀补全词。"sikao"→"思考"(100,精确) 与 "sikaozhe"→"思考者"
+/// (9000,补全)：输入 "sikao" 时「思考」必须排在「思考者」之前，即便后者词频高得多。
 ///
-/// ⚠️ **本例刻意用 2 音节输入**。原版用 `si` → 期望「思考」作为前缀补全出现，
-/// 该场景已被 6.3 音节数闸门（[`STRICT_SYLLABLE_MATCH_MAX`]）关掉：单音节输入下
-/// 前缀补全整体不产出，`si` 不再出「思考」，正如 `dian` 不再出「电话」。
-/// 要验证的层级序本身没变，只能移到不进严格档的输入长度上（used=2）。
-/// 单音节侧的新语义由 `single_syllable_drops_longer_completions` 守卫。
+/// 刻意用 2 音节输入：单音节输入下 6.3 音节数闸门（[`STRICT_SYLLABLE_MATCH_MAX`]）让前缀补全
+/// 整体不产出，那一侧由 `single_syllable_drops_longer_completions` 守卫。
 #[test]
 fn exact_ranks_above_prefix_completion() {
     let mut raw = CodetableDict::empty();
@@ -4190,13 +4111,10 @@ fn exact_ranks_above_prefix_completion() {
     );
 }
 
-/// 6.3 音节数闸门：**输入只表达 1 个音节时，音节数更多的前缀补全一律不产出**。
+/// 6.3 音节数闸门：输入只表达 1 个音节时，音节数更多的前缀补全一律不产出。
 ///
-/// 这是上面那条测试原场景的新语义版本，也是本闸门的核心断言：`si` 只出单字「四」，
-/// 不出 2 音节的「思考」——对齐主流拼音输入法（`dian` 不出「电话」）。
-///
-/// ⚠️ `merge_single` 造的词典 **boundary 恒为 0**（P2b 记录在案），故本例同时覆盖了
-/// `effective_boundary` 的 DAG 兜底路径：「思考」的 2 音节是现切 `si|kao` 得来的。
+/// `si` 只出单字「四」，不出 2 音节的「思考」——对齐主流拼音输入法（`dian` 不出「电话」）。
+/// `merge_single` 造的词典 boundary 恒为 0，故本例同时覆盖 `effective_boundary` 的 DAG 兜底路径。
 #[test]
 fn single_syllable_drops_longer_completions() {
     let mut raw = CodetableDict::empty();
@@ -4222,10 +4140,8 @@ fn single_syllable_drops_longer_completions() {
     );
 }
 
-/// **反向对照**：多打一个字母（`sik`，残码使 used=2）后，同一个补全词必须回来。
-///
-/// 缺了这条，上面那个断言可以靠「把前缀补全整个废掉」来满足 —— 那是另一个更严重的
-/// 回归（`meiy`→「没有」、`nih`→「你好」全灭）。
+/// 反向对照：多打一个字母（`sik`，残码使 used=2）后，同一个补全词必须回来。
+/// 缺了这条，上面那个断言可以靠「把前缀补全整个废掉」来满足（`meiy`→「没有」会全灭）。
 #[test]
 fn trailing_partial_restores_completions() {
     let mut raw = CodetableDict::empty();
@@ -4249,11 +4165,8 @@ fn trailing_partial_restores_completions() {
 
 /// 完整匹配优先于子短语（对齐 Go coverage 分层）：输入完整音节 "nihao" 时，
 /// 全长精确词「拟好」(code==nihao) 即便权重远低于子短语「你」(code=ni)，也应排在「你」之前。
-/// 「你」只覆盖部分输入(ni)，是分段上屏候选(is_partial)，整体降到完整词之后。
-///
-/// 注：此前 `subphrase_not_demoted_below_rare_exact` 断言相反（子词组不降权 → 你 > 拟好），
-/// 那是刻意偏离 Go 的旧设计，正是 baoan→报案 被高频单字埋没的根因。现改为对齐 Go：
-/// `score = exp(词频) + initialQuality + coverage`，完整词(cov=1,iq=4) 恒先于子短语单字(cov=.5,iq=2.5)。
+/// 「你」只覆盖部分输入(ni)，是分段上屏候选(is_partial)，整体降到完整词之后；反过来的话
+/// `baoan`→「报案」会被高频单字埋没。
 #[test]
 fn full_word_ranks_above_subphrase_singlechar() {
     let mut raw = CodetableDict::empty();
@@ -4344,7 +4257,7 @@ fn fuzzy_disabled_no_extra_candidates() {
     );
 }
 
-/// 模糊命中的权重折扣：同一输入下，精确命中恒优先于**同词频**的模糊命中。
+/// 模糊命中的权重折扣：同一输入下，精确命中恒优先于同词频的模糊命中。
 #[test]
 fn fuzzy_penalty_keeps_exact_ahead_at_equal_weight() {
     let mut raw = CodetableDict::empty();
@@ -4366,15 +4279,11 @@ fn fuzzy_penalty_keeps_exact_ahead_at_equal_weight() {
     );
 }
 
-/// **本次修复的回归守卫（原 bug 的直接复现）**：模糊命中不得被大量**前缀补全**挤出候选。
+/// 模糊命中不得被大量前缀补全挤出候选。
 ///
-/// 原实现把 `is_fuzzy` 当 `cmp_match_layers` 的首要键，所有非模糊候选（含码更长的前缀
-/// 补全）无条件排在模糊命中之前。真实词库下 `si` 的前缀补全有 230 条，把「是」顶到第
-/// 231 位，而生产候选上限仅 50~300 —— 模糊音整体失效。
-///
-/// 此处用 40 条 `si*` 前缀补全模拟那堵墙：**上限取 20**（小于补全总数），若模糊命中仍
-/// 被整层压在补全之后，它必然落在截断线外。这正是「迷你词典单测全绿、真机全废」的
-/// 那道缺口——测试数据的**规模**本身就是被测条件的一部分。
+/// 别把 `is_fuzzy` 当 `cmp_match_layers` 的首要键：真实词库下 `si` 的前缀补全有 230 条，会把「是」
+/// 顶到截断线外。此处用 40 条 `si*` 前缀补全模拟那堵墙、上限取 20——测试数据的规模本身就是
+/// 被测条件的一部分，迷你词典测不出来。
 #[test]
 fn fuzzy_hit_survives_a_wall_of_prefix_completions() {
     let mut raw = CodetableDict::empty();
@@ -4400,11 +4309,9 @@ fn fuzzy_hit_survives_a_wall_of_prefix_completions() {
     );
 }
 
-/// 多音节整词的模糊命中（**step1 `lookup_with_fuzzy` 路径**，一直走逐音节 `fuzzy_codes`）：
-/// `beijinsi` → 「北京市」(beijingshi) 需要第 2 音节 in→ing **且** 第 3 音节 s→sh。
-///
-/// 注意本例**测不到 lattice 路径**：词典存有覆盖整串的词条，step1 直接命中。
-/// lattice 的逐音节展开由 `fuzzy_non_initial_initial_via_lattice_sentence` 覆盖。
+/// 多音节整词的模糊命中（step1 `lookup_with_fuzzy` 路径，逐音节 `fuzzy_codes`）：
+/// `beijinsi` → 「北京市」(beijingshi) 需要第 2 音节 in→ing 且第 3 音节 s→sh。
+/// 本例测不到 lattice 路径（step1 直接命中），那一路由 `fuzzy_non_initial_initial_via_lattice_sentence` 覆盖。
 #[test]
 fn fuzzy_hits_non_initial_syllables_via_lookup() {
     let mut raw = CodetableDict::empty();
@@ -4424,14 +4331,11 @@ fn fuzzy_hits_non_initial_syllables_via_lookup() {
     );
 }
 
-/// **lattice 逐音节展开的专项回归守卫**（本次修复的核心路径）。
+/// lattice 逐音节展开的专项守卫。
 ///
-/// 设计要点，缺一条就测不到真东西：
-/// - 用**非首音节的声母**变体（`zou`→`zhou`，第 2 音节）。声母规则是 `starts_with`，
-///   整串调用只能改首音节；而韵母规则是 `find`，第一处匹配常恰好落在非首音节上，
-///   用韵母做判据会让整串调用也「碰巧」通过（`beijin`→`beijing` 正是如此）。
-/// - 词典**不含**覆盖整串的词条，迫使候选只能由 Viterbi 多节点拼接产生，
-///   从而必经 lattice；否则 step1 的 `lookup_with_fuzzy` 会先命中，测不到 lattice。
+/// - 用非首音节的声母变体（`zou`→`zhou`，第 2 音节）：声母规则是 `starts_with`，整串调用只能改
+///   首音节；韵母规则是 `find`，用它做判据会让整串调用也碰巧通过。
+/// - 词典不含覆盖整串的词条，迫使候选只能由 Viterbi 多节点拼接产生，必经 lattice。
 ///
 /// 把 lattice 改回对整串 `code` 求变体，本测试即挂。
 #[test]
@@ -4449,10 +4353,8 @@ fn fuzzy_non_initial_initial_via_lattice_sentence() {
 
     // zhong|zou|ming：词典无覆盖整串的词条 → 只能靠词图拼接
     let r = eng.convert("zhongzouming", 20).unwrap();
-    // **必须断言整句**（`is_sentence`），不能只断言「中州」出现：后者由 step3 的子短语
-    // 查询命中（`partial=true, code=zhongzou`，同样走逐音节 `lookup_with_fuzzy`），
-    // 在旧实现下**照样存在**——拿它做判据测不到 lattice，是一条会永远通过的假测试。
-    // 只有整句「中州明」需要「中州」先作为**词图节点**存在，才必经 lattice 的模糊展开。
+    // 必须断言整句（`is_sentence`），不能只断言「中州」出现：后者也会由 step3 的子短语查询命中，
+    // 测不到 lattice。只有整句「中州明」需要「中州」先作为词图节点存在。
     let dump: Vec<String> = r
         .candidates
         .iter()
@@ -4466,8 +4368,7 @@ fn fuzzy_non_initial_initial_via_lattice_sentence() {
     );
 }
 
-/// 模糊命中的**整句**让位于精确整词：整句带 3e7 基准分，比例折扣压不下来，
-/// 故走 `is_sentence_demoted` 降级。
+/// 模糊命中的整句让位于精确整词（`is_sentence_demoted` 降级）。
 #[test]
 fn fuzzy_sentence_yields_to_exact_word() {
     let mut raw = CodetableDict::empty();
@@ -4491,7 +4392,7 @@ fn fuzzy_sentence_yields_to_exact_word() {
     );
 }
 
-/// 反面：**没有**精确整词竞争时，模糊命中的整句照常居首——这正是模糊音要的效果
+/// 反面：没有精确整词竞争时，模糊命中的整句照常居首——这正是模糊音要的效果
 /// （`zongguo` → 「中国」）。与上一条共用同一判据，二者必须同时成立。
 #[test]
 fn fuzzy_sentence_leads_when_no_exact_word() {
@@ -4558,13 +4459,9 @@ fn shuangpin_store_user_word_appears_in_candidates() {
 // ── use_smart_compose 开关 ──────────────────────────────────────────────────
 
 /// 构造带单字词典的拼音引擎（供整句/Viterbi 相关测试使用）：
-/// 词典含 "ni"→"你"、"hao"→"好"，但无 "nihao"→"你好" 整词。
-/// 任何 "你好" 候选只能来自 Viterbi 整句路径。
-/// ⚠️ 权重取 `cn_dicts` 的真实值（你 492791 / 好 124546），不要随手编：节点打分是
-/// `ln(weight / DICT_TOTAL)`，各类闸门与惩罚常数都在真实权重分布上标定。原值 100 会让
-/// 每个节点落到 -14.7，整句被质量闸门挡下 —— 测出的是另一个世界的行为。
-/// （2026-08-08 之前 `score_node` 对无 unigram 的引擎走 `weight/100_000` 线性回退，
-/// 与真实路径不在同一数轴，编造值因此「碰巧」可用。）
+/// 词典含 "ni"→"你"、"hao"→"好"，但无 "nihao"→"你好" 整词，任何 "你好" 候选只能来自整句路径。
+/// 权重取 `cn_dicts` 的真实值（你 492791 / 好 124546），不要随手编：节点打分是
+/// `ln(weight / DICT_TOTAL)`，闸门与惩罚常数都在真实权重分布上标定，编造的小值会让整句被质量闸门挡下。
 fn engine_for_sentence_tests(config: Config) -> PinyinEngine {
     let mut raw = CodetableDict::empty();
     raw.merge_single("ni".to_string(), "你".to_string(), 492_791, 0);
@@ -4579,16 +4476,11 @@ fn is_viterbi_sentence(c: &Candidate) -> bool {
 
 // ── 词典整词被 Viterbi 选中时的同文合并 ─────────────────────────────────────
 
-/// 词典整词恰好被 Viterbi 选为最优解时，经 step 2 的**同文合并**分支继承整句身份，
+/// 词典整词恰好被 Viterbi 选为最优解时，经 step 2 的同文合并分支继承整句身份，
 /// 且 weight 取 `max(词典 weight, W_eff)`。
 ///
-/// 构造要点：**给整词高权重、单字低权重**，迫使 Viterbi 选「你好」这个单节点，从而
-/// 走同文合并分支（与 `demoted_sentence_falls_below_all_max_weight_exact_words` 的
-/// 构造正好相反 —— 那里要的是多节点合成整句）。
-///
-/// 这个结构曾是 step 6.6 `is_sentence_contested` 的现场（`siyuan` 寺院/思源：整句
-/// 锚定是硬闸门，同码词灌到 count=5000 都翻不动）。锚定与该字段均已移除，本用例
-/// 保留的是同文合并本身的三条事实。
+/// 构造要点：给整词高权重、单字低权重，迫使 Viterbi 选「你好」这个单节点，从而走同文合并分支
+/// （与 `demoted_sentence_falls_below_all_max_weight_exact_words` 的多节点合成正好相反）。
 #[test]
 fn dict_word_selected_by_viterbi_inherits_sentence_identity() {
     let mut raw = CodetableDict::empty();
@@ -4609,11 +4501,9 @@ fn dict_word_selected_by_viterbi_inherits_sentence_identity() {
         !c.is_sentence_demoted,
         "它本身即精确整词，无处可让，不该走 6.5 降级"
     );
-    // ★ 同文合并**不得**置 `is_synthesized`：这条候选是词库里实打实的词条，
-    // 只是恰好被 Viterbi 选中而继承了整句身份。协调器的自动造词以该字段为准
-    // ——若在这里跟着置真，打 `nihao` 选「你好」就会把系统词一条条抄进临时词库
-    //（每次上屏一次 redb 写，还会被 promote_count 批量「晋升」进用户词库）。
-    // 这正是 `is_sentence` 不能直接用作造词判据的原因，见该字段文档。
+    // 同文合并不得置 `is_synthesized`：这是词库里实打实的词条，只是被 Viterbi 选中。协调器的
+    // 自动造词以该字段为准，置真的话打 `nihao` 选「你好」就会把系统词抄进临时词库
+    // （见 `is_sentence` 字段文档）。
     assert!(
         !c.is_synthesized,
         "词库已有此词条 ⇒ 不是引擎新合成，不得置 is_synthesized"
@@ -4627,8 +4517,7 @@ fn dict_word_selected_by_viterbi_inherits_sentence_identity() {
     assert_eq!(r.candidates[0].text, "你好", "无词频记录时整句居首");
 }
 
-/// 对照组：同码**没有**别的精确整词时，整句身份照样成立。
-///
+/// 对照组：同码没有别的精确整词时，整句身份照样成立。
 /// 与上一条合看，说明「继承整句身份」取决于 Viterbi 选没选中它，与同码有无竞争者无关。
 #[test]
 fn dict_word_sentence_without_peer_still_is_sentence() {
@@ -4753,19 +4642,15 @@ fn nbest_alternate_merged_with_user_word_still_demotes_top_sentence() {
     assert!(top.weight < user.weight);
 }
 
-/// 用户要求的那条保证：**多个精确整词并列于最大权重时，整句排在它们全部之后**。
+/// 多个精确整词并列于最大权重时，整句排在它们全部之后。
 ///
-/// `max - 1` 在算术上蕴含它（并列者皆为 `max`），但这是要靠实测确认的那一类断言，
-/// 不是靠推理就算数的 —— 并列走的是 `better`/`candidate_display_order` 的后续键
-/// （base_order / natural_order），只有真跑一遍才知道整句没混进并列组里。
+/// `max - 1` 在算术上蕴含它，但并列走的是 `better`/`candidate_display_order` 的后续键
+/// （base_order / natural_order），要真跑一遍才知道整句没混进并列组里。
 #[test]
 fn demoted_sentence_falls_below_all_max_weight_exact_words() {
     let mut raw = CodetableDict::empty();
-    // 单字给高权重，确保 Viterbi 选「你+好」而非把某个 nihao 词条当单节点整句
-    // （那样会走同文合并分支，压根不触发降级，测试就测空了）。
-    // ⚠️ 权重取真实量级，理由同 `demoted_sentence_still_precedes_ordinary_candidates`：
-    // 整句是概率**连乘**，编造的 (1e5, 1e5) vs 同码词 5000 会让 Viterbi 直接选同码词、
-    // 整句根本不产生。
+    // 单字给高权重，确保 Viterbi 选「你+好」而非把某个 nihao 词条当单节点整句（那样走同文合并，
+    // 不触发降级）。权重取真实量级：整句是概率连乘，编造值会让 Viterbi 直接选同码词、整句不产生。
     raw.merge_single("ni".to_string(), "你".to_string(), 492_791, 0);
     raw.merge_single("hao".to_string(), "好".to_string(), 124_546, 1);
     // 三个精确整词，权重并列且同为最大
@@ -4793,10 +4678,9 @@ fn demoted_sentence_falls_below_all_max_weight_exact_words() {
     let sc = &r.candidates[sent];
     assert!(sc.is_sentence, "「你好」应是合成整句");
     assert!(sc.is_sentence_demoted, "存在精确整词时整句须降级");
-    // ★ 正向对照（与 `dict_word_selected_by_viterbi_inherits_sentence_identity` 里那条
-    // 反向断言配对）：这里的「你好」是「你」+「好」两个节点**拼**出来的，词库里没有
-    // `nihao → 你好` 这个词条，故必须置 `is_synthesized` —— 协调器的自动造词只认它。
-    // 少了这条对照，哪怕引擎再也不置该字段（功能整个失效），反向断言照样全绿。
+    // 正向对照（与 `dict_word_selected_by_viterbi_inherits_sentence_identity` 的反向断言配对）：
+    // 这里的「你好」由两个节点拼出、词库里没有，必须置 `is_synthesized`——否则引擎不再置该字段
+    // （自动造词整个失效）时反向断言照样全绿。
     assert!(
         sc.is_synthesized,
         "多节点合成、词库无此词条 ⇒ 必须置 is_synthesized，否则自动造词全线失效"
@@ -4818,19 +4702,14 @@ fn demoted_sentence_falls_below_all_max_weight_exact_words() {
     }
 }
 
-/// 不变量：降级整句仍须在**普通候选**之前，无论后者权重多高。
-///
-/// 守的是 `max - 1` 的权重并列风险 —— 位置靠 `cmp_match_layers` 的层级键保证，
-/// 而非靠权重数值，故权重再离谱也不该翻转。
+/// 降级整句仍须在普通候选之前，无论后者权重多高。
+/// 位置靠 `cmp_match_layers` 的层级键保证而非权重数值，防 `max - 1` 的权重并列风险。
 #[test]
 fn demoted_sentence_still_precedes_ordinary_candidates() {
     let mut raw = CodetableDict::empty();
-    // ⚠️ 单字与「拟好」取 cn_dicts 真实权重。节点打分是 `ln(w / DICT_TOTAL)`，整句为各词
-    // **概率连乘**，故两字拼句天然弱于同码整词：编造的 (你 1e5, 好 1e5, 拟好 5000) 下
-    // P(拟好)=2.07e-5 远高于 P(你)·P(好)=1.7e-7，Viterbi 会直接选「拟好」而不产生
-    // 「你好」整句，本用例的前提就没了。真实权重下 P(你)·P(好)=1.05e-6 > P(拟好)=2.6e-7，
-    // 整句成立。（2026-08-08 前无 unigram 的引擎走 `weight/100_000` 线性相加，没有连乘
-    // 衰减、系统性偏好多词切分，编造值因此「碰巧」可用。）
+    // 单字与「拟好」取 cn_dicts 真实权重：整句是各词概率连乘，编造的 (你 1e5, 好 1e5, 拟好 5000)
+    // 下 P(拟好) 远高于 P(你)·P(好)，Viterbi 直接选「拟好」、不产生「你好」整句；
+    // 真实权重下 P(你)·P(好)=1.05e-6 > P(拟好)=2.6e-7，整句成立。
     raw.merge_single("ni".to_string(), "你".to_string(), 492_791, 0);
     raw.merge_single("hao".to_string(), "好".to_string(), 124_546, 1);
     raw.merge_single("nihao".to_string(), "拟好".to_string(), 64, 2);

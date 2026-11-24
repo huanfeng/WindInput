@@ -1,8 +1,7 @@
 use super::*;
 
-/// ⚠️ 夹具走**生产同一条** `push` + `finish`，不再自己复制一份「≥2 个词才进索引」的
-/// 判据、也不自己补排序——那种复制品曾与 `build` 并存，是典型的漂移隐患
-/// （改了一处另一处静默过期）。
+/// 夹具走生产同一条 `push` + `finish`，不自己复制「≥2 个词才进索引」的判据或补排序，
+/// 免得副本与 `build` 漂移。
 fn idx(pairs: &[(&str, &str, i32)]) -> PhraseSegIndex {
     let mut b = PhraseSegBuilder::default();
     for (text, code, w) in pairs {
@@ -28,19 +27,12 @@ fn texts(i: &PhraseSegIndex, input: &str) -> Vec<String> {
 /// 真机量级（18 万条）下二分窗口与全表扫的耗时对比。手动跑：
 /// `cargo test -p wind-engine --release --lib -- --ignored --nocapture bench_`
 ///
-/// 实测（release、单线程、同一查询 200 次取均值，合成 18 万条、窗口 100 条）：
-/// - 2026-09-22，arena 结构体版：窗口 5.1 µs / 全表 1.48 ms；
-/// - 2026-10-09，字节镜像版（落盘改造后，条目按需小端解码；AMD EPYC 7402 开发机，
-///   3 轮）：窗口 7.2–8.3 µs / 全表 1.88–1.99 ms，约 250 倍。
+/// 窗口在个位微秒、全表扫约 2 ms（量级见 docs/architecture/engine-candidate-pipeline.md 的
+/// 「6.1 词组分词」）。全表扫落在按键链路上，每多打一个字母就再付一次，这才是做二分的理由。
 ///
-/// 无法确认两次是否同机同负载，不可直接对比出「解码慢了多少」；能确定的是窗口仍在
-/// 个位微秒。
-/// 全表扫的毫秒级落在按键链路上，每多打一个字母就再付一次——这才是做二分的理由，
-/// 不是「显得快一点」。
-///
-/// `#[ignore]` 是因为它是**基准不是判据**：机器一换数字就变，拿它当回归门会变成
-/// 随机红。正确性由 `the_binary_search_window_returns_exactly_what_a_full_scan_would`
-/// 守，「有没有真的少扫」由 `the_first_word_window_is_exactly_the_prefix_block` 守。
+/// `#[ignore]`：它是基准不是判据，换机器数字就变。正确性由
+/// `the_binary_search_window_returns_exactly_what_a_full_scan_would` 守，「有没有真的少扫」由
+/// `the_first_word_window_is_exactly_the_prefix_block` 守。
 #[test]
 #[ignore = "基准，不参与常规回归"]
 fn bench_window_vs_full_scan() {
@@ -73,26 +65,17 @@ fn bench_window_vs_full_scan() {
     );
 }
 
-/// ★ 构建期间被 `invalidate` 的那份结果，**不许写回**。
+/// 构建期间被 `invalidate` 的那份结果不许写回。
 ///
-/// `get` 刻意在锁外构建（全表扫，持锁会堵住按键线路），于是「开始构建」到「写回」
-/// 之间有一段长窗口。热摘词库落在窗口里时，那份按**旧**词库建好的索引若被原样写回，
-/// 用户看到的就是「关了词库没反应」。
+/// `get` 刻意在锁外构建（全表扫，持锁会堵住按键线路），「开始构建」到「写回」之间有一段长窗口；
+/// 热摘词库落在窗口里时，按旧词库建好的索引若被写回，用户看到的就是「关了词库没反应」。
+/// 引擎构造时 `prewarm` 后台建索引，这个窗口每次启动都存在。
 ///
-/// 这不是理论竞态：引擎构造时 `prewarm` 一条后台线程去建索引，窗口每次启动都存在。
-/// 2026-09-22 `tests/english_phrase_index.rs` 在 `cargo test --workspace` 的负载下
-/// 稳定复现（机器闲时反而绿，所以单独跑那条照不出来）。
+/// 时序是摆明的：自定义一个遍历中途停下等信号的层，把「已读过旧词库、尚未写回」的瞬间固定住
+/// （在调 `get` 之前同步是错的，构建根本没跨过失效点）。层内容用标志翻转模拟热摘而不真去
+/// `unregister_layer`：`for_each_entry` 正持着 composite 的锁，主线程摘层会死锁。
 ///
-/// # 时序是**摆明**的，不是靠撞
-///
-/// 自定义一个会在遍历中途停下来等信号的层，于是「构建已经读过旧词库、但还没写回」
-/// 这个瞬间被固定住。第一版用 `channel` 在**调 `get` 之前**同步，那是错的——构建
-/// 压根没跨过失效点，删掉代号比对照样绿（实测）。
-///
-/// 层的内容用一个标志翻转来模拟热摘，而不是真去 `unregister_layer`：`for_each_entry`
-/// 正持着 composite 的锁停在那里，主线程这时摘层会直接死锁。
-///
-/// 反向验证（变异）：删掉 `get` 里 `generation != started_at` 那段比对即红。
+/// 变异验证：删掉 `get` 里 `generation != started_at` 那段比对即红。
 #[test]
 fn a_build_that_started_before_invalidate_must_not_win() {
     use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
@@ -103,7 +86,7 @@ fn a_build_that_started_before_invalidate_must_not_win() {
     struct Gate {
         entered: mpsc::Sender<()>,
         resume: Mutex<mpsc::Receiver<()>>,
-        /// 只让**第一趟**遍历停下来；重建那趟要直接走完。
+        /// 只让第一趟遍历停下来；重建那趟要直接走完。
         stopped_once: AtomicBool,
         /// 还吐不吐 `zzz zzz`。主线程在放行前翻成 false = 那本词库被热摘了。
         yields_zzz: AtomicBool,
@@ -125,9 +108,8 @@ fn a_build_that_started_before_invalidate_must_not_win() {
             Vec::new()
         }
         fn for_each_entry(&self, f: &mut dyn FnMut(&str, &str, i32)) {
-            // ⚠️ 先吐词条**再**停。反过来的话，放行后读到的已经是翻转后的标志，
-            // 构建结果本来就不含 zzz —— 两种实现都绿，什么也证不出来（第一版的错）。
-            // 要照出缺陷，构建线程手上必须是**旧**视图。
+            // 先吐词条再停：反过来的话放行后读到的已是翻转后的标志，两种实现都绿。
+            // 要照出缺陷，构建线程手上必须是旧视图。
             if self.0.yields_zzz.load(Relaxed) {
                 f("zzz", "zzz zzz", 100);
             }
@@ -172,7 +154,7 @@ fn a_build_that_started_before_invalidate_must_not_win() {
             .map(|c| c.text)
             .collect()
     };
-    // 要紧的是**别人**读到的那份：缓存里不许躺着按旧词库建的索引。
+    // 要紧的是别人读到的那份：缓存里不许躺着按旧词库建的索引。
     let after = zzz(&lazy.get(&dm));
     assert!(after.is_empty(), "缓存里躺着按旧词库建的索引：{after:?}");
     // 反面：主库那条必须还在，证明作废的是过时的那份，不是把功能连坐关掉了。
@@ -185,15 +167,12 @@ fn a_build_that_started_before_invalidate_must_not_win() {
     );
 }
 
-/// ★ 索引侧与查询侧的小写化必须是**同一个**函数。
+/// 索引侧与查询侧的小写化必须是同一个函数。
 ///
 /// 判据非用希腊词尾 Σ 不可：`str::to_lowercase` 有上下文特例（`"ΟΔΟΣ"` → `"οδος"`），
-/// 逐字符 `char::to_lowercase` 恒给 σ（`"οδοσ"`）。Café / Über 这类常见多字节词两种
-/// 写法结果相同——既有的 `multibyte_words_slice_on_char_boundaries` 正是因此照不出
-/// 分叉，那条恒绿。
+/// 逐字符 `char::to_lowercase` 恒给 σ（`"οδοσ"`）；Café / Über 两种写法结果相同，照不出分叉。
 ///
-/// 反向验证（变异）：把 `split_segments` 的 `.map(lower)` 换回 `.map(str::to_lowercase)`，
-/// 本用例立刻红——首段 `odos` 配不上索引里的 `οδοσ`，二分窗口为空。
+/// 变异验证：把 `split_segments` 的 `.map(lower)` 换成 `.map(str::to_lowercase)`，本用例即红。
 #[test]
 fn both_sides_lowercase_the_same_way() {
     // 首词与非首词各放一个词尾 Σ，两条匹配规则都要覆盖。
@@ -227,8 +206,7 @@ fn prefix_family() -> PhraseSegIndex {
 
 /// 朴素全表扫，只回答「命中哪些」。
 ///
-/// 刻意**不复制排序逻辑**：顺序自有 `weight_outranks_span` 那几条用例守着，这里再抄
-/// 一份三级比较器只会多一个会漂移的副本。用集合比对，测的是「二分有没有漏/多」。
+/// 刻意不复制排序逻辑（顺序由 `weight_outranks_span` 那几条守），用集合比对测「二分有没有漏/多」。
 fn linear_hits(i: &PhraseSegIndex, input: &str) -> std::collections::BTreeSet<String> {
     let segs = split_segments(input, PHRASE_SEPARATOR);
     if segs.is_empty() {
@@ -247,14 +225,10 @@ fn search_hits(i: &PhraseSegIndex, input: &str) -> std::collections::BTreeSet<St
         .collect()
 }
 
-/// ★ 二分窗口必须与全表扫召回同一批条目。
+/// 二分窗口必须与全表扫召回同一批条目。
 ///
-/// 反向验证（变异）：删掉 `finish()` 里那句 `sort_by`（并去掉它末尾的有序断言，模拟
-/// 「只是漏了排序」），本用例红在 **`ip'pro`** 上——2026-09-22 实跑的结果。
-///
-/// ⚠️ 举例必须实跑，不能推。列表里第一个输入 `i'pro` **照不出来**：未排序时它的窗口
-/// 恰好仍然正确。所以这条用例的有效性来自「覆盖了一整族前缀」，不是某一个输入；
-/// 删掉别的输入只留 `i'pro`，它就变成假护栏了。
+/// 变异验证：删掉 `finish()` 里的 `sort_by`（并去掉其末尾有序断言），本用例红在 `ip'pro` 上。
+/// 有效性来自覆盖一整族前缀：`i'pro` 在未排序时窗口恰好仍然正确，只留它就成了假护栏。
 #[test]
 fn the_binary_search_window_returns_exactly_what_a_full_scan_would() {
     let i = prefix_family();
@@ -279,10 +253,9 @@ fn the_binary_search_window_returns_exactly_what_a_full_scan_would() {
     }
 }
 
-/// ★ 窗口本身的边界：`ip` 收住三族、不吃 `internet`。
+/// 窗口本身的边界：`ip` 收住三族、不吃 `internet`。
 ///
-/// 与上一条的分工：那条测「结果对不对」，这条测「少看了多少」——窗口若退化成全表，
-/// 结果照样正确，而本功能（把按键路径上的 18 万条扫描降下来）就白做了。
+/// 上一条测「结果对不对」，这条测「少看了多少」：窗口退化成全表时结果照样正确，但本功能白做了。
 #[test]
 fn the_first_word_window_is_exactly_the_prefix_block() {
     let i = prefix_family();
@@ -306,10 +279,8 @@ fn the_first_word_window_is_exactly_the_prefix_block() {
         i.first_word_range("zz").is_empty(),
         "无人匹配的首词该给出空窗口"
     );
-    // 空前缀 = 全表。⚠️ 这**不是**一条按键路径：`split_segments` 已经
-    // `filter(|s| !s.is_empty())`，`segs[0]` 永不为空（用户刚按下分词符时是
-    // `ip'` ⇒ `segs = ["ip"]`）。留这条是钉住 `partition_point` 在空前缀上的
-    // 边界行为，免得将来有人「优化」成空前缀直接返回空切片。
+    // 空前缀 = 全表。这不是按键路径（`split_segments` 已滤掉空段，`segs[0]` 永不为空），
+    // 留着是钉住 `partition_point` 在空前缀上的边界行为，免得被「优化」成返回空切片。
     assert_eq!(
         i.first_word_range("").len(),
         i.len(),
@@ -328,7 +299,7 @@ fn matches_both_encoding_schemes() {
     assert_eq!(texts(&i, "ip'15"), vec!["iPhone 15 Pro"]);
 }
 
-/// 跳词：`ip'pro` 越过 `15` 命中 `Pro`。这是 2026-09-18 拍板的「优先保效果」。
+/// 跳词：`ip'pro` 越过 `15` 命中 `Pro`（优先保效果）。
 #[test]
 fn skips_intervening_words() {
     let i = idx(&[("iPhone 15 Pro", "iphone", 100)]);
@@ -357,10 +328,8 @@ fn first_segment_must_anchor_the_first_word() {
     );
 }
 
-/// 跨度是**次级**键：同权重时跳得少的排前面。
-///
-/// ⚠️ 两条 weight 必须**相等**，本用例才测得到跨度。weight 不等的话主键就分出了胜负，
-/// 「有没有跨度这一级」根本看不出来。
+/// 跨度是次级键：同权重时跳得少的排前面。
+/// 两条 weight 必须相等才测得到跨度，否则主键就分出了胜负。
 #[test]
 fn tighter_span_breaks_ties_within_the_same_weight() {
     let i = idx(&[
@@ -374,11 +343,10 @@ fn tighter_span_breaks_ties_within_the_same_weight() {
     );
 }
 
-/// ★ 而 weight 是**主键**：权重更高的排前面，哪怕它跨度更大。
+/// 而 weight 是主键：权重更高的排前面，哪怕它跨度更大。
 ///
-/// 这条钉的是 AGENTS.md 那条硬约定的落地——协调器会按 weight 统一重排，引擎内序
-/// 若以跨度为主键，到了用户眼前就是另一个顺序（两个作用域还会各不相同）。
-/// 与上一条构成对照的两半：缺了它，「跨度优先」的旧实现同样能过上一条。
+/// 协调器会按 weight 统一重排（AGENTS.md 硬约定），引擎内序若以跨度为主键，用户看到的就是另一个
+/// 顺序。与上一条构成对照：缺了它，「跨度优先」的实现同样能过上一条。
 #[test]
 fn weight_outranks_span() {
     let i = idx(&[
@@ -415,7 +383,7 @@ fn trailing_empty_segment_is_dropped() {
     assert_eq!(texts(&i, "ip'"), vec!["iPhone 15 Pro"]);
 }
 
-/// 单词条目不进索引——它们走原本的 Trie 前缀匹配，不该在这里被重复召回。
+/// 单词条目不进索引——它们走 Trie 前缀匹配，不该在这里被重复召回。
 #[test]
 fn single_word_entries_are_not_indexed() {
     let i = idx(&[
@@ -425,18 +393,13 @@ fn single_word_entries_are_not_indexed() {
     assert_eq!(i.len(), 1);
 }
 
-/// ★ **每条词组的堆开销上界**。这是本模块唯一的内存护栏。
+/// 每条词组的堆开销上界，本模块唯一的内存护栏。
 ///
-/// 缘起：真机上这张表有 18 万条（用户自备英文词库，出厂只有 787 条），旧结构每条
-/// 持有 `Vec<Box<str>>` + 两个 `Box<str>`，约 90 万次小分配，实测常驻 **48 MB**，
-/// 而它被建了两份（english 方案 + 混输的 english 子引擎）⇒ 96 MB。
+/// 用户自备词库可达 18 万条，且建两份（english 方案 + 混输的 english 子引擎），逐条独立分配
+/// 时常驻数十 MB。上界取 120 字节/条：arena 版约 78，挡得住退回 `Box<str>`（`Vec` + 两个 `Box`
+/// 的头部就 56 字节，加上每词一次分配的开销必然超线）。
 ///
-/// 上界取 120 字节/条：arena 版实测约 78（entry 28 + word_ends 10 + lower 15 + raw 25），
-/// 留出的余量够容纳词长分布的波动，但**挡得住退回 `Box<str>`**——那一版光
-/// `Vec` + 两个 `Box` 的头部就已经是 56 字节，加上每词一次分配的分配器开销必然超线。
-///
-/// ⚠️ 样本必须**足够多且带多词条目**：条数太少时 arena 的翻倍扩容尾巴会摊到分母上，
-/// 测出来的是扩容策略而不是结构本身。
+/// 样本必须足够多且带多词条目：条数太少时 arena 扩容尾巴摊到分母上，测的就是扩容策略。
 #[test]
 fn heap_cost_per_phrase_stays_within_budget() {
     let pairs: Vec<(String, String, i32)> = (0..2000)
@@ -452,15 +415,12 @@ fn heap_cost_per_phrase_stays_within_budget() {
     for (text, code, w) in &pairs {
         b.push(code, text, *w);
     }
-    // ⚠️ 走生产同一条收尾（`finish` → 镜像），别手抄——抄一份的话，将来改布局时这里会
-    // 静默地测一个生产里不存在的形态。这正是 `idx()` 夹具注释点名批评的漂移模式。
+    // 走生产同一条收尾（`finish` → 镜像），别手抄，否则改布局时这里会静默地测一个不存在的形态。
     let me = PhraseSegIndex::from_image(b.finish());
 
-    // ★ 这一条堵的是上面那条护栏的**漏网口**：`heap_bytes` 只统计镜像那一块，
-    // 谁要是往 `PhraseEntry` 里加回一个 `Box<str>`（16 B）或 `Vec<Box<str>>`（24 B），
-    // 那份堆内存**不会被 `heap_bytes` 统计到**，上面的预算断言照样绿。
-    // 用 `size_of` 直接钉住「条目里不许出现指针」，这是编译期事实，绕不过去。
-    // 它也与镜像里一条记录的定长一致：解码值比记录还大，说明多了不该有的字段。
+    // 堵上面那条护栏的漏网口：`heap_bytes` 只统计镜像，往 `PhraseEntry` 里加回 `Box<str>` /
+    // `Vec<Box<str>>` 不会被统计到。用 `size_of` 钉住「条目里不许出现指针」（编译期事实），
+    // 也与镜像里一条记录的定长一致。
     assert!(
         size_of::<PhraseEntry>() <= ENTRY_SIZE,
         "PhraseEntry 涨到 {} 字节——加了指针字段？条目必须只存定长偏移",
@@ -468,11 +428,8 @@ fn heap_cost_per_phrase_stays_within_budget() {
     );
     assert_eq!(me.len(), 2000, "全部应进索引（每条 5 个词）");
     let per = me.heap_bytes() / me.len();
-    // ⚠️ 预算按**本夹具**定，不是按生产表定：这里每条 5 个词（`iPhone {i} Pro Max
-    // Ultra`），实测 per≈102；生产表平均 2~3 词、靶机 18 万条实测 per≈74。拿 120 卡
-    // 5 词的夹具只剩 15% 余量，夹具字符串一改长就会在结构毫无退化时假红，故留到 140。
-    // 真正钉住「不许退回 per-entry 堆分配」的是下面那条 `size_of` 断言，它是编译期
-    // 事实、绕不过去；本条只是粗筛。
+    // 预算按本夹具定：每条 5 个词（per≈102），生产表平均 2~3 词（per≈74）。卡 120 只剩 15% 余量，
+    // 夹具字符串一改长就会假红，故留到 140；真正钉住结构的是上面的 `size_of`，本条只是粗筛。
     assert!(
         per < 140,
         "每条词组堆开销 {per} 字节，超出预算 140——退回 per-entry 堆分配了？\n             （总计 {} KB / {} 条，本夹具每条 5 个词）",
@@ -481,8 +438,7 @@ fn heap_cost_per_phrase_stays_within_budget() {
     );
 }
 
-/// 多字节字符不能把偏移算错：arena 存的是**字节**偏移，切片边界必须落在字符边界上。
-/// 旧结构各词独立成串，天然不会切错；arena 把它们首尾相接之后这就成了真实风险。
+/// 多字节字符不能把偏移算错：arena 存的是字节偏移，词首尾相接后切片边界必须落在字符边界上。
 #[test]
 fn multibyte_words_slice_on_char_boundaries() {
     let i = idx(&[("Café Noir Über", "cafe", 100)]);
@@ -508,8 +464,8 @@ fn tmp_dir(tag: &str) -> PathBuf {
     d
 }
 
-/// 一次查询的完整可观测结果：顺序、text、code、weight、natural_order 全在里面。
-/// 对拍比的是这个，不是集合——堆版与 mmap 版连**顺序**都必须一致。
+/// 一次查询的完整可观测结果：顺序、text、code、weight、natural_order。
+/// 对拍比的是这个而不是集合——堆版与 mmap 版连顺序都必须一致。
 fn full(i: &PhraseSegIndex, input: &str) -> Vec<(String, String, i32, i32)> {
     i.search(&split_segments(input, PHRASE_SEPARATOR), 50)
         .into_iter()
@@ -603,17 +559,13 @@ fn open_both(pairs: &[(String, String, i32)], dir: &Path) -> (PhraseSegIndex, Ph
     (resident, mapped)
 }
 
-/// ★ 堆版、常驻读入版、mmap 版对同一批查询**逐条**相同（含顺序、code、weight）。
+/// 堆版、常驻读入版、mmap 版对同一批查询逐条相同（含顺序、code、weight）。
 ///
-/// 三者共用同一套查找代码，这条测的是「落盘—读回」这段链路没有走样（盖指纹盖错位置、
-/// 写盘写坏、读回读错）。
+/// 三者共用同一套查找代码，这条测「落盘—读回」链路没有走样（指纹位置、写盘、读回）。
+/// 照不出对称的解码错误（`entry()` 读错字段时三版错得一样），那一类由
+/// `matches_both_encoding_schemes` 等语义用例兜。
 ///
-/// ⚠️ 它**照不出对称的解码错误**：`entry()` 里把 `text_len` 读成 `code_len`，三个版本
-/// 错得一模一样、对拍照样绿（实跑如此）。那一类由 `matches_both_encoding_schemes` 等
-/// 语义用例兜（同一变异下它们红）。
-///
-/// 反向验证（变异）：让 `write_atomically` 落盘前把首条记录的 `raw_start` 翻一位，
-/// 本条红在 `b'air` 上（2026-10-09 实跑）。
+/// 变异验证：让 `write_atomically` 落盘前把首条记录的 `raw_start` 翻一位，本条红在 `b'air` 上。
 #[test]
 fn heap_resident_and_mapped_views_agree_on_every_probe() {
     let dir = tmp_dir("agree");
@@ -643,10 +595,10 @@ fn heap_resident_and_mapped_views_agree_on_every_probe() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// ★ 真机量级（18 万条）下堆版与 mmap 版对拍。
+/// 真机量级（18 万条）下堆版与 mmap 版对拍。
 ///
-/// 合成词库模仿靶机那份的两个特征：两种编码方案并存（拼接式 / 共同前缀式），以及
-/// 首词大量共享前缀（二分窗口里有成百上千条，跨度与 weight 的排序真正起作用）。
+/// 合成词库模仿真实词库的两个特征：两种编码方案并存（拼接式 / 共同前缀式），以及首词大量共享前缀
+/// （二分窗口里有成百上千条，跨度与 weight 的排序真正起作用）。
 #[test]
 fn heap_and_mapped_agree_on_a_180k_synthetic_dictionary() {
     let dir = tmp_dir("agree180k");
@@ -737,9 +689,8 @@ fn open_rejects_truncated_or_foreign_files() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// 段**内**被写坏（头部完好、偏移乱指）：查询不 panic，最多查不中。
-///
-/// 头部校验挡不住这一类——它只验各段整体在界内。按键链路上的 `convert` 不许 panic。
+/// 段内被写坏（头部完好、偏移乱指）：查询不 panic，最多查不中。
+/// 头部校验只验各段整体在界内，挡不住这一类；按键链路上的 `convert` 不许 panic。
 #[test]
 fn scribbled_entries_never_panic() {
     let image = build_image(&probe_pairs(), "");
@@ -757,9 +708,8 @@ fn scribbled_entries_never_panic() {
         }
     }
 
-    // 写坏的 `word_count` 不许把跳词循环拖成几十亿步（首版实测：上面 20 轮跑了 48 s）。
-    // 这里造一条确定的：首条词数改成 u32::MAX，段数 2 ⇒ 无守卫时要空转 ~4e9 次。
-    // 反向验证（变异）：删掉 `match_entry` 里「词表越界」那道守卫，本条红在耗时上。
+    // 写坏的 `word_count` 不许把跳词循环拖成几十亿步：首条词数改成 u32::MAX、段数 2，
+    // 无守卫时要空转 ~4e9 次。变异验证：删掉 `match_entry` 里「词表越界」守卫，本条红在耗时上。
     let mut bad = image.clone();
     bad[HEADER_SIZE + 20..HEADER_SIZE + 24].copy_from_slice(&u32::MAX.to_le_bytes());
     let i = PhraseSegIndex::parse(ImageData::Owned(bad)).unwrap();
@@ -863,10 +813,8 @@ fn wphr_files(dir: &Path) -> Vec<PathBuf> {
     v
 }
 
-/// ★ 第二个实例（= 下次启动）命中盘上那份，**一次全表扫都不做**，结果与首建相同。
-///
-/// 反向验证（变异）：把 `load_or_build` 的 ① 整段删掉（每次都重扫），本条红在
-/// `full_scans() == 0` 上。
+/// 第二个实例（= 下次启动）命中盘上那份，一次全表扫都不做，结果与首建相同。
+/// 变异验证：删掉 `load_or_build` 的 ① 整段（每次都重扫），本条红在 `full_scans() == 0` 上。
 #[test]
 fn a_second_instance_reuses_the_cache_without_scanning() {
     let dir = tmp_dir("hit");
@@ -909,10 +857,9 @@ fn a_small_cache_is_read_into_memory() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// ★ 热摘词库：按**新的启用集合**取另一份，不读回旧的；再启用回来直接复用先前那份。
-///
-/// 反向验证（变异）：把 `CompositeDict::entries_digest` 的 `.filter(|l| l.enabled())`
-/// 删掉（摘要不随启停变），本条红在「关掉 ext 后不该再召回 iPhone」上——读回了旧文件。
+/// 热摘词库：按新的启用集合取另一份，不读回旧的；再启用回来直接复用先前那份。
+/// 变异验证：删掉 `CompositeDict::entries_digest` 的 `.filter(|l| l.enabled())`，本条红在
+/// 「关掉 ext 后不该再召回 iPhone」上。
 #[test]
 fn toggling_a_dictionary_switches_caches_and_switching_back_reuses() {
     let dir = tmp_dir("toggle");
@@ -938,11 +885,10 @@ fn toggling_a_dictionary_switches_caches_and_switching_back_reuses() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// ★ 词库内容变了（摘要变）⇒ 换一份重建，不复用旧内容。
+/// 词库内容变了（摘要变）⇒ 换一份重建，不复用旧内容。
 ///
-/// 真实词库的摘要来自 wdat 的 `.fp`（内容指纹）或 `大小:mtime`，见
-/// `SystemDictLayer::entries_digest`（wind-dict 另有用例钉住它随文件变）；这里钉的是
-/// 「摘要一变，这一层就不会再读回旧文件」。
+/// 真实词库的摘要来自 wdat 的 `.fp` 或 `大小:mtime`（`SystemDictLayer::entries_digest`，wind-dict
+/// 另有用例钉住）；这里钉「摘要一变，这一层就不再读回旧文件」。
 #[test]
 fn a_changed_dictionary_is_rebuilt() {
     let dir = tmp_dir("changed");
@@ -986,7 +932,7 @@ fn a_changed_dictionary_is_rebuilt() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// ★ 盘上那份被截断 / 写坏 ⇒ 重建并覆盖，不 panic；覆盖后下一次又能命中。
+/// 盘上那份被截断 / 写坏 ⇒ 重建并覆盖，不 panic；覆盖后下一次又能命中。
 #[test]
 fn a_corrupt_cache_file_is_rebuilt_and_overwritten() {
     let dir = tmp_dir("corrupt");
@@ -1041,15 +987,12 @@ fn an_undigestable_layer_disables_persistence() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// ★ 扫描与启停交错：扫到的内容对不上扫描前取的指纹 ⇒ **不落盘**。
+/// 扫描与启停交错：扫到的内容对不上扫描前取的指纹 ⇒ 不落盘。
 ///
-/// 不设这道闸的话，按新集合扫出的内容会躺进以旧集合命名的文件；文件跨重启复用，
-/// 下次以旧集合启动时就读到了错的词组——比「这次关了没反应」更难查。
+/// 否则按新集合扫出的内容会躺进以旧集合命名的文件，跨重启复用后读到错的词组。时序是摆明的：
+/// 被扫的层吐完词条后亲手把另一层停掉。
 ///
-/// 时序是摆明的：被扫的层在吐完自己的词条之后亲手把另一层停掉，于是「扫描前」与
-/// 「扫描后」的启用集合必然不同。
-///
-/// 反向验证（变异）：删掉 `load_or_build` ③ 那段指纹复核，本条红（落了一份文件）。
+/// 变异验证：删掉 `load_or_build` ③ 那段指纹复核，本条红（落了一份文件）。
 #[test]
 fn a_scan_that_races_a_toggle_is_not_persisted() {
     struct Toggler {
@@ -1134,15 +1077,12 @@ fn old_caches_are_pruned_but_foreign_files_are_left_alone() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// ★ wdat 换了内容、`.fp` 却没跟上（写 `.fp` 失败的现场）：词组索引必须重建，
-/// 不得召回新 wdat 里已没有的词组。
+/// wdat 换了内容、`.fp` 却没跟上（写 `.fp` 失败）：词组索引必须重建，不得召回已没有的词组。
 ///
-/// 旧摘要只看 `.fp`，这种现场下它与换内容之前逐字相同。现在 `SystemDictLayer` 给
-/// 词组索引的摘要另混入 wdat 自身的 `大小:mtime`（只混进这一处，不动 `.wridx` 共用的
-/// `cache_digest`——那会让全体用户的反查索引白重建一次）。
+/// `SystemDictLayer` 给词组索引的摘要另混入 wdat 自身的 `大小:mtime`；只混这一处，不动
+/// `.wridx` 共用的 `cache_digest`（那会让全体用户的反查索引白重建一次）。
 ///
-/// 反向验证（变异）：把 `entries_digest` 里那段 `大小:mtime` 去掉，本条红在 `ip'max`
-/// 仍召回 iPhone 上。
+/// 变异验证：去掉 `entries_digest` 里那段 `大小:mtime`，本条红在 `ip'max` 仍召回 iPhone 上。
 #[test]
 fn a_rewritten_wdat_with_a_stale_fp_is_rebuilt() {
     use wind_dict::SystemDictLayer;
@@ -1218,14 +1158,11 @@ fn stale_temp_files_from_a_crash_are_cleaned() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// ★ 扫描期间启用集合「关了又开」（ABA）：扫描前后指纹相同，但扫到的是中间态。
-/// 这份内容不许落盘——否则它躺在以完整集合命名的文件里，下次（以及本次重试）
-/// 都会命中它，被关过一瞬的那本词库的词组从此消失。
+/// 扫描期间启用集合「关了又开」（ABA）：前后指纹相同但扫到的是中间态，不许落盘——
+/// 否则它躺在以完整集合命名的文件里，被关过一瞬的那本词库的词组从此消失。
 ///
 /// 判据靠失效代号：扫描期间每次启停都伴随 `invalidate`，代号一变就不落盘。
-///
-/// 反向验证（变异）：删掉 `load_or_build` 里落盘前的代号比对，本条红（重试命中了
-/// 那份残缺的文件，`ip'max` 召回为空）。
+/// 变异验证：删掉 `load_or_build` 里落盘前的代号比对，本条红（`ip'max` 召回为空）。
 #[test]
 fn a_scan_that_sees_an_off_then_on_toggle_is_not_persisted() {
     use std::sync::atomic::AtomicBool;
@@ -1292,15 +1229,11 @@ fn a_scan_that_sees_an_off_then_on_toggle_is_not_persisted() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// ★ 单飞：预热线程与按键线程同时 `get`，全表扫只发生一次。
+/// 单飞：预热线程与按键线程同时 `get`，全表扫只发生一次。
 ///
-/// 两边各扫一遍不只是白费几百毫秒：两份同指纹的落盘在 Windows 上会让后到的 rename
-/// 撞上先到者刚映射的文件，打一条误导性的 warn。
-///
-/// 时序：第一趟扫描停在层里，放第二条线程进 `get`、等 200 ms 再放行。没有单飞锁时
-/// 第二条线程这期间必然自己开扫（索引还没写回）。
-///
-/// 反向验证（变异）：去掉 `get` 里的单飞锁，本条红在扫描次数 2 上。
+/// 两份同指纹的落盘在 Windows 上会让后到的 rename 撞上先到者刚映射的文件，打一条误导性 warn。
+/// 时序：第一趟扫描停在层里，放第二条线程进 `get`、等 200 ms 再放行。
+/// 变异验证：去掉 `get` 里的单飞锁，本条红在扫描次数 2 上。
 #[test]
 fn concurrent_gets_scan_only_once() {
     use std::sync::mpsc;

@@ -182,11 +182,9 @@ fn ziguang_scheme() {
 // --- TestGb2017Scheme ---
 /// GB/T 34947-2017 的 ü 与同键双韵母。
 ///
-/// ü 在布局里一律写 `v`（j/q/x/y 后由 `normalize_pinyin` 折回 u）；写成字面
-/// `ü`/`üe`/`ün` 时一个音节也认不出，jue/que/xue/yue、lve/nve、lv/nv 整片打不出。
-/// `o` 键的顺序同理：一键双韵母只取第一个合法者，`["o", "uo"]` 会让 `lo`（咯）
-/// 抢走 `luo`（罗/落/络…）。零声母按标准 4.1.1 以 `a` 引导——`ac`=ao、`ao`=o，
-/// 不是首字母直接重复。
+/// ü 在布局里一律写 `v`（j/q/x/y 后由 `normalize_pinyin` 折回 u），写成字面 `ü`/`üe`/`ün` 时
+/// jue/que/xue/yue、lve/nve、lv/nv 整片打不出。一键双韵母只取第一个合法者，`["o", "uo"]` 会让
+/// `lo`（咯）抢走 `luo`。零声母按标准 4.1.1 以 `a` 引导——`ac`=ao、`ao`=o，不是首字母直接重复。
 #[test]
 fn gb2017_scheme() {
     let c = conv("gb2017");
@@ -252,9 +250,7 @@ fn zero_initial_ao() {
 
 // --- TestZeroInitialLiteralAo ---
 // 测的是零声母的「字面匹配」路径（convert_pair 路径 b）：击键本身就是音节全拼。
-// ⚠️ 只对**首字母引导**的方案成立。微软/搜狗改为纯 `o` 引导后其 `ao` 走的是常规
-// 声母路径（a 自映射声母 + o 键的 "o" 韵母），结果同样是 "ao" 但性质不同 ——
-// 留在这里会假绿地暗示它们的零声母字面路径还在，故移出，改由官方击键表覆盖。
+// 只对首字母引导的方案成立；微软/搜狗是纯 `o` 引导，其 `ao` 走常规声母路径，由官方击键表覆盖。
 #[test]
 fn zero_initial_literal_ao() {
     for scheme in ["xiaohe", "ziranma"] {
@@ -329,7 +325,7 @@ fn xiaohe_fuzzy_disabled_switch() {
 
 /// 同键韵母：`q = ["iu", "ui"]` 时 `dq` 两个读音互为对端；`w` 上 `ia`/`o` 同键时
 /// `lw` 得 `lia`/`lo`。零声母引导键不造对（`o` 不会和 `ia` 配上）。
-/// `x` 同时放 uo/o/ia：出厂固有的 luo/lo 按**对**排除，lia 与两者的对照常生效。
+/// `x` 同时放 uo/o/ia：出厂固有的 luo/lo 按对排除，lia 与两者的对照常生效。
 const SHARED_KEY: &str = r#"
 [meta]
 id = "shared"
@@ -442,11 +438,10 @@ v = ["ui"]
     assert!(c.shared_key_syllables().is_empty());
 }
 
-/// 出厂布局的同键情形全部落在排除表里：出厂布局推不出任何同键对，行为与改动前一致。
+/// 出厂布局的同键情形全部落在排除表里：出厂布局推不出任何同键对。
 ///
-/// 守护的是排除表的完整性——这里按**不排除**的口径重算一遍各布局的同键音节对，逐对
-/// 断言在表里。新增/修改出厂布局引入新的固有对时这里变红：要么把它补进表，要么评估
-/// 让它生效的排序影响。
+/// 守护排除表的完整性：按不排除的口径重算各布局的同键音节对，逐对断言在表里。新增/修改出厂布局
+/// 引入新的固有对时这里变红：要么补进表，要么评估让它生效的排序影响。
 #[test]
 fn builtin_layouts_shared_key_pairs_are_all_excluded() {
     let mut seen: Vec<(String, String)> = Vec::new();
@@ -531,9 +526,7 @@ fn ziranma_fuzzy_final_keeps_misspelling() {
 }
 
 // --- 边界测试 6.1-4：符号键 `;` e2e 转换（mspy 布局，;=ing）---
-// mspy 布局中 `;` 映射 ing，输入 "n;" 应转换为 "ning"（n 声母 + ; 韵母 ing）。
-// 真值依据：mspy.toml 显式声明 ";" = ["ing"]，ning 为合法拼音音节；
-//   与 Go converter 行为对齐（finals 路径：initial_of('n')="n" + finals_of(';')=["ing"] → "ning"）。
+// mspy.toml 显式声明 ";" = ["ing"]，输入 "n;" 应转换为 "ning"（n 声母 + ; 韵母 ing）。
 #[test]
 fn mspy_semicolon_final_e2e() {
     let c = conv("mspy");
@@ -701,21 +694,18 @@ fn all_builtin_ids() -> Vec<String> {
     ids
 }
 
-/// ★ 反向表的**正确性定义**：表里说音节 S 敲 `[k1,k2]`，那么敲下这个键对就必须
-/// 能得到 S —— 即 S ∈ `convert_pair(k1, k2)`。
+/// 反向表的正确性定义：表里说音节 S 敲 `[k1,k2]`，敲下这个键对就必须能得到 S，
+/// 即 S ∈ `convert_pair(k1, k2)`。
 ///
-/// 用「包含」而非「恒等」作全量判据，是因为建表第二遍会给「只能作次选出现」的
-/// 冷僻音节兜底（它们在该键对的候选列表里排第二及以后）。对这些音节，用户敲出
-/// 键对后要往下翻一格才选得到，但编码本身没有错。恒等那一档由下面的
-/// `reverse_common_syllables_are_first_choice` 单独钉。
+/// 用「包含」而非「恒等」：建表第二遍会给只能作次选出现的冷僻音节兜底（往下翻一格才选得到，
+/// 但编码没错）。恒等那一档由 `reverse_common_syllables_are_first_choice` 单独钉。
 #[test]
 fn reverse_table_is_decodable_for_all_builtin_layouts() {
     for id in all_builtin_ids() {
         let c = conv(&id);
         let rev = c.build_reverse();
         assert!(!rev.is_empty(), "{id}：反向表不应为空");
-        // 实测全部内置布局恒为 414 个音节。留一点余量给将来的布局差异，
-        // 但掉到 400 以下就不是差异而是枚举漏了键。
+        // 全部内置布局恒为 414 个音节。留点余量给布局差异，掉到 400 以下就是枚举漏了键。
         assert!(
             rev.len() >= 400,
             "{id}：反向表只收录了 {} 个音节，疑似枚举漏键",
@@ -732,10 +722,8 @@ fn reverse_table_is_decodable_for_all_builtin_layouts() {
     }
 }
 
-/// 常用音节必须是**首选**（敲完即得，不用往下翻）。
-///
-/// 上一条只保证「选得到」，这条保证「一敲就是它」。注释里显示的编码若要用户
-/// 翻一格才对得上，用户会认为编码显示错了。
+/// 常用音节必须是首选（敲完即得，不用往下翻）。
+/// 注释里显示的编码若要翻一格才对得上，用户会认为编码显示错了。
 #[test]
 fn reverse_common_syllables_are_first_choice() {
     // 覆盖各条取码路径：常规声母韵母、zh/ch/sh 独立键、ü 归一化、零声母、整体认读。
@@ -764,9 +752,7 @@ fn reverse_common_syllables_are_first_choice() {
 }
 
 /// 整串往返：`encode_all` 出来的击键串喂回 `convert`，必须还原成同一串全拼。
-///
-/// 这一条比逐音节判据更接近真机——它连带验证了「每音节恒 2 键」这个隐含前提，
-/// 若哪天有布局的零声母要敲 3 键，这里会红。
+/// 连带验证「每音节恒 2 键」这个隐含前提，哪天有布局的零声母要敲 3 键，这里会红。
 #[test]
 fn reverse_roundtrip_through_convert() {
     const WORDS: &[(&[&str], &str)] = &[
@@ -798,15 +784,11 @@ fn reverse_roundtrip_through_convert() {
     }
 }
 
-/// ★ 建表必须无视模糊音开关。
+/// 建表必须无视模糊音开关。
 ///
-/// `chua` 在小鹤下的真值键对是 `ix`（`i` = ch，`x` = ua）。但开着 ch↔c 模糊音时，
-/// `cx` 这个键对的 `c`+`ua` = "cua" 不是合法音节被 trie 拒掉，模糊对偶 `ch`+`ua`
-/// = "chua" 却合法，于是 "chua" 成了 `cx` 的首选；而枚举序 `c` 在 `i` 之前，
-/// 若建表跟随模糊开关，"chua" 就会被登记成 `cx`。
-///
-/// 那不是「显示得不够好」，是**显示的编码是错的**：模糊音是输入时的宽容，
-/// 不是这个字的打法。
+/// `chua` 在小鹤下的真值键对是 `ix`。开着 ch↔c 模糊音时 `cx` 的模糊对偶 "chua" 合法，成了 `cx` 的
+/// 首选；枚举序 `c` 在 `i` 之前，建表若跟随模糊开关，"chua" 就会被登记成 `cx`。
+/// 模糊音是输入时的宽容，不是这个字的打法。
 #[test]
 fn reverse_ignores_fuzzy_initials() {
     let plain = conv("xiaohe").build_reverse();
@@ -830,11 +812,9 @@ fn reverse_ignores_fuzzy_initials() {
     assert_eq!(plain.encode("zhuang"), Some(*b"vl"), "小鹤 zhuang 应为 vl");
 }
 
-/// 三个零声母流派各自按自己的规矩出码，数据说了算。
-///
-/// 小鹤=首字母引导(`aa`)、微软=O 引导(`oa`)、首道=显式 `zero_pairs`(`aa`)。
-/// 这条同时守着 `convert_pair` 里「单韵母重复键只对把该键配成零声母引导键的方案
-/// 生效」那道闸——若它退回无条件放行，微软的 `a` 会变成 `aa`，这里立刻红。
+/// 三个零声母流派各自按自己的规矩出码：小鹤=首字母引导(`aa`)、微软=O 引导(`oa`)、
+/// 首道=显式 `zero_pairs`(`aa`)。同时守着 `convert_pair` 里「单韵母重复键只对把该键配成零声母
+/// 引导键的方案生效」那道闸：无条件放行的话微软的 `a` 会变成 `aa`。
 #[test]
 fn reverse_zero_initial_schools() {
     assert_eq!(
@@ -854,9 +834,8 @@ fn reverse_zero_initial_schools() {
     );
 }
 
-/// 查不到的音节返回 `None`；整串里**任一**音节查不到即整串 `None`。
-///
-/// 不做「查得到的拼上、查不到的跳过」：半截击键串是错的答案而不是不完整的答案。
+/// 查不到的音节返回 `None`；整串里任一音节查不到即整串 `None`。
+/// 半截击键串是错的答案而不是不完整的答案。
 #[test]
 fn reverse_rejects_unknown_syllables() {
     let rev = conv("xiaohe").build_reverse();
@@ -871,17 +850,11 @@ fn reverse_rejects_unknown_syllables() {
     assert!(rev.encode_all(&["ni", "hao"]).is_some());
 }
 
-/// 建表第二遍（给「只能作次选出现」的音节兜底）的受益者：`lo`（全部布局）与
-/// 手道的 `dia`。
+/// 建表第二遍（给只能作次选出现的音节兜底）的受益者：`lo`（全部布局）与手道的 `dia`。
 ///
-/// `o` 键在全部 8 个内置布局下都配着 `["uo", "o"]` 两个韵母，于是 `l` + `o` 解出
-/// 两个都合法的音节 `["luo", "lo"]`——「罗」占了首选，「咯」只能从第二遍拿到
-/// 同一个键对。手道的 `k` 键配 `["en", "ia"]`，`dia` 补进标准音节表后 `d` + `k` 解出
-/// `["den", "dia"]`，同理。实测全部内置布局只有这两个多解键对。
-///
-/// ⚠️ 没有这条测试，第二遍扫描就是一段**无法被任何测试区分**的代码：删掉它，
-/// 反向表从 414 个音节掉到 413（手道掉到 412），而其余每一条断言照常全绿。这一点是实测出来的
-/// （变异检验：合并两遍扫描后 6 条测试全过），不是推演。
+/// `o` 键在全部内置布局下都配 `["uo", "o"]`，`l` + `o` 解出 `["luo", "lo"]`，「咯」只能从第二遍
+/// 拿到同一个键对；手道 `k` 键配 `["en", "ia"]`，`d` + `k` 解出 `["den", "dia"]`。
+/// 没有这条，删掉第二遍扫描其余断言照常全绿（反向表只是从 414 个音节掉到 413）。
 #[test]
 fn reverse_second_pass_rescues_secondary_syllables() {
     for id in all_builtin_ids() {
@@ -905,21 +878,15 @@ fn reverse_second_pass_rescues_secondary_syllables() {
     assert_eq!(shoudao.build_reverse().encode("dia"), Some(*b"dk"));
 }
 
-/// 两遍扫描的**顺序**保障：同一个音节既是 A 键对的次选、又是 B 键对的首选时，
-/// 反向表必须给 B。
+/// 两遍扫描的顺序保障：同一个音节既是 A 键对的次选、又是 B 键对的首选时，反向表必须给 B，
+/// 否则用户照着注释显示的编码敲下去，出来的是另一个字。
 ///
-/// ⚠️ 现有 8 个内置布局**触发不了**这个差异——实测多解键对只有 `lo → [luo, lo]`
-/// 与手道的 `dk → [den, dia]`，而 `lo`/`dia` 在该布局别处并不是谁的首选，故两遍与一遍结果完全相同。
-/// 所以这里用一份构造布局把差异造出来，否则「先扫首选、再扫次选」这个顺序就是
-/// 一段无法被任何测试区分的代码（变异检验实测：合并两遍后其余测试全绿）。
-///
-/// 差异的实际后果：用户照着注释显示的编码敲下去，出来的是**另一个字**，
-/// 要往下翻一格才是他要的那个。
+/// 现有内置布局触发不了这个差异（`lo`/`dia` 在别处不是谁的首选），故用构造布局造出来，
+/// 否则「先扫首选、再扫次选」这个顺序无法被任何测试区分。
 #[test]
 fn reverse_prefers_first_choice_pair_over_secondary() {
-    // `a` 键配两个韵母（ang 在前、a 在后），`z` 键只配 `a`。
-    // 于是 "ba" 是 `ba` 键对的**次选**（首选是 "bang"），却是 `bz` 键对的首选。
-    // 而枚举序里 `ba` 在 `bz` 之前。
+    // `a` 键配两个韵母（ang 在前、a 在后），`z` 键只配 `a`。于是 "ba" 是 `ba` 键对的次选
+    // （首选 "bang"），却是 `bz` 键对的首选；而枚举序里 `ba` 在 `bz` 之前。
     const DUAL: &str = r#"
 [meta]
 id = "test_dual"
@@ -950,16 +917,11 @@ z = ["a"]
     assert_eq!(rev.encode("bang"), Some(*b"ba"), "bang 本就是 ba 的首选");
 }
 
-/// 枚举必须按**排序后**的键走，否则反向表随哈希序漂移。
+/// 枚举必须按排序后的键走，否则反向表随哈希序漂移。
 ///
-/// 实测每个内置布局都有 5~10 个音节被多个键对同时当作首选。最典型的是 ü 归一化
-/// 造成的 `ju ← [ju, jv]`（`normalize_pinyin` 把 j/q/x/y 后的 `v` 转成 `u`，
-/// 于是 `j`+`u` 与 `j`+`v` 殊途同归）；微软/搜狗那边是 `[ju, jy]`。
-/// 零声母也有：abc 的 `ou ← [ob, ou]`、微软的 `ai ← [ai, ol]`。
-///
-/// 这些音节取哪个键对**完全由枚举顺序决定**。不排序就是由 `HashMap` 的哈希序
-/// 决定，而那个序**跨进程随机** —— 后果不是测试时绿时红那么轻：同一个字，
-/// 用户今天看到编码是 `ju`，重启输入法后变成 `jv`。编码显示不稳定，用户就没法信它。
+/// 每个内置布局都有若干音节被多个键对同时当作首选（如 ü 归一化造成的 `ju ← [ju, jv]`、
+/// 微软/搜狗的 `[ju, jy]`、零声母 abc 的 `ou ← [ob, ou]`），取哪个完全由枚举顺序决定。
+/// `HashMap` 的哈希序跨进程随机，不排序的话同一个字重启后显示的编码会变。
 #[test]
 fn reverse_table_is_deterministic_under_first_choice_conflicts() {
     for id in all_builtin_ids() {

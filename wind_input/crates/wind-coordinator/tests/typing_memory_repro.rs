@@ -1,17 +1,15 @@
 //! 本机复现「注释 + 悬停开着时打字常驻 +18 MB」（`docs/design/memory-footprint.md` S5）的探针。
 //!
-//! ⚠️ **本文件只能有这一个用例**：用户目录靠 `set_var("WIND_INSTALL_ROOT")` + 便携标记重定向，
-//! `set_var` 要求进程里没有别的线程同时读环境、且路径缓存（`OnceLock`）只认第一次；再加用例
-//! 就会与它并行（或抢先初始化路径缓存），重定向失效、读写到真实用户目录。另起文件。
+//! 本文件只能有这一个用例：用户目录靠 `set_var("WIND_INSTALL_ROOT")` + 便携标记重定向，
+//! `set_var` 要求没有别的线程同时读环境，且路径缓存（`OnceLock`）只认第一次；再加用例会与它
+//! 并行或抢先初始化路径缓存，重定向失效、读写到真实用户目录。另起文件。
 //!
-//! **观测用、不断言**，默认 `#[ignore]`。按桌面构造的顺序跑：构造协调器 → 等价于桌面的启动
-//! 预热 → 经真实按键入口打字（五笔简码 + 拼音分步上屏，持续刷新候选、触发注释 / 悬停渲染与
-//! 拼音自动造词）→ 空闲。每阶段打点：
+//! 观测用、不断言，默认 `#[ignore]`。按桌面构造的顺序跑：构造协调器 → 启动预热 → 经真实按键入口
+//! 打字（五笔简码 + 拼音分步上屏，触发注释 / 悬停渲染与拼音自动造词）→ 空闲。每阶段打点：
 //!
-//! - `live`：本测试二进制的计数分配器统计的**在用堆字节**（与分配器是否归还无关，
-//!   最接近「常驻数据」的口径）；
-//! - `RssAnon`（≈ Windows Private：mmap 的词库页是 file-backed，不计）不整理 / `malloc_trim(0)` 后
-//!   两个值（后者近似 Windows 堆会自行归还大块）；`VmHWM` 高水位；
+//! - `live`：计数分配器统计的在用堆字节（与分配器是否归还无关，最接近「常驻数据」）；
+//! - `RssAnon`（≈ Windows Private，mmap 的词库页不计）不整理 / `malloc_trim(0)` 后两个值
+//!   （后者近似 Windows 堆会自行归还大块）；`VmHWM` 高水位；
 //! - 各结构自报大小与已加载引擎（`Coordinator::debug_memory_report`）。
 //!
 //! # 用法
@@ -23,7 +21,7 @@
 //! WIND_REPRO_KEY_MS=15               # 键间隔
 //! WIND_REPRO_STOP_AFTER=3            # 「一阶段一进程」：跑到第 N 阶段就停（缺省全跑）
 //! WIND_REPRO_LONG_IDLE=65            # 末阶段真等这么多秒（缺省直接调 debug_reclaim_now 模拟）
-//! WIND_REPRO_PREBUILD_PINYIN=1       # 打字前先单独建 `${pinyin}` 的读音索引（S2 后多一拍）
+//! WIND_REPRO_PREBUILD_PINYIN=1       # 打字前先单独建 `${pinyin}` 的读音索引
 //! WIND_REPRO_SYNTH_CT=190000         # 构造前往用户库 wubi86 灌这么多条合成码表用户词
 //! WIND_REPRO_IDLE_SWEEP=1            # 末尾多一拍：闲置清扫（阈值 0，设计 §7）后的读数
 //! cargo test -p wind-coordinator --release --test typing_memory_repro -- --ignored --nocapture --test-threads=1
@@ -31,44 +29,11 @@
 //!
 //! `WIND_REPRO_DIR` 是从靶机拉下来的用户目录副本（`config.toml`、`userdata.redb`、`schemas/`、
 //! `schema_overrides/` 等）。用户目录经便携标记重定向到 `$TMPDIR/wi-s5-root/userdata`，每次运行
-//! 从 `WIND_REPRO_DIR` **复制**一份再用（打字会写库，原件不动）；`localdata/cache` 跨运行保留，
+//! 从 `WIND_REPRO_DIR` 复制一份再用（打字会写库，原件不动）；`localdata/cache` 跨运行保留，
 //! 首跑要建缓存，先跑一次热身再取数。系统数据取 `build_dev/data`。headless 没有 caret 事件，
 //! 首显闸门改成 `instant`，否则首帧不渲染注释与悬停。
 //!
-//! # 结论（2026-10-09，靶机配置：wubi86_pinyin、注释含 `${pinyin}`、19 万拼音用户词）
-//!
-//! 400 次上屏 / 2553 键，单位 MB，RssAnon 取 `malloc_trim` 后；各跑两次、数字一致：
-//!
-//! | 配置 | 预热后 live / RssAnon | 长档回收后 live / RssAnon |
-//! |---|---|---|
-//! | 原配置（紧凑化前） | 18.4 / 20.4 | 27.5 / 36.8 |
-//! | 只关注释、或模板去掉 `${pinyin}` | 18.4 / 20.4 | 18.4 / 24.2 |
-//! | 只关悬停 / 去 `${code_rev}` / 关拼音造词 | 同原配置 | 27.5 / 36.6–36.8 |
-//! | 原配置（`CharPinyinIndex` 紧凑化后） | 18.4 / 20.4 | 19.1 / 24.9–25.1 |
-//!
-//! - 「打字常驻 +18 MB」的主体是 `${pinyin}` 对五笔候选推读音时建的 `CharPinyinIndex`：
-//!   紧凑化前 4 万字 / 5.2 万读音拆成 13.3 万个小块，在用堆 9.1 MB、RssAnon +12.5 MB；
-//!   紧凑化后 3 块共 675 KB（在用堆 +0.7 MB），构建 30 ms → 13–15 ms。
-//! - `UserTextIndex` 不在其中：19 万词都在 `pinyin` 桶，按方案代次只推进那一份，wubi86 槽
-//!   1 KB、整段打字重建 1 次。
-//! - 其余约 4 MB（各配置都有）是 redb 读缓存（回收后落）与打字碎片。
-//! - 60 秒长档回收实际要停手约 60–70 秒才触发（闲置慢拍 10 秒 + 60 个 1 秒拍）。
-//!
-//! # 闲置清扫（S5 后半，2026-10-09，本机合成库）
-//!
-//! 空用户目录（出厂配置）+ 变体 `ct_auto_phrase,keep_all`（码表自动造词开、方案全常驻，
-//! 清扫只放懒建缓存），`WIND_REPRO_SYNTH_CT=190000`，400 次上屏，各 3 次一致：
-//!
-//! | 阶段 | live | blocks | RssAnon（trim 后） |
-//! |---|---|---|---|
-//! | S5 长档回收后 | 12.8 MB | 43708 | 14.3–15.9 MB |
-//! | S6 闲置清扫后 | 4.7 MB | 22467 | 12.7–14.3 MB |
-//!
-//! −8.1 MB live = `UserTextIndex wubi86` 7.0 MB（19 万合成码表用户词）+ 单字全码表 1.0 MB
-//! （2.1 万字、2.1 万块）。不灌合成词时只剩单字全码表：live 5.8 → 4.7 MB、RssAnon −1.6 MB。
-//! RssAnon 降得比 live 少：glibc 把这些块留在线程 arena 里，`malloc_trim` 也只还一部分
-//! （Windows 堆会还大块，见设计 §1）。同一份 19 万码表用户词，`UserTextIndex` 首建扫表持库锁
-//! 96–169 ms、总 228–431 ms；随机打字 400 次上屏期间不再重建（代次只在该方案新增词 / 权重变化时推进）。
+//! 测得的结论见 `docs/design/memory-footprint.md` 的「10 分阶段」S5 前半 / 后半两行。
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::{Path, PathBuf};

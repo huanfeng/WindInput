@@ -246,11 +246,10 @@ fn find_mixed_cycle_reports_path() {
     assert_eq!(EngineManager::find_mixed_cycle("a", &g), None);
 }
 
-/// 反查索引落在**方案自己的目录**下，且与主词库放得多深无关。
+/// 反查索引落在方案自己的目录下，且与主词库放得多深无关。
 ///
-/// 论坛 t120：主库在 `schemas/ime_wubi86/Default/` 时，索引曾落到
-/// `<cache>/Default/ime_wubi86.wridx` —— 目录来自主库 `.wdat` 的父目录名，
-/// 而 `Default` 与任何方案都不对应，多个方案还会挤进同一个。
+/// 目录不能取主库 `.wdat` 的父目录名：主库在 `schemas/ime_wubi86/Default/` 时会落到
+/// `<cache>/Default/`，与任何方案都不对应，多个方案还会挤进同一个。
 #[test]
 fn reverse_index_path_is_scoped_by_schema_id_only() {
     let root = Path::new("cache");
@@ -283,9 +282,7 @@ fn data_facts_are_cached_until_invalidated() {
 }
 
 /// 单字全码表与反查索引同键同目录、只差扩展名。
-///
-/// 两者同源于该方案启用的整组词库，一起生、一起废。分开放的话，清缓存/换词库时
-/// 漏掉一个，留下的那份就是一份与另一份不同步的幽灵。
+/// 两者同源于该方案启用的整组词库，一起生、一起废；分开放的话清缓存/换词库时漏掉一个就成了幽灵。
 #[test]
 fn single_char_codes_cache_sits_next_to_the_reverse_index() {
     let root = Path::new("cache");
@@ -296,14 +293,11 @@ fn single_char_codes_cache_sits_next_to_the_reverse_index() {
     assert_ne!(w, r);
 }
 
-/// **`max_code_length` 必须进单字全码表的指纹。**
+/// `max_code_length` 必须进单字全码表的指纹。
 ///
-/// 它是这张表与反查索引的唯一分歧：反查索引记录词库里实际存在的编码、与 cap 无关，
-/// 单字全码表却拿 cap 当闸筛超长码。用户在设置页改了码长而词库一字未动时，只哈希词库
-/// 的指纹仍判「新鲜」⇒ 按旧 cap 筛出来的表被永久复用，表现为改了设置毫无变化，
-/// 且重装也不好使（缓存还在）。
-///
-/// 空词库列表下摘要为空，剩下的恰好就是 cap 这一项，判据因此不受词库构造干扰。
+/// 它是这张表与反查索引的唯一分歧：反查索引与 cap 无关，单字全码表却拿 cap 筛超长码。
+/// 只哈希词库的话，改了码长而词库未动时旧表被永久复用（重装也不好使，缓存还在）。
+/// 空词库列表下摘要为空，剩下的恰好就是 cap 这一项，判据不受词库构造干扰。
 #[test]
 fn cap_is_part_of_the_single_char_cache_fingerprint() {
     let a = EngineManager::single_char_codes_source_digests(&[], 4).unwrap();
@@ -340,18 +334,17 @@ fn schema_cache_key_disambiguates_escaped_ids() {
     assert_eq!(EngineManager::schema_cache_key(""), None);
 }
 
-/// 混输主引擎的整句开关**不继承** `primary_schema` 的声明。
+/// 混输主引擎的整句开关不继承 `primary_schema` 的声明。
 ///
-/// 用户在 `wubi86.schema.toml` 里开了整句，不代表 `wubi86_pinyin` 也该开——后者的
-/// 超码长区间已经归拼音管（`MixedEngine::convert` 直接走 `convert_overflow`，
-/// 不经主引擎），继承过来只会得到「配置开着却不生效」这种最难排查的状态。
+/// `wubi86` 开了整句不代表 `wubi86_pinyin` 也该开：后者的超码长区间归拼音管
+/// （`MixedEngine::convert` 直接走 `convert_overflow`），继承过来只会得到「配置开着却不生效」。
 #[test]
 fn mixed_primary_does_not_inherit_sentence_input() {
     // 独立方案：用自己的声明。
     assert!(resolve_sentence_input(None, true));
     assert!(!resolve_sentence_input(None, false));
 
-    // ★ 混输主：`own=true`（primary_schema 开着）也要被压成混输方案自己的取值。
+    // 混输主：`own=true`（primary_schema 开着）也要被压成混输方案自己的取值。
     assert!(!resolve_sentence_input(
         Some(MixedRole::Primary {
             sentence_input: false
@@ -371,16 +364,15 @@ fn mixed_primary_does_not_inherit_sentence_input() {
     assert!(resolve_sentence_input(sec, true));
 }
 
-/// 逆切分在**混输主引擎上一律关闭**，谁声明都不行 —— 见 [`resolve_split_input`]：
+/// 逆切分在混输主引擎上一律关闭，谁声明都不行——见 [`resolve_split_input`]：
 /// 切分候选的 `code` 是整串，会落进混输档位体系的档 0、无条件压过拼音精确候选。
-/// 让它在混输下正确需要先定档位归属，那是独立一步。
 #[test]
 fn split_input_is_off_for_mixed_primary() {
     // 独立方案：用自己的声明。
     assert!(resolve_split_input(None, true));
     assert!(!resolve_split_input(None, false));
 
-    // ★ 混输主：两个来源都开着也压成 false —— 不是「不继承」，是「不生效」。
+    // 混输主：两个来源都开着也压成 false——不是「不继承」，是「不生效」。
     for own in [true, false] {
         assert!(
             !resolve_split_input(
@@ -393,8 +385,7 @@ fn split_input_is_off_for_mixed_primary() {
         );
     }
 
-    // ★ 反向对照：整句**不受**这条影响，仍按混输方案自己的声明走。
-    // 缺了它，一个把两个开关一起压死的实现也会让上面那段变绿。
+    // 反向对照：整句不受这条影响，仍按混输方案自己的声明走，防两个开关被一起压死。
     let sentence_on = Some(MixedRole::Primary {
         sentence_input: true,
     });
@@ -413,9 +404,8 @@ fn split_input_is_off_for_mixed_primary() {
 
 /// 造一个含三个方案的 data_dir：两个带 `[overlay]` 段、一个不带。
 ///
-/// ⚠️ **不能断言 `overlay_modes().len()`**：`installed_schemas` 还会扫描
-/// `Config::user_config_dir()/schemas`（真实用户目录），开发机上那里可能就装着快符方案。
-/// 故所有断言都写成「我造的这几个的相对关系」，不写绝对数量。
+/// 不能断言 `overlay_modes().len()`：`installed_schemas` 还会扫描真实用户目录
+/// `Config::user_config_dir()/schemas`，故断言只写「我造的这几个的相对关系」。
 fn make_overlay_data_dir(tag: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("wind_overlay_data_{tag}"));
     let _ = std::fs::remove_dir_all(&dir);
@@ -457,10 +447,8 @@ fn overlay_mgr(tag: &str) -> (EngineManager, std::path::PathBuf) {
     (mgr, ov)
 }
 
-/// 注册表的准入判据是**`[overlay]` 段存在**，不是 `hidden`。
-///
-/// 这两个属性正交：`hidden` 只说「不列进方案切换列表」，隐藏的码表方案也可能只是
-/// mix 成员、并无 overlay 生命周期。拿 hidden 当判据会把这类方案误收进特殊模式列表。
+/// 注册表的准入判据是 `[overlay]` 段存在，不是 `hidden`。
+/// 两者正交：`hidden` 只说「不列进方案切换列表」，隐藏的码表方案也可能只是 mix 成员。
 #[test]
 fn overlay_modes_admits_by_section_presence() {
     let (mgr, _ov) = overlay_mgr("admit");
@@ -479,9 +467,7 @@ fn overlay_modes_admits_by_section_presence() {
 }
 
 /// 下标 = 按 id 字典序，且 `overlay_index_of` 与之一致。
-///
-/// 这条钉住的是 `ModeKind::Special(u8)` 的下标语义来源：它必须由本表给出，
-/// 不再是用户 config 数组的顺序。
+/// 钉住 `ModeKind::Special(u8)` 的下标语义来源：由本表给出，不是用户 config 数组的顺序。
 #[test]
 fn overlay_modes_sorted_by_id_and_index_matches() {
     let (mgr, _ov) = overlay_mgr("order");
@@ -500,9 +486,6 @@ fn overlay_modes_sorted_by_id_and_index_matches() {
 }
 
 /// 显示名/短称从方案文件 `[schema]` 派生，短称只取首字符。
-///
-/// 原先这两个字段在 `special_modes` 条目里重复了一份、缺省时才回落方案文件；
-/// 下沉后条目即方案，重复消失。
 #[test]
 fn overlay_entry_derives_name_and_icon_from_schema() {
     let (mgr, _ov) = overlay_mgr("name");
@@ -510,8 +493,7 @@ fn overlay_entry_derives_name_and_icon_from_schema() {
     let kf = modes.iter().find(|e| e.schema_id == "zz_kf").unwrap();
     assert_eq!(kf.name, "快符");
     // 一个汉字宽 2，恰好等于上限（`wind_config::ICON_LABEL_MAX_WIDTH`）、原样保留。
-    // ⚠️ 这条断言**测不到截断**——它验证的是"取自方案文件且没被多截"。截断本身由
-    // `wind_config::schema` 的单元测试覆盖，别在这里加长标签的 fixture 来重复测。
+    // 这条测不到截断，截断由 `wind_config::schema` 的单元测试覆盖，别在这里重复测。
     assert_eq!(kf.icon_label, "符", "宽度在上限内，不截断");
     assert!(kf.spec.show_all_on_enter);
     assert_eq!(
@@ -524,11 +506,8 @@ fn overlay_entry_derives_name_and_icon_from_schema() {
     assert!(!rare.spec.show_all_on_enter, "空 [overlay] 段取字段默认值");
 }
 
-/// `schema_overrides/{id}.toml` 的 `[overlay]` 覆盖**自动生效**——注册表走的是
-/// 静态 `read_schema`，它内部已做 `merge_toml` 深合并，无需为 overlay 另接一条线。
-///
-/// 这正是「配置下沉到方案文件」相对「留在 config.toml 数组」的核心收益：
-/// 用户改动的存储、编辑、保存通路全部现成。
+/// `schema_overrides/{id}.toml` 的 `[overlay]` 覆盖自动生效：注册表走静态 `read_schema`，
+/// 其内部已做 `merge_toml` 深合并，无需为 overlay 另接一条线。
 #[test]
 fn overlay_spec_honors_schema_override_layer() {
     let (mgr, ov) = overlay_mgr("override");
@@ -559,10 +538,6 @@ fn overlay_spec_honors_schema_override_layer() {
     assert_eq!(kf.name, "快符", "override 未提及的字段仍来自方案文件");
 }
 
-/// 半衰期回落只有**两级**：本段的值 > store 默认（72h）。
-///
-/// 码表段曾回落到拼音段（三级），已否决——设置页上那是两个独立控件，回落链会让用户
-/// 「把码表的留在 0、改了拼音的、发现码表跟着变」。回落链只在配置层不可见时是便利。
 /// 辅助码设置缓存的回填竞态：未命中时先记代次再算，算的途中被清过（方案覆盖层写入 /
 /// 重载），算出来的旧值不得回填。反向对照：代次没变时正常回填。
 #[test]
@@ -583,7 +558,6 @@ fn aux_settings_cache_drops_stale_fill() {
     assert!(cached(&mgr), "代次未变照常回填");
 }
 
-/// 码表设置每次按键要取好几次（单字过滤、建候选、短语自动上屏），不能每次都重读方案文件。
 fn codetable_cache_fixture(name: &str, auto_commit: bool) -> std::path::PathBuf {
     let base =
         std::env::temp_dir().join(format!("wind_eng_ct_cache-{name}-{}", std::process::id()));
@@ -599,6 +573,7 @@ fn codetable_cache_fixture(name: &str, auto_commit: bool) -> std::path::PathBuf 
     base
 }
 
+/// 码表设置每次按键要取好几次（单字过滤、建候选、短语自动上屏），不能每次都重读方案文件。
 #[test]
 fn codetable_settings_are_cached_until_schema_invalidated() {
     let base = codetable_cache_fixture("inv", true);
@@ -658,6 +633,9 @@ fn codetable_settings_cache_drops_stale_fill() {
     assert!(cached(&mgr), "代次未变照常回填");
 }
 
+/// 半衰期回落只有两级：本段的值 > store 默认（72h）。
+///
+/// 码表段不回落到拼音段：设置页上那是两个独立控件，回落链会让用户改了拼音的、码表跟着变。
 #[test]
 fn half_life_falls_back_to_store_default_only() {
     let store_default = wind_store::freq::FreqProfile::default().half_life_hours;
@@ -665,24 +643,20 @@ fn half_life_falls_back_to_store_default_only() {
 
     // ① 本段有值 → 用它
     assert_eq!(EngineManager::resolve_half_life(6.0, store_default), 6.0);
-    // ② 本段为 0 → store 默认。**这条是 ① 的反向对照**：若实现写成恒取第一个参数，
-    //    ① 仍会绿，只有本条能抓到。
+    // ② 本段为 0 → store 默认。这是 ① 的反向对照：实现写成恒取第一个参数时 ① 仍会绿。
     assert_eq!(
         EngineManager::resolve_half_life(0.0, store_default),
         store_default
     );
-    // 负值当未设置：配置是 f64，手改配置文件写成负数不该得出负半衰期（那会让
-    // decay_factor 随时间**增长**）。
+    // 负值当未设置：手改配置写成负数不该得出负半衰期（会让 decay_factor 随时间增长）。
     assert_eq!(
         EngineManager::resolve_half_life(-1.0, store_default),
         store_default
     );
 }
 
-/// 码表衰减参数**不读拼音段任何字段**。
-///
-/// 这条不能只靠读代码保证：`codetable_freq_profile` 曾以 `pinyin_freq_profile()` 为基，
-/// 只覆盖 half_life——那种写法下拼音段的其余字段会静默漏进来，而且看起来毫无问题。
+/// 码表衰减参数不读拼音段任何字段：以 `pinyin_freq_profile()` 为基只覆盖 half_life 的写法
+/// 会让拼音段其余字段静默漏进来。
 #[test]
 fn codetable_profile_is_independent_of_pinyin_config() {
     let mut cfg = Config::default();
@@ -709,12 +683,8 @@ fn codetable_profile_is_independent_of_pinyin_config() {
     assert_eq!(py.recency_peak, 777.0);
 }
 
-/// 英文衰减参数与码表、拼音**三者互不相干**，各读各的 half_life。
-///
-/// 方案文件的 `[engine.codetable.frequency]` 能覆盖基线，**且逐字段稀疏**。
-///
-/// 此前 `freq_settings` 直读全局镜像，方案文件里写了调频也无人读——「每方案独立调频」
-/// 这个能力看起来存在（字段能写进 TOML）、实际完全不生效。
+/// 方案文件的 `[engine.codetable.frequency]` 能覆盖基线，且逐字段稀疏。
+/// `freq_settings` 不能直读全局镜像，否则方案文件里写了调频也无人读。
 #[test]
 fn schema_level_frequency_overrides_baseline() {
     use std::io::Write;
@@ -755,7 +725,7 @@ fn schema_level_frequency_overrides_baseline() {
     let _ = std::fs::remove_dir_all(&base_dir);
 }
 
-/// 英文此前共用码表段，于是「英文调频衰减慢一点」这个愿望只能靠改五笔的半衰期实现。
+/// 英文衰减参数与码表、拼音三者互不相干，各读各的 half_life。
 #[test]
 fn english_profile_is_independent_of_codetable_and_pinyin() {
     let mut cfg = Config::default();
@@ -769,7 +739,7 @@ fn english_profile_is_independent_of_codetable_and_pinyin() {
     assert_eq!(mgr.codetable_freq_profile().half_life_hours, 888.0);
     assert_eq!(mgr.pinyin_freq_profile().half_life_hours, 999.0);
 
-    // 英文段留 0 时走 store 默认，**不回落码表的 888**。
+    // 英文段留 0 时走 store 默认，不回落码表的 888。
     cfg.schema.english.frequency.half_life = 0.0;
     let mgr2 = EngineManager::new(&cfg, None);
     let def = wind_store::freq::FreqProfile::default();
@@ -780,10 +750,8 @@ fn english_profile_is_independent_of_codetable_and_pinyin() {
     );
 }
 
-/// 英文记账口径**对所有分支生效**——混输/码表方案下混进来的英文候选同样按它记账。
-///
-/// 只在「当前是英文方案」时读这个字段的话，混输里的英文候选会静默回到默认口径，
-/// 而读写两端口径不一致的后果是：写进去的词频记录，读的时候永远找不到。
+/// 英文记账口径对所有分支生效——混输/码表方案下混进来的英文候选同样按它记账。
+/// 只在英文方案下读这个字段的话，混输里的英文词频写读口径不一致，写进去的记录读不到。
 #[test]
 fn english_code_scope_applies_to_every_schema_kind() {
     let mut cfg = Config::default();
@@ -803,7 +771,7 @@ fn english_code_scope_applies_to_every_schema_kind() {
 
 #[test]
 fn join_rel_dir_keeps_one_separator() {
-    //! 子表路径要当**稳定 id** 用，两种分隔符混着写会让同一张表得到两个 id。
+    //! 子表路径要当稳定 id 用，两种分隔符混着写会让同一张表得到两个 id。
     assert_eq!(
         join_rel_dir(
             "pinyin/rime_frost.dict.yaml",
@@ -975,12 +943,10 @@ fn resolve_dict_file_priority_order() {
     std::fs::remove_dir_all(&base).ok();
 }
 
-/// 三层（user / custom / data）下的词库解析：**两趟结构**必须保住。
+/// 三层（user / custom / data）下的词库解析：两趟结构必须保住。
 ///
-/// 核心是那个反例组合——靠前的层只投了 `.wdat`、靠后的层有 `.yaml`：
-/// 正确结果是**靠后那层的 yaml 胜出**（第 1 趟就在各层找完了 yaml），而天真地改成
-/// 一趟逐层「yaml 或 wdat 谁先命中算谁」会让靠前那层的 wdat 抢走。定制者只投
-/// `.wdat`（预编译词库的产物）是很自然的做法，加了 custom 层后这类组合只会更多。
+/// 反例组合：靠前的层只投了 `.wdat`、靠后的层有 `.yaml` ⇒ 靠后那层的 yaml 胜出（第 1 趟在各层
+/// 找完 yaml）。改成一趟逐层「谁先命中算谁」会让靠前那层的 wdat 抢走；定制者只投 `.wdat` 很常见。
 #[test]
 fn resolve_dict_file_three_layers_keeps_two_pass_semantics() {
     let base = std::env::temp_dir().join(format!("wind-resolve3-{}", std::process::id()));
@@ -1005,8 +971,7 @@ fn resolve_dict_file_three_layers_keeps_two_pass_semantics() {
     // 三层皆空 → 兜底 data 层（末位）
     assert_eq!(got(), yaml(&sys), "三层皆空应兜底到 data 层");
 
-    // ★ 反例组合一：user 只有 wdat、data 有 yaml ⇒ **data 的 yaml 胜出**。
-    // 一趟逐层写法会在这里返回 user 的路径——这正是本测试存在的理由。
+    // 反例组合一：user 只有 wdat、data 有 yaml ⇒ data 的 yaml 胜出（一趟逐层写法会返回 user）。
     touch(wdat(&user));
     touch(yaml(&sys));
     assert_eq!(
@@ -1015,7 +980,7 @@ fn resolve_dict_file_three_layers_keeps_two_pass_semantics() {
         "第 1 趟要在各层找完 yaml：user 只有 wdat 时不得抢走 data 的 yaml"
     );
 
-    // ★ 反例组合二：中间层同理。custom 只有 wdat、data 有 yaml ⇒ 仍是 data 胜出。
+    // 反例组合二：中间层同理。custom 只有 wdat、data 有 yaml ⇒ 仍是 data 胜出。
     touch(wdat(&custom));
     assert_eq!(
         got(),
@@ -1182,9 +1147,8 @@ fn resolve_codetable_reads_schema_inline_behavior() {
     std::fs::create_dir_all(&schemas).unwrap();
     let mut f = std::fs::File::create(schemas.join("wb_test.schema.toml")).unwrap();
     // 内联：自动上屏开、顶码关；z_key_repeat 不写 → 应回落全局。
-    // **不写 hidden**：回落全局是普通方案的语义，特殊方案另有一条
-    // （见 special_schema_does_not_inherit_global_codetable）。此处原用 qsym +
-    // hidden = true，两条语义撞在同一个用例里，特殊方案改为不继承后才暴露出来。
+    // 不写 hidden / overlay：回落全局是普通方案的语义，特殊方案另有一条
+    // （见 special_schema_does_not_inherit_global_codetable）。
     write!(
         f,
         "[schema]\nid = \"wb_test\"\n[engine]\ntype = \"codetable\"\n[engine.codetable]\nmax_code_length = 8\nauto_commit_at_full = true\ntop_code_commit = false\n"
@@ -1210,11 +1174,10 @@ fn resolve_codetable_reads_schema_inline_behavior() {
     let _ = std::fs::remove_dir_all(&base_dir);
 }
 
-/// overlay 方案（带 `[overlay]` 段）**不继承**全局 `schema.codetable`：没写的字段取内置
-/// 默认，而不是主码表的设置。
+/// overlay 方案（带 `[overlay]` 段）不继承全局 `schema.codetable`：没写的字段取内置默认。
 ///
-/// 快符是几十条的小符号表，全局基线是按五笔那种数万条全码表调的。继承的后果是用户改
-/// 五笔的「精确匹配」，快符跟着变，而改的人根本意识不到自己动了另一个表。
+/// 快符是几十条的小符号表，全局基线按五笔数万条全码表调；继承的话用户改五笔的「精确匹配」，
+/// 快符跟着变而毫无察觉。
 #[test]
 fn overlay_schema_does_not_inherit_global_codetable() {
     use std::io::Write;
@@ -1222,7 +1185,7 @@ fn overlay_schema_does_not_inherit_global_codetable() {
     let schemas = base_dir.join("schemas");
     let _ = std::fs::remove_dir_all(&base_dir);
     std::fs::create_dir_all(&schemas).unwrap();
-    // 两个方案，除 `[overlay]` 段外**逐字相同**——差别只能来自那一段本身。
+    // 两个方案除 `[overlay]` 段外逐字相同——差别只能来自那一段本身。
     for (id, overlay) in [("sp_overlay", true), ("sp_normal", false)] {
         let mut f = std::fs::File::create(schemas.join(format!("{id}.schema.toml"))).unwrap();
         let ov = if overlay { "[overlay]\n" } else { "" };
@@ -1233,8 +1196,7 @@ fn overlay_schema_does_not_inherit_global_codetable() {
         .unwrap();
     }
 
-    // 基准是**特殊方案基线**，不是 CodetableGlobal::default()——后者是结构体零值，
-    // 与「特殊方案该长什么样」是两件事（见 special_schema_baseline 的文档）。
+    // 基准是特殊方案基线，不是 CodetableGlobal::default()（结构体零值，见 special_schema_baseline）。
     let def = EngineManager::special_schema_baseline();
     // 全局把三个开关都拨到与该基线相反的一侧，这样「有没有继承」一眼可辨。
     let global = wind_config::CodetableGlobal {
@@ -1268,7 +1230,7 @@ fn overlay_schema_does_not_inherit_global_codetable() {
 }
 
 /// 通配两项与其它码表行为同一条折叠链：方案写了覆盖、没写回落全局；overlay 方案
-/// 取内置基线，**不继承**全局开关（快符那类小符号表里 `z` 多半是正经编码）。
+/// 取内置基线，不继承全局开关（快符那类小符号表里 `z` 多半是正经编码）。
 #[test]
 fn wildcard_folds_from_schema_and_overlay_does_not_inherit() {
     use std::io::Write;
@@ -1325,14 +1287,12 @@ fn factory_stroke_schema_opts_out_of_wildcard() {
     assert_eq!(key("wubi86"), Some('z'), "对照：五笔 86 跟随全局");
 }
 
-/// ★ 基线判据是 `[overlay]` 段而**不是** `hidden`：钉住两个「反对角」组合。
+/// 基线判据是 `[overlay]` 段而不是 `hidden`：钉住两个「反对角」组合。
 ///
-/// 这两例正是旧判据（`hidden`）判错的地方，本测试在换判据前是红的：
-///
-/// | 方案 | 旧判据（hidden） | 新判据（overlay） |
+/// | 方案 | 按 hidden 判（错） | 按 overlay 判（对） |
 /// |---|---|---|
-/// | 有 `[overlay]`、无 `hidden` | 全局 ❌ 会继承五笔的精确匹配 | 内置基线 ✅ |
-/// | 有 `hidden`、无 `[overlay]` | 内置基线 ❌ | 全局 ✅ 它只是不列进切换列表的普通码表 |
+/// | 有 `[overlay]`、无 `hidden` | 全局，会继承五笔的精确匹配 | 内置基线 |
+/// | 有 `hidden`、无 `[overlay]` | 内置基线 | 全局，它只是不列进切换列表的普通码表 |
 ///
 /// 必须两条一起断言：只测其一的话，判据被改成恒真/恒假时另一半照样通过。
 #[test]
@@ -1342,7 +1302,7 @@ fn codetable_baseline_keys_on_overlay_section_not_hidden() {
     let schemas = base_dir.join("schemas");
     let _ = std::fs::remove_dir_all(&base_dir);
     std::fs::create_dir_all(&schemas).unwrap();
-    // 两个方案的 hidden 与 overlay 刻意**取反**，两个属性由此可分辨。
+    // 两个方案的 hidden 与 overlay 刻意取反，两个属性由此可分辨。
     for (id, extra) in [("od_overlay_only", "[overlay]\n"), ("od_hidden_only", "")] {
         let mut f = std::fs::File::create(schemas.join(format!("{id}.schema.toml"))).unwrap();
         let h = if id == "od_hidden_only" {
@@ -1388,12 +1348,10 @@ fn codetable_baseline_keys_on_overlay_section_not_hidden() {
     let _ = std::fs::remove_dir_all(&base_dir);
 }
 
-/// `effective_codetable`（设置页的初值快照来源）必须与 `resolve_codetable`（引擎实际
-/// 构建时用的折叠）**同口径**——它们是第三、第四个平行折叠点，一处改了另一处没改，
-/// 用户会看到「设置页显示精确匹配是关的，实际按开的跑」。
-///
-/// 顺带钉住基线分流：设置页给 overlay 方案显示的初值必须来自 overlay 基线，否则用户
-/// 一打开「自定义码表配置」就把全局的值写进了本不继承全局的方案。
+/// `effective_codetable`（设置页初值快照）必须与 `resolve_codetable`（引擎构建用的折叠）同口径，
+/// 否则用户看到「设置页显示精确匹配是关的，实际按开的跑」。
+/// 顺带钉住基线分流：overlay 方案的初值必须来自 overlay 基线，否则一打开「自定义码表配置」
+/// 就把全局的值写进了本不继承全局的方案。
 #[test]
 fn effective_codetable_matches_resolve_and_splits_by_overlay() {
     use std::io::Write;
@@ -1472,15 +1430,11 @@ fn merge_toml_table_recurse_and_scalar_replace() {
     assert_eq!(t.get("z").unwrap().as_integer(), Some(30), "新增键加入");
 }
 
-/// **键集合可变的表**（键名是数据而非结构字段，如 `key_actions` 的按键名）同样逐键合并。
+/// 键集合可变的表（键名是数据，如 `key_actions` 的按键名）同样逐键合并。
+/// 这是 `docs/design/schema-key-actions.md` §3「逐键合并」覆盖语义成立的前提。
 ///
-/// 与上一个用例的区别：那里的 x/y/z 是已知字段，这里的键由用户任意填写。`merge_toml`
-/// 不关心键名语义，故两者行为一致——但这是 `docs/design/schema-key-actions.md` §3
-/// 「逐键合并」覆盖语义能成立的前提，值得单独钉住。
-///
-/// ★ 顺带钉住一条**能力缺口**：override **无法表达「删除 base 的某个键」**。
-/// 合并只会新增/覆盖，base 里有而 override 里没有的键恒保留。因此「本方案禁用某个
-/// 全局绑定」只能靠显式哨兵值（设计里的 `none`），不能靠"从 override 里删掉这一行"。
+/// 顺带钉住能力缺口：override 无法表达「删除 base 的某个键」，合并只会新增/覆盖。
+/// 「本方案禁用某个全局绑定」只能靠显式哨兵值（`none`）。
 #[test]
 fn merge_toml_merges_tables_with_arbitrary_key_sets() {
     // base = 方案作者内联；over = 用户 override。键名均为按键名，非结构字段。
@@ -1515,7 +1469,7 @@ fn merge_toml_merges_tables_with_arbitrary_key_sets() {
     );
 }
 
-/// dictionaries 的 override 是**按 id 的稀疏合并**，不是数组整体替换：
+/// dictionaries 的 override 是按 id 的稀疏合并，不是数组整体替换：
 /// 只有 enabled 会被覆盖，结构定义（顺序/path/label/base_order）恒以方案文件为准。
 #[test]
 fn merge_toml_dictionaries_only_overrides_enabled_by_id() {
@@ -1616,7 +1570,7 @@ const PINYIN_WITH_DIR: &str = "[[dictionaries]]\nid = \"main\"\npath = \"pinyin/
         type = \"rime_pinyin\"\ndefault = true\n\
         [[dictionary_dirs]]\npath = \"pinyin/cn_dicts_cell\"\ntype = \"rime_pinyin\"\n";
 
-/// 目录里的词库登记成**出厂关**的扩展库，id 带前缀、label 取词库头 name（空则文件名）。
+/// 目录里的词库登记成出厂关的扩展库，id 带前缀、label 取词库头 name（空则文件名）。
 #[test]
 fn dir_dicts_are_injected_disabled_with_name_or_file_label() {
     let base = inject_with(
@@ -1756,7 +1710,7 @@ fn pinyin_without_dirs_falls_back_to_main_dict_ext() {
     assert_eq!(schema.dictionary_dirs[0].dict_type, "rime_pinyin");
 }
 
-/// 英文方案同样兜底（t306）：出厂主库在 `english/en.dict.yaml`，类型取 english，扫到的库排在
+/// 英文方案同样兜底：出厂主库在 `english/en.dict.yaml`，类型取 english，扫到的库排在
 /// 内置 en_ext 之后、出厂关。
 #[test]
 fn english_without_dirs_falls_back_to_main_dict_ext() {
@@ -1880,12 +1834,10 @@ fn merge_toml_dictionaries_not_created_from_override_alone() {
 
 /// 方案级 `[session_actions]`：逐键合并 + 显式 `none` 留在表里 + 并集滤掉 `none`。
 ///
-/// 三条断言各守一个会被「简化」掉的点：
 /// - override 逐键合并（整段替换会让方案作者内联的其余键消失）；
-/// - 显式 `none` **必须留在表里**——过滤掉它，消费点就会以为「方案没提这个键」而回落
-///   全局，用户写的禁用完全失效；
-/// - 但**并集要滤掉** `none`——并集的消费者据此决定装不装 CapsLock 全局钩子、要不要让
-///   TSF 转发，被禁用的键两者都不需要。两处方向相反，合并成一套就必错一头。
+/// - 显式 `none` 必须留在表里：滤掉它，消费点会回落全局，用户写的禁用失效；
+/// - 并集要滤掉 `none`：并集决定装不装 CapsLock 全局钩子、要不要让 TSF 转发。
+///   两处方向相反，合并成一套就必错一头。
 #[test]
 fn active_session_actions_merges_per_key_and_union_drops_none() {
     use std::io::Write;
@@ -1941,11 +1893,8 @@ fn active_session_actions_merges_per_key_and_union_drops_none() {
     let _ = std::fs::remove_dir_all(&ov_dir);
 }
 
-/// 方案级 `[key_actions]`：方案文件内联 + override **逐键合并**，不是整段替换。
-///
-/// 这是 `docs/design/schema-key-actions.md` §3 覆盖语义的端到端确认——上游
-/// `merge_toml_merges_tables_with_arbitrary_key_sets` 只证明了 toml 层的合并行为，
-/// 这里证明它真的贯通到 `active_key_actions()` 的返回值。
+/// 方案级 `[key_actions]`：方案文件内联 + override 逐键合并，不是整段替换。
+/// `docs/design/schema-key-actions.md` §3 的端到端确认：贯通到 `active_key_actions()` 的返回值。
 #[test]
 fn active_key_actions_merges_schema_file_and_override_per_key() {
     use std::io::Write;
@@ -2003,9 +1952,8 @@ fn active_key_actions_merges_schema_file_and_override_per_key() {
     let _ = std::fs::remove_dir_all(&ov_dir);
 }
 
-/// `[[dictionaries]]` 下的 `font_path` / `font_family` 不是受支持的键。以前被静默丢弃，
-/// 方案作者只看得到「字体没生效」；现在要进 `degraded_items`（toast 的数据源），
-/// 并且方案其余部分照常读出。
+/// `[[dictionaries]]` 下的 `font_path` / `font_family` 不是受支持的键：要进 `degraded_items`
+/// （toast 的数据源），且方案其余部分照常读出。
 #[test]
 fn font_keys_under_dictionaries_are_reported_not_silently_dropped() {
     let base_dir =
@@ -2046,16 +1994,10 @@ fn font_keys_in_engine_chaizi_are_not_reported() {
     assert!(misplaced_dict_font_keys(&v).is_empty());
 }
 
-/// 用户 override 里写了值域外的值，**不许**让整个方案读不出来。
+/// 用户 override 里写了值域外的值（如 `text_orientation = ""`），不许让整个方案读不出来。
 ///
-/// 复现的是 2026-09-04 的真实事故：`schema_overrides/toli.toml` 里一行
-/// `text_orientation = ""` 让 `read_schema` 返回 `None`，而它有约 30 个调用点
-/// （方案名 / 类型 / 引擎构建 / behavior 全走它）⇒ 这个方案在系统里等于不存在，
-/// 用户看到的是「完全没反应，也不报错」。
-///
-/// 三条断言分别钉住修复的三个层次，**缺一条都会让回归悄悄溜过去**：
-/// ① 方案还在；② 同段的其它设置没被连累；③ 降级被记下来了（toast 的数据源，
-/// 没有它就退回「静默不生效」——只是比原来安静，同样查不出）。
+/// `read_schema` 有约 30 个调用点，返回 `None` 时这个方案在系统里等于不存在且不报错。
+/// 三条断言缺一不可：① 方案还在；② 同段的其它设置没被连累；③ 降级被记下来了（toast 的数据源）。
 #[test]
 fn bad_enum_value_in_override_degrades_instead_of_killing_the_schema() {
     use std::io::Write;
@@ -2112,10 +2054,7 @@ type = \"codetable\"
 }
 
 /// 方案级 `[punct]` / `[candidate]` / `[phrases]`：内联 + override 合并，三段同批失效。
-///
-/// 与 `active_key_actions_merges_schema_file_and_override_per_key` 同形，
-/// 但这里额外钉住**三段共用一个缓存条目**时的失效正确性：override 只改一段，
-/// 另两段不能被顺手清成默认值（三段合订的实现方式若写成「读一段存一段」就会）。
+/// 额外钉住三段共用一个缓存条目时的失效正确性：override 只改一段，另两段不能被清成默认值。
 #[test]
 fn active_behavior_merges_schema_file_and_override() {
     use std::io::Write;
@@ -2181,9 +2120,7 @@ layout = \"horizontal\"
 }
 
 /// 读不到方案（文件缺失）时三段全部回落默认值 = 一段都不覆盖。
-///
-/// 这条不是凑数：默认值若不是「不覆盖」，一个装歪的方案包就会静默改掉用户的标点态
-/// 与候选方向，而用户找不到是谁改的。
+/// 否则装歪的方案包会静默改掉用户的标点态与候选方向。
 #[test]
 fn active_behavior_defaults_to_no_override_when_schema_missing() {
     let mut cfg = Config::default();
@@ -2207,9 +2144,7 @@ fn active_behavior_defaults_to_no_override_when_schema_missing() {
 }
 
 /// `schema_code_char_set` 必须与引擎构建同规则：`leading_chars` 为空时等于全集。
-///
-/// 它服务于设置页的「这个键是不是本方案首码」提示。两处规则若不一致，提示就会
-/// 指向一个内核并不认可的冲突——比不提示更糟，用户会按提示去改一个没坏的配置。
+/// 它服务于设置页的「这个键是不是本方案首码」提示，规则不一致就会指向内核并不认可的冲突。
 #[test]
 fn schema_code_char_set_follows_engine_rules() {
     use std::io::Write;
@@ -2248,7 +2183,7 @@ input_chars = \"a-z;\"
     let _ = std::fs::remove_dir_all(&base_dir);
 }
 
-/// 符号通配键只算纯码表方案（论坛 t302）：拼音方案经折叠也继承全局 `wildcard`，但不消费它，
+/// 符号通配键只算纯码表方案：拼音方案经折叠也继承全局 `wildcard` 但不消费它，
 /// 算进去会让「空闲透传标点」在拼音下也白吃这个符号。字母键不算（字母本不在透传集）。
 #[test]
 fn schema_lead_inputs_counts_symbol_wildcard_only_for_codetable() {
@@ -2351,15 +2286,10 @@ fn schema_override_merge_and_delete() {
     let _ = std::fs::remove_dir_all(&ov_dir);
 }
 
-/// Task 4.3：验证 shuangpin 方案在 EngineManager 层 available 过滤中真正被放行。
+/// shuangpin 方案在 EngineManager 层的 available 过滤中被放行，不支持的双拼布局被滤掉。
 ///
-/// 测试设计：
-/// - 用 temp 数据目录，写三个最小 schema TOML：
-///   * "dummy_ct"：codetable 类型，作为 active（ensure_loaded 无词库会 warn 但不 panic）
-///   * "sp_test"：pinyin + scheme="shuangpin" → is_supported()=true，应留在 available
-///   * "sp_unsupported"：pinyin + scheme="ziranma_xxx" → is_supported()=false，应被过滤
-/// - 不触发词库加载（shuangpin 不是 active，schema_supported 只做 TOML 解析）
-/// - Linux 无词库环境可跑。
+/// 夹具：`dummy_ct`（codetable，active）、`sp_test`（scheme="shuangpin"，留下）、
+/// `sp_unsupported`（scheme="ziranma_xxx"，滤掉）。不触发词库加载，无词库环境可跑。
 #[test]
 fn shuangpin_available_not_filtered_out() {
     use std::io::Write;
@@ -2434,15 +2364,11 @@ fn shuangpin_available_not_filtered_out() {
     let _ = std::fs::remove_dir_all(&ov_dir);
 }
 
-/// 双拼布局的非字母键（mspy `;` = ing）必须成为**码元**、但**不可作首码**。
+/// 双拼布局的非字母键（mspy `;` = ing）必须成为码元、但不可作首码。
 ///
-/// 这是「`;` 能打 ying」的唯一接线点：协调器只认 `active_is_code_char`，
-/// 布局里写了 `";" = ["ing"]` 而这里为 false，`;` 就会被次选键 / quick_mix 引导键 /
-/// 标点流水线依次拦下（三条都拦，故只堵一条无用）。首码为 false 同样是硬要求——
-/// 一旦 `;` 能起头，空缓冲按 `;` 就归码表，快捷输入再也进不去。
-/// ⚠️ 必须用 `build_dev/data`（带编译好的词典）而不是源码 `data/`：码元集挂在
-/// **活跃引擎**上，引擎建不起来 → `active_engine()` 为 None → 回落 `a-z` → 断言全红。
-/// 旧的 `shuangpin_final_key` 只读布局 TOML 文件，源 `data/` 就够，这条依赖是新增的。
+/// 协调器只认 `active_is_code_char`：这里为 false 时 `;` 会被次选键 / quick_mix 引导键 /
+/// 标点流水线依次拦下。首码为 false 同样是硬要求：`;` 能起头的话空缓冲按 `;` 归码表，
+/// 快捷输入再也进不去。必须用 `build_dev/data`：码元集挂在活跃引擎上，引擎建不起来就回落 `a-z`。
 #[test]
 fn shuangpin_symbol_final_is_code_char_but_not_leading() {
     let data_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data");
@@ -2504,7 +2430,7 @@ fn shuangpin_symbol_final_is_code_char_but_not_leading() {
 }
 
 /// 对照：非双拼方案（codetable，未配 `input_chars`）码元集回落内置 `a-z`，
-/// `;` 不得因为「别的方案用它作韵母」而变成码元——码元集是**方案级**的。
+/// `;` 不得因为「别的方案用它作韵母」而变成码元——码元集是方案级的。
 #[test]
 fn non_shuangpin_schema_keeps_default_alpha_charset() {
     use std::io::Write;
@@ -2544,16 +2470,10 @@ fn non_shuangpin_schema_keeps_default_alpha_charset() {
     let _ = std::fs::remove_dir_all(&ov_dir);
 }
 
-/// installed_schemas 应返回所有已安装且受支持的方案，不受 available 限制。
+/// installed_schemas 返回所有已安装且受支持的方案，不受 available 限制。
 ///
-/// 测试方案：
-///   - "dummy_active": codetable，active 方案（始终在 available）
-///   - "sp_installed": pinyin + scheme="shuangpin"，已安装但**未**在 config.available
-///     → installed_schemas 应包含它，available_schemas 不含它
-///   - "unsupported_installed": pinyin + scheme="ziranma_xxx"，已安装但不受支持
-///     → installed_schemas 不含它
-///   - "ct_installed": codetable，已安装但未在 config.available
-///     → installed_schemas 应包含它
+/// 夹具：`dummy_active`（active）、`sp_installed` 与 `ct_installed`（已装但不在 available ⇒
+/// installed 含、available 不含）、`unsupported_installed`（不受支持 ⇒ installed 不含）。
 #[test]
 fn installed_schemas_includes_all_supported_not_just_available() {
     use std::io::Write;
@@ -2719,12 +2639,7 @@ fn scan_shuangpin_layouts_merges_user_priority() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
-/// Task 1：data_schema_id 拼音族折叠 + 未知方案返回自身 id。
-///
-/// 策略：用 temp 目录写最小 schema TOML（与既有测试同模式）：
-///   - "py_test"：engine.type="pinyin" → data_schema_id 应返回 "pinyin"
-///   - "ct_test"：engine.type="codetable" → 返回自身 "ct_test"
-///   - "nonexistent"：无此 schema 文件 → schema_engine_type=None → 返回自身
+/// data_schema_id 拼音族折叠为 "pinyin"；码表与未知方案返回自身 id。
 #[test]
 fn data_schema_id_folds_pinyin_and_returns_self() {
     use std::io::Write;
@@ -3116,21 +3031,9 @@ fn merged_pinyin_build_skipped_after_repeated_deaths() {
     assert!(!marker.exists());
 }
 
-/// 分层视图（主库 + 细胞库各一层）与「主表 import 细胞库合成一份 merged」查询结果逐项
-/// 一致：精确查、前缀查、按音节截断的前缀查、简拼、更长码存在性。
-///
-/// 夹具里刻意放的三类陷阱：
-/// - **跨层同权**（主库「拟好」与细胞库「尼豪」都是 64）：`order` 是层内名次，跨层直接比
-///   会排反；
-/// - **被音节过滤掉的同码高权词**（主库「西安」xi'an 1000 与单音节「先」同码 `xian`）：
-///   读端先取名次再过滤，合并缓存里「先」的名次照样排在「西安」之后，拿候选池重算会算小；
-/// - **跨层同一个词**（两层都有「你好」）：合并缓存保留两条，分层也不去重。
-///
-/// 简拼 `xg` 的跨层同权码（主库 xiguan、细胞库 xigua 都是 300）验证按码字典序而非层序。
-/// ★ S3/S4 对拍：merged 改为「子表各自成段 → k 路归并 → 流式写入器」之后，产物必须与
-/// 旧算法（并行解析全部子表 → HashMap 聚合 → `WdatWriter`）**逐字节相同**。旧算法在
-/// 本用例里原样复刻作 oracle。夹具覆盖：跨表同 code、跨表同 (text, code)（不去重）、
-/// 同码多条等权（稳定序＝子表序）、单音节（无简拼）、多音节简拼跨表取最大权重。
+/// 子表各自成段 → k 路归并 → 流式写入器的 merged 产物，必须与「并行解析全部子表 → HashMap 聚合
+/// → `WdatWriter`」的聚合算法逐字节相同；后者在本用例里原样复刻作 oracle。夹具覆盖：跨表同 code、
+/// 跨表同 (text, code)（不去重）、同码多条等权（稳定序＝子表序）、单音节（无简拼）、多音节简拼跨表取最大权重。
 #[test]
 fn merge_from_segments_matches_aggregate_build() {
     let dir = std::env::temp_dir().join(format!("wind_eng_mergeeq-{}", std::process::id()));
@@ -3213,6 +3116,16 @@ fn merge_from_segments_matches_aggregate_build() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// 分层视图（主库 + 细胞库各一层）与「主表 import 细胞库合成一份 merged」查询结果逐项
+/// 一致：精确查、前缀查、按音节截断的前缀查、简拼、更长码存在性。
+///
+/// 夹具里刻意放的三类陷阱：
+/// - 跨层同权（主库「拟好」与细胞库「尼豪」都是 64）：`order` 是层内名次，跨层直接比会排反；
+/// - 被音节过滤掉的同码高权词（主库「西安」xi'an 1000 与单音节「先」同码 `xian`）：
+///   读端先取名次再过滤，合并缓存里「先」的名次照样排在「西安」之后，拿候选池重算会算小；
+/// - 跨层同一个词（两层都有「你好」）：合并缓存保留两条，分层也不去重。
+///
+/// 简拼 `xg` 的跨层同权码（主库 xiguan、细胞库 xigua 都是 300）验证按码字典序而非层序。
 #[test]
 fn layered_pinyin_dict_matches_merged_cache() {
     let dir = std::env::temp_dir().join(format!("wind_eng_layered-{}", std::process::id()));
@@ -3359,11 +3272,8 @@ fn purge_cache_files_only_removes_cache_extensions() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
-/// 区间累加的两条规则：字符去重升序，词条数**按条去重**。
-///
-/// 后者是这段逻辑最容易写错的地方——顺手写成「各字符命中数之和」，一条含两个注音的
-/// 词条就会被数两遍，界面上那个「会影响 N 条词」的数字随即失真。虎码里全角逗号只是
-/// 1 个字符却牵连 326 条词，这种失真用户是察觉不到的。
+/// 区间累加的两条规则：字符去重升序，词条数按条去重。
+/// 写成「各字符命中数之和」的话，一条含两个注音的词条会被数两遍，「会影响 N 条词」随即失真。
 #[test]
 fn range_scan_counts_entries_once_per_entry() {
     let (start, end) = (0x3100, 0x312F); // 注音符号
@@ -3383,11 +3293,10 @@ fn range_scan_counts_entries_once_per_entry() {
     assert_eq!(s.entries, 3, "三条词条命中；若按字符数累加会得到 4");
 }
 
-/// 扫描**不收空白与控制字符**，哪怕它们落在区间里。
+/// 扫描不收空白与控制字符，哪怕它们落在区间里。
 ///
-/// `ASCII` 块（0020–007F）整块允许批量，而词库里含空格的词条成百上千。不挡的话，
-/// 用户对任一 ASCII 行点「整类设为生僻」就会给**空格**登记一条覆盖——从此含空格的
-/// 候选全判非常用，设置页多出一行看不出是什么的空白，导出写得进去、导入却被拒。
+/// `ASCII` 块整块允许批量，而词库里含空格的词条成百上千；不挡的话「整类设为生僻」会给空格登记一条
+/// 覆盖，含空格的候选全判非常用，且导出写得进去、导入却被拒。
 #[test]
 fn range_scan_skips_unmarkable_chars() {
     let (start, end) = (0x0020, 0x007F); // ASCII

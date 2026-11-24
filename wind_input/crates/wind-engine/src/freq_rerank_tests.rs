@@ -45,14 +45,11 @@ fn pin_sentence(text: &str, weight: i32) -> Candidate {
     c
 }
 
-/// 整句**不再锚定**：同层的常用词可凭位置提升反超它。
+/// 整句不锚定：同层的常用词可凭位置提升反超它。
 ///
-/// 断言方向已随整句退役 `SENTENCE_WEIGHT_BASE` 反转（原为「整句恒锚定首位」）。整句
-/// weight 现与词库同量纲，它靠 weight 在 `candidate_display_order` 里挣到 base_pos 0，
-/// 但**不再对词频免疫** —— 硬闸门只要还在，「同量纲」就只在无词频记录时成立。
-///
-/// 无词频时整句仍居首，见 `pinyin_sentence_leads_without_freq`（对照组，缺了它
-/// 本条也能被「整句被无条件压到最后」这种实现骗过）。
+/// 整句 weight 与词库同量纲，靠 weight 在 `candidate_display_order` 里挣到 base_pos 0，但不对
+/// 词频免疫。无词频时整句仍居首，见对照组 `pinyin_sentence_leads_without_freq`（缺了它，
+/// 「整句被无条件压到最后」的实现也能骗过本条）。
 #[test]
 fn pinyin_sentence_can_be_overtaken_by_frequent_peer() {
     // weight 取等效词频量级（几千），不再是旧的 3e7 —— 本函数从不比 weight，
@@ -82,7 +79,7 @@ fn pinyin_sentence_can_be_overtaken_by_frequent_peer() {
     assert_eq!(cands[2].text, "拟");
 }
 
-/// 零权重读音让位对**有词频记录**的字失效：摘掉标记、退回精确层，排到简拼词之前。
+/// 零权重读音让位对有词频记录的字失效：摘掉标记、退回精确层，排到简拼词之前。
 /// 无记录的对照字保留标记、留在简拼层。
 #[test]
 fn freq_record_clears_zero_weight_reading() {
@@ -112,16 +109,10 @@ fn freq_record_clears_zero_weight_reading() {
     assert!(cands[2].is_zero_weight_reading, "无词频记录的字仍应让位");
 }
 
-/// ★ **模糊同码候选**能靠词频反超整句 —— 这是移除整句锚定唯一实际改变的场景。
+/// 模糊同码候选能靠词频反超整句。
 ///
-/// 移除前，其余情形都已被两侧夹掉、锚定名存实亡：
-/// - 同码同层的竞争者存在 ⇒ 引擎侧 step 6.6 已摘掉锚定（该步骤此后删除）；
-/// - 不同层的候选（前缀补全 / 子短语）⇒ `cmp_match_layers` 在排序键里位于 target_pos
-///   之前，位置提升本就推不动它们跨层。
-///
-/// 剩下的缝隙正是这里：6.6 的竞争者过滤器带 `!o.is_fuzzy`，**模糊候选不算竞争者**，
-/// 于是整句不标 contested、锚定保留，用户把模糊音候选选中再多次也翻不过它。
-/// 移除锚定后它才下场竞争 —— 用户明确选过的东西就该能赢。
+/// 别的情形下整句本就压不住对手（同码同层的精确竞争者、或 `cmp_match_layers` 在 target_pos
+/// 之前分开的跨层候选），模糊候选是整句不锚定后唯一实际改变的场景：用户明确选过的就该能赢。
 #[test]
 fn pinyin_fuzzy_peer_can_overtake_sentence() {
     let fuzzy_peer = {
@@ -146,8 +137,7 @@ fn pinyin_fuzzy_peer_can_overtake_sentence() {
 }
 
 /// 对照组：无词频记录时整句仍居首（靠入参显示序，即 weight）。
-///
-/// 与上一条合看才说明「整句让位」是**词频**造成的，而非本函数把整句一律压后。
+/// 与上一条合看才说明「整句让位」是词频造成的，而非本函数把整句一律压后。
 #[test]
 fn pinyin_sentence_leads_without_freq() {
     let mut cands = vec![
@@ -166,16 +156,13 @@ fn pinyin_sentence_leads_without_freq() {
     assert_eq!(cands[0].text, "你好世界", "无词频时整句仍是最优解读");
 }
 
-/// 降级整句**不参与**锚定：让位于精确整词后，须停在精确整词之后、普通候选之前。
+/// 降级整句不参与锚定：让位于精确整词后，须停在精确整词之后、普通候选之前。
 ///
-/// 这一条是整个降级方案的另一半。引擎侧只改了 weight，而本比较器**不看 weight**——
-/// 只要标志为真就置顶。若此处不豁免，引擎那半边等于白改：实测过权重顶到 2e9
-/// 都赢不过这里的锚定。
+/// 引擎侧只改 weight，而本比较器不看 weight、标志为真就置顶；此处不豁免，引擎那半边等于白改。
 ///
-/// **入参顺序即协调器 `candidate_display_order` 的输出**（`handle_candidate.rs:528`
-/// 先按权重层级排好，`:530` 才调本函数）。本函数在同层同衰减分时返回
-/// `Ordering::Equal`，靠稳定排序保住入参序 —— 它**从不自己比权重**，故测试必须
-/// 按显示序喂入，否则测的是一个生产中不存在的状态。
+/// 入参顺序即协调器 `candidate_display_order` 的输出（`handle_candidate.rs` 先按权重层级排好再调
+/// 本函数）。本函数同层同衰减分时返回 `Ordering::Equal`、靠稳定排序保住入参序，从不自己比权重，
+/// 故测试必须按显示序喂入。
 #[test]
 fn pinyin_demoted_sentence_yields_to_exact_word() {
     let mut cands = vec![
@@ -207,14 +194,10 @@ fn pinyin_demoted_sentence_yields_to_exact_word() {
     assert_eq!(cands[2].text, "连");
 }
 
-/// 整句排在哪里由**入参显示序**决定，本函数不会把它拉回首位。
+/// 整句排在哪里由入参显示序决定，本函数不会把它拉回首位。
 ///
-/// 断言方向已随锚定移除反转（原为「未降级的整句即使排在后面也会被锚定拉回首位」）。
-/// 那条拉回正是硬闸门的表现：本函数不看 weight，只要标志为真就置顶，于是引擎侧
-/// 精心排好的序在这里被推翻。现在整句与其余候选同轴，**这一层不再有隐形的重排**。
-///
-/// 锁住这条等于锁住「协调器 `candidate_display_order` 是权威显示序」——谁再往
-/// `anchored` 里加整句判据，本断言即会红。
+/// 锁住「协调器 `candidate_display_order` 是权威显示序」：谁往 `anchored` 里加整句判据，
+/// 引擎排好的序会在这里被推翻，本断言即红。
 #[test]
 fn pinyin_sentence_is_not_pulled_back_to_top() {
     let mut cands = vec![pin("廉政提醒", 100_000), pin_sentence("连整体性", 99_999)];
@@ -259,12 +242,10 @@ fn pinyin_demoted_sentence_participates_in_freq() {
     );
 }
 
-/// 有同码竞争者的整句**接受词频挑战**：同码精确整词可凭词频反超。
+/// 有同码竞争者的整句接受词频挑战：同码精确整词可凭词频反超。
 ///
-/// 现场 `siyuan`：「寺院」既是词典精确整词、又被 Viterbi 选为最优解（step 2 同文合并
-/// 继承整句身份），而「思源」同码。这里曾经需要一个 `is_sentence_contested` 标记去摘
-/// 锚定 —— 锚定是硬闸门，实测灌到 count=5000 都翻不动、词频对该编码整体失效。整句
-/// 锚定移除后，标记连同 step 6.6 一并回收，本行为改由「整句本就不锚定」直接保证。
+/// `siyuan`：「寺院」既是词典精确整词、又被 Viterbi 选为最优解（step 2 同文合并继承整句身份），
+/// 「思源」同码。整句不锚定，本行为不需要任何「被竞争」标记。
 #[test]
 fn pinyin_contested_sentence_yields_to_used_peer() {
     let mut cands = vec![pin_contested("寺院"), pin("思源", 245)];
@@ -287,10 +268,8 @@ fn pinyin_contested_sentence_yields_to_used_peer() {
     assert_eq!(cands[1].text, "寺院", "整句退居第二，不是被赶出列表");
 }
 
-/// 与上一条配对：**无词频记录时同款整句仍居首**。
-///
-/// 有同码竞争者这件事本身不该压低整句 —— 它靠调用方喂进来的权重序 + 稳定排序保住首位。
-/// 若哪天误把「有竞争者」做成降权，这条会挂。
+/// 与上一条配对：无词频记录时同款整句仍居首。
+/// 有同码竞争者本身不该压低整句；若误把「有竞争者」做成降权，这条会挂。
 #[test]
 fn pinyin_contested_sentence_still_leads_without_freq() {
     let mut cands = vec![pin_sentence("寺院", 491), pin("思源", 245)];
@@ -314,8 +293,7 @@ fn pinyin_contested_sentence_still_leads_without_freq() {
 /// 这正是把 `weight >= 20M` 阈值换成 `is_sentence` 标记要解决的问题。
 #[test]
 fn pinyin_high_weight_non_sentence_still_learns() {
-    // 92,194 = 8105 常用字表的 p99，是非整句候选够得到的真实量级
-    // （早先用例写 30,000,000，那是旧的 SENTENCE_WEIGHT_BASE 量级，非整句候选到不了）。
+    // 92,194 = 8105 常用字表的 p99，是非整句候选够得到的真实量级。
     let mut cands = vec![pin("高权非整句", 92_194), pin("近用低权", 100)];
     let r = recs(&[("近用低权", 1, NOW)]);
     rerank_pinyin_positional(
@@ -331,11 +309,9 @@ fn pinyin_high_weight_non_sentence_still_learns() {
         "非整句候选不享锚定豁免，第 2 位用一次即可超过它"
     );
 
-    // 配对用例（分别在别处）：`anchored_sentence_is_immune_to_promotion` 验证锚定者
-    // 用 50 次也纹丝不动，`no_record_means_no_movement` 验证无记录时一步不挪。
-    //
-    // 此处不再写「次数不足时压不动」的对照——位置模型下只有两个候选，第 2 位用一次
-    // 就到顶，不存在「次数不足」这个状态。那是等效权重模型的遗留断言。
+    // 配对用例：`anchored_sentence_is_immune_to_promotion` 验证锚定者用 50 次也不动，
+    // `no_record_means_no_movement` 验证无记录时一步不挪。位置模型下两个候选时第 2 位
+    // 用一次就到顶，不存在「次数不足」的对照。
 }
 
 /// 精确码短语（`is_phrase && is_exact_code`，lookup 完全匹配）与整句同享锚定豁免。
@@ -360,12 +336,11 @@ fn pinyin_exact_phrase_is_anchored_like_sentence() {
     assert_eq!(cands[0].text, "我的邮箱", "精确码短语须与整句同享锚定");
 }
 
-/// 前缀短语**不锚定**：`is_phrase && !is_exact_code`（`lookup_prefix` 命中）落到匹配层，
+/// 前缀短语不锚定：`is_phrase && !is_exact_code`（`lookup_prefix` 命中）落到匹配层，
 /// 靠 is_prefix 降到精确候选之下，不因 is_phrase 被顶到首位。
 ///
-/// 回归拼音潜伏现场：打 `da` 时 `date` 前缀短语曾被 `|| is_phrase` 一刀切锚定到首位（开
-/// 自动调频且有词频记录时触发）。入参按 candidate_display_order 输出序（精确拼音字在前、
-/// 前缀短语在后）。旧码（`|| is_phrase`）下前缀短语会锚到首位 → 本用例会红。
+/// 场景：开自动调频且有词频记录时打 `da`，`date` 前缀短语不得被 `|| is_phrase` 一刀切锚定到首位。
+/// 入参按 candidate_display_order 输出序（精确拼音字在前、前缀短语在后）。
 #[test]
 fn pinyin_prefix_phrase_not_anchored() {
     let exact_word = pin("大", 5000); // 精确拼音字：is_prefix=false, is_exact_code=false
@@ -416,16 +391,12 @@ fn pin_fuzzy(text: &str, weight: i32) -> Candidate {
     c
 }
 
-/// 词频 used-first **不因「模糊来源」而豁免**：用户在 "si" 下反复选过模糊命中「是」，
-/// 词频重排应照常把它软置前——`is_fuzzy` 只是「召回来源」标记，不构成学习壁垒。
+/// 词频 used-first 不因「模糊来源」而豁免：用户在 "si" 下反复选过模糊命中「是」，
+/// 词频重排应照常把它软置前——`is_fuzzy` 只是召回来源标记，不构成学习壁垒。
 ///
-/// **本测试断言的是与从前相反的行为**（原名 `pinyin_exact_ranks_above_used_fuzzy`，
-/// 断言「精确恒优先于被使用过的模糊命中」）。那套语义依赖 `cmp_match_layers` 把
-/// `is_fuzzy` 当首要层级键，而该分层在真实词库下把模糊候选整体压到 200 名开外
-/// （`si` 下「是」第 231 位），远超 50~300 的生产候选上限，使模糊音在拼音 / 混输 /
-/// 临拼三条路径上全部等价于未实现。层级键已废除，模糊惩罚改由引擎在 weight 上施加
-/// （见 `pinyin::FUZZY_WEIGHT_SCALE`）——真实链路进入本函数时「是」的权重已被折过，
-/// 词频再据用户实际选择调整是合理的：用户反复选它，说明他要的就是它。
+/// 别把 `is_fuzzy` 做回 `cmp_match_layers` 的首要层级键：真实词库下那会把模糊候选整体压到
+/// 生产候选上限之外，模糊音等于未实现。模糊惩罚由引擎在 weight 上施加
+/// （`pinyin::FUZZY_WEIGHT_SCALE`），进入本函数时权重已折过。
 #[test]
 fn pinyin_used_fuzzy_can_rank_above_exact() {
     let mut cands = vec![
@@ -530,8 +501,7 @@ fn mixed_tier_keeps_codetable_exact_above_pinyin() {
 }
 
 /// 兜底档 `fallback=1`：重排后基础序首位被回填锁定，高词频候选在保护位之后正常上浮。
-///
-/// 三条候选的 `code` 均等于输入，故都属精确档（保护名额只在该档内取，见
+/// 三条候选的 `code` 均等于输入，都属精确档（保护名额只在该档内取，见
 /// `protect_slots_taken_from_exact_only`）。
 #[test]
 fn protect_top_n_pins_original_head() {
@@ -588,14 +558,11 @@ fn protect_policy_resolve_by_len() {
     assert_eq!(p.resolve(""), 0, "空码不保护");
 }
 
-/// **主用例**：一简位（码长 1）的词库钦定首选不被词频顶掉。
+/// 主用例：一简位（码长 1）的词库钦定首选不被词频顶掉。
 ///
-/// 现场取自发行词库 `wubi86_jidian.dict.yaml`：`a` → 工(9999) / 戈(9998)。一简 25 个码
-/// **每个都是二选一**，而本模块的比较链不含 weight——词库靠 9999/9998 表达的钦定次序
-/// 在这里完全失效，「戈」被误选一次即永久翻转（码表侧 used-first 不衰减）。
-///
-/// 必须与 `full_code_still_reranks_freely` 合看：只有这一条时，一个「全局硬保护」的
-/// 错误实现同样会绿，证明不了分级真的分了。
+/// 取自 `wubi86_jidian.dict.yaml`：`a` → 工(9999) / 戈(9998)。一简每个码都是二选一，而本模块的
+/// 比较链不含 weight，「戈」被误选一次即永久翻转（码表侧 used-first 不衰减）。
+/// 必须与 `full_code_still_reranks_freely` 合看，否则「全局硬保护」的错误实现同样会绿。
 #[test]
 fn short_code_len1_protects_dict_head() {
     let mut cands = vec![ct_exact("a", "工", 9999), ct_exact("a", "戈", 9998)];
@@ -619,8 +586,8 @@ fn short_code_len1_protects_dict_head() {
     assert_eq!(cands[1].text, "戈", "被保护的只是位次，戈仍在列表里");
 }
 
-/// **对照组**：同一组数据放到全码位（码长 4）→ 词频照常生效。
-/// 这一条锁住「分级」本身：若把简码保护做成全局硬保护，本用例会红。
+/// 对照组：同一组数据放到全码位（码长 4）→ 词频照常生效。
+/// 锁住「分级」本身：若把简码保护做成全局硬保护，本用例会红。
 #[test]
 fn full_code_still_reranks_freely() {
     let mut cands = vec![ct_exact("aaaa", "甲", 9999), ct_exact("aaaa", "乙", 9998)];
@@ -661,11 +628,10 @@ fn short_code_len2_protects_under_mru() {
     assert_eq!(cands[0].text, "式", "二简位在 MRU 策略下同样须保住钦定首选");
 }
 
-/// 保护名额**只在精确档内取**：名额多于精确候选时，多出来的不落到前缀补全头上。
+/// 保护名额只在精确档内取：名额多于精确候选时，多出来的不落到前缀补全头上。
 ///
-/// 现场：打 `a`，精确档只有一简字「工」，其后全是 `a*` 的前缀补全。若名额按位置无差别
-/// 取（旧实现），第 2 个名额会把补全词「工艺」钉死在第 2 位——它不是任何码位的钦定首选，
-/// 没有被保护的语义依据，且会挡住用户真正常用的「工区」。
+/// 打 `a`：精确档只有一简字「工」，其后全是 `a*` 的前缀补全。名额若按位置无差别取，补全词「工艺」
+/// 会被钉死在第 2 位——它不是任何码位的钦定首选，且会挡住用户真正常用的「工区」。
 #[test]
 fn protect_slots_taken_from_exact_only() {
     let mut cands = vec![
@@ -735,13 +701,11 @@ fn none_policy_degrades_to_no_protection() {
     assert_eq!(cands[0].text, "戈", "NONE 策略下词频照常生效");
 }
 
-/// freq_tier 短语再分档：精确码短语（is_exact_code）与码表精确**同档**（tier 0）；前缀短语
-/// （!is_exact_code）排在码表前缀补全**之后**，**不因 is_phrase 抬到补全之上**。
+/// freq_tier 短语再分档：精确码短语（is_exact_code）与码表精确同档（tier 0）；前缀短语
+/// （!is_exact_code）排在码表前缀补全之后，不因 is_phrase 抬到补全之上。
 ///
-/// 回归 `da`→`date` 现场：混输下 `date` 前缀短语曾只因 is_phrase 拿高档、压过码表
-/// 前缀补全（如 矼/509000）。入参按 `candidate_display_order` 的输出序喂入（精确码 →
-/// 精确码短语 → 码表前缀补全 → 前缀短语），验证 rerank 维持该档位结构而非把短语顶起。
-/// 旧码（`is_phrase` 一刀切进高档）下前缀短语会排到 矼 之前 → 本用例会红。
+/// 混输 `da`：入参按 `candidate_display_order` 的输出序喂入（精确码 → 精确码短语 → 码表前缀补全
+/// → 前缀短语），验证 rerank 维持该档位结构；`is_phrase` 一刀切进高档时前缀短语会排到「矼」之前。
 #[test]
 fn codetable_tier_prefix_phrase_stays_with_completion() {
     let exact_code = ct("da", "左", 3000); // 码表精确全码 tier 0
@@ -778,20 +742,14 @@ fn codetable_tier_prefix_phrase_stays_with_completion() {
     );
 }
 
-/// **开调频不得推翻协调器按权重排出的「短语 vs 码表精确」次序。**
+/// 开调频不得推翻协调器按权重排出的「短语 vs 码表精确」次序。
 ///
-/// 这是把精确码短语并入 tier 0 的**唯一动因**，也是这条合并要偿还的账：
-/// `PHRASE_WEIGHT_BASE`(40M) 删除后，协调器在纯码表下已按权重比二者；而本模块的
-/// `freq_tier` 是 `rerank_codetable_usedfirst` 的**首要键**、整体压过协调器显示序。
-/// 二者若分档，同一个输入就会「开调频码表精确恒赢、关调频按权重比」——一处**开关依赖
-/// 的不一致**，且开关（`[schema.codetable.frequency] enabled`）默认关，用户一旦打开
-/// 就会发现短语行为变了，却完全看不出关联。
+/// 这是把精确码短语并入 tier 0 的唯一动因：协调器在纯码表下按权重比二者，而 `freq_tier` 是
+/// `rerank_codetable_usedfirst` 的首要键、整体压过显示序。若分档，同一个输入就会「开调频码表精确
+/// 恒赢、关调频按权重比」，开关（`[schema.codetable.frequency] enabled`，默认关）一开短语行为就变。
 ///
-/// ⚠️ **两个方向都测**：只测「短语在前」证明不了档位已合并——若断言方向恰好与
-/// 「码表恒赢」一致，旧码同样会绿。真正能证伪的是第 ① 条。
-///
-/// 无词频记录 ⇒ 档内落到稳定排序 ⇒ 维持入参序。这正是设计意图：调频重排的比较链
-/// 不含 weight（见 frequency.md §8），权重次序由协调器负责，本模块只做 used-first。
+/// 两个方向都测：只测「短语在前」时，断言方向恰与「码表恒赢」一致就证明不了合并，能证伪的是第 ① 条。
+/// 无词频记录 ⇒ 档内稳定排序维持入参序：调频重排的比较链不含 weight（见 frequency.md §8）。
 #[test]
 fn codetable_tier_exact_phrase_keeps_coordinator_weight_order() {
     let phrase = |w: i32| {
@@ -831,15 +789,15 @@ fn codetable_tier_exact_phrase_keeps_coordinator_weight_order() {
 
 // ─────────────── 位置提升（docs/design/freq-rerank-model.md）───────────────
 //
-// 下列常量是 `build_dev/data/schemas/pinyin/cn_dicts/` 的实测权重，用来构造**真实的
-// 位次关系**——位置模型本身不看权重，但入参顺序必须与生产一致（按显示序排好）。
+// 下列常量是 `build_dev/data/schemas/pinyin/cn_dicts/` 的实测权重，用来构造真实的位次关系——
+// 位置模型本身不看权重，但入参顺序必须与生产一致（按显示序排好）。
 
-/// `de` 音单字实测：的 > 得 > 地 > 德，「的」是第二名的 486 倍。
-/// 位置模型下这个悬殊比例**不影响**提升速度，这正是它取代权重模型的理由。
+/// `de` 音单字：的 > 得 > 地 > 德，「的」是第二名的 486 倍。
+/// 位置模型下这个悬殊比例不影响提升速度，这正是它取代权重模型的理由。
 const W_DE: i32 = 15_378_475;
 const W_DEI: i32 = 31_646;
 const W_DI: i32 = 13_039;
-/// `si yuan` 实测：寺院 491 > 思源 245，仅 2 倍。
+/// `si yuan`：寺院 491 > 思源 245，仅 2 倍。
 const W_SIYUAN_TEMPLE: i32 = 491;
 const W_SIYUAN_PRODUCT: i32 = 245;
 
@@ -852,15 +810,11 @@ fn pin_contested(text: &str) -> Candidate {
     c
 }
 
-/// **真机回归**：`count=1` 的记录在**经过一段时间后**仍须生效。
+/// `count=1` 的记录在经过一段时间后仍须生效。
 ///
-/// 这是真机上「选了『思源』，再打 siyuan 还是老样子」的根因用例。此前
-/// `promotion_power` 写作 `(count * decay) as u32`，而 `as` 向零截断——选完仅仅
-/// 1 分钟，decay 就掉到 0.99984，截断即得 0，提升完全消失。
-///
-/// ⚠️ **本用例的关键在于 `last_used != now`**。全部旧用例都用 `now == last_used`
-/// （decay 恰为 1.0）喂入，正好落在唯一能通过的点上，32 项全绿却漏掉了这个缺陷。
-/// 涉及衰减的用例**必须让时间真的流逝**。
+/// `promotion_power` 不能向零截断（`(count * decay) as u32`）：选完 1 分钟 decay 就小于 1，
+/// 截断得 0，提升完全消失。关键在于 `last_used != now`：涉及衰减的用例必须让时间真的流逝，
+/// `now == last_used` 时 decay 恰为 1.0，正好落在唯一能通过的点上。
 #[test]
 fn single_use_still_promotes_after_realistic_delay() {
     for (label, secs) in [("1 分钟", 60i64), ("1 小时", 3600), ("1 天", 86_400)] {
@@ -881,8 +835,7 @@ fn single_use_still_promotes_after_realistic_delay() {
     }
 }
 
-/// 配对：衰减**够久**之后必须失效，否则上面那条可以靠「永不衰减」满足。
-///
+/// 配对：衰减够久之后必须失效，否则上面那条可以靠「永不衰减」满足。
 /// 半衰期 72h，`MIN_PROMOTION_POWER = 0.5` ⇒ `count=1` 的记录约一个半衰期后归零。
 #[test]
 fn single_use_expires_after_long_disuse() {
@@ -903,17 +856,13 @@ fn single_use_expires_after_long_disuse() {
     );
 }
 
-/// 高频记录的衰减边界——**含一条已知局限**。
+/// 高频记录的衰减边界——含一条已知局限。
 ///
-/// 半衰期 72h：一周（≈2.3 个半衰期）后 `count=50` 的有效强度仍有 9.9，正常生效。
-/// 但 30 天（≈10 个半衰期）后衰减到 0.049，低于 `MIN_PROMOTION_POWER` 而归零——
-/// **用过 50 次的词，一个月不用就被完全遗忘**。
+/// 半衰期 72h：一周后 `count=50` 的有效强度仍有 9.9；30 天（≈10 个半衰期）后衰减到 0.049，
+/// 低于 `MIN_PROMOTION_POWER` 而归零——用过 50 次的词，一个月不用就被完全遗忘。
 ///
-/// ⚠️ 这是**墙钟衰减的固有行为**，不是缺陷，但也确实反直觉。fcitx5 用「被后续输入挤出
-/// 分级 LRU 池」而非墙钟老化，正是为了避免它（放假两周回来词频不失效）。换老化机制
-/// 需要改词频存储模型，已列为独立立项（设计文档「不在本次范围」一节）。
-///
-/// 本用例把当前行为钉死：换机制时它会红，那时应连同本注释一起更新。
+/// 这是墙钟衰减的固有行为（fcitx5 用「被后续输入挤出分级 LRU 池」避免它），换老化机制需改
+/// 词频存储模型，另行立项。本用例钉死当前行为，换机制时连同本注释一起更新。
 #[test]
 fn frequent_use_decay_boundary_including_known_limitation() {
     // 一周后仍生效：50 × decay(168h)=0.198 → 9.9
@@ -946,11 +895,10 @@ fn frequent_use_decay_boundary_including_known_limitation() {
     );
 }
 
-/// **真机回归**：首位候选自身有词频时，不得被后面的提升者挤下去。
+/// 首位候选自身有词频时，不得被后面的提升者挤下去（`siyuan` 下「寺院」`base_pos=0`、`p=8.0`）。
 ///
-/// 现场（trace 日志）：`siyuan` 下「寺院」`base_pos=0`、`p=8.0`，却被挤到第 3 位。
-/// 根因是排序键第四项曾写作 `target < base_pos`（「是否真的前移」）——`base_pos=0`
-/// 的候选无处可移，恒判为「未提升」，于是排在所有提升者之后。判据应是「有没有词频」。
+/// 排序键第四项的判据是「有没有词频」，不能写成 `target < base_pos`（「是否真的前移」）：
+/// `base_pos=0` 无处可移，会恒判为「未提升」而排到所有提升者之后。
 #[test]
 fn top_candidate_with_freq_is_not_pushed_down() {
     let mut c = vec![pin("寺院", W_SIYUAN_TEMPLE), pin("思源", W_SIYUAN_PRODUCT)];
@@ -969,9 +917,8 @@ fn top_candidate_with_freq_is_not_pushed_down() {
     );
 }
 
-/// **反向对照**：首位不是被钉死的——竞争者用得更多时仍能反超。
-///
-/// 缺了它，上面那条可以靠「base_pos=0 恒居首」满足，那会把位置提升整个废掉。
+/// 反向对照：首位不是被钉死的——竞争者用得更多时仍能反超。
+/// 缺了它，上面那条可以靠「base_pos=0 恒居首」满足。
 #[test]
 fn top_candidate_yields_to_stronger_peer() {
     let mut c = vec![pin("寺院", W_SIYUAN_TEMPLE), pin("思源", W_SIYUAN_PRODUCT)];
@@ -992,9 +939,8 @@ fn top_candidate_yields_to_stronger_peer() {
 
 /// `promote_prefix = false`（拼音默认）：前缀补全候选不参与位置提升。
 ///
-/// 真机现场（trace 日志）：打 `d` 时「东西」（`dongxi`，码比输入长）连选 6 次即从
-/// 第 40 位爬到首位，压过「的」「得」等高频单字。短输入下用户给出的信息量很少，
-/// 把长词组顶到单字前面与直觉相悖——微软拼音实测「只对全码生效」亦然。
+/// 打 `d` 时「东西」（`dongxi`）连选几次就会从第 40 位爬到首位，压过「的」「得」；短输入下信息量
+/// 很少，把长词组顶到单字前面与直觉相悖（微软拼音也只对全码生效）。
 #[test]
 fn prefix_completion_not_promoted_when_switch_off() {
     let completion = |t: &str, w: i32| {
@@ -1002,8 +948,7 @@ fn prefix_completion_not_promoted_when_switch_off() {
         c.is_prefix = true;
         c
     };
-    // ⚠️ 打 `d` 时**所有候选都是前缀补全**（`de`/`dongxi` 的码都比 `d` 长），
-    // 层级相同，位次才说了算——「东西」也才爬得上来。若把「的」「得」构造成精确匹配，
+    // 打 `d` 时所有候选都是前缀补全，层级相同，位次才说了算。若把「的」「得」构造成精确匹配，
     // `cmp_match_layers` 会先把「东西」降层，本用例就测不到开关本身了。
     let build = || {
         vec![
@@ -1029,7 +974,7 @@ fn prefix_completion_not_promoted_when_switch_off() {
         "开关关闭时前缀补全不得因词频前移"
     );
 
-    // **对照**：开启后同样的记录能把它提到首位——否则本用例只是在测「提升从未工作」
+    // 对照：开启后同样的记录能把它提到首位——否则本用例只是在测「提升从未工作」
     let mut on = build();
     rerank_pinyin_positional(
         &mut on,
@@ -1042,7 +987,7 @@ fn prefix_completion_not_promoted_when_switch_off() {
     assert_eq!(on[0].text, "东西", "开关开启时应恢复提升");
 }
 
-/// 开关只挡**有效前缀层**：被引擎提升进完整匹配层的候选（残码上浮 / 用户长词上浮）
+/// 开关只挡有效前缀层：被引擎提升进完整匹配层的候选（残码上浮 / 用户长词上浮）
 /// 仍可调频——那是结构决策，与「码更长」无关。
 #[test]
 fn promoted_completion_still_reranks_when_switch_off() {
@@ -1065,10 +1010,8 @@ fn promoted_completion_still_reranks_when_switch_off() {
     );
 }
 
-/// `Single` 档（默认）：**单字提升、词组不提升**——短输入下的关键区分。
-///
-/// 打 `d` 时所有候选都是前缀补全（`de`/`dongxi` 的码都比输入长）。此前 `promote_prefix`
-/// 是 bool，关掉即把「的/得」之间的正常调整一并挡死；三态后 `Single` 只挡词组。
+/// `Single` 档（默认）：单字提升、词组不提升——短输入下的关键区分。
+/// 打 `d` 时所有候选都是前缀补全，`Single` 只挡词组，不把「的/得」之间的正常调整一并挡死。
 #[test]
 fn single_tier_promotes_chars_but_not_words() {
     let completion = |t: &str, w: i32| {
@@ -1109,11 +1052,10 @@ fn single_tier_promotes_chars_but_not_words() {
     );
 }
 
-/// **英文必须能调频**：`Single` 档按语义单元数判定，英文词整体计 1。
+/// 英文必须能调频：`Single` 档按语义单元数判定，英文词整体计 1。
 ///
-/// 英文所有候选都是前缀匹配（打 `hel` 出 `hello`/`help`）。若判据用 `chars().count()`，
-/// `hello` = 5 会被 `Single` 直接挡死——**英文调频全灭**。这是把判据从「字符数」改成
-/// 「语义单元数」的全部理由。
+/// 英文候选几乎都是前缀匹配（`hel` 出 `hello`/`help`），判据若用 `chars().count()`，
+/// `hello` = 5 会被 `Single` 挡死，英文调频全灭。
 #[test]
 fn english_words_still_promote_in_single_tier() {
     let completion = |t: &str, w: i32| {
@@ -1157,10 +1099,8 @@ fn english_words_still_promote_in_single_tier() {
 
 // ─────────────── 码表 / 英文的 position 策略 ───────────────
 
-/// 英文方案的典型场景：**候选几乎全是前缀匹配**，布尔 used-first 过于粗暴。
-///
-/// `Top`/`Step` 下选一次 `hello` 就整体跳到档内最前；`Position` 则逐次前移，
-/// 这正是「想要调频但不想那么粗暴」的方案要的。
+/// 英文方案的典型场景：候选几乎全是前缀匹配，布尔 used-first 过于粗暴。
+/// `Top`/`Step` 下选一次 `hello` 就整体跳到档内最前；`Position` 则逐次前移。
 #[test]
 fn codetable_position_promotes_english_gradually() {
     let en = |code: &str, t: &str, w: i32| {
@@ -1210,8 +1150,7 @@ fn codetable_position_promotes_english_gradually() {
     );
 }
 
-/// **对照**：同样的记录在 `Step` 下会直接跳到档内最前——这正是「粗暴」之处。
-///
+/// 对照：同样的记录在 `Step` 下会直接跳到档内最前。
 /// 缺了它，上面那条无从证明 `Position` 确实换了行为。
 #[test]
 fn codetable_step_is_boolean_gate_by_contrast() {
@@ -1242,9 +1181,8 @@ fn codetable_step_is_boolean_gate_by_contrast() {
     );
 }
 
-/// `Position` 下**来源档位仍是硬约束**：前缀补全再怎么提升也跨不到精确全码之前。
-///
-/// 「五笔优先」不受策略影响——用户确认英文场景要的是**档内**提升，不是跨档。
+/// `Position` 下来源档位仍是硬约束：前缀补全再怎么提升也跨不到精确全码之前。
+/// 英文场景要的是档内提升，不是跨档。
 #[test]
 fn codetable_position_respects_source_tiers() {
     let mut c = vec![
@@ -1269,11 +1207,10 @@ fn codetable_position_respects_source_tiers() {
     assert_eq!(c[1].text, "戒", "但档内提升生效：它越过了同档的「式」");
 }
 
-/// **模型的核心断言**：提升速度与权重差距无关。
+/// 模型的核心断言：提升速度与权重差距无关。
 ///
-/// `de` 下「的」是第二名的 486 倍，`siyuan` 下「寺院」只是「思源」的 2 倍——两处的
-/// 第 2 位候选都应**用一次到首位**。前三版权重模型正是死在这里：同一套参数在 486 倍
-/// 的落差下慢得离谱、在 2 倍的落差下快得离谱。
+/// `de` 下「的」是第二名的 486 倍，`siyuan` 下「寺院」只是「思源」的 2 倍，两处的第 2 位候选都应
+/// 用一次到首位。权重模型的同一套参数在两种落差下必然一处太慢、一处太快。
 #[test]
 fn promotion_speed_is_independent_of_weight_gap() {
     // ① 486 倍落差
@@ -1304,8 +1241,7 @@ fn promotion_speed_is_independent_of_weight_gap() {
 }
 
 /// 位次逐次减半：第 8 位 → 4 → 2 → 1 → 0。
-///
-/// 对应实测的微软行为「1 次提前一半、2 次进第 2 位、再 1 次到首位」。
+/// 对应微软拼音的行为「1 次提前一半、2 次进第 2 位、再 1 次到首位」。
 #[test]
 fn position_halves_on_each_use() {
     let names = ["a", "b", "c", "d", "e", "f", "g", "h", "i"];
@@ -1333,8 +1269,7 @@ fn position_halves_on_each_use() {
     }
 }
 
-/// **反向对照**：没有词频记录就一步都不动。
-///
+/// 反向对照：没有词频记录就一步都不动。
 /// 缺了它，「无条件把某些候选前移」也能让上面两条通过。
 #[test]
 fn no_record_means_no_movement() {
@@ -1354,7 +1289,7 @@ fn no_record_means_no_movement() {
 
 /// contested 整句可被同码竞争者靠位置提升反超（`siyuan` 寺院/思源）。
 ///
-/// 位置模型下**不需要 `dict_weight`**：整句的 3e7 只决定它的 `base_pos=0`，
+/// 位置模型下不需要 `dict_weight`：整句的权重只决定它的 `base_pos=0`，
 /// 竞争者提升到同一目标位次后靠「被提升者在前」胜出。
 #[test]
 fn contested_sentence_can_be_overtaken_by_promoted_peer() {
@@ -1372,7 +1307,7 @@ fn contested_sentence_can_be_overtaken_by_promoted_peer() {
     assert_eq!(c[1].text, "寺院", "整句退居第二，不是被赶出列表");
 }
 
-/// **反向对照**：无词频记录时 contested 整句仍居首，不得平白掉位。
+/// 反向对照：无词频记录时 contested 整句仍居首，不得平白掉位。
 #[test]
 fn contested_sentence_still_leads_without_record() {
     let mut c = vec![pin_contested("寺院"), pin("思源", W_SIYUAN_PRODUCT)];
@@ -1387,10 +1322,9 @@ fn contested_sentence_still_leads_without_record() {
     assert_eq!(c[0].text, "寺院", "无词频记录时整句解仍是最优解读");
 }
 
-/// 锚定候选**不参与位置提升**：用再多次也推不动它。
-///
-/// 锚定机制本身还在，只是唯一的享用者变成了精确码短语（用户显式定义、码完全匹配）。
-/// 整句已退出锚定，见 `pinyin_sentence_can_be_overtaken_by_frequent_peer`。
+/// 锚定候选不参与位置提升：用再多次也推不动它。
+/// 锚定的唯一享用者是精确码短语（用户显式定义、码完全匹配）；整句不锚定，见
+/// `pinyin_sentence_can_be_overtaken_by_frequent_peer`。
 #[test]
 fn anchored_exact_phrase_is_immune_to_promotion() {
     let phrase = {
@@ -1442,11 +1376,10 @@ fn promotion_decays_with_time() {
     assert_eq!(fresh[0].text, "得", "刚用过必须生效");
 }
 
-/// 位置提升**不得跨匹配层级**：前缀补全再常用也压不过精确候选。
+/// 位置提升不得跨匹配层级：前缀补全再常用也压不过精确候选。
 ///
-/// ⚠️ 必须同时钉住「层内提升确实生效」——只断言「补全没上来」的话，
-/// 「提升机制整个失效」也能让它通过。反向验证（令 `promotion_steps` 恒 0）
-/// 当场抓到过这一点：其余 8 条全红，唯独本条还绿着。
+/// 必须同时钉住「层内提升确实生效」：只断言「补全没上来」的话，「提升机制整个失效」也能通过
+/// （令 `promotion_steps` 恒 0 时其余用例全红，唯独只断言一半的版本还绿）。
 #[test]
 fn promotion_does_not_cross_match_layers() {
     let completion = |t: &str, w: i32| {

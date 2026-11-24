@@ -1,14 +1,10 @@
 //! 临时拼音的候选取数上限与检索范围过滤回归测试
 //!
-//! **取数上限**：临拼曾固定向引擎取 `ENGINE_MAX_CANDIDATES`(50) 条，而它**没有翻页扩容
-//! 通路**（`expand_candidates` 的守卫比对 `input_buffer`，临拼的码在 `temp_pinyin_buffer`
-//! 里），于是第 51 位之后的候选**翻多少页都取不到**。用户实测：临拼下 `ying` 打不出「瑩」
-//! （该字在拼音候选的第 158 位）。修复是让拼音类目标方案取全量
-//! （`TEMP_PINYIN_MAX_CANDIDATES`），翻页由对 `state.candidates` 切片天然穷尽。
+//! 取数上限：临拼没有翻页扩容通路（`expand_candidates` 的守卫比对 `input_buffer`，临拼的码在
+//! `temp_pinyin_buffer` 里），因此拼音类目标方案取全量（`TEMP_PINYIN_MAX_CANDIDATES`），
+//! 翻页由对 `state.candidates` 切片穷尽；取少了深位候选（如 `ying` 的「瑩」）翻多少页都到不了。
 //!
-//! **检索范围过滤**：临拼此前完全不经过 `apply_filter`——「检索范围」设置对它从来无效，
-//! 默认 smart 下临拼比主路径多出数百个生僻字（实测 `ying`：299 vs 76）。现已按主路径同序
-//! 接入（`mark_common` → `apply_filter`）。
+//! 检索范围过滤：临拼按主路径同序接入 `mark_common` → `apply_filter`。
 
 use std::path::PathBuf;
 use wind_bridge::handler::{KeyAction, KeyEventData, MessageHandler};
@@ -20,8 +16,7 @@ fn data_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data")
 }
 
-/// 词库缺失时跳过（无数据 CI 环境）。⚠️ 判据是耗时：本测试族真跑时约 0.15s 以上，
-/// 若整体 0.00s 说明走了跳过分支，不能当作通过。
+/// 词库缺失时跳过（无数据 CI 环境）。本测试族真跑约 0.15s 以上，整体 0.00s 说明走了跳过分支。
 fn has_schemas() -> bool {
     let d = data_dir();
     d.join("schemas/wubi86.schema.toml").exists()
@@ -69,9 +64,7 @@ fn temp_pinyin_candidates(filter_mode: &str, input: &str) -> Vec<String> {
 
 /// 生僻字必须可达：检索范围为「全部字符」时 `ying` → 「瑩」。
 ///
-/// 断言刻意包含**位置 > 50**：这是「测试没有恰好通过」的证据——若取数上限被改回 50
-/// 之类的小值，该字不再在场，测试即红。只断言「包含瑩」是不够的，那在别的实现下
-/// 也可能因排序变化而偶然满足。
+/// 断言刻意包含位置 > 50：取数上限被压回小值时该字不在场即红；只断言「包含」可能因排序变化偶然满足。
 #[test]
 fn temp_pinyin_reaches_rare_char_beyond_old_limit() {
     if !has_schemas() {
@@ -92,25 +85,15 @@ fn temp_pinyin_reaches_rare_char_beyond_old_limit() {
     );
 }
 
-/// 临拼一次取到的候选量，不得少于主路径首屏 —— 即「翻页有内容可翻」。
+/// 临拼一次取到的候选量不得少于主路径首屏，且拿到了该输入的全部精确匹配——即「翻页有内容可翻」。
 ///
-/// ⚠️ **不能断言两者相等**。前缀补全的条数现在跟随请求量
-/// （`pinyin/mod.rs` 的 `completion_limit`），而临拼一次取 `TEMP_PINYIN_MAX_CANDIDATES`、
-/// 主路径首屏只取 `initial_candidate_limit`(300) 并靠翻页逐步扩容 —— 两者本就不同。
-/// 早期版本曾断言相等，那建立在「补全固定 30 条、两侧都取到同一个全量」的旧假设上，
-/// 放开补全后该前提即失效。
+/// 不能断言两者相等：前缀补全条数跟随请求量（`pinyin/mod.rs` 的 `completion_limit`），临拼取
+/// `TEMP_PINYIN_MAX_CANDIDATES`，主路径首屏只取 `initial_candidate_limit` 并靠翻页扩容。
+/// 单音节 `ying` 受 step 6.3 音节数闸门（`STRICT_SYLLABLE_MATCH_MAX`）影响不产出前缀补全，
+/// 故以精确同音字量级作判据；「取数上限没被压低」由
+/// [`temp_pinyin_reaches_rare_char_beyond_old_limit`] 守。
 ///
-/// 真正要钉的是：临拼**不比主路径少**，且拿到了该输入的全部精确匹配。
-///
-/// ⚠️ **数字随 step 6.3 音节数闸门变过一次**（`STRICT_SYLLABLE_MATCH_MAX`）。`ying` 是
-/// 单音节输入，其前缀补全（「影响」「英语」…）现已整体不产出，总数从 1248 降到 293：
-/// 272 条 `code == ying` 的精确同音字（**改动前后一条不差**）+ 21 条切分为 `yin|g…` 的词
-/// （「因果」「因故」，第 2 个音节起点落在输入内 ⇒ used=2 ⇒ 不进严格档，属合法候选）。
-/// 故这里改用精确同音字量级作判据；「取数上限没被压低」另有
-/// [`temp_pinyin_reaches_rare_char_beyond_old_limit`]（「瑩」须在第 50 位之外）语义化守卫。
-///
-/// 两侧都用 `gb18030`（不过滤）以统一口径；过滤本身由
-/// [`temp_pinyin_respects_filter_mode`] 单独覆盖。
+/// 两侧都用 `gb18030`（不过滤）统一口径；过滤由 [`temp_pinyin_respects_filter_mode`] 覆盖。
 #[test]
 fn temp_pinyin_candidate_count_not_less_than_main_path() {
     if !has_schemas() {
@@ -149,9 +132,8 @@ fn temp_pinyin_candidate_count_not_less_than_main_path() {
 
 /// 临拼必须遵守「检索范围」设置。
 ///
-/// **自带反向对照**：同一输入在 `smart` 下生僻字「瑩」应被滤掉、在 `gb18030` 下应在场。
-/// 只测其中一侧都不足以证明过滤真的接上了——只测 smart 无法区分「过滤生效」与「取数
-/// 上限又退回 50」，只测 gb18030 则根本不经过过滤分支。
+/// 自带反向对照：`smart` 下「瑩」应被滤掉、`gb18030` 下应在场。只测 smart 分不清「过滤生效」与
+/// 「取数上限退回 50」，只测 gb18030 则根本不经过过滤分支。
 #[test]
 fn temp_pinyin_respects_filter_mode() {
     if !has_schemas() {
@@ -204,15 +186,13 @@ fn temp_pinyin_paging_does_not_change_candidate_set() {
     assert!(after.iter().any(|t| t == "瑩"), "翻页后「瑩」仍应在候选中");
 }
 
-/// ★ 临拼也支持末页翻页放宽，与主路径同一套机制。
+/// 临拼也支持末页翻页放宽，与主路径同一套机制。
 ///
-/// 两处判据必须按模式分流，否则临拼下**静默失效**：
-/// - 触发（`try_relax_scope_on_page_end`）：临拼的码在 `temp_pinyin_buffer`，用
-///   `input_buffer` 一刀切会让它永远触发不了（那边恒为空）；
-/// - 失效（`expire_scope_override`）：同样的原因，会让放宽在下一次按键就被清掉。
+/// 两处判据必须按模式分流（临拼的码在 `temp_pinyin_buffer`，`input_buffer` 恒为空），否则静默失效：
+/// - 触发（`try_relax_scope_on_page_end`）：永远触发不了；
+/// - 失效（`expire_scope_override`）：放宽在下一次按键就被清掉。
 ///
-/// 反向对照用 `gb18030`：那里本就不过滤，放宽前后候选数必须相等——证明多出来的候选确实
-/// 来自「被智能档滤掉的那些」，而不是翻页顺带触发了别的扩容通路。
+/// 反向对照用 `gb18030`：本就不过滤，放宽前后候选数必须相等，证明多出的候选来自被智能档滤掉的那些。
 #[test]
 fn temp_pinyin_relaxes_scope_on_page_end() {
     if !has_schemas() {
@@ -269,20 +249,15 @@ fn plain_pinyin_candidates(filter_mode: &str, input: &str) -> Vec<String> {
     coord.debug_all_candidate_texts()
 }
 
-/// ★ 临拼的候选顺序必须与**直接用该拼音方案打字**一致。
+/// 临拼的候选顺序必须与直接用该拼音方案打字一致（`ni` 首选是「你」）。
 ///
-/// 回归（用户报障）：临拼下打 `ni` 首选是「年」，整页被「你的」「你们」等高频词组占满，
-/// 而全拼下首选是「你」。两个成因叠加：
+/// 两个要点：
+/// 1. 须用 `candidate_display_order`，纯 weight 排序缺 `is_prefix` 层，前缀补全（「年」nian）
+///    会压过精确匹配；
+/// 2. `ignore_weight` 须按临拼目标方案取（`base_sort_ignores_weight_of`），
+///    不能用 `active_base_sort_ignores_weight()`——那是活跃码表方案的 `base_sort`。
 ///
-/// 1. 临拼用**纯 weight 排序**（`b.weight.cmp(&a.weight).then(natural_order)`），缺了
-///    `candidate_display_order` 的 `is_prefix` 层 ⇒ 前缀补全（「年」nian 是 ni 的扩展）
-///    压过精确匹配；
-/// 2. 就算换成 `candidate_display_order`，`ignore_weight` 若取
-///    `active_base_sort_ignores_weight()` 拿到的是**活跃方案（五笔）**的 `base_sort`——
-///    用码表的排序配置排拼音候选，即用户直觉说的「被五笔干扰」。须按临拼**目标方案**取
-///    （`base_sort_ignores_weight_of`）。
-///
-/// 断言整体列表而非只比首选：只比首选时，一个「把词组整体沉底」的错误实现也能碰巧通过。
+/// 断言整体列表：只比首选时「把词组整体沉底」的错误实现也能碰巧通过。
 #[test]
 fn temp_pinyin_order_matches_plain_pinyin() {
     if !has_schemas() {
@@ -334,26 +309,19 @@ fn quick_input_candidates(input: &str) -> Vec<String> {
     coord.debug_all_candidate_texts()
 }
 
-/// ★★ **四条拼音路径的候选顺序必须一致**：纯拼音方案 / 临时拼音 / 快捷输入 member 拼音，
-/// 三者逐项相等；混输的拼音部分保持相同相对顺序。
-///
-/// 这四条路径的候选装配方式各不相同，历史上正因如此走散过：
+/// 四条拼音路径的候选顺序必须一致：纯拼音方案 / 临时拼音 / 快捷输入 member 拼音三者逐项相等；
+/// 混输的拼音部分保持相同相对顺序。
 ///
 /// | 路径 | 装配 | 排序 |
 /// |---|---|---|
 /// | 纯拼音 | `build_candidates` | 合并短语后 `candidate_display_order` 重排 |
-/// | 临时拼音 | `update_temp_pinyin_candidates` | 同上（**曾用纯 weight，是本测试要防的回归**）|
-/// | 快捷输入 | `handle_mode` 按 member 汇总 | **不重排**，保持引擎顺序 + member 优先级 |
+/// | 临时拼音 | `update_temp_pinyin_candidates` | 同上 |
+/// | 快捷输入 | `handle_mode` 按 member 汇总 | 不重排，保持引擎顺序 + member 优先级 |
 /// | 混输 | `MixedEngine` 内部融合 | 引擎内按档位（码表精确 > 拼音）|
 ///
-/// 三者一致同时证明了一件事：**拼音引擎自身给出的顺序就等于 `candidate_display_order`**
-/// （快捷输入不重排却与重排过的纯拼音相同）。所以临拼当初的 bug 本质是「在已正确的引擎
-/// 顺序上又用错误规则重排了一次」——纯 weight 排序缺 `is_prefix` 层，前缀补全「年」(nian)
-/// 与高频词组「你的」压过了精确匹配的单字「你」。
-///
-/// 混输单独比对：它首位是**五笔码表候选**（`ni` → 二简「悄」w9950，正是 gen_dict 给二简的
-/// 钦定权重），码表精确匹配优先于拼音属设计（见 mixed_pinyin_exact_tier），故只断言其中
-/// 拼音候选的**相对顺序**不变。
+/// 快捷输入不重排却与纯拼音相同，说明拼音引擎自身的顺序就等于 `candidate_display_order`，
+/// 下游重排只能用同一规则。混输首位是五笔码表候选（码表精确优先于拼音属设计，见
+/// mixed_pinyin_exact_tier），故只断言其中拼音候选的相对顺序。
 #[test]
 fn all_pinyin_paths_share_same_order() {
     if !has_schemas() {
@@ -382,12 +350,8 @@ fn all_pinyin_paths_share_same_order() {
             &plain[..n]
         );
 
-        // 混输：滤出两边共有的候选，比对**前 20 位**的相对顺序（码表候选允许插在其间）。
-        //
-        // 只比前 20 而非全表：实测两侧在第 100 位附近会有个别同权重候选互换（如「念」与
-        // 「你看看」），那是稳定排序下**输入顺序不同**导致的——混输的拼音候选经过与码表的
-        // 融合，进入排序时的原始次序本就与纯拼音不同。深尾部的这种抖动不影响使用，
-        // 断言全表只会让测试变脆。
+        // 混输：滤出两边共有的候选，比对前 20 位的相对顺序（码表候选允许插在其间）。
+        // 深尾部会有个别同权重候选因融合后输入次序不同而互换，断言全表只会让测试变脆。
         let take = 20;
         let mixed = mixed_candidates(input);
         let mixed_seq: Vec<&String> = mixed
