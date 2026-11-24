@@ -1,7 +1,7 @@
-//! 快捷输入历史（成员 `quick_input.history`，t46）：在快捷输入里上屏过的字面文本，
+//! 快捷输入历史（成员 `quick_input.history`）：在快捷输入里上屏过的字面文本，
 //! 下次按前缀补全。设计见 `src/quick_history.rs` 模块文档。
 //!
-//! ⚠️ 依赖 `build_dev/data` 真实词库（快捷输入的成员方案要能加载）；缺失时**静默跳过**
+//! 依赖 `build_dev/data` 真实词库（快捷输入的成员方案要能加载）；缺失时静默跳过
 //! （判据是耗时 0.00s）。
 
 use std::path::PathBuf;
@@ -156,7 +156,7 @@ fn literal_commit_is_remembered_and_recalled() {
 }
 
 /// 纯小写前缀（文本透镜）下历史排在成员顺序里自己的位置：成员列表里排在拼音、英文前面，
-/// `reset_time` / `font-size` 打前缀即首位；排在末尾则被拼音、英文压到首页之外（论坛 t298）。
+/// `reset_time` / `font-size` 打前缀即首位；排在末尾则被拼音、英文压到首页之外。
 #[test]
 fn text_lens_history_rank_follows_member_order() {
     skip_without_data!();
@@ -283,7 +283,7 @@ fn numeric_lens_is_not_remembered() {
     assert_eq!(history_len(&store), 0, "计算 / 数字不该进历史");
 }
 
-/// 英文词库词不进历史（英文词只记英文词频，t46 楼主说英文不需要）。
+/// 英文词库词不进历史（英文词只记英文词频）。
 #[test]
 fn english_dictionary_word_is_not_remembered() {
     skip_without_data!();
@@ -384,7 +384,7 @@ fn text_lens_raw_commit_is_remembered_without_moving_pinyin() {
     assert_eq!(before[..head], after[..head], "拼音前部不应被历史挤动");
 }
 
-/// 标点顶屏高亮的历史候选：次数 +1，且**不**往任何方案写词频（它没有编码）。
+/// 标点顶屏高亮的历史候选：次数 +1，且不往任何方案写词频（它没有编码）。
 #[test]
 fn punct_top_commit_of_history_writes_no_freq() {
     skip_without_data!();
@@ -417,8 +417,8 @@ fn punct_top_commit_of_history_writes_no_freq() {
     }
 }
 
-/// 历史置首（高亮停在历史上）时大小写档位键仍然生效（改动前 Free 透镜首位恒是原文，
-/// 档位键可用）。关掉临英「原文候选」才能让英文词缓冲的历史置首。
+/// 历史置首（高亮停在历史上）时大小写档位键仍然生效。关掉临英「原文候选」才能让英文词缓冲的
+/// 历史置首。
 #[test]
 fn case_cycle_key_still_works_when_history_is_first() {
     skip_without_data!();
@@ -480,7 +480,7 @@ fn english_word_raw_follows_temp_english_raw_candidate() {
     assert!(!t.iter().any(|x| x == "RSTQ"), "Off 下不单列原文: {t:?}");
 }
 
-/// 自由输入（Free 透镜）下候选窗照常显示序号（维护者 2026-10-07 定）。
+/// 自由输入（Free 透镜）下候选窗照常显示序号。
 #[test]
 fn free_lens_shows_index_labels() {
     skip_without_data!();
@@ -676,9 +676,9 @@ fn delete_hotkey_removes_a_history_entry() {
     );
 }
 
-/// 数字透镜里**只有历史**命中时，字母不是选词键：`.` 起手召回了 `.txt`，接着打 `xlsx`
+/// 数字透镜里只有历史命中时，字母不是选词键：`.` 起手召回了 `.txt`，接着打 `xlsx`
 /// 照样字面入缓冲。历史是字面前缀补全、不是这个透镜算出来的结果，它不该让空候选那条
-/// 「选词键归字面」的判据失效（GH 回归：开历史成员后 `;.xlsx` 停在那个点）。
+/// 「选词键归字面」的判据失效（否则开历史成员后 `;.xlsx` 停在那个点）。
 #[test]
 fn numeric_lens_history_only_does_not_eat_letters() {
     skip_without_data!();
@@ -722,7 +722,7 @@ fn numeric_lens_history_only_after_digit_does_not_eat_letters() {
     assert_eq!(committed(&act).as_deref(), Some(".7z"));
 }
 
-/// ★反向对照：数字透镜有**本透镜的**候选时，即便历史也命中，字母仍是选词键
+/// 反向对照：数字透镜有本透镜的候选时，即便历史也命中，字母仍是选词键
 /// （`a` 选首选，越界的 `z` 仍被吃掉、不污染缓冲）。
 #[test]
 fn numeric_lens_letters_still_select_with_history_alongside() {
@@ -753,12 +753,12 @@ fn numeric_lens_letters_still_select_with_history_alongside() {
     assert_eq!(committed(&act).as_deref(), Some("3"), "a 应选走首选");
 }
 
-/// t253：历史排在英文之后时，用过几次的 `font-size` 与英文词一起按热度重排——打前缀即上首位。
+/// 历史排在英文之后时，用过几次的 `font-size` 与英文词一起按热度重排——打前缀即上首位。
 #[test]
 fn hot_history_joins_english_segment_and_reaches_top() {
     skip_without_data!();
     let (coord, store) = open_with("hot_hist", |c| {
-        // 同 GH#253 楼主的配置：只留英文、历史，历史在后；原文与变形候选不显示。
+        // 只留英文、历史，历史在后；原文与变形候选不显示。
         c.schema.english.frequency.enabled = true;
         c.input.temp_english.raw_candidate = wind_config::config::RawCandidateMode::Off;
         c.input.temp_english.case_variants = false;
@@ -782,7 +782,7 @@ fn hot_history_joins_english_segment_and_reaches_top() {
     );
 }
 
-/// t253 反向：英文词 `font` 用得更多时仍在 `font-size` 之前（热度翻转，不是历史一律置顶）。
+/// 反向：英文词 `font` 用得更多时仍在 `font-size` 之前（热度翻转，不是历史一律置顶）。
 #[test]
 fn hotter_english_word_stays_above_history() {
     skip_without_data!();
@@ -820,7 +820,7 @@ fn hotter_english_word_stays_above_history() {
 }
 
 /// 英文调频选「一次到顶」时，Free / 大写英文透镜里的历史也按它排：最近用过的在前，
-/// 不再只看累计次数（反馈：`${ResetTime}` 输了几次仍排在老条目 `${reset_time}` 后面）。
+/// 不只看累计次数（`${ResetTime}` 输了几次要排到老条目 `${reset_time}` 前面）。
 #[test]
 fn free_lens_history_follows_english_top_strategy() {
     skip_without_data!();

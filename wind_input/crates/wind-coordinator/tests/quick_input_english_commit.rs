@@ -1,16 +1,14 @@
-//! 快捷输入（`quick_mix` 的 english 成员）里英文上屏对齐临时英文（A2-3b 批 2）。
+//! 快捷输入（`quick_mix` 的 english 成员）里英文上屏对齐临时英文：一律读临英那份开关
+//! （`input.temp_english.*`），不另立第三份。本文件钉两件事：
 //!
-//! 用户拍板：快捷输入里的英文**一律读临英那份开关**（`input.temp_english.*`），不另立第三份。
-//! 本文件钉两件事：
-//!
-//! - **补空格**（`input.temp_english.commit_space`）：选中「算英文」的候选（英文词库来源 / 所打
+//! - 补空格（`input.temp_english.commit_space`）：选中「算英文」的候选（英文词库来源 / 所打
 //!   原文）上屏后补一个空格；空格、数字键、鼠标点选同一出口。中文候选、回车上屏原文不补。
-//! - **全角**：全角态下英文候选、回车原文转全角，补的是全角空格——与临英同口径。
+//! - 全角：全角态下英文候选、回车原文转全角，补的是全角空格——与临英同口径。
 //!
 //! 英文方案那份 `schema.english.commit_space` 在各用例里刻意置反：两份取值相同时，读错了
 //! 开关也照样全绿。
 //!
-//! ⚠️ 词典缺失时整族静默跳过（判据是耗时而非通过条数），worktree 需自备 `build_dev`。
+//! 词典缺失时整族静默跳过（判据是耗时而非通过条数），worktree 需自备 `build_dev`。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -152,7 +150,7 @@ fn no_space_when_temp_english_switch_off() {
     assert_eq!(commit_text(&act), "very");
 }
 
-/// ★ 中文候选不补：开关只作用于英文内容，快捷输入里的拼音字词照旧。
+/// 中文候选不补：开关只作用于英文内容，快捷输入里的拼音字词照旧。
 #[test]
 fn chinese_candidate_never_appends_space() {
     if !has_english_schema() {
@@ -215,7 +213,7 @@ fn space_fallback_appends_space() {
     if !has_english_schema() {
         return;
     }
-    // 原文候选与大小写变形关掉：它们开着时 `vqzx` 本身就是一条候选（批 3 的英文段段首），
+    // 原文候选与大小写变形关掉：它们开着时 `vqzx` 本身就是一条候选（英文段段首），
     // 走不到兜底分支。
     let mut cfg = quick_config(true);
     cfg.input.temp_english.raw_candidate = wind_config::config::RawCandidateMode::Off;
@@ -254,7 +252,7 @@ fn free_lens_raw_follows_temp_english() {
     assert_eq!(commit_text(&act), "ｒｏｃｋ＇ｎ\u{3000}");
 }
 
-/// ★ 数字透镜不算英文：`;12` 的结果里有一条 `12`，文本恰好等于所打原码，不得被当成
+/// 数字透镜不算英文：`;12` 的结果里有一条 `12`，文本恰好等于所打原码，不得被当成
 /// 英文原文补空格（数字透镜下数字键是输入，故用鼠标点选）。
 #[test]
 fn numeric_lens_never_appends_space() {
@@ -270,8 +268,8 @@ fn numeric_lens_never_appends_space() {
     assert_eq!(commit_text(&act), "12", "数字透镜结果不该补空格");
 }
 
-/// ★ 数字透镜的回车原文不转全角：算式原文与英文无关，且与空格兜底同一判据
-/// （`mix_raw_counts_as_english`）。曾出现全角态 `;1+` 空格得 `1+`、回车得 `１＋` 的分叉。
+/// 数字透镜的回车原文不转全角：算式原文与英文无关，且与空格兜底同一判据
+/// （`mix_raw_counts_as_english`），否则全角态 `;1+` 空格与回车结果分叉。
 #[test]
 fn full_width_enter_keeps_numeric_raw() {
     if !has_english_schema() {
@@ -286,7 +284,7 @@ fn full_width_enter_keeps_numeric_raw() {
     assert_eq!(commit_text(&act), "12", "数字透镜回车应上屏半角原文");
 }
 
-/// ⑥ 标点顶屏：英文候选随临英转全角，但**不补空格**（补了会得到 `ｖｅｒｙ　，`）。
+/// ⑥ 标点顶屏：英文候选随临英转全角，但不补空格（补了会得到 `ｖｅｒｙ　，`）。
 /// 取 `free_input = off`：出厂 `auto` 下标点会作字面输入进缓冲，走不到顶屏臂。
 #[test]
 fn full_width_punct_commit_converts_without_space() {
@@ -327,7 +325,7 @@ fn full_width_mode_switch_converts_raw() {
     assert_eq!(commit_text(&act), "ｖｅｒｙ");
 }
 
-/// 回车上屏的原文**包括拼音码**：含英文成员的实例里，缓冲原文一律按英文对待
+/// 回车上屏的原文包括拼音码：含英文成员的实例里，缓冲原文一律按英文对待
 /// （`;nihao` 全角态回车得 `ｎｉｈａｏ`）——回车时无从分辨这串是拼音还是英文。
 #[test]
 fn full_width_enter_converts_pinyin_raw_too() {

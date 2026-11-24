@@ -1,12 +1,12 @@
 //! 方案常驻策略（`schema.keep_all_loaded`，设计 `docs/design/memory-footprint.md` §5）端到端：
 //! 启动常驻集合、启动后台校验全部方案的派生缓存、闲置淘汰与保护名单、运行期两个方向的切换。
 //!
-//! 整棵目录树经**便携标记**重定向到临时目录（`WIND_INSTALL_ROOT` + `portable_mode`）：
+//! 整棵目录树经便携标记重定向到临时目录（`WIND_INSTALL_ROOT` + `portable_mode`）：
 //! 词库缓存落在 `<root>/localdata/cache`（可观测、不碰真实缓存），`reload_user_config` 读
 //! `<root>/userdata/config.toml`。一个进程只能重定向一次，故单开测试二进制；用例共用这棵树，
 //! 用 `LOCK` 串行、每条开头重写配置。
 //!
-//! ⚠️ 不依赖 `build_dev/data`：方案全部自造（码表 za / zb / zc / zd + 混输 zm），不会静默跳过。
+//! 不依赖 `build_dev/data`：方案全部自造（码表 za / zb / zc / zd + 混输 zm），不会静默跳过。
 //!
 //! 方案角色（各用例同一套）：
 //! - `za`：当前方案；
@@ -113,9 +113,8 @@ fn cache_root() -> PathBuf {
     root().join("localdata/cache")
 }
 
-/// `<cache>/<id>/` 下的 `.wdat`（码表词库缓存）。
-/// 该方案目录下**最新**的 wdat。缓存按内容命名、重建写新文件且旧份保留到被 prune
-/// （`cache_fp` S2），同一时刻目录里可能有新旧两份，取 mtime 最新的才是当前这份。
+/// `<cache>/<id>/` 下最新的 `.wdat`（码表词库缓存）。缓存按内容命名、重建写新文件且旧份保留到
+/// 被 prune，目录里可能有新旧两份，取 mtime 最新的才是当前这份。
 fn wdat_of(id: &str) -> Option<PathBuf> {
     std::fs::read_dir(cache_root().join(id))
         .ok()?
@@ -274,7 +273,7 @@ fn keep_all_loaded_prewarms_everything_and_never_evicts() {
     assert_eq!(loaded(&c), all, "常驻开着时一个都不摘");
 }
 
-/// 懒建缓存的闲置清扫（设计 §7）走同一个清扫拍子，且**不看** `keep_all_loaded`：常驻开着
+/// 懒建缓存的闲置清扫（设计 §7）走同一个清扫拍子，且不看 `keep_all_loaded`：常驻开着
 /// 时方案一个不摘，单字全码表与按词查编码用户层照样到期释放。
 #[test]
 fn idle_sweep_releases_caches_even_when_keep_all() {
@@ -462,7 +461,7 @@ fn prewarm_all_stops_when_keep_all_is_off() {
     assert_eq!(loaded(&c), sorted(&["za", "zc"]));
 }
 
-/// 快捷输入成员的取数上限按成员**引擎类型**分级：成员没加载时也要按它的真实类型算
+/// 快捷输入成员的取数上限按成员引擎类型分级：成员没加载时也要按它的真实类型算
 /// （码表单码 100），不能当成「类型未知」落到 300。
 #[test]
 fn mix_member_limit_uses_real_type_of_unloaded_member() {

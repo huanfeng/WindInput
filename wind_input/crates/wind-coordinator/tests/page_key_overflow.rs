@@ -3,13 +3,10 @@
 //! `commit_and_input` 档：主路上可打印的翻页键（`-` `=` `,` `.` `[` `]`）翻不动、且这批
 //! 候选从未翻过页时，不再空转吞键，而是落到标点臂——顶高亮候选 + 输出该键的符号。
 //!
-//! ## ⚠️ 反向对照不可省
+//! 每条正向用例都配一条 `ignore`（出厂）的对照：同一操作在出厂档下必须仍是吞键，
+//! 否则开关整个没接线时正向用例也会绿。
 //!
-//! 每条正向用例都配一条 `ignore`（出厂）的对照：同一操作在出厂档下必须仍是吞键。只测正向的话，
-//! 哪怕开关整个没接线（键因别的原因落到了标点臂），用例一样会绿。
-//!
-//! 词典缺失时自动跳过 —— ⚠️ `build_dev/data` 不存在时**整族静默跳过而计数照绿**，
-//! 确认真的跑了看 `--nocapture` 里有没有「跳过：」那行。
+//! `build_dev/data` 不存在时整族静默跳过而计数照绿，确认真的跑了看 `--nocapture` 里的「跳过：」。
 
 use std::path::PathBuf;
 use wind_bridge::handler::{KeyAction, KeyEventData, MessageHandler};
@@ -191,7 +188,7 @@ fn minus_after_paging_back_is_still_swallowed() {
     }
 }
 
-/// 上翻之外：高亮挪过之后顶的是**高亮项**，不是首选。
+/// 上翻之外：高亮挪过之后顶的是高亮项，不是首选。
 #[test]
 fn highlight_moved_commits_highlighted() {
     if !data_ready() {
@@ -406,8 +403,7 @@ fn overlay_temp_pinyin_unaffected() {
 
 // ───────────────────────── 按键级策略（翻页动作的后缀）─────────────────────────
 // 设计：docs/design/keys-overflow-per-key.md。全局档保留为默认，自定义按键里给单个键绑
-// `page_prev:commit_and_input` / `page_prev:ignore` 把策略落到这个键上——「有人只要逗号翻不动
-// 时上屏，其余翻页键无效就是无效」（GH#249）。
+// `page_prev:commit_and_input` / `page_prev:ignore` 把策略落到这个键上。
 
 /// 后缀优先于全局档：全局 `ignore`，只把 `,` 绑成「上一页（翻不动时上屏）」——同方案下 `,`
 /// 上屏「你好，」、`.` 是不带后缀的翻页、回落全局档仍吞键（不被殃及）。

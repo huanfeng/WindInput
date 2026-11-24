@@ -1,18 +1,14 @@
 //! 快捷输入里打大写英文（Shift+字母）：英文段对齐临英——大小写变形 + 词库候选，词库候选
-//! **跟随输入大小写**（读 `input.temp_english.case_follow_input`，用户已定：快捷输入英文一律
-//! 读临英开关）。
+//! 跟随输入大小写（快捷输入英文一律读临英开关 `input.temp_english.case_follow_input`）。
 //!
-//! 现场：Shift+字母让缓冲带上大写，按透镜判据越界进 `Free`，候选只剩所打原文一条——
-//! 英文成员根本没被问到，`case_follow_input` 无从生效。
+//! 带大写的缓冲按透镜判据进 `Free`（判据不动）：缓冲是纯 ASCII 字母、本实例含英文成员且
+//! `free_input = auto` 时，Free 透镜在原文之后追加英文段。原文仍钉首位，数字 / 符号照旧字面
+//! 入缓冲，拼音 / 数字透镜不受影响（缓冲里一有大写就不是它们的编码）。
 //!
-//! 最小改法（不动透镜判据，A2-23 / t157 的 Free 语义原样）：缓冲是**纯 ASCII 字母**、本实例
-//! 含英文成员且 `free_input = auto` 时，Free 透镜在原文之后追加英文段。原文仍钉首位，
-//! 数字 / 符号照旧字面入缓冲，拼音 / 数字透镜不受影响（缓冲里一有大写就不是它们的编码）。
+//! `free_input = off`：含英文成员时大写同样进缓冲、候选是同一份英文段，但数字 / 符号键保持
+//! 功能键身份（选词、翻页、顶屏）；不含英文成员时恒小写。
 //!
-//! `free_input = off` 的实例（A2-50 / t235）：含英文成员时大写同样进缓冲、候选是同一份英文段，
-//! 但数字 / 符号键保持功能键身份（选词、翻页、顶屏）；不含英文成员时恒小写，维持原状。
-//!
-//! ⚠️ 依赖 `build_dev/data` 真实词库；缺失时**静默跳过**（判据是耗时 0.00s）。
+//! 依赖 `build_dev/data` 真实词库；缺失时静默跳过（判据是耗时 0.00s）。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -158,7 +154,7 @@ fn selecting_projected_word_records_dict_freq() {
     let _ = std::fs::remove_file(&db);
 }
 
-/// 含非字母字符的字面输入照旧只有原文一条（A2-23 的 Free 语义不动）。
+/// 含非字母字符的字面输入照旧只有原文一条（Free 语义不动）。
 #[test]
 fn literal_with_symbols_stays_single_candidate() {
     skip_without_data!();
@@ -333,11 +329,10 @@ fn free_literal_with_symbols_is_not_taken() {
     let _ = std::fs::remove_file(&db);
 }
 
-// ── 自由输入关闭（`free_input = off`，A2-50 / t235）──
+// ── 自由输入关闭（`free_input = off`）──
 //
-// off 的语义是「数字 / 符号键保持功能键身份」。含英文成员的实例里 Shift+字母仍以大写进
-// 缓冲，候选只给英文段（与 auto 下同一份逻辑），但数字键照旧选词、`-`/`=` 照旧翻页——
-// 不能因为缓冲进了大写就把整个会话拖进字面输入。
+// off 的语义是「数字 / 符号键保持功能键身份」：含英文成员时 Shift+字母仍以大写进缓冲、
+// 候选只给英文段，但数字键照旧选词、`-`/`=` 照旧翻页，不因缓冲进了大写就转为字面输入。
 
 fn open_off(tag: &str, edit: impl FnOnce(&mut Config)) -> (Arc<Coordinator>, Arc<Store>, PathBuf) {
     open(tag, |c| {
@@ -366,7 +361,7 @@ fn off_uppercase_projects_english_segment() {
     let _ = std::fs::remove_file(&db);
 }
 
-/// off 下大写缓冲按数字键是**选词**，不是字面输入。
+/// off 下大写缓冲按数字键是选词，不是字面输入。
 #[test]
 fn off_uppercase_digit_still_selects() {
     skip_without_data!();

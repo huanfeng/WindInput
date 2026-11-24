@@ -1,4 +1,4 @@
-//! 临拼 / 快捷输入 / 临英剩余码**无候选**时按标点：与主路空码标点同一套语义
+//! 临拼 / 快捷输入 / 临英剩余码无候选时按标点：与主路空码标点同一套语义
 //! （`input.punct_on_empty_behavior`，唯一解释器 `punct_empty_code_policy`）。
 //!
 //! - `commit`：上屏「引导字母 + 已选段 + 剩余原码」再接标点；原码按本模式来源记统计、
@@ -6,12 +6,7 @@
 //! - `clear`（出厂）：已选段与剩余原码都丢，只出标点。
 //! - `clear_no_input`：连标点也不出，整键当没按过（退出模式、清组合）。
 //!
-//! 现场：临拼兜底标点臂无候选时 `exit + ClearComposition`，已选段 / 剩余码 / 标点三样
-//! 全丢；快捷输入 ⑥ 无高亮候选时只上屏已选段 + 标点，剩余原码与字母引导符静默消失。
-//! 两者都不读 `punct_on_empty_behavior`。临英无候选时恒上屏原文 + 标点，而英文方案主路
-//! 同样的无候选状态按该开关处置。
-//!
-//! ⚠️ 依赖 `build_dev/data` 真实词库；缺失时**静默跳过**（判据是耗时 0.00s）。
+//! 依赖 `build_dev/data` 真实词库；缺失时静默跳过（判据是耗时 0.00s）。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -356,8 +351,8 @@ fn temp_english_clear_no_input_drops_everything() {
     assert_eq!(coord.debug_active_mode(), None, "应退出临英");
 }
 
-/// 对照组：英文方案主路同一状态（原文候选关、词库无命中 ⇒ 无候选）按同一开关处置。
-/// 它不是本次改动的对象，只钉住「临英对齐的是什么」。
+/// 对照组：英文方案主路同一状态（原文候选关、词库无命中 ⇒ 无候选）按同一开关处置，
+/// 钉住「临英对齐的是什么」。
 #[test]
 fn english_schema_main_path_reference() {
     skip_without_data!();
@@ -441,7 +436,7 @@ fn quick_input_letter_guide_counts_as_code() {
 #[test]
 fn temp_pinyin_select_key_without_candidate_follows_overflow_policy() {
     skip_without_data!();
-    // 出厂 `ignore`：吞键，组合留着继续打（此前一律退出清空，已选段与剩余码丢掉）。
+    // 出厂 `ignore`：吞键，组合留着继续打，不退出清空。
     let coord = open("clear", |_| {});
     temp_pinyin_ni_vvv(&coord);
     assert!(matches!(

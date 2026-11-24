@@ -1,10 +1,10 @@
-//! 拼音「屏蔽这个词」：右键删多字的系统词 / 整句，按**文字**屏蔽（候选调整里 `code = *` 的删除行），
+//! 拼音「屏蔽这个词」：右键删多字的系统词 / 整句，按文字屏蔽（候选调整里 `code = *` 的删除行），
 //! 所有输入串、所有来源都不再出现；删多字用户词 / 临时词则真删所有编码的条目、不留屏蔽记录；
 //! 单字与码表仍按编码隐藏。设计见 docs/design/system-dict-patch-and-candidate-adjust.md §4a。
 //!
 //! 每条用例先断言删除前候选确实在，最终候选一律经 Coordinator 取（引擎位次 ≠ 界面位次）。
 //!
-//! ⚠️ 依赖 `build_dev/data` 真实词库；缺失时整族静默跳过（判据是耗时 0.0x s）。
+//! 依赖 `build_dev/data` 真实词库；缺失时整族静默跳过（判据是耗时 0.0x s）。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -208,7 +208,7 @@ fn shuangpin_delete_blocks_by_text() {
     assert!(!has(&full, &store, "nh", "你好"), "简拼同样屏蔽");
 }
 
-/// 整句文字恰为被屏蔽的词（`nihao` 拼出的「你好」）：首选换成另一条**覆盖整串**的解读，
+/// 整句文字恰为被屏蔽的词（`nihao` 拼出的「你好」）：首选换成另一条覆盖整串的解读，
 /// 空格上屏后缓冲清空，不是只上半截。编码栏仍是整串的切分。
 #[test]
 fn blocked_sentence_top_still_covers_whole_input() {
@@ -332,7 +332,7 @@ fn delete_merged_candidate_purges_and_blocks() {
     assert!(!has(&cfg, &store, "nh", "你好"));
 }
 
-/// GH#269 的形态：选过的整句学进了临时词库，删掉它后候选消失，再分段上屏也不会学回来。
+/// 选过的整句学进了临时词库，删掉它后候选消失，再分段上屏也不会学回来。
 #[test]
 fn delete_learned_sentence_stays_gone() {
     if !has_schemas() {
@@ -459,7 +459,7 @@ fn codetable_delete_stays_per_code() {
     assert!(!has(&cfg, &store, "aaaa", &victim));
 }
 
-/// 联想：被屏蔽的整词不出，且是在截断**之前**滤——条数与没屏蔽时一样，空出的格由后面的补上。
+/// 联想：被屏蔽的整词不出，且是在截断之前滤——条数与没屏蔽时一样，空出的格由后面的补上。
 #[test]
 fn association_skips_blocked_word_before_truncation() {
     if !has_schemas() {

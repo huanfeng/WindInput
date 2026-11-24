@@ -1,11 +1,11 @@
-//! 码表用户词里的 `$` 模板（`aadg` → `$Y年$M月$D日`）经**顶码 / 满码自动上屏 / 特殊模式**
-//! 三个出口上屏时，词频同样记在展开前的源文本上（GH#177）。
+//! 码表用户词里的 `$` 模板（`aadg` → `$Y年$M月$D日`）经顶码 / 满码自动上屏 / 特殊模式
+//! 三个出口上屏时，词频同样记在展开前的源文本上。
 //!
-//! 读端 `apply_freq_rerank_in` 按 `Candidate::freq_text()`（模板源文本）查词频；这几个出口的
-//! 写端此前直接拿上屏文本（当天的展开结果）记账，读写永不同键，且逐日留下孤儿行。
+//! 读端 `apply_freq_rerank_in` 按 `Candidate::freq_text()`（模板源文本）查词频；写端若拿上屏
+//! 文本（当天的展开结果）记账，读写永不同键，且逐日留下孤儿行。
 //! 主选词出口另见 `pinyin_user_word_abbrev_code.rs`。
 //!
-//! ⚠️ 依赖 `build_dev/data` 真实词库；缺失时**静默跳过**（判据是耗时 0.00s）。
+//! 依赖 `build_dev/data` 真实词库；缺失时静默跳过（判据是耗时 0.00s）。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -148,7 +148,7 @@ fn top_code_commit_records_template_source() {
 /// 满码唯一自动上屏：`vbnm` 系统词库无字，模板词是唯一候选。
 ///
 /// 顺带钉住：引擎的上屏意向是词条原文 `$Y年$M月$D日`，协调器复核须按 `template_source`
-/// 认它——此前只比展开后的 `text`，模板词条恒被否决、从不满码自动上屏。
+/// 认它；只比展开后的 `text` 时模板词条恒被否决、从不满码自动上屏。
 #[test]
 fn auto_commit_at_full_records_template_source() {
     if !has_data() {
@@ -256,7 +256,7 @@ fn special_mode_auto_commit_records_template_source() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
-/// `{..}` 插值（剪贴板 / 反查）**不**满码自动上屏：内容取自外部状态，须经候选窗让用户
+/// `{..}` 插值（剪贴板 / 反查）不满码自动上屏：内容取自外部状态，须经候选窗让用户
 /// 看过再选。主路与特殊模式同一判据（`auto_commit_target_matches`），这里钉主路。
 ///
 /// 用 `{code()}`（求值即当前编码）：不依赖剪贴板等外部状态，headless 下稳定非空，候选必在。
@@ -334,7 +334,7 @@ fn dict_command_select_records_label() {
 }
 
 /// 显示态复评（`recheck_auto_commit`）这条来路：引擎首轮见同码两条（系统「工厂」+ 用户词）
-/// 判不唯一，shadow 删掉「工厂」后只剩用户词，复评按**展开后的**候选给出意向。
+/// 判不唯一，shadow 删掉「工厂」后只剩用户词，复评按展开后的候选给出意向。
 ///
 /// 插值词条在这条路上同样不放行（复评返回的是展开文本，只比 `text` 会放过它）；
 /// `$` 模板词条照常放行——对照组，证明拦的是插值而不是复评整条路。

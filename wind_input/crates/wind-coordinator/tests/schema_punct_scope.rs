@@ -1,24 +1,9 @@
-//! 方案级标点（`[punct]`）在**方案之间来回切换**时的还原语义。
+//! 方案级标点（`[punct]`）在方案之间来回切换时的还原语义。设计见
+//! `docs/design/schema-scoped-behavior.md` §4。
 //!
-//! 设计见 `docs/design/schema-scoped-behavior.md` §4。
-//!
-//! # 这组测试的由来
-//!
-//! 2026-08-23 真机报障：**「从五笔用快捷键切到英文方案，标点变英文；再切回五笔，还是
-//! 英文标点」**。
-//!
-//! 根因是标点缺一层「基线」：布局的基线是 `candidate_vertical` 镜像，方案意图不写它，
-//! `Follow` 每次重算自然回落；而 `state.chinese_punct` 既是当前值又是唯一存储，被英文
-//! 方案覆盖成 `false` 之后，切回一个 `Follow`（= 不干预）的方案时**没有可回落的原值**，
-//! 于是「不干预」退化成了「保持上一个方案强加的值」。
-//!
-//! ⇒ `Follow` 的语义必须是「回到不受方案影响的那个值」。`punct_before_schema` 记的就是它。
-//!
-//! # 为什么第 4 条比第 1 条更能防回归
-//!
-//! 只测「切回来变回中文」的话，一个「切回 Follow 方案时硬置中文」的错误实现照样通过。
-//! `restores_the_users_own_preference_not_a_hardcoded_chinese` 那条先把全局态改成英文标点
-//! 再走一遍，两条一起才把「还原的是**用户自己设的值**」钉住。
+//! `state.chinese_punct` 既是当前值又是唯一存储，被英文方案覆盖后，切回 `Follow`（不干预）的
+//! 方案须回到不受方案影响的那个值（`punct_before_schema`），而不是保持上一个方案强加的值。
+//! `restores_the_users_own_preference_not_a_hardcoded_chinese` 防「切回时硬置中文」的错误实现。
 
 use std::path::PathBuf;
 use wind_bridge::handler::MessageHandler;
@@ -31,8 +16,8 @@ fn data_dir() -> PathBuf {
 
 /// 英文方案就绪判据：方案定义要在，且它得真的声明了 `[punct]`。
 ///
-/// 后半条不可省——本组测试全靠 `english.schema.toml` 里的 `mode = "english"` 驱动，
-/// 那一行被删掉的话所有断言都会以「标点从没变过」的方式静默通过。
+/// 后半条不可省：本组测试靠 `english.schema.toml` 里的 `mode = "english"` 驱动，那行被删时
+/// 所有断言会以「标点从没变过」的方式静默通过。
 fn ready() -> bool {
     let f = data_dir().join("schemas/english.schema.toml");
     let Ok(text) = std::fs::read_to_string(&f) else {
@@ -63,7 +48,7 @@ fn toggle_punct(c: &Coordinator) {
     c.handle_menu_command("toggle_punct");
 }
 
-/// ★ 真机报障的那条路径：切过去变英文标点，**切回来必须变回中文**。
+/// 切到英文方案变英文标点，切回来必须变回中文。
 #[test]
 fn returning_to_a_follow_schema_restores_the_punct_state() {
     if !ready() {
@@ -89,7 +74,7 @@ fn returning_to_a_follow_schema_restores_the_punct_state() {
     );
 }
 
-/// 手动切换在**本代际内**胜出：方案意图不会把它顶回去。
+/// 手动切换在本代际内胜出：方案意图不会把它顶回去。
 #[test]
 fn manual_toggle_wins_within_the_same_generation() {
     if !ready() {
@@ -130,9 +115,7 @@ fn manual_value_expires_with_the_generation() {
     );
 }
 
-/// ★★ 还原的是**用户自己的偏好**，不是硬编码的中文。
-///
-/// 没有这条，「切回 Follow 方案时置中文标点」这种错误实现也能让上面几条全绿。
+/// 还原的是用户自己的偏好，不是硬编码的中文；没有这条，「切回时置中文」也能让上面几条全绿。
 #[test]
 fn restores_the_users_own_preference_not_a_hardcoded_chinese() {
     if !ready() {
@@ -171,12 +154,11 @@ fn repeated_round_trips_stay_stable() {
     }
 }
 
-// ── 方案意图 vs 其它写 `chinese_punct` 的入口（GH#164）─────────────────────────
+// ── 方案意图 vs 其它写 `chinese_punct` 的入口 ─────────────────────────
 //
-// 方案意图只在**活跃方案换代**时由 `sync_schema_scope` 落地，代际不变就不再动。于是任何
-// 在代际内改写 `chinese_punct` 的入口（IME 激活的重置、`follow_mode` 的中英跟随）都能把
-// 它顶回中文，而没人再纠正。原则：范围更小的意图优先——方案意图压过这两者。
-// 用户手动 `toggle_punct` 不在此列（它本来就该在本代际内胜出，见上面的测试）。
+// 方案意图只在活跃方案换代时由 `sync_schema_scope` 落地，代际内改写 `chinese_punct` 的入口
+// （IME 激活的重置、`follow_mode` 的中英跟随）若不让位就会把它顶回中文且无人纠正。原则：范围
+// 更小的意图优先，方案意图压过这两者；用户手动 `toggle_punct` 不在此列（本代际内胜出）。
 
 fn coord_follow(follow: bool) -> std::sync::Arc<Coordinator> {
     let mut c = cfg();
@@ -223,7 +205,7 @@ fn follow_mode_does_not_override_schema_punct_intent() {
     );
 }
 
-/// 上面的优先级只对**声明了意图**的方案成立：Follow 方案里 follow_mode 照常跟随。
+/// 上面的优先级只对声明了意图的方案成立：Follow 方案里 follow_mode 照常跟随。
 #[test]
 fn follow_mode_still_works_in_a_schema_without_intent() {
     if !ready() {

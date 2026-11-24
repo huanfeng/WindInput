@@ -1,27 +1,16 @@
-//! A2-39：临时英文 / 快捷输入里用过的英文词，再打短前缀时要能靠词频浮上来（t202）。
+//! 临时英文 / 快捷输入里用过的英文词，再打短前缀时要能靠词频浮上来（调频开着时）。两组：
 //!
-//! 反馈：打完 `translation` 上屏，再键入 `t`，`translation` 不置顶。英文调频
-//! （`schema.english.frequency.enabled`）出厂关，那是出厂值问题、不在本文件；开了调频之后
-//! 还有两个**代码**问题，本文件各钉一组：
+//! - ② 头部候选上屏按词库词记：打全时词库那条被头部候选（原文 / 变形）按字面去重吃掉，
+//!   上屏的头部候选须按英文词库的键规则（小写码、大小写不敏感）找回对应词库词，按它记，
+//!   与从列表里选中该词逐字节同一行。不在词库里的纯原文仍不记
+//!   （`temp_english_freq.rs::temp_english_literal_text_is_not_recorded`）。
+//! - ③ 短前缀召回：引擎只取 300 条，词频重排只作用于已取回的候选。调频开着时把词频表里以当前
+//!   前缀开头、有记录、且仍是词库词的补进候选池尾，再参与重排。
 //!
-//! - **②「打全再上屏」一条都不记**：打全 `translation` 时词库那条被头部候选（原文
-//!   `Translation` / 变形 `translation`）按字面去重吃掉，上屏的是头部候选——它没有词库来源，
-//!   写端一律跳过。修法：头部候选上屏时按英文词库的键规则（小写码、大小写不敏感）找回它对应的
-//!   词库词，按那个词记——与从列表里选中该词逐字节同一行。**不在词库里的纯原文仍不记**
-//!   （`temp_english_freq.rs::temp_english_literal_text_is_not_recorded` 钉着）。
-//! - **③ 短前缀下取不回来**：`t` 下引擎只取 300 条，`translation` 不在其中；词频重排只作用于
-//!   已取回的候选，用多少次都排不上来。修法：调频开着时把词频表里以当前前缀开头、有记录、且
-//!   仍是词库词的补进候选池（放在池尾，即「原序至少在池外」），再参与重排。
+//! 位次走 Coordinator（`debug_all_candidate_texts` 是界面最终列表），不拿引擎 `convert` 的顺序。
+//! 反向对照（调频关）防召回不看开关、静默改动出厂行为。
 //!
-//! 位次一律走 **Coordinator 实测**（`debug_all_candidate_texts` 是界面上的最终列表），
-//! 不拿引擎 `convert` 的顺序——协调器还要叠头部候选、去重、重排。
-//!
-//! 反向对照（调频关）不可省：「召回」若不看开关，关着时 `t` 下就会多出一条，
-//! 那是对出厂行为的静默改动。
-//!
-//! ⚠️ 依赖 `build_dev/data` 真实词库；缺失时整族跳过。
-//!
-//! 用例里的观测词是 `tranquil` 而非反馈里的 `translation`，理由见 [`WORD`]。
+//! 依赖 `build_dev/data` 真实词库；缺失时整族跳过。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -31,9 +20,8 @@ use wind_coordinator::Coordinator;
 use wind_ipc::protocol::{EVENT_KEY_DOWN, MOD_SHIFT};
 use wind_store::Store;
 
-/// 观测词取一个**没有词频名次**的词库词：英文候选按词频名次排序后，有名次的常用词
-/// （如反馈里的 `translation`）已在 `t` 的 300 条池内，测不出「池外召回」。无名次的词排在
-/// 所有有名次的词之后（`t` 下有名次的有八百多条），必在池外。
+/// 观测词取一个没有词频名次的词库词：有名次的常用词（如 `translation`）已在 `t` 的 300 条池内，
+/// 测不出「池外召回」；无名次的词排在所有有名次的词（`t` 下八百多条）之后，必在池外。
 const WORD: &str = "tranquil";
 const VK_ESCAPE: u32 = 0x1B;
 const VK_SPACE: u32 = 0x20;
@@ -62,7 +50,7 @@ fn key(key_code: u32, modifiers: u32) -> KeyEventData {
 }
 
 /// 主方案取五笔（临英 / 快捷输入的归属必须是英文桶，与 active 无关）。临英的原文 / 变形 /
-/// 大小写投影保持 `Config::default()` 的出厂值（都开着）——反馈就发生在这组值下。
+/// 大小写投影保持 `Config::default()` 的出厂值（都开着）。
 fn config(freq: bool) -> Config {
     let mut cfg = Config::default();
     cfg.schema.available = vec!["wubi86".into(), "english".into()];
@@ -198,12 +186,8 @@ fn raw_head_commit_records_nothing_when_freq_off() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// 快捷输入英文成员的头部候选（`;tranquil` 里的原文 `tranquil`）上屏 → 记进**英文桶**，
-/// 不再落到主方案桶。
-///
-/// 改前它没有来源 ⇒ 反查不到成员方案 ⇒ 归属落回 active（五笔），码表调频开着时写出
-/// `("wubi86", "tranquil", "tranquil")` 这条五笔读端永远用不上的行。故这里特意打开
-/// 码表调频，才看得见那条错行。
+/// 快捷输入英文成员的头部候选（`;tranquil` 里的原文 `tranquil`）上屏 → 记进英文桶，
+/// 不落到主方案桶。特意打开码表调频，落错桶时才看得见 `("wubi86", …)` 那条错行。
 #[test]
 fn quick_input_head_commit_credits_english_bucket() {
     if !has_english_schema() {
@@ -240,10 +224,8 @@ fn quick_input_head_commit_credits_english_bucket() {
 /// 端到端：临英打全 `tranquil` 空格上屏 5 次，再键入 `t`——它进入候选并靠前。
 ///
 /// 位次依据（英文出厂 `strategy = position`、`promote_prefix = all`）：召回的词放在词库段
-/// **池尾**（`t` 下池子 300 条 ⇒ base_pos ≈ 300），5 次有效使用 ⇒ 目标位次
-/// `300 / 2^5 ≈ 9`（衰减让有效次数略小于 5，floor 后仍是 9）；同位次时有词频者在前。
-/// 词库段之前还有头部候选（`T` 原文 + `t` 变形，2 条），合计界面下标 ≤ 11
-/// （2026-09-25 实测恰为 11：第 2 页第 5 位，每页 7 条）。
+/// 池尾（base_pos ≈ 300），5 次有效使用 ⇒ 目标位次 `300 / 2^5 ≈ 9`；同位次时有词频者在前。
+/// 加上头部候选（`T` 原文 + `t` 变形，2 条），界面下标 ≤ 11。
 #[test]
 fn used_word_is_recalled_under_single_letter() {
     if !has_english_schema() {
@@ -276,7 +258,7 @@ fn used_word_is_recalled_under_single_letter() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// 调频关：同样上屏 5 次，`t` 下的整张列表与从没用过时**逐字相同**。
+/// 调频关：同样上屏 5 次，`t` 下的整张列表与从没用过时逐字相同。
 #[test]
 fn freq_off_leaves_single_letter_list_unchanged() {
     if !has_english_schema() {
@@ -305,7 +287,7 @@ fn freq_off_leaves_single_letter_list_unchanged() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// 召回只收**仍是词库词**的记录，且验证的是 `(码, 文本)` 这一整条：种一条「码是真实词库码
+/// 召回只收仍是词库词的记录，且验证的是 `(码, 文本)` 这一整条：种一条「码是真实词库码
 /// （`thoughtless`）、文本却不是词库词（`thoughtlessx`）」的记录（导入残留 / 词库改过文本），`t` 下的
 /// 列表必须与没有任何记录时逐字相同——只按码验证的话，会把码对应的词库词 `thoughtless` 召回来，
 /// 借一条不属于它的记录冒出来。词频是排序维度，不是词条来源。
@@ -343,7 +325,7 @@ fn recall_ignores_records_that_are_not_dict_words() {
     let _ = std::fs::remove_file(&empty_path);
 }
 
-/// 召回在**快捷输入的英文成员**与**英文方案**上同样生效（读端直接种 5 次记录）。
+/// 召回在快捷输入的英文成员与英文方案上同样生效（读端直接种 5 次记录）。
 ///
 /// 快捷输入英文段在拼音成员之后，只断言「进了列表」（英文段截到配额 50 条之后仍在，
 /// 即重排发生在截配额之前）；英文方案下与临英同一把尺：头部只有原文 `t` 1 条（英文方案
@@ -385,7 +367,7 @@ fn recall_reaches_quick_input_and_english_schema() {
     let _ = std::fs::remove_file(&path);
 }
 
-// ───────────────────────── 审查补充 ─────────────────────────
+// ───────────────────────── 上屏历史、出口归属与召回边界 ─────────────────────────
 
 const VK_COMMA: u32 = 0xBC;
 
@@ -397,7 +379,7 @@ fn repeat_candidate(coord: &Coordinator) -> Vec<String> {
     page
 }
 
-/// M1：临英上屏历史记**实际上屏文本**，与词频分开。打 `Tranquil` 空格上屏后，`;` 重复
+/// 临英上屏历史记实际上屏文本，与词频分开。打 `Tranquil` 空格上屏后，`;` 重复
 /// 上屏调回来的必须是 `Tranquil`，不是词频键用的词库原文 `tranquil`。
 #[test]
 fn temp_english_history_keeps_committed_case() {
@@ -413,7 +395,7 @@ fn temp_english_history_keeps_committed_case() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// M1 反向：调频关时历史照记（历史是重复上屏的数据源，与调频开关无关）。
+/// 反向：调频关时历史照记（历史是重复上屏的数据源，与调频开关无关）。
 #[test]
 fn temp_english_history_recorded_when_freq_off() {
     if !has_english_schema() {
@@ -428,7 +410,7 @@ fn temp_english_history_recorded_when_freq_off() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// L4：英文方案主输入路，大写打 `Tranquil` 空格上屏（头部原文）→ 记到词库词
+/// 英文方案主输入路，大写打 `Tranquil` 空格上屏（头部原文）→ 记到词库词
 /// `(tranquil, tranquil)`，不写 `(tranquil, Tranquil)` 这条孤儿键。
 #[test]
 fn english_schema_cased_raw_commit_credits_dict_word() {
@@ -454,7 +436,7 @@ fn english_schema_cased_raw_commit_credits_dict_word() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// T1：快捷输入 `;tranquil` 高亮原文后按 `,` 顶屏——英文桶记一次、五笔桶为空。
+/// 快捷输入 `;tranquil` 高亮原文后按 `,` 顶屏——英文桶记一次、五笔桶为空。
 /// 成员只留 english，使首条（高亮）就是英文原文；码表调频打开才看得见落错桶。
 #[test]
 fn quick_input_punct_commit_of_head_credits_english_bucket() {
@@ -488,7 +470,7 @@ fn quick_input_punct_commit_of_head_credits_english_bucket() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// T2：词已在取回的池里时不重复召回——打 `tran`（`tranquil` 本就在池内）列表里它只出现
+/// 词已在取回的池里时不重复召回——打 `tran`（`tranquil` 本就在池内）列表里它只出现
 /// 一次。关掉大小写投影：投影开着时列表末尾那道去重会把重复条悄悄吃掉，测不出召回自己
 /// 有没有排除池内的词。
 #[test]
@@ -548,7 +530,7 @@ const T_WORDS: &[&str] = &[
     "tackling",
 ];
 
-/// L1-a：**先验证、后截断**。同前缀下有 20 条次数更高的非词库记录时，用了 5 次的词库词
+/// 先验证、后截断：同前缀下有 20 条次数更高的非词库记录时，用了 5 次的词库词
 /// `tranquil` 仍要召回——先截前 16 条再验证的话，名额全被非词库残留占掉。
 #[test]
 fn recall_validates_before_truncating() {
@@ -576,7 +558,7 @@ fn recall_validates_before_truncating() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// L1-b：召回按**衰减后的有效次数**排，与重排同一把尺。30 条一年前用过 50 次的旧记录
+/// 召回按衰减后的有效次数排，与重排同一把尺。30 条一年前用过 50 次的旧记录
 /// （衰减殆尽，重排里提升强度为 0）不得挤掉最近用了 5 次的 `tranquil`——按原始次数排
 /// 的话旧记录全排在前面、占满名额。
 #[test]
@@ -644,8 +626,8 @@ fn english_schema_config() -> Config {
     cfg
 }
 
-/// 英文方案下空格上屏**非词库原文**（`wxyzq`，头部原文候选、找不到对应词库词）：
-/// **不记词频**（读端永远查不中的孤儿键，与临英 / 快捷输入同口径），但输入统计与上屏历史
+/// 英文方案下空格上屏非词库原文（`wxyzq`，头部原文候选、找不到对应词库词）：
+/// 不记词频（读端永远查不中的孤儿键，与临英 / 快捷输入同口径），但输入统计与上屏历史
 /// 照记——`;` 进快捷输入，重复上屏候选就是它。
 #[test]
 fn english_schema_literal_raw_commit_records_no_freq() {
@@ -683,7 +665,7 @@ fn english_schema_literal_raw_commit_records_no_freq() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// 对照：**用户词库里的词**（`wxyzqab`，英文来源）照常记词频——它是词库候选，不是头部原文。
+/// 对照：用户词库里的词（`wxyzqab`，英文来源）照常记词频——它是词库候选，不是头部原文。
 /// 同时覆盖用户词被头部原文按字面吃掉的情形（打全 `wxyzqab` 空格上屏原文）：能找到对应的
 /// 用户词，按它记。
 #[test]

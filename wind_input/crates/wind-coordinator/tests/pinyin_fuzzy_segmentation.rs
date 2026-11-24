@@ -5,11 +5,9 @@
 //! 「每条切分上的变体都要查」，并附「模糊音关着不出」的对照，证明命中来自模糊路径。
 //!
 //! 每条用例还钉住开 / 关模糊音两种情形下的首选与编码栏：编码栏跟随首选，模糊命中的首选
-//! 要按它实际走的那条**所打码**切分显示（`pin'an`），而不是 `maximum_match` 的 `pi'nan`。
+//! 要按它实际走的那条所打码切分显示（`pin'an`），而不是 `maximum_match` 的 `pi'nan`。
 //!
-//! 位次在 **Coordinator 层**取（协调器会按消费长度等再排一次，引擎位次 ≠ 界面位次）。
-//!
-//! ⚠️ 词典缺失时整族静默跳过（判据是**耗时 0.00s**，不是通过条数）。
+//! 位次在 Coordinator 层取（引擎位次 ≠ 界面位次）。词典缺失时整族静默跳过（判据是耗时 0.00s）。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -108,7 +106,7 @@ fn an_ang(cfg: &mut Config) {
     cfg.schema.pinyin.fuzzy.an_ang = true;
 }
 
-/// 报障原例：`pi|nan` 与 `pin|an` 等长，平安在后一条切分上。
+/// `pi|nan` 与 `pin|an` 等长，平安在后一条切分上。
 /// 关模糊音时首选是整句「拼按」，同样走 `pin|an`。
 #[test]
 fn in_ing_pinan_recalls_pingan() {
@@ -153,7 +151,7 @@ fn an_ang_fanan_recalls_fangan() {
 }
 
 /// 整串已有精确词时（`ji|nan` 济南），平安那类整句兜不住：`jin|an → jing|an`（静安）只能靠
-/// 词候选那一路查出来，而它此前只按 `maximum_match` 那一条切分展开变体。
+/// 词候选那一路按全部切分展开变体才查得到。
 /// 首选仍是济南，编码栏跟随它显示 `ji'nan`。
 #[test]
 fn in_ing_jinan_recalls_jingan() {

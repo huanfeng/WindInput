@@ -1,16 +1,11 @@
-//! 短语侧对**全码唯一自动上屏**的否决（`phrase_vetoes_auto_commit`）。
+//! 短语侧对全码唯一自动上屏的否决（`phrase_vetoes_auto_commit`）。
 //!
-//! 引擎的 `decide_auto_commit` 在**码表候选子集**上判唯一（按 `c.code == input` 筛），而短语
-//! 候选的 `code` 恒为空串、且在引擎 `convert` 之后才由协调器追加 ⇒ 短语对那道判据完全不可见。
-//! 修复前的症状是「关掉开关候选面有两条、开了反而只剩一条」——显示与处置对不上。
+//! 引擎的 `decide_auto_commit` 在码表候选子集上判唯一（按 `c.code == input` 筛），而短语
+//! 候选的 `code` 恒为空串、且在引擎 `convert` 之后才由协调器追加 ⇒ 短语对那道判据不可见，
+//! 需协调器另行否决，否则开着开关时同码短语连露面的机会都没有。
 //!
-//! 真机现场（v0.118.0，用户反馈 + 日志 + 操作视频三方确认）：用户短语 `aqgy → 东乌珠穆沁旗`
-//! （w=1000）与五笔 `aqgy → 葡`（w=1379）同码，敲完第 4 码当场上屏「葡」，候选窗从未显示
-//! （日志里按 Y 后只有 HideCandidates、无 UpdateCandidates），用户根本没有按空格的机会。
-//!
-//! 数据前提：`wubi86_jidian_extra_district.dict.yaml`（内含 `aqgy 东乌珠穆沁旗` w=152525）出厂
-//! `default_enabled = false`，故码表侧 `aqgy` 只有「葡」一条——这既是 `decide_auto_commit` 判
-//! 「唯一」的前提，也是用户要手动加这条短语的原因。
+//! 数据前提：`wubi86_jidian_extra_district.dict.yaml`（内含 `aqgy 东乌珠穆沁旗`）出厂
+//! `default_enabled = false`，故码表侧 `aqgy` 只有「葡」一条，`decide_auto_commit` 判为唯一。
 
 use std::path::PathBuf;
 use wind_bridge::handler::{KeyAction, KeyEventData, MessageHandler};
@@ -85,8 +80,8 @@ fn auto_commit_at_full_yields_to_same_code_phrase() {
         eprintln!("跳过：缺少 build_dev/data/schemas —— 本测试未实际执行");
         return;
     }
-    // 权重与用户截图一致（1000，词库管理页默认值）：**低于**码表「葡」的 1379。
-    // 这个高低关系是修复前触发 bug 的必要条件之一，故必须照抄，不可随手写个大数。
+    // 权重取词库管理页默认值 1000，低于码表「葡」的 1379：短语权重输才走到被测路径，
+    // 不可随手写个大数。
     let (coord, store_path) = coord_with_phrase("same", "aqgy", "东乌珠穆沁旗", 1000, true);
     let (action, cands) = drive_aqgy(&coord);
     let _ = std::fs::remove_file(&store_path);
@@ -100,11 +95,9 @@ fn auto_commit_at_full_yields_to_same_code_phrase() {
     );
 }
 
-/// **码长超过方案满码长的短语**不得被自动上屏劫走（`has_longer_code` 那一半判据的守门测试）。
-///
-/// 5 码短语 `aqgyz` 落在 4 码五笔方案里：敲到 `aqgy` 时码表侧恰是「精确唯一 + 无更长后继」
-/// ——正是自动上屏最爱命中的形态。一旦在这里上屏「葡」，`aqgyz` 这条短语**永远打不出来**。
-/// 与顶码那侧的 `top_code_yields_to_overlong_phrase` 是同一类事故的两条路径。
+/// 码长超过方案满码长的短语不得被自动上屏劫走（`has_longer_code` 那一半判据）：5 码短语
+/// `aqgyz` 在 4 码方案里，敲到 `aqgy` 就上屏「葡」的话它永远打不出来。顶码那侧见
+/// `top_code_yields_to_overlong_phrase`。
 #[test]
 fn auto_commit_at_full_yields_to_overlong_phrase() {
     if !has_schemas() {
@@ -123,8 +116,8 @@ fn auto_commit_at_full_yields_to_overlong_phrase() {
     }
 }
 
-/// 对照：短语权重高于同码码表候选时，首选本就是短语，既有守护（首选须是码表来源）已能拦住。
-/// 与上面那条一起划出 bug 的边界——修复前**仅在权重输时**被绕过，故权重不是可有可无的前提。
+/// 对照：短语权重高于同码码表候选时，首选本就是短语，既有守护（首选须是码表来源）已能拦住；
+/// 故第一条里「短语权重输」是必要前提。
 #[test]
 fn higher_weight_phrase_takes_first_and_blocks_auto_commit() {
     if !has_schemas() {
@@ -146,8 +139,7 @@ fn higher_weight_phrase_takes_first_and_blocks_auto_commit() {
     );
 }
 
-/// 对照：开关关闭（出厂默认）时行为不变。与第一条合起来即用户的核心诉求——
-/// **开与不开，候选面必须是同一份**。
+/// 对照：开关关闭（出厂默认）时行为不变。与第一条合起来钉住「开与不开，候选面是同一份」。
 #[test]
 fn candidates_identical_whether_auto_commit_enabled() {
     if !has_schemas() {
@@ -172,10 +164,8 @@ fn candidates_identical_whether_auto_commit_enabled() {
     );
 }
 
-/// 论坛 t308：双拼关简拼后，`ofa` 没有任何拼音候选，短语（这里是直通命令）成了唯一一条，
-/// 打完第三码就被「全码唯一自动上屏」当场执行——拼音系没有满码，这条开关本不该管它。
-///
-/// 开关读的是 `schema.codetable`，拼音方案继承全局那一份，故用户为码表开了它，双拼就中招。
+/// 拼音系没有满码，「全码唯一自动上屏」不该管它：双拼关简拼后 `ofa` 只剩一条短语，也不得当场上屏。
+/// 开关读的是 `schema.codetable`，拼音方案继承全局那一份，为码表开了它时双拼也会读到。
 /// 用普通短语断言（命令短语走同一道闸，结局只是 AutoCommand 而非 InsertText）。
 #[test]
 fn shuangpin_phrase_is_not_auto_committed() {
@@ -245,10 +235,8 @@ fn has_mixed_schema() -> bool {
         .exists()
 }
 
-/// 混输是码表系，有满码：满码唯一的短语照常自动上屏。
-///
-/// 拼音 / 双拼的拦截（`shuangpin_phrase_is_not_auto_committed`）曾按 `max_code_length == 0`
-/// 认引擎，而混输引擎这个值刻意为 0，于是混输也被一并拦下。
+/// 混输是码表系，有满码：满码唯一的短语照常自动上屏。混输引擎的 `max_code_length` 刻意为 0，
+/// 拼音系的拦截不能按这个值认引擎，否则混输被一并拦下。
 #[test]
 fn mixed_full_code_phrase_is_auto_committed() {
     if !has_mixed_schema() {
@@ -328,10 +316,8 @@ fn sentence_coord_with_phrase(
     (store_path, root, coord)
 }
 
-/// 短语满码上屏读的是配置、绕过引擎，整句开启时须在协调器侧另行让位。
-///
-/// `qwrr` 在五笔 86 里是空码，挂上一条短语后它就是唯一候选、且满码——正是短语满码上屏
-/// 的命中形态。两向对照：关整句时上屏（证明现场确实走到了短语上屏），开整句时不上屏。
+/// 短语满码上屏读的是配置、绕过引擎，整句开启时须在协调器侧另行让位。`qwrr` 在五笔 86 里
+/// 是空码，挂上短语后即唯一且满码。两向对照：关整句时上屏（证明走到了短语上屏），开整句时不上屏。
 #[test]
 fn phrase_auto_commit_yields_to_sentence_input() {
     if !has_schemas() {

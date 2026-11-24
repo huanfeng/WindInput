@@ -2,19 +2,13 @@
 //!
 //! 设计见 `docs/design/schema-scoped-behavior.md` §6。
 //!
-//! # ★★ 这组测试真正要钉住的是「六个消费点一个都没漏」
+//! 要钉住的是「六个消费点一个都没漏」：两处候选生成（`lookup` / `lookup_prefix`）、两处
+//! 「这个码位归短语管」的判据（`phrase_owns_code` 内含 `has_exact_code` + `has_longer_code`、
+//! `phrase_has_exact_code`）、临英两处。只漏 `phrase_owns_code` 时短语候选消失但顶码仍被
+//! 否决，表现为打字卡住不上屏且零日志，见 `phrases_off_does_not_veto_top_code`。
 //!
-//! 短语查询有六个消费点：两处候选生成（`lookup` / `lookup_prefix`）、两处「这个码位归短语
-//! 管」的判据（`phrase_owns_code` 内含 `has_exact_code` + `has_longer_code`、
-//! `phrase_has_exact_code`）、临英两处。
-//!
-//! **只漏掉 `phrase_owns_code` 的表现最刁钻**：短语候选不出现了（前两处已过滤），但顶码与
-//! 全码自动上屏仍被短语层否决 ⇒ **打字卡住不上屏，且零日志**。所以本文件里
-//! `phrases_off_does_not_veto_top_code` 那条比「候选里没有短语」那条重要得多——
-//! 后者一眼能看出来，前者只会被用户描述成「有时候打字就卡住了」。
-//!
-//! 编译期强制（`PhraseScope` 是必填参数）挡的是「新增查询方法时忘了过滤」；
-//! 本文件挡的是「传了 scope 但传错了口径」。两者互补，缺一不可。
+//! 编译期强制（`PhraseScope` 是必填参数）挡「新增查询方法时忘了过滤」；本文件挡「传了 scope
+//! 但传错了口径」。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -139,13 +133,8 @@ fn phrases_off_removes_all_phrase_candidates() {
     );
 }
 
-/// ★★ `enabled = false` ⇒ 短语**不再否决顶码**。
-///
-/// 这是六个消费点里最危险的一处（`phrase_owns_code`）。漏了它的表现不是「短语还在」，
-/// 而是**打字卡住不上屏**：候选面已经没有短语了，但顶码路径仍以为「这个码位归短语管」，
-/// 于是拒绝顶码、也不出候选，用户看到的是按键毫无反应。
-///
-/// 判据用「有没有上屏」而不是「候选里有没有短语」——后者在漏接时**照样通过**。
+/// `enabled = false` ⇒ 短语不再否决顶码（`phrase_owns_code`）。漏接时候选已无短语、顶码却仍被
+/// 拒，按键毫无反应。判据用「有没有上屏」，「候选里有没有短语」在漏接时照样通过。
 #[test]
 fn phrases_off_does_not_veto_top_code() {
     if !has_wubi() {
@@ -157,8 +146,7 @@ fn phrases_off_does_not_veto_top_code() {
     c.schema.codetable.top_code_commit = true;
     let ov = phrases_override("veto", "wubi86", "enabled = false");
     let coord = Coordinator::new_headless_with_override(c, Some(&data_dir()), Some(ov));
-    // 装一条**比满码长**的短语：它在码表侧既无精确匹配也无更长后继，正是顶码最爱命中的
-    // 形态，也正是 `phrase_owns_code` 存在的理由。
+    // 装一条比满码长的短语：码表侧既无精确匹配也无更长后继，正是 `phrase_owns_code` 要管的形态。
     coord.debug_install_phrases(vec![seed("aaaaa", "五码短语", "")]);
 
     // 打满 4 码 + 第 5 码：短语层若仍在管这个码位，第 5 码会被否决顶码。
@@ -180,9 +168,7 @@ fn phrases_off_does_not_veto_top_code() {
     );
 }
 
-/// 反向对照：开着时短语**确实**拥有该码位。
-///
-/// 没有这条，「恒不否决」与「按开关否决」两种实现都能让上面那条通过。
+/// 反向对照：开着时短语确实拥有该码位；没有这条，「恒不否决」也能让上面那条通过。
 #[test]
 fn phrases_on_does_veto_top_code() {
     if !has_wubi() {
@@ -226,9 +212,7 @@ fn categories_whitelist() {
     );
 }
 
-/// ★ 空串 `""` 显式匹配未分类短语。
-///
-/// 不引入 `default` 之类的映射名：存储层本来就是空串，多一层映射就多一处要对齐的地方。
+/// 空串 `""` 显式匹配未分类短语；不引入 `default` 之类的映射名，存储层本来就是空串。
 #[test]
 fn empty_category_string_matches_uncategorized() {
     if !has_wubi() {
@@ -256,10 +240,7 @@ fn exclude_subtracts_after_whitelist() {
     assert!(!coord.debug_phrase_owns_code("ac"), "被排除的分类滤掉");
 }
 
-/// ★ 空列表 = **不施加这一项限制**，不是「一条都不要」。
-///
-/// 「一条都不要」由 `enabled = false` 表达。两个字段语义完全对称，这条钉住的正是那个
-/// 「三态里有一态是重复的」的结论（设计文档 §6.2）。
+/// 空列表 = 不施加这一项限制，不是「一条都不要」（那由 `enabled = false` 表达，设计文档 §6.2）。
 #[test]
 fn empty_lists_mean_no_restriction() {
     if !has_wubi() {

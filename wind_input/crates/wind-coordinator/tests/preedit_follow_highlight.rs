@@ -1,4 +1,4 @@
-//! 拼音编码栏按**高亮候选**的切分显示，不是按首选算一次就不动。
+//! 拼音编码栏按高亮候选的切分显示，不是按首选算一次就不动。
 //!
 //! `pinan` 有 `pi|nan` 与 `pin|an` 两条切法：高亮「平安」显示 `pin'an`，移到「皮」应变
 //! `pi'nan`，移回首选恢复。每条候选自带切分（`CandidateMeta::preedit_split`，引擎按它自己走的
@@ -8,7 +8,7 @@
 //! 每例同时断言首选与它的编码栏、高亮移到指定候选后的编码栏；高亮移动的回执（编码嵌在宿主里
 //! 时回传的组合串）一并核对。位次在 Coordinator 层取（引擎位次 ≠ 界面位次）。
 //!
-//! ⚠️ 词典缺失时整族静默跳过（判据是**耗时 0.00s**，不是通过条数）。
+//! 词典缺失时整族静默跳过（判据是耗时 0.00s，不是通过条数）。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -157,7 +157,7 @@ fn assert_at(coord: &Coordinator, cand: &str, preedit: &str) {
     }
 }
 
-/// 报障原例。开 in↔ing：首选「平安」走 `pin|an`，「皮」走 `pi|nan`，移回首选恢复。
+/// 开 in↔ing：首选「平安」走 `pin|an`，「皮」走 `pi|nan`，移回首选恢复。
 /// 对照：关模糊音时首选是整句「拼按」（同样 `pin|an`），「皮」照样按自己的切分。
 #[test]
 fn main_pinan_follows_highlight() {
@@ -254,9 +254,8 @@ fn temp_pinyin_pinan_follows_highlight() {
 }
 
 /// 临拼目标是双拼：全拼降级与简拼的形态随高亮切换，对齐主路
-/// （`input_flow.rs` 的 `shuangpin_preedit_follows_highlight_between_domains`）。
-/// 修前临拼只读引擎的 `preedit_display`：「再见」配着双拼切法 `za'ij'ia'n`，移到「问」
-/// 也停在简拼切法。
+/// （`input_flow.rs` 的 `shuangpin_preedit_follows_highlight_between_domains`），不能只读引擎的
+/// `preedit_display`。
 #[test]
 fn temp_pinyin_shuangpin_target_switches_forms() {
     if !has_data() {
@@ -394,7 +393,7 @@ fn sentence_cycle_caret_tracks_form_switch() {
     );
 }
 
-/// 双拼（出厂小鹤）开全拼降级支路：降级候选按**自己的**全拼切分显示，不是整串最大匹配
+/// 双拼（出厂小鹤）开全拼降级支路：降级候选按自己的全拼切分显示，不是整串最大匹配
 /// （`xiandaxue` 的「西安大学」是 `xi'an'da'xue`，最大匹配给 `xian'da'xue`）；双拼候选仍按
 /// 击键两两分段（`xi'an'da'xu'e`）。对照：关掉支路时没有降级候选，编码栏全是双拼分段。
 #[test]

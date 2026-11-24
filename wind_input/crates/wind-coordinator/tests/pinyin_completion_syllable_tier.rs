@@ -1,24 +1,10 @@
-//! **音节数对齐者优先**（`cmp_completion_extra`）的协调器级显示序。
+//! 音节数对齐者优先（`cmp_completion_extra`）的协调器级显示序：`zaim` 表达 2 个音节时，
+//! 「在美国」「在没有」不得排在 2 字候选之前。
 //!
-//! 用户诉求：「拼音的候选优先级应该优先匹配拼音音节数。`zaim` 算 2 个音节，应该优先出
-//! 2 个字的，但现在『在美国』『在没有』之类却会很前。」
-//!
-//! ## 为什么必须在协调器级测
-//!
-//! 该档位**只在协调器 `candidate_display_order` 施加一次**，两处刻意不加：
-//! - 引擎的 `sort_by`：那里 `truncate` 紧随排序，排序键同时决定**去留**，加进去等于
-//!   「音节数超出即被截断」——销毁而非降级。分工与 `consumed_length` 完全一致。
-//! - `freq_rerank` 的层级比较器：档位已随 `base_pos` 传进去了，再加一遍会把它升级成
-//!   **词频也翻不过的硬约束**（`jisuanjik` 下选过 30 次的「计算机科学」会压不过
-//!   「计算机看」，`pinyin_sentence_flag` 抓得到）。
-//!
-//! ⇒ 引擎级测试对本文件的每一条都没有约束力。
-//!
-//! ## 为什么权重折扣不够（这是本档位存在的理由）
-//!
-//! 引擎侧早有 `COMPLETION_WEIGHT_DISCOUNT`（`0.5^extra`），但它在对数域只有 0.69，
-//! 压不过跨 5 个数量级的词频差：真实词库实测 `zaij` 的「再加上」(3 音节，折后 w=5278)
-//! 稳压「再加」(2 音节，1461)、「再见」(1419)。详见 `wind_candidate::cmp_completion_extra`。
+//! 该档位只在协调器 `candidate_display_order` 施加一次，故必须在协调器级测。引擎 `sort_by`
+//! 不加（紧随的 `truncate` 会把降级变成销毁）；`freq_rerank` 不重复加（会变成词频也翻不过的
+//! 硬约束）。权重折扣 `COMPLETION_WEIGHT_DISCOUNT` 压不过词频差，是本档位存在的理由，
+//! 详见 `wind_candidate::cmp_completion_extra` 与 docs/architecture/candidate-sorting-rules.md。
 
 use std::path::PathBuf;
 use wind_bridge::handler::{KeyEventData, MessageHandler};
@@ -41,15 +27,8 @@ fn config() -> Config {
     cfg.schema.available = vec!["pinyin".into()];
     cfg.schema.active = "pinyin".into();
     cfg.input.default.chinese_mode = true;
-    // ⚠️ **必须显式设回 2**，不能吃出厂默认（现为 4）。
-    //
-    // 本文件测的是「谁排在前」（`cmp_completion_extra` 显示序档位），而 `min_syllables`
-    // 管的是「谁在场」（召回门槛）：`started < min` 时上限收紧到 `started`，超音节候选
-    // 压根不进候选列表。出厂值升到 4 之后，`zaim`（started=2）下「在美国」在召回层就被
-    // 挡掉了——两条断言会以「候选缺失」失败，而它们本想验的排序逻辑一次都没执行到。
-    //
-    // 两件事必须解耦：召回门槛的行为由 `pinyin_completion_recall_gate` 那侧的用例守，
-    // 本文件只负责「召回进来之后的先后」，故把门槛钉死在能产生跨档样本的取值上。
+    // 必须显式设回 2，不能吃出厂默认（4）：出厂门槛下 `zaim`（started=2）的「在美国」在召回层
+    // 就被挡掉，排序逻辑一次都执行不到。召回门槛由 `pinyin_completion_recall_gate` 守。
     cfg.schema.pinyin.completion.min_syllables = 2;
     cfg.schema.pinyin.completion.max_extra_syllables = 3;
     cfg
@@ -106,10 +85,7 @@ fn syllable_aligned_candidates_precede_longer_completions() {
     }
 }
 
-/// 更长的补全**只是降级、没有被销毁** —— 它仍在候选里，翻页可及。
-///
-/// 这是仓库一贯的手法（同 step 6.5「降级不销毁」）：想要「根本不出现」应该去调
-/// `[schema.pinyin.completion]` 的召回闸门，那是用户的旋钮，不是本档位的职责。
+/// 更长的补全只是降级、没有被销毁，翻页可及；「根本不出现」归 `[schema.pinyin.completion]` 的召回闸门。
 #[test]
 fn longer_completions_are_demoted_not_dropped() {
     if !has_pinyin() {
@@ -128,9 +104,7 @@ fn longer_completions_are_demoted_not_dropped() {
 
 /// 既有定点不受影响：残码整句 / 恰好用完残码的补全仍在首位。
 ///
-/// 这几条是 step 2c 与 step 6.5b 的产物，它们的音节数**本就与输入对齐**（`extra = 0`），
-/// 故与本档位无冲突。缺了这条，「把所有多音节候选一律压到最后」这种过度实现也能让上面
-/// 两条通过。
+/// 它们 `extra = 0`，与本档位无冲突；缺了这条，「多音节候选一律压到最后」的过度实现也能通过上面两条。
 #[test]
 fn existing_trailing_partial_fixtures_unaffected() {
     if !has_pinyin() {

@@ -1,24 +1,15 @@
 //! 临时英文复用英文方案词频（`schema.english.frequency`）与候选调整的端到端测试。
 //!
-//! # 这组测试要钉住的东西
-//!
-//! 临英此前**整条候选管线与主输入路是两套实现**：候选只经 `finalize_candidates`，上屏出口
-//! 只接文本（`commit_temp_english_text(String)`）——候选的 `source` / `code` 在出口处就丢了，
-//! 于是词频「不是漏调了一行」，而是根本没有可记的东西。改造后两个入口共用 `"english"` 这
-//! 一个数据桶，本文件的断言重心就是**读写两端确实落在同一个桶**：
+//! 临英与英文方案共用 `"english"` 这一个数据桶，断言重心是读写两端确实落在同一个桶：
 //!
 //! - 写端：临英选词 → `store.get_freq("english", …)` 查得到；
 //! - 读端：桶里有记录 → 临英候选顺序跟着变；
 //! - 跨入口：临英学到的，切到英文方案照样生效（反过来同理）。
 //!
-//! # ⚠️ 两条最容易写出「假绿」的地方
-//!
-//! 1. **`schema.english.frequency.enabled` 出厂是 `false`，`Config::default()` 也是 `false`**。
-//!    不显式打开，测的就是一个关着的功能——所有断言都会以「没记录」的方式"通过"某些写法。
-//! 2. **词典缺失时整族静默跳过**（判据是耗时而非通过条数），worktree 里需自备 `build_dev`。
-//!
-//! 反向对照（`..._when_disabled`）不可省：没有它，「恒不记」与「按开关记」两种实现都能让
-//! 正向断言通过——本仓 `english_commit_space` 的缺陷形态正是「代码看着对、通路走不到」。
+//! 假绿防线：
+//! 1. `schema.english.frequency.enabled` 出厂与 `Config::default()` 都是 `false`，须显式打开；
+//! 2. 词典缺失时整族静默跳过（判据是耗时而非通过条数），worktree 里需自备 `build_dev`；
+//! 3. 反向对照（`..._when_disabled`）排除「恒不记」的实现。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -36,7 +27,7 @@ fn data_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data")
 }
 
-/// 英文方案就绪判据：方案定义与**词库**都要在（词库由构建 assemble 注入，不进 git）。
+/// 英文方案就绪判据：方案定义与词库都要在（词库由构建 assemble 注入，不进 git）。
 fn has_english_schema() -> bool {
     let d = data_dir();
     d.join("schemas/english.schema.toml").exists() && d.join("schemas/english").is_dir()
@@ -55,8 +46,8 @@ fn key(key_code: u32, modifiers: u32) -> KeyEventData {
     }
 }
 
-/// 主方案刻意取**五笔**：临英的归属必须是内置英文方案，与 active 无关。active 若也是英文，
-/// 「按 active 归属」这种错误实现同样能通过，等于什么都没锁住。
+/// 主方案刻意取五笔：临英的归属必须是内置英文方案，与 active 无关；active 若也是英文，
+/// 「按 active 归属」的错误实现同样能通过。
 fn temp_english_config(freq_enabled: bool, strategy: &str) -> Config {
     let mut cfg = Config::default();
     cfg.schema.available = vec!["wubi86".into(), "english".into()];
@@ -66,10 +57,8 @@ fn temp_english_config(freq_enabled: bool, strategy: &str) -> Config {
     // 关掉大小写变形：它们每条占一个候选位，会把词库候选挤到下标不定的位置，
     // 断言「第 2 条是词库首条」就不再成立。变形本身另有测试覆盖。
     cfg.input.temp_english.case_variants = false;
-    // 同理关掉大小写投影：本文件测的是**词频归属**，而投影会把候选面文本改写成用户所打
-    // 的形态（临英首字母恒大写 ⇒ `hello` 显示成 `Hello`）。这些断言拿候选面文本当词频键
-    // 用，开着投影就成了「拿投影后的键去查按原文存的记录」——测试自己制造的失配，与被测
-    // 的词频通路无关。投影开启时词频仍记原文这一条，另由 `english_case_follow.rs` 覆盖。
+    // 同理关掉大小写投影：这些断言拿候选面文本当词频键，投影会把它改写成所打形态
+    // （`hello` → `Hello`），造出与被测通路无关的失配。投影下词频记原文另由 `english_case_follow.rs` 覆盖。
     cfg.input.temp_english.case_follow_input = false;
     cfg.schema.english.case_follow_input = false;
     cfg.schema.english.frequency.enabled = freq_enabled;
@@ -114,14 +103,14 @@ fn commit_text(action: &KeyAction) -> String {
     }
 }
 
-/// 临英当前页的**词库候选**（去掉首条原文）。
+/// 临英当前页的词库候选（去掉首条原文）。
 fn dict_texts(coord: &Coordinator) -> Vec<String> {
     coord.debug_page_texts().into_iter().skip(1).collect()
 }
 
 // ───────────────────────── 写端 ─────────────────────────
 
-/// 临英选中词库候选 → 词频落进 **`"english"` 桶**（不是主方案 `wubi86`）。
+/// 临英选中词库候选 → 词频落进 `"english"` 桶（不是主方案 `wubi86`）。
 #[test]
 fn temp_english_selection_records_into_english_bucket() {
     if !has_english_schema() {
@@ -151,9 +140,7 @@ fn temp_english_selection_records_into_english_bucket() {
     );
 }
 
-/// 反向对照：调频开关关闭时**一条都不记**。
-///
-/// 这条同时守住另一件事——`record_selection_in` 的开关是按**归属方案**取的
+/// 反向对照：调频开关关闭时一条都不记；同时钉住 `record_selection_in` 的开关按归属方案取
 /// （`freq_settings_for("english")`），不是主方案的开关。
 #[test]
 fn temp_english_records_nothing_when_disabled() {
@@ -180,10 +167,8 @@ fn temp_english_records_nothing_when_disabled() {
     );
 }
 
-/// 原文候选（词库里没有的自造串）上屏 → **不记词频**。
-///
-/// 它没有词库来源（`code` 空、`source` 为 `None`），记进去就是一条读端按候选码永远查不中的
-/// 孤儿键，只会逐日累积垃圾。与「短语有文本无码位、恒不记词频」同一先例。
+/// 原文候选（词库里没有的自造串）上屏 → 不记词频：它没有词库来源，记进去是读端永远查不中的
+/// 孤儿键（同「短语恒不记词频」）。
 #[test]
 fn temp_english_literal_text_is_not_recorded() {
     if !has_english_schema() {
@@ -210,10 +195,8 @@ fn temp_english_literal_text_is_not_recorded() {
     );
 }
 
-/// `code_scope = "input"` 口径下，记账码必须是**小写化的缓冲**。
-///
-/// 临英缓冲带大写（Shift+H 进入即 `H`），而英文方案那侧 `input_buffer` 恒为全小写。不归一
-/// ⇒ `Hel` 与 `hel` 是两个键，两个入口永远学不到一块去，而这种失效完全静默。
+/// `code_scope = "input"` 口径下，记账码必须是小写化的缓冲：临英缓冲带大写（Shift+H 进入即
+/// `H`），英文方案那侧恒为全小写，不归一则两个入口静默地学不到一块去。
 #[test]
 fn temp_english_input_scope_code_is_lowercased() {
     if !has_english_schema() {
@@ -240,10 +223,8 @@ fn temp_english_input_scope_code_is_lowercased() {
 
 // ───────────────────────── 读端 ─────────────────────────
 
-/// 桶里已有记录 → 临英候选**跟着重排**（读端接上了）。
-///
-/// 直接往 store 里种记录而不是先选一遍：这样即便写端整个坏掉，本条仍能独立回答「读端通没通」。
-/// 策略取 `top`（一次到顶 MRU）使断言确定——`position` 只前移一半，名次变化依赖初始下标。
+/// 桶里已有记录 → 临英候选跟着重排。直接往 store 种记录，使本条不依赖写端；策略取 `top`
+/// 使断言确定（`position` 只前移一半，名次变化依赖初始下标）。
 #[test]
 fn temp_english_candidates_follow_recorded_freq() {
     if !has_english_schema() {
@@ -281,22 +262,9 @@ fn temp_english_candidates_follow_recorded_freq() {
     );
 }
 
-/// 取数上限须按**词库方案**（english）的引擎类型分级，不是写死 50。
-///
-/// # 判据词的位次就是这条测试的全部意义
-///
-/// `technicians` 在内置英文词库 `t` 前缀的 top-k 里排第 **150**：50 条取不到、300 条取得到。
-/// 换一个排在前 50 的词，改前改后都能通过，等于什么都没锁住——本条已做变异验证（把上限
-/// 改回 50 则精确变红）。
-///
-/// # 这条守的是什么缺陷
-///
-/// 真机现象：英文方案下打 `t` 能出刚用过的词，临英下同一个 `t` 出不来，打到 `th` 又正常。
-/// 根因不在词频链路（读写两端都正常），而在**候选池**——词频重排只能重排已在池中的候选，
-/// 取不到就无从谈起。临英此前写死 `ENGINE_MAX_CANDIDATES`(50)，而主输入路按引擎类型取 300。
-///
-/// ⚠️ 断言用 `debug_all_candidate_texts` 而非 `dict_texts`：后者只有**当前页**，一页装不下
-/// 第 150 名，用它会让「进没进池」与「排到第几」两件事混在一起。
+/// 取数上限须按词库方案（english）的引擎类型分级（300），不是写死 50：词频重排只能重排已在池中
+/// 的候选。判据词 `technicians` 在 `t` 前缀里排第 150，换成前 50 的词就钉不住。断言用
+/// `debug_all_candidate_texts` 而非只有当前页的 `dict_texts`。
 #[test]
 fn temp_english_limit_follows_dict_schema_engine_type() {
     if !has_english_schema() {
@@ -328,10 +296,7 @@ fn temp_english_limit_follows_dict_schema_engine_type() {
     );
 }
 
-/// 词频重排**不得越过首候选**：首条恒是用户所打原文。
-///
-/// 这是临英的硬承诺——打词库里没有的词时，原文是唯一能上屏的东西。重排一旦作用于整个列表，
-/// 用户按空格就会上屏一个他没打的词。
+/// 词频重排不得越过首候选：首条恒是用户所打原文，否则按空格会上屏一个没打的词。
 #[test]
 fn temp_english_rerank_never_displaces_literal_first() {
     if !has_english_schema() {
@@ -365,10 +330,8 @@ fn temp_english_rerank_never_displaces_literal_first() {
 
 // ───────────────────────── 跨入口共享 ─────────────────────────
 
-/// **本组的核心**：临英里选过的词，切到英文方案打同样的码照样受益。
-///
-/// 读写两端只要有一端取错方案（比如写进 `wubi86`、读的是 `english`），记账看着成功、候选
-/// 顺序永远不动——这正是本仓反复栽过的那种完全静默的失配。
+/// 临英里选过的词，切到英文方案打同样的码照样受益；读写两端任一端取错方案时记账看着成功、
+/// 候选顺序却永远不动。
 #[test]
 fn temp_english_freq_carries_over_to_english_schema() {
     if !has_english_schema() {
@@ -404,7 +367,7 @@ fn temp_english_freq_carries_over_to_english_schema() {
     assert_eq!(coord.active_schema_id(), "english");
     type_word(&coord, "hel");
 
-    // ⚠️ 断言落在**词库段首位**（下标 1）而不是整列首位：英文方案的第 0 条恒是所打原文
+    // 断言落在词库段首位（下标 1）而不是整列首位：英文方案的第 0 条恒是所打原文
     // （`schema.english.raw_candidate` 默认开），调频只在词库段内部生效——原文与变形被
     // `split_off(dict_start)` 挡在重排之外，见 `docs/design/schema-scoped-behavior.md` §5.2。
     let page = coord.debug_page_texts();
@@ -422,11 +385,8 @@ fn temp_english_freq_carries_over_to_english_schema() {
 
 // ───────────────────────── 补空格 ─────────────────────────
 
-/// 临英选词上屏补空格，开关是 **`input.temp_english.commit_space`**（临英自己那一份）。
-///
-/// 此前临英与英文方案共用 `schema.english.commit_space`，2026-09-14 拆成两份：
-/// 用户对「长时打英文」与「中文里插一个英文词」的取舍本就可能相反 ——
-/// 前者连着打词、补空格顺手；后者插完往往接中文或标点，补上的还得退格删掉。
+/// 临英选词上屏补空格，开关是 `input.temp_english.commit_space`（临英自己那一份）：「长时打英文」
+/// 与「中文里插一个英文词」的取舍可能相反，故与 `schema.english.commit_space` 分开。
 #[test]
 fn temp_english_select_appends_space() {
     if !has_english_schema() {
@@ -458,10 +418,7 @@ fn temp_english_no_space_when_disabled() {
     assert_eq!(text, picked, "开关关闭时不得补空格");
 }
 
-/// ★ **两份开关互不越界**：开英文方案那份，临英**不得**跟着补。
-///
-/// 这一条是拆分的验收标准。没有它，「两个字段、内部仍读同一个」的实现照样能让上面两条通过
-/// —— 那正是拆分前的状态。
+/// 两份开关互不越界：开英文方案那份，临英不得跟着补；排除「两个字段、内部仍读同一个」的实现。
 #[test]
 fn english_schema_switch_does_not_leak_into_temp_english() {
     if !has_english_schema() {
@@ -481,10 +438,8 @@ fn english_schema_switch_does_not_leak_into_temp_english() {
     );
 }
 
-/// 回车上屏原文**不补空格**——终结性动作，与英文方案 `VK_RETURN` 空码分支同口径。
-///
-/// ⚠️ 这条与上面 `temp_english_select_appends_space` 是同一开关下的**相反**期望。两条都在，
-/// 才能把「恒补」和「恒不补」两种实现同时排除。
+/// 回车上屏原文不补空格（终结性动作，与英文方案 `VK_RETURN` 空码分支同口径）。与
+/// `temp_english_select_appends_space` 一起排除「恒补」与「恒不补」。
 #[test]
 fn temp_english_enter_never_appends_space() {
     if !has_english_schema() {
@@ -501,8 +456,8 @@ fn temp_english_enter_never_appends_space() {
 
 // ── 鼠标点选（`select_candidate_at` 的临英分支）────────────────────────────────
 //
-// 此前临英的鼠标点选落在通用 overlay 分支：`commit_candidate` 拿主路 `input_buffer`（临英下
-// 恒空）判原码 ⇒ 永不补空格；也不记词频、全角态不转。现改走键盘同一出口，下面三条逐项钉住。
+// 鼠标点选须走与键盘同一出口（补空格、记词频、全角转换）；通用 overlay 分支拿主路
+// `input_buffer`（临英下恒空）判原码，三样都会漏。
 // `debug_mouse_select` 取页内下标：0 = 原文，1 = 词库首条（本文件的配置关了变形）。
 
 /// 鼠标点选词库候选上屏补空格，与数字键同口径。
@@ -527,7 +482,7 @@ fn temp_english_mouse_select_appends_space() {
     );
     assert_eq!(coord.debug_active_mode(), None, "上屏后退出临英");
 
-    // 原文候选（无 source）同样补——那正是旧路径判不中的一类。
+    // 原文候选（无 source）同样补。
     enter_temp_english(&coord, "qzxv");
     let act = coord
         .debug_mouse_select(0)

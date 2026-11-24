@@ -213,7 +213,7 @@ fn empty_marker_shows_plain_text() {
     assert!(marked(&s.items).is_empty());
 }
 
-/// 关纠错 = 改动前：`gogn` 本无「工」，打对的输入候选不受影响。
+/// 关纠错：`gogn` 不出「工」，打对的输入候选不受影响。
 #[test]
 fn correction_disabled_is_byte_identical() {
     if !has_data() {
@@ -252,14 +252,9 @@ fn assert_plain_order_kept(input: &str, on: &[CandidateItem], off: &[CandidateIt
 
 /// 简拼冲突类输入：首选与关纠错时相同；非纠错候选在首页的相对顺序不变。
 ///
-/// `xign` 只断言后一半：本文件的 `config()` 打开了 `gn_ng`（出厂关），`xign` 纠成 `xing` 的
-/// 「型」按 D6 可以压过简拼（简拼不算完整候选，与 `gogn` 出「工」同一条规则），首选必然变
-/// ——这正是设计 §5.2 给 `gn_ng` 记的冲突示例；出厂配置下的首选见
-/// [`xign_top_unchanged_with_factory_rules`]。
-///
-/// 且 `xign` 的首页全是 *型 一类纠错候选（`xing` 的整串字排在 `xi` 半截之前），首页上比
-/// 相对顺序会空过；故它改比**全部候选**，并先断言交集非空（「习惯」等仍在）。被纠错候选
-/// 挤出取数窗口尾部是允许的（Ruling 8），故不要求关纠错的候选全数在列。
+/// `xign` 只断言后一半：本文件 `config()` 开了 `gn_ng`（出厂关），纠出的「型」按 D6 可压过
+/// 简拼，首选必然变（设计 §5.2 的冲突示例）；出厂配置下见 [`xign_top_unchanged_with_factory_rules`]。
+/// 它首页全是纠错候选，故改比全部候选并先断言交集非空；被挤出取数窗口尾部是允许的（Ruling 8）。
 #[test]
 fn abbrev_inputs_unaffected_by_correction() {
     if !has_data() {
