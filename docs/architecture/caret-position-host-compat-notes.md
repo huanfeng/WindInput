@@ -381,6 +381,23 @@ B 屏的任务栏。
   先在上一次 `gui_caret` 位置闪一下再跳到默认位置。代价是该宿主恒 arm 600ms 长兜底：默认位置帧
   通常几十毫秒内就到并消费掉兜底，但 `IsHostDefaultPosition` 失败关闭时会等满 600ms。
 
+## 二·八、热键直达模式的占位 composition（`input.caret`，`CaretPlacementConfig`）
+
+加词、临拼、特殊模式、生僻字等由热键激活的模式，激活瞬间没有输入内容却要立刻显示候选窗 / 预览窗。
+做法是发一个占位 composition：C++ 侧 `StartComposition` 并 `SetText(" ")` 撑开 range，再
+`GetTextExt` 取矩形。很多应用的 `GetTextExt` 之外的 Win32 取坐标 API 给不出正确坐标，只有基于
+composition 的才准，所以不能一律关掉。
+
+代价是占位 composition 建在当前 selection 上（`StartComposition` 不折叠、不改写 `tfSelection.range`），
+用户选中着文字时那个空格会把选中内容替换掉。这是 TSF 标准语义，Qt / Electron / QQ 都会发生。
+
+- 开关为 `false` 时协调器返回 `Consumed`、完全不发 `UpdateComposition`，DLL 不建 composition，选中内容
+  保留；坐标退到 `GetCaretPosition` 的回退链（GUITHREADINFO → GetCaretPos → 上次已知位置 → 窗口中心估计）。
+- 已否定：建了 composition 再折叠成插入点。只要对 composition 做操作，选中内容就会被清空，且与宿主有关。
+- 出厂只关加词：报障场景就是 Ctrl+= 造词吃掉选中文字；加词弹的是预览窗，对坐标精度不敏感，靶机实测
+  关掉后选中内容保住、记事本下预览窗位置仍正确。另几项弹候选列表，错位代价更大且缺实测数据，保持开，
+  这也是做成逐模式开关的原因。
+
 ## 三、必测矩阵
 
 **每次改动候选窗定位相关代码，以下组合都要跑一遍。** 单个宿主全绿完全不能说明问题——本轮

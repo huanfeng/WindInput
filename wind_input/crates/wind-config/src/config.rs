@@ -1,10 +1,9 @@
 //! 配置系统：四层合并（代码默认值 L1、系统配置 L2、定制版配置 L2.5、用户配置 L3）
 //!
-//! 与 Go 版本 `wind_input/pkg/config/config.go` 对齐。
 //! 配置文件为 TOML 格式，四层合并：默认值 → data/config.toml → data_custom/config.toml
 //! → %APPDATA%/WindInput/config.toml。L2.5 见 `docs/design/data-custom-layer.md`。
 //!
-//! 顶级域（"正交大类"准则，详见 SETTINGS_REVAMP_PLAN.md / docs/config-key-migration.md）：
+//! 顶级域按「正交大类」划分（见 docs/architecture/config-design-rules.md / docs/config-key-migration.md）：
 //! schema(方案+pinyin+模式) / input(输入行为，含 default 启动默认 / phrase 短语) /
 //! keys(全部按键) / ui(外观) / stats(统计) / debug。
 //!
@@ -86,15 +85,11 @@ fn remove_nested(table: &mut toml::Table, path: &[&str]) -> bool {
 }
 
 /// 从 `root`（用户层）删除所有与 `preset`（出厂默认 L1⊕L2⊕L2.5）取值相同的叶子键，返回删除数。
+/// 纯函数，IO 由 [`Config::prune_user_config`] 负责，便于在不碰真实 `%APPDATA%` 的前提下测试。
 ///
-/// 纯函数、不碰文件系统：[`Config::prune_user_config`] 负责 IO，本函数负责判定，
-/// 单测得以在不触碰真实 `%APPDATA%` 的前提下验证「清理前后合并结果不变」这条不变量。
-///
-/// **两道保险，缺一不可**：
-/// 1. `is_known_key` —— 只碰注册表登记过的键。这排除掉两类绝不能删的东西：**废弃键**（清理它们
-///    是另一件事，必须走显式名单，绝不能靠「preset 里没有」来推断）、以及 `Map`/`StructList`
-///    类型键的**下钻子路径**（`input.punct.custom_mappings` 整体才是一个配置项，
-///    `collect_leaf_paths` 却会切出 `...custom_mappings."'1"` 这种伪键——删单条是错的语义）。
+/// 两道保险缺一不可：
+/// 1. `is_known_key`：只碰注册表登记过的键。排除废弃键（清理它们必须走显式名单）与
+///    `Map`/`StructList` 键的下钻子路径（如 `input.punct.custom_mappings."'1"`，删单条是错的语义）。
 /// 2. 值必须与 preset 逐一相等（`get_nested` 两侧都取到才比）。
 fn prune_redundant(root: &mut toml::Value, preset: &toml::Value) -> usize {
     let mut leaves = Vec::new();
@@ -122,39 +117,31 @@ fn prune_redundant(root: &mut toml::Value, preset: &toml::Value) -> usize {
     removed
 }
 
-/// **已退役的配置键**：结构体里已经没有它们，`load()` 时被 serde 静默丢弃。
-///
-/// 但它们会在用户层 `config.toml` 里**永久留存**——写回走的是原始 `toml::Value`
-/// （见 [`Config::set_user_value`]），从不经过类型化结构体，未知键因此既不会被读取、
-/// 也不会被删除。留着只有坏处：用户翻开配置看见 `enable_english = true`，会以为它还在
-/// 起作用，而实际早已无人读取。
-///
-/// **只能用显式名单**，不能改成「凡未登记键一律删」——`input.punct.custom_mappings.<字符>`
-/// 这类 `Map` 子路径同样不在注册表里，一刀切会把用户的自定义标点映射删光。这也正是
-/// [`prune_redundant`] 用 `is_known_key` 把未登记键整体排除在外的原因。
 /// 引导键物化迁移的当前版本，落在 `keys.key_actions_materialized`。
 ///
-/// 递增即让 [`Config::materialize_key_actions`] 对所有用户再跑一次。只有在「出厂绑定
-/// 本身要变、且必须送达存量用户」时才递增——那会**覆盖用户对这批键的修改**，属于
-/// 破坏性操作，不是加个新绑定就该做的事。
+/// 递增即让 [`Config::materialize_key_actions`] 对所有用户再跑一次，会覆盖用户对这批键的修改；
+/// 只在出厂绑定本身要变、且必须送达存量用户时才递增。
 const KEY_ACTIONS_MATERIALIZE_VERSION: u32 = 1;
 
+/// 已退役的配置键：结构体里已经没有它们，`load()` 时被 serde 静默丢弃，但会在用户层
+/// `config.toml` 里永久留存（写回走原始 `toml::Value`，不经类型化结构体），让人以为还在起作用。
+///
+/// 只能用显式名单，不能改成「凡未登记键一律删」：`Map` 子路径（如 `input.punct.custom_mappings.<字符>`）
+/// 同样不在注册表里，一刀切会删光用户的自定义映射。
 const RETIRED_KEYS: &[&[&str]] = &[
     // 与 `mix_modes.members` 构成双真相源，已废弃：英文候选的开关只看 members 里有没有
-    // `english`。⚠️ **不是** `schema.mix.enable_english` —— 那个还活着，是混输引擎
+    // `english`。不是 `schema.mix.enable_english` —— 那个还活着，是混输引擎
     // （`wubi86_pinyin` 这类方案）混入英文词库候选的开关，两者只是名字像。
     &["schema", "quick_input", "enable_english"],
     // 从未被任何逻辑读取过，关掉不产生任何效果（曾被误当作快捷输入的总开关）。
     // 真正的「禁用快捷输入」＝把 quick_mix 的 trigger_keys 清空。
     &["schema", "quick_input", "enabled"],
-    // 随英文段独立迁至 `schema.english.frequency.code_scope`。**不做值迁移**：该键
-    // 从未随任何版本发布到用户手里（接进设置页的改动与本次迁移在同一个未发布版本内），
-    // 且新旧默认值都是 "candidate"，能读到它的只有开发期配置。
+    // 随英文段独立迁至 `schema.english.frequency.code_scope`。不做值迁移：从未随发布版到用户手里，
+    // 且新旧默认值都是 "candidate"。
     &["schema", "codetable", "frequency", "english_code_scope"],
-    // 并入 `ui.candidate.font_size`（0 = 跟随主题）。它仍被值迁移读取，本不该进来（本清单在
-    // 用户文件上做删除、迁移只改内存，只清不迁 = 下次启动再也迁不到）——能进来是因为 [`Config::prune_user_config`] 在清本清单**之前**先把
-    // [`Config::migrate_font_size_follow_theme_value`] 的结果落盘，清的时候它已对生效值
-    // 毫无影响。新增同类条目须照此先落盘迁移。
+    // 并入 `ui.candidate.font_size`（0 = 跟随主题）。本清单只删不迁，能登记它是因为
+    // [`Config::prune_user_config`] 清本清单之前先把 [`Config::migrate_font_size_follow_theme_value`]
+    // 的结果落盘。新增同类条目须照此先落盘迁移。
     &["ui", "candidate", "font_size_follow_theme"],
     // 悬停提示的六个旧开关，并入 `ui.tooltip.sections`。与上一条同一判据：
     // [`Config::prune_user_config`] 先把 [`Config::migrate_tooltip_sections_value`] 的结果
@@ -166,19 +153,16 @@ const RETIRED_KEYS: &[&[&str]] = &[
     &["ui", "tooltip", "chaizi_enabled"],
     &["ui", "tooltip", "debug_enabled"],
     // 反查模式改造（docs/design/codetable-reverse-mode.md §9）：总开关去掉、「含未启用扩展词库」挪成
-    // `input.reverse.lookup_disabled_dicts`。**不做值迁移**：两键只存在于 0.124.0 之后、0.125 之前的开发期，
-    // 从未随发布版到用户手里（判据同上面 english_code_scope）。
+    // `input.reverse.lookup_disabled_dicts`。不做值迁移：两键从未随发布版到用户手里。
     &["input", "reverse", "enabled"],
     &["schema", "codetable", "lookup_disabled_dicts"],
-    // 拆成 `_vertical` / `_horizontal`。与 `font_size_follow_theme` 同一判据：
-    // [`Config::prune_user_config`] 先把 [`Config::migrate_comment_max_chars_value`] 的结果
-    // 落盘、再清本清单。此前它刻意不登记、迁移也不摘旧键，于是旧键在用户文件里常驻，设置页把
-    // 竖排改回 0（等于出厂 ⇒ 新键被删）后，下次 load 又被旧键补回原值。
+    // 拆成 `_vertical` / `_horizontal`。与 `font_size_follow_theme` 同一判据：先把
+    // [`Config::migrate_comment_max_chars_value`] 的结果落盘、再清。旧键常驻会让设置页改回 0 后
+    // 下次 load 又被旧键补回原值。
     &["ui", "candidate", "comment_max_chars"],
     // 候选注释重构（docs/design/candidate-comment-templates.md）：注释模板、开关与三个编码来源
-    // 并入 `[ui.comment]`。**不做值迁移**（维护者定）：会配这些的都是深度用户，让他们重新设置，
-    // 破坏性变更登记在 docs/config-key-migration.md。`schema.mix_modes[]` 条目里的同名键是数组
-    // 元素、无法按路径列出，留在原处无人读取。
+    // 并入 `[ui.comment]`。不做值迁移，破坏性变更登记在 docs/config-key-migration.md。
+    // `schema.mix_modes[]` 条目里的同名键是数组元素、无法按路径列出，留在原处无人读取。
     &["ui", "candidate", "comment_enabled"],
     &["ui", "candidate", "comment_template_vertical"],
     &["ui", "candidate", "comment_template_horizontal"],
@@ -197,16 +181,14 @@ const RETIRED_KEYS: &[&[&str]] = &[
     &["input", "temp_pinyin", "code_hint_source"],
     &["schema", "mix", "pinyin_code_hint"],
     // 按键级翻页溢出覆盖表，被翻页动作后缀取代（`page_prev:ignore` 这类写在 `keys.session_actions`
-    // 里，见 docs/design/keys-overflow-per-key.md）。**不做值迁移**（维护者定，0.131 破坏性变更）：
-    // 旧值已被 serde 丢弃，这里只把它从用户文件里清掉，免得看起来还在生效。
+    // 里，见 docs/design/keys-overflow-per-key.md）。不做值迁移，这里只把它从用户文件里清掉。
     &["keys", "overflow", "page_key_overrides"],
 ];
 
 /// 从用户层删除 [`RETIRED_KEYS`] 里的退役键，返回删除数。
 ///
-/// 与 [`prune_redundant`] 同一条不变量：**清理前后 `load()` 的结果逐键完全相同**——
-/// 这些键本来就已经被 serde 丢弃，删掉不改变任何生效值。
-/// 幂等；`remove_nested` 会顺带回收变空的父表（`[schema.quick_input]` 只剩这两个键时整段消失）。
+/// 与 [`prune_redundant`] 同一条不变量：清理前后 `load()` 的结果逐键相同。幂等；
+/// `remove_nested` 会顺带回收变空的父表。
 fn prune_retired(root: &mut toml::Value) -> usize {
     let toml::Value::Table(t) = root else {
         return 0;
@@ -218,9 +200,7 @@ fn prune_retired(root: &mut toml::Value) -> usize {
 }
 
 /// 用户层是否已完成引导键物化（版本号 >= [`KEY_ACTIONS_MATERIALIZE_VERSION`]）。
-///
-/// 判据只认这一个显式版本号，**不做「看起来像迁移过了」的推断**（如「key_actions 非空
-/// 就算迁过」）——那种推断在用户手工配过 key_actions 但从没迁移过时会直接猜错，
+/// 只认显式版本号，不做「key_actions 非空就算迁过」之类推断：手工配过 key_actions 的用户会被猜错，
 /// 导致出厂绑定永久丢失。
 fn already_materialized(root: &toml::Value) -> bool {
     get_nested(root, &["keys", "key_actions_materialized"])
@@ -232,13 +212,8 @@ fn already_materialized(root: &toml::Value) -> bool {
 /// 把 `bindings` 写进用户层 `keys.key_actions`、摘掉五处旧 `trigger_keys`、打上版本标记。
 /// 返回摘掉的旧字段数。
 ///
-/// 纯函数、不碰文件系统：[`Config::materialize_key_actions`] 负责 IO 与两道安全闸，本函数
-/// 负责改写。拆开的理由与 [`prune_redundant`] 相同——`materialize_key_actions` 依赖
-/// `user_config_dir()`，直接测就会写用户真实的 `%APPDATA%\WindInput\config.toml`
-/// （本仓已有前科：`cargo test -p wind-coordinator` 曾真写 `schema.active`）。
-/// **本函数会删键，直接测的代价比那次更大。**
-///
-/// 调用方须先用 [`already_materialized`] 判幂等：本函数每次都会照写，不自带幂等。
+/// 纯函数，IO 与安全闸由 [`Config::materialize_key_actions`] 负责：后者依赖 `user_config_dir()`，
+/// 直接测会改写真实的用户配置。调用方须先用 [`already_materialized`] 判幂等，本函数每次都会照写。
 fn materialize_into(
     root: &mut toml::Value,
     bindings: &BTreeMap<String, String>,
@@ -289,7 +264,7 @@ fn materialize_into(
 
 /// 收集 TOML 值里所有叶子路径（表递归；数组/标量视为叶子，不下钻）。
 ///
-/// 数组**必须**当叶子：`schema.mix_modes` / `keys.page_keys` 这类整体就是一个配置项，
+/// 数组必须当叶子：`schema.mix_modes` / `keys.page_keys` 这类整体就是一个配置项，
 /// 下钻进数组元素会切出无法用 `path` 表达、也无法与出厂默认逐项比对的伪键。
 fn collect_leaf_paths(v: &toml::Value, prefix: &mut Vec<String>, out: &mut Vec<Vec<String>>) {
     match v {
@@ -304,33 +279,27 @@ fn collect_leaf_paths(v: &toml::Value, prefix: &mut Vec<String>, out: &mut Vec<V
     }
 }
 
-/// 某一层配置文件**没能按 TOML 语法读完**的记录（见 [`parse_toml_lenient`]）。
+/// 某一层配置文件没能按 TOML 语法读完的记录（见 [`parse_toml_lenient`]）。
 ///
-/// 与 [`ConfigDegradation::sections`] 是**两类不同的故障**，不要混为一谈：
+/// 与 [`ConfigDegradation::sections`] 是两类不同的故障：
 ///
 /// | | 段级降级 (`sections`) | 层级语法故障（本结构） |
 /// |---|---|---|
-/// | 出错位置 | 四层合并**之后**的 `try_into` | 合并**之前**的单文件 `from_str` |
-/// | 文件本身 | 语法合法，只是某个键的**类型**不对 | 语法就不合法（重复键、缺引号、括号不配对……） |
-/// | 影响范围 | 精确到一段/一个子表 | 整个文件——除非能逐行救回 |
+/// | 出错位置 | 四层合并之后的 `try_into` | 合并之前的单文件 `from_str` |
+/// | 文件本身 | 语法合法，只是某个键的类型不对 | 语法就不合法（重复键、缺引号、括号不配对……） |
+/// | 影响范围 | 精确到一段/一个子表 | 整个文件，除非能逐行救回 |
 ///
-/// ★ 本结构是 2026-08-31 补的**第二个维度**：在此之前语法错误走
-/// `read_toml_value` 的 `Err ⇒ None`，整层被静默丢弃且 `degradation` 全程干净，
-/// 于是四道写盘闸、设置页横幅、CLI 报告**同时**判定「一切正常」——而那正是
-/// 用户配置被整表覆盖的时刻。教训：安全网的判据必须覆盖它要防的**全部**入口，
-/// 只覆盖一个入口的安全网，会在另一个入口上给出最有底气的错误答案。
+/// 安全网的判据必须覆盖全部入口：语法故障若不记在这里，写盘闸、设置页横幅、CLI 报告都会判
+/// 「一切正常」，而那正是用户配置被整表覆盖的时刻。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnparsableLayer {
     /// 层名：`data` / `custom` / `user`，与 [`LayerOrigin::layer`] 同域。
     pub layer: &'static str,
     /// 出问题的配置文件。
     pub path: PathBuf,
-    /// **首个**解析错误的原文（含 toml 自带的行列与代码片段）。
-    ///
-    /// 只留第一个：逐行救回时后续错误往往是同一处笔误的连锁，全列出来会把用户
-    /// 淹没在噪音里，而第一个恰好是他要去改的那一行。
+    /// 首个解析错误的原文（含 toml 自带的行列与代码片段）。后续错误多是同一处笔误的连锁，只留第一个。
     pub error: String,
-    /// 被跳过的行号（**1-based**，升序）。空 = 一行都没救回来（整个文件作废）。
+    /// 被跳过的行号（1-based，升序）。空 = 一行都没救回来（整个文件作废）。
     pub skipped_lines: Vec<usize>,
     /// 救回来的顶层键数量。0 且 `skipped_lines` 为空 ⇒ 该层完全作废。
     pub salvaged_keys: usize,
@@ -338,11 +307,8 @@ pub struct UnparsableLayer {
     pub not_utf8: bool,
 }
 
-/// 文案里最多列出几个行号，其余折叠成计数。
-///
-/// 实跑定的：一份完全不是 TOML 的文件（编码错乱、被别的文件覆盖）会一路啃到
-/// [`LENIENT_MAX_SKIPS`]，于是 32 个行号全列进 toast 和设置页横幅——撑爆版面，
-/// 而且那种情形下具体是哪几行本来就没意义（整份都没加载）。
+/// 文案里最多列出几个行号，其余折叠成计数。完全不是 TOML 的文件会一路啃到
+/// [`LENIENT_MAX_SKIPS`]，全列出会撑爆 toast 与横幅，且那时具体行号没有意义。
 const LINES_LISTED_MAX: usize = 6;
 
 impl UnparsableLayer {
@@ -351,15 +317,10 @@ impl UnparsableLayer {
         self.salvaged_keys > 0
     }
 
-    /// 行号**短语**（含「第…行」），最多列 [`LINES_LISTED_MAX`] 个，其余折叠成「等 N 处」。
-    /// 无行号时返回空串。
+    /// 行号短语（含「第…行」），最多列 [`LINES_LISTED_MAX`] 个，其余折叠成「等 N 处」。
+    /// 无行号时返回空串。量词跟着内容一起给，免得调用方拼出「等 32 处行」这种语病。
     ///
-    /// ★ 连「第…行」一起给，而不是只给数字列表：调用方各自拼 `"第 {} 行"` 的话，
-    /// 折叠形态会拼出「第 1、2、3… 等 32 处 **行**」这种语病（实跑撞到过）。
-    /// 量词跟着内容走，别留给模板。
-    ///
-    /// 供 core 内所有文案（`describe`、toast、CLI）共用。跨仓的设置端另有一份等价实现
-    /// ——那边拿到的是 JSON 数组，共用不了这段代码，但截断阈值须保持一致。
+    /// 供 core 内所有文案（`describe`、toast、CLI）共用。设置端另有一份等价实现，截断阈值须保持一致。
     pub fn lines_phrase(&self) -> String {
         if self.skipped_lines.is_empty() {
             return String::new();
@@ -378,14 +339,10 @@ impl UnparsableLayer {
         }
     }
 
-    /// 给用户看的一句话：哪个文件、丢了哪几行。
+    /// 给用户看的一句话：哪个文件、丢了哪几行（1-based，用户能直接跳过去改）。
     ///
-    /// 行号用 1-based 并且**列出具体行**——「配置有语法错误」这种说法用户无从下手，
-    /// 「第 6 行」他能直接跳过去改。
-    ///
-    /// ★ 判据是 [`Self::is_salvaged`]，**不是** `skipped_lines` 非空。
-    /// 「跳过了几行」与「救回来了」是两件事：啃到 [`LENIENT_MAX_SKIPS`] 仍失败时
-    /// 两者同时成立，而那时说「加载其余内容」是在撒谎——一个字都没加载。
+    /// 判据是 [`Self::is_salvaged`] 而非 `skipped_lines` 非空：啃到 [`LENIENT_MAX_SKIPS`] 仍失败时
+    /// 两者同时成立，那时一个字都没加载，不能说「加载其余内容」。
     pub fn describe(&self) -> String {
         let file = self.path.display();
         if self.not_utf8 {
@@ -407,25 +364,20 @@ impl UnparsableLayer {
     }
 }
 
-/// 本次加载中发生的**降级**记录（段级见 [`Config::deserialize_with_section_fallback`]，
+/// 本次加载中发生的降级记录（段级见 [`Config::deserialize_with_section_fallback`]，
 /// 层级语法故障见 [`UnparsableLayer`]）。
 ///
 /// 这不是配置项，是「这一份 `Config` 是怎么来的」的元信息。异常态，正常加载恒为空。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ConfigDegradation {
-    /// 被替换为 L1 默认的段，**点分路径**，按字典序排列。
-    ///
-    /// 一层（`keys`）表示整个顶层段回落；两层（`ui.font`）表示只有该子表回落、同段其余
-    /// 子表的用户值完好。探针能定位到哪一层就记到哪一层——`ui` 一段就有 99 个键，
-    /// 整段回落离「一切归零」并不远，而缩小爆炸半径正是这套机制存在的理由。
+    /// 被替换为 L1 默认的段，点分路径，按字典序排列。一层（`keys`）表示整个顶层段回落；
+    /// 两层（`ui.font`）表示只有该子表回落、同段其余子表完好。
     pub sections: Vec<String>,
     /// 整份配置都回落到了 L1 默认——毒不在任何单段（例如顶层不是表）。
     /// 与 `sections` 互斥：走到这一步时 `sections` 为空，因为没能定位到任何有毒段。
     pub total_fallback: bool,
-    /// 本次加载中**语法不合法**的配置文件，按层从低到高。正常加载恒为空。
-    ///
-    /// ⚠️ 非空时 [`Self::taints`] 对**任何路径**恒为真（见那里的说明）：文件层面的
-    /// 残缺没有「只影响某一段」这回事，被跳过的行可能落在任何段里。
+    /// 本次加载中语法不合法的配置文件，按层从低到高。正常加载恒为空。
+    /// 非空时 [`Self::taints`] 对任何路径恒为真：被跳过的行可能落在任何段里。
     pub unparsable: Vec<UnparsableLayer>,
 }
 
@@ -435,57 +387,30 @@ impl ConfigDegradation {
         self.total_fallback || !self.sections.is_empty() || !self.unparsable.is_empty()
     }
 
-    /// 是否有配置文件语法不合法。
-    ///
-    /// 与 [`Self::is_degraded`] 分开：写盘路径需要**区分**这两种，语法故障要备份原文件，
-    /// 段级降级不需要（后者的文件还是好的，只是某个值类型不对）。
+    /// 是否有配置文件语法不合法。与 [`Self::is_degraded`] 分开：语法故障写盘前要备份原文件，
+    /// 段级降级不需要（文件本身是好的）。
     pub fn has_unparsable(&self) -> bool {
         !self.unparsable.is_empty()
     }
 
-    /// 顶层段 `section` 是否受本次降级影响——**含它的子路径**。
+    /// 顶层段 `section` 是否受本次降级影响，含它的子路径。
     ///
-    /// ⚠️ 判据不能写成「`sections` 里精确等于 `section`」：降级粒度可以细到子表，
-    /// `keys` 段出问题时记下的可能是 `keys.key_actions` 而不是 `keys`，精确相等会漏判，
-    /// 而漏判的后果是本该拦下的写盘照样发生（见 [`Config::materialize_key_actions`] 闸三）。
-    ///
-    /// 传顶层段名时与 [`Self::taints`] 等价（顶层名不可能有更短的祖先）；本方法只是
-    /// 那个更一般判据的一个习惯叫法，实现共用一份。
+    /// 不能写成精确相等：降级可细到子表，`keys` 段出问题时记下的可能是 `keys.key_actions`，
+    /// 漏判会让本该拦下的写盘照样发生。实现与 [`Self::taints`] 共用一份。
     pub fn affects(&self, section: &str) -> bool {
         self.taints(section)
     }
 
-    /// **写盘闸的核心判据**：本次加载在 `path` 处的值是否**不可信**。
+    /// 写盘闸的核心判据：本次加载在 `path` 处的值是否不可信。
     ///
-    /// # 这个判据存在的理由
+    /// 段级降级把 `load()` 的 `Err` 变成了「成功但某段是出厂值」，拿 `Config::load()` 的结果（或其
+    /// 派生值）当种子整表写回用户层或导出的路径，落盘前必须先问这里，否则降级会变成永久数据丢失。
     ///
-    /// 段级降级把 `load()` 的 `Err` 变成了「成功但某段是出厂值」。原先靠 `?` 保护的下游
-    /// 因此拿到**残缺表**并当成用户的真实配置去写盘或导出——降级本身就变成了磁盘上的
-    /// 永久数据丢失。本仓已发现**四条**同形状的路径（`materialize_key_actions`、
-    /// `cmd_export`、`patch::writes`/`applyPatch`、`setItems` 的 Map 键），逐条打地鼠
-    /// 显然会漏下一条，故把判据固化成这一个函数：
+    /// 降级段与待写路径相等、是其祖先、或是其后代，都算不可信：只判一个方向会漏掉「写大表、坏在小格」
+    /// 或「坏在大段、写小格」。
     ///
-    /// > 凡是拿 `Config::load()` 的结果（或其派生值）当**种子**，再整表写回用户层
-    /// > 或导出给用户的路径，落盘前必须先问这里。
-    ///
-    /// # 两个方向都要判
-    ///
-    /// `sections` 是点分路径，与待写路径的关系有三种，**都算不可信**：
-    ///
-    /// - 相等：`keys.key_actions` 降级，要写 `keys.key_actions`；
-    /// - 降级段是待写路径的**祖先**：`input.punct` 降级 ⇒ 它下面的
-    ///   `input.punct.custom_mappings` 也是出厂值；
-    /// - 待写路径是降级段的**祖先**：要整表写 `keys`，而 `keys.key_actions` 降级过
-    ///   ⇒ 这张表里有一块是假的。
-    ///
-    /// 只判前两种会漏掉「写大表、坏在小格」，只判后两种会漏掉「坏在大段、写小格」。
-    ///
-    /// # 层级语法故障恒为真
-    ///
-    /// `unparsable` 非空时对**任何** `path` 返回 `true`，不做路径匹配。这不是偷懒：
-    /// 被跳过的行落在哪一段是**不可知的**——救回来的那份 Value 里，丢掉的键与从未写过的
-    /// 键完全同形。任何「只有这几段受影响」的判断都是在猜，而猜错的代价是把残缺表
-    /// 写回磁盘、覆盖掉用户原本还在文件里的内容。
+    /// `unparsable` 非空时对任何 `path` 恒为真：救回来的 Value 里，被跳过的键与从未写过的键同形，
+    /// 无法判断哪些段受影响。
     pub fn taints(&self, path: &str) -> bool {
         fn is_ancestor(ancestor: &str, descendant: &str) -> bool {
             descendant
@@ -500,12 +425,9 @@ impl ConfigDegradation {
                 .any(|s| s == path || is_ancestor(s, path) || is_ancestor(path, s))
     }
 
-    /// [`Self::taints`] 的带日志版本：不可信时打一行 WARN 并返回 `true`，
-    /// 调用方据此**什么都不做**（与 `preset_for_pruning` 取不到就退化为不清理同构）。
-    ///
-    /// 统一在这里打点，是为了让四条闸的日志措辞一致、可按 `降级闸` 一次 grep 出全部
-    /// 「因为降级而没做的写盘」——排查「我的设置怎么没保存」时，这一行是唯一的线索。
-    /// `what` 描述被拦下的动作（如 `key_actions 物化`），用于把日志对上现象。
+    /// [`Self::taints`] 的带日志版本：不可信时打一行 WARN 并返回 `true`，调用方据此什么都不做。
+    /// 统一措辞，可按 `降级闸` 一次 grep 出全部因降级而跳过的写盘。`what` 描述被拦下的动作
+    /// （如 `key_actions 物化`）。
     #[must_use]
     pub fn blocks_write_back(&self, path: &str, what: &str) -> bool {
         if !self.taints(path) {
@@ -535,7 +457,7 @@ impl ConfigDegradation {
 pub struct LenientParse {
     /// 解析出的值。`None` = 连容错都救不回来。
     pub value: Option<toml::Value>,
-    /// **首个**语法错误原文；`None` = 文件本来就合法（此时 `skipped_lines` 必为空）。
+    /// 首个语法错误原文；`None` = 文件本来就合法（此时 `skipped_lines` 必为空）。
     pub first_error: Option<String>,
     /// 被跳过的行号（1-based，升序）。
     pub skipped_lines: Vec<usize>,
@@ -548,33 +470,19 @@ impl LenientParse {
     }
 }
 
-/// 容错解析上限：最多剔除这么多处语法错误。
-///
-/// 超过基本可以断定「这不是一份写坏了几行的配置，而是一份根本不是 TOML 的文件」
-/// （编码搞错、被别的程序覆盖、下载到半截）。继续剔下去只会把它啃成一个语义面目全非
-/// 的残骸，那比整份作废更危险——用户会以为配置还在。
+/// 容错解析上限：最多剔除这么多处语法错误。超过基本可断定文件根本不是 TOML（编码错、被覆盖、
+/// 下载到半截），继续剔只会啃出面目全非的残骸，比整份作废更危险。
 const LENIENT_MAX_SKIPS: usize = 32;
 
-/// **容错解析 TOML**：严格解析失败时，逐行剔除报错处，尽量救回其余内容。
+/// 容错解析 TOML：严格解析失败时，逐行剔除报错处，尽量救回其余内容。配置是手写的，写错一行
+/// 不该让所有设置一起失效。
 ///
-/// # 为什么要有它
+/// 每轮用 [`toml::de::Error::span`] 定位出错行并置空（不删除）后重试，行号因此稳定，
+/// 报给用户的就是编辑器里看到的行号。出错行是段头时丢弃整段：只删 `[ui]` 那一行，它下面的键会被
+/// 归进上一个段（`ui.font_size` 变成 `input.font_size`），污染比丢失更危险。
 ///
-/// `toml::from_str` 是全有全无的：一个重复键、一个漏引号，整个文件作废。而配置文件
-/// 是用户手写的，写错一行是常态。整份作废意味着他**所有**设置一次性失效。
-///
-/// # 算法：按 toml 报错的 span 逐行剔除
-///
-/// 每轮拿 [`toml::de::Error::span`] 定位到出错行，把它**置空**（不是删除）后重试。
-/// 置空保持总行数不变 ⇒ 行号在整个过程中稳定，报给用户的行号就是他在编辑器里看到的行号。
-///
-/// ★ **出错行是段头时丢弃整段，而不是只删那一行**。这是本函数唯一不显然的地方：
-/// 删掉 `[ui]` 之后，它下面那几十个键并不会消失，而是被 TOML 语法归给**上一个段**——
-/// `ui.font_size` 变成 `input.font_size`。那不是「丢了一段配置」，是「把一段配置
-/// 悄悄搬到了别的段里」，可能碰巧解析成功并生效。**污染比丢失更危险**：丢失看得见，
-/// 污染看不见。
-///
-/// ⚠️ 救回来的值里，「被跳过的键」与「用户从未写过的键」完全同形，事后无从区分。
-/// 这正是 [`ConfigDegradation::taints`] 在 `unparsable` 非空时对任何路径都返回真的理由。
+/// 救回的值里「被跳过的键」与「从未写过的键」同形，所以 [`ConfigDegradation::taints`] 在
+/// `unparsable` 非空时对任何路径都返回真。
 pub fn parse_toml_lenient(src: &str) -> LenientParse {
     let first_error = match src.parse::<toml::Value>() {
         Ok(v) => {
@@ -621,7 +529,7 @@ pub fn parse_toml_lenient(src: &str) -> LenientParse {
         }
 
         let killed = if lines[idx].trim_start().starts_with('[') {
-            // 段头有毒 ⇒ 整段丢弃（见上方 ★）。段的范围 = 本行到下一个段头之前。
+            // 段头有毒 ⇒ 整段丢弃（见函数文档）。段的范围 = 本行到下一个段头之前。
             let mut end = idx + 1;
             while end < lines.len() && !lines[end].trim_start().starts_with('[') {
                 end += 1;
@@ -631,7 +539,7 @@ pub fn parse_toml_lenient(src: &str) -> LenientParse {
             vec![idx]
         };
         for i in &killed {
-            // 只记**非空**行：段内的空行/注释行本来就不承载配置，报给用户只是噪音。
+            // 只记非空行：段内的空行/注释行本来就不承载配置，报给用户只是噪音。
             if !lines[*i].trim().is_empty() {
                 skipped.push(*i + 1);
             }
@@ -665,26 +573,11 @@ pub fn parse_toml_lenient(src: &str) -> LenientParse {
 /// 完整配置
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
-    /// 本次加载的降级记录，**不是配置键**：`#[serde(skip)]` 让它既不进配置文件、
-    /// 也不进 `config.get` 的序列化产物，跟着这一份 `Config` 走完生命周期。
+    /// 本次加载的降级记录，不是配置键：`#[serde(skip)]` 让它不进配置文件，也不进 `config.get` 的产物。
     ///
-    /// ★ 选「随实例的字段」而不是「模块级静态快照」：`Config::load` 有多个并发调用方
-    /// （RPC dispatch、协调器热重载、CLI、构造期），静态快照会互相覆盖，消费点读到的
-    /// 可能是**别人那次**加载的降级结果，而这恰好是最需要可信的场合。
-    ///
-    /// 已核实的影响面（`skip` 不触碰其中任何一条）：
-    /// - `Config` 未派生 `PartialEq`，全仓无 `impl PartialEq for Config`，不存在整体相等性比较；
-    /// - `config_schema::config_leaf_keys()` 由 `toml::Value::try_from(Config::default())`
-    ///   推导叶子路径，`skip` 字段不出现在序列化产物里 ⇒ `registry_covers_every_config_key`
-    ///   的差集不变，注册表无需登记；
-    /// - `prune_redundant` / `prune_retired` / `set_user_value` 走的都是那同一套叶子路径，
-    ///   同理不受影响；
-    /// - `config.get`（`wind-rpc/dispatch.rs`、`wind-webdata/lib.rs`）把 `Config` 序列化
-    ///   回 `toml::Value` 再比对/写回，`skip` 字段不出现 ⇒ 不会被当成用户配置写进 config.toml。
-    ///
-    /// ⚠️ 这里的 `skip` **不是**被禁止的那个 `skip_serializing_if`：后者用于表达
-    /// 「某个**配置键**退出配置体系」，会让守门测试静默放行一个用户够不着的键；
-    /// 本字段从来就不是配置键。
+    /// 随实例而非模块级静态快照：`Config::load` 有多个并发调用方，静态快照会互相覆盖。
+    /// `skip` 字段不出现在序列化产物里，故注册表守门、剪枝与 `config.get` 写回都不受影响。
+    /// 它不是被禁止的 `skip_serializing_if`（那个用于让配置键退出体系），本字段从来就不是配置键。
     #[serde(skip)]
     pub degradation: ConfigDegradation,
     #[serde(default)]
@@ -763,14 +656,12 @@ pub struct SchemaConfig {
     pub primary_pinyin: String,
     /// 方案常驻策略（出厂 `false`）。
     ///
-    /// - `true`：启动后预热全部可用方案（+ 临拼目标 + 英文）并一直常驻——切换零等待。
-    /// - `false`：启动只建用得着的（当前方案、临拼目标、临英开着时的英文），其余方案只在
-    ///   后台校验 / 重建派生缓存、建完即释放；切过去时现建（缓存新鲜时只是 mmap + 建外壳），
+    /// - `true`：启动后预热全部可用方案（+ 临拼目标 + 英文）并一直常驻，切换零等待。
+    /// - `false`：启动只建用得着的，其余方案只在后台校验 / 重建派生缓存、建完即释放；切过去时现建，
     ///   30 分钟没用的方案引擎自动卸载。
     ///
-    /// 一个布尔同时管「预热」与「淘汰」：两者是同一个取舍的两面，拆成两个键会出现「不预热
-    /// 但永不卸载」这类无意义组合（设计 `docs/design/memory-footprint.md` §5）。30 分钟与
-    /// 每分钟一拍不进配置（R1：程序能定）。
+    /// 一个布尔同时管预热与淘汰：拆开会出现「不预热但永不卸载」这类无意义组合
+    /// （`docs/design/memory-footprint.md` §5）。卸载时限与节拍不进配置（R1：程序能定）。
     #[serde(default)]
     pub keep_all_loaded: bool,
     /// 词库缓存策略（出厂 `"lock"`）：词库、反查索引、注释等只读缓存文件映射后怎么处理。
@@ -779,7 +670,7 @@ pub struct SchemaConfig {
     /// - `"preload"`：预加载，启动时把缓存整份载入内存，之后允许系统回收。
     /// - `"off"`：关闭，不做处理，页按需换入、可被系统回收。
     ///
-    /// 只在桌面服务进程生效，**修改后需重启服务**（已映射的文件不会回头处理）；锁页失败
+    /// 只在桌面服务进程生效，修改后需重启服务（已映射的文件不会回头处理）；锁页失败
     /// （系统配额不够）时静默退化为普通映射，不影响输入。取值由注册表的 `Enum` 校验。
     #[serde(default = "default_dict_cache_policy")]
     pub dict_cache_policy: String,
@@ -798,20 +689,17 @@ pub struct SchemaConfig {
     /// 快捷输入（日期/计算等内置类方案）配置。将随"英文/快捷做成方案"一并重构。
     #[serde(default)]
     pub quick_input: QuickInputConfig,
-    /// **跨引擎**的词频公共基线（[schema.frequency]）。
+    /// 跨引擎的词频公共基线（[schema.frequency]）。
     ///
-    /// ⚠️ 与 `schema.{codetable,pinyin,english}.frequency` **是不同的东西，别合并**：
-    /// 那三段是各引擎自己的调频参数（策略、保护位数、半衰期），值可以互不相同；本段装的是
-    /// 「三个引擎都该照办的同一条规则」。判据是**用户会不会想给不同引擎配不同的值**——
-    /// 「emoji 不参与词频」在码表里成立、在拼音里就不成立是说不通的，配三遍只会漂移。
+    /// 与 `schema.{codetable,pinyin,english}.frequency` 不同，别合并：那三段是各引擎自己的调频参数，
+    /// 本段是三个引擎都该照办的同一条规则（如「emoji 不参与词频」），配三遍只会漂移。
     #[serde(default)]
     pub frequency: FrequencyGlobal,
-    /// **已废弃**：特殊模式的实例集合改由「带 `[overlay]` 段的已安装方案」定义
+    /// 已废弃：特殊模式的实例集合改由带 `[overlay]` 段的已安装方案定义
     /// （`EngineManager::overlay_modes`），见 `docs/redesign/overlay-mode-config.md`。
     ///
-    /// 字段保留只为**读得出残留值以便告警**（[`Config::warn_legacy_special_modes`]）——
-    /// 删掉的话 serde 会静默丢弃这一段，用户改了半天配置没反应还查不到原因。
-    /// 不参与任何行为，也不再写出（`skip_serializing_if`）。
+    /// 字段保留只为读出残留值以便告警（[`Config::warn_legacy_special_modes`]），删掉的话 serde 会
+    /// 静默丢弃这一段。不参与任何行为，也不再写出（`skip_serializing_if`）。
     #[serde(
         rename = "special_modes",
         default,
@@ -847,56 +735,33 @@ impl Default for SchemaConfig {
 /// 跨引擎的词频公共基线（[schema.frequency]）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct FrequencyGlobal {
-    /// 这些 Unicode 区块的候选**不参与词频**：既不记录选中（不学习），也不受已有记录影响
-    /// （不重排）。取值为区块名（`"表情符号"`）或预设组名（`"emoji"`），
-    /// 取值是**字符类的 key**：区块名、`"其它"`、`"符号"` 或 `"emoji"`。
-    /// 解析与告警见 `wind_engine::charset_assembly`（装配期打 `no_freq` 标记）。
+    /// 这些 Unicode 区块的候选不参与词频：既不记录选中，也不受已有记录影响（不重排）。
+    /// 取值是字符类的 key：区块名、`"其它"`、`"符号"` 或 `"emoji"`。解析与告警见
+    /// `wind_engine::charset_assembly`（装配期打 `no_freq` 标记）。
     ///
-    /// 出厂**为空**（＝行为与改动前完全一致）。诉求来自「emoji 在正常输入时不要参与词频
-    /// 调整」：emoji 多是一次性的点缀，被它顶到前面会把常用字挤下去，而用户下次多半又想
-    /// 打回那个字。
-    ///
-    /// ★ **空列表即关闭，故不另设 `enabled` 开关**——「开着但一个区块都没选」是个无意义
-    /// 状态，两个键就要多解释一次它们的组合（配置设计规则 R3 的「枚举当开关」同款判据）。
-    ///
-    /// ⚠️ **写端与读端必须同时照办**：只跳过记录的话，用户库里既有的 emoji 词频记录仍在
-    /// 生效，开关看起来像没反应。两端共用 `FreqSettings::excluded_from_freq` 一个判据。
+    /// 出厂为空。用途如让 emoji 不参与调频：它多是一次性点缀，被顶到前面会把常用字挤下去。
+    /// 空列表即关闭，不另设 `enabled`。写端与读端必须同时照办，否则库里既有的记录仍在生效；
+    /// 两端共用 `FreqSettings::excluded_from_freq`。
     #[serde(default)]
     pub exclude_blocks: Vec<String>,
 }
 
-/// 「首候选是所打原文」的三档（`schema.english.raw_candidate` /
-/// `input.temp_english.raw_candidate`，两个作用域各一份）。
+/// 「首候选是所打原文」的三档（`schema.english.raw_candidate` / `input.temp_english.raw_candidate`，
+/// 两个作用域各一份）。
 ///
-/// # 为什么是三档而不是开关
+/// 是三档而非开关：打 `hel`（词库无此词）时用户不想要原文占首位，打 `hell`（词库有）时又想要它
+/// 恒在首位不被调频顶下去，[`Self::InDict`] 按「原文是不是词库词」在两档间逐次切换。
 ///
-/// 英文引擎的特殊性是「输入即内容」——输入串本身就是合法上屏文本。但用户对这条能力的
-/// 需求**依赖当次输入的查询结果**，静态开关表达不了（t139 / A2-2）：
-///
-/// - 打 `hel`（词库里没有这个词）：开着就多出一条 `hel` 占着首位，用户不想要；
-/// - 打 `hell`（词库里有）：关掉就被调频顶下去（`hello` 用得多就排到了前面），用户想要
-///   它恒在首位。
-///
-/// 两种诉求**同时**成立，而 `true` / `false` 各只满足一半。[`Self::InDict`] 就是那条
-/// 缺失的对角线：按「原文本身是不是词库词」在另外两档之间逐次切换。
-///
-/// # 判据为什么是**字面**相同，不是忽略大小写、也不是 `is_exact_code`
-///
-/// 实测（`en.dict.yaml`）：打 `hell` 时 `he'll` 的 `code` 也是 `hell`（撇号在建码时被
-/// 剥掉）⇒ `is_exact_code` 回答的是「码对得上」，不是「这个词在词库里」，据它产出的
-/// 原文候选可能是一个词库里根本不存在的词。
-///
-/// 忽略大小写同样不取：打 `usa` 时词库里只有 `USA`，`usa` 这个**字面**并不在词库里。
-/// 按字面判 ⇒ 不产原文候选 ⇒ `USA` 自然成为首选，正是用户要的；而想上屏小写 `usa`
-/// 仍可按回车走「上屏原码」那条既有通路。判据口径与紧邻的**精确去重**一致
-/// （`heads.contains(c.text)`，那里的注释写明「不是小写去重」）。
+/// 判据是字面相同：不用 `is_exact_code`（`he'll` 的 code 也是 `hell`），不忽略大小写（打 `usa`
+/// 时词库只有 `USA`，不产原文候选，想要小写仍可回车上屏原码）。口径与精确去重一致，见
+/// `docs/design/schema-scoped-behavior.md` 的 `wants_raw_candidate` 一节。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RawCandidateMode {
     /// 恒是首候选（历史 `true`，出厂档）。打词库里没有的词时它是唯一能上屏的东西。
     #[default]
     Always,
-    /// **仅当所打原文本身是词库里的词**时才作首候选（钉最前、不受调频影响）；
+    /// 仅当所打原文本身是词库里的词时才作首候选（钉最前、不受调频影响）；
     /// 否则一条都不产，列表就是纯词库候选、调频照常生效。
     InDict,
     /// 不产原文候选（历史 `false`）。想上屏所打原文走回车。
@@ -905,12 +770,9 @@ pub enum RawCandidateMode {
 
 /// `raw_candidate` 的兼容反序列化：老配置里它是 `bool`。
 ///
-/// `true` → [`RawCandidateMode::Always`]、`false` → [`RawCandidateMode::Off`]，与升级前
-/// 逐字节同义。⚠️ **不可改成「认不出就当 Always」**：那会把 `false` 也吞成开启，
-/// 关掉过这一项的用户升级后会突然多出一条原文候选，而他没改过任何设置。
-///
-/// 字符串分支把值重新喂给 derive 生成的实现（同 [`crate::tolerant_de::tolerant`] 的手法），
-/// 值域因此仍只有枚举本身一份；写错了回落出厂档并记进 fallback 供设置端 toast。
+/// `true` → [`RawCandidateMode::Always`]、`false` → [`RawCandidateMode::Off`]。不可改成
+/// 「认不出就当 Always」，那会把 `false` 也吞成开启。字符串分支把值重新喂给 derive 生成的实现
+/// （同 [`crate::tolerant_de::tolerant`]），写错了回落出厂档并记进 fallback 供设置端 toast。
 fn de_raw_candidate<'de, D>(d: D) -> Result<RawCandidateMode, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -944,77 +806,51 @@ where
     }
 }
 
-/// 全局英文配置（[schema.english]）。
+/// 全局英文配置（[schema.english]）。英文是可切换方案，行为不挂靠码表段，免得纯码表用户与
+/// 英文用户互相牵连。
 ///
-/// 英文自 0.114 起是可切换方案，行为不再挂靠码表段——那是历史包袱：英文引擎复用了
-/// 码表的重排路径，配置就顺手挂在了 `schema.codetable` 下，于是纯码表用户的「上屏行为」
-/// 里混着只对英文生效的项，而英文用户改调频策略又会连带改掉五笔的。
-///
-/// ⚠️ **不 derive `Default`**：本段有默认非零值的字段（如 `case_follow_input` 默认 `true`、
-/// `raw_candidate` 默认 [`RawCandidateMode::Always`]），而 `derive(Default)` 只会给零值。
-/// serde 的 `#[serde(default = ...)]` 只在**反序列化缺键**时生效，管不着 `Config::default()`
-/// 这条路——两条路不一致的后果是「出厂配置文件里写着 true、代码里的默认值却是 false」，
-/// 而这种分叉只有端到端测试才看得见（见 `config-design-rules` §R4「L1 与 L2 必须一致」）。
+/// 不 derive `Default`：本段有非零默认值（如 `case_follow_input`、`raw_candidate`），而 serde 的
+/// `default = ...` 管不着 `Config::default()`，两条路会分叉（`config-design-rules` §R4）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EnglishGlobal {
     #[serde(default)]
     pub frequency: EnglishFrequency,
-    /// 英文方案下上屏一个词后**再补一个空格**。
-    ///
-    /// 英文是词间带空格的语言，连续打词时每次上屏都要多按一次空格。开启后由输入法补上。
+    /// 英文方案下上屏一个词后再补一个空格。
     ///
     /// 生效范围（消费点见 `english_appends_space` / `english_space_enabled`）：
-    /// - **所有选中方式**——空格 / 数字键 / 次三选键 / 修饰键选词 / 鼠标点选；
-    /// - **空格上屏原码**（打了词库里没有的词）；
-    /// - **不含**回车上屏原码（终结性动作）、标点键顶屏（会得到 `hello ,`）、顶码。
+    /// - 所有选中方式：空格 / 数字键 / 次三选键 / 修饰键选词 / 鼠标点选；
+    /// - 空格上屏原码（打了词库里没有的词）；
+    /// - 不含回车上屏原码（终结性动作）、标点键顶屏（会得到 `hello ,`）、顶码。
     #[serde(default)]
     pub commit_space: bool,
-    /// 首候选是用户所打原文（英文方案下的「输入即内容」保证）。**三档**，
-    /// 见 [`RawCandidateMode`]；出厂 [`RawCandidateMode::Always`]（＝老配置的 `true`）。
+    /// 首候选是用户所打原文。三档，见 [`RawCandidateMode`]；出厂 [`RawCandidateMode::Always`]
+    /// （＝老配置的 `true`）。
     ///
-    /// 英文引擎的特殊性：输入串本身就是合法上屏内容。而调频一旦把某个词顶到首位，
-    /// 想上屏所打原文就只剩回车这一条路，而回车是终结性动作、会打断连续输入流。
-    /// 码表方案没有这个问题——`aaaa` 不是可上屏文本，所以这条**不下放给码表**。
-    ///
-    /// 与 `input.temp_english.raw_candidate` 是**两个作用域各一份**，不是两个真相源：
-    /// 用户对「中文里插一个英文词」与「长时打英文」的需求本就可能相反。
+    /// 英文输入串本身就是合法上屏内容，调频把某个词顶到首位后，想上屏原文只剩回车（终结性动作）。
+    /// 码表的 `aaaa` 不是可上屏文本，所以不下放给码表。与 `input.temp_english.raw_candidate` 是两个
+    /// 作用域各一份。
     #[serde(default, deserialize_with = "de_raw_candidate")]
     pub raw_candidate: RawCandidateMode,
-    /// 生成大小写变形候选（全小写 / 首字母大写 / 全大写）。**默认关**。
+    /// 生成大小写变形候选（全小写 / 首字母大写 / 全大写）。默认关。
     ///
-    /// ★ 与临英那份（`input.temp_english.case_variants`，默认**开**）默认值刻意相反，
-    /// 这正是「两个作用域场景不同」的证据：临英是「中文里插一个英文词」，人名与专有名词
-    /// 要首字母大写是刚需；英文方案是长时打英文，每条变形吃一个候选位，每页 5 条时吃掉
-    /// 一半。⛔ 合并成一个键必然改掉其中一侧的既有行为。
+    /// 与临英那份（`input.temp_english.case_variants`，默认开）刻意相反：临英里人名、专有名词首字母
+    /// 大写是刚需；英文方案长时打英文，每条变形吃一个候选位。合并成一个键必然改掉其中一侧。
     #[serde(default)]
     pub case_variants: bool,
-    /// 词库候选跟随输入的大小写形态（逐位投影）。**默认开**。
+    /// 词库候选跟随输入的大小写形态（逐位投影）。默认开。
     ///
-    /// 打 `Hi` ⇒ 候选 `hill` 显示为 `Hill`；打 `WoW` ⇒ `wowed` 显示为 `WoWed`。
-    /// **单向**：只投影大写，输入的小写位不会把词库自带的大写压掉（`China` / `iPhone`）。
-    ///
-    /// 与 [`Self::case_variants`] 不重叠：变形候选给的是**整串**三形态、各占一个候选位；
-    /// 本项改的是词库候选**自身**的形态，不新增条目。
+    /// 打 `Hi` ⇒ `hill` 显示为 `Hill`；打 `WoW` ⇒ `wowed` 显示为 `WoWed`。单向：只投影大写，
+    /// 不压掉词库自带的大写（`China` / `iPhone`）。与 [`Self::case_variants`] 不重叠：本项改的是
+    /// 词库候选自身的形态，不新增条目。
     #[serde(default = "default_true")]
     pub case_follow_input: bool,
-    /// 英文词组分词输入（论坛 t42）：用 `'` 切开各段，每段只打前缀。**默认关**。
+    /// 英文词组分词输入：用 `'` 切开各段，每段只打前缀。默认关。
     ///
-    /// `bue'air` ⇒ `Buenos Aires`，`ip'max` ⇒ `iPhone 15 Pro Max`。允许跳词，
-    /// 故 `ip'pro` 也能命中 `iPhone 15 Pro`，不必写成 `ip'15'pro`。
+    /// `bue'air` ⇒ `Buenos Aires`，`ip'max` ⇒ `iPhone 15 Pro Max`；允许跳词。
     ///
-    /// # 为什么默认关
-    ///
-    /// 开启会让 `'` 在英文方案下**不再是第三候选键**（它要被收进缓冲当分词符）。
-    /// 那是所有英文方案用户都会察觉的行为变化，不该由一次升级静默施加。
-    /// 代价本身很小——`'` 选第 3 候选只是数字键 `3` 的冗余别名，同
-    /// `MixModeConfig::free_input_takes_select_keys` 的取舍——但「小」不等于「可以不问」。
-    ///
-    /// # 分词符为什么是 `'` 而不可配
-    ///
-    /// 词库里 57 条 code 本身含撇号（`you're` / `let's` / `O'Reilly`），看似冲突，实则不：
-    /// 英文方案 `input_chars` 默认 `a-z`，`'` 本来就进不了缓冲，那些词一直是靠**前缀**
-    /// 召回的（打 `let` 就能出 `let's`）。且 `convert` 是**合并**而非劫持，原路径照查。
-    /// 真正的备选是 `.`（t153 想拿它作模糊万能键），两者将来要一起定，那时再谈可配。
+    /// 默认关：开启后 `'` 在英文方案下不再是第三候选键，这种可察觉的行为变化不该由升级静默施加。
+    /// 分词符固定为 `'`：含撇号的词（`let's`）本就靠前缀召回、`'` 进不了缓冲，且 `convert` 是合并
+    /// 而非劫持。备选是 `.`，将来要可配时与它一起定。
     #[serde(default)]
     pub phrase_seg: bool,
     /// 英文自动造词（[schema.english.auto_learn]）。见 [`EnglishAutoLearn`]。
@@ -1036,27 +872,21 @@ impl Default for EnglishGlobal {
     }
 }
 
-/// 英文自动造词（[schema.english.auto_learn]，GH#136 / C1-11 子项 1）。
+/// 英文自动造词（[schema.english.auto_learn]）。
 ///
-/// **一个开关管英文方案与临时英文两处**：两者共用 schema id `english` 与同一套用户 /
-/// 临时词库，造出来的词两边都查得到。与临时拼音跟随 `[schema.pinyin.auto_learn]`、自己
-/// 不另设开关同一口径（维护者 2026-10-07 定）。快捷输入里的英文不在此列：那里的原文进
-/// 快捷输入历史（`quick_input.history`）。
+/// 一个开关管英文方案与临时英文两处：两者共用 schema id `english` 与同一套用户 / 临时词库。
+/// 快捷输入里的英文不在此列，那里的原文进快捷输入历史。
 ///
-/// 造词信号是**上屏了词库里没有的原文**——选中原文候选、回车 / 空格上屏原码、标点顶屏
-/// 原文。造词与词频互不相干：造完它就是词库原文，此后按词库词记词频。
-///
-/// 词走**两跳**，与码表 / 拼音的自动造词同构：先进临时词库（有条数上限、会淘汰，拼错一次
-/// 不会永久留下），累计使用 `promote_count` 次后晋升用户词库。
+/// 造词信号是上屏了词库里没有的原文（选中原文候选、回车 / 空格上屏原码、标点顶屏原文）。
+/// 词走两跳，与码表 / 拼音同构：先进临时词库（有上限、会淘汰），累计使用 `promote_count`
+/// 次后晋升用户词库。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EnglishAutoLearn {
     /// 总开关，出厂关。
     #[serde(default)]
     pub enabled: bool,
-    /// 临时词晋升进用户词库所需使用次数（含造词那一次）。**0 = 不晋升**，一直留在临时词库。
-    ///
-    /// L1 与 L2 同值（3），见 [`EnglishGlobal`] 文档里的 §R4——不学码表那份「L1 零值、L2 出厂 3」
-    /// 的分叉。
+    /// 临时词晋升进用户词库所需使用次数（含造词那一次）。0 = 不晋升，一直留在临时词库。
+    /// L1 与 L2 同值（3），见 [`EnglishGlobal`] 文档里的 §R4。
     #[serde(default = "default_english_promote_count")]
     pub promote_count: usize,
     /// 英文临时词库条目上限（0 = 不限）。超出后按「用得最少、造得最早」淘汰。内部字段，
@@ -1083,13 +913,9 @@ impl Default for EnglishAutoLearn {
     }
 }
 
-/// 英文调频（[schema.english.frequency]）。
+/// 英文调频（[schema.english.frequency]）。不 derive `Eq`：`half_life` 是 f64。
 ///
-/// 不 derive `Eq`：`half_life` 是 f64。与 `CodetableFrequency` / `PinyinFrequency` 一致。
-///
-/// **没有 `protect_top_n*`**：那组是「简码位首选保护」，判据是本次输入的码长——英文
-/// 没有简码位这回事，一个 `a` 后面跟的是几万个词而不是钦定首选，照搬过来只会锁死
-/// 前几位不让调频。
+/// 没有 `protect_top_n*`：那是简码位首选保护，英文没有简码位，照搬只会锁死前几位不让调频。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EnglishFrequency {
     #[serde(default)]
@@ -1097,34 +923,26 @@ pub struct EnglishFrequency {
     /// 调频关闭时仍记录选词次数；语义同 [`CodetableFrequency::record_always`]。
     #[serde(default)]
     pub record_always: bool,
-    /// `"top"` / `"step"` / `"position"`，默认 `"position"`。
-    ///
-    /// **与码表默认不同**：英文候选几乎全是前缀匹配，`top`/`step` 那种「用过一次即整体
-    /// 跳到没用过的那批之前」在这里过于激进——误选一次就把词顶到很显眼的位置且不衰减。
-    /// `position` 每次只前移一半、久不用会回落，更适合前缀为主的场景。
+    /// `"top"` / `"step"` / `"position"`，默认 `"position"`（与码表默认不同）：英文候选几乎全是前缀
+    /// 匹配，`top`/`step` 误选一次就把词顶到显眼位置且不衰减；`position` 每次只前移一半、久不用会回落。
     #[serde(default = "default_english_freq_strategy")]
     pub strategy: String,
-    /// 前缀补全候选参与位置提升的范围；**仅 `strategy = "position"` 时生效**。
-    ///
-    /// 英文默认 `"all"`：它的候选**本来就几乎全是前缀补全**（打 `hel` 出 `hello`），
-    /// 收窄到 `single` 等于把调频关掉大半。
+    /// 前缀补全候选参与位置提升的范围；仅 `strategy = "position"` 时生效。
+    /// 英文默认 `"all"`：候选本来就几乎全是前缀补全，收窄到 `single` 等于把调频关掉大半。
     #[serde(default = "default_codetable_promote_prefix")]
     pub promote_prefix: String,
     /// 衰减半衰期（小时），`0` = 内置默认 72 小时；仅 `position` 策略生效。
     #[serde(default)]
     pub half_life: f64,
-    /// **词频记账码口径**（`"candidate"` / `"input"`，默认 `"candidate"`）。
-    ///
-    /// 原 `schema.codetable.frequency.english_code_scope`，随英文段独立迁到这里。
+    /// 词频记账码口径（`"candidate"` / `"input"`，默认 `"candidate"`）。
     ///
     /// | 取值 | 打 `hel` 选 `hello` 记成 | 之后打 `he` |
     /// |---|---|---|
-    /// | `"candidate"`（默认） | `(hello, hello)` | **也受益**（跨码位共享） |
+    /// | `"candidate"`（默认） | `(hello, hello)` | 也受益（跨码位共享） |
     /// | `"input"` | `(hel, hello)` | 不受益（码位独立） |
     ///
-    /// ⚠️ 本项**按候选来源生效，不按当前方案**——混输方案里混进来的英文候选同样读它。
-    /// 故 `EngineManager::freq_settings` 的**每个分支**都要从这里取值，不能只在
-    /// 「当前是英文方案」时读。
+    /// 按候选来源生效，不按当前方案：混输里的英文候选同样读它，故 `EngineManager::freq_settings`
+    /// 的每个分支都要从这里取值。
     #[serde(default = "default_english_code_scope")]
     pub code_scope: String,
 }
@@ -1146,7 +964,7 @@ impl Default for EnglishFrequency {
     }
 }
 
-/// `input.alt_commit` 的值域：Alt+数字 / Alt+空格 上屏候选的**什么**。
+/// `input.alt_commit` 的值域：Alt+数字 / Alt+空格 上屏候选的什么。
 ///
 /// 一个键兼作开关与内容选择（而不是 bool + 内容两键）：关着时内容无意义，两键组合里有一半
 /// 格子是死的；设置页也只需一个下拉。
@@ -1166,7 +984,7 @@ pub enum AltCommit {
 impl AltCommit {
     /// 认不出的值按 `Off` 处理——这是一个会抢宿主快捷键的功能，写错不该让它意外开启。
     ///
-    /// ⚠️ match 臂必须与 `config_schema::ALT_COMMIT_VALUES` 逐项对齐。
+    /// match 臂必须与 `config_schema::ALT_COMMIT_VALUES` 逐项对齐。
     pub fn from_config(s: &str) -> Self {
         match s.trim().to_ascii_lowercase().as_str() {
             "pinyin" => Self::Pinyin,
@@ -1176,7 +994,7 @@ impl AltCommit {
         }
     }
 
-    /// **生效**档：`comment` 档而候选注释总开关（`ui.comment.enabled`）关着时按
+    /// 生效档：`comment` 档而候选注释总开关（`ui.comment.enabled`）关着时按
     /// `Off` 处理——注释恒空，认领 Alt 组合只会把宿主的加速键吞掉。热键登记与协调器分派
     /// 都取这一份，两边口径一致（TSF 吃键集 ⊆ Rust 出字集）。
     pub fn effective(cfg: &Config) -> Self {
@@ -1193,58 +1011,34 @@ impl AltCommit {
 pub struct PinyinGlobalConfig {
     #[serde(default = "default_true")]
     pub use_smart_compose: bool,
-    /// 让**用户上屏过的词**（用户词 + 临时词）参与整句解码（S2）。**出厂 true**
-    /// （2026-09-28 起；此前出厂 false）。
+    /// 让用户上屏过的词（用户词 + 临时词）参与整句解码。出厂 true。
     ///
-    /// 关闭时整句词图只从系统词库建，自造词永远不会成为整句的一段：「盖伦」单独打得出、
-    /// 「有盖伦吗」却被打散（t134）；手动调过权重的词在整句里同样不认（GH#93）。
+    /// 关闭时整句词图只从系统词库建：自造词单独打得出，在整句里却被打散，调过权重的词也不认。
+    /// 已知局限：出厂只露一条整句（赢者通吃）、会改变所有老用户的整句结果（导入词也进图）、
+    /// 用户词 weight 只做了上限截断。取舍是「用户造过的词该在整句里认得出」优先。
     ///
-    /// ★ 曾经出厂关，理由是三条结构事实：出厂只出**一条**整句（赢者通吃，调大
-    /// `sentence_count` 才看得到备选）；它会改变**所有**老用户的整句结果（含从未造过词的
-    /// —— wdict 导入词也进图）；用户词 weight 的标定只做了上限截断、没做分布对齐。这三条
-    /// 仍然成立、仍是用户词进图质量的已知局限，但不再作为出厂值的否决理由——翻开的判断是
-    /// 「用户造过的词该在整句里认得出」比「结果不变」更贴近预期。
-    ///
-    /// ⚠️ 设置页里本项 `enabled_when` 挂在 `use_smart_compose`（智能组词）：智能组词关闭时
-    /// 三条整句建图通路都不会跑（`pinyin::mod.rs` 的三处调用点），本项在引擎侧是死代码，
-    /// UI 必须同步置灰，否则用户会以为开着却看不到效果。
-    ///
-    /// ⚠️ 接用户词与临时词，**不接草稿层**——滑窗草稿会造大量杂词，「用过即转正」
-    /// （草稿 → 临时）是它的质量闸；但临时层也收自动造词直接写入的分步拼接与合成整句，
-    /// 分错段的上屏同样会进图（见 `add_store_nodes` 约束 1）。全拼段见 `pinyin/lattice.rs::add_store_nodes`，
-    /// 简拼段见 `add_store_abbrev_nodes`。
-    ///
-    /// ⚠️ 默认值与 `wind_engine::pinyin::Config::default()` 那份**必须同值**
-    ///（同 completion 两项的先例：两处分叉会让「引擎单测通过、协调器行为不同」这类假绿
-    /// 有可乘之机）。
+    /// 设置页里本项 `enabled_when` 挂在 `use_smart_compose`：智能组词关闭时整句建图不会跑，
+    /// 本项无效，UI 须同步置灰。只接用户词与临时词，不接草稿层（「用过即转正」是草稿的质量闸）；
+    /// 但临时层也收自动造词写入的分步拼接与合成整句（见 `pinyin/lattice.rs::add_store_nodes` 约束 1，
+    /// 简拼段见 `add_store_abbrev_nodes`）。默认值须与 `wind_engine::pinyin::Config::default()` 同值。
     #[serde(default = "default_true")]
     pub sentence_uses_user_words: bool,
-    /// 整句 N-best：候选列表里**露**几条整句。出厂 1 = 单条整句（改动前的行为）。
-    ///
-    /// 起因是可验证性：整句只出一条、赢者通吃，用户词（`sentence_uses_user_words`）赢了
-    /// 才看得见、输了什么线索都没有。>1 时整句块连续摆在候选最前。
-    ///
-    /// ⚠️ 默认值与 `wind_engine::pinyin::Config::default()` 那份**必须同值**。
+    /// 整句 N-best：候选列表里露几条整句。出厂 1 = 单条整句。>1 时整句块连续摆在候选最前，
+    /// 便于看出用户词输给了什么。默认值须与 `wind_engine::pinyin::Config::default()` 同值。
     #[serde(default = "default_sentence_count")]
     pub sentence_count: u8,
-    /// 整句 N-best：解码时**算**几条（切换键的池子）。不足 `sentence_count` 时按后者抬，
+    /// 整句 N-best：解码时算几条（切换键的池子）。不足 `sentence_count` 时按后者抬，
     /// 上限 8（引擎 `SENTENCE_COUNT_LIMIT`）。
     #[serde(default = "default_sentence_count")]
     pub sentence_max_count: u8,
-    /// 整句切换键：在整句池（`sentence_max_count` 条）里滚动显示窗口。**空串 = 关闭（出厂）**。
+    /// 整句切换键：在整句池（`sentence_max_count` 条）里滚动显示窗口。空串 = 关闭（出厂）。
     ///
-    /// 键名取值同 `keys.session_actions` 那张表（`wind_keys::keymap::session_key_name_to_vk`：
-    /// 会话功能键 `tab` 等 + 符号键 `backtick` 等，可带 `shift+`）。不认识的键名**告警后按
-    /// 关闭处理**，不静默。
+    /// 键名取值同 `keys.session_actions`（`wind_keys::keymap::session_key_name_to_vk`，可带 `shift+`），
+    /// 不认识的键名告警后按关闭处理。键即开关，与 `input.english_case_cycle_key` 同形，不另设 `enabled`。
     ///
-    /// ★ **键即开关**，与 `input.english_case_cycle_key` 同形：不再另设 `enabled` bool，否则
-    /// 就是两道闸串联——用户把键配好却没反应，两处显示都正常。
-    ///
-    /// ⚠️ **只在「整句池 ≥ 2 条」时夺取**，其余时候这个键保持它原本的语义。Tab 出厂是
-    /// 高亮下移键、也是配对跳出键与加词界面的切来源键，所以不能无条件抢；它若是当前方案的
-    /// 音节分隔符或被方案 `[key_actions]` 绑定，则一律让位（不夺取）；出厂 `sentence_max_count
-    /// = 1` 时池子恒空，即使配了键也不会吃。撞车时启动体检告警，见
-    /// `Coordinator::warn_sentence_cycle_conflict`。
+    /// 只在整句池 ≥ 2 条时夺取，其余时候保持原语义（Tab 出厂还是高亮下移、配对跳出、加词切来源键）；
+    /// 它若是音节分隔符或被方案 `[key_actions]` 绑定则一律让位。出厂 `sentence_max_count = 1` 时恒不吃。
+    /// 撞车时启动体检告警（`Coordinator::warn_sentence_cycle_conflict`）。
     #[serde(default)]
     pub sentence_cycle_key: String,
     /// 拼音分隔策略（"auto" 等）。原 input.pinyin_separator 收拢至此。
@@ -1254,22 +1048,15 @@ pub struct PinyinGlobalConfig {
     pub fuzzy: PinyinFuzzy,
     /// 英文候选混入（[schema.pinyin.english_merge]）。见 [`PinyinEnglishMerge`]。
     ///
-    /// 与码表那份（[`CodetableEnglishMerge`]）是两件独立的事，**不共享取值**。
+    /// 与码表那份（[`CodetableEnglishMerge`]）是两件独立的事，不共享取值。
     #[serde(default)]
     pub english_merge: PinyinEnglishMerge,
-    /// **单字输入**：开启后候选只出单字。
+    /// 单字输入：开启后候选只出单字。出厂关。
     ///
-    /// ★ 与码表那份（[`CodetableGlobal::single_char`]）是两件独立的事，**不共享取值**
-    /// ——同 `english_merge` 在两侧各有一份的先例。分开的理由是诉求本就不同：码表用户开
-    /// 单字是为了**定长盲打**（单字恒 ≤ 全码长 ⇒ 满码唯一即上屏），拼音没有定长，开了
-    /// 只是「不出词」。分成两份之后，「五笔只出单字、拼音照常出词」在全局层就表达得了，
-    /// 不必逐方案配。
-    ///
-    /// ⚠️ **拼音没有方案级覆盖**（码表才有 `[engine.codetable] single_char`）：一台机器上
-    /// 常有多张码表、简码体系深浅不同，而拼音方案通常只有一张，全局这一份就够了。
-    /// 要加的话先读 [`CodeTableSpec::single_char`] 的文档，那里写着为什么当初只给了码表。
-    ///
-    /// 出厂关。运行时热键切换不写回本项（临时态，见 `State::single_char_override`）。
+    /// 与码表那份（[`CodetableGlobal::single_char`]）不共享取值：码表开单字是为定长盲打（满码唯一即
+    /// 上屏），拼音开了只是「不出词」，分开才能表达「五笔只出单字、拼音照常出词」。拼音没有方案级覆盖，
+    /// 要加先读 [`CodeTableSpec::single_char`] 的文档。运行时热键切换不写回本项
+    /// （临时态，见 `State::single_char_override`）。
     #[serde(default)]
     pub single_char: bool,
     /// 拼音调频（衰减参数；全局唯一，按引擎分——见 docs/redesign/schema-config-layering.md §3.4）。
@@ -1281,13 +1068,13 @@ pub struct PinyinGlobalConfig {
     /// 词组补全的音节数约束（全局唯一）。
     #[serde(default)]
     pub completion: PinyinCompletion,
-    /// 简拼（只打声母）的开关（`[schema.pinyin.abbrev]`，GH#180）。
+    /// 简拼（只打声母）的开关（`[schema.pinyin.abbrev]`）。
     #[serde(default)]
     pub abbrev: PinyinAbbrev,
     /// 双拼相关的全局行为（`[schema.pinyin.shuangpin]`）。
     #[serde(default)]
     pub shuangpin: PinyinShuangpin,
-    /// 辅助码字形二次筛选（`[schema.pinyin.aux_code]`）。**出厂关闭**。
+    /// 辅助码字形二次筛选（`[schema.pinyin.aux_code]`）。出厂关闭。
     #[serde(default)]
     pub aux_code: AuxCodeGlobal,
     /// 上下文语言模型（n-gram 语法模型）。
@@ -1295,40 +1082,29 @@ pub struct PinyinGlobalConfig {
     pub grammar: PinyinGrammar,
 }
 
-/// 辅助码的**全局基线**（`[schema.pinyin.aux_code]`）：拼音候选的字形二次筛选。
+/// 辅助码的全局基线（`[schema.pinyin.aux_code]`）：拼音候选的字形二次筛选。
 ///
 /// 与方案段 `[engine.aux_code]`（[`crate::schema::AuxCodeSpec`]）的分工同码表那套
-/// （schema-config-layering.md §4）：那里放 `files`（这个方案配哪张码表，属方案属性），
-/// 本段放「这台机器怎么用辅助码」的行为基线，方案可用 tri-state `Option` 逐字段覆盖。
-///
-/// 全部字段的出厂值恰好都是类型默认值（`false` / `0`），故用 `derive(Default)`
-/// 而非手写 `impl`——**这不是巧合而是设计**：出厂值必须是「什么都不发生」。
+/// （schema-config-layering.md §4）：那里放 `files`（方案属性），本段放行为基线，方案可用 tri-state
+/// `Option` 逐字段覆盖。全部字段出厂即类型默认值（`false` / `0`），故 `derive(Default)`：
+/// 出厂值必须是「什么都不发生」。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct AuxCodeGlobal {
-    /// 总开关。**出厂 `false`**。
-    ///
-    /// ## ★ 为什么默认必须是关
-    ///
-    /// 同 [`PinyinGrammar::model`] 那条：默认值必须是「什么都不发生」。辅助码会
-    /// **改变一个已有按键的语义**（双拼下反引号从标点变成进入筛选模式），并把
-    /// 数十万条码表读进内存。这两件事都不该在用户没表态时发生。
-    ///
-    /// 方案文件里配了 `files` 只表示「这个方案推荐这张表」，不构成开启意图——
+    /// 总开关，出厂 `false`。辅助码会改变已有按键的语义（双拼下反引号从标点变成进入筛选），并把
+    /// 数十万条码表读进内存，不该在用户没表态时发生。方案配了 `files` 只表示推荐，不构成开启意图，
     /// 判据分离在 [`Self::resolved`]。
     #[serde(default)]
     pub enabled: bool,
-    /// 词组长度上限：字数 > 此值的**词组**一律排除、不参与筛选（0 = 不限）。
+    /// 词组长度上限：字数 > 此值的词组一律排除、不参与筛选（0 = 不限）。
     /// 单字恒参与匹配，不受此限。
     #[serde(default)]
     pub max_phrase_len: usize,
-    /// 直接辅助码（**仅双拼**）：不按引导键，任一音节后直接敲 1～2 位形码当该字的辅码，
-    /// 长句中间也可以（连续辅助码：`gokqk` → 国情，国 = ky；`docs/design/aux-code-continuous.md`）。
-    /// 串尾末字 1 位照旧提前（`docs/design/aux-code-direct.md`）。**出厂 `false`**。
+    /// 直接辅助码（仅双拼）：不按引导键，任一音节后直接敲 1～2 位形码当该字的辅码，长句中间也可以
+    /// （`gokqk` → 国情；`docs/design/aux-code-continuous.md`）。串尾末字 1 位照旧提前
+    /// （`docs/design/aux-code-direct.md`）。出厂 `false`。
     ///
-    /// 只在 [`Self::enabled`] 也生效时起作用：`enabled` 是总闸（码表加载），本项只决定
-    /// 「音节后的字母要不要自动判为辅码」。它改变了字母的语义，要用户表态，故出厂关——
-    /// 与 `enabled` 同一条「默认什么都不发生」。全拼方案写了也不生效（`lim` 既可能是
-    /// li+m 也可能是「厘米」简拼），见 `EngineManager::aux_code_settings_of`。
+    /// 只在 [`Self::enabled`] 也开时起作用。它改变了字母的语义，故出厂关。全拼方案写了也不生效
+    /// （`lim` 既可能是 li+m 也可能是简拼），见 `EngineManager::aux_code_settings_of`。
     #[serde(default)]
     pub direct: bool,
 }
@@ -1359,45 +1135,28 @@ impl AuxCodeGlobal {
 /// 上下文语言模型（`[schema.pinyin.grammar]`）。
 ///
 /// 整句解码原本只有 unigram（词频），分不出「是想 / 思想」这类需要上下文才能定夺的解读。
-/// 本段挂上一个 n-gram 搭配模型给**词与词之间的转移**打分。
+/// 本段挂上一个 n-gram 搭配模型给词与词之间的转移打分。
 /// 设计与实测见 `docs/design/language-model-integration.md`。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PinyinGrammar {
-    /// 总开关，设置页的那个勾。**结构体缺省 true 且只做否决**：真正生效仍要 `weight` 与
-    /// `model` 都配了（见 [`PinyinGrammar::active`]）。出厂配置里桌面把它写成 false、同时
-    /// 备好 weight / model，设置页一勾即用。
-    ///
-    /// ⚠️ 缺省 true 只在**单层**成立：分层合并后桌面出厂的 false 会盖住用户层没写的这一项，
-    /// 手写过 weight + model 的老配置靠 [`Config::migrate_grammar_enabled_value`] 补 true。
+    /// 总开关，设置页的那个勾。结构体缺省 true 且只做否决：真正生效仍要 `weight` 与 `model` 都配了
+    /// （见 [`PinyinGrammar::active`]）。桌面出厂写成 false、同时备好 weight / model，设置页一勾即用。
+    /// 分层合并后 L2 的 false 会盖住用户层没写的这一项，手写过 weight + model 的老配置靠
+    /// [`Config::migrate_grammar_enabled_value`] 补 true。
     #[serde(default = "default_grammar_enabled")]
     pub enabled: bool,
-    /// 影响力权重。**0 = 关闭**：不加载模型文件、不占内存，且整句结果与没有这个
-    /// 功能时**逐位相同**。
-    ///
-    /// 之所以默认关闭：接上模型会大幅重排整句结果（实测跨词边界命中率 88%、
-    /// 搭配分跨度 12.76 nat，是每词固定罚 `WORD_PENALTY`=3.0 的四倍以上），
-    /// 相关常数需要整套重新标定后才谈得上默认开启。
+    /// 影响力权重。0 = 关闭：不加载模型文件、不占内存，整句结果与没有这个功能时逐位相同。
+    /// 默认关：接上模型会大幅重排整句结果，相关常数需整套重新标定（见 `language-model-integration.md`）。
     #[serde(default = "default_grammar_weight")]
     pub weight: f64,
-    /// 模型文件名，相对 `data/schemas/pinyin/grammar/`。**默认空串 = 不启用**。
+    /// 模型文件名，相对 `data/schemas/pinyin/grammar/`。默认空串 = 不启用。
     ///
-    /// 格式是 librime-octagram 的 `.gram`（darts-clone double-array）。
-    /// 随包带 `wanxiang-mini.gram`（万象的 5.3 MB 子集，见设计文档 §11）：桌面默认不启用，
-    /// 移动端经 [`MobileGrammarConfig`] 默认启用。
+    /// 格式是 librime-octagram 的 `.gram`（darts-clone double-array）。随包带 `wanxiang-mini.gram`
+    /// （设计文档 §11）：桌面默认不启用，移动端经 [`MobileGrammarConfig`] 默认启用。
     ///
-    /// ## ★ 为什么默认是空串而不是某个具体模型名
-    ///
-    /// 默认值必须是「什么都不发生」。填任何具体文件名都意味着：一旦用户
-    /// **只**把 `weight` 调成非 0（很自然的做法——文档就是这么写的），
-    /// 就会静默启用那个默认模型。而我们实测过的三个模型里：
-    ///
-    /// - `zh-hans-bgc`（字级）在 192 条整句评测上是 **−6**
-    /// - `zh-hans-bgw`（词级）是 **−4**——它曾长期是本字段的默认值
-    /// - 只有 `wanxiang-lts-zh-hans`（万象，420MB）是正的（+5）
-    ///
-    /// 也就是说，旧的默认值会把用户静默导向一个**质量为负**的模型。
-    /// 空串则让「没配模型」直接落到不启用，用户必须**同时**显式给出 weight 与 model
-    /// 才会生效——两个字段都写过一遍，就不存在「不知道自己开了什么」。
+    /// 默认必须是空串：填任何文件名，用户只把 `weight` 调成非 0 就会静默启用那个模型，而实测过的
+    /// 模型里有质量为负的（评测见 `docs/design/language-model-integration.md`）。必须同时显式给出
+    /// weight 与 model 才生效。
     #[serde(default)]
     pub model: String,
 }
@@ -1427,85 +1186,55 @@ impl Default for PinyinGrammar {
     }
 }
 
-/// 双拼相关的**全局**行为（`[schema.pinyin.shuangpin]`）。
+/// 双拼相关的全局行为（`[schema.pinyin.shuangpin]`）。
 ///
-/// 与**方案级** `engine.pinyin.shuangpin` 的分工：那里放 `layout`（＝这个方案的编码规则，
-/// 换布局就是换方案）；本段放「这台机器怎么用双拼」的偏好，一次配置对所有双拼方案生效。
-///
-/// 判据即本仓那条「配置落点看**实例身份从哪来**」：布局的身份来自方案，故归方案级；而
-/// 「允不允许别人用全拼打字」跟装了哪个双拼方案无关，归全局。
-///
-/// 代价是**不能按方案区分**（`PinyinGlobalConfig` 全体无方案级 override）——做不到
-/// 「小鹤允许、自然码不允许」。真有此需求时应整体重估这一段的归属，而不是单独挪一个键。
+/// 方案级 `engine.pinyin.shuangpin` 放 `layout`（编码规则，属方案）；本段放「这台机器怎么用双拼」，
+/// 对所有双拼方案生效。代价是不能按方案区分（`PinyinGlobalConfig` 无方案级 override），真有此需求
+/// 时应整体重估这一段的归属。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PinyinShuangpin {
-    /// 双拼方案下是否额外把击键串当全拼解释一遍（`nihao` → 「你好」）。
+    /// 双拼方案下是否额外把击键串当全拼解释一遍（`nihao` → 「你好」）。默认 `false`。
     ///
-    /// 服务「多人共用一台机器」：主力用户打双拼，偶尔来的人只会全拼。产出的候选里只有
-    /// **低置信**那部分沉底（前缀补全 / 子短语），精确整词与整句和双拼候选同层竞争，
-    /// 见 [`wind_candidate::Candidate::is_fullpinyin_fallback`]。
-    ///
-    /// 非双拼方案下本项无效（引擎侧判据是 `shuangpin.is_some() && 本项`）；混输的拼音
-    /// 次引擎强制关闭，理由同 `PinyinConfig::enable_partial_final`。
-    ///
-    /// 默认 `false`：新功能，不打扰既有用户。
+    /// 服务多人共用一台机器。只有低置信部分（前缀补全 / 子短语）沉底，精确整词与整句和双拼候选同层竞争，
+    /// 见 [`wind_candidate::Candidate::is_fullpinyin_fallback`]。非双拼方案下无效；混输的拼音次引擎
+    /// 强制关闭，理由同 `PinyinConfig::enable_partial_final`。
     #[serde(default)]
     pub allow_full_pinyin: bool,
 }
 
 /// 词组补全（前缀补全）的音节数约束（`[schema.pinyin.completion]`）。
 ///
-/// 约束的是「码比输入长」的补全词——即引擎在**预测用户尚未输入的音节**。精确匹配、
-/// 子短语、整句、简拼都不受这两项影响（它们不预测任何东西）。
-///
-/// 判据的尺子是 `started` = 输入的完整音节数 + (有尾部残码 ? 1 : 0)，是**输入自身的
-/// 属性**。允许的候选音节数上限 = `started < min_syllables ? started : started + max_extra_syllables`。
+/// 约束的是「码比输入长」的补全词，即引擎在预测用户尚未输入的音节；精确匹配、子短语、整句、
+/// 简拼不受影响。`started` = 输入的完整音节数 + (有尾部残码 ? 1 : 0)，允许的候选音节数上限 =
+/// `started < min_syllables ? started : started + max_extra_syllables`。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PinyinCompletion {
-    /// 至少输入几个音节才给出词组候选。
-    ///
-    /// 补全词的音节数恒 ≥ 输入音节数，故 `started < min_syllables` 时上限收紧到
-    /// `started` 本身，效果就是「只出同音节数的候选」——单字母 `d` 与单音节 `dian`
-    /// 只出单字，不再混进「但是」「电话」。取 1 = 不设限（回到历史行为）。
-    ///
-    /// 尾部残码算作起头的一个音节：`dianh`(dian + h) 已经算 2 个，故它照常出「电话」。
+    /// 至少输入几个音节才给出词组候选。不足时只出同音节数的候选：`d` 与 `dian` 只出单字，
+    /// 不混进「但是」「电话」。取 1 = 不设限。尾部残码算一个音节：`dianh` 已算 2 个，照常出「电话」。
     #[serde(default = "default_completion_min_syllables")]
     pub min_syllables: u32,
-    /// 词组最多比输入多几个音节。
-    ///
-    /// 0 = 只给音节数与输入相等的词；1 = 只补下一个音节（`nih` → 你好/你会，
-    /// 不给 4 音节的「你会发现」）；4 以上才够 `zhonghuar` → 「中华人民共和国」
-    /// （输入 3 音节、词 7 音节）。数值越大，引擎越敢预测你还没打的内容。
+    /// 词组最多比输入多几个音节。0 = 只给音节数相等的词；1 = 只补下一个音节（`nih` → 你好/你会）；
+    /// 4 以上才够 `zhonghuar` → 「中华人民共和国」。数值越大，引擎越敢预测还没打的内容。
     #[serde(default = "default_completion_max_extra_syllables")]
     pub max_extra_syllables: u32,
 }
 
-/// 取 4，与两个参考实现独立选定的门槛一致：librime 的
-/// `UserDictionary::kNumSyllablesToPredictWord = 4`、fcitx5-chinese-addons 的
-/// `LongWordLengthLimit` 默认 4。语义都是「输入不足 4 个音节时不预测用户没打的内容」。
-///
-/// 旧值 2 会让 `zaim`（2 音节）混进「在美国」「在没有」这类 3 音节候选——档位排序
-/// （`cmp_completion_extra`）能把它们压到后面，但压不掉「候选列表里全是没打的音节」
-/// 这个体感。参考实现是从**召回**层面直接不给。
+/// 取 4，与 librime `UserDictionary::kNumSyllablesToPredictWord` 及 fcitx5-chinese-addons
+/// `LongWordLengthLimit` 的默认值一致：输入不足 4 个音节时不预测用户没打的内容。
+/// 在召回层直接不给，比靠档位排序压到后面体感更好。
 fn default_completion_min_syllables() -> u32 {
     4
 }
 
-/// 取 5：与 `min_syllables = 4` 配合，`started = 4` 时上限 4 + 5 = 9 音节，恰好够
-/// 「冰冻三尺非一日之寒」这类 9 音节长成语在打到第 4 个音节时被召回。
-///
-/// ⚠️ **两个旋钮必须配合改**。上限 = `started < min ? started : started + max_extra`，
-/// 故 `min = 4` 配旧值 3 会把上限压到 7，9 音节的长词在任何输入长度下都召回不到
-/// （报障用户正是自己把本项调到 6 才补上的）。
+/// 取 5：配合 `min_syllables = 4`，`started = 4` 时上限 9 音节，够召回「冰冻三尺非一日之寒」。
+/// 两个旋钮必须配合改：`min = 4` 配 3 会把上限压到 7，9 音节的长词永远召回不到。
 fn default_completion_max_extra_syllables() -> u32 {
     5
 }
 
 impl Default for PinyinCompletion {
-    /// ⚠️ 与 [`CodetableGlobal`] 那种「结构体零值」不同，这里给的是**真实默认值**，
-    /// 与 `data/config.toml` 的出厂值一致。零值在此没有意义：`min_syllables = 0`
-    /// 等于不设限，而 `max_extra_syllables = 0` 是一个合法且很严格的取值，
-    /// 没法拿来当「未配置」的哨兵。
+    /// 这里是真实默认值（与 `data/config.toml` 一致），不同于 [`CodetableGlobal`] 的结构体零值：
+    /// `max_extra_syllables = 0` 是合法且严格的取值，不能当「未配置」哨兵。
     fn default() -> Self {
         Self {
             min_syllables: default_completion_min_syllables(),
@@ -1514,10 +1243,8 @@ impl Default for PinyinCompletion {
     }
 }
 
-/// 简拼（只打声母，`nh` → 你好）的开关（`[schema.pinyin.abbrev]`，GH#180）。
-///
-/// 管的是**纯拼音方案**（全拼 / 双拼）。混输里的拼音另有 `schema.mix.enable_pinyin_abbrev`
-/// 管开关，两者取与。
+/// 简拼（只打声母，`nh` → 你好）的开关（`[schema.pinyin.abbrev]`）。管纯拼音方案（全拼 / 双拼）；
+/// 混输里的拼音另有 `schema.mix.enable_pinyin_abbrev`，两者取与。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PinyinAbbrev {
     /// 是否给简拼候选。关掉后纯简拼（`nh`）、混合简拼（`nhao`）、简拼整句
@@ -1537,8 +1264,8 @@ impl Default for PinyinGlobalConfig {
     fn default() -> Self {
         Self {
             use_smart_compose: true,
-            // 出厂开（2026-09-28 起）。与引擎侧 `pinyin::Config::default()` 同值，
-            // UI 侧靠 enabled_when 挂在 use_smart_compose 上防止关了智能组词还显得开着。
+            // 出厂开，与引擎侧 `pinyin::Config::default()` 同值；UI 侧靠 enabled_when 挂在
+            // use_smart_compose 上，防止关了智能组词还显得开着。
             sentence_uses_user_words: true,
             sentence_count: default_sentence_count(),
             sentence_max_count: default_sentence_count(),
@@ -1558,24 +1285,13 @@ impl Default for PinyinGlobalConfig {
     }
 }
 
-/// 全局码表配置（[schema.codetable]）。所有码表方案的公共基线，方案可经
-/// `schema_overrides/{id}.toml` 的 `[codetable]` 段（带 enabled 总开关）逐字段覆盖。
-/// z 键功能（`schema.codetable.z_key_action` 的解析形态）。
+/// z 键功能（`schema.codetable.z_key_action` 的解析形态），也是 `key_actions` 的动词值域。
 ///
-/// # 为什么是方案级、且只管 z
+/// 方案级、且只管 z：字母能否借作引导键取决于它在这张码表里是不是死码，全局 `trigger_keys`
+/// 配字母就是在所有方案里无条件抢键，故字母引导键已移除（见 `Coordinator::special_trigger_vk`）。
+/// 只管 z 是因为本项与 `z_key_repeat` 是同一个键的两个身份，换成别的字母会让 repeat 状态去挡无关的键。
 ///
-/// 字母天然是编码键，能否借作引导键取决于**这张码表里它是不是死码**（五笔 86 的 z 是，
-/// 别的码表未必）。这是方案的属性，全局 `trigger_keys` 无从表达——那里配了字母就是无条件
-/// 抢键，该字母在所有方案里都打不出编码。故字母引导键已从 `trigger_keys` 移除
-/// （见 `Coordinator::special_trigger_vk`），能力收归本项。
-///
-/// 只管 z 而不做「任意字母可配」：本项与 `z_key_repeat` 是同一个键的两个身份，裁决链要在
-/// 二者之间选。若本项可配成别的字母，`z_key_repeat` 的状态就会去挡一个与它无关的键
-/// （旧实现正是如此：配 `u` 作触发键时，按 u 会被 z 的 repeat 历史挡住不进模式）。
-/// 严格同域才自洽。将来真有换字母的需求，改这一处即可。
-///
-/// # 值域
-///
+/// 值域：
 /// - `""` / `"none"`：z 是普通编码字母（默认）
 /// - `"temp_pinyin"`：进临时拼音
 /// - `"temp_english"`：进临时英文
@@ -1584,11 +1300,11 @@ impl Default for PinyinGlobalConfig {
 /// - `"mix:<id>"`：进指定融合模式（`mix:quick_mix` = 内置「快捷」）
 /// - `"special:<id>"`：进指定特殊模式
 /// - `"toggle_schema:<id>"`：切到指定方案，再按回来
-/// - `"switch_schema:<id>"`：切到指定方案，单向（仅全局 `keys.key_actions`，见该变体说明）
+/// - `"switch_schema:<id>"`：切到指定方案，单向（见该变体说明）
 /// - `"command:<cmdbar 表达式>"`：执行一段命令（同工具栏自定义按钮），见 [`BoundAction::Command`]
 ///
 /// 未知值一律解析成 [`BoundAction::None`]（不静默变成别的功能）；指向不存在的 id 由消费端
-/// 的门卫拦下（`mix_members` / `ensure_schema`），并在加载期 `warn`。
+/// 门卫拦下（`mix_members` / `ensure_schema`），并在加载期 `warn`。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BoundAction {
     /// 不启用：z 作正常编码字母。
@@ -1603,7 +1319,7 @@ pub enum BoundAction {
     ///
     /// 无载荷——它是单例，不像 [`Self::Special`] 那样一个引导键对应一份码表方案。
     RareChar,
-    /// 进反查模式：输入**本方案编码**（含通配，任何位置都可通配），只查主码表
+    /// 进反查模式：输入本方案编码（含通配，任何位置都可通配），只查主码表
     /// （reverse-mode spec §3）。无载荷，单例。
     Reverse,
     /// 进指定融合模式（携带实例 id）。
@@ -1611,59 +1327,41 @@ pub enum BoundAction {
     /// 进指定特殊模式（携带实例 id）。
     Special(String),
     /// 切换单字输入（开 / 关 / 切换 / 回落配置）。载荷见 [`SingleCharAction`]。
-    ///
-    /// 它切的是**内存临时态**，不写配置——与同族的 `toggle_schema` 一样是「此刻的动作」，
-    /// 而不是「改一项设置」。切方案即失效（见 `Coordinator::sync_schema_scope`）。
+    /// 切的是内存临时态，不写配置；切方案即失效（见 `Coordinator::sync_schema_scope`）。
     SingleChar(SingleCharAction),
     /// 切候选注释的详细 / 默认态（持久，写回 `ui.comment.state`）。载荷见 [`CommentStateAction`]。
     ///
     /// 本表没有「当前候选窗」可言，故不接受 `session` 档（见 [`CommentStateAction::Session`]）。
     CommentState(CommentStateAction),
-    /// 切到指定方案，**再按回到来源**（携带目标方案 id）。
+    /// 切到指定方案，再按回到来源（携带目标方案 id）。
     ///
-    /// 往返语义由**运行时来源**兜底，不要求目标方案配对称的绑定。
+    /// 往返语义由运行时来源兜底，不要求目标方案配对称的绑定。
     /// 见 docs/design/schema-key-actions.md §5。
     ToggleSchema(String),
-    /// 切到指定方案，**单向**（携带目标方案 id）。原 `keys.schema_hotkeys` 的语义。
+    /// 切到指定方案，单向（携带目标方案 id）。原 `keys.schema_hotkeys` 的语义。
     ///
-    /// 全局 `keys.key_actions` 与方案级 `[key_actions]` **都合法**，但作用域不同：
+    /// 全局 `keys.key_actions` 与方案级 `[key_actions]` 都合法，作用域不同：
+    /// - 全局：在所有方案下都命中，目标方案里再按走幂等分支（`restore_state_for_same_schema`）。
+    /// - 方案级：只在源方案里命中；切走后这把键在目标方案里被吞掉、不动作
+    ///   （`Coordinator::schema_switch_arrival` + `handle_bound_modifier_key_up` 的 `NotBound` 分支）。
     ///
-    /// - **全局**：在所有方案下都命中。目标方案里再按走幂等分支
-    ///   （`restore_state_for_same_schema`：把中英态/CapsLock 归位到能用这个方案打字）。
-    /// - **方案级**：只在源方案里命中。切走之后目标方案没有这条绑定，这把键在那里
-    ///   **被吞掉、不动作**（`Coordinator::schema_switch_arrival` 记录 +
-    ///   `handle_bound_modifier_key_up` 的 `NotBound` 分支）。
-    ///
-    /// ⚠️ **方案级单向没有回程**——这是它与 [`Self::ToggleSchema`] 的全部区别，也正是
-    /// 「切过去就完事、不留状态」这个诉求要的东西；回程请交给另一把键。
-    ///
-    /// ★ 2026-08-30 之前方案级单向被整条禁掉（`bound_key_decision` 让位并 warn），理由是
-    /// 「单向切走就回不来了」。那描述的是**这把键**按不动，而回程本可以由别的键负责，
-    /// 禁令因此挡掉了合法配法。放开的同时必须保留那条吞键兜底：少了它，键会落回全局链，
-    /// 而 `lshift`/`rshift` 出厂就是 `toggle_mode` 键 ⇒「配的是切方案却切了中英文」。
+    /// 方案级单向没有回程，回程交给另一把键。那条吞键兜底必须保留：少了它键会落回全局链，
+    /// 而 `lshift`/`rshift` 出厂是 `toggle_mode`，就成了「配的是切方案却切了中英文」。
     SwitchSchema(String),
     /// 开关软键盘；`Some(id)` 直接切到指定面（直通车），`None` 保持/切上次那面。
     ///
-    /// ⚠️ **不进 [`Self::DISPATCH_ACTIONS`]**，与 `add_word` 同类：软键盘开启后要接管
-    /// 全部主键区按键，得返回占位 composition 激活宿主转发，不符 `dispatch_hotkey`
-    /// 的 `bool` 契约。混进那份白名单的症状是「按了没反应」。
-    /// 判据：**开启后是否需要接管后续按键**——`toggle_toolbar` 不接管，本动作接管。
+    /// 不进 [`Self::DISPATCH_ACTIONS`]（同 `add_word`）：开启后要接管后续按键，得返回占位 composition
+    /// 激活宿主转发，不符 `dispatch_hotkey` 的 `bool` 契约，混进去就是「按了没反应」。
     SoftKeyboard(Option<String>),
-    /// A 类状态切换（`toggle_punct` / `take_screenshot` 那类）。
-    ///
-    /// 携带动词原文，由协调器转交 `dispatch_hotkey` ——那里是这批动作的既有单点，
-    /// 复制一份实现只会让两处慢慢漂移。值域见 [`Self::DISPATCH_ACTIONS`]。
+    /// A 类状态切换（`toggle_punct` / `take_screenshot` 那类）。携带动词原文，由协调器转交
+    /// `dispatch_hotkey`（这批动作的既有单点）。值域见 [`Self::DISPATCH_ACTIONS`]。
     Action(String),
     /// 执行一段 cmdbar 表达式（`command:<表达式>`，如 `command:proc.run("charmap.exe")`）。
     ///
-    /// 执行通路与工具栏自定义按钮**同一条**（`wrap_command_source` + `spawn_command`），故
-    /// 裸表达式与已写成 `$CC(...)` 的都收，求值失败同样弹 toast。载荷是用户原文（只 trim
-    /// 首尾，大小写与内部空白原样保留——`proc.run` 的路径、`open` 的网址都区分大小写）；
-    /// 表达式为空解析成 [`Self::None`]。
-    ///
-    /// 与中英态无关（`only_in_chinese_mode = false`）、不限修饰键
-    /// （`requires_modifier_key = false`）：它不改输入状态，英文态下想开个字符映射表同样合理。
-    /// 目标函数经独立线程执行（`run_command_candidate` 要求未持 `State` 锁），归「锁外」一类。
+    /// 执行通路与工具栏自定义按钮同一条（`wrap_command_source` + `spawn_command`），裸表达式与
+    /// `$CC(...)` 都收。载荷只 trim 首尾、保留大小写（路径与网址区分大小写）；表达式为空解析成
+    /// [`Self::None`]。与中英态无关、不限修饰键。目标函数经独立线程执行（`run_command_candidate`
+    /// 要求未持 `State` 锁）。
     Command(String),
 }
 
@@ -1671,9 +1369,7 @@ pub enum BoundAction {
 const COMMAND_VERB_PREFIX: &str = "command:";
 
 /// 解析 `command:<表达式>`：不是这个动词返回 `None`；是但表达式为空返回 `Some(None)`。
-///
-/// ★ 两张表共用这一份：`SessionAction::parse` 一上来就整串小写化，command 必须在那之前
-/// 剥出来——表达式里的路径与网址区分大小写。前缀本身大小写不敏感，与其余动词同口径。
+/// 两张表共用：`SessionAction::parse` 会整串小写化，command 必须在那之前剥出来。
 fn parse_command_verb(s: &str) -> Option<Option<String>> {
     let s = s.trim();
     let head = s.get(..COMMAND_VERB_PREFIX.len())?;
@@ -1687,12 +1383,9 @@ fn parse_command_verb(s: &str) -> Option<Option<String>> {
 impl BoundAction {
     /// A 类可绑的状态切换动词，与 `Coordinator::dispatch_hotkey` 的分支一一对应。
     ///
-    /// 白名单而非「解析得动就收」：写错的动词若静默通过，按下时分发端匹配不上、
-    /// 什么都不发生，与「没绑上」完全同形，用户无从分辨（同 `is_supported_key_action`）。
-    ///
-    /// `add_word` / `open_add_word_dialog` **不在此列**：它们要返回占位 composition
-    /// 来激活 C++ 转发全部按键，不符 `dispatch_hotkey` 的 `bool` 契约，在按键路径上
-    /// 是单独特判的（`coordinator.rs` 的热键分支）。混进来会变成「按了没反应」。
+    /// 白名单：写错的动词若静默通过，表现与「没绑上」同形（同 `is_supported_key_action`）。
+    /// `add_word` / `open_add_word_dialog` 不在此列：它们要返回占位 composition 激活 C++ 转发，
+    /// 在按键路径上单独特判（`coordinator.rs` 的热键分支）。
     pub const DISPATCH_ACTIONS: &'static [&'static str] = &[
         "toggle_mode",
         "switch_engine",
@@ -1706,19 +1399,17 @@ impl BoundAction {
         "take_screenshot",
     ];
 
-    /// 该动作是否**只能绑无字符键**（修饰键）。
+    /// 该动作是否只能绑无字符键（修饰键）。
     ///
-    /// 判据是「它是不是**从英文态出来**的手段」——是的话，绑在有字符的键上就等于
-    /// 单程票：有字符的键走 keydown 链，那条链在英文模式分水岭之后，英文态根本到不了，
-    /// 于是切过去就再也切不回来。
+    /// 判据是「它是不是从英文态出来的手段」：有字符的键走 keydown 链，在英文模式分水岭之后，
+    /// 绑在上面就切得过去、切不回来。
     ///
     /// | 动作 | 限修饰键 | why |
     /// |---|---|---|
     /// | `toggle_mode` / `switch_engine` / `toggle_schema:*` / `switch_schema:*` | 是 | 正是用来离开/返回英文态的 |
-    /// | `toggle_punct` / `toggle_s2t` / `toggle_t2s` / `take_screenshot` … | 否 | 本就只在中文态有意义（全局那份也带 `CHINESE_ONLY`） |
+    /// | `toggle_punct` / `toggle_s2t` / `toggle_t2s` / `take_screenshot` … | 否 | 本就只在中文态有意义 |
     ///
-    /// 这与「键有没有字符」是**正交的两问**，合起来才定得了插入点，见
-    /// docs/design/schema-key-actions.md §4.1。
+    /// 与「键有没有字符」是正交的两问，见 docs/design/schema-key-actions.md §4.1。
     pub fn requires_modifier_key(&self) -> bool {
         match self {
             Self::ToggleSchema(_) | Self::SwitchSchema(_) => true,
@@ -1727,38 +1418,16 @@ impl BoundAction {
         }
     }
 
-    /// 该动作是否**只在中文态有意义**。
+    /// 该动作是否只在中文态有意义，即组合键的策略位该不该带 `HOTKEY_POLICY_CHINESE_ONLY`
+    /// （`hotkey.rs` 的 `hotkey_policy_for`，对全部动词生效）。
     ///
-    /// 两处共用：
+    /// 分派端（`dispatch_bound_action_hotkey`）借它判 B 类（建 overlay 的）的进入条件，兜住从别的路径
+    /// 转发进来的同一个键。A 类（`BoundAction::Action(_)`）在守卫之前就被 `is_lock_free_bound` 分流走，
+    /// 这是刻意的：A 类只改状态位、不建 overlay，「英文态先切好繁简档」是合理用法；需要内检的动词
+    /// 各自负责（如 `toggle_punct` 的 `effective_chinese`）。
     ///
-    /// - 编译期 —— 组合键要不要带 `HOTKEY_POLICY_CHINESE_ONLY`（`hotkey.rs` 的
-    ///   `hotkey_policy_for`），决定 TSF 在英文态转不转发。**对全部动词生效**。
-    /// - 分派端 —— 组合键命中后判不判 `chinese_mode`（`dispatch_bound_action_hotkey`）。
-    ///   ⚠️ **只对建 overlay 的 B 类生效**，见下。
-    ///
-    /// 分派端那道守卫是给策略位兜底的：策略位说「英文态别转发」，但别的路径转发进来的
-    /// 同一个键仍会到达分派端，那时在英文态凭空建一个组合区就是明显的错。
-    ///
-    /// # 为什么 A 类不走分派端那道守卫
-    ///
-    /// `toggle_punct` / `toggle_s2t` / `toggle_t2s` 在本方法是 `true`（策略位该带
-    /// `CHINESE_ONLY`，与固定字段那段的既有分组一致），但它们是 `BoundAction::Action(_)`，
-    /// 在 `dispatch_bound_action_hotkey` 里被 `is_lock_free_bound` 在守卫**之前**分流走。
-    ///
-    /// 这是**刻意的**，不是漏网：
-    ///
-    /// - A 类只改一个状态位，不建 overlay ⇒ 英文态下改了也不会在屏幕上凭空出现什么；
-    /// - 「英文态下先把繁简档切好，回中文态就生效」是**合理用法**，挡掉是回归；
-    /// - `toggle_punct` 自己在 `dispatch_hotkey` 里有 `effective_chinese` 内检
-    ///   （它改的东西只在中文态有意义），需要内检的动词各自负责。
-    ///
-    /// ⇒ 本方法回答的是「**策略位**该不该带 `CHINESE_ONLY`」；分派端借用它来判 B 类的
-    /// 进入条件，是这个判据的一个**子集用法**，不是它的全部含义。
-    ///
-    /// 判据是「离开英文态的手段吗」的**反面**：`toggle_mode` / `switch_engine` /
-    /// `toggle_schema:` / `switch_schema:` 恰恰要在非中文态按得动（否则切过去回不来），
-    /// 故一律 `false`。`softkeyboard` 也是 `false`——面板画的是「键位 → 符号」，与中英态
-    /// 无关（英文态想打个 ℃ 同样合理），C++ 侧为此专设了软键盘总闸 `IsSoftKeyboard()`。
+    /// 离开英文态的手段（`toggle_mode` / `switch_engine` / `toggle_schema:` / `switch_schema:`）一律
+    /// `false`；`softkeyboard` 也是 `false`，面板与中英态无关（C++ 侧有软键盘总闸 `IsSoftKeyboard()`）。
     pub fn only_in_chinese_mode(&self) -> bool {
         match self {
             // 进 overlay 的一族：中文输入中途才有意义。
@@ -1779,16 +1448,9 @@ impl BoundAction {
             | Self::ToggleSchema(_)
             | Self::SwitchSchema(_)
             | Self::Command(_) => false,
-            // A 类：只有这三个是「中文态才有意义」，其余（`toggle_mode` / `switch_engine` /
-            // `toggle_full_width` / `toggle_toolbar` / `open_settings` / `take_screenshot`）
-            // 两模式都吃。分组与 `hotkey.rs` 里固定字段那两段逐条一致。
-            //
-            // ⚠️ 载荷是 `String`，**编译期穷举不了**，新增的 A 类动词会静默落进 `false`
-            // 那一档。守门交给测试 `chinese_only_covers_every_dispatch_action`：它遍历
-            // `DISPATCH_ACTIONS` 比对一张预期表，新增动词时那条会红，逼人当场表态。
-            //
-            // `open_dictionary`（词库管理）落 `false`：与 `open_settings` 同档——打开的是
-            // 一个独立窗口，跟当前是不是中文输入态无关，英文态下也该按得动。
+            // A 类：只有这三个是「中文态才有意义」，其余（含 `open_dictionary`，打开的是独立窗口）
+            // 两模式都吃，分组与 `hotkey.rs` 固定字段那两段一致。载荷是 `String` 编译期穷举不了，
+            // 由 `chinese_only_covers_every_dispatch_action` 守门。
             Self::Action(a) => matches!(a.as_str(), "toggle_punct" | "toggle_s2t" | "toggle_t2s"),
         }
     }
@@ -1843,9 +1505,8 @@ impl BoundAction {
                 Self::SoftKeyboard(Some(id.to_string()))
             };
         }
-        // 单字输入 `single_char[:<on|off|toggle|follow>]`。裸形式 = toggle（开关类最常绑
-        // 的就是切换）。⚠️ 载荷写错落 `None` 而不是回落某个状态：静默降级会让
-        // `single_char:yes` 这种拼错表现成「切了但方向不对」，那比「这个键没绑上」更难倒推。
+        // 单字输入 `single_char[:<on|off|toggle|follow>]`，裸形式 = toggle。载荷写错落 `None`
+        // 而不是回落某个状态：拼错表现成「切了但方向不对」比「这个键没绑上」更难倒推。
         if s.trim().eq_ignore_ascii_case("single_char") {
             return Self::SingleChar(SingleCharAction::Toggle);
         }
@@ -1886,9 +1547,8 @@ impl BoundAction {
 
 /// 翻页动作在「翻不动」时怎么办（`page_prev` / `page_next` 的后缀）。
 ///
-/// 外面的 `keys.overflow.page_key` 是全局档；要把策略落到单个键上（「只有逗号翻不动时上屏」，
-/// GH#249），在自定义按键里给那个键绑带后缀的翻页动作。翻不动判定与闸门见
-/// `Coordinator::page_key_overflow_to_punct`。
+/// `keys.overflow.page_key` 是全局档；要落到单个键上（如「只有逗号翻不动时上屏」），在自定义按键
+/// 里给那个键绑带后缀的翻页动作。翻不动判定与闸门见 `Coordinator::page_key_overflow_to_punct`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageOverflow {
     /// 跟随全局档 `keys.overflow.page_key`（出厂 / 写 `page_prev`）。
@@ -1949,37 +1609,21 @@ impl CaretEnd {
     }
 }
 
-/// **会话态**按键动词（`keys.session_actions` 的值域）。
+/// 会话态按键动词（`keys.session_actions` 的值域）。
 ///
-/// 与 [`BoundAction`] 是同构的姊妹表，分野是**触发态**：那张表管「无输入会话时这个键干
-/// 什么」（进模式 / 切方案 / 状态切换），本表管「**正在组合一段输入**时这个键干什么」。
+/// 与 [`BoundAction`] 是姊妹表，分野是触发态：那张管无输入会话时，本表管正在组合一段输入时。
+/// 必须是两张表：同一个键在两种态下本就是两个动作（Tab 有会话时翻页、无会话时是制表符）；
+/// 且边界与 C++ 侧的按键可达性区间重合（`_IsSessionKey` 功能键有会话时免费转发、可打印符号键须带
+/// `HOTKEY_POLICY_FORWARD_ONLY`、修饰键与 CapsLock 只有 keyup），见 docs/design/session-key-actions.md §3。
 ///
-/// # 为什么必须是两张表，而不是一张带条件的表
+/// 判据是「有会话」不是「有候选」：`clear` 在打了码还没出候选时也要能用，且须与 C++ 的
+/// `hasComp || _hasCandidates` 同构。只在有候选时才有意义的动词由消费点自己判。
 ///
-/// 因为诉求本身就是「同一个键在两种态下是两个动作」：Tab 有会话时翻页、无会话时该是
-/// 宿主的制表符。合表就只能往动词里长出条件维度，分发端迟早要拆回来。
-///
-/// 更硬的一条是**可达性是物理约束**：C++ 侧把键分成三个区间——`_IsSessionKey` 里的功能键
-/// （Tab / Esc / 方向 / PgUp…）有会话时**免费转发**、可打印符号键须带
-/// `HOTKEY_POLICY_FORWARD_ONLY` 显式登记、修饰键与 CapsLock 只有 keyup。两张表的边界与
-/// 这个区间划分重合，不是巧合。详见 docs/design/session-key-actions.md §3。
-///
-/// # 判据是「有会话」，不是「有候选」
-///
-/// 初版拟名 `candidate_actions`、判据取 `!candidates.is_empty()`，**已否决**：`clear` 这类
-/// 动词在「打了码还没出候选」时同样要能用，而 C++ 的 `FORWARD_ONLY` 闸门判据本来就是
-/// `hasComp || _hasCandidates`。两侧判据必须同构，否则「C++ 吃键集 ⊆ Rust 出字集」这条
-/// 不变量守不住。
-///
-/// 「有候选才有意义」的动词（导航类）由**消费点**自己守一行空候选判据，不靠表结构表达
-/// ——状态维度进分发端是加法，进表结构是乘法。
-///
-/// # 值域
-///
+/// 值域：
 /// - `"none"`：在本态禁用该键（第三态，非「未声明」）
 /// - `"page_prev"` / `"page_next"`：上一页 / 下一页（候选展开后逐行移动激活行）
-/// - `"page_screen_prev"` / `"page_screen_next"`：上一屏 / 下一屏——**候选展开后**翻一整屏
-///   （`rows` 行），**未展开时与 `page_prev` / `page_next` 完全相同**（翻一页，首次下翻仍先展开）
+/// - `"page_screen_prev"` / `"page_screen_next"`：候选展开后翻一整屏（`rows` 行），未展开时
+///   与 `page_prev` / `page_next` 相同
 /// - `"highlight_up"` / `"highlight_down"`：高亮上移 / 下移
 /// - `"cancel"`（别名 `"clear"`）：放弃当前输入，等同 Esc
 /// - `"select_candidate:N"`：选中当前页第 N 个候选（N 从 1 起、至多 10，`2` 即次选键）
@@ -2000,116 +1644,70 @@ pub enum SessionAction {
     PageScreenNext,
     HighlightUp,
     HighlightDown,
-    /// 放弃当前输入：清空编码与候选，并退出 overlay 模式。**语义完全等同 Esc**。
+    /// 放弃当前输入：清空编码与候选，并退出 overlay 模式，语义等同 Esc。
     ///
-    /// # 为什么不另立一个「只清空不退模式」的 `clear`
-    ///
-    /// 用户诉求原话是「支持自定义输入清空的热键，因为 ESC 在日常输入时有些太远」——
-    /// 要的是 **Esc 的替代键**，不是一个新语义。而「清空但留在模式里」在普通输入下与
-    /// 本动作**完全无区别**（普通输入没有模式可退），只有 overlay 模式下才分得出来，
-    /// 属于没有人要、却要额外定义五个模式各自边界的语义分叉。
-    ///
-    /// `"clear"` 因此收作**别名**而非第二个动词：用户按「清空」的心智去写照样能用，
-    /// 但内核只有一种行为，不会出现「两个名字行为微妙不同」这种最难查的配置陷阱。
+    /// 诉求是 Esc 的替代键，不另立「只清空不退模式」的语义（普通输入下两者无区别）。`"clear"` 收作
+    /// 别名而非第二个动词，避免两个名字行为微妙不同。
     Cancel,
-    /// 选中当前页第 N 个候选（**N 从 1 起，至多 10**，1 = 首选）。收编自 `keys.select_key_groups`。
-    ///
-    /// 载荷用「第几个」而非内部的 0-based 偏移：配置是给人读的，`select_candidate:2`
-    /// 一眼就是「次选键」。转换成偏移在消费点做一次即可。
+    /// 选中当前页第 N 个候选（N 从 1 起，至多 10，1 = 首选）。收编自 `keys.select_key_groups`。
+    /// 载荷用「第几个」而非 0-based 偏移，配置是给人读的。
     SelectCandidate(u8),
-    /// 切换单字输入。**动词、裸形式与载荷都与 [`BoundAction::SingleChar`] 逐字一致**。
+    /// 切换单字输入。动词、裸形式与载荷都与 [`BoundAction::SingleChar`] 一致。
     ///
-    /// 两张表都有它，是因为用户两种态下都想按：`key_actions` 那张表只解析得出符号键、
-    /// 字母 z 与修饰键，Tab / 翻页键那一批要靠本表才表达得出来（同 `aux_code` 的处境，
-    /// 见 [`Self::AuxCode`] 的说明）。
-    ///
-    /// ⚠️ 只在一张表里加是**错的**：另一张表里写同一个动词会落 `None`，表现成「这个键
-    /// 没绑上」——而用户只是把配置从一张表挪到了另一张。这条纪律见
-    /// [`Self::parse`] 里 `aux_code` 那一行的注释。
+    /// 两张表都有：`key_actions` 只解析得出符号键、字母 z 与修饰键，Tab / 翻页键要靠本表（同
+    /// [`Self::AuxCode`]）。只在一张表里加是错的，另一张写同一个动词会落 `None`（见 [`Self::parse`]）。
     SingleChar(SingleCharAction),
-    /// 切候选注释态。**动词与载荷同 [`BoundAction::CommentState`]**，另多一档 `session`
+    /// 切候选注释态。动词与载荷同 [`BoundAction::CommentState`]，另多一档 `session`
     /// （只翻转当前候选窗，不写配置）。
     CommentState(CommentStateAction),
-    /// 以词定字：取当前高亮候选词的第 N 个字（**N 从 1 起**）。收编自 `keys.select_char_keys`。
+    /// 以词定字：取当前高亮候选词的第 N 个字（N 从 1 起）。收编自 `keys.select_char_keys`。
     SelectChar(u8),
     /// 进辅助码筛选：对已出的候选按字形码二次过滤。
     ///
-    /// # 为什么它在**这张**表而不是 `key_actions`
-    ///
-    /// 辅助码是**对已有候选的操作**——`enter_aux_code` 第一件事就是查
-    /// `state.candidates.is_empty()`，空了直接拒。这正是本表的定义性质
-    /// （见 [`Self::requires_candidates`]），而 `key_actions` 那张表管的是「给这个键指定
-    /// 一个功能」，不以有会话为前提。
-    ///
-    /// 实际后果：`key_actions` 只认符号键、字母 z 与四个修饰键
-    /// （`key_action_name_to_vk` 的值域），Tab / PageDown / 方向键那一批**根本解析不出来**，
-    /// 写进去会被静默丢弃。本表认得它们，于是「Tab 进辅助码」才表达得出来。
-    ///
-    /// ⚠️ `key_actions` 里的 `aux_code` 仍然有效且保留（双拼出厂就是 `backtick = "aux_code"`）。
-    /// 两条路都通向同一个 `enter_aux_code`，差别只在**哪些键名解析得出来**。
-    ///
-    /// 载荷 [`AuxCodeShare`] 是**这个动词的参数**（共键降级目标），不是第二条绑定，
-    /// 理由见那里。
+    /// 放在这张表：辅助码是对已有候选的操作（`enter_aux_code` 无候选即拒），且 `key_actions` 只认
+    /// 符号键、字母 z 与修饰键，Tab / PageDown / 方向键写进去会被静默丢弃。`key_actions` 里的
+    /// `aux_code` 仍有效（双拼出厂 `backtick = "aux_code"`），两条路都通向 `enter_aux_code`。
+    /// 载荷 [`AuxCodeShare`] 是这个动词的参数（共键降级目标），不是第二条绑定。
     AuxCode(AuxCodeShare),
-    /// 上屏当前高亮候选——空格在「有候选」时做的那件事，换一个键来按。
+    /// 上屏当前高亮候选，空格在有候选时做的那件事，换一个键来按。
     ///
-    /// 执行体与各模式空格臂是**同一个函数**（`Coordinator::commit_highlighted`），词频、
-    /// 上屏历史、统计、造词、补空格等副作用逐字一致。
-    ///
-    /// ⚠️ 两个空格变体，取舍相反：
-    ///
-    /// - 临英 `space_as_input`（空格作输入字符）**不跟**：那是「空格这个键拿去干别的」，
-    ///   上屏职责移交给了别的键，绑本动词的用户要的正是「上屏高亮」这个动作本身。
-    /// - 联想态 `space_commits = false`（空格不选联想）**跟**：它表达的是「联想的高亮是
-    ///   输入法猜的，别替我选」，这个意愿与用哪个键无关。此时本动词不吞键、回落原语义。
-    ///
-    /// 只在有候选时生效（[`Self::requires_candidates`]）：没有高亮可上屏时按键回落原语义，
-    /// 空码空格的那套处置（`space_on_empty_behavior`）不属于本动词。
+    /// 执行体与各模式空格臂同一个函数（`Coordinator::commit_highlighted`），副作用一致。两个空格变体
+    /// 取舍相反：临英 `space_as_input` 不跟（绑本动词要的就是上屏动作本身）；联想态 `space_commits = false`
+    /// 跟（「别替我选联想」与用哪个键无关），此时不吞键、回落原语义。
+    /// 只在有候选时生效（[`Self::requires_candidates`]），空码空格的处置不属于本动词。
     CommitHighlighted,
     /// 编码区光标左移一字符（`input_buffer` 内，已转换前缀进不去）。
     ///
-    /// 服务的交互形态（GH#234，C2-97）：「← 从编码末尾进入编辑编码」。底层是
-    /// `preedit_cursor::BufEdit::move_left`——光标是**编辑位置**，不参与引擎查询，
-    /// 中间改码后按整串重算候选，与末尾输入无差别。
-    ///
-    /// 边界：已在开头 = 吞键（方向键有宿主原义，但组合进行中把 ← 交给宿主会让宿主光标
-    /// 与组合区错位，macOS 同款行为也是吞）；**无会话 = 放行**（空闲 ← 是宿主的 ←）。
-    /// **overlay 让位**：临拼 / 快捷输入等各有自己的缓冲光标（`state.active` 非 `None`），
-    /// 本动词不接管，消费点据此放行。
+    /// 交互形态是「← 从编码末尾进入编辑编码」，底层是 `preedit_cursor::BufEdit::move_left`；光标是编辑
+    /// 位置，不参与引擎查询，改码后按整串重算候选。已在开头 = 吞键（交给宿主会让宿主光标与组合区错位）；
+    /// 无会话 = 放行。overlay 让位：临拼 / 快捷输入等有自己的缓冲光标（`state.active` 非 `None`）。
     CaretLeft,
-    /// 编码区光标右移一字符；**已在末尾 = 做 [`CaretEnd`] 指定的动作**，默认上屏高亮候选（macOS「→ 进入选词」）。
+    /// 编码区光标右移一字符；已在末尾 = 做 [`CaretEnd`] 指定的动作，默认上屏高亮候选（macOS「→ 进入选词」）。
     /// 写法 `caret_right` / `caret_right:commit|next|tip`。
     ///
-    /// 边沿语义必须内建在动词里：「光标到末尾那一下改为选词」用静态绑定表达不出来——
-    /// 绑 `commit_highlighted` 就永远移动不了光标，绑移动就永远选不了词。无候选时末尾
-    /// 那一下纯吞键（没有可上屏的东西，也不该把 → 交给宿主）。其余边界同 [`Self::CaretLeft`]。
+    /// 边沿语义必须内建在动词里，静态绑定表达不出「到末尾那一下改为选词」。无候选时末尾那一下纯吞键。
+    /// 其余边界同 [`Self::CaretLeft`]。
     CaretRight(CaretEnd),
-    /// 编码区光标**整音节**左跳（rime `left_by_syllable`）：落到前一个音节起点，已在开头则回绕到
+    /// 编码区光标整音节左跳（rime `left_by_syllable`）：落到前一个音节起点，已在开头则回绕到
     /// 最后一个音节起点。分隔符 `'` 之后算起点。无可用切分（双拼、码表单码等）时退回左移一字符。
     /// 可绑到普通键（会话键表只认键 + Shift）。Ctrl+← 是内建的另一条通路（见
     /// `Compiler` 的 Ctrl+←/→ 转发登记与协调器的 Ctrl 分支），不经本动词。
     SyllablePrev,
-    /// 编码区光标**整音节**右跳（rime `right_by_syllable`），已在末尾则回绕到第一个音节边界。
+    /// 编码区光标整音节右跳（rime `right_by_syllable`），已在末尾则回绕到第一个音节边界。
     /// 其余同 [`Self::SyllablePrev`]。
     SyllableNext,
-    /// 开 / 关高亮候选的悬停提示气泡（反查编码、拆字等），不用鼠标悬停（t372）。
+    /// 开 / 关高亮候选的悬停提示气泡（反查编码、拆字等），不用鼠标悬停。
     ///
-    /// 走鼠标悬停同一条通路（悬停目标 = 高亮项），气泡内容与定位完全一致；再按一次收起，
-    /// 移动高亮 / 翻页 / 候选刷新都会收起（同鼠标离开）。需要候选；候选没有提示内容时无效果。
+    /// 走鼠标悬停同一条通路（悬停目标 = 高亮项）；再按一次收起，移动高亮 / 翻页 / 候选刷新都会收起。
+    /// 需要候选；候选没有提示内容时无效果。
     ToggleTip,
-    /// 上屏编码——回车在「有编码」时做的那件事，换一个键来按（极点 / 小鸭用 Ctrl）。
+    /// 上屏编码，回车在有编码时做的那件事，换一个键来按（极点 / 小鸭用 Ctrl）。
     ///
-    /// 恒为上屏编码，**不看 `input.enter_behavior`**：「回车清空编码」是回车这个键的配置，
-    /// 用户另绑一个键要的就是上屏编码。
-    ///
-    /// 执行方式是把这个键当成一次回车重新分派、且那一下强制走上屏编码那一支
-    /// （`Coordinator::redispatch_commit_code`），不另写上屏：回车在主路与各 overlay 里
-    /// 各有一条臂，另写一份就得跟着这些臂逐个维护。
-    ///
-    /// 不要候选（[`Self::requires_candidates`] 为假）：空码时上屏原码恰是它最常用的场合。
-    /// 无会话、联想态（没有编码可上屏）时放行，按键回落原语义。
+    /// 恒为上屏编码，不看 `input.enter_behavior`。执行方式是把这个键当回车重新分派并强制走上屏编码
+    /// 那一支（`Coordinator::redispatch_commit_code`），不另写上屏，免得跟着各模式的回车臂逐个维护。
+    /// 不要候选（空码时上屏原码恰是常用场合）；无会话、联想态时放行。
     CommitCode,
-    /// 执行一段 cmdbar 表达式，**当前组合原样不动**（不清空、不上屏），吞键。
+    /// 执行一段 cmdbar 表达式，当前组合原样不动（不清空、不上屏），吞键。
     /// 写法、载荷与执行通路都与 [`BoundAction::Command`] 逐字一致。
     ///
     /// 不要候选（[`Self::requires_candidates`] 为假）：打了码还没出候选时也能按；判据与
@@ -2117,62 +1715,38 @@ pub enum SessionAction {
     Command(String),
 }
 
-/// 辅助码触发键的「共键」参数：**进不去辅助码时，这个键改做什么**。
+/// 辅助码触发键的「共键」参数：进不去辅助码时，这个键改做什么。
 ///
-/// # 为什么是参数，而不是 `page_next_aux_code` 这种组合动词或 `a|b` 通用链
+/// 做成动词参数，而不是组合动词（`page_next_aux_code` 会先翻页再进入，名字随组合数相乘）或通用
+/// 降级链（`aux_code|page_next`，可表达的组合远多于有意义的，已在 `docs/design/key-resolver-unification.md`
+/// §5 否决）。一组取值只对一个动词有意义 ⇒ 它是那个动词的参数。
 ///
-/// 需求是「Tab 既翻页又进辅助码」。三种表达形态里：
-///
-/// 1. **组合动词**（`page_next_aux_code`）：语义是「两个都做」——先翻页再进入，于是进入
-///    瞬间停在第 2 页、首选被翻走，还得在进入路径上保存/恢复 `current_page` 去补救。
-///    且每多一个组合就多一个动词，名字随组合数相乘。
-/// 2. **通用降级链**（`aux_code|page_next`）：要给每个动词定义「不适用」，而那些条件多是
-///    实现细节（`page_next` 的「失败」是已在末页 ⇒ 语法允许的 `page_next|cancel` 会在末页
-///    取消整段输入）。可表达的组合远多于有意义的组合，终点是 DSL。**已在
-///    `docs/design/key-resolver-unification.md` §5「不做通用降级链」否决过**。
-/// 3. **动词参数**（本形态）：值域封闭在 `aux_code` 上，配不出无意义的组合，
-///    与 `select_candidate:N` / `mix:id` / `special:id` 同一套 `verb:arg` 写法。
-///
-/// 判据是本仓已用过三次的那条：**一组取值只对一个动词有意义 ⇒ 它是那个动词的参数**。
-/// 「与翻页共键」只对 `aux_code` 成立（没有别的动词需要它），故取第 3 种。
-///
-/// # 语义：顺序即优先级
-///
-/// `aux_code:page_next` = **先试辅助码，进不去才翻页**。「进不去」不需要新定义——
-/// `enter_aux_code` 本就是「门卫没过返回 `None` 不吞键」的契约，四道门卫
-/// （已在别的 overlay / 未启用 / 无码表 / 无候选）直接复用。于是这几种情形全部天然成立：
-///
-/// - 主输入路 + 辅助码可用 → 进辅助码，**不翻页**（首选不会被翻走）；
-/// - 已在辅助码态内 → `active.is_some()` 拒 ⇒ 降级翻页（模式内继续翻页）；
-/// - 辅助码未开启 / 方案无码表 → 拒 ⇒ 退化成纯翻页键；
-/// - 无候选 → 两个成员都 `requires_candidates` ⇒ 按键放行，Tab 仍是宿主的制表符。
+/// 顺序即优先级：`aux_code:page_next` = 先试辅助码，进不去才翻页。「进不去」复用 `enter_aux_code`
+/// 门卫不过返回 `None` 的契约：
+/// - 主输入路 + 辅助码可用 → 进辅助码，不翻页（首选不会被翻走）；
+/// - 已在辅助码态内 → 降级翻页；
+/// - 辅助码未开启 / 方案无码表 → 退化成纯翻页键；
+/// - 无候选 → 两个成员都 `requires_candidates`，按键放行，Tab 仍是宿主的制表符。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuxCodeShare {
     /// 专用触发键（`aux_code`）：进不去就不吞键，落该键原本的语义。
     Solo,
-    /// 与下翻页共键（`aux_code:page_next`）：进不去时翻下一页。
-    ///
-    /// **只收下翻页**：`page_prev` 共键没有对应的心智（「翻回上一页」与「进筛选」不构成
-    /// 同一个递进动作），放开只是让值域变大。要加成员先问它有没有真实用例。
+    /// 与下翻页共键（`aux_code:page_next`）：进不去时翻下一页。只收下翻页，`page_prev` 共键没有
+    /// 对应的心智；要加成员先问有没有真实用例。
     PageNext,
 }
 
 impl SessionAction {
-    /// 解析配置字符串。大小写与首尾空白不敏感；未知值 → [`Self::None`]。
-    ///
-    /// 未知值不静默变成别的动作，与 `BoundAction::parse` 同策略。写错的动词落 `None`
-    /// 后表现为「这个键在会话态没绑定」，与「没配」同形——所以调用方在加载期要 `warn`
-    /// （见 [`Self::parse_checked`]）。
+    /// 解析配置字符串。大小写与首尾空白不敏感；未知值 → [`Self::None`]，不静默变成别的动作。
+    /// 写错的动词与「没配」同形，调用方在加载期要 `warn`（见 [`Self::parse_checked`]）。
     pub fn parse(s: &str) -> Self {
-        // `command:` 必须在小写化**之前**剥出来：表达式原样保留大小写（路径 / 网址）。
+        // `command:` 必须在小写化之前剥出来：表达式原样保留大小写（路径 / 网址）。
         if let Some(expr) = parse_command_verb(s) {
             return expr.map_or(Self::None, Self::Command);
         }
         let t = s.trim().to_lowercase();
-        // 带载荷的两个动词。序号从 1 起——`select_candidate` 上限随每页候选数上限（10，
-        // 数字键 0 选第 10 个，见 coordinator 的 `handle_number_key_select`）到 10；
-        // `select_char` 仍限个位数，词长远不到两位数，放宽只会让
-        // `select_char:99` 这种一定不生效的配置被静默收下。
+        // 带载荷的两个动词，序号从 1 起。`select_candidate` 上限 10（数字键 0 选第 10 个，见
+        // `handle_number_key_select`）；`select_char` 限个位数，放宽只会静默收下必不生效的配置。
         if let Some(n) = t.strip_prefix("select_candidate:") {
             return match n.trim().parse::<u8>() {
                 Ok(n @ 1..=10) => Self::SelectCandidate(n),
@@ -2194,7 +1768,7 @@ impl SessionAction {
                 _ => Self::None,
             };
         }
-        // 单字输入。动词、裸形式与载荷须与 `BoundAction::parse` 里那一段**逐字一致**，
+        // 单字输入。动词、裸形式与载荷须与 `BoundAction::parse` 里那一段逐字一致，
         // 否则用户把配置从一张表挪到另一张就静默失效。
         if t == "single_char" {
             return Self::SingleChar(SingleCharAction::Toggle);
@@ -2253,26 +1827,19 @@ impl SessionAction {
         }
     }
 
-    /// 该动作是否**只在有候选时**才有意义。
+    /// 该动作是否只在有候选时才有意义。
     ///
-    /// 导航类（翻页 / 移高亮）在没有候选时无事可做，消费点据此放行按键、回落原语义；
-    /// 而 `cancel` 在「打了码还没出候选」时恰恰**必须**生效——那正是判据从「有候选」
-    /// 放宽到「有会话」的理由（见 docs/design/session-key-actions.md §4）。
-    ///
-    /// ★ 判据挂在**动作**上而不是写在消费点：消费点有三个（主输入 / mix / 候选导航），
-    /// 写在那里就要维护三份一致的守卫，而这类「三处必须一致」的约束本仓已栽过四次。
+    /// 导航类在没有候选时无事可做，消费点据此放行按键；`cancel` 在打了码还没出候选时必须生效
+    /// （见 docs/design/session-key-actions.md §4）。判据挂在动作上而非三个消费点（主输入 / mix /
+    /// 候选导航）各写一份。
     pub fn requires_candidates(&self) -> bool {
         // 注释态：只有翻转当前候选窗（`session`）依赖候选窗；改持久态随时可做。
         if let Self::CommentState(a) = self {
             return *a == CommentStateAction::Session;
         }
-        // `SingleChar` 与 `Cancel` 同侧：切换在「打了码还没出候选」时**恰恰最该生效**
-        // ——单字模式下某个码本来就可能一条候选都不剩，那时按键若被判成「无事可做」而放行，
-        // 用户就再也关不掉它了。
-        // `Command` 同侧：命令与候选无关，打了码没出候选时照样要能执行。
-        // `CommitCode` 同侧：空码上屏原码正是它的用处。
-        // `CaretLeft` / `CaretRight` 同侧：光标移动改的是**编码本身**，「打了码还没出候选」
-        // 时恰恰是最想改码的时刻（候选因无匹配而空）。
+        // 以下与 `Cancel` 同侧，在「打了码还没出候选」时也要生效：`SingleChar`（单字模式下可能
+        // 一条候选都不剩，放行就再也关不掉）、`Command`、`CommitCode`（空码上屏原码）、
+        // `CaretLeft` / `CaretRight`（候选因无匹配而空时正是最想改码的时刻）。
         !matches!(
             self,
             Self::None
@@ -2303,11 +1870,8 @@ impl SessionAction {
         }
     }
 
-    /// 同 [`Self::parse`]，但把「写错的动词」与「显式 none」区分开，供加载期告警。
-    ///
-    /// 返回 `None` 表示**值不认识**；`Some(Self::None)` 表示用户明确写了 `none`。
-    /// 静默忽略拼写错误与「功能坏了」完全同形，用户无从分辨——同
-    /// `is_supported_key_action` 立的口径。
+    /// 同 [`Self::parse`]，但区分「写错的动词」与「显式 none」，供加载期告警。
+    /// 返回 `None` 表示值不认识；`Some(Self::None)` 表示用户明确写了 `none`。
     pub fn parse_checked(s: &str) -> Option<Self> {
         let t = s.trim();
         if t.is_empty() || t.eq_ignore_ascii_case("none") {
@@ -2326,11 +1890,9 @@ impl SessionAction {
     }
 }
 
-/// 配置字符串形式（折算与写回用）。与 [`SessionAction::parse`] 互为逆运算。
-///
-/// 用 `Display` 而非 `as_str() -> &'static str`：带载荷的动词（`select_candidate:2`）
-/// 拼不出 `'static` 串。**一个真相源**——写回与解析对不上的话，折算出来的配置自己就
-/// 读不回来，而那是启动时才暴露、且看起来像「配置丢了」的一类问题。
+/// 配置字符串形式（折算与写回用），与 [`SessionAction::parse`] 互为逆运算。
+/// 用 `Display` 而非 `as_str()`：带载荷的动词拼不出 `'static` 串。两边对不上的话，
+/// 折算出来的配置自己就读不回来。
 impl std::fmt::Display for SessionAction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -2374,12 +1936,13 @@ impl std::fmt::Display for SessionAction {
     }
 }
 
+/// 全局码表配置（[schema.codetable]）。所有码表方案的公共基线，方案可经
+/// `schema_overrides/{id}.toml` 的 `[codetable]` 段（带 enabled 总开关）逐字段覆盖。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CodetableGlobal {
     /// 英文候选混入（[schema.codetable.english_merge]）。见 [`CodetableEnglishMerge`]。
-    ///
-    /// ⚠️ 方案级覆盖须**单独登记**进 `SCHEMA_OVERRIDES`：`schema.codetable.` 那条段前缀
-    /// 刻意不递归到子段（见 `SchemaOverride::key` 的文档），与 `frequency.` 同理。
+    /// 方案级覆盖须单独登记进 `SCHEMA_OVERRIDES`：`schema.codetable.` 段前缀刻意不递归到子段
+    /// （见 `SchemaOverride::key`），与 `frequency.` 同理。
     #[serde(default)]
     pub english_merge: CodetableEnglishMerge,
     /// 顶码上屏（超满码长取前 N 码首选上屏）。
@@ -2411,7 +1974,7 @@ pub struct CodetableGlobal {
     pub z_key_repeat: bool,
     /// z 键功能：空缓冲按 z 且 z 在本方案是死码时，进哪个模式。见 [`BoundAction`]。
     ///
-    /// 与 [`Self::z_key_repeat`] **正交**（可同时开）：repeat 先手，继续打字母才轮到本项，
+    /// 与 [`Self::z_key_repeat`] 正交（可同时开）：repeat 先手，继续打字母才轮到本项，
     /// 详见 `Coordinator::try_activate_mode` 的三重身份裁决。
     #[serde(default)]
     pub z_key_action: String,
@@ -2419,10 +1982,10 @@ pub struct CodetableGlobal {
     /// 解析与回落见 [`crate::code_charset::CodeCharSet`]。
     #[serde(default)]
     pub input_chars: String,
-    /// 可作**首码**的字符集（`input_chars` 的子集）。空=与 `input_chars` 相同。
+    /// 可作首码的字符集（`input_chars` 的子集）。空=与 `input_chars` 相同。
     #[serde(default)]
     pub leading_chars: String,
-    /// 通配输入（万能键）：组码时通配键代替**恰好一个**码元，候选显示完整编码；
+    /// 通配输入（万能键）：组码时通配键代替恰好一个码元，候选显示完整编码；
     /// 通配结果不自动上屏、不顶字、不清空。见 `docs/design/codetable-wildcard.md`。
     #[serde(default)]
     pub wildcard: bool,
@@ -2433,62 +1996,42 @@ pub struct CodetableGlobal {
     /// 与 `wildcard` 主开关正交。见 reverse-mode spec §2。
     #[serde(default)]
     pub wildcard_single_only: bool,
-    /// 码表整句 N-best：候选列表里**露**几条整句。出厂 1。上限 8。
-    ///
-    /// 只在方案开了整句（`[engine.codetable].sentence_input`）时有消费者。语义与
-    /// `schema.pinyin.sentence_count` 相同，但**各管各的**：码表整句的首选准确率与拼音不在
-    /// 一个水平上，用户很可能只想给其中一边开备选。
+    /// 码表整句 N-best：候选列表里露几条整句。出厂 1，上限 8。只在方案开了整句
+    /// （`[engine.codetable].sentence_input`）时有消费者。与 `schema.pinyin.sentence_count` 各管各的：
+    /// 两边整句首选准确率不在一个水平上。
     #[serde(default = "default_sentence_count")]
     pub sentence_count: u8,
-    /// 码表整句 N-best：解码时**算**几条（整句切换键的池子）。不足 `sentence_count` 时按后者抬。
+    /// 码表整句 N-best：解码时算几条（整句切换键的池子）。不足 `sentence_count` 时按后者抬。
     #[serde(default = "default_sentence_count")]
     pub sentence_max_count: u8,
-    /// 码表整句的切换键。**空串 = 关闭（出厂）**。键名取值、夺取规则同
+    /// 码表整句的切换键。空串 = 关闭（出厂）。键名取值、夺取规则同
     /// `schema.pinyin.sentence_cycle_key`。
     #[serde(default)]
     pub sentence_cycle_key: String,
-    /// 码表整句挂语法模型的权重。**0 = 不挂**。出厂 0.5。
+    /// 码表整句挂语法模型的权重。0 = 不挂。出厂 0.5。
     ///
-    /// 模型固定用随包的 `wanxiang-mini.gram`，不跟 `schema.pinyin.grammar`：拼音桌面端出厂
-    /// 不挂模型，码表整句挂上收益大得多（词组最短码打法首选 56.8% → 79.5%）。权重取 0.5
-    /// 而不是 1.0：1.0 在逐字全码打法上反而掉分（83.5% → 74.4%）。数据见
+    /// 模型固定用随包的 `wanxiang-mini.gram`，不跟 `schema.pinyin.grammar`（拼音桌面端出厂不挂）：
+    /// 码表整句挂上收益大得多；权重取 0.5 是因为 1.0 在逐字全码打法上反而掉分。数据见
     /// `docs/design/codetable-sentence-input.md` §12。
     #[serde(default = "default_codetable_sentence_grammar_weight")]
     pub sentence_grammar_weight: f64,
-    /// 出简让全：有简码的字，在更长的码位上把首选让给词语（「路」的三简是 `kht`，
-    /// 那么 `khtk` 的首选就该给「路上」之类）。值 = **参与让位的简码级别上限**：
+    /// 出简让全：有简码的字，在更长的码位上把首选让给词语（「路」的三简是 `kht`，那么 `khtk` 的首选
+    /// 就该给「路上」之类）。值 = 参与让位的简码级别上限：
     ///
-    /// - `0` 关闭（**全局出厂值**），候选顺序完全按词库原序
+    /// - `0` 关闭（全局出厂值），候选顺序完全按词库原序
     /// - `2` 一二级简码置后
     /// - `3` 全部简码置后
     ///
-    /// 判据是「当前码长 > 本值」而不是「当前码长 == 全码长」——后者要知道方案有几码，
-    /// 换到非四码方案就错位。
-    ///
-    /// 此前这件事由 `gen_dict` 在词库生成阶段做（`[demotion]` 段，已退役），判定烘进权重、
-    /// 用户关不掉，且触发条件是有条件降权而非标准的出简让全语义。
+    /// 判据是「当前码长 > 本值」而非「当前码长 == 全码长」，后者换到非四码方案就错位。
     #[serde(default = "default_short_code_yield_level")]
     pub short_code_yield_level: usize,
-    /// **字词范围**：候选里出单字、出词组，还是两者都出（`all` / `char` / `phrase`）。
+    /// 字词范围：候选里出单字、出词组，还是两者都出（`all` / `char` / `phrase`）。出厂关。
     ///
-    /// 五笔系输入法的传统功能。主要价值是**定长盲打**：五笔单字恒 ≤ 全码长，同码的词
-    /// 被滤掉后「满码唯一即上屏」的成立率大幅提高。
-    ///
-    /// ⚠️ 与 `input.filter_mode`（检索范围）是两根**正交**的轴：那个按字符常用度裁剪，
-    /// 这个按候选长度裁剪，同时施加时依次生效。判据是
-    /// `wind_candidate::single_char_admits`。
-    ///
-    /// ★ **拼音另有一份**（[`PinyinGlobalConfig::single_char`]），刻意不共享取值——两种引擎
-    /// 对这件事的诉求本就不同（见 [`CodeTableSpec::single_char`] 的文档）。同 `english_merge`
-    /// 在两侧各有一份的先例。
-    ///
-    /// ⚠️ 运行时热键切换**不写回本项**：那是内存里的临时态，切方案或重启即回到本值。
-    /// 故本项恒是「用户配的初值」，读它得不到「此刻开没开」。
-    ///
-    /// # 出厂关
-    ///
-    /// 与 `default_short_code_yield_level` 同一条论证：全局段是该引擎下所有方案共用的
-    /// 基线，而「只出单字」是五笔这类定长码表才成立的手感。默认开会让人以为词库坏了。
+    /// 主要价值是定长盲打：五笔单字恒 ≤ 全码长，滤掉同码的词后「满码唯一即上屏」的成立率大幅提高。
+    /// 与 `input.filter_mode`（检索范围）正交，同时施加时依次生效，判据是
+    /// `wind_candidate::single_char_admits`。拼音另有一份（[`PinyinGlobalConfig::single_char`]），
+    /// 不共享取值。运行时热键切换不写回本项，故读它得不到「此刻开没开」。
+    /// 出厂关的理由同 `default_short_code_yield_level`：只出单字是定长码表才成立的手感。
     #[serde(default)]
     pub single_char: bool,
     /// 码表调频（统一开关，取代旧 user_frequency）。
@@ -2499,16 +2042,11 @@ pub struct CodetableGlobal {
     pub auto_phrase: AutoPhraseConfig,
 }
 
-/// 出简让全的**全局**出厂值是关。
+/// 出简让全的全局出厂值是关，由方案在 `[engine.codetable]` 里声明（内置 wubi86 声明 3）。
 ///
-/// 0.118 曾默认开到三级（理由是与它取代的 `gen_dict` `[demotion]` 同量级，实测 239 vs
-/// 205 个码，升级后手感延续）。但全局基线是**所有码表方案**共用的，而「短码首选 = 简码」
-/// 这个前提只对五笔这类前缀式简码成立——第三方码表（词频码、二三重码表等）里短码首选
-/// 往往就是作者精心排定的常用字，让位纯属破坏。全局默认开会静默改掉这些方案的候选顺序，
-/// 而用户根本不知道有这么一项。
-///
-/// 故改为：**全局关，由方案自己在 `[engine.codetable]` 里声明**（内置 wubi86 已声明 3）。
-/// 这与 `z_key_action` 是同一个模式——「这张码表适不适合」只有方案作者知道。
+/// 全局基线是所有码表方案共用的，而「短码首选 = 简码」只对五笔这类前缀式简码成立；第三方码表的
+/// 短码首选往往是作者排定的常用字，全局开会静默改掉它们的候选顺序。同 `z_key_action`：
+/// 「这张码表适不适合」只有方案作者知道。
 fn default_short_code_yield_level() -> usize {
     0
 }
@@ -2517,10 +2055,8 @@ fn default_wildcard_key() -> String {
     "z".to_string()
 }
 
-/// 通配键的合法性：恰好一个字符、ASCII 可打印（不含空格）、**不是数字**；字母归一小写。
-///
-/// 数字排除的理由：空缓冲时 C++ 不吃数字键（到不了 core），组码中数字恒是选词键（按 §3.3
-/// 恒让位）——两个位置都当不了通配，配上只会「开了没反应」。
+/// 通配键的合法性：恰好一个字符、ASCII 可打印（不含空格）、不是数字；字母归一小写。
+/// 数字排除：空缓冲时数字键到不了 core，组码中数字恒是选词键，两处都当不了通配。
 pub fn parse_wildcard_key(s: &str) -> Option<char> {
     let mut it = s.chars();
     let c = it.next()?;
@@ -2534,12 +2070,9 @@ impl Default for CodetableGlobal {
     fn default() -> Self {
         Self {
             english_merge: CodetableEnglishMerge::default(),
-            // ⚠️ 这是**结构体零值**，不是「出厂默认」——出厂值在 `data/config.toml`（L2 层，
-            // 恒覆盖本处）。大量集成测试以 `Config::default()` 构造，把这些拨成 true 会连带
-            // 改变它们的输入行为（顶码/标点上屏都会生效）。
-            //
-            // 特殊方案的折叠基线**另有定义**，见 `EngineManager::SPECIAL_SCHEMA_BASELINE`——
-            // 那是「特殊方案该长什么样」，与本处的「结构体零值」不是同一件事，别合并。
+            // 这是结构体零值，不是出厂默认（出厂值在 `data/config.toml` 的 L2，恒覆盖本处）。大量集成测试
+            // 以 `Config::default()` 构造，拨成 true 会改变它们的输入行为。特殊方案的折叠基线另见
+            // `EngineManager::SPECIAL_SCHEMA_BASELINE`，与这里不是同一件事，别合并。
             top_code_commit: false,
             clear_on_empty_max: false,
             auto_commit_at_full: false,
@@ -2614,7 +2147,7 @@ impl CodetableGlobal {
         if let Some(v) = o.z_key_repeat {
             out.z_key_repeat = v;
         }
-        // 码元字符集是 `String` 而非 `Option`，故「未设置」由**空串**表达（与上面那些
+        // 码元字符集是 `String` 而非 `Option`，故「未设置」由空串表达（与上面那些
         // tri-state 字段不同）。非空才覆盖——否则方案没写这项时会把全局基线抹成空串，
         // 落到 `CodeCharSet::new` 又被回落成 `a-z`，全局配的字符集就被静默丢弃了。
         if !o.input_chars.is_empty() {
@@ -2647,11 +2180,8 @@ impl CodetableGlobal {
         if let Some(v) = o.sentence_grammar_weight {
             out.sentence_grammar_weight = v;
         }
-        // 调频段逐字段折叠。整段缺省 = 全部跟随基线。
-        //
-        // ⚠️ 这一段的消费方是 `EngineManager::freq_settings`，与上面那些上屏行为字段的
-        // 消费方（`build_engine` 的 CommitOptions）不是同一条路径。加字段时两条都要看：
-        // 光在这里折叠、`freq_settings` 仍读全局镜像的话，方案文件里写了也没人读。
+        // 调频段逐字段折叠，整段缺省 = 全部跟随基线。消费方是 `EngineManager::freq_settings`，
+        // 与上屏行为字段（`build_engine` 的 CommitOptions）不同路径；加字段时两条都要看。
         if let Some(f) = &o.frequency {
             if let Some(v) = f.enabled {
                 out.frequency.enabled = v;
@@ -2681,10 +2211,8 @@ impl CodetableGlobal {
                 out.frequency.protect_top_n_len3 = v;
             }
         }
-        // 英文混入子段：同 `frequency` 的逐字段稀疏折叠。
-        //
-        // ⚠️ 同样的「两条路径」提醒：本段的消费方是 `EngineManager::english_merge_ctx`
-        // （它按活跃方案取 resolved 值），不是 `build_engine` 的 CommitOptions。
+        // 英文混入子段：同 `frequency` 的逐字段稀疏折叠。消费方是 `EngineManager::english_merge_ctx`
+        // （按活跃方案取 resolved 值），不是 `build_engine` 的 CommitOptions。
         if let Some(e) = &o.english_merge {
             if let Some(v) = e.enable {
                 out.english_merge.enable = v;
@@ -2715,9 +2243,8 @@ impl CodetableGlobal {
     }
 
     /// 生效的通配键：关闭 ⇒ `None`；键非法 ⇒ 告警并视为关闭（spec §4）。
-    ///
-    /// 只在**构建引擎时**调用一次（`EngineManager::build_engine`），协调器经
-    /// `EngineManager::active_wildcard_key` 取引擎上的值——按键热路径上反复折叠会反复告警。
+    /// 只在构建引擎时调用一次（`EngineManager::build_engine`），协调器经
+    /// `EngineManager::active_wildcard_key` 取值，免得热路径上反复告警。
     pub fn wildcard_char(&self, schema_id: &str) -> Option<char> {
         if !self.wildcard {
             return None;
@@ -2748,18 +2275,15 @@ impl CodetableGlobal {
 pub struct CodetableFrequency {
     #[serde(default)]
     pub enabled: bool,
-    /// **调频关闭时仍记录选词次数**（GH 论坛 t278）。`enabled = true` 时本项无意义（本来就记）。
+    /// 调频关闭时仍记录选词次数。`enabled = true` 时本项无意义。
     ///
-    /// 记录与使用是两件事：本项只放开**写端**（`record_selection_in`），读端（主候选重排、
-    /// 英文热词召回、词语联想打分）仍只认 `enabled`。用途是攒一份「真实常用字词」的次数表
-    /// 供设置页查看 / 导出，而候选顺序保持固定。日后再开 `enabled`，攒下的次数即刻参与排序。
+    /// 只放开写端（`record_selection_in`），读端（主候选重排、英文热词召回、词语联想打分）仍只认
+    /// `enabled`：攒一份真实常用字词的次数表供查看 / 导出，候选顺序保持固定；日后开 `enabled` 即刻参与排序。
     #[serde(default)]
     pub record_always: bool,
-    /// 锁定码表原始前 N 位——**兜底档**：码长 ≥ 4 的深码位。
-    /// 简码位（码长 1/2/3）另有分级值，见下面三个字段。
-    ///
-    /// ⚠️ 作用域是「码表配置组」而非「纯码表方案」：混输走的也是这套值
-    /// （`EngineManager::freq_settings` 按"非拼音即码表"分流）。
+    /// 锁定码表原始前 N 位，兜底档：码长 ≥ 4 的深码位；简码位（码长 1/2/3）见下面三个字段。
+    /// 作用域是「码表配置组」而非纯码表方案：混输也用这套值（`EngineManager::freq_settings`
+    /// 按「非拼音即码表」分流）。
     #[serde(default)]
     pub protect_top_n: usize,
     /// 一简位（码长 1）保护前 N 位。五笔一简 25 个码每个都是二选一，默认保护首选。
@@ -2771,30 +2295,23 @@ pub struct CodetableFrequency {
     /// 三简位（码长 3）保护前 N 位。默认不保护——三简的钦定性弱于一二简。
     #[serde(default)]
     pub protect_top_n_len3: usize,
-    /// 词频应用策略：`"top"`（一次到顶 MRU）/ `"step"`（逐次提升，默认）/
-    /// `"position"`（位次减半）。原 freq_strategy 迁入。
+    /// 词频应用策略：`"top"`（一次到顶 MRU）/ `"step"`（逐次提升，默认）/ `"position"`（位次减半）。
     ///
-    /// `top`/`step` 是**布尔 used-first**——用过一次即整体跳到档内最前，策略只决定「已用过
-    /// 的那批内部怎么排」。`position` 让位次连续表达强弱，没有「用过 / 没用过」这道台阶，
-    /// 适合**前缀匹配为主**的方案（英文尤甚，其候选几乎全是前缀匹配）。
+    /// `top`/`step` 是布尔 used-first：用过一次即跳到档内最前，策略只决定已用过的那批怎么排。
+    /// `position` 让位次连续表达强弱，适合前缀匹配为主的方案（尤其英文）。
     #[serde(default = "default_freq_strategy")]
     pub strategy: String,
-    /// 前缀补全候选参与词频位置提升的范围（`"none"` / `"single"` / `"all"`）。
+    /// 前缀补全候选参与词频位置提升的范围（`"none"` / `"single"` / `"all"`）。仅 `strategy = "position"`
+    /// 时生效。
     ///
-    /// **仅 `strategy = "position"` 时生效**；`top`/`step` 走布尔 used-first，不读本项。
-    ///
-    /// 码表默认 `"all"`（与拼音的 `"single"` 不同）：码表的前缀补全已由来源档位隔离、
-    /// 跨不到精确档之前，无需再按语义单元收窄；且这与 `top`/`step` 的历史行为一致
-    /// （那两者对前缀补全从无限制），避免升级后存量用户的调频范围突然变窄。
+    /// 码表默认 `"all"`（拼音是 `"single"`）：码表的前缀补全已由来源档位隔离，且与 `top`/`step`
+    /// 对前缀补全从无限制的行为一致，存量用户的调频范围不会突然变窄。
     #[serde(default = "default_codetable_promote_prefix")]
     pub promote_prefix: String,
-    /// **衰减半衰期（小时）**；`0` = 用内置默认 72 小时。**与拼音段完全独立，不回落到它。**
+    /// 衰减半衰期（小时）；`0` = 内置默认 72 小时。仅 `strategy = "position"` 时生效。
     ///
-    /// **仅 `strategy = "position"` 时生效**；`top`/`step` 直接比 `count`/`last_used`，不读衰减。
-    ///
-    /// 曾做成「`0` 回落到 `schema.pinyin.frequency.half_life`」，已否决：设置页上这是两个
-    /// 独立控件，回落链会让用户「把码表的留在 0、改了拼音的、发现码表跟着变」。**回落链只在
-    /// 配置层不可见时才是便利，一旦两端都有 GUI 就变成了陷阱。**
+    /// 与拼音段完全独立，不回落到 `schema.pinyin.frequency.half_life`：设置页上是两个独立控件，
+    /// 回落链会让「改了拼音的、码表跟着变」。
     #[serde(default)]
     pub half_life: f64,
 }
@@ -2852,24 +2369,18 @@ pub struct PinyinFrequency {
     /// 最近使用峰值。
     #[serde(default)]
     pub recency_peak: f64,
-    /// **前缀补全候选参与词频位置提升的范围**（默认 `"single"`）。
+    /// 前缀补全候选参与词频位置提升的范围（默认 `"single"`）。
     ///
     /// | 取值 | 打 `d` 选「得」 | 打 `d` 选「东西」 | 打 `hel` 选 `hello` |
     /// |---|---|---|---|
     /// | `"none"` | 不提升 | 不提升 | 不提升 |
-    /// | `"single"`（默认） | **提升** | 不提升 | **提升** |
+    /// | `"single"`（默认） | 提升 | 不提升 | 提升 |
     /// | `"all"` | 提升 | 提升 | 提升 |
     ///
-    /// 判据是[语义单元数][wind_candidate::semantic_units]（汉字逐字计、西文词整体计 1），
-    /// **不是字符数**——英文候选 `hello` 有 5 个 char，按字符数会被「只提升单个」挡死，
-    /// 而英文所有候选都是前缀匹配，那等于英文调频全灭。
-    ///
-    /// 默认 `"single"` 的理由：短输入下用户给出的信息量撑不起一个词组，把长词组靠词频顶到
-    /// 高频单字前面与直觉相悖（微软拼音实测「只对全码生效」是同一取舍的更强版本）。而单字
-    /// 之间的调整（「的」/「得」）是合理的，`"none"` 会连它一起挡掉。
-    ///
-    /// 只作用于**有效前缀层**（`is_prefix && !is_promoted_completion`），与 `cmp_match_layers`
-    /// 同口径：被引擎主动提升进完整匹配层的候选是结构决策，不该被本项误伤。
+    /// 判据是[语义单元数][wind_candidate::semantic_units]（汉字逐字计、西文词整体计 1）而非字符数，
+    /// 否则英文调频全灭。默认 `"single"`：短输入撑不起一个词组，把长词组顶到高频单字前面与直觉相悖，
+    /// 而单字之间的调整是合理的。只作用于有效前缀层（`is_prefix && !is_promoted_completion`），
+    /// 与 `cmp_match_layers` 同口径。
     #[serde(default = "default_promote_prefix")]
     pub promote_prefix: String,
 }
@@ -2878,18 +2389,14 @@ fn default_promote_prefix() -> String {
     "single".to_string()
 }
 
-/// 码表自动造词（[schema.codetable.auto_phrase]）。**滑窗草稿层模型**
-/// （`docs/design/auto-phrase-draft-layer.md`，2026-09-22 起）。
+/// 码表自动造词（[schema.codetable.auto_phrase]），滑窗草稿层模型
+/// （`docs/design/auto-phrase-draft-layer.md`）。
 ///
-/// 缓冲的对象是**最近落屏的文本流**（逐字打与选词组上屏都进流），不是旧模型的
-/// 「连续单字序列」——后者把多字词上屏当终止符，而正常打字里大多数词就是选词组上屏的，
-/// 那正是「开了功能却几乎不造词」的主因。
-///
-/// 词走**两跳**才进用户词库，勿混作一件事：
-/// 1. 滑窗切出 `min_phrase_len..=max_phrase_len` 字的窗口 → 全部记进**草稿层**
+/// 缓冲的是最近落屏的文本流（逐字打与选词组上屏都进流）。词走两跳才进用户词库：
+/// 1. 滑窗切出 `min_phrase_len..=max_phrase_len` 字的窗口 → 全部记进草稿层
 ///    （`DRAFT_WORDS` 表，带 `draft_ttl_hours` 有效期）；
-/// 2. 用户真的用某条草稿上屏过一次 → 跃迁进**临时词库**（即「用过即转正」）；
-/// 3. 此后累计使用达 `promote_count` 次 → 晋升进**用户词库**（永久，无容量上限）。
+/// 2. 用户用某条草稿上屏过一次 → 跃迁进临时词库；
+/// 3. 此后累计使用达 `promote_count` 次 → 晋升进用户词库（永久，无容量上限）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AutoPhraseConfig {
     #[serde(default)]
@@ -2897,49 +2404,33 @@ pub struct AutoPhraseConfig {
     /// 滑窗下界（字，默认 2；内部字段，设置页不开放）。
     #[serde(default = "default_phrase_min_len")]
     pub min_phrase_len: usize,
-    /// 滑窗上界（字，默认 5；内部字段，设置页不开放）。
-    ///
-    /// ⚠️ 旧模型里它是「超长序列**整体放弃**」的那道闸；滑窗模型下它只是窗口上界，
-    /// 超过它的连续输入不再被整段丢弃，而是照常切出 `min..=max` 的各个窗口。
+    /// 滑窗上界（字，默认 5；内部字段，设置页不开放）。超过它的连续输入照常切出
+    /// `min..=max` 的各个窗口，不整段丢弃。
     #[serde(default = "default_phrase_max_len")]
     pub max_phrase_len: usize,
-    /// 临时词晋升进用户词库所需使用次数。**0 = 不晋升**，一直留在临时词库。
+    /// 临时词晋升进用户词库所需使用次数。0 = 不晋升，一直留在临时词库。
     ///
-    /// ⚠️ 这里的 `0` 是**结构体零值（L1）**，不是出厂值：出厂值在 `data/config.toml`
-    /// （L2，恒覆盖 L1），**自 2026-09-22 起是 3**。改 L1 会连带改变大量以
-    /// `Config::default()` 构造的集成测试的行为，故只动 L2——同 [`CodetableGlobal::default`]
-    /// 那段注释立下的规矩。
-    ///
-    /// 拼音侧 [`AutoLearnConfig::promote_count`] 的**出厂值仍是 0**，两边自此分叉：
-    /// 本段出厂 `enabled = false`（只触及主动开启的用户），拼音那段出厂就开着（全体用户）。
+    /// 这里的 `0` 是结构体零值（L1），出厂值在 `data/config.toml`（L2）是 3；只动 L2，理由同
+    /// [`CodetableGlobal::default`]。拼音侧 [`AutoLearnConfig::promote_count`] 出厂仍是 0：本段出厂
+    /// `enabled = false` 只影响主动开启的用户，拼音那段出厂就开着。
     #[serde(default)]
     pub promote_count: usize,
     /// 落屏文本流的最大间隔（毫秒，0=默认 5000）。超时即断流，已缓冲内容不再与后续拼接。
-    ///
-    /// 兜底用：其余断流信号（标点/焦点/切方案/移光标）全漏时，防止跨句拼出「加好加好」
-    /// 这类杂词。内部字段，设置页不开放。
+    /// 兜底用：其余断流信号（标点/焦点/切方案/移光标）全漏时防止跨句拼出杂词。内部字段。
     #[serde(default)]
     pub idle_timeout_ms: u32,
     /// 临时词库条目上限（0=不限）。超出后按「用得最少、造得最早」淘汰。内部字段，设置页不开放。
     #[serde(default = "default_temp_max_entries")]
     pub temp_max_entries: usize,
-    /// **草稿层**有效期（小时，0=永不过期）。默认 24。
-    ///
-    /// 草稿是滑窗切出的猜测词，到期没被用过就自动丢弃
-    /// （`docs/design/auto-phrase-draft-layer.md`）。内部字段，设置页不开放。
+    /// 草稿层有效期（小时，0=永不过期）。默认 24。到期没被用过的草稿自动丢弃。内部字段。
     #[serde(default = "default_draft_ttl_hours")]
     pub draft_ttl_hours: u32,
-    /// **草稿层**条目上限（0=不限）。超出后按 `last_used` 升序淘汰（最早的先走；
-    /// 写入会刷新它，故实际是近似 LRU）。内部字段，设置页不开放。
-    ///
-    /// ⚠️ 默认值来自设计稿 §7 的**纸面估算上界**（滑窗约每字 4 条，一天 8 小时约 11.5 万条），
-    /// 真实打字有大量停顿与重复窗口应显著更低——**这不是实测值**，待真机数据出来后重定。
+    /// 草稿层条目上限（0=不限）。超出后按 `last_used` 升序淘汰（近似 LRU）。内部字段。
+    /// 默认值来自设计稿 §7 的纸面估算上界，不是实测值，待真机数据重定。
     #[serde(default = "default_draft_max_entries")]
     pub draft_max_entries: usize,
-    /// **草稿层**单次批量写最多落库多少条草稿。默认 64。
-    ///
-    /// 太小则同一批词要多开几次批量写，太大则一批的取码与查重堆在一起、且崩溃时丢得更多。
-    /// 内部字段，设置页不开放。**待实测调参。**
+    /// 草稿层单次批量写最多落库多少条。默认 64，待实测调参。太小则多开几次批量写，太大则一批的
+    /// 取码与查重堆在一起、崩溃时丢得更多。内部字段。
     #[serde(default = "default_draft_flush_batch")]
     pub draft_flush_batch: usize,
 }
@@ -2992,29 +2483,20 @@ pub struct AutoLearnConfig {
     pub enabled: bool,
     /// 造词最小字数。
     ///
-    /// ⚠️ **默认值必须落在设置页数值控件的 `[min, max]` 区间内**（该控件 min = 2）。
-    /// 此前默认 `0`（哨兵，消费端 `if min_len == 0 { 2 }` 回退成 2）——生效值确实是 2，
-    /// 但设置页控件把 0 夹到 2 显示，于是用户什么都没动、点一次「应用设置」就把 2 写进
-    /// 了配置文件。守门测试 `untouched_settings_produce_no_diff` 为此长期红着。
-    ///
-    /// 消费端那行 `== 0` 回退**保留**：老用户配置里显式写着 0，删掉会让它变成「无下限」。
+    /// 默认值必须落在设置页数值控件的 `[min, max]` 区间内（min = 2），否则控件夹值后没动过也会写盘
+    /// （`untouched_settings_produce_no_diff`）。消费端的 `== 0` 回退 2 保留：老配置里可能显式写着 0。
     #[serde(default = "default_learn_min_len")]
     pub min_word_length: usize,
-    /// 造词最大字数（`0` = 不限）。超出后先按「从尾部保留整段」裁剪，仍超则**整体放弃**
-    /// ——在一串汉字中间切一刀，切出来的多半不是词（同 `AutoPhraseConfig::max_phrase_len`）。
-    ///
-    /// 整句一次上屏时只有一段可裁，故本项对整句等价于「超过就不学」。默认 10：既覆盖
-    /// 「今天天气不错」这类值得进词库的长词，又挡住整句解常见的跨句拼接。
+    /// 造词最大字数（`0` = 不限）。超出后先按「从尾部保留整段」裁剪，仍超则整体放弃：在一串汉字中间
+    /// 切一刀，切出来的多半不是词。整句一次上屏时只有一段可裁，对整句等价于「超过就不学」。
+    /// 默认 10：覆盖值得进词库的长词，又挡住整句解常见的跨句拼接。
     #[serde(default = "default_learn_max_len")]
     pub max_word_length: usize,
-    /// 临时词晋升进用户词库所需使用次数。**0 = 不晋升**，一直留在临时词库（**出厂值**）
-    /// ——与 [`AutoPhraseConfig::promote_count`] 逐字同义，两边共用同一套晋升判定
-    /// （`Coordinator::maybe_promote_temp`）。不是「0 = 用内置默认」：这条曾在
-    /// `data/config.toml` 的注释里写反，于是「自动学习」出厂即学了也永不转正。
+    /// 临时词晋升进用户词库所需使用次数。0 = 不晋升，一直留在临时词库（出厂值）。
+    /// 与 [`AutoPhraseConfig::promote_count`] 同义、共用晋升判定（`Coordinator::maybe_promote_temp`）。
     ///
-    /// ⚠️ **出厂值自 2026-09-22 起与码表侧分叉**：那边改成了 3，本项仍是 0。语义没有分叉，
-    /// 分叉的是影响面——码表侧出厂 `enabled = false`，本段出厂 `enabled = true`，
-    /// 动本项等于给**全体用户**的用户词库开闸。要不要跟着改是单独一项，需先有真机数据。
+    /// 出厂值与码表侧（3）不同：本段出厂 `enabled = true`，改本项等于给全体用户的用户词库开闸，
+    /// 需先有真机数据。
     #[serde(default)]
     pub promote_count: usize,
 }
@@ -3025,15 +2507,14 @@ fn default_learn_min_len() -> usize {
     2
 }
 
-/// 拼音造词最大字数默认值。比码表侧的 5 宽松——码表造词的素材是**连续单字序列**
+/// 拼音造词最大字数默认值。比码表侧的 5 宽松——码表造词的素材是连续单字序列
 /// （跨句拼接风险高），而拼音整句/分步转换的每一段都是用户明确选中的语义单元。
 fn default_learn_max_len() -> usize {
     10
 }
 
-/// ⚠️ 手写而非 `derive(Default)`：`max_word_length`（10）与 `min_word_length`（2）的
-/// 默认值都不是零值，derive 会让**代码默认**（`AutoLearnConfig::default()`）给 0、而
-/// **配置默认**（serde 反序列化缺键）给那两个值，同一个语义在两条路上分叉。
+/// 手写而非 `derive(Default)`：`max_word_length`（10）与 `min_word_length`（2）的默认值不是零值，
+/// derive 会让 `AutoLearnConfig::default()` 与 serde 缺键给出不同的值。
 impl Default for AutoLearnConfig {
     fn default() -> Self {
         Self {
@@ -3060,24 +2541,20 @@ pub struct MixGlobal {
     /// 顶码偏好（顶码覆盖拼音）。
     #[serde(default)]
     pub top_code_override_pinyin: bool,
-    /// 满码自动上屏 **与顶码上屏**遇拼音候选则否决（保护拼音用户）。默认开。
+    /// 满码自动上屏与顶码上屏遇拼音候选则否决（保护拼音用户）。默认开。
     ///
-    /// 这是**粗粒度**一票否决：整串只要能查出任何拼音候选就让路拼音，不看拼音成不成词。
-    /// 与细粒度的 `block_commit_on_pinyin_word`（按词强度判，默认开）叠加生效，
-    /// 二者任一命中即否决（见 `pinyin_vetoes_commit`）。
-    /// 注意作用面覆盖顶码上屏，而 `schema.codetable.top_code_commit` 出厂即开——
-    /// 混输方案下改动本项会直接改变顶码行为；`top_code_override_pinyin` 可无视本否决。
-    ///
-    /// 它还兼管**满码空码清空**（`schema.codetable.clear_on_empty_max`）的两道拼音守护：
-    /// 「已有拼音候选」与「拼音还没打完」（`is_possible_pinyin_sequence`，如 zhon→zhong）。
-    /// 关闭本项 = 拼音一律不干预码表处置，满码无匹配即清空/上屏。
+    /// 粗粒度一票否决：整串能查出任何拼音候选就让路，与细粒度的 `block_commit_on_pinyin_word` 任一命中
+    /// 即否决（见 `pinyin_vetoes_commit`）。`top_code_commit` 出厂即开，故改动本项会直接改变混输的
+    /// 顶码行为；`top_code_override_pinyin` 可无视本否决。它还兼管满码空码清空
+    /// （`clear_on_empty_max`）的两道拼音守护（已有拼音候选、拼音还没打完如 zhon→zhong）。
+    /// 关闭 = 拼音一律不干预码表处置。
     #[serde(default = "default_true")]
     pub auto_commit_block_on_pinyin: bool,
     /// 满码上屏遇英文候选则否决（保护正在输入英文词的用户；仅 enable_english 开时有意义）。
-    /// **前缀级**：有英文词以当前串开头即否决；开着时涵盖下面的成词级。
+    /// 前缀级：有英文词以当前串开头即否决；开着时涵盖下面的成词级。
     #[serde(default)]
     pub auto_commit_block_on_english: bool,
-    /// **成词级**英文否决：整串恰是一个英文完整单词时否决满码 / 顶码上屏（英文临时词不算）。
+    /// 成词级英文否决：整串恰是一个英文完整单词时否决满码 / 顶码上屏（英文临时词不算）。
     /// 默认开；与前缀级 `auto_commit_block_on_english` 的关系同拼音那对
     /// （`auto_commit_block_on_pinyin` / `block_commit_on_pinyin_word`）。
     #[serde(default = "default_true")]
@@ -3111,21 +2588,18 @@ pub struct MixGlobal {
     /// 拼音歧义拦截的词强度权重阈值（0=仅结构判据：≥2 汉字且消费整串；预留真机调）。
     #[serde(default)]
     pub pinyin_word_min_weight: i32,
-    /// 混输**码长内**（输入 ≤ 主码表最大码长）是否保留「未消费整串」的拼音候选。
-    /// 默认 `false`（丢弃）：`gedw`（五笔「青春」）下拼音会把 `ge` 的 219 条同音单字全交出来，
-    /// 每条只解释 4 键中的 2 键。关掉后候选只剩五笔精确码，开着简拼时混合简拼词也能浮上来。
-    /// 代价是码长内没有分步上屏；正在输入中的拼音（`wanl`→「完了」）不受影响。
+    /// 混输码长内（输入 ≤ 主码表最大码长）是否保留「未消费整串」的拼音候选。默认 `false`（丢弃）：
+    /// 否则 `gedw`（五笔「青春」）下拼音会交出 `ge` 的两百多条同音单字。关掉时开着简拼仍能浮出混合简拼词；
+    /// 代价是码长内没有分步上屏，正在输入中的拼音（`wanl`→「完了」）不受影响。
     #[serde(default)]
     pub pinyin_partial_candidates: bool,
-    /// 混输**超码长**（已切入纯拼音语境）是否保留同类候选。默认 `true`（保留）：
+    /// 混输超码长（已切入纯拼音语境）是否保留同类候选。默认 `true`（保留）：
     /// 那里正是长拼音的地盘，`nihaom` 选「你好」再续打的分步上屏要留着。
     #[serde(default = "default_true")]
     pub pinyin_partial_candidates_overflow: bool,
-    /// 混输时拼音是否产出简拼候选（声母缩写，nh→你好）。**出厂关**（a3971b4f 起；此前恒开）：
-    /// 开着时超码长的顶码上屏基本不会发生，理由见 `data/config.toml` 同名项注释。
-    /// 关闭时混输里的拼音只认全拼，候选更干净。仅影响混输的拼音子引擎，纯拼音方案不受影响。
-    /// ⚠️ 三处同源：本处 serde 默认 / `Default` / `data/config.toml`，由
-    /// `mix_pinyin_abbrev_*` 三条测试守门。
+    /// 混输时拼音是否产出简拼候选（声母缩写，nh→你好）。出厂关：开着时超码长的顶码上屏基本不会发生
+    /// （见 `data/config.toml` 同名项注释）。仅影响混输的拼音子引擎。
+    /// 三处同源：serde 默认 / `Default` / `data/config.toml`，由 `mix_pinyin_abbrev_*` 测试守门。
     #[serde(default)]
     pub enable_pinyin_abbrev: bool,
 }
@@ -3135,8 +2609,8 @@ impl Default for MixGlobal {
         Self {
             show_source_hint: false,
             enable_english: false,
-            // ⚠️ 三处同源：本处 / `MixConfig::default()`（wind-engine mixed/engine.rs）/
-            // `data/config.toml [schema.mix]` 必须一致，改默认须同步全部三处。
+            // 三处同源：本处 / `MixConfig::default()`（wind-engine mixed/engine.rs）/
+            // `data/config.toml [schema.mix]`，改默认须同步全部三处。
             pinyin_only_overflow: true,
             top_code_override_pinyin: false,
             auto_commit_block_on_pinyin: true,
@@ -3150,13 +2624,11 @@ impl Default for MixGlobal {
             english_max_count: default_english_max_count(),
             block_commit_on_pinyin_word: true,
             pinyin_word_min_weight: 0,
-            // ⚠️ 同属「三处同源」：本处 / `MixConfig::default()` / `data/config.toml`。
+            // 同属「三处同源」：本处 / `MixConfig::default()` / `data/config.toml`。
             pinyin_partial_candidates: false,
             pinyin_partial_candidates_overflow: true,
-            // 出厂**关**：简拼几乎能主张任何字母串，开着时超码长归属恒判给拼音，
-            // 五笔顶码上屏基本不会发生（`pinyin_only_overflow` 独立拦下，且它是隐藏项，
-            // 用户把两个否决开关都关掉也无济于事）。混输用户以码表为主，默认让顶码可用；
-            // 需要简拼的用户显式打开即可。详见 `data/config.toml` 同名项注释。
+            // 出厂关：简拼几乎能主张任何字母串，开着时超码长归属恒判给拼音，顶码上屏基本不会发生
+            // （`pinyin_only_overflow` 是隐藏项，另两个否决开关都关掉也无济于事）。
             enable_pinyin_abbrev: false,
         }
     }
@@ -3164,48 +2636,30 @@ impl Default for MixGlobal {
 
 /// 码表方案的「英文候选混入」配置（[schema.codetable.english_merge]）。
 ///
-/// ## 为什么按引擎各配一份，而不是一个全局总开关
+/// 按引擎各配一份：五笔用户常打命令行、变量名，全拼的英文词与音节大面积重叠，取舍不同。
+/// 拆开后 [`Self::block_commit`] 只出现在码表这份（拼音没有满码 / 顶码），设置页的两个键也能各归其分区。
 ///
-/// 「码表方案要不要捎带英文」与「拼音方案要不要捎带英文」是**两件独立的事**：五笔用户
-/// 常打命令行、变量名，开着有用；全拼用户的英文词与拼音串大面积重叠（`hen`/`men`/`she`
-/// 都既是音节又是英文词），可能宁可不开。一个总开关表达不了这种取舍，只会逼用户在
-/// 「两个都开」和「两个都关」之间二选一。
-///
-/// 拆开还顺带解决了两个具体问题：
-///
-/// 1. [`Self::block_commit`] 只对定长码表有意义（拼音没有满码上屏 / 顶码），合在一起时
-///    它对拼音用户是一个恒不生效的开关——照本仓判据（见 `SchemaOverride::key` 的文档），
-///    「标出一个不会被读的配置」等于告诉用户一件不成立的事。拆开后拼音那份就不带它。
-/// 2. 设置页的清单按配置键唯一（`HashMap<String, MItem>`），一个键进不了两个分区；
-///    拆成两个键后，码表那份落「上屏行为」、拼音那份落「候选行为」，各自归位。
-///
-/// ⚠️ 混输（`[schema.mix]` 的 `enable_english` / `min_english_length` /
-/// `auto_commit_block_on_english`）**是第三份，互不接管**：那三项与
-/// `MixedEngine::truncation_tier` 的三方档位仲裁耦合，语义已和 `convert_overflow` 的截断
-/// 归属绑在一起。混输方案不读本段，否则两套英文各混一遍、档位与配额双重失真。
+/// 混输（`[schema.mix]` 的 `enable_english` / `min_english_length` / `auto_commit_block_on_english`）
+/// 是第三份，互不接管：它们与 `MixedEngine::truncation_tier` 的档位仲裁耦合，混输方案不读本段，
+/// 否则两套英文各混一遍、档位与配额双重失真。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CodetableEnglishMerge {
-    /// 在候选列表里混入英文词库候选（中文侧有候选时只收**精确命中**，按
+    /// 在候选列表里混入英文词库候选（中文侧有候选时只收精确命中，按
     /// [`Self::complete_min_length`] 才补前缀）。出厂关。
     #[serde(default)]
     pub enable: bool,
     /// 最小触发长度（0=回退 3，即 2 字符以内不查英文）。口径同 `schema.mix.min_english_length`。
     #[serde(default)]
     pub min_length: usize,
-    /// 存在英文候选时否决**满码自动上屏 / 顶码上屏 / 满码空码清空**（保护正在输入英文词的用户）。
-    /// 默认开。**前缀级**：有英文词以当前串开头即否决，开着时涵盖成词级 [`Self::block_commit_on_word`]。
+    /// 存在英文候选时否决满码自动上屏 / 顶码上屏 / 满码空码清空。默认开。前缀级：有英文词以当前串
+    /// 开头即否决（`english_merge::has_any`），开着时涵盖成词级 [`Self::block_commit_on_word`]。
+    /// 只看精确命中的话，打 `github` 到第 4 键 `gith` 就会被满码顶出中文。
     ///
-    /// ⚠️ 默认值与 `schema.mix.auto_commit_block_on_english`（默认**关**）刻意相反，不是漂移。
-    /// 那边默认关，是因为混输用户以码表为主、顶码要保持可用，英文只是捎带；而本段是用户
-    /// **显式打开**的能力，关着它等于白开——五笔 4 码即满码自动上屏，打 `github` 到第 4 键
-    /// `gith` 就被顶出中文，英文候选永远等不到露面。`wind-engine/AGENTS.md` 记着同款现场
-    /// 在混输里已经发生过一次（"github 打到第 5 键顶出「不算」"）。
-    ///
-    /// ⚠️ 本项的判据看的是**前缀命中**而非精确命中（`english_merge::has_any`）：用户打到
-    /// `gith` 时精确命中还不存在，若否决也要求精确，满码就会在第 4 键把中文顶上屏。
+    /// 默认值与 `schema.mix.auto_commit_block_on_english`（默认关）刻意相反：混输以码表为主、顶码要可用；
+    /// 本段是用户显式打开的能力，不否决等于白开。
     #[serde(default = "default_true")]
     pub block_commit: bool,
-    /// **成词级**否决：整串恰是一个英文完整单词时否决满码 / 顶码上屏 / 满码空码清空（英文
+    /// 成词级否决：整串恰是一个英文完整单词时否决满码 / 顶码上屏 / 满码空码清空（英文
     /// 临时词不算）。默认开。前缀级 [`Self::block_commit`] 关掉时，用它保住「打完一个英文词
     /// 不被顶走」，又不让英文词的前缀拦住五笔满码。两级关系同混输拼音那对。
     #[serde(default = "default_true")]
@@ -3261,34 +2715,24 @@ impl Default for CodetableEnglishMerge {
 
 /// 拼音方案的「英文候选混入」配置（[schema.pinyin.english_merge]）。
 ///
-/// 与 [`CodetableEnglishMerge`] 是**两件独立的事**，理由见该结构文档。
-///
-/// ⚠️ **刻意没有 `block_commit`**：那一项否决的是满码自动上屏 / 顶码上屏，而拼音方案
-/// 两者都没有。给它一个恒不生效的开关，等于教用户去配一件不成立的事。
+/// 与 [`CodetableEnglishMerge`] 是两件独立的事，理由见该结构文档。刻意没有 `block_commit`：
+/// 拼音方案没有满码自动上屏与顶码上屏。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PinyinEnglishMerge {
-    /// 在候选列表里混入英文词库候选（只收**精确命中**，前缀扩展不入列）。出厂关。
+    /// 在候选列表里混入英文词库候选（只收精确命中，前缀扩展不入列）。出厂关。
     #[serde(default)]
     pub enable: bool,
     /// 最小触发长度（0=回退 3，即 2 字符以内不查英文）。
     #[serde(default)]
     pub min_length: usize,
-    /// 中文侧**有**候选时，输入达到几个字母起也补英文前缀（不与精确命中重复）。
-    /// 0 = 不补，只在中文侧为空时补（出厂值）；开时建议 5。口径同码表的同名项，另加一条拼音判据：
-    ///
-    /// 只在「打的不是完整拼音」时补：整串**任何切法**都切不成完整的全拼音节序列（`templa`
-    /// 补 template，`shang` / `chang` 不补）。判据见
-    /// `wind_engine::english_merge::prefix_complete_applies`。
-    ///
-    /// ⚠️ 双拼方案下不生效：判据按全拼音节定义，双拼码两键一音节、几乎任何串都解得开，
-    /// 套不上这条判据。
+    /// 中文侧有候选时，输入达到几个字母起也补英文前缀（不与精确命中重复）。
+    /// 0 = 只在中文侧为空时补（出厂值）；开时建议 5。口径同码表的同名项，另加一条拼音判据：
+    /// 整串任何切法都切不成完整的全拼音节序列时才补（`templa` 补 template，`shang` 不补），
+    /// 见 `wind_engine::english_merge::prefix_complete_applies`。双拼方案下不生效（几乎任何串都解得开）。
     #[serde(default)]
     pub complete_min_length: usize,
-    /// 完整单词英文最靠前排第几位（1 起）。0 = 按方案自动：全拼 1、双拼 2（出厂值）；
-    /// 写了非 0 值则全拼双拼都用它。仍先让过开头吃满整串的中文，只会更靠后。
-    ///
-    /// 双拼默认让一位：双拼两键一音节，`the` / `good` / `this` 这类常用英文词几乎都解得出
-    /// 中文，英文当首选会抢掉用户真正在打的那个字词。
+    /// 完整单词英文最靠前排第几位（1 起）。0 = 按方案自动：全拼 1、双拼 2（出厂值）；非 0 则都用它。
+    /// 仍先让过开头吃满整串的中文。双拼默认让一位：两键一音节，`the` / `good` 这类常用词几乎都解得出中文。
     #[serde(default)]
     pub exact_position: usize,
     /// 前缀补全英文最靠前排第几位（1 起；0 = 默认 2）。恒在完整单词英文之后。
@@ -3450,32 +2894,19 @@ impl HintScope {
     pub const VALUES: &'static [&'static str] = &["first", "all"];
 }
 
-/// 快捷输入的**全局**行为配置。
+/// 快捷输入的全局行为配置。
 ///
-/// 各候选来源的开关与优先级**不在这里**——它们是 `mix_modes.members` 的成员
-/// （`quick_input.calc` / `.date` / `.number` / `.repeat` 与 `$primary_pinyin` / `english`），
-/// 开关即增删、优先级即排序。本结构只留与来源无关的全局项。
-///
-/// 曾有 `enable_english` 与 `members` 并存，构成双真相源（协调器两处各过滤一遍
-/// english 成员）。已废弃并在加载期迁移：旧值 false → 从 quick_mix 的 members 移除 english。
-/// 快捷输入的**全局**行为配置。
-///
-/// 没有总开关：想禁用就把 `quick_mix` 的 `trigger_keys` 清空——没有触发键自然进不去，
-/// 一件事只有一种表达。（曾有 `enabled` 字段，但它从未被任何逻辑读取，关掉不产生任何效果。）
-///
-/// 曾有 `force_vertical`（强制竖排），但它的判定条件是「**这个 mix 实例**含 quick 成员」，
-/// 属于实例的显示属性却被存在与实例无关的全局段里。已迁移到
-/// [`MixModeConfig::candidate_layout`]（见 docs/design/mode-candidate-layout.md）。
+/// 各候选来源的开关与优先级不在这里，它们是 `mix_modes.members` 的成员（`quick_input.calc` /
+/// `.date` / `.number` / `.repeat` 与 `$primary_pinyin` / `english`），开关即增删、优先级即排序。
+/// 没有总开关：清空 `quick_mix` 的 `trigger_keys` 即禁用。旧的 `enable_english` 与 `force_vertical`
+/// 已在加载期迁移（后者迁到 [`MixModeConfig::candidate_layout`]，见 docs/design/mode-candidate-layout.md）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QuickInputConfig {
     /// 计算器结果小数位数，默认 6
     #[serde(default = "default_decimal_places")]
     pub decimal_places: i32,
     /// 快捷输入历史（成员 `quick_input.history`）的条数上限，默认 1000；`0` = 不限。
-    ///
-    /// 超出时按「次数少、用得旧」裁掉，与网址历史 `input.url.history_max` 同一套裁剪。
-    /// 不做按时间过期（维护者 2026-10-05 定）：按「用得旧」淘汰本身就会让过气项目的词
-    /// 慢慢被挤出去。设置页：输入 → 快捷输入 → 历史条数上限。
+    /// 超出时按「次数少、用得旧」裁掉，与 `input.url.history_max` 同一套裁剪；不做按时间过期。
     #[serde(default = "default_quick_history_max")]
     pub history_max: u32,
 }
@@ -3501,19 +2932,11 @@ impl Default for QuickInputConfig {
 
 /// 模式级候选布局意图（设计见 docs/design/mode-candidate-layout.md）。
 ///
-/// - `Follow`：跟随全局 `ui.candidate.layout`——用户改全局，本模式跟着改。
+/// - `Follow`：跟随全局 `ui.candidate.layout`。
 /// - `Vertical` / `Horizontal`：进入该模式期间覆盖全局方向，退出自动回到全局。
 ///
-/// 刻意与 `ui.candidate.layout` 共用取值词汇（"vertical"/"horizontal"），让「模式级设置」
-/// 与「全局设置」在用户眼里是同一件事的两个层级，而不是两套发明出来的开关名。
-///
-/// **为什么不是布尔**：`Follow` 与 `Vertical` 只在全局本身是竖排时才有区别——前者跟着
-/// 全局变、后者恒定竖排。布尔（旧 `quick_input.force_vertical`）把这两种意图压成同一个
-/// `true`，且表达不了「全局竖排但本模式横排」（临英候选一行放得下，竖排反而占屏）。
-///
-/// ⛔ **旋转 90° / 文字竖排不在本枚举里**，它们是另一根轴
-/// （[`TextOrientation`]，方案级 `[candidate] text_orientation`）。
-/// 曾把它们当成第三、第四种「排列」，作废理由见该类型的文档。
+/// 与 `ui.candidate.layout` 共用取值词汇。不用布尔：`Follow` 与 `Vertical` 只在全局竖排时无区别，
+/// 布尔也表达不了「全局竖排但本模式横排」。旋转 / 文字竖排是另一根轴（[`TextOrientation`]）。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum LayoutIntent {
@@ -3523,35 +2946,19 @@ pub enum LayoutIntent {
     Horizontal,
 }
 
-/// **横排时**文字的排列方式（方案级 `[candidate] text_orientation`）。
+/// 横排时文字的排列方式（方案级 `[candidate] text_orientation`）。
 ///
 /// | 取值 | 屏幕上 | 给谁用 |
 /// |---|---|---|
 /// | `Normal` | 一行候选，文字水平 | 绝大多数方案 |
-/// | `Rotated` | 候选成列自左向右，**整项**顺时针转 90° | 蒙古文等连写的纵向书写脚本 |
+/// | `Rotated` | 候选成列自左向右，整项顺时针转 90° | 蒙古文等连写的纵向书写脚本 |
 /// | `Upright` | 同上，但字不转、逐字下行 | 汉字的对联式竖排 |
 ///
 /// 术语取自 CSS `text-orientation: sideways \| upright`，`Rotated` 对应 sideways。
 ///
-/// # ★★ 为什么是**独立一根轴**，而不是 [`LayoutIntent`] 的第三、第四个取值
-///
-/// 曾按后者实现过，作废理由有三条，每条单独都足够：
-///
-/// 1. **注释模板只认横竖**。它在全局/方案/overlay/模式**四层**各有一对
-///    `_vertical`/`_horizontal`，窗口尺寸下限有四个字段，`flip_when_above` 只对竖排成立。
-///    把旋转塞进同一个枚举，这些对子要么变三元组四元组（组合级代价），要么被迫「旋转态
-///    走横排那一支」——后者能跑，但它恰恰说明**旋转本来就不是一种排列**。
-/// 2. **值域挤在同一个下拉里**。外观页那个控件面向所有用户，而旋转是极少数方案才用的；
-///    四个平铺选项既难选，也在暗示它们是同一类东西。
-/// 3. ★ **两根轴合成一根就切不开了**：蒙古文用户想在自己的方案里切横排/竖排时，
-///    `ime.toggle("layout")` 只能把方向整个换掉、连旋转一起丢。拆成两根轴之后，
-///    切换只动 `vertical`，`text_orientation` 是方案属性，纹丝不动。
-///
-/// # ⚠️ 竖排时不生效
-///
-/// 键名里的「横排时」是字面意思：`vertical = true` 时本轴一律按 `Normal` 处理
-/// （竖排再转 90° 就是横排，没有第二种解释）。归一化只在
-/// [`Orientation::normalized`] 一处做。
+/// 独立一根轴而非 [`LayoutIntent`] 的取值：注释模板、窗口尺寸下限、`flip_when_above` 都只按横竖
+/// 成对；面向所有用户的布局下拉不该混进极少数方案才用的选项；合成一根轴的话 `ime.toggle("layout")`
+/// 切横竖会连旋转一起丢。竖排时本轴一律按 `Normal` 处理，归一化只在 [`Orientation::normalized`] 一处做。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TextOrientation {
@@ -3560,10 +2967,8 @@ pub enum TextOrientation {
     Normal,
     /// 整项顺时针旋转 90°。
     Rotated,
-    /// 整项旋转，但每个字逆时针扶正、逐字下行（对联式）。
-    ///
-    /// ⚠️ 它按**字**切单元，故会切断连写脚本（阿拉伯文、蒙古文）的字形连接；
-    /// 那些脚本要的是 [`Self::Rotated`]。本项是给汉字这类等宽独立字形用的。
+    /// 整项旋转，但每个字逆时针扶正、逐字下行（对联式）。按字切单元，会切断连写脚本的字形连接，
+    /// 那些脚本要用 [`Self::Rotated`]。
     Upright,
 }
 
@@ -3594,15 +2999,9 @@ impl TextOrientation {
 
 /// 候选呈现方向：竖排位 + 横排时的文字排列方式。
 ///
-/// # 两根轴，且**真的正交**
-///
-/// `vertical` 是用户随时可切的呈现偏好（外观页、命令栏 `ime.toggle("layout")`、模式级覆盖）；
-/// `text` 是方案声明的「这套文字怎么写」（`[candidate] text_orientation`）。
-/// 切前者不动后者——这正是拆成两根轴的主要收益，见 [`TextOrientation`] 的第 3 条理由。
-///
-/// 唯一的耦合是**竖排时 `text` 不生效**（竖排再转 90° 就是横排）。归一化只在
-/// [`Self::normalized`] 一处做，读侧一律通过 [`Self::rotated`] / [`Self::upright`] 取值，
-/// 不要自己判 `!vertical && text != Normal`——那等于把归一化复制到第二处。
+/// `vertical` 是用户随时可切的呈现偏好，`text` 是方案声明的「这套文字怎么写」，切前者不动后者。
+/// 唯一的耦合是竖排时 `text` 不生效，归一化只在 [`Self::normalized`] 一处做；读侧一律经
+/// [`Self::rotated`] / [`Self::upright`] 取值，不要自己判 `!vertical && text != Normal`。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Orientation {
     /// 候选纵向堆叠（屏幕空间）。
@@ -3631,7 +3030,7 @@ impl Orientation {
         text: TextOrientation::Upright,
     };
 
-    /// 竖排时把文字排列归零。**下发 UI 前必须过一次**——渲染端的
+    /// 竖排时把文字排列归零。下发 UI 前必须过一次——渲染端的
     /// `list_vertical` 同时看两位，`vertical && rotated` 会让列表既按竖排堆叠又被转 90°。
     pub fn normalized(self) -> Self {
         if self.vertical { Self::VERTICAL } else { self }
@@ -3647,10 +3046,8 @@ impl Orientation {
         !self.vertical && self.text == TextOrientation::Upright
     }
 
-    /// 解析 `ui.candidate.layout`；未知值按横排（出厂行为）。
-    ///
-    /// ⚠️ 本函数**只认横竖两个值**。旋转/直立不从这个键来——它们是方案属性，
-    /// 混进来会让 `ime.toggle("layout")` 的写回把方案意图覆盖掉。
+    /// 解析 `ui.candidate.layout`；未知值按横排（出厂行为）。只认横竖两个值：旋转/直立是方案属性，
+    /// 混进来会让 `ime.toggle("layout")` 的写回覆盖方案意图。
     pub fn from_layout_str(s: &str) -> Self {
         if s.eq_ignore_ascii_case("vertical") {
             Self::VERTICAL
@@ -3659,10 +3056,7 @@ impl Orientation {
         }
     }
 
-    /// 回写 `ui.candidate.layout` 用的字符串——**只反映 `vertical`**。
-    ///
-    /// ★ 于是 `ime.toggle("layout")` 写盘时不会碰到方案声明的文字排列：
-    /// 蒙古文用户切一次横竖，回来还是旋转态。
+    /// 回写 `ui.candidate.layout` 用的字符串，只反映 `vertical`，于是切横竖不会碰到方案声明的文字排列。
     pub fn layout_str(self) -> &'static str {
         if self.vertical {
             "vertical"
@@ -3672,35 +3066,21 @@ impl Orientation {
     }
 }
 
-/// 自由输入（字面输入）模式：让 mix 能打出 `GetTestData()` / `test_data` / `<TAB>`
-/// 这类**任何 member 都无法接受**的内容。
+/// 自由输入（字面输入）模式：让 mix 能打出 `GetTestData()` / `test_data` / `<TAB>` 这类任何 member
+/// 都无法接受的内容。
 ///
-/// - `Off`：越界字符仍走「顶屏候选 + 上屏标点 + 退出」，没有 Free 透镜。例外两条：
-///   含英文成员的实例里 Shift+字母：大写照样进缓冲、候选只给英文段（同 `Auto`），但数字 /
-///   符号键仍是功能键（选词、翻页、顶屏），见 `MixLens::English`（A2-50）；下文的
-///   **第二条判据同样适用**——零候选时选词键归字面，`;.xlsx` 在 `Off` 下也打得出。
-/// - `Auto`（**默认**）：由缓冲内容自动推导，见 `MixLens`。
-/// - `Always`：本实例恒为自由输入——用于新建一个专做字面输入的融合模式。
+/// - `Off`：越界字符仍走「顶屏候选 + 上屏标点 + 退出」，没有 Free 透镜。例外：含英文成员的实例里
+///   Shift+字母照样进缓冲、候选只给英文段，但数字 / 符号键仍是功能键（`MixLens::English`）；
+///   下面第二条判据同样适用。
+/// - `Auto`（默认）：由缓冲内容自动推导，见 `MixLens`。
+/// - `Always`：本实例恒为自由输入，用于专做字面输入的融合模式。
 ///
-/// # 为什么没有切换键
+/// 没有切换键：mix 里几乎每个键都已双重占用。判据落在输入内容本身，两条：
+/// 1. 字符不在当前透镜的合法字符集内，就只能是字面内容；
+/// 2. 一个候选都没有时，选词键也归字面（否则 `.txt` 这类本透镜合法却换不来候选的输入打不出）。
+///    快捷输入历史的候选不算数，只有历史命中时选词键同样归字面。
 ///
-/// mix 里几乎每个键都已双重占用（文本透镜：数字选词、标点顶屏；数字透镜：字母选词），
-/// 挑不出一个真正空闲的可打印键；而非可打印键（Tab / 方向键 / PgUp）又都是可配置的
-/// 导航键组。于是判据落在**输入内容本身**：一个字符若不在当前透镜的合法字符集内，
-/// 它就不可能是编码，只能是字面内容。
-///
-/// 判据有**第二条**（0.122 补，`Off` 档后来也纳入）：**一个候选都没有时，选词键也不是
-/// 功能键**，同样归字面。
-/// 上面那条对「本透镜合法、却换不来任何候选」的字符无能为力——`.` 是算式字符，缓冲 `.`
-/// 自身永不越界，而字母在数字透镜里被选词臂吃掉，于是越界字符永远进不了缓冲，`.txt`
-/// 打不出来。两条判据是同一句话的两面：这个键此刻根本没在起作用，它就只能是字面。
-/// 快捷输入历史的候选不算数：它是字面前缀补全、不是本透镜的产出，只有历史命中时
-/// 选词键同样归字面（否则 `.txt` 进了历史，`.xlsx` 又打不出）。
-///
-/// # 为什么是缓冲的纯函数而非粘滞状态位
-///
-/// 没有进入键就没有退出键，粘滞态找不到可解释的清除时机。纯函数下退格删掉最后一个
-/// 越界字符就自然回到原透镜，所见即所得。
+/// 是缓冲的纯函数而非粘滞状态位：没有进入键就找不到清除时机；退格删掉越界字符即回到原透镜。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum FreeInputMode {
@@ -3712,10 +3092,8 @@ pub enum FreeInputMode {
 
 /// 临时 mix 模式配置（overlay 激活面）。触发后对每个成员方案查询并按成员序合并候选。
 ///
-/// ⚠️ **`Default` 手写而非 derive**：`free_input_takes_select_keys` 的 serde 缺省是 `true`，
-/// 而 derive 出来的 `bool::default()` 是 `false`——两条路径会给出相反的默认值，测试夹具
-/// （`..Default::default()`）与真实配置的行为就此分叉。新增带非零默认值的字段时，
-/// **必须同时改这里**（与 `TempEnglishConfig` 手写 `Default` 同因）。
+/// `Default` 手写而非 derive：`free_input_takes_select_keys` 的 serde 缺省是 `true`，derive 会给出
+/// `false`，测试夹具与真实配置就此分叉。新增带非零默认值的字段时必须同时改这里。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MixModeConfig {
     /// 实例唯一标识
@@ -3730,7 +3108,7 @@ pub struct MixModeConfig {
     /// 引导键列表
     #[serde(default)]
     pub trigger_keys: Vec<String>,
-    /// 成员列表：**候选来源的单一真相源**——有无即开关，顺序即优先级。
+    /// 成员列表：候选来源的单一真相源——有无即开关，顺序即优先级。
     ///
     /// 三类取值：
     /// - 真实方案 id（`"pinyin"` / `"english"` / 码表方案…），经其 `.schema.toml` 加载；
@@ -3752,34 +3130,19 @@ pub struct MixModeConfig {
     /// 中文标点」；专做字面输入的实例则设 `Always`。
     #[serde(default, deserialize_with = "crate::tolerant_de::tolerant")]
     pub free_input: FreeInputMode,
-    /// 自由输入是否**夺取二三候选键**（`keys.select_key_groups` 的键，默认 `;` `'`）
-    /// 作字面输入。默认开；`free_input = "off"` 时本项无意义。
+    /// 自由输入是否夺取二三候选键（`keys.select_key_groups` 的键，默认 `;` `'`）作字面输入。
+    /// 默认开；`free_input = "off"` 时无意义。
     ///
-    /// # 为什么需要它
+    /// 文本透镜下选词键与字面字符是同一批键的两种解释。`rock'n'roll` / `for(;;)` 里的 `'` `;`
+    /// 恰是默认选词键，不夺取就会先被 `select_key_offset` 吃掉。夺取无能力损失：它们只是数字键
+    /// `2`/`3` 的别名。数字键 1-9 不在夺取范围（文本透镜唯一的选词通路），代价是 `utf8` 这类
+    /// 「纯小写 + 数字」在有候选时仍需先打大写或符号切进自由输入（无候选时选词键本就让位，见 [`FreeInputMode`]）。
     ///
-    /// 文本透镜下「选词键」与「字面字符」是同一批物理键的两种解释，无法两全。而
-    /// `rock'n'roll` / `don't` / `for(;;)` 这类内容里的 `'` `;` 恰好就是默认选词键：
-    /// 不夺取的话它们在第④步就被 `select_key_offset` 吃掉，根本走不到第⑤步的字面输入
-    /// （实测 `;rock` 按 `'` 会选走第 3 候选「日欧」并触发分步确认，输入被打散）。
-    ///
-    /// 夺取的代价是**零能力损失**：`;`/`'` 选第 2/3 候选只是数字键 `2`/`3` 的冗余别名，
-    /// 数字键仍在。**数字键 1-9 刻意不在夺取范围内**——它们是文本透镜唯一的选词通路，
-    /// 让位就没有选词键了。代价是 `utf8` / `mp3` / `x64` 这类「纯小写字母 + 数字」仍需
-    /// 先打一个大写字母或符号切进自由输入。
-    ///
-    /// ⚠️ 这个代价只在**有候选**时成立：0.122 起「一个候选都没有」时选词键一律让位
-    /// （见 [`FreeInputMode`] 的第二条判据），故 `utf` 若在本 mix 下换不来任何候选，
-    /// 后面那个 `8` 现在直接就是字面。本项管的是「有候选时要不要夺」，与那条无关。
-    ///
-    /// # 为什么是独立开关而非跟随 `free_input`
-    ///
-    /// 翻页键（`-`/`=`）的让位是跟着 `free_input` 走的，本项刻意不对称：翻页有
-    /// PageUp/PageDown 作等价替代，让位是纯收益；而选词键的取舍因人而异——习惯用
-    /// `;`/`'` 选词的用户可以单独关掉本项，保住手感，同时仍享有大写字母与其它符号
-    /// 触发的自由输入。
+    /// 独立开关而非跟随 `free_input`：翻页键有 PageUp/PageDown 替代，让位是纯收益；选词键的取舍
+    /// 因人而异，习惯 `;`/`'` 选词的用户可单独关掉。
     #[serde(default = "default_true")]
     pub free_input_takes_select_keys: bool,
-    /// 数字透镜（首字符是数字/符号）下是否拿**小写字母**作选词键（a=首选）。默认开。
+    /// 数字透镜（首字符是数字/符号）下是否拿小写字母作选词键（a=首选）。默认开。
     ///
     /// 关掉后字母在数字透镜里是字面输入，`2fa`、`1.5x` 可以直接打进缓冲；序号标签随之
     /// 改回数字，选词靠 `keys.quick_input_select`（出厂 Ctrl+数字）与空格。
@@ -3797,7 +3160,7 @@ impl Default for MixModeConfig {
             members: Vec::new(),
             candidate_layout: LayoutIntent::default(),
             free_input: FreeInputMode::default(),
-            // 与 `#[serde(default = "default_true")]` 对齐，见结构体文档的 ⚠️。
+            // 与 `#[serde(default = "default_true")]` 对齐，见结构体文档。
             free_input_takes_select_keys: default_true(),
             numeric_letter_select: default_true(),
         }
@@ -3813,14 +3176,11 @@ pub const QUICK_MIX_ID: &str = "quick_mix";
 /// 与字面 `"pinyin"` 严格区分——后者表示"就要全拼"，永不被替换。
 pub const MIX_MEMBER_PRIMARY_PINYIN: &str = "$primary_pinyin";
 
-/// mix 成员占位符：**生僻字候选**（用当前活跃方案的编码查询，只留生僻字）。
+/// mix 成员占位符：生僻字候选（用当前活跃方案的编码查询，只留生僻字）。
 ///
-/// 与 [`MIX_MEMBER_PRIMARY_PINYIN`] 同样是 `$` 前缀的占位符而非字面方案 id——它指向的
-/// 不是某个固定方案，而是「此刻的活跃方案 + 一道过滤」。写成字面 id 是不可能的：
-/// 用户在五笔下和在拼音下要查的是同一个东西，而那是两个不同的方案。
-///
-/// ⚠️ 它不是真实方案，`ensure_schema` 对它必然失败，故 `mix_members`（真实方案列表）
-/// 要像排除 `quick_input.*` 那样把它排除，进入门卫则要单独认它。
+/// 与 [`MIX_MEMBER_PRIMARY_PINYIN`] 同为 `$` 前缀占位符：它指向「此刻的活跃方案 + 一道过滤」，
+/// 无法写成字面方案 id。它不是真实方案，`ensure_schema` 对它必然失败，故 `mix_members` 要像排除
+/// `quick_input.*` 那样排除它，进入门卫则要单独认它。
 pub const MIX_MEMBER_RARE_CHAR: &str = "$rare_char";
 
 /// 主拼音方案缺省回退（`schema.primary_pinyin` 为空时的目标方案）。
@@ -3838,13 +3198,9 @@ fn default_mix_modes() -> Vec<MixModeConfig> {
         id: QUICK_MIX_ID.to_string(),
         name: "快捷".to_string(),
         short_name: "快".to_string(),
-        // ★ 出厂引导键**刻意仍放在这里**（而不是 data/config.toml 的 keys.key_actions）。
-        //
-        // 收编后它由 `normalize` 折算进 `keys.key_actions`。默认值必须留在**被折算的
-        // 那一侧**，折算结果才能如实反映用户意图：没配过→折算出默认；改成别的键→
-        // 折算出新值；**清空→折算出空**。若把默认值直接写进 key_actions，第三种就废了
-        // ——合并后 `trigger_keys = []` 与「从没配过」同形，折算跳过、默认绑定仍在，
-        // 用户清空了个寂寞。见 docs/design/schema-key-actions.md 五c。
+        // 出厂引导键刻意放在这里而非 keys.key_actions：`normalize` 会把它折算进 key_actions，默认值
+        // 留在被折算的一侧，「清空」才能折算出空；写进 key_actions 的话清空与「从没配过」同形。
+        // 见 docs/design/schema-key-actions.md 五c。
         trigger_keys: vec!["semicolon".to_string()],
         members,
         // 出厂强制竖排：快捷输入的候选是日期/算式结果等长文本，横排放不下。
@@ -3860,39 +3216,29 @@ fn default_mix_modes() -> Vec<MixModeConfig> {
     }]
 }
 
-// ⛔ `SpecialModeConfig` 已删除。特殊模式的实例集合改由「带 `[overlay]` 段的已安装方案」
-// 定义（`EngineManager::overlay_modes`）：呈现配置落方案文件的 `[overlay]` 段，引导键与
-// 直达热键落 `keys.key_actions`（`special:<方案id>`）。
-// 见 `docs/redesign/overlay-mode-config.md`。残留旧配置的告警见 `warn_legacy_special_modes`。
+// `SpecialModeConfig` 已删除。特殊模式的实例集合改由带 `[overlay]` 段的已安装方案定义
+// （`EngineManager::overlay_modes`），引导键与直达热键落 `keys.key_actions`（`special:<方案id>`）。
+// 见 `docs/redesign/overlay-mode-config.md`；残留旧配置的告警见 `warn_legacy_special_modes`。
 // ───────────────────────── input（输入行为）─────────────────────────
 
 /// 「检索范围」智能档的放宽增强（设计见 `docs/design/smart-filter-scope-relax.md`）。
 ///
-/// 智能档会滤掉同码位有常用字的生僻字，代价是**唯一编码被占的生僻字彻底打不出**（如五笔
-/// 「桜」sivg 与常用「档」同码），用户只能整体切「全部字符」并常忘记切回。
-///
-/// 出路只有**一条**：候选窗内按向后翻页键翻到底，再按一次即临时放宽。刻意不做任何自动
-/// 行为——曾实现过「候选不足一页自动补充」，实测平白改变了智能档的既有观感，已删除。
+/// 智能档会滤掉同码位有常用字的生僻字，唯一编码被占的生僻字（如五笔「桜」sivg 与「档」同码）
+/// 因而彻底打不出。PC 上出路只有一条：候选窗内向后翻页翻到底再按一次即临时放宽；
+/// 刻意不做自动补充，那会改变智能档的既有观感。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScopeRelaxConfig {
     /// 末页再按向后翻页键即临时放宽为「全部字符」，本次组合结束后自动恢复。
-    ///
-    /// 三类引擎通用且唯一的入口——用户找生僻字本就会一路翻页，翻到底即是明确的放宽意图。
-    /// 候选**不足一页**时同样适用：那时只有一页，按翻页键一样翻不动，落到同一条路径。
+    /// 三类引擎通用；候选不足一页时同样适用。
     #[serde(default = "default_true")]
     pub page_end_key: bool,
     /// 放宽放出来的候选的前缀标注（空=不标注），用于与正常候选区分。
     #[serde(default = "default_scope_relax_prefix")]
     pub prefix: String,
-    /// 智能档下**始终**把被滤掉的候选追加在列表末尾（不必先翻到底再按翻页键）。
+    /// 智能档下始终把被滤掉的候选追加在列表末尾（不必先翻到底再按翻页键）。
     ///
-    /// 给没有翻页键的触屏端用：那里 `page_end_key` 的出路不存在，唯一编码被常用字占着的
-    /// 生僻字就彻底打不出（实测 98 五笔导入后约 22% 的单字如此）。追加的候选与翻页放宽
-    /// 出来的同源——带 `is_scope_filtered`、沉底、不计入满码自动上屏、不参与词频重排。
-    ///
-    /// **PC 出厂关**：曾实现过「候选不足一页自动补充」，实测平白改变了智能档的既有观感，
-    /// 已删除；本项是为触屏端单独留的显式开关，只在智能档生效（常用字档要的就是稳定只出
-    /// 常用字，全部字符档本就不过滤），辅助码模式也不适用。
+    /// 给没有翻页键的触屏端用，PC 出厂关。追加的候选与翻页放宽同源：带 `is_scope_filtered`、沉底、
+    /// 不计入满码自动上屏、不参与词频重排。只在智能档生效，辅助码模式不适用。
     #[serde(default)]
     pub always_append: bool,
 }
@@ -3911,7 +3257,7 @@ fn default_scope_relax_prefix() -> String {
     "·".to_string()
 }
 
-/// 联想（`[input.association]`）：上屏之后按**上文**推荐下一个词或标点。
+/// 联想（`[input.association]`）：上屏之后按上文推荐下一个词或标点。
 ///
 /// 与普通候选的根本差别在输入源——普通候选的输入是编码缓冲，联想的输入是刚上屏的文本。
 /// 候选生成在 `wind-assoc`，何时展示/退出在协调器 `handle_assoc.rs`。
@@ -3919,18 +3265,11 @@ fn default_scope_relax_prefix() -> String {
 pub struct AssociationConfig {
     /// 哪一种联想：`"off"`（默认）/ `"word"` / `"smart"`。
     ///
-    /// - `word` **词语联想**：上文当**前缀**，出词库里以它开头的更长的词。打完「中」给
-    ///   「中国」「中间」，选中只补出「国」「间」。PC 输入法说的「联想」就是这个，
-    ///   **不含标点**。
-    /// - `smart` **智能联想**：上文当**上下文**，出下一个可能的词与标点。移动端刚需
-    ///   ——软键盘上每多打一个字都很贵。
+    /// - `word` 词语联想：上文当前缀，出以它开头的更长的词（「中」→「国」「间」），不含标点。
+    /// - `smart` 智能联想：上文当上下文，出下一个可能的词与标点，移动端刚需。
     ///
-    /// ★ **开关与类型合并成这一个字段**。拆成 `enabled` + `kind` 会立刻产生「开着但类型
-    /// 没配」的歧义状态，而那个状态没有正确答案。
-    ///
-    /// ⚠️ **本段是桌面基线，移动端的差异走 [`MobileAssociationConfig`]**，不要在这里加
-    /// `"auto"` 之类的平台哨兵——那会把平台知识塞进值域，设置界面被迫列一个语义空洞的
-    /// 选项，用户看不出选了会得到什么。
+    /// 开关与类型合并成一个字段，避免「开着但类型没配」的歧义态。本段是桌面基线，移动端差异走
+    /// [`MobileAssociationConfig`]，不要加 `"auto"` 之类的平台哨兵。
     #[serde(default = "default_assoc_kind")]
     pub kind: String,
     /// `"one_shot"`（默认）/ `"continuous"`。
@@ -3939,44 +3278,32 @@ pub struct AssociationConfig {
     /// 接着给。桌面默认一次性：候选窗是浮层，常驻会挡住正文。
     #[serde(default = "default_assoc_mode")]
     pub mode: String,
-    /// 候选总数上限。各源的配额由它按优先级分配，**配额本身不开放给用户**——那是调参项，
+    /// 候选总数上限。各源的配额由它按优先级分配，配额本身不开放给用户——那是调参项，
     /// 而用户没有评测手段。
     #[serde(default = "default_assoc_max_count")]
     pub max_count: usize,
-    /// 空格是否上屏当前高亮的联想候选。
-    ///
-    /// 主流输入法多数如此，故默认开。关掉则空格照常出空格（联想窗同时收起）。
-    /// 这一项没有「更对」的答案——它取决于用户把联想当「顺手就选」还是「别挡我打字」。
+    /// 空格是否上屏当前高亮的联想候选。主流输入法多数如此，故默认开；关掉则空格照常出空格
+    /// （联想窗同时收起）。
     #[serde(default = "default_true")]
     pub space_commits: bool,
-    /// 二三候选键（`keys.select_key_groups` / `session_actions` 里 `select_candidate:N`
-    /// 的**可打印**键，出厂 `;` `'`）在联想态是否选联想候选。
+    /// 二三候选键（`keys.select_key_groups` / `session_actions` 里 `select_candidate:N` 的可打印键，
+    /// 出厂 `;` `'`）在联想态是否选联想候选。
     ///
-    /// `true`（默认）= 照常选第 2/3 条，与非联想态一致。`false` = 联想态下让出这些键：
-    /// 收起联想窗，该键按「联想窗不在」处理（普通标点照常出；若另绑了模式引导，则照常进
-    /// 该模式）。对标 QQ 五笔（论坛 t251）：联想是输入法猜的，按 `;` 想打的是分号。
-    ///
-    /// 只管 keydown 消费的可打印键。修饰键组（`lrshift` / `lrctrl`）走 keyup、没有字符可
-    /// 「原样上屏」，不受本项影响；数字键选联想也不受影响。
+    /// `true`（默认）= 照常选第 2/3 条。`false` = 联想态下让出：收起联想窗，该键按「联想窗不在」处理
+    /// （对标 QQ 五笔：按 `;` 想打的是分号）。只管 keydown 消费的可打印键；修饰键组（`lrshift` /
+    /// `lrctrl`）与数字键不受影响。
     #[serde(default = "default_true")]
     pub select_keys_commit: bool,
-    /// 联想态按**回车**：只收窗（吃键），还是收窗 + 把回车**透传**给宿主。
+    /// 联想态按回车：只收窗（吃键），还是收窗 + 把回车透传给宿主。
     ///
-    /// `false`（默认）= 透传：联想窗收起，同时回车照常换行 / 发送消息。
-    /// `true` = 仅取消联想：回车被吃掉，要按第二次才生效。
-    ///
-    /// 默认透传，是因为回车是**终结性动作**——用户按它是要发送或换行，而联想窗是输入法
-    /// 自己弹出来的、用户并没有在选词。让它吞掉一次回车，等于让一个「建议」挡住了正事。
+    /// `false`（默认）= 透传，联想窗收起同时照常换行 / 发送；`true` = 回车被吃掉。
+    /// 默认透传：回车是终结性动作，不该让输入法自己弹出的建议挡住。
     #[serde(default)]
     pub enter_cancels_only: bool,
-    /// 联想态按**退格**：只收窗（吃键），还是收窗 + 把退格**透传**给宿主。
+    /// 联想态按退格：只收窗（吃键），还是收窗 + 把退格透传给宿主。
     ///
-    /// 取值语义与 [`Self::enter_cancels_only`] 完全对称，但**默认相反**（`true` = 仅取消
-    /// 联想，保持吃键）。
-    ///
-    /// 两者默认值相反是刻意的（2026-08-20 用户拍板）：回车的透传是「把正事办了」，而退格
-    /// 的透传是**删掉刚上屏的字**——一个不可逆的破坏性动作。联想窗弹出时用户的手正停在
-    /// 刚打完的字上，误触退格若直接删字，比多按一次键的代价大得多。要这个行为的人可以开。
+    /// 语义与 [`Self::enter_cancels_only`] 对称，但默认相反（`true` = 吃键）：退格透传是删掉刚上屏的
+    /// 字，不可逆，而联想窗弹出时手正停在刚打的字上，误触代价大。
     #[serde(default = "default_true")]
     pub backspace_cancels_only: bool,
     /// 联想窗自动隐藏的毫秒数；`0` = 不自动隐藏。
@@ -3985,11 +3312,8 @@ pub struct AssociationConfig {
     /// 自行淡出，用户若要用就在这几秒内按数字。
     #[serde(default = "default_assoc_hide_after_ms")]
     pub hide_after_ms: u64,
-    /// 联想态在**编码栏**显示的标识；空串 = 不显示。
-    ///
-    /// 只在「编码不嵌入宿主」（候选窗自绘编码栏）时可见——嵌入模式下编码栏本身不存在。
-    /// 它回答的是「候选窗为什么还开着、这批候选是哪来的」：联想候选与普通候选长得一样，
-    /// 没有标识时用户分不清自己是不是还在打字。
+    /// 联想态在编码栏显示的标识；空串 = 不显示。只在候选窗自绘编码栏时可见。
+    /// 联想候选与普通候选长得一样，没有标识时用户分不清自己是不是还在打字。
     #[serde(default = "default_assoc_hint")]
     pub hint: String,
     /// 个人上屏历史学到的搭配。
@@ -4003,9 +3327,8 @@ pub struct AssociationConfig {
     pub prefix: bool,
     /// 标点与符号（静态规则表打底）。
     ///
-    /// ⚠️ **桌面默认关**（移动端在 [`MobileAssociationConfig::punct`] 里开）。桌面上打完
-    /// 一个字就弹一串标点，干扰远大于收益——标点在实体键盘上本来就一键可达，而候选窗是
-    /// 浮层、还占着数字键。移动端相反：软键盘上打标点要切键盘层，从候选里点走省事得多。
+    /// 桌面默认关（移动端在 [`MobileAssociationConfig::punct`] 里开）：实体键盘上标点一键可达，
+    /// 打完一个字就弹一串标点干扰远大于收益；软键盘上打标点要切层，从候选里点更省事。
     #[serde(default)]
     pub punct: bool,
 }
@@ -4043,36 +3366,18 @@ pub enum ConfigOverlay {
     Mobile,
 }
 
-/// `[mobile]`：**移动端对桌面基线的覆盖**。桌面构建完全无视本域。
+/// `[mobile]`：移动端对桌面基线的覆盖。桌面构建完全无视本域。
 ///
-/// # 为什么单独开一个顶层域
+/// 少数配置项的最优值在两个平台上不同（如联想）。不用值域哨兵（`kind = "auto"`，设置页被迫列一个
+/// 语义空洞的选项），也不靠两份预置文件各写各的（安卓的是无守门测试的手工副本，同步时会被覆盖）；
+/// 本域让一份文件显式说清两个平台的差异。
 ///
-/// 少数配置项的最优值在两个平台上就是不同的（联想是第一例：PC 上候选窗是浮层、会占用
-/// 数字键，移动端软键盘本就常驻、每多打一个字都很贵）。表达这种差异有三条路，前两条都
-/// 试过并被否决：
+/// 只登记真有平台差异的键，没出现的键沿用基线：每登记一个都要在 REGISTRY、预置文件、
+/// capability 快照、设置页豁免名单里各占一行。字段用 `String` 而非 `Option<String>`：
+/// `None` + `skip_serializing_if` 会让本段序列化成空表、自己变成叶子键，注册表守门测试都得开特例。
 ///
-/// 1. ⛔ **值域哨兵**（`kind = "auto"` 由宿主按 `cfg!(target_os)` 解释）——把平台知识塞进
-///    了值里。后果是设置界面被迫列一个语义空洞的「自动」选项，用户看不出选了会得到什么
-///    （2026-08-16 用户否决）。
-/// 2. ⛔ **两份预置文件各写各的**——`data/config.toml` 与安卓仓 `assets/data/config.toml`
-///    确实是两份，但后者是**手工副本且无守门测试**（实测已滞后 89 行）。把平台差异寄托在
-///    「两份文件恰好不一样」上，下次同步就被无脑覆盖回去了。
-/// 3. ✅ **本域**：一份文件同时说清两个平台，差异是显式的、可读的、同步不会丢。
-///
-/// # 只登记真有平台差异的键
-///
-/// 本域里出现的键，移动端就用这里的值；**没出现的键沿用基线**。所以「移动端与基线相同」
-/// 的键根本不该被登记进来——每登记一个都要在 REGISTRY、预置文件、capability 快照、设置页
-/// 豁免名单里各占一行，改基线时还得记得改另一边。
-///
-/// ⚠️ 字段用 `String` 而不是 `Option<String>`：`Option` 看着更贴「覆盖」的字面意思，但
-/// `None` + `skip_serializing_if` 会让本段在默认配置里序列化成**空表**，于是
-/// `mobile.association` 自己成了叶子键，三道注册表守门测试全都要为它开特例
-/// （2026-08-16 实测撞上）。而那份「稀疏」能力本就是多余的——见上一段。
-///
-/// ⚠️ 覆盖**不在 [`Config::load`] 里合并**，而是在消费点由宿主决定是否取用
-/// （协调器 `handle_assoc.rs`）。理由：合并进 `input.*` 之后，移动端设置页读到的是合并
-/// 后的值，一保存就把移动端的值写进了桌面基线。
+/// 覆盖不在 [`Config::load`] 里合并，而在消费点由宿主决定是否取用（协调器 `handle_assoc.rs`）：
+/// 合并进 `input.*` 的话，移动端设置页一保存就把移动端的值写进了桌面基线。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MobileConfig {
     #[serde(default)]
@@ -4083,12 +3388,9 @@ pub struct MobileConfig {
 
 /// `[mobile.grammar]`：拼音整句语法模型的移动端取值。字段语义见 [`PinyinGrammar`]。
 ///
-/// 移动端默认**开**随包的 `wanxiang-mini.gram`（5.3 MB，万象的子集，挑法见设计文档
-/// `language-model-integration.md` §10–§11）：软键盘上整句打错要逐字改，代价比桌面高。
-/// 桌面基线仍关（[`PinyinGrammar`] 默认），等移动端真机跑稳再议。
-///
-/// 覆盖同样不在 `Config::load` 里合并，由引擎在取拼音配置时按平台挑
-/// （[`Config::pinyin_effective`]）。
+/// 移动端默认开随包的 `wanxiang-mini.gram`（挑法见 `language-model-integration.md` §10–§11）：
+/// 软键盘上整句打错要逐字改，代价比桌面高。桌面基线仍关。覆盖同样不在 `Config::load` 里合并，
+/// 由引擎按平台挑（[`Config::pinyin_effective`]）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MobileGrammarConfig {
     /// 总开关，语义见 [`PinyinGrammar::enabled`]。
@@ -4127,29 +3429,26 @@ pub struct MobileAssociationConfig {
     /// 移动端 `"continuous"`：软键盘上方的联想栏本就常驻，多显示一行没有额外遮挡成本。
     #[serde(default = "default_mobile_assoc_mode")]
     pub mode: String,
-    /// 移动端**开**标点联想：软键盘上打标点要切键盘层，从候选里点走省事得多。
+    /// 移动端开标点联想：软键盘上打标点要切键盘层，从候选里点走省事得多。
     /// 桌面相反（见 [`AssociationConfig::punct`]）——实体键盘上标点一键可达。
     #[serde(default = "default_true")]
     pub punct: bool,
-    /// 移动端**关**：联想态空格出空格、收起联想，不选首个联想（豆包、微信都是这样）。
-    /// 汉字后双击空格出「。」也靠这一下真的是空格。桌面相反（[`AssociationConfig::space_commits`]
-    /// 默认开）——候选窗里看得见高亮，空格选词顺手；手机上联想挤在候选条里，空格选走它就是
-    /// 「我想打空格却上了个词」。留作开关给习惯「空格选首个联想」的人。
+    /// 移动端关：联想态空格出空格、收起联想，不选首个联想；汉字后双击空格出「。」也靠它。
+    /// 桌面相反（[`AssociationConfig::space_commits`] 默认开）：手机上联想挤在候选条里，
+    /// 空格选走它就是「想打空格却上了个词」。
     #[serde(default)]
     pub space_commits: bool,
-    /// 移动端**关**：联想态的二三候选键（`;` `'`）不选联想，照常出标点。
+    /// 移动端关：联想态的二三候选键（`;` `'`）不选联想，照常出标点。
     /// 手机上选联想只靠点候选；这两个键在软键盘上就是普通标点键，不该被联想截走。
     /// 桌面相反（[`AssociationConfig::select_keys_commit`] 默认开）。
     #[serde(default)]
     pub select_keys_commit: bool,
-    /// 移动端**关**（= 透传）：联想态按回车收起联想并照常换行/发送。语义同
+    /// 移动端关（= 透传）：联想态按回车收起联想并照常换行/发送。语义同
     /// [`AssociationConfig::enter_cancels_only`]。
     #[serde(default)]
     pub enter_cancels_only: bool,
-    /// 移动端**关**（= 透传）：联想态按退格收起联想并照常删字。
-    /// 桌面默认吃键（[`AssociationConfig::backspace_cancels_only`] = true），理由是桌面联想窗
-    /// 弹出时手停在刚打的字上、误触代价大；手机上联想只是候选条里的建议，退格就是要删字，
-    /// 吃掉一次反而成了「删不掉」。
+    /// 移动端关（= 透传）：联想态按退格收起联想并照常删字。桌面默认吃键
+    /// （[`AssociationConfig::backspace_cancels_only`]）；手机上退格就是要删字，吃掉一次成了「删不掉」。
     #[serde(default)]
     pub backspace_cancels_only: bool,
 }
@@ -4199,32 +3498,23 @@ fn default_assoc_hint() -> String {
 /// `single_char[:<载荷>]` 按键动词的载荷（[`BoundAction::SingleChar`] /
 /// [`SessionAction::SingleChar`] 共用）。
 ///
-/// 载荷：`on` / `off` / `toggle` / `follow`；**裸 `single_char` 等价于 `:toggle`**
-/// ——开关类功能最常绑的就是切换，同 `aux_code` 与 `aux_code:page_next` 的裸/带载荷先例。
-///
-/// `follow` = 清掉临时态、回落配置层，与方案文件里「不写这一项＝跟随全局」是**同构**的
-/// 语义，用户在两处看到同一个词表达同一件事。
+/// 载荷：`on` / `off` / `toggle` / `follow`；裸 `single_char` 等价于 `:toggle`。
+/// `follow` = 清掉临时态、回落配置层，与方案文件里「不写＝跟随全局」同义。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SingleCharAction {
     /// 直达指定状态（`on` / `off`）。
     Set(bool),
     /// 在开 / 关之间切换（裸 `single_char` 与 `single_char:toggle`）。
     ///
-    /// ★ 无法由 `Set` 组合出来：一个键要既能开又能关，只有 toggle 表达得了。
+    /// 无法由 `Set` 组合出来：一个键要既能开又能关，只有 toggle 表达得了。
     Toggle,
-    /// 清掉临时态，回到配置层（`follow`）。
-    ///
-    /// ★ 也无法由 `Toggle` 转出来——切换只在开/关两个具体状态间走，永远回不到
-    /// 「没有临时态」。三者都不冗余。
+    /// 清掉临时态，回到配置层（`follow`）。`Toggle` 永远回不到「没有临时态」，三者都不冗余。
     Follow,
 }
 
 impl SingleCharAction {
-    /// 解析 `single_char:` 之后的那一段；未知载荷返回 `None`。
-    ///
-    /// ⚠️ 未知载荷必须落 `None`（⇒ `BoundAction::None`）而不是回落某个状态：静默降级会让
-    /// `single_char:yes` 这种拼错表现成「切了但方向不对」，符合「写错的动词不静默变成别的
-    /// 功能」这条全表通用的策略。
+    /// 解析 `single_char:` 之后的那一段；未知载荷返回 `None`（⇒ `BoundAction::None`），
+    /// 不回落某个状态：写错的动词不静默变成别的功能。
     pub fn parse_payload(rest: &str) -> Option<Self> {
         match rest.trim().to_ascii_lowercase().as_str() {
             "on" | "true" => Some(Self::Set(true)),
@@ -4287,58 +3577,21 @@ impl CommentStateAction {
     }
 }
 
-/// 候选窗定位方式（**内部配置**，不进设置页）。
+/// 候选窗定位方式（内部配置，不进设置页）：热键直达模式激活时是否发占位 composition 取坐标。
 ///
-/// 这几个模式的共同处境：**由热键激活，激活瞬间没有任何输入内容**，却要立刻显示候选窗
-/// / 预览窗，因而需要一个光标坐标。当前做法是发一个占位 composition —— C++ 侧据此
-/// `StartComposition` 并 `SetText(" ")` 把 range 撑开，再用 `GetTextExt` 取矩形。
-///
-/// # 为什么要能关
-///
-/// 占位 composition 建在**当前 selection** 上。用户选中了文字时，那个空格会把选中内容
-/// **替换掉** —— 这就是 t123 报的「Ctrl+= 造词吃掉编辑器里选中的文字」，Qt / Electron /
-/// QQ 全中，因为这是 TSF 标准语义而非某个宿主的怪癖。
-///
-/// # 为什么不干脆一律关掉
-///
-/// 实践结论（admin）：**很多应用的 `GetTextExt` 与其它 Win32 取坐标 API 都给不出正确
-/// 坐标，只有基于 TSF composition 的才准**。占位空格正是为兼容那些应用而存在的。
-/// 一律关掉会让候选窗在那些宿主上错位 —— 拿「吃字」换「错位」，不是改善。
-///
-/// 故做成**逐模式开关**而非一个总开关：这几个模式的 UI 形态不同（加词是预览窗、临拼与
-/// 特殊模式是候选列表），对定位精度的敏感度未必一致，实测下来很可能要分别取值。
-///
-/// # ⚠️ 出厂值不统一：加词 `false`，另三个 `true`
-///
-/// 开关为 `true` 时 **t123 依然会发生**：`StartComposition` 拿的就是当前
-/// `tfSelection.range`（C++ 侧不折叠、不改写它），用户选中着文字时 composition 罩住选中
-/// 内容，`SetText(" ")` 随即把它替换掉 —— 字照吃。所以这几个开关本身不是 t123 的修复，
-/// 是给它一个出口；**加词那一项出厂就走了这个出口**。
-///
-/// 为什么只关加词：t123 报的就是 Ctrl+= 造词这一个场景；加词弹的是预览窗，对坐标精度的
-/// 敏感度低于候选列表；2026-09-15 靶机实测关掉后选中内容保住、记事本下预览窗位置仍然
-/// 正确 ⇒ 这一项上「保住用户的字」赢过「坐标最准」。
-///
-/// 为什么另三个不跟着关：它们弹的是候选列表，错位的观感与代价更大，而且尚无实测数据说明
-/// 各自宿主上的回退链够不够用。一律关掉是拿「吃字」换「错位」，而错位影响的是**所有**
-/// 用户的日常输入，吃字只在「选中着文字又去按热键」时发生。等实测再逐个调 —— 这正是做成
-/// 四个开关而不是一个总开关的理由。
-///
-/// - `true` = 占位 composition 取坐标，最准，但选中态会吃掉选中的文字。
-/// - `false` = 协调器返回 `Consumed`，**完全不发 `UpdateComposition`** ⇒ DLL 不建
-///   composition ⇒ 选中内容原样保留；坐标退到 `GetCaretPosition` 的回退链
-///   （GUITHREADINFO → GetCaretPos → 上次已知位置 → 窗口中心估计）。
-///   ⛔ 不是「建了 composition 再折叠成插入点」—— 那条路试过且已作废：admin 2026-09-15
-///   实测「只要对 composition 做操作，选中内容就会被清空，且与宿主有关」。
+/// 这些模式激活瞬间没有输入内容却要立刻显示窗口。占位 composition（`SetText(" ")` 后
+/// `GetTextExt`）坐标最准，但建在当前 selection 上，用户选中着文字时会把它替换掉；
+/// `false` 则完全不发 `UpdateComposition`，选中内容保留，坐标退到 `GetCaretPosition` 的回退链。
+/// 逐模式开关，出厂只关加词。背景与已否定的方向见
+/// `docs/architecture/caret-position-host-compat-notes.md` 的「热键直达模式的占位 composition」。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct CaretPlacementConfig {
-    /// 快捷加词（`keys.add_word`，出厂 Ctrl+=）。**t123 报的就是这一个。**
+    /// 快捷加词（`keys.add_word`，出厂 Ctrl+=）。
     pub add_word_via_composition: bool,
     /// 临时拼音直达热键（`enter_temp_pinyin`）。热键进入时 `key_code=0` ⇒ 前缀为空 ⇒ 空组合区。
-    /// ⚠️ 只管「按下热键时缓冲是空的」那一种进入。打了一半再按直达热键（最常见的用法）
-    /// 走的是顶字上屏那条，它本来就不插占位（`InsertText { new_composition: None }`，
-    /// 压根不建 composition），与本开关无关，配 false 也看不出差别。
+    /// 只管按下热键时缓冲为空的进入；打了一半再按直达热键走顶字上屏，本就不建 composition，
+    /// 与本开关无关。
     pub temp_pinyin_via_composition: bool,
     /// 特殊模式直达热键（`enter_special:<id>`）。同上，`key_code=0` ⇒ 前缀空。
     pub special_via_composition: bool,
@@ -4348,15 +3601,8 @@ pub struct CaretPlacementConfig {
 
 impl Default for CaretPlacementConfig {
     fn default() -> Self {
-        // ⚠️ **加词出厂为 false，其余三个为 true** —— 不是笔误，是实测驱动的逐个取值。
-        //
-        // 加词关掉：t123 报的就是 Ctrl+= 造词吃掉选中文字这一个场景，而加词弹的是**预览窗**、
-        // 对坐标精度的敏感度低于候选列表；2026-09-15 靶机实测关掉后选中内容保住、记事本下
-        // 预览窗位置仍然正确（回退链够用）⇒ 这一项上「保住用户的字」赢过「坐标最准」。
-        //
-        // 另三个保持 true：它们弹的是候选列表，错位的观感与代价都更大，而且尚无实测数据
-        // 说明各自宿主上的回退链够不够用。等实测再逐个调 —— 这正是做成四个开关而不是一个
-        // 总开关的理由。
+        // 加词出厂为 false、其余为 true，是逐个取值而非笔误：加词弹预览窗，对坐标精度不敏感，
+        // 「保住选中文字」优先；另三个弹候选列表，错位代价更大。理由见本结构体文档。
         Self {
             add_word_via_composition: false,
             temp_pinyin_via_composition: true,
@@ -4370,58 +3616,39 @@ impl Default for CaretPlacementConfig {
 pub struct InputConfig {
     #[serde(default = "default_filter_mode")]
     pub filter_mode: String,
-    /// 含生僻字的**词**要不要吃 `filter_mode` 这一刀：`keep`（出厂，整词放行）/ `filter`
-    /// （与单字同判，0.121 及以前的行为）。值域与语义见 `wind_candidate::RarePhrasePolicy`，
-    /// 那里也记着「一般输入法怎么做」的调研。
+    /// 含生僻字的词要不要吃 `filter_mode` 这一刀：`keep`（出厂，整词放行）/ `filter`（与单字同判）。
+    /// 值域与调研见 `wind_candidate::RarePhrasePolicy`。
     ///
-    /// ⚠️ 与 `filter_mode` **正交**：那个决定「什么算该滤」，本项决定「词要不要吃这一刀」。
-    /// 故不是给 `filter_mode` 加第四个档——档位是互斥的单选，而这两件事要能任意组合
-    /// （常用字档 + 整词放行，正是楼主 t103 要的那一格）。
+    /// 与 `filter_mode` 正交（那个决定「什么算该滤」），故不是给它加第四档：两件事要能任意组合，
+    /// 如常用字档 + 整词放行。
     #[serde(default = "default_rare_phrase")]
     pub rare_phrase: String,
-    /// 上屏文本里的换行**用什么字符表达**的全局默认档；per-app 覆盖见 compat.toml 的
-    /// `[[commit_newline]]` 段。值域与「为什么必须按应用配」见
-    /// [`crate::app_compat::NewlineStyle`]：`keep`（出厂）/ `cr` / `lf` / `crlf`。
+    /// 上屏文本里的换行用什么字符表达的全局默认档；per-app 覆盖见 compat.toml 的 `[[commit_newline]]`。
+    /// 值域与「为什么必须按应用配」见 [`crate::app_compat::NewlineStyle`]：`keep`（出厂）/ `cr` / `lf` / `crlf`。
     ///
-    /// 认不出的值按出厂档处理——回落只发生在**全局层这一处**，per-app 层认不出的值
-    /// 退化为「没配」＝跟随全局（同 `first_show_mode` 的取舍）。
-    ///
-    /// ⚠ 与 `NewlineStyle` 的 `#[default]` 是两处独立事实，必须一致——由
-    /// `commit_newline_global_default_matches_enum_default` 钉住。
-    ///
-    /// **仅 Windows 消费**：macOS 的 IMKit 用 LF，协调器在非 Windows 上编译期即 `Keep`。
+    /// 认不出的值只在全局层回落出厂档，per-app 层认不出的值等于「没配」＝跟随全局。须与 `NewlineStyle`
+    /// 的 `#[default]` 一致（`commit_newline_global_default_matches_enum_default`）。仅 Windows 消费，
+    /// macOS 的 IMKit 用 LF，协调器在非 Windows 上编译期即 `Keep`。
     #[serde(default = "default_commit_newline")]
     pub commit_newline: String,
-    /// 英文输入态（英文方案 / 临时英文）下，**临时夺取哪个键**来切换候选的大小写档位：
+    /// 英文输入态（英文方案 / 临时英文）下临时夺取哪个键来切换候选的大小写档位：
     /// 默认 → 全大写 → 全小写 → 默认，一次组合结束即复位。空串 = 关闭（出厂）。
-    /// 快捷输入里有英文段时同样生效，档位只套英文段（中文候选与计算结果不动）。
+    /// 快捷输入里有英文段时同样生效，档位只套英文段。
     ///
-    /// 值域见 `Coordinator::parse_case_cycle_key`：`capslock` / `tab` / `enter` / `space` /
-    /// `escape`。不认识的键名**告警后按关闭处理**，不静默。
+    /// 值域见 `Coordinator::parse_case_cycle_key`：`capslock` / `tab` / `enter` / `space` / `escape`，
+    /// 不认识的键名告警后按关闭处理。是键名而非 bool：macOS 上 CapsLock 拦不到（IMKit 走
+    /// `.flagsChanged`），用户需自己指定键（Windows 填 `capslock`、macOS 填 `tab`）。
+    /// 键即开关，不要再加 `enabled`，两道闸串联会让配好了却没反应。
     ///
-    /// # 为什么是「键名」而不是一个 bool
-    ///
-    /// 本项最初是 `input.capslock.english_case_cycle`（bool，键固定 CapsLock）。macOS 上
-    /// 那条路走不通：CapsLock 的按键事件在 IMKit 里走 `.flagsChanged`，`toWindowsVK` 没有
-    /// 它的映射（只有锁定态经 `toggles` 位传过来），而拦截手段 `SetWindowsHookExW` 本身
-    /// 就是 Windows-only。⇒ 让用户自己指定键，Windows 填 `capslock`、macOS 填 `tab`。
-    ///
-    /// ★ **键即开关，仍是单一真相源**：不要在此之外再加一个 `enabled` bool，那就成了两道
-    /// 闸串联——用户把键配好却没反应，而两处显示都正常（同 `key_actions` 物化那条教训）。
-    ///
-    /// ⚠️ 被夺取的键在英文输入期间用不出它原本的语义（`capslock` 的系统大写锁定、`tab` 的
-    /// 辅助码 / 配对跳出 / 会话动作）。启动体检会为此告警，见
-    /// `Coordinator::warn_english_case_cycle_conflict`。
+    /// 被夺取的键在英文输入期间失去原语义，启动体检会告警（`Coordinator::warn_english_case_cycle_conflict`）。
     #[serde(default)]
     pub english_case_cycle_key: String,
-    /// 上屏注释 / 拼音（t138）：组合中按 **Alt+数字 N** 上屏第 N 个候选的拼音或注释
-    /// 而非候选字本身，**Alt+空格** 取高亮那条（出厂即首选）。键**不可配**，本项同时是开关与
-    /// 内容选择：`off`（出厂）/ `pinyin`（带调）/ `pinyin_plain`（不带调）/ `comment`（候选
-    /// 右侧的注释段原文，不截断）。解析见 [`AltCommit`]。
+    /// 上屏注释 / 拼音：组合中按 Alt+数字 N 上屏第 N 个候选的拼音或注释而非候选字本身，
+    /// Alt+空格 取高亮那条。键不可配，本项同时是开关与内容选择：`off`（出厂）/ `pinyin`（带调）/
+    /// `pinyin_plain`（不带调）/ `comment`（注释段原文，不截断）。解析见 [`AltCommit`]。
     ///
-    /// 冲突处置（排查清单见 `docs/design/alt-commit.md`）：只在「中文 + 有候选」时吃键，
-    /// 其余时候 Alt+数字 / Alt+空格 原样归宿主；`keys.key_actions` 里用户已绑的 Alt 组合
-    /// 一律让位（编译期不登记、分派期不认领）。
+    /// 只在「中文 + 有候选」时吃键；`keys.key_actions` 里用户已绑的 Alt 组合一律让位
+    /// （排查清单见 `docs/design/alt-commit.md`）。
     #[serde(default = "default_alt_commit")]
     pub alt_commit: String,
     /// 检索范围放宽（智能档增强）。
@@ -4434,72 +3661,43 @@ pub struct InputConfig {
     pub enter_behavior: String,
     #[serde(default = "default_space_behavior")]
     pub space_on_empty_behavior: String,
-    /// 空码（缓冲非空但无候选）时按标点/符号键的处理方式。**三态**：
+    /// 空码（缓冲非空但无候选）时按标点/符号键的处理方式。三态：
     ///
     /// - `commit` 上屏原码再接标点；
     /// - `clear`（出厂）丢弃原码，标点照常上屏；
-    /// - `clear_no_input` 丢弃原码，标点本身也不上屏——整个按键当没按过。
+    /// - `clear_no_input` 丢弃原码，标点本身也不上屏。
     ///
-    /// ★ 与 [`Self::enter_behavior`] / [`Self::space_on_empty_behavior`] 同族但**值域多一态**。
-    /// 这一族描述的行为其实有两根轴：「废码上不上屏」与「键字符本身出不出」。回车/空格的
-    /// `clear` 落在**吞键**那一格（返回 `ClearComposition`），标点的 `clear` 落在**出键**那一
-    /// 格——同一字面值在第二根轴上取值相反，是刻意的（标点是用户真想输入的可见字符）。
-    /// `clear_no_input` 补的是标点缺的那一格。值域清单在
-    /// `config_schema::PUNCT_EMPTY_CODE_BEHAVIOR_VALUES`，唯一解释器是
-    /// `Coordinator::punct_empty_code_policy`。
-    ///
-    /// **不要与 `schema.codetable.punct_commit` 混淆**：那一项关掉是「吞键、**保留**编码」，
-    /// 编码留在组合区继续输入；`clear_no_input` 是「吞键、**丢弃**编码」。
+    /// 与 [`Self::enter_behavior`] / [`Self::space_on_empty_behavior`] 同族，但同一字面值 `clear`
+    /// 在「键字符出不出」上刻意相反：回车/空格的 `clear` 吞键，标点的 `clear` 出键（标点是用户
+    /// 真想输入的字符），`clear_no_input` 补的是标点缺的那一格。值域清单在
+    /// `config_schema::PUNCT_EMPTY_CODE_BEHAVIOR_VALUES`，唯一解释器是 `Coordinator::punct_empty_code_policy`。
+    /// 不要与 `schema.codetable.punct_commit` 混淆：那一项关掉是吞键并保留编码。
     #[serde(default = "default_punct_on_empty_behavior")]
     pub punct_on_empty_behavior: String,
-    /// **组码中**可直接进输入缓冲的符号（纯字面字符集，逐字符匹配）。出厂 `-`，留空 = 关闭。
+    /// 组码中可直接进输入缓冲的符号（纯字面字符集，逐字符匹配）。出厂 `-`，留空 = 关闭。
     ///
-    /// 解决的是 `-` 这个字符的双重身份：它既是英文标识符里的高频字符（`sun-panel`、
-    /// `e-mail`），又是出厂翻页键（`keys.page_keys` 含 `minus_equal`）。两个身份在组码中
-    /// 撞车，而撞车处此前**两边都不通**——配成翻页键时首页按下是空转吞键（按了没反应），
-    /// 不配翻页键时落标点臂顶码上屏，都打不出 `sun-panel`。
+    /// 解决 `-` 的双重身份：它既是英文标识符的高频字符（`sun-panel`），又是出厂翻页键。
+    /// 只在该键此刻没有别的活身份时才入缓冲，判据单点在 `Coordinator::symbol_buffer_key_free`
+    /// （会话动作、次选键、以词定字键、引导键、音节分隔符与英文分词符、数字选词，命中即让位）。
+    /// 唯一例外是有候选、本次会话尚未翻过页时的「上一页」，那一格本是空转吞键；翻过页后恢复翻页身份
+    /// （`State::paged` 粘滞到候选重装），对齐微软拼音。
     ///
-    /// ★ **只在该键此刻没有别的活身份时才入缓冲**，判据单点在
-    /// `Coordinator::symbol_buffer_key_free`：会话动作（翻页/移高亮/取消/辅助码/单字输入）、
-    /// 次选键、以词定字键、`key_actions` 引导键（含方案级 `[key_actions]` 与 `z_key_action`）、
-    /// 音节分隔符与英文分词符、数字选词，命中任一即让位、行为逐字不变。
+    /// 无候选那一格不碰：那里 `-` 走标点臂按 `punct_on_empty_behavior` 甩掉废码；但缓冲里已有本闸门
+    /// 放进来的符号时照收。只对组码中生效，空闲时这些键仍归宿主/标点流水线。
     ///
-    /// 唯一的例外是**有候选、且本次会话尚未翻过页时的「上一页」**——只有那一格是真空转
-    /// （`page_prev` 返回 false 而 `apply_session_action` 末尾无条件 `Consumed`），让给字符
-    /// 输入零损失。翻过页之后 `-` 恢复翻页身份（`State::paged` 粘滞到候选重装），对齐微软拼音。
-    ///
-    /// ⚠️ **无候选那一格刻意不碰**：那里 `-` 原本会落标点臂，按 `punct_on_empty_behavior`
-    /// 甩掉废码（出厂 `clear`，是打错码时的退出口），还要吃全角与自定义标点映射——都不是
-    /// 「按下没反应」。例外的例外是缓冲里已经有本闸门放进来的符号（`e-mail-addr` 的第二个
-    /// 连字符），那一串早已不是编码，照收。
-    ///
-    /// ⚠️ 只对**组码中**生效（`input_buffer` 非空）。空闲时这些键仍归宿主/标点流水线，
-    /// 否则用户在任何程序里都打不出减号。
-    ///
-    /// ★ 刻意**不**复用码元集 `input_chars` 的 `a-z` 范围语法，理由同
-    /// [`TempEnglishConfig::symbol_chars`]：`-` 在符号集里是高频字符，范围语法下它会被
-    /// 解析成区间端点而静默放行几十个字符。字面即全部真相。
-    ///
-    /// **不是码元**：本项不进 `CodeCharSet`、不参与引擎查询语义，只决定「这个键此刻是
-    /// 字符还是功能」。方案作者要让某符号成为真正的码元（参与码长/顶码判定）仍走
-    /// `[engine.codetable] input_chars`，那条路会**无条件夺取**该键（见
-    /// `Coordinator::code_char_conflicts`），与本项的「让位优先」正相反。
+    /// 不复用 `input_chars` 的范围语法，理由同 [`TempEnglishConfig::symbol_chars`]。本项也不是码元：
+    /// 不进 `CodeCharSet`；要让符号成为真正的码元走 `[engine.codetable] input_chars`，那条路无条件夺取
+    /// 该键（见 `Coordinator::code_char_conflicts`），与本项的「让位优先」相反。
     #[serde(default = "default_buffer_symbol_chars")]
     pub buffer_symbol_chars: String,
     #[serde(default = "default_numpad_behavior")]
     pub numpad_behavior: String,
-    /// 小键盘恒半角：开启后小键盘的 `0-9` 与 `. + - * /` 在**全角态下仍输出 ASCII 原形**，
-    /// 且**整条标点流水线一并跳过**（自定义映射四态表 / 中文标点 / 全半角三步全不走）。
+    /// 小键盘恒半角：开启后小键盘的 `0-9` 与 `. + - * /` 在全角态下仍输出 ASCII，且整条标点流水线
+    /// 一并跳过（自定义映射 / 中文标点 / 全半角）。
     ///
-    /// 语义是「设备级」而非「字符级」——小键盘的用途就是录数字（金额 / 编号 / 日期），
-    /// 全角 `１２３` 在表格与编号栏里几乎总是错的，而用户开全角通常只为排版正文。
-    /// 故它与 [`Self::numpad_behavior`] **正交**：`follow_main` 下小键盘仍照常选词 / 翻页
-    /// （归一化照做），只有落到**出字**那一步才改半角。
-    ///
-    /// ⚠️ 覆盖面止于「单键直接上屏」的路径。临英 / URL / mix 等**缓冲类**模式下，
-    /// 小键盘字符先入缓冲、整串上屏时才全角化，而缓冲只存字符不存来源，
-    /// `"abc12"` 里的 `12` 是不是小键盘打的已无从分辨 ⇒ 那几条路不受本开关影响。
-    /// 这是刻意的能力边界，不是漏接。
+    /// 语义是设备级：小键盘用来录数字，全角数字在表格与编号栏里几乎总是错的。与
+    /// [`Self::numpad_behavior`] 正交，只有落到出字那一步才改半角。覆盖面止于单键直接上屏的路径：
+    /// 临英 / URL / mix 等缓冲类模式只存字符不存来源，不受本开关影响，这是刻意的能力边界。
     #[serde(default)]
     pub numpad_half_width: bool,
     /// 启动默认状态（记住上次状态 / 默认中文 / 全角 / 中文标点；原 general 域）。
@@ -4538,7 +3736,7 @@ pub struct InputConfig {
     #[serde(default)]
     pub url: UrlConfig,
     /// 邮箱输入模式（缓冲非空时按 `@` 触发，补全常用后缀）。与 [`Self::url`] 共用
-    /// 补全候选源与夺取回退骨架，但触发判据是**后缀**而非前缀。
+    /// 补全候选源与夺取回退骨架，但触发判据是后缀而非前缀。
     #[serde(default)]
     pub email: EmailConfig,
     /// Unicode 码点输入模式（`u+4e00` → 一）。与 [`Self::url`] 同为前缀夺取式。
@@ -4551,10 +3749,8 @@ pub struct InputConfig {
     #[serde(default)]
     pub s2t: S2TConfig,
     /// 繁简转换（上屏文字变换，与 [`Self::s2t`] 反向）：词库与内部候选是繁体、要出简体。
-    ///
-    /// 与 `s2t` **互斥**（由 `Coordinator::persist_s2t_enabled` / `persist_t2s_enabled`
-    /// 两侧共同保证）：内部域只有一个，两个方向同时开会先转过去再转回来，产物是绕了
-    /// 一圈的近似原文，用户无从理解自己看到了什么。
+    /// 与 `s2t` 互斥（由 `Coordinator::persist_s2t_enabled` / `persist_t2s_enabled` 保证）：
+    /// 内部域只有一个，同时开会转过去再转回来。
     #[serde(default)]
     pub t2s: T2SConfig,
     /// 命令栏（$CC/$SS/$AA 等命令候选）。原 features.cmdbar。
@@ -4566,65 +3762,48 @@ pub struct InputConfig {
     /// 顶码上屏策略（内部/实验，默认 direct_commit 真提交时序，躲开 diff 合并与整段下划线）。
     #[serde(default, deserialize_with = "crate::tolerant_de::tolerant")]
     pub top_commit_mode: TopCommitMode,
-    /// 顶屏类上屏（标点顶屏 / 非码元字符与小键盘顶屏 / 进模式顶屏）是否也**造词并推进
-    /// 临时词晋升计数**（6b），口径与各路选词出口一致（内部配置，不进设置页）。
+    /// 顶屏类上屏（标点顶屏 / 非码元字符与小键盘顶屏 / 进模式顶屏）是否也造词并推进临时词晋升计数
+    /// （6b），口径与各路选词出口一致（内部配置，不进设置页）。
     ///
-    /// 默认开：顶屏就是「选高亮那条」，与按空格选中是同一次选择。关掉时各路（含临拼）一律
-    /// 不造词、不推 6b——词频与上屏历史不受本项影响。次三选键越界的 `commit_and_input`
-    /// 也算顶屏；高亮是分步候选时只推 6b 不造词。
-    ///
+    /// 默认开：顶屏就是「选高亮那条」。关掉时各路（含临拼）一律不造词、不推 6b，词频与上屏历史
+    /// 不受影响。次三选键越界的 `commit_and_input` 也算顶屏；高亮是分步候选时只推 6b 不造词。
     /// 例外：临拼兜底臂（非标点键被吞、选中高亮候选）是选词不是顶屏，恒造词、不读本项。
     #[serde(default = "default_true")]
     pub top_commit_learn: bool,
     /// 密码框强制英文：宿主报出的 InputScope 含密码位（掩码 bit31）时，输入闸强制英文透传，
-    /// 不改 `chinese_mode` 持久值（内部配置，不进设置页；入口是托盘/工具栏右键的「高级」菜单）。
+    /// 不改 `chinese_mode` 持久值（内部配置，入口是托盘/工具栏右键的「高级」菜单）。
     ///
-    /// 出厂开：真密码框里出中文候选既打不对密码、又可能把明文露在候选窗里。
+    /// 出厂开：真密码框里出中文候选既打不对密码、又可能把明文露在候选窗里。必须能关：有的宿主把
+    /// 普通输入框也报成 `IS_DEFAULT + IS_PASSWORD`（`0x80000001`）。
     ///
-    /// 为什么必须能关：有的宿主把普通输入框也报成 `IS_DEFAULT + IS_PASSWORD`（掩码
-    /// `0x80000001`，t197），开着就是「这个框里永远打不出中文」。菜单开关原本只改内存、
-    /// 重启服务即复原，本键让它落盘。
-    ///
-    /// 关掉时两侧一起放行：协调器不再置位 `password_suppress`（输入闸与工具栏/语言栏的
-    /// 「英」呈现都跟着解除），DLL 侧的本地吃键门控经 `push_password_suppress_config`
-    /// 同步关闭——只关 core 不推 DLL，DLL 仍按密码框全放行，开关形同虚设。
-    /// 输入诊断 HUD 的 InputScope 显示与本项无关：关掉后照样能看到宿主报的是不是密码位，
-    /// 那正是判断「是不是误报」的依据。
+    /// 关掉时两侧一起放行：协调器不再置位 `password_suppress`，DLL 侧本地吃键门控经
+    /// `push_password_suppress_config` 同步关闭，只关 core 则开关形同虚设。输入诊断 HUD 的 InputScope
+    /// 显示不受影响，那是判断误报的依据。
     #[serde(default = "default_true")]
     pub password_force_english: bool,
     /// 忽略软件（宿主）自己写 compartment 引起的中英切换，开和关两个方向都忽略。出厂关。
     ///
-    /// 按应用的 compat.toml `ignore_host_ime_switch` 写了值就以它为准，没写才取本项。判据
-    /// （只认 compartment 来源、Ctrl 按住放行）见协调器 `host_ime_switch_ignored`。
-    ///
-    /// ⚠ 全局打开有代价：gvim 一类宿主依赖 OPENCLOSE 来保存/恢复中英，忽略后它们会失灵；
-    /// 按应用锁定中英的外部工具（KBLSwitch、AutoHotkey 脚本）写的也是 compartment，会被一并忽略。
-    /// 所以出厂关，只给用户自选；更推荐在「应用兼容性」里对出问题的软件单独开。
+    /// 按应用的 compat.toml `ignore_host_ime_switch` 写了值就以它为准。判据（只认 compartment 来源、
+    /// Ctrl 按住放行）见协调器 `host_ime_switch_ignored`。全局打开有代价：gvim 一类宿主靠 OPENCLOSE
+    /// 保存/恢复中英，按应用锁定中英的外部工具（KBLSwitch、AutoHotkey 脚本）也会被忽略；更推荐在
+    /// 「应用兼容性」里单独开。
     #[serde(default)]
     pub ignore_host_ime_switch: bool,
     /// 联想（上屏后按上文推荐下一个词/标点）。默认关。
     #[serde(default)]
     pub association: AssociationConfig,
     /// 候选窗定位方式（内部配置，见 [`CaretPlacementConfig`]）。
-    /// `serde(default)`：旧配置文件无此段，缺省即全 true（与改动前逐位一致）。
+    /// `serde(default)`：旧配置文件无此段时取 [`CaretPlacementConfig::default`]。
     #[serde(default)]
     pub caret: CaretPlacementConfig,
 }
 
 impl InputConfig {
-    /// 简繁两个方向的**生效**状态：`(简入繁出, 繁入简出)`。
+    /// 简繁两个方向的生效状态：`(简入繁出, 繁入简出)`。
     ///
-    /// 两者互斥（内部候选域只有一个，同时开等于转过去再转回来）。配置里若两个都 true，
-    /// 这里以 **s2t 优先**——配置是一份快照、不带顺序，无从知道用户后开的是哪个，于是取
-    /// 一个可解释的固定优先级：简入繁出是既有功能、用户基数大，反过来会让一批老用户在
-    /// 某次升级后莫名不出繁体。
-    ///
-    /// ★ 「后开的赢」那条语义住在协调器的 `toggle_conversion_direction` 与设置页的互斥
-    /// 联动里——那两处**知道**用户此刻按的是哪一个。本函数只回答「拿到一份配置，该按哪个
-    /// 方向转」。
-    ///
-    /// 收成一处是因为这个判据原本抄在三个地方（构造、reload、归一）：同一条语义散着写，
-    /// 迟早有一处漏改，而症状是「某条路径下简繁方向不对」，从现象反查不到是哪一处。
+    /// 两者互斥；配置里两个都 true 时以 s2t 优先：快照不带顺序，取固定优先级，简入繁出用户基数大。
+    /// 「后开的赢」住在协调器 `toggle_conversion_direction` 与设置页的互斥联动里，那两处知道用户按的是哪个。
+    /// 构造、reload、归一都调用这一处，别再各写一份。
     pub fn conversion_directions(&self) -> (bool, bool) {
         (self.s2t.enabled, self.t2s.enabled && !self.s2t.enabled)
     }
@@ -4733,15 +3912,10 @@ impl Default for PunctConfig {
 /// 中英 / 中数之间自动补空格（[input.spacing]）。设计见
 /// `docs/design/auto-spacing-and-latin-smart-punct.md`。
 ///
-/// 只管**切换处**：空格是切换后那一笔上屏的前缀（`你好` → ` Hello`、`Hello` → ` 世界`），
-/// 交界一侧是标点、空白或不可知时一律不补。「上一笔末字符」来自客户端的输入序列记账
-/// （`KeyPayload.seq_char`），宿主光标碰巧停在哪个字后面不算。
-///
-/// 连续的英文之间不归这里管：英文词之间的空格是英文输入本身的 `schema.english.commit_space` /
-/// `input.temp_english.commit_space`（上屏时立即补尾随空格，之后接中文看到的是空格，不再补）。
-///
-/// 按应用关闭见 compat `[[apps]] auto_spacing = false`（自带 pangu 类空格处理的 Markdown
-/// 编辑器、终端）。
+/// 只管切换处：空格是切换后那一笔上屏的前缀（`你好` → ` Hello`），交界一侧是标点、空白或不可知时
+/// 不补。「上一笔末字符」来自客户端输入序列记账（`KeyPayload.seq_char`），不看宿主光标。
+/// 英文词之间的空格归 `schema.english.commit_space` / `input.temp_english.commit_space`。
+/// 按应用关闭见 compat `[[apps]] auto_spacing = false`（自带空格处理的 Markdown 编辑器、终端）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SpacingConfig {
     /// 汉字与拉丁字母之间补空格（`中 en 中`）。默认关。
@@ -4752,14 +3926,11 @@ pub struct SpacingConfig {
     pub cjk_digit: bool,
 }
 
-/// 智能符号替换方案。两者是「体感」与「兼容性」的取舍，故都保留：
-/// - `DeleteReplace`（**默认**）：press1 直接提交中文符号，press2 删掉重打成英文。
-///   所见即所得、无预览态中间状态，实际体感更好；代价是依赖对宿主做删改
-///   （早期的 Office 500ms 重复、SendInput 自重入、prevChar 读不到致完全不触发
-///   三处已修）。
-/// - `HoldComposition`：press1 开启 TSF 组合态展示中文符号，press2 替换组合提交英文；
-///   超时（smart_timeout_ms）后自动提交中文。全程不做删改，**兼容性更好**，
-///   适合对删改敏感、DeleteReplace 下表现异常的宿主。
+/// 智能符号替换方案，「体感」与「兼容性」的取舍，故都保留：
+/// - `DeleteReplace`（默认）：press1 直接提交中文符号，press2 删掉重打成英文。所见即所得，
+///   代价是依赖对宿主做删改。
+/// - `HoldComposition`：press1 开启 TSF 组合态展示中文符号，press2 替换组合提交英文；超时
+///   （smart_timeout_ms）后自动提交中文。不做删改，适合对删改敏感的宿主。
 // Copy + Eq：本身是无字段枚举，且要按值放进 per-app 的 `ActiveCompat`（那是个 Copy 结构）。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -4786,13 +3957,12 @@ pub enum TopCommitMode {
 
 /// 智能符号配置（[input.symbol]）：同一标点在时限内连按两次，删前一字符替换为另一形态。
 ///
-/// 三个总开关**互相独立**，各管一种上下文，都默认关：
-///   - `smart_mode`：中文标点状态 —— press1 中文 → press2 英文（数字后智能标点方向相反）。
-///   - `english_punct_mode`：中文输入 + 英文标点状态 —— press1 英文 → press2 中文。
-///   - `english_mode`：英文输入模式 —— 同上，但发生在整个输入法切英文时。
+/// 三个总开关互相独立，各管一种上下文，都默认关：
+///   - `smart_mode`：中文标点状态，press1 中文 → press2 英文（数字后智能标点方向相反）。
+///   - `english_punct_mode`：中文输入 + 英文标点状态，press1 英文 → press2 中文。
+///   - `english_mode`：英文输入模式，同上。
 ///
-/// 后两者拆成两个开关而非一个，是因为它们是**不同场景**：前者是「用英文标点写中文、偶尔要个
-/// 中文句号」，后者是「正在打英文」。很多人只想要前者，英文态保持纯净。
+/// 后两者是不同场景（用英文标点写中文 vs 正在打英文），很多人只想要前者。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SymbolConfig {
     /// 智能符号模式总开关（默认 false）。
@@ -4817,14 +3987,11 @@ pub struct SymbolConfig {
     /// 透传给宿主的，不吃就永远到不了引擎。故此开关的影响面比另外两个大，默认关。
     #[serde(default)]
     pub english_mode: bool,
-    /// 参与英文智能符号的**源字符**集合（`english_punct_mode` 与 `english_mode` 共用）。
+    /// 参与英文智能符号的源字符集合（`english_punct_mode` 与 `english_mode` 共用）。
     ///
-    /// 与 `smart_chars` 存中文产物不同，这里存的是**键本身的 ASCII 标点**（`.` 而非 `。`）：
-    /// 英文侧的产物通常就等于源字符，而推给 DLL 的吃键集必须是源字符——按源字符判定，
-    /// 两边同源、无需从产物反推。
-    ///
-    /// **不建议放配对符**（`([{"'` 等）：英文模式下这些键被吃走后，配对改由 core 处理，而
-    /// DLL 的跳出栈是空的，Tab 跳出会失效（见 `handle_english_custom_punct` 的已知限制）。
+    /// 与 `smart_chars` 存中文产物不同，这里存键本身的 ASCII 标点：推给 DLL 的吃键集必须是源字符。
+    /// 不建议放配对符：英文模式下这些键被吃走后配对改由 core 处理，DLL 跳出栈为空，Tab 跳出会失效
+    /// （见 `handle_english_custom_punct`）。
     #[serde(default = "default_english_smart_chars")]
     pub english_chars: String,
 }
@@ -4860,37 +4027,23 @@ pub struct AutoPairConfig {
     pub english_pairs: Vec<String>,
     /// 跳出配对的按键：命中即光标越过右符号、弹出配对栈。可多选。
     ///
-    /// 取值为键名（`"tab"`/`"enter"`/`"space"`/`"escape"`），外加一个特殊值
-    /// **`"right_symbol"` = 右符号键本身**（打 `）` 跳出已插入的 `（）`）。右符号跳出曾是
-    /// 无条件行为，现收敛为本列表的一项——**列表里没有它就是没有，不做隐式补偿**，故旧配置
-    /// 若只写了 `["tab"]`，右符号跳出即关闭（用户可在设置界面重新勾选）。
-    ///
-    /// 对称配对（引号）**永不参与右符号跳出**，与本项无关：按键不携带「开/闭」这一位，
-    /// 无从判断跳出还是嵌套，故一律开新的一对（见 `pin_quote_left_if_paired`）。
+    /// 取值为键名（`"tab"`/`"enter"`/`"space"`/`"escape"`），外加 `"right_symbol"` = 右符号键本身。
+    /// 列表里没有就是没有，不做隐式补偿。对称配对（引号）永不参与右符号跳出：按键不携带开/闭，
+    /// 一律开新的一对（见 `pin_quote_left_if_paired`）。
     #[serde(default = "default_jump_out_keys")]
     pub jump_out_keys: Vec<String>,
-    /// 配对状态时效，单位秒（内部项，设置界面不暴露）。`0` = 不过期。
+    /// 配对状态时效，单位秒（内部项）。`0` = 不过期。
     ///
-    /// 管的是**同一个输入框内**的状态陈旧：用户中途用鼠标点过别处、滚过页、把括号退格删掉
-    /// ——这些输入法都感知不到，没有时效的话陈旧状态会一直存活到吃掉用户的 Tab。
-    /// 距**最后一次按键**超过本值即视为陈旧，跳出键不再生效；从最后一次按键算起而非从插入
-    /// 配对算起，因此持续输入会不断刷新，在括号里打多久都不会误过期。
-    ///
-    /// 跨焦点的陈旧不归它管——失焦一律清空配对状态（见 `handle_focus_lost`）。
+    /// 管同一输入框内的状态陈旧（鼠标点过别处、退格删掉括号，输入法都感知不到）：距最后一次按键
+    /// 超过本值即跳出键不再生效；持续输入会不断刷新。跨焦点的陈旧由失焦清空处理（见 `handle_focus_lost`）。
     #[serde(default = "default_pair_state_ttl_secs")]
     pub state_ttl_secs: u32,
-    /// 配对插入改走 Unicode 按键注入提交（内部项，默认关 = 现状的 TSF 直写）。
+    /// 配对插入改走 Unicode 按键注入提交（内部项，默认关 = TSF 直写）。键名沿用最初的组合语义设计。
     ///
-    /// **为什么需要**：配对插入（`InsertTextWithCursor`）走 `ITfInsertAtSelection` 直写宿主
-    /// text store。AutoCAD 表格在位编辑器谎报 `S_OK` 却丢弃写入的 ASCII（2026-11-18 靶机
-    /// 实测：半角 `()` 丢、全角「（）」接受）；开组合 SetText、逐字符会话等 TSF 写法同样
-    /// 无效，只有 `VK_PACKET` 产生的真实 WM_CHAR 能上屏。
-    ///
-    /// 开启后 DLL 以按键注入上屏配对文本（空闲态被吃下的 ASCII 标点同理），光标回移仍走
-    /// `VK_LEFT`（修饰键按住时延后到松开，避免 Shift+Left 选中右符号）。
-    ///
-    /// 默认关：直写在多数宿主已工作多年；compat 层 `pair_via_comp` 按应用覆盖本值，
-    /// 目前只有 AutoCAD 需要。
+    /// 有的宿主（AutoCAD 表格在位编辑器）对 `ITfInsertAtSelection` 直写谎报成功却丢弃 ASCII，只有
+    /// `VK_PACKET` 产生的 WM_CHAR 能上屏（见 `docs/architecture/pair-commit-host-compat-notes.md`）。
+    /// 开启后 DLL 以按键注入上屏配对文本（空闲态被吃下的 ASCII 标点同理），光标回移仍走 `VK_LEFT`
+    /// （修饰键按住时延后到松开）。compat 层 `pair_via_comp` 按应用覆盖本值。
     #[serde(default)]
     pub commit_via_composition: bool,
 }
@@ -4936,19 +4089,16 @@ fn default_english_pairs() -> Vec<String> {
 
 /// 临英符号白名单出厂值：数字 + 标识符/代码里最常用的符号。
 ///
-/// 含 `.` 与 `-` 是刻意的（`obj.prop` / `e-mail` / `snake_case` 都要打得出），代价是这
-/// 两个键在临英下交出各自的翻页职责——`comma_period` / `minus_equal` 两个键组各被劈掉
-/// 一半，「上一页」只剩 ↑ 与 PgUp；「打完英文顺手按句号上屏」这条通路也随之失效。
-/// 不需要代码场景的人把这两个字符从列表里删掉即可拿回。
+/// 含 `.` 与 `-` 是刻意的（`obj.prop` / `e-mail`），代价是它们在临英下交出翻页职责，
+/// 「打完英文按句号上屏」也随之失效。不需要的人从列表里删掉即可。
 fn default_temp_english_symbol_chars() -> String {
     "0123456789+-_.@#/".to_string()
 }
 
 /// 临时英文配置（[input.temp_english]，原 input.shift_temp_english）。
-/// ⚠️ `PartialEq` 是**承重的**，不是顺手 derive 的：`Coordinator::reload_user_config`
-/// 的 `schema_dirty` 判据靠它发现本段变更，进而触发 `EngineManager::reload_from_config`
-/// 去刷新引擎侧镜像。去掉它，`phrase_seg` 这类「协调器实时读、引擎走镜像」的开关就会
-/// 退化成「改了没反应、重启才生效」。同 [`TempPinyinConfig`] 的理由。
+///
+/// `PartialEq` 是承重的：`Coordinator::reload_user_config` 的 `schema_dirty` 判据靠它发现本段变更、
+/// 触发引擎刷新镜像，去掉它 `phrase_seg` 这类开关会变成重启才生效。同 [`TempPinyinConfig`]。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TempEnglishConfig {
     #[serde(default = "default_true")]
@@ -4958,7 +4108,7 @@ pub struct TempEnglishConfig {
     pub show_candidates: bool,
     #[serde(default = "default_shift_behavior")]
     pub shift_behavior: String,
-    /// **已有编码缓冲时**按 Shift+字母的行为（`shift_behavior` 只管空缓冲那一支）。
+    /// 已有编码缓冲时按 Shift+字母的行为（`shift_behavior` 只管空缓冲那一支）。
     /// 字符串枚举，值域：
     /// - `buffer`（出厂）：大写字母以小写进编码缓冲、大小写记在影子串里（现状，
     ///   英文候选套形、混输自由输入都依赖它）。
@@ -4973,98 +4123,64 @@ pub struct TempEnglishConfig {
     /// 总开关，放行哪些字符由 [`Self::symbol_chars`] 精确决定。
     #[serde(default)]
     pub allow_symbols: bool,
-    /// 允许入缓冲的符号/数字白名单（**纯字面字符集**，逐字符匹配）。仅 `allow_symbols`
-    /// 开启时生效；**列表外的字符一律维持关闭时的语义**——符号仍「上屏高亮候选 +
-    /// 转换后标点 → 退出临英」，`;`/`'` 仍选第 2/3 候选，`-=[],.` 仍翻页，数字键 1-9
-    /// 仍选词。即：白名单只把选中的字符从这套语义里摘出来改成入缓冲。
+    /// 允许入缓冲的符号/数字白名单（纯字面字符集，逐字符匹配）。仅 `allow_symbols` 开启时生效；
+    /// 列表外的字符维持关闭时的语义（符号上屏并退出临英、`;`/`'` 选词、`-=[],.` 翻页、数字选词）。
+    /// 留空 = 一个都不放行。
     ///
-    /// 留空 = 一个字符都不放行（等价于关掉 `allow_symbols`）。
-    ///
-    /// ★ 刻意**不**复用码元集 `input_chars` 的 `a-z` 范围语法：`-` 在符号集里是高频
-    /// 字符（`e-mail`），那套语法下 `+-_` 会被解析成 `0x2B..=0x5F` 一整片（含全部大写
-    /// 字母与 `:;<=>?@[\]^`），用户在设置页填一个减号就静默放行几十个字符。与同类的
-    /// `symbol.english_chars` / `symbol.smart_chars` 一致，字面即全部真相。
+    /// 不复用 `input_chars` 的 `a-z` 范围语法：`+-_` 会被解析成 `0x2B..=0x5F` 一整片，填一个减号
+    /// 就静默放行几十个字符。与 `symbol.english_chars` / `symbol.smart_chars` 一致，字面即全部真相。
     #[serde(default = "default_temp_english_symbol_chars")]
     pub symbol_chars: String,
     /// 空格作为输入字符入缓冲（可打出带空格的英文短句）。上屏职责随之转给回车，
-    /// 且回车此时上屏**高亮候选**而非原文——否则该配置下没有任何选词键可用。
+    /// 且回车此时上屏高亮候选而非原文——否则该配置下没有任何选词键可用。
     #[serde(default)]
     pub space_as_input: bool,
     /// 进入临时英文期间的候选布局（默认跟随全局）。
     /// 典型用法是设 `horizontal`——英文候选一行放得下，全局竖排时反而占屏。
     #[serde(default, deserialize_with = "crate::tolerant_de::tolerant")]
     pub candidate_layout: LayoutIntent,
-    /// 首候选是用户所打原文（保证能上屏自己输入的内容）。**三档**，见
-    /// [`RawCandidateMode`]；出厂 [`RawCandidateMode::Always`]（＝老配置的 `true`，
-    /// 保持既有行为——此前这条是硬编码、不可配的）。
+    /// 首候选是用户所打原文。三档，见 [`RawCandidateMode`]；出厂 [`RawCandidateMode::Always`]
+    /// （＝老配置的 `true`）。可配是因为「总走词库补全」也是合理偏好，原文占首位时常用词永远在 2 号键。
     ///
-    /// 开成配置项是因为「打英文时总是走词库补全」也是一种合理偏好——原文占掉首位，
-    /// 常用词就永远在 2 号键。
+    /// 本项不出原文、[`Self::case_variants`] 也关、词库又无命中时候选为空，这不是缺陷：临英空格臂按
+    /// 实际候选是否为空判断，会落到上屏缓冲原文（见 `handle_temp.rs`）。`show_candidates = false` 时
+    /// 词库不被查询，`InDict` 按 `Always` 处理（见 `update_temp_english_candidates`）。
     ///
-    /// ⚠️ 本项为 [`RawCandidateMode::Off`]（或 [`RawCandidateMode::InDict`] 未命中）
-    /// 且 [`Self::case_variants`] 也关、词库又无命中时，候选列表会是空的。那不是缺陷：
-    /// 临英空格臂的判据是「实际候选是否为空」而非本配置，空候选会正确落到「上屏缓冲原文」
-    /// 的兜底分支。见 `handle_temp.rs` 空格臂。
-    ///
-    /// ⚠️ `show_candidates = false` 时词库**根本不被查询**，`InDict` 的判据无从回答，
-    /// 届时按 [`RawCandidateMode::Always`] 处理（见 `update_temp_english_candidates`）
-    /// ——否则这个组合下临英一条候选都不产。
-    ///
-    /// ★ 本项与 [`Self::case_variants`] 也作用于**快捷输入里的英文成员**（A2-3b）：头部候选
-    /// 落在英文段段首（成员顺序即优先级，不抢全表首位），且占该成员的候选配额。
+    /// 本项与 `case_variants` 也作用于快捷输入里的英文成员：头部候选落在英文段段首，占该成员的配额。
     #[serde(default, deserialize_with = "de_raw_candidate")]
     pub raw_candidate: RawCandidateMode,
     /// 生成大小写变形候选（全小写 / 首字母大写 / 全大写）。
     ///
-    /// 关掉后候选只剩输入原文 + 词库匹配。变形候选的代价是**每条都占一个候选位**：
-    /// 每页 5 条时它们能吃掉一半，把真正的词库候选挤到下一页；且它们与词库候选交错，
-    /// 注释、词频这些附加信息在变形项上都是空的，列表看起来参差。
-    /// 需要大小写变换的人默认开着，只想要词库补全的人可以关掉。
+    /// 关掉后候选只剩输入原文 + 词库匹配。变形候选每条占一个候选位，会把词库候选挤到下一页，
+    /// 且没有注释、词频；只想要词库补全的人可以关掉。
     #[serde(default = "default_true")]
     pub case_variants: bool,
-    /// 词库候选跟随输入的大小写形态（逐位投影）。**默认开**，语义同
-    /// [`EnglishGlobal::case_follow_input`]（两个作用域各一份，与本段其余项同形制）。
+    /// 词库候选跟随输入的大小写形态（逐位投影）。默认开，语义同
+    /// [`EnglishGlobal::case_follow_input`]（两个作用域各一份）。
     ///
-    /// ⚠️ 临英由 Shift+字母进入 ⇒ 缓冲首字母**恒大写** ⇒ 本项开着时候选恒为首字母大写形态。
-    /// 这是明知 2026 年那次 `adapt_en_case` 因「把整列候选强制套成 Title case」被删除，
-    /// 仍重新裁定的行为（用户 2026-09-09 拍板）。两者的区别不在观感而在规则：
-    /// 旧实现是**整串套形**（不管词库原文长什么样），本项是**逐位投影且单向**
-    /// （只覆盖用户按了 Shift 的那几位，词库自带的大写一律保留）。
+    /// 临英由 Shift+字母进入，缓冲首字母恒大写，本项开着时候选恒为首字母大写形态，这是有意裁定的。
+    /// 与已删除的整串套 Title case 不同，本项逐位投影且单向：只覆盖用户按了 Shift 的位，
+    /// 词库自带的大写一律保留。
     ///
-    /// ★ 也作用于**快捷输入里的英文**：Shift+字母让缓冲带上大写（`free_input = auto` 落自由
-    /// 输入透镜；`off` 且含英文成员时落大写英文词透镜）时，纯字母缓冲在所打原文之后追加
-    /// 英文段，其词库候选按本项投影（见 `Coordinator::mix_free_english_segment`）。
+    /// 也作用于快捷输入里的英文：缓冲因 Shift+字母带上大写时，纯字母缓冲在原文之后追加的英文段
+    /// 按本项投影（见 `Coordinator::mix_free_english_segment`）。
     #[serde(default = "default_true")]
     pub case_follow_input: bool,
     /// 临英选词上屏后自动补一个空格。中文与英文之间的空格另见 [`SpacingConfig`]。
     ///
-    /// 与 `schema.english.commit_space` 是**两个作用域各一份**，不是两个真相源 ——
-    /// 同 [`Self::raw_candidate`] 那一对的理由：用户对「长时打英文」与「中文里插一个
-    /// 英文词」的需求本就可能相反。前者连着打词、补空格顺手；后者插完往往接中文或标点，
-    /// 补上的空格还得退格删掉。
+    /// 与 `schema.english.commit_space` 是两个作用域各一份：长时打英文时补空格顺手，中文里插一个
+    /// 英文词时补上的空格往往还得删掉，需求可能相反。出厂两者皆关。
     ///
-    /// ⚠️ **行为变更**（此前两者共用 `schema.english.commit_space`）：升级前开着英文方案
-    /// 那个开关的用户，临英会从「补」变成「不补」，需要另外打开本项。出厂两者皆关，
-    /// 故只影响主动开启过的用户。
-    ///
-    /// ★ 也作用于**快捷输入里的英文**（A2-3b）：英文词库候选与所打原文上屏补空格，
-    /// 中文候选与计算结果不补。判据见 `Coordinator::mix_candidate_is_english`。
-    ///
-    /// ★ 也作用于**中文方案主路径里的英文词库候选**（码表 / 拼音的英文混入）：同是「中文里
-    /// 插一个英文词」。原码与短语不补。判据见 `Coordinator::english_appends_space`。
+    /// 也作用于快捷输入里的英文（英文词库候选与原文补，中文候选与计算结果不补，判据见
+    /// `Coordinator::mix_candidate_is_english`），以及中文方案主路径里的英文词库候选（原码与短语
+    /// 不补，判据见 `Coordinator::english_appends_space`）。
     #[serde(default)]
     pub commit_space: bool,
-    /// 临英下的词组分词输入（论坛 t42）：用 `'` 切开各段，每段只打前缀。**默认关**。
+    /// 临英下的词组分词输入：用 `'` 切开各段，每段只打前缀。默认关。
     ///
-    /// 与 [`EnglishGlobal::phrase_seg`] 是**两个作用域各一份**，同本段其余项的形制。
-    /// 语义、分词符、跳词规则完全一致——临英只是「临时状态」，核心功能与英文方案统一，
-    /// 但进入时机不同、需求可能相反（长时打英文 vs 中文里插一个英文词），故开关独立。
-    ///
-    /// ★ 也作用于**快捷输入里的英文成员**（A2-3b）：同属「中文里插一个英文词」，
-    /// 读这一份而不是 [`EnglishGlobal::phrase_seg`]，见 `Coordinator::mix_phrase_separator`。
-    ///
-    /// ⚠️ 开启后 `'` 在临英下不再作二三候选键（`select_key_offset` 那条判定够不着它）。
-    /// 与英文方案侧同一个取舍，理由见那边。
+    /// 与 [`EnglishGlobal::phrase_seg`] 是两个作用域各一份，语义、分词符、跳词规则一致，只是需求
+    /// 可能相反故开关独立。快捷输入里的英文成员也读这一份（见 `Coordinator::mix_phrase_separator`）。
+    /// 开启后 `'` 在临英下不再作二三候选键，取舍同英文方案侧。
     #[serde(default)]
     pub phrase_seg: bool,
 }
@@ -5094,20 +4210,16 @@ impl Default for TempEnglishConfig {
 pub struct CapslockConfig {
     #[serde(default)]
     pub cancel_on_mode_switch: bool,
-    /// 切中英时取消了大写锁定之后落到哪个模式（仅 `cancel_on_mode_switch` 开着时有意义）。
-    /// 字符串枚举（同 `temp_english.shift_behavior` 的既有风格），值域：
+    /// 切中英时取消了大写锁定之后落到哪个模式（仅 `cancel_on_mode_switch` 开着时有意义）。值域：
     ///
-    /// - `chinese`（出厂）：Shift 等切换键归位中文（对齐搜狗）；Ctrl+空格 这类自带
-    ///   目标方向的切换按它请求的方向——两条都是本字段出现前的旧行为，逐字保留；
-    /// - `english`：两条路都进英文（论坛 t283：「输完大写想接着打小写」）；
-    /// - `toggle`：照常切换——Shift 翻转中英，Ctrl+空格 按请求方向。
+    /// - `chinese`（出厂）：Shift 等切换键归位中文（对齐搜狗）；Ctrl+空格 这类自带目标方向的切换
+    ///   按请求方向；
+    /// - `english`：两条路都进英文（输完大写想接着打小写）；
+    /// - `toggle`：照常切换，Shift 翻转中英，Ctrl+空格 按请求方向。
     ///
-    /// 只管**用户按出来的**切换；宿主写 compartment、功能菜单这类非用户发起的模式请求
-    /// 恒按请求落地，不受本项改写。
-    ///
+    /// 只管用户按出来的切换；宿主写 compartment、功能菜单等非用户发起的请求恒按请求落地。
     /// 消费端见 `Coordinator::mode_after_caps_cancel`，认不出的值告警后回落 `chinese`。
-    /// 另起字段而非把 `cancel_on_mode_switch` 改成枚举：那个布尔已写进用户配置、设置端
-    /// 平台门控与文档，改类型要做旧值兼容反序列化，收益只是少一个键。
+    /// 另起字段而非把 `cancel_on_mode_switch` 改成枚举：改已发布键的类型要做兼容迁移，收益只是少一个键。
     #[serde(default = "default_capslock_mode_after_cancel")]
     pub mode_after_cancel: String,
     /// 打字中按 CapsLock 切换时，把正在打的编码转大写上屏（打 `wps` 得 `WPS`）：开大写那一下，
@@ -5133,32 +4245,20 @@ fn default_capslock_mode_after_cancel() -> String {
     "chinese".to_string()
 }
 
-/// 生僻字模式配置（[input.rare_char]）。
+/// Emoji 候选扩展：打出词组后，按候选文本查表把对应 emoji 追加到候选里。
 ///
-/// Emoji 候选扩展：打出词组后，按**候选文本**查表把对应 emoji 追加到候选里。
+/// 只查文本不查码，所有方案自动支持。设计与六条硬约束见 `docs/design/emoji-suggestion.md`。
 ///
-/// 与编码域无关（不查码、只查文本）⇒ 所有方案自动支持，不需要任何方案配置。设计与
-/// 六条硬约束见 `docs/design/emoji-suggestion.md`。
-///
-/// # 为什么每个非零默认值都有一个 `default_emoji_*` 函数
-///
-/// serde 的 `#[serde(default = "f")]` 管的是「配置文件里**缺这个键**」，而
-/// [`Default::default()`] 管的是「代码里造一个空配置」。两者若各写各的字面量，改默认值时
-/// 必然漏掉一边——于是「配置文件里没写」与「代码里 default()」给出不同结果，且只在
-/// 其中一条路径上表现出来。这里让两者共用同一组函数，从结构上消掉这种分叉。
-///
-/// ⚠️ `scope` / `show_as` 是**字符串枚举**（同 `input.filter_mode` 的既有风格），类型层
-/// 不做约束。值域见各字段注释；消费端遇到不认识的值必须**告警后回落默认**，不得静默
-/// ——设置页 options 与 core 值域脱节是本仓踩过的坑，静默降级会让它彻底无人发现。
+/// 每个非零默认值都有 `default_emoji_*` 函数，供 serde 缺键与 [`Default::default()`] 共用，
+/// 免得两边字面量分叉。`scope` / `show_as` 是字符串枚举，类型层不约束；消费端遇到不认识的值
+/// 必须告警后回落默认，不得静默。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EmojiConfig {
-    /// 总开关。**出厂关**（同 aux_code / short_code_yield 等新增可选功能）。
-    ///
-    /// 关闭时连数据文件都不打开——`load_or_build` 根本不会被调用，故未启用的用户为本功能
-    /// 付出的常驻内存与启动开销均为零。
+    /// 总开关，出厂关。关闭时不打开数据文件（`load_or_build` 不会被调用），未启用的用户
+    /// 常驻内存与启动开销为零。
     #[serde(default)]
     pub enabled: bool,
-    /// 触发范围：`off` 不扩展 / `exact` 仅对**精确整词命中**的候选扩展 / `all` 所有候选。
+    /// 触发范围：`off` 不扩展 / `exact` 仅对精确整词命中的候选扩展 / `all` 所有候选。
     ///
     /// 出厂 `exact`：`all` 会让前缀补全、子短语之类的候选也带出 emoji，而那些候选本身就是
     /// 「猜」出来的，再挂一个 emoji 只会放大噪音。
@@ -5167,14 +4267,12 @@ pub struct EmojiConfig {
     /// 呈现形态：`after` 紧随宿主候选 / `tail` 追加到列表末尾 / `comment` 只在注释段灰字
     /// 显示（走 `${emoji}` 模板变量，不进候选列表）。
     ///
-    /// 三档互斥，是「emoji 以什么形态出现」的**单一决策点**——`${emoji}` 变量因此也只在
+    /// 三档互斥，是「emoji 以什么形态出现」的单一决策点——`${emoji}` 变量因此也只在
     /// `comment` 档求值，否则配了 `after` 又在模板里写 `${emoji}` 会两处都出。
     #[serde(default = "default_emoji_show_as")]
     pub show_as: String,
-    /// 一个词最多产出几个 emoji。
-    ///
-    /// 实测上游 `emoji_word.txt` 平均 1.09 个/键、最多 4 个 —— 本闸门对它**几乎不触发**；
-    /// 真正要拦的是分类表（`emoji_category.txt` 平均 9 个、最多 90 个「动物」）。
+    /// 一个词最多产出几个 emoji。主表 `emoji_word.txt` 平均约 1 个/键，几乎不触发；
+    /// 真正要拦的是分类表（`emoji_category.txt` 一键可达几十上百个）。
     #[serde(default = "default_emoji_max_per_word")]
     pub max_per_word: usize,
     /// 对候选列表的前几个候选做扩展。
@@ -5186,13 +4284,11 @@ pub struct EmojiConfig {
     /// 宿主候选至少要有几个字才触发。出厂 2：单字词（「一」→ 1️⃣）噪音最大且最没用。
     #[serde(default = "default_emoji_min_word_chars")]
     pub min_word_chars: usize,
-    /// 是否加载分类表（`emoji_category.txt`：「动物」→ 90 个 emoji 那种）。
-    ///
-    /// 出厂关：干扰几乎全部集中在这 166 条上。但它也是「我想找个动物表情」时唯一好用的
-    /// 入口，故做成独立开关而不是不引入。
+    /// 是否加载分类表（`emoji_category.txt`：「动物」→ 一大批 emoji 那种）。
+    /// 出厂关：干扰几乎全来自这张表；但它是「找个动物表情」唯一好用的入口，故做成独立开关。
     #[serde(default)]
     pub categories: bool,
-    /// 候选里有追加出来的 emoji / 附加模块符号时，**不**做全码唯一自动上屏（码表与短语两侧）。
+    /// 候选里有追加出来的 emoji / 附加模块符号时，不做全码唯一自动上屏（码表与短语两侧）。
     ///
     /// 出厂关：追加候选不是这个码检索出的词条，默认不计入唯一性判据（见
     /// `Candidate::is_emoji_suggestion`）。开了附加模块（如偏旁部首）的用户要的往往正是那条
@@ -5202,8 +4298,8 @@ pub struct EmojiConfig {
     /// 附加模块开关（`[input.emoji.modules]`，键 = [`EMOJI_MODULES`] 的 id）。缺的键按该模块
     /// 的出厂值（[`EmojiConfig::module_enabled`]）；不认识的键忽略。
     ///
-    /// 用表而不是 `[[tables]]` 数组：配置分层对**表按键合并**、对**数组整体覆盖**。写成数组的话
-    /// 用户在设置里翻一个开关，整份列表就落进用户配置固化下来，之后新增的出厂模块对他不可见。
+    /// 用表而不是数组：配置分层对表按键合并、对数组整体覆盖，写成数组的话翻一个开关就把整份列表
+    /// 固化进用户配置，之后新增的出厂模块对他不可见。
     #[serde(default = "default_emoji_modules")]
     pub modules: BTreeMap<String, bool>,
 }
@@ -5227,11 +4323,11 @@ pub struct EmojiModule {
     pub default_on: bool,
 }
 
-/// 附加模块注册表。**顺序即查询合并顺序**（同一个词多个模块都有时，靠前的排前面）。
+/// 附加模块注册表。顺序即查询合并顺序（同一个词多个模块都有时，靠前的排前面）。
 ///
-/// ⚠ 与 `data/config.toml` 的 `[input.emoji.modules]`、`config_schema` 的登记、设置端清单
-/// 的开关同步。`others.txt` 里「著名表演艺术家」一组（成人影星名）构建期就剔除、不在此列；
-/// 「emoji集合」一组的键带 `V` 前缀（`V动物`），正常打字打不出宿主词，也不收。
+/// 须与 `data/config.toml` 的 `[input.emoji.modules]`、`config_schema` 的登记、设置端清单同步。
+/// `others.txt` 里「著名表演艺术家」一组构建期即剔除；「emoji集合」一组的键带 `V` 前缀，
+/// 正常打字打不出宿主词，也不收。
 pub const EMOJI_MODULES: &[EmojiModule] = &[
     EmojiModule {
         id: "frost_emoji",
@@ -5311,7 +4407,7 @@ pub const EMOJI_MODULES: &[EmojiModule] = &[
 pub const EMOJI_USER_DIR: &str = "emoji";
 
 /// 数据根 `emoji/` 下属于内置表源文件的文件名，不当作用户模块（它们由主表 / 分类表 /
-/// [`EMOJI_MODULES`] 读取；用户层放同名文件是**覆盖**那张内置表，不是新增模块）。
+/// [`EMOJI_MODULES`] 读取；用户层放同名文件是覆盖那张内置表，不是新增模块）。
 const EMOJI_BUILTIN_FILES: &[&str] = &[
     "emoji_word.txt",
     "emoji_category.txt",
@@ -5359,10 +4455,9 @@ impl Config {
 impl Config {
     /// 运行时生效的会话态按键表：[`KeysConfig::effective_session_actions`] ⊕ 注释切换键。
     ///
-    /// 注释切换键选功能键（F1–F12）时在这里补一条绑定，转发与分派都走会话按键的现成通路；用户自己
-    /// 在 `session_actions` 里绑过这个键（含 `none`）就让给用户。`hold` 档也补 `comment_state:session`：
-    /// 这条只负责让平台转发这个键，有候选时的按下与松开由协调器的按住判定先接走。
-    /// 设置页读写的仍是存储层的 `keys.session_actions`，补的这条不落盘。
+    /// 注释切换键选功能键（F1–F12）时在这里补一条绑定，走会话按键的现成通路；用户在
+    /// `session_actions` 里绑过这个键（含 `none`）就让给用户。`hold` 档也补 `comment_state:session`，
+    /// 只为让平台转发这个键，按下与松开由协调器的按住判定接走。补的这条不落盘。
     pub fn effective_session_actions(&self) -> BTreeMap<String, String> {
         use crate::comment_lib::SwitchMode;
         let mut out = self.keys.effective_session_actions();
@@ -5488,35 +4583,27 @@ impl Default for EmojiConfig {
     }
 }
 
-/// ⚠️ **没有 `enabled`**：不绑任何键 ＝ 这个模式进不去 ＝ 关闭，无须第二个开关。
+/// 生僻字模式配置（[input.rare_char]）。
+///
+/// 没有 `enabled`：不绑任何键即进不去，即关闭，无须第二个开关。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RareCharConfig {
     /// 引导键（空码时按下即进入本模式）。
     ///
-    /// ★ **不是写入路径**：与其余五处 `trigger_keys` 一样，`normalize()` 会把它折算进
-    /// `keys.key_actions`（动词 `"rare_char"`）随后清空，真正被读的只有那张表。本字段的
-    /// 职责只剩两个——**出厂声明处**，以及设置端 `dialog_button_key_action` 控件的
-    /// 标识符（那个控件按被标识字段的类型校验，只认 strlist）。
-    ///
-    /// ⚠️ 出厂值必须留在**被折算的这一侧**：直接写进 `key_actions` 的话，「用户清空」
-    /// 与「从没配过」就同形了，清空的意图会被静默丢掉（同 `default_mix_modes` 的注释）。
-    /// 本模式出厂**不绑任何键**，故这里是空数组——但空与「没有这个字段」不是一回事。
+    /// 不是写入路径：同其余 `trigger_keys`，`normalize()` 把它折算进 `keys.key_actions`（动词
+    /// `"rare_char"`）后清空。本字段只剩出厂声明处，以及设置端 `dialog_button_key_action` 控件的
+    /// 标识符（该控件只认 strlist）。出厂值必须留在被折算的这一侧，否则「用户清空」与「从没配过」
+    /// 同形；本模式出厂不绑键，故是空数组。
     #[serde(default)]
     pub trigger_keys: Vec<String>,
 
-    /// **额外**纳入本模式的 Unicode 区块（区块名或预设组名，如 `"emoji"`）。
+    /// 额外纳入本模式的 Unicode 区块（区块名或预设组名，如 `"emoji"`）。出厂为空 = 只出生僻汉字。
     ///
-    /// 生僻汉字本来就在（判据见 `wind_candidate::rare_admits`），本项管的是那些
-    /// **默认字表管不着**的字符：emoji、注音符号、假名、间架结构符。它们的
-    /// `is_string_common` 恒为 true（语义是「忽略」而非「常用」），不显式纳入就永远
-    /// 进不来——这正是本项存在的理由。
+    /// 生僻汉字本来就在（判据见 `wind_candidate::rare_admits`）；emoji、注音、假名、间架结构符等
+    /// 的 `is_string_common` 恒为 true，不显式纳入就永远进不来。
     ///
-    /// 出厂为空 ＝ 只出生僻汉字。
-    ///
-    /// ★ **「其它」是一个可选的兜底档**：区块表是显示域的表，逐块列举一份仍在增长的
-    /// Unicode 区间，新版本的新块会落进「其它」。对本项而言漏一块的后果是「那批字在
-    /// 这个模式里打不出」——不安全的方向，故给出这个兜底档，让新块落进一个用户控制得
-    /// 到的开关里，而不是静默消失。判据表见 `wind_candidate::charblock` 模块头。
+    /// 「其它」是兜底档：区块表逐块列举一份仍在增长的 Unicode 区间，新块会落进「其它」，
+    /// 让它落在用户可控的开关里而不是静默打不出。判据表见 `wind_candidate::charblock` 模块头。
     #[serde(default)]
     pub include_blocks: Vec<String>,
 }
@@ -5524,14 +4611,14 @@ pub struct RareCharConfig {
 /// 反查模式配置（[input.reverse]，reverse-mode spec §3）。
 ///
 /// 进入方式只由 `keys.key_actions` / 方案 `[key_actions]` / `z_key_action`（动词 `reverse`）
-/// 承载，出厂不绑任何键 ⇒ 默认不可用；**没有**总开关，与生僻字（[`RareCharConfig`]）同。
+/// 承载，出厂不绑任何键 ⇒ 默认不可用；没有总开关，与生僻字（[`RareCharConfig`]）同。
 /// 绑了键还要活跃方案有反查能力（码表 / 五笔拼音混输），门卫在协调器 `reverse_mode_available`。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReverseConfig {
     /// 反查模式期间的候选布局（默认跟随全局）。
     #[serde(default, deserialize_with = "crate::tolerant_de::tolerant")]
     pub candidate_layout: LayoutIntent,
-    /// 反查模式里也查**未启用**的扩展词库（`DictSpec::is_enabled() == false`，如五笔「行政区域」），
+    /// 反查模式里也查未启用的扩展词库（`DictSpec::is_enabled() == false`，如五笔「行政区域」），
     /// 结果排在已启用词库之后。只管反查模式本身：行内通配、普通打字候选与候选注释里的编码反查都不受影响。
     /// 出厂关。见 docs/design/codetable-reverse-mode.md §9。
     #[serde(default)]
@@ -5563,7 +4650,7 @@ pub struct TempPinyinConfig {
     /// 总开关（原方案级 [engine.codetable.temp_pinyin].enabled 上移至此）。
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// 触发键（如 "backtick" / "semicolon"），默认反引号。**只认符号键**——字母触发键
+    /// 触发键（如 "backtick" / "semicolon"），默认反引号。只认符号键——字母触发键
     /// 已迁往方案级 `schema.codetable.z_key_action`（见 `migrate_letter_trigger_keys`）。
     #[serde(default = "default_temp_pinyin_triggers")]
     pub trigger_keys: Vec<String>,
@@ -5600,24 +4687,16 @@ pub struct UrlConfig {
     /// 触发前缀（恰好匹配；如 "www." / "http" / "https" / "ftp."）
     #[serde(default = "default_url_prefixes")]
     pub prefixes: Vec<String>,
-    /// 是否把上屏过的网址记进历史，供下次补全（默认**关闭**）。
+    /// 是否把上屏过的网址记进历史，供下次补全（默认关闭）。
     ///
-    /// # 为什么它独立于 [`Self::enabled`]
-    ///
-    /// 网址模式本身只是「让我自由打字不被转成中文」，不产生任何持久数据；开了历史才
-    /// 开始**把用户打过的网址原文落盘**。这两件事的隐私量级不同，合成一个开关等于让
-    /// 想要前者的人被动接受后者。邮箱后缀学习则没有这道分界——它只记后缀（`qq.com`
-    /// 这类域名），不记用户名，故跟随 [`EmailConfig::enabled`] 即可。
+    /// 独立于 [`Self::enabled`]：网址模式本身不产生持久数据，开了历史才把网址原文落盘，隐私量级
+    /// 不同。邮箱后缀学习只记域名不记用户名，故跟随 [`EmailConfig::enabled`] 即可。
     #[serde(default)]
     pub history_enabled: bool,
     /// 历史条数上限，超出时按「次数少、用得旧」的顺序裁掉（0 = 不限）。
     ///
-    /// 历史是**无界增长**的——用户打过的每个网址都是一条。没有这道闸，库会一直长，
-    /// 而补全候选窗从来只显示前几条，长出来的部分纯属负担。
-    ///
-    /// ⚠️ **`0` 的代价**：补全每按一键查一次库，而那次查询是「命中前缀的行全取出来
-    /// 排序再分页」。设上限时 n 有顶，代价可控；设 0 之后 n 随使用无限增长，逐键
-    /// 开销跟着涨。给高级用户留这个口子，但它不是免费的。
+    /// 历史无界增长，而补全只显示前几条。`0` 有代价：补全每键都取出所有命中前缀的行排序再分页，
+    /// 不设上限时逐键开销随使用增长。
     #[serde(default = "default_url_history_max")]
     pub history_max: u32,
     /// 进入网址模式期间的候选布局（默认跟随全局）。
@@ -5653,26 +4732,18 @@ impl Default for UrlConfig {
 
 /// 邮箱输入配置（[input.email]）。
 ///
-/// # 它不是前缀夺取式，是**后缀触发**
-///
-/// [`UrlConfig`] 那类的判据是「缓冲 + 本键 == 某个前缀」（全等）；邮箱的判据是
-/// 「本键是 `@` 且缓冲非空」，缓冲整体作为用户名被带进模式。`abc@` 里缓冲是 `abc`，
-/// 与任何前缀都不相等——照抄前缀夺取会撞墙（`docs/design/prefix-hijack-modes.md` §5.2）。
-///
-/// 两者共用 `try_prefix_hijack` 那道闸门与 `Rewind` 回退骨架，只是闸门里多一条判据。
+/// 不是前缀夺取式而是后缀触发：判据是「本键是 `@` 且缓冲非空」，缓冲整体作为用户名带进模式
+/// （`docs/design/prefix-hijack-modes.md` §5.2）。与 [`UrlConfig`] 共用 `try_prefix_hijack`
+/// 闸门与 `Rewind` 回退骨架，只是闸门里多一条判据。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmailConfig {
     /// 总开关（默认关闭，与 [`UrlConfig`] 同口径）。
     #[serde(default)]
     pub enabled: bool,
-    /// 预置后缀表，存 `@` **之后**的部分（`qq.com` 而不是 `@qq.com`）。
+    /// 预置后缀表，存 `@` 之后的部分（`qq.com` 而不是 `@qq.com`）。
     ///
-    /// 不带 `@` 是为了与学习数据（`wind_store::completion::CompletionKind::EmailSuffix`）
-    /// 同域——两者要按同一把尺子去重与比对，一边带一边不带就永远对不上，表现是用户
-    /// 常用的那个后缀在候选里出现两次。
-    ///
-    /// 用户自己打出的后缀不必在表内：模式内可自由输入，上屏后会被学进补全数据，
-    /// 下次自动出现在候选里（且因为带频次，很快就会排到预置项前面）。
+    /// 须与学习数据（`wind_store::completion::CompletionKind::EmailSuffix`）同域，否则去重对不上，
+    /// 同一后缀出现两次。用户打出的后缀不必在表内：上屏后会被学进补全数据，带频次后很快排到前面。
     #[serde(default = "default_email_suffixes")]
     pub suffixes: Vec<String>,
     /// 进入邮箱模式期间的候选布局（默认跟随全局）。
@@ -5680,14 +4751,10 @@ pub struct EmailConfig {
     pub candidate_layout: LayoutIntent,
 }
 
-/// 出厂预置的邮箱后缀。
+/// 出厂预置的邮箱后缀。国内常用在前、国际常用在后：只影响没有频次数据的冷启动排序。
 ///
-/// 国内常用在前、国际常用在后——补全候选没有频次数据时就按这个顺序排，而本输入法的
-/// 用户绝大多数在国内。学过几次之后频次接管排序，这份顺序只影响冷启动那几次。
-///
-/// ⚠️ 这是**数组字段**（不是 map），所以用户在设置里删干净就是真的空表，不会被逐键
-/// 深合并把出厂值合回来——见 AGENTS.md「出厂预置的绑定/开关，落点必须是用户能清空的
-/// 载体」。空表时邮箱模式仍可用，只是没有预置候选，全靠学习数据。
+/// 这是数组字段，用户删干净就是真的空表，不会被深合并把出厂值合回来（AGENTS.md「出厂预置的
+/// 绑定/开关，落点必须是用户能清空的载体」）。
 fn default_email_suffixes() -> Vec<String> {
     [
         // 国内
@@ -5734,7 +4801,7 @@ impl Default for EmailConfig {
 
 /// Unicode 码点输入配置（[input.unicode]）。
 ///
-/// 与 [`UrlConfig`] 同为**前缀夺取式**模式（正常输入累积到某前缀即夺取），共用
+/// 与 [`UrlConfig`] 同为前缀夺取式模式（正常输入累积到某前缀即夺取），共用
 /// `Coordinator::try_prefix_hijack` 那道闸门与 `Rewind` 回退骨架。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnicodeConfig {
@@ -5743,18 +4810,13 @@ pub struct UnicodeConfig {
     pub enabled: bool,
     /// 触发前缀（恰好匹配）。
     ///
-    /// ⚠️ **按字面匹配，不做大小写归一** —— 这是与 [`UrlConfig::prefixes`] 的刻意差异。
-    /// `U+` 是 Unicode 的标准书写形式，大小写在这里携带真实信息；若照 url 那样把探针
-    /// `to_ascii_lowercase()` 之后再比，配置里就再也表达不出「只认大写」这个意图。
+    /// 按字面匹配、不做大小写归一，与 [`UrlConfig::prefixes`] 刻意不同：`U+` 的大小写携带真实信息。
+    /// 出厂两条各对应一个入口：
+    /// - `u+`：小写 u 进码表 `input_buffer`，`+` 在 `try_prefix_hijack` 触发夺取；
+    /// - `U+`：Shift+U 先进临时英文（缓冲为 `U`），由 `handle_temp.rs` 的转交分支交给本模式。
     ///
-    /// 出厂两条各对应一个入口，两者共用本表（配置是单一真相源）：
-    /// - `u+` —— 小写 u 进码表 `input_buffer`，`+` 在 `try_prefix_hijack` 触发夺取；
-    /// - `U+` —— Shift+U 先被 `try_activate_mode` 截进临时英文（缓冲为 `U`），
-    ///   由 `handle_temp.rs` 的转交分支交给本模式。
-    ///
-    /// ⛔ 不要配单字符前缀：小写 `"u"` 会夺取一切 u 起手，废掉码表的 `u` 码元与拼音的
-    /// `u`；大写 `"U"` 则在空缓冲时被临英先截走，根本够不着夺取点（临英若被用户关掉，
-    /// 大写字母落普通输入、`input_buffer` 里是小写 `u`，仍由 `u+` 那条命中）。
+    /// 不要配单字符前缀：`"u"` 会夺取一切 u 起手，废掉码表与拼音的 `u`；`"U"` 在空缓冲时被临英
+    /// 先截走，够不着夺取点。
     #[serde(default = "default_unicode_prefixes")]
     pub prefixes: Vec<String>,
     /// 进入 Unicode 模式期间的候选布局（默认跟随全局）。
@@ -5780,9 +4842,7 @@ impl Default for UnicodeConfig {
 /// 故其布局意图优先于底层模式（见 `Coordinator::layout_intent`）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AddWordConfig {
-    /// 加词面板期间的候选布局。默认竖排——逐字确认的面板竖排更易读。
-    /// 此前是**无条件硬编码**强制竖排、连开关都没有；本项只是给它一个出口，
-    /// 默认值保持原行为不变。
+    /// 加词面板期间的候选布局。默认竖排：逐字确认的面板竖排更易读，也是本项出现前的固定行为。
     #[serde(
         default = "default_add_word_layout",
         deserialize_with = "crate::tolerant_de::tolerant"
@@ -5821,9 +4881,8 @@ impl Default for S2TConfig {
 
 /// 繁入简出（[input.t2s]）：出口把繁体转成简体。
 ///
-/// ⚠️ 刻意**没有** `variant`：繁→简只做标准一档。台/港变体归一（tw2s/hk2s）要
-/// `TWVariantsRev` 一类反转表，OpenCC 官方 `data/dictionary` 里没有、得自造，
-/// 而这本就是小众场景。要加时同时补 `wind_transform::s2t::chain_for` 的分支。
+/// 刻意没有 `variant`：台/港变体归一要自造 OpenCC 官方没有的反转表，场景小众。
+/// 要加时同时补 `wind_transform::s2t::chain_for` 的分支。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct T2SConfig {
     #[serde(default)]
@@ -5870,16 +4929,13 @@ pub struct KeysConfig {
     pub toggle_mode_keys: Vec<String>,
     #[serde(default = "default_true")]
     pub commit_on_switch: bool,
-    /// Ctrl+空格 切换中英文（GH#172）。**出厂开**。
+    /// Ctrl+空格 切换中英文。出厂开。
     ///
-    /// 关掉之后：DLL 不再吃 Ctrl+空格、也不做按键侧兜底切换（键原样交给宿主，IDEA /
-    /// Android Studio 的代码提示才按得出来）；Windows 系统输入法开关热键翻 OPENCLOSE
-    /// compartment 时服务端拒绝并把 compartment 拉回（见协调器 `ctrl_space_switch_rejected`）。
-    /// ⚠ 系统热键本身在 msctf 层就消费了按键，宿主收不到——那只能让用户去系统设置里关，
-    /// 本开关只保证模式不被翻。
+    /// 关掉后 DLL 不吃 Ctrl+空格、不做兜底切换，键原样交给宿主（IDEA 等的代码提示才按得出）；
+    /// 系统输入法开关热键翻 OPENCLOSE 时服务端拒绝并拉回（见协调器 `ctrl_space_switch_rejected`）。
+    /// 系统热键本身在 msctf 层就消费了按键，那只能让用户去系统设置里关。
     ///
-    /// 消费端读 [`Self::ctrl_space_toggle_effective`]，**不要**直接读本字段：「全局自定义
-    /// 按键」里把 `ctrl+space` 绑成 `none` 也算关。
+    /// 消费端读 [`Self::ctrl_space_toggle_effective`]，不要直接读本字段。
     #[serde(default = "default_true")]
     pub ctrl_space_toggle: bool,
     #[serde(default = "default_switch_engine")]
@@ -5892,7 +4948,7 @@ pub struct KeysConfig {
     pub toggle_toolbar: String,
     #[serde(default = "default_open_settings")]
     pub open_settings: String,
-    /// 打开词库管理页快捷键。**出厂不绑**——与 `toggle_t2s` 同理：这是个小众直达入口，
+    /// 打开词库管理页快捷键。出厂不绑——与 `toggle_t2s` 同理：这是个小众直达入口，
     /// 常规路径（菜单「词库管理…」/设置页内导航）已经够用，任何默认组合都在抢用户键位。
     /// 落点见 `Coordinator::open_dictionary`：直接跳设置端 `dict` 页并带上当前方案 id。
     #[serde(default = "default_open_dictionary")]
@@ -5903,13 +4959,10 @@ pub struct KeysConfig {
     pub open_add_word_dialog: String,
     #[serde(default = "default_toggle_s2t")]
     pub toggle_s2t: String,
-    /// 繁入简出开关键。**出厂不绑**——功能小众，而任何默认值都在抢用户键位；
-    /// `ctrl+shift+j` 旁边好记的组合（`k`）已经是软键盘的。设置页可配。
+    /// 繁入简出开关键。出厂不绑：功能小众，任何默认值都在抢用户键位。设置页可配。
     ///
-    /// ★ 「不绑」写 `"none"` 而**不是空串**。core 侧两者等价（`parse_hotkey` 都返回
-    /// `None`），但设置页的 hotkey 控件只认 `"none"` 这一种：它的 writer 在禁用态恒写
-    /// `"none"`，出厂值若是空串，用户**什么都没动**打开一次设置页就会被判「有未保存的
-    /// 更改」，每次关窗都被拦一次（`untouched_settings_produce_no_diff` 钉的正是这条）。
+    /// 「不绑」写 `"none"` 而不是空串：core 侧两者等价，但设置页 hotkey 控件禁用态恒写 `"none"`，
+    /// 出厂值是空串会让没动过的设置页被判「有未保存的更改」（`untouched_settings_produce_no_diff`）。
     #[serde(default = "default_toggle_t2s")]
     pub toggle_t2s: String,
     #[serde(default = "default_activate_ime")]
@@ -5921,99 +4974,69 @@ pub struct KeysConfig {
     /// 快捷输入（mix）专用选词上屏键，模板值域同 [`Self::pin_candidate`]
     /// （见 `hotkey::number_template_mods`），`"none"` 不绑。
     ///
-    /// 只在快捷输入里生效、且先于置顶/删除判定：快捷输入的候选没有词库落点，置顶本就
-    /// 无从谈起，而数字键常被算式/字面输入占着，候选一多就没有别的选词通路。
+    /// 只在快捷输入里生效、且先于置顶/删除判定：快捷输入的候选无词库落点，数字键又常被算式占着。
     ///
-    /// ★ 本键自己不进 TSF 热键表，送达靠两条现成通路：
-    /// - 与置顶/删除**同模板**（出厂即是）：借它们的 SESSION 热键送达；候选可见时那批键被
-    ///   `RegisterHotKey` 抢成系统热键，走 WM_HOTKEY → `DispatchHotkey`（非按键上下文上屏）。
-    /// - 模板不同：快捷输入期间恒有组合，TSF 对会话中未登记的 Ctrl/Alt 组合一律先吃下转发
-    ///   （cleanup 通路），上屏后不再交还宿主。代价是不受 `RegisterHotKey` 保护，QQNT 一类
-    ///   Chromium 宿主可能对同一键再触发一次加速键。
+    /// 本键自己不进 TSF 热键表，送达靠两条现成通路：
+    /// - 与置顶/删除同模板（出厂即是）：借它们的 SESSION 热键送达（WM_HOTKEY → `DispatchHotkey`）。
+    /// - 模板不同：快捷输入期间恒有组合，TSF 对会话中未登记的 Ctrl/Alt 组合先吃下转发。代价是不受
+    ///   `RegisterHotKey` 保护，Chromium 宿主（如 QQNT）可能对同一键再触发一次加速键。
     ///
-    /// 不单独登记的理由：登记进 SESSION 表会让主输入路也吃掉它，而主输入路对它没有出口。
+    /// 不单独登记进 SESSION 表：那会让主输入路也吃掉它，而主输入路对它没有出口。
     #[serde(default = "default_quick_input_select")]
     pub quick_input_select: String,
     #[serde(default = "default_take_screenshot")]
     pub take_screenshot: String,
     /// 软键盘面板开关热键。
     ///
-    /// ★ 出厂绑定住在**本字段**而不是 [`Self::key_actions`]。那张表是 `BTreeMap`，
-    /// 四层深合并（`merge_value`）只能新增/覆盖、表达不了删除 ⇒ 写在 L2 的出厂条目
-    /// 用户在设置页删掉后每次 `load()` 都被合并回来，**永远关不掉**（v0.120.0 报障）。
-    /// 标量字段清空即禁用，与其余功能热键一致。
-    ///
-    /// ⚠️ 这**不是**把 `key_actions` 那条挪个地方：想给某个**面**配直通车
-    /// （`softkeyboard:<面 id>`）仍写 `key_actions`。两张表方向相反、刻意并存——
-    /// 本字段是「一功能一键」，那张表是「一键一功能」（见
-    /// docs/design/key-resolver-unification.md §9 第一条否决过的合并提案）。
+    /// 出厂绑定住在本字段而不是 [`Self::key_actions`]：那张表四层深合并表达不了删除，写在 L2 的
+    /// 出厂条目被用户删掉后每次 `load()` 都会合并回来。标量字段清空即禁用。
+    /// 给某个面配直通车（`softkeyboard:<面 id>`）仍写 `key_actions`：本字段是「一功能一键」，那张表是
+    /// 「一键一功能」，刻意并存（见 docs/design/key-resolver-unification.md §9）。
     #[serde(default = "default_softkeyboard")]
     pub softkeyboard: String,
     #[serde(default)]
     pub global_hotkeys: Vec<String>,
-    /// **已废弃且不再生效**：方案直达热键已并入 [`Self::key_actions`]，动词
-    /// `switch_schema:<方案id>`。**不做自动迁移**，只在加载期告警一次
-    /// （[`Config::warn_legacy_schema_hotkeys`]）。
+    /// 已废弃且不再生效：方案直达热键已并入 [`Self::key_actions`]（`switch_schema:<方案id>`）。
+    /// 不做自动迁移，只在加载期告警一次（[`Config::warn_legacy_schema_hotkeys`]）。
     ///
-    /// 字段保留只为**读得出残留值以便告警**——删掉的话 serde 会静默丢弃这一段，用户
-    /// 的热键失效且查不到原因。处置与 `schema.legacy_special_modes` 同构：`rename` 保住
-    /// TOML/JSON 里的原键名，`skip_serializing_if` 让它不再被写出，于是它也自动退出
-    /// `config_schema` 的登记表对应关系（那道守卫按序列化产物比对）。
-    ///
-    /// ⚠️ **不要**在新代码里读它。告警之后本表恒为空；消费端一律读 `key_actions`。
+    /// 字段保留只为读出残留值以便告警，删掉的话 serde 会静默丢弃这一段。`rename` 保住原键名，
+    /// `skip_serializing_if` 让它不再写出、退出 `config_schema` 登记。新代码不要读它。
     #[serde(
         rename = "schema_hotkeys",
         default,
         skip_serializing_if = "HashMap::is_empty"
     )]
     pub legacy_schema_hotkeys: HashMap<String, String>,
-    /// **按键功能表**：热键串 → 动词（如 `{ "ctrl+shift+n" = "toggle_schema:english" }`）。
+    /// 按键功能表：热键串 → 动词（如 `{ "ctrl+shift+n" = "toggle_schema:english" }`）。
     ///
-    /// 与上面那批「一个功能一个字段」的热键不同，这是「键 → 干什么」的通用表——同一套
-    /// 动词值域将来也用于方案级 `[key_actions]`（见 docs/design/schema-key-actions.md）。
-    /// 当前只接 `toggle_schema:<id>`，其余动词随后续阶段接入。
-    ///
-    /// 用 `BTreeMap` 而非 `HashMap`：编译成热键条目时遍历顺序即冲突时的胜者顺序，
-    /// `HashMap` 会让同一份配置在不同进程里表现不同（`schema_hotkeys` 为此要显式排序）。
+    /// 「键 → 干什么」的通用表，同一套动词值域也用于方案级 `[key_actions]`
+    /// （见 docs/design/schema-key-actions.md）。用 `BTreeMap`：编译成热键条目时遍历顺序即冲突时的
+    /// 胜者顺序，`HashMap` 会让同一份配置在不同进程里表现不同。
     #[serde(default)]
     pub key_actions: BTreeMap<String, String>,
-    /// 引导键**物化**迁移的版本号（0 = 未物化）。见 [`Config::materialize_key_actions`]。
+    /// 引导键物化迁移的版本号（0 = 未物化）。见 [`Config::materialize_key_actions`]。
     ///
-    /// 置位后 [`Config::migrate_trigger_keys_into_key_actions`] 不再折算——五处
-    /// `trigger_keys` 从「每次加载都灌一遍的真相源」降级为**出厂声明处**（只供设置页
-    /// 「恢复默认」读），[`Self::key_actions`] 成为唯一真相源。
-    ///
-    /// ⚠️ **必须住在用户层 config.toml 里，不能改成独立标记文件**：标记要能跟着
-    /// 备份/还原走。否则 A 机删掉的绑定，在 B 机还原后会因「看起来没迁移过」被重新
-    /// 折算灌回去——那正是本次要修的报障现场。
-    ///
-    /// 用版本号而非 bool：日后若要再物化一批键，递增即可重跑，bool 没有第二次机会。
-    /// `skip_serializing_if` 让它默认时不出现在序列化产物里，于是自动退出
-    /// `config_schema` 的登记表对应关系（同 [`Self::legacy_schema_hotkeys`] 的处置）——
-    /// 它是迁移账本，不是用户可配项。
+    /// 置位后 [`Config::migrate_trigger_keys_into_key_actions`] 不再折算，[`Self::key_actions`] 成为
+    /// 唯一真相源。必须住在用户层 config.toml 里而非独立标记文件，才能跟着备份/还原走，否则还原后
+    /// 会被重新折算。用版本号而非 bool，日后可递增重跑。`skip_serializing_if` 让它退出
+    /// `config_schema` 登记：它是迁移账本，不是用户可配项。
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub key_actions_materialized: u32,
-    /// **会话态按键功能表**：键名 → 动词（如 `{ tab = "page_next", capslock = "page_prev" }`）。
+    /// 会话态按键功能表：键名 → 动词（如 `{ tab = "page_next", capslock = "page_prev" }`）。
     ///
-    /// 与 [`Self::key_actions`] 同构的姊妹表，分野是触发态：那张管无会话态，本表管
-    /// 「正在组合一段输入」时。值域见 [`SessionAction`]，键名解析见
-    /// `wind_keys::keymap::session_key_name_to_vk`（认功能键、修饰键与符号键，支持
-    /// `shift+tab` 这样的单修饰前缀）。
+    /// [`Self::key_actions`] 的姊妹表，管「正在组合一段输入」时。值域见 [`SessionAction`]，键名解析见
+    /// `wind_keys::keymap::session_key_name_to_vk`（支持 `shift+tab` 这样的单修饰前缀）。
     ///
-    /// **`page_keys` / `highlight_keys` 在 `normalize()` 里折算进本表**（组名 → 具体键），
-    /// 用户显式写在这里的键优先、不被折算覆盖。⚠️ 默认值刻意**留在那两个字段**一侧：
-    /// 若把出厂绑定直接写进本表，`page_keys = []`（用户清空）就与「从没配过」同形，
-    /// 折算跳过而默认绑定仍在 —— 用户清空的意图会静默丢失。这是五c 折算 `trigger_keys`
-    /// 时用血换来的教训，见 docs/design/session-key-actions.md §6。
-    ///
-    /// 用 `BTreeMap` 而非 `HashMap`：理由同 `key_actions`——遍历顺序即冲突时的胜者顺序，
-    /// `HashMap` 会让同一份配置在不同进程里表现不同。
+    /// `page_keys` / `highlight_keys` 等键组在 [`Self::effective_session_actions`] 里展开并入，
+    /// 本表显式写的键优先。默认值刻意留在键组字段一侧：写进本表的话，用户清空键组就与
+    /// 「从没配过」同形，清空意图会丢失（docs/design/session-key-actions.md §6）。
+    /// 用 `BTreeMap` 的理由同 `key_actions`。
     #[serde(default)]
     pub session_actions: BTreeMap<String, String>,
     // ── 选择/导航键（原 input.*）──
     #[serde(default = "default_select_key_groups")]
     pub select_key_groups: Vec<String>,
-    /// 翻页键组。**消费点已改为 [`Self::session_actions`]**，本字段是折算来源与
+    /// 翻页键组。消费点已改为 [`Self::session_actions`]，本字段是折算来源与
     /// 默认值的家（见那边的注释）。
     #[serde(default = "default_page_keys")]
     pub page_keys: Vec<String>,
@@ -6028,16 +5051,12 @@ pub struct KeysConfig {
 }
 
 impl KeysConfig {
-    /// Ctrl+空格 中英切换**实际**是否生效（GH#172）。
-    ///
-    /// 两个入口任一说「关」就关：
+    /// Ctrl+空格 中英切换实际是否生效。两个入口任一说「关」就关：
     /// 1. [`Self::ctrl_space_toggle`] 开关；
     /// 2. [`Self::key_actions`] 里把 Ctrl+空格 绑成 `none`（「全局自定义按键 → 不启用」）。
     ///
-    /// 第 2 条是为了让用户最先想到的那个地方真的管用：内置切换从来不在 `key_actions` 里，
-    /// 在那里设「不启用」原本只是删一条不存在的绑定（报障原话「设为不启用也禁不掉」）。
-    /// 只认 `none`、不认别的动词：绑成真动作时系统热键仍可能在 msctf 层先翻 compartment，
-    /// 那时若一并拒绝，启用了系统热键的机器上按 Ctrl+空格 就什么都不发生了。
+    /// 第 2 条让用户最先想到的地方真的管用。只认 `none`：绑成真动作时系统热键仍可能先翻
+    /// compartment，一并拒绝会让按 Ctrl+空格 什么都不发生。
     pub fn ctrl_space_toggle_effective(&self) -> bool {
         if !self.ctrl_space_toggle {
             return false;
@@ -6056,10 +5075,8 @@ fn is_zero_u32(v: &u32) -> bool {
     *v == 0
 }
 
-// 热键默认值对齐 Go 版 DefaultConfig.Hotkeys（wind_input/pkg/config/config.go）。
-// 关键：config.getDefaults 以 Config::default() 为 L1 基线（再叠 data/config.toml），
-// [keys] 整表在 L2 缺失时用 Default::default()，故必须手写 Default（而非 derive 的
-// 空值），否则设置页"开关后默认键丢失"。
+// [keys] 整表在 L2 缺失时用 Default::default()，而 config.getDefaults 以 Config::default() 为 L1 基线，
+// 故必须手写 Default（而非 derive 的空值），否则设置页开关后默认键丢失。
 fn default_toggle_mode_keys() -> Vec<String> {
     vec!["lshift".to_string(), "rshift".to_string()]
 }
@@ -6113,11 +5130,10 @@ fn default_highlight_keys() -> Vec<String> {
     vec!["arrows".to_string(), "tab".to_string()]
 }
 
-/// 翻页键**组名** → 折算出的 (键名, 动词) 对。组名值域与旧 `NavKeys::from_config` 一一对应。
+/// 翻页键组名 → 折算出的 (键名, 动词) 对。
 ///
-/// ⚠️ 键名必须与 `wind_keys::keymap::session_key_name_to_vk` 认的规范名逐字一致。这是一条
-/// **无编译期约束**的跨 crate 拼写契约：写错了这里的键会解析不出 VK，表现为「升级后翻页键
-/// 全没了」而无任何报错。`config.rs` 的单测 `nav_group_names_resolve` 守这条。
+/// 键名必须与 `wind_keys::keymap::session_key_name_to_vk` 认的规范名逐字一致：跨 crate 拼写契约
+/// 无编译期约束，写错表现为翻页键全没了且无报错。单测 `nav_group_names_resolve` 守这条。
 fn page_key_group_binds(group: &str) -> &'static [(&'static str, SessionAction)] {
     match group.trim().to_lowercase().as_str() {
         "pageupdown" => &[
@@ -6144,7 +5160,7 @@ fn page_key_group_binds(group: &str) -> &'static [(&'static str, SessionAction)]
     }
 }
 
-/// 高亮移动键**组名** → 折算出的 (键名, 动词) 对。约束同 [`page_key_group_binds`]。
+/// 高亮移动键组名 → 折算出的 (键名, 动词) 对。约束同 [`page_key_group_binds`]。
 fn highlight_key_group_binds(group: &str) -> &'static [(&'static str, SessionAction)] {
     match group.trim().to_lowercase().as_str() {
         "arrows" => &[
@@ -6159,13 +5175,10 @@ fn highlight_key_group_binds(group: &str) -> &'static [(&'static str, SessionAct
     }
 }
 
-/// 二三候选键**组名** → 折算出的 (键名, 动词) 对。约束同 [`page_key_group_binds`]。
+/// 二三候选键组名 → 折算出的 (键名, 动词) 对。约束同 [`page_key_group_binds`]。
 ///
-/// 组内第一个键选**次选**（第 2 个候选）、第二个选**三选**——这是 `select_key_vks` 的
-/// 位置语义（`pos + 1`），折算成显式序号后就不再依赖数组下标。
-///
-/// `lrshift` / `lrctrl` 展开成纯修饰键名：它们走 keyup 轻敲通路，而 `session_key_name_to_vk`
-/// 与 `hotkey::session_key_to_vk` 都认这四个名字。
+/// 组内第一个键选次选、第二个选三选（`select_key_vks` 的位置语义 `pos + 1`）。
+/// `lrshift` / `lrctrl` 展开成纯修饰键名：它们走 keyup 轻敲通路。
 fn select_key_group_binds(group: &str) -> &'static [(&'static str, SessionAction)] {
     match group.trim().to_lowercase().as_str() {
         "semicolon_quote" => &[
@@ -6188,11 +5201,9 @@ fn select_key_group_binds(group: &str) -> &'static [(&'static str, SessionAction
     }
 }
 
-/// 以词定字键**组名** → 折算出的 (键名, 动词) 对。约束同 [`page_key_group_binds`]。
-///
-/// ⚠️ 值域与 [`select_key_group_binds`] **不同**：这里有 `brackets`、没有修饰键组。
-/// 两者曾被张冠李戴过一次（用选词键组的解析器去解以词定字配置，`brackets` 静默失效），
-/// 所以分成两张表而不是一张带参数的。
+/// 以词定字键组名 → 折算出的 (键名, 动词) 对。约束同 [`page_key_group_binds`]。
+/// 值域与 [`select_key_group_binds`] 不同（这里有 `brackets`、没有修饰键组），故分成两张表，
+/// 混用会让 `brackets` 静默失效。
 fn select_char_group_binds(group: &str) -> &'static [(&'static str, SessionAction)] {
     match group.trim().to_lowercase().as_str() {
         "comma_period" => &[
@@ -6212,32 +5223,18 @@ fn select_char_group_binds(group: &str) -> &'static [(&'static str, SessionActio
 }
 
 impl KeysConfig {
-    /// **有效**的会话态按键表：四组键组配置的展开结果 ⊕ `session_actions`（后者优先）。
+    /// 有效的会话态按键表：四组键组配置的展开结果 ⊕ `session_actions`（后者优先）。
     ///
-    /// # ★ 这是消费层的视图，不是存储层的改写
+    /// 这是消费层的视图，不是存储层的改写：四组键组（`page_keys` / `highlight_keys` /
+    /// `select_key_groups` / `select_char_keys`）与 `session_actions` 在配置里各自保持原样。
+    /// 不要在 `normalize()` 里折算并清空原字段：设置页读的是存储，那样出厂默认会显示为未勾选、
+    /// 保存后重开又变空、删掉的折算绑定还会被折算回来。
     ///
-    /// 四组键组（`page_keys` / `highlight_keys` / `select_key_groups` / `select_char_keys`）
-    /// 与 `session_actions` 在配置文件里**各自保持原样**，只在这里合并成运行时的单一真相。
-    ///
-    /// 曾经的做法是在 `normalize()` 里折算并 `clear()` 掉四个原字段，后果是**存储层被视图
-    /// 吃掉**（2026-08-11 用户报「感觉有些乱」时查实）：
-    ///
-    /// - 设置页读 `config.get` → `Config::load` → `normalize`，四项恒为空 ⇒ 出厂默认
-    ///   （`page_keys` 等三项非空）在界面上全显示为未勾选，**每个用户都会遇到**。
-    /// - 用户勾选后保存，重开设置页又变空，像是没保存。
-    /// - 在自定义表里删掉一条折算来的绑定，下次启动又被折算回来，**删不掉**。
-    ///
-    /// ⇒ 判据：**折算属于「怎么解释配置」，不属于「配置是什么」。** 把视图写回存储，就丢掉了
-    /// 用户的原始意图，而设置页读的正是存储。
-    ///
-    /// # 优先级（两层，都必须保持）
-    ///
-    /// 1. **组间**：折算顺序 = 消费点的判定顺序，撞键时先折的赢。主输入路径上是
-    ///    以词定字（`select_char_index`）→ 翻页/高亮（`apply_session_action`）
-    ///    → 二三候选（`select_key_offset`），故这里必须同序。`comma_period` 同时是选词键组
-    ///    与以词定字键组的合法值，顺序就是唯一的裁决依据——搞反了的表现是「一直用的 `,`
-    ///    突然从取字变成选次选」，而用户什么都没改。
-    /// 2. **显式优先**：`session_actions` 里写了的键覆盖折算结果。用户在高级表里改的就该赢。
+    /// 优先级两层都必须保持：
+    /// 1. 组间：折算顺序 = 主输入路径的判定顺序（以词定字 `select_char_index` → 翻页/高亮
+    ///    `apply_session_action` → 二三候选 `select_key_offset`），撞键时先折的赢；
+    ///    `comma_period` 同属两个键组，顺序是唯一裁决依据。
+    /// 2. 显式优先：`session_actions` 里写了的键覆盖折算结果。
     pub fn effective_session_actions(&self) -> BTreeMap<String, String> {
         let mut out: BTreeMap<String, String> = BTreeMap::new();
         let mut folded: Vec<(&'static str, SessionAction)> = Vec::new();
@@ -6302,7 +5299,7 @@ impl Default for KeysConfig {
     }
 }
 
-/// 候选无效按键策略（[keys.overflow]，对齐 Go OverflowConfig）。
+/// 候选无效按键策略（[keys.overflow]）。
 /// 每项取值："ignore"（吞键无效）/ "commit"（上屏当前高亮候选）/
 /// "commit_and_input"（上屏高亮候选 + 追加按键字符）。默认全 ignore。
 /// 仅 `number_key` 另有 "clear_and_input"（清空输入并上屏该数字，不顶高亮候选）。
@@ -6373,10 +5370,8 @@ fn default_fast_first_show_fallback_ms() -> u64 {
     25
 }
 
-/// 候选窗首显策略的**全局默认档**。
-///
-/// ⚠ 与 `app_compat::FirstShowMode` 的 `#[default]` 是两处独立事实，必须一致——
-/// 由 `wind-config` 的 `global_first_show_mode_matches_enum_default` 钉住。
+/// 候选窗首显策略的全局默认档。须与 `app_compat::FirstShowMode` 的 `#[default]` 一致，
+/// 由 `global_first_show_mode_matches_enum_default` 钉住。
 fn default_first_show_mode() -> String {
     "fast".to_string()
 }
@@ -6408,33 +5403,17 @@ pub struct UiConfig {
     #[serde(default)]
     pub labels: LabelsConfig,
     /// 注释词库挂载列表（`[[ui.comment_dicts]]`），供候选注释模板的 `${dict}` 变量查询。
-    ///
-    /// **数组顺序即优先级**：同一个词在多个库里都有注释时，取靠前那个库的。
-    ///
-    /// 表里除了用户手工挂的库，还可以出现**自动派生项的引用条目**（`auto = true`），
-    /// 见 [`CommentDictSpec::auto`]。
+    /// 数组顺序即优先级：同一个词在多个库里都有注释时取靠前的。表里还可以有自动派生项的
+    /// 引用条目（`auto = true`），见 [`CommentDictSpec::auto`]。
     #[serde(default)]
     pub comment_dicts: Vec<CommentDictSpec>,
 }
 
 /// 非中文态的图标主字（`[ui.labels]`）。
 ///
-/// ## 这里为什么**没有**中文态
-///
-/// 中文态的主字是**方案的属性**，配在方案文件的 `[schema] icon_label`（「五」「拼」）。
-/// 把它也搬来这里就成了两个来源争同一个显示位，切方案时该听谁的没有答案。
-///
-/// ## 为什么是全局段而不是下沉到方案
-///
-/// 英文半角是 `chinese_mode` 这个**全局运行时状态**，与当前是哪个方案无关。下沉到
-/// 方案文件后，同一个英文态会随方案切换而改标签（五笔下显 `E`、拼音下显 `En`），
-/// 而用户按 Shift 切出去的是同一个状态。
-///
-/// ## 为什么不复用 `english.schema.toml` 的 `icon_label`
-///
-/// 「英文半角」与「英文方案」是本仓明确区分的两件事：前者按键原样透传、不出候选；
-/// 后者是 active 方案切换、走常规候选路径。而且英文方案可以被用户从方案列表里禁用，
-/// 复用它的标签等于让一个可禁用对象持有全局状态的呈现。
+/// 没有中文态：中文态主字是方案属性（方案文件 `[schema] icon_label`），放两处会争同一个显示位。
+/// 不下沉到方案：英文半角是全局运行时状态，随方案切换改标签会让同一个状态显示不同。
+/// 不复用 `english.schema.toml` 的 `icon_label`：英文半角与英文方案是两件事，且英文方案可被禁用。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct LabelsConfig {
@@ -6461,9 +5440,8 @@ pub const DEFAULT_LABEL_CAPS: &str = "A";
 impl LabelsConfig {
     /// 英文半角态该显示的主字（已截断 + 已回落，可直接送渲染）。
     ///
-    /// ⚠️ **截断与回落封在这里，不能留给调用方各做一遍**——这个值有四个消费面
-    /// （语言栏图标 / 工具栏 / 状态气泡 / 移动端），其中语言栏那条路会把标签写进
-    /// C++ 侧一个 `wchar_t[4]` 的缓冲，漏掉截断的后果不是显示错乱而是宿主进程崩溃。
+    /// 截断与回落必须封在这里：四个消费面（语言栏图标 / 工具栏 / 状态气泡 / 移动端）中语言栏那条
+    /// 会写进 C++ 侧 `wchar_t[4]` 缓冲，漏掉截断会让宿主进程崩溃。
     pub fn english_label(&self) -> String {
         crate::schema::icon_label_or(&self.english, DEFAULT_LABEL_ENGLISH)
     }
@@ -6476,15 +5454,9 @@ impl LabelsConfig {
 
 /// 一个注释词库（`[[ui.comment_dicts]]`）。
 ///
-/// # 为什么是独立配置表，而不是塞进 `[[dictionaries]]`
-///
-/// 🔴 **注释库不参与召回**。若复用词库表加个 `type = "comment"` 区分，那么词库开关、
-/// `base_order`、`composite::merge_search`、造词、加词、词频学习 —— 每一条路径都得**记得**
-/// 跳过它，漏一处的表现是注释库里的词变成候选。独立成表意味着它从来就不在召回的数据结构里，
-/// 不需要任何一处记得跳过。
-///
-/// 这也是本仓反复出现的教训（见候选调整按来源分流、密码框抑制的分层）：**「加个标志位区分」
-/// 要求所有消费点同步，而消费点的数量只增不减。**
+/// 独立成表而不塞进 `[[dictionaries]]` 加 `type` 区分：注释库不参与召回，复用词库表的话词库开关、
+/// `base_order`、`composite::merge_search`、造词、学习每条路径都得记得跳过它，漏一处注释库的词
+/// 就变成候选。独立成表则它从不在召回的数据结构里。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CommentDictSpec {
     /// 稳定标识（供设置页与日志定位；不参与查询）。
@@ -6500,30 +5472,22 @@ pub struct CommentDictSpec {
     /// 「配了没反应」比「多加载一份」难查得多。
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// **自动派生项的引用条目**：`true` 时本条不带自己的 `path`，而是按 `id` 去认领一个
-    /// 运行时检测出来的自动注释源（词库自带 `comment` 列，见 [`UiConfig::auto_comment_dicts`]）。
+    /// 自动派生项的引用条目：`true` 时本条不带自己的 `path`，按 `id` 认领一个运行时检测出的
+    /// 自动注释源（词库自带 `comment` 列，见 [`UiConfig::auto_comment_dicts`]）。
     ///
-    /// # 为什么自动项要在这张表里留一条「空壳」
-    ///
-    /// 自动项的 **启用态与优先级** 得能被用户改，而优先级就是本表的数组位置 —— 不落进
-    /// 同一张表，顺序就只能另立一个 `comment_dict_order` 之类的键，那是第二个真相源，
-    /// 两边失同步的表现是「拖了顺序没变化」。
-    ///
-    /// 空壳里**只有 `id` / `enabled` / 位置是用户的**，`path` 与 `schemas` 每次启动都从
-    /// 检测结果重新取 —— 词库换了路径、方案改了名，用户不需要来这里同步。认领不到（词库
-    /// 被删/停用/关掉了总开关）的空壳静默跳过，不告警：那是常态而非配置错误。
+    /// 留空壳是因为自动项的启用态与优先级（即本表的数组位置）要能被用户改，另立顺序键会成为
+    /// 第二个真相源。空壳里只有 `id` / `enabled` / 位置是用户的，`path` 与 `schemas` 每次启动
+    /// 从检测结果重取。认领不到的空壳静默跳过，那是常态而非配置错误。
     #[serde(default)]
     pub auto: bool,
-    /// **随包内置项的引用条目**：与 `auto` 同形，按 `id` 去认领 `system.comments.toml` 的
+    /// 随包内置项的引用条目：与 `auto` 同形，按 `id` 去认领 `system.comments.toml` 的
     /// `[[dicts]]`，只保留用户的 `enabled` 与位置；认领不到静默丢弃。
     #[serde(default)]
     pub builtin: bool,
-    /// 限定生效的方案 id；**留空 = 全部方案**。
+    /// 限定生效的方案 id；留空 = 全部方案。
     ///
-    /// 注释库常常是方案专属的：一份大英汉词典只在英文方案下有意义，挂在五笔方案上
-    /// 每次输入都要多走一次二分且注定查不到。留空之所以是「全部」而非「无」——
-    /// 用户手写一条却没写 `schemas` 时，「到处都显示」比「哪都不显示」好查得多，
-    /// 与 `enabled` 缺省即启用同一取舍。
+    /// 注释库常是方案专属的，挂在无关方案上每次输入都白查一次。留空取「全部」而非「无」：
+    /// 手写一条忘了 `schemas` 时，到处显示比哪都不显示好查，与 `enabled` 缺省即启用同一取舍。
     #[serde(default)]
     pub schemas: Vec<String>,
 }
@@ -6544,22 +5508,14 @@ pub struct ToolbarConfig {
     /// 前台应用全屏时自动隐藏工具栏（默认 true）。
     #[serde(default = "default_true")]
     pub hide_in_fullscreen: bool,
-    /// 主动检测前台全屏态（默认 true）。
+    /// 主动检测前台全屏态（默认 true），只在 `hide_in_fullscreen` 之下有意义。
     ///
-    /// 只在 `hide_in_fullscreen` 之下才有意义，管的是**靠什么发现进出全屏**：关掉则只在
-    /// 焦点/激活事件到达时顺带查一次，开着则工具栏显示期间按固定节拍自查。
-    ///
-    /// 为什么需要这个开关：进出全屏本身不产生任何 TSF 回调（在输入框里按 F11、播放器
-    /// 快捷键全屏），只靠事件的话缓存会停在进全屏之前的值，工具栏该隐没隐（GH#134）。
-    /// 但复查是一条常驻线程，而「这个功能值不值得常驻开销」该由用户定——故留此开关。
-    /// 关掉后 F11 那条已知例外会回来。
-    ///
-    /// ⚠ 节拍取值与实测开销**只写在实现处**（`wind-coordinator` 的
-    /// `coordinator/fullscreen_watch.rs` 的 `WATCH_TICK`），此处不复述：那个数会随实测
-    /// 调整，写两处迟早只改一处。
+    /// 进出全屏不产生 TSF 回调（如输入框里按 F11），只靠焦点/激活事件时缓存会停在旧值、工具栏
+    /// 该隐没隐；开着则工具栏显示期间按固定节拍自查。复查是一条常驻线程，故留开关由用户定，
+    /// 关掉后 F11 那类例外会回来。节拍与开销只写在 `coordinator/fullscreen_watch.rs` 的 `WATCH_TICK`。
     #[serde(default = "default_true")]
     pub fullscreen_watch: bool,
-    /// 英文状态下隐藏工具栏（默认关，论坛 t167）。
+    /// 英文状态下隐藏工具栏（默认关）。
     ///
     /// 「英文状态」= 中英模式处于英文（`chinese_mode == false`），与全屏否决同档：只否决显示，
     /// 切回中文时照常出现。临时英文 / 大写锁定仍属中文态，不在此列。
@@ -6571,12 +5527,11 @@ pub struct ToolbarConfig {
     /// 自动隐藏超时（秒，默认 5；下限 1 由协调器钳制）。
     #[serde(default = "default_toolbar_auto_hide_delay")]
     pub auto_hide_delay: u32,
-    /// 自动隐藏的附加选项「假隐藏」（默认 false，论坛 t167）：淡出后窗口仍留在原位（几乎透明、
+    /// 自动隐藏的附加选项「假隐藏」（默认 false）：淡出后窗口仍留在原位（几乎透明、
     /// 可被鼠标命中），光标移到那里即重新显示，移开后按 `auto_hide_delay` 再淡出。
     /// 关掉则淡出后真隐藏，只有状态变化（切中英等）才重新出现。仅在 `auto_hide` 下有意义。
     ///
-    /// 代价：假隐藏期间那一小块屏幕的点击落在工具栏上，而不是下面的应用——但光标得先
-    /// 移过去，工具栏会先亮出来，不会「点到看不见的东西」。
+    /// 代价：那一小块屏幕的点击落在工具栏上，但光标移过去时工具栏会先亮出来。
     #[serde(default)]
     pub auto_hide_hover_reveal: bool,
     /// 纵向排列（默认 false=横条）。纵向是横向的转置：条宽取主题 `[toolbar] height`，
@@ -6584,26 +5539,18 @@ pub struct ToolbarConfig {
     /// 属用户偏好而非视觉设计，所以落在此处而非主题。
     #[serde(default)]
     pub vertical: bool,
-    /// 显示哪些条目、按什么顺序。**数组顺序即渲染顺序**，合法项见 [`TOOLBAR_ITEM_KEYS`]。
+    /// 显示哪些条目、按什么顺序。数组顺序即渲染顺序，合法项见 [`TOOLBAR_ITEM_KEYS`]。
     ///
-    /// **`-` 前缀 = 「在这个位置，但不显示」**（如 `"-s2t"`）：设置页关掉某格时写的就是
-    /// 这个，于是关掉再打开它还在原位。若关闭的项直接从数组里删掉，位置信息就丢了，
-    /// 重开只能补在声明序位——用户体感是「排好的顺序，关一下再开就乱了」。
-    /// 顺序与启用态因此留在**同一个数组**里，不必拆成两个键去同步。
+    /// `-` 前缀 = 「在这个位置，但不显示」（如 `"-s2t"`）：设置页关掉某格时写的就是这个，
+    /// 关掉再打开仍在原位；顺序与启用态因此留在同一个数组里。
     ///
-    /// **留空 = 全部显示**：既是「未配置」的合理默认，也让旧配置文件（无此键）行为不变。
-    /// 想整条不要的正确表达是 `visible = false`——那才是「不要工具栏」这个意图的落点。
-    /// 设置页另有一道「至少留一格」的闸门，故「每项都带 `-`」只在手写配置时可达
-    /// （此时协调器回落成全部显示并告警）。
-    ///
-    /// ⚠️ 顺序是有语义的，故设置页必须用**列表编辑器**（拖拽排序）而非 `checkbox_group`
-    /// ——后者恒按声明顺序写回，会静默改写用户手排的顺序（`config-design-rules.md` §R3）。
+    /// 留空 = 全部显示（未配置的默认，旧配置行为不变）；整条不要用 `visible = false`。
+    /// 每项都带 `-` 只在手写配置时可达，协调器回落成全部显示并告警。
+    /// 顺序有语义，设置页必须用列表编辑器而非 `checkbox_group`（`config-design-rules.md` §R3）。
     #[serde(default = "default_toolbar_items")]
     pub items: Vec<String>,
-    /// 自定义按钮定义（`[[ui.toolbar.buttons]]`）。**定义在此，显不显示 / 排第几由
-    /// [`Self::items`] 里的 `custom:<id>` 决定**——两者是引用关系，不是同一语义的两张表。
-    ///
-    /// 出厂空。这是 expert 档配置：动作是 cmdbar 表达式，设置页不提供编辑器
+    /// 自定义按钮定义（`[[ui.toolbar.buttons]]`）。显不显示、排第几由 [`Self::items`] 里的
+    /// `custom:<id>` 决定，两者是引用关系。出厂空；expert 档，设置页不提供编辑器
     /// （`config-design-rules.md` §R5）。
     #[serde(default)]
     pub buttons: Vec<ToolbarButtonSpec>,
@@ -6617,10 +5564,7 @@ pub struct ToolbarButtonSpec {
     pub id: String,
     /// 格内显示的文字。见 [`toolbar_label_trunc`] 的宽度口径。
     ///
-    /// ⚠️ **刻意没有 tooltip 字段**：工具栏至今没有悬停提示机制（`wind-ui` 的 tooltip
-    /// 窗口绑在候选窗上，是编码反查用的）。加一个渲染端消费不了的字段，等于给用户一个
-    /// 配了永远没反应的旋钮——比没有更糟。要做提示得先给工具栏做悬停窗口，那是独立的
-    /// 一件事，不该顺带塞进按钮定义里。
+    /// 刻意没有 tooltip 字段：工具栏没有悬停提示机制，渲染端消费不了的字段是配了也没反应的旋钮。
     #[serde(default)]
     pub label: String,
     /// 点击执行的 cmdbar 表达式，如 `proc.run("charmap.exe")` / `open("https://…")`。
@@ -6634,27 +5578,19 @@ pub struct ToolbarButtonSpec {
     pub enabled: bool,
 }
 
-/// 工具栏按钮 label 的宽度上限，按**显示宽度**计（CJK 记 2、其余记 1）。
+/// 工具栏按钮 label 的宽度上限，按显示宽度计（CJK 记 2、其余记 1）。
 pub const TOOLBAR_LABEL_MAX_WIDTH: usize = 2;
 
 /// 工具栏按钮 label 的截断口径：去首尾空白后，取显示宽度不超过
 /// [`TOOLBAR_LABEL_MAX_WIDTH`] 的前缀。即「一个汉字」或「两个 ASCII 字符」。
 ///
-/// # 与 `schema::icon_label_trunc` 的关系（issue #85 后已合并口径）
-///
-/// 那条口径原先是**字符数** ≤ 2，与这条**显示宽度** ≤ 2 对「符号」判断相反（前者放行、
-/// 后者截成「符」）。当时留的话是"若日后要合并两条口径，得先确认语言栏那三个调用点
-/// 接受「符号」被截成「符」"——issue #85 就是这个确认：第三方方案的 `icon_label = "虎单"`
-/// 在 16px 图标里被回缩到认不出，用户明确要求按显示宽度收。
-///
-/// 现在两者**同一条规则、不同上限常量**，共用 [`display_width_trunc`]。上限仍各留一个
-/// 常量：两处的物理约束不同（这里是等宽方格的长宽比，那里是 16px 位图 + C++ 侧
-/// `wcscpy_s` 缓冲），日后其中一处要动不该被另一处绑住。
+/// 与 `schema::icon_label_trunc` 同一条规则、共用 [`display_width_trunc`]，上限各留一个常量：
+/// 两处物理约束不同（这里是等宽方格，那里是 16px 位图 + C++ 侧 `wcscpy_s` 缓冲）。
 pub fn toolbar_label_trunc(raw: &str) -> String {
     display_width_trunc(raw, TOOLBAR_LABEL_MAX_WIDTH)
 }
 
-/// 按**显示宽度**截断的共享内核：去首尾空白后，取显示宽度不超过 `max_width` 的前缀。
+/// 按显示宽度截断的共享内核：去首尾空白后，取显示宽度不超过 `max_width` 的前缀。
 ///
 /// 宽度口径见 [`is_wide_char`]（CJK 记 2、其余记 1）。字符不可拆，故结果宽度可能小于
 /// `max_width`（`"A符"` 在上限 2 下只剩 `"A"`）。
@@ -6672,15 +5608,13 @@ pub(crate) fn display_width_trunc(raw: &str, max_width: usize) -> String {
     out
 }
 
-/// 是否按双宽字符计。粗口径够用：这里只为决定「一格能放几个」，不是排版引擎。
+/// 是否按双宽字符计。粗口径，只为决定「一格能放几个」。
 ///
 /// 覆盖 CJK 统一表意文字及扩展 A、兼容表意文字、假名、全角/半角形式区、CJK 符号与标点、
-/// 注音符号、谚文——即用户会拿来当按钮标签 / 图标主字的那些。其余（拉丁、数字、常用符号、
-/// **emoji**）记 1。
+/// 注音符号、谚文；其余（拉丁、数字、常用符号、emoji）记 1。
 ///
-/// ⚠️ emoji 记 1 是有代价的：它占 2 个 UTF-16 code unit，图标主字上限 2 因此蕴含
-/// 「最坏 4 wchar」，C++ 侧 `_inputTypeLabel` 的容量按这个最坏值取。若要把 emoji
-/// 划进双宽，先看 `schema::icon_label_limit_counts_scalar_values` 那条断言。
+/// emoji 记 1 意味着图标主字上限 2 最坏占 4 个 UTF-16 码元，C++ 侧 `_inputTypeLabel` 的容量
+/// 按这个取。要把 emoji 划进双宽，先看 `schema::icon_label_limit_counts_scalar_values`。
 pub fn is_wide_char(c: char) -> bool {
     matches!(c as u32,
         0x1100..=0x115F      // 谚文字母
@@ -6699,10 +5633,10 @@ pub fn is_wide_char(c: char) -> bool {
     )
 }
 
-/// 工具栏条目键的全集，同时也是默认值（全部显示）与**默认顺序**。
+/// 工具栏条目键的全集，同时也是默认值（全部显示）与默认顺序。
 ///
 /// 与 [`STATUS_ITEM_KEYS`] 的差别：那份的顺序无语义（状态气泡的渲染顺序固定在代码里），
-/// 这份的顺序**就是**渲染顺序。
+/// 这份的顺序就是渲染顺序。
 pub const TOOLBAR_ITEM_KEYS: [&str; 7] = [
     "mode",
     "punct",
@@ -6713,20 +5647,12 @@ pub const TOOLBAR_ITEM_KEYS: [&str; 7] = [
     "settings",
 ];
 
-/// 出厂**默认排布**：全集的每一项都在，关掉的写 `-` 前缀（「在这个位置，但不显示」）。
+/// 出厂默认排布：全集的每一项都在，关掉的写 `-` 前缀。
 ///
-/// ★ 刻意不是 [`TOOLBAR_ITEM_KEYS`] 原样：那份是「合法值域」（顺序即声明序），这份是
-/// 「出厂长什么样」。两份分开之后，往值域里加新格不再自动改变任何人的工具栏外观。
-///
-/// **为什么 `s2t` 关着**：这一格恒显示（渲染端已无运行时合取，见 `expand_cells_raw`），
-/// 而简繁转换是少数人才用的功能——默认给所有人多一格「简」是打扰。想要就在设置页
-/// 勾上，勾上之后它就是简繁的鼠标开关，不再有「关着时看不见、于是开不回来」的自锁。
-///
-/// **为什么 `soft_keyboard` 开着**：软键盘面板没有别的显眼入口（热键要记、主菜单要两层），
-/// 而它恰恰是那种「偶尔要、要的时候得马上找到」的东西。
-///
-/// **为什么 `t2s` 也关着**：同 `s2t` 的理由，且更甚——繁入简出是给「词库是繁体、要出
-/// 简体」那一小撮人的，它连右键菜单都不做。这一格是它唯一的鼠标入口，勾上即可用。
+/// 与 [`TOOLBAR_ITEM_KEYS`]（合法值域）分开，往值域里加新格不会改变任何人的工具栏外观。
+/// - `s2t` / `t2s` 关着：简繁转换是少数人用的功能，默认多一格是打扰；勾上后这一格就是它的
+///   鼠标开关（`t2s` 没有右键菜单，这是唯一的鼠标入口）。
+/// - `soft_keyboard` 开着：软键盘没有别的显眼入口，偶尔要用时得马上找到。
 const DEFAULT_TOOLBAR_SHOWN: [&str; 7] = [
     "mode",
     "punct",
@@ -6767,54 +5693,30 @@ fn default_toolbar_auto_hide_delay() -> u32 {
 
 /// 语言栏图标（Windows 任务栏输入指示器）的呈现参数（`[ui.langbar]`）。
 ///
-/// # 模型：总开关 + 全局参数 + 有序规则表
+/// 模型是总开关 + 全局参数 + 有序规则表：「什么状态、画在哪个角、什么颜色、多大」组合起来
+/// 必须是一张表，摊成扁平键会铺十几个且状态集合一变就要重排。顺序即优先级：一个角落只画
+/// 最靠前命中的那一条（16px 上叠两个三角会糊成一片）。
 ///
-/// 角标只有一种形状（角落三角），可配的是**什么状态、画在哪个角、什么颜色、多大**。
-/// 这几个自由度组合起来必须是一张表，不能摊成扁平键：三个状态 × 位置 × 亮暗两色 ×
-/// 尺寸，扁平化要铺十几个键，且状态集合一变就得整段重排；而表的形态下加一条规则
-/// 只是多一个数组元素，读写两侧都不用动。
-///
-/// **顺序即优先级**：位置进了规则之后，两条规则可以落在同一个角落（如把「全角」也
-/// 配到右下），而 16px 上叠两个三角只会糊成一片——故一个角落只画最靠前命中的那一条。
-/// 与 `ui.toolbar.items`「数组顺序即渲染顺序」同一条规矩。
-///
-/// # 默认值在这里也写了一份，靠测试防漂移
-///
-/// 渲染侧（`wind_ui::langbar_icon::IconRenderer`）本来就有一套默认常量，理想情况下
-/// 默认值只该有一个出处。但 wind-config 不能反向依赖 wind-ui（层次颠倒），而本仓的
-/// 配置约定又要求**每个可配置项都有具体默认值并在 `data/config.toml` 里完整列出**
-/// （那份预置文件同时是出厂默认与说明书，有守门测试强制）。
-///
-/// 于是两处各存一份，用 `wind-coordinator` 的 `langbar_config_defaults_match_renderer`
-/// 把它们钉在一起——那个 crate 同时依赖两边，是唯一能做这件比对的地方。漂移的症状
-/// （「设置页看到的默认值与实际渲染不一致」）不会自己暴露，必须靠测试拦。
-///
-/// 颜色只存字符串，解析与回退发生在协调器侧（同样是因为不能依赖渲染侧的类型）。
+/// 默认值与渲染侧（`wind_ui::langbar_icon::IconRenderer`）各存一份：wind-config 不能依赖
+/// wind-ui，而配置约定要求每项在 `data/config.toml` 列出具体默认值。两份由 `wind-coordinator`
+/// 的 `langbar_config_defaults_match_renderer` 钉住。颜色只存字符串，解析与回退在协调器侧。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LangBarConfig {
     /// 角标总开关。取值见 `wind_ui::langbar_icon::BadgeStyle::as_id()`：
     /// `none`（默认，不显示）/ `corner`（角标）。
     ///
-    /// 关掉即**全部规则都不画**，不必逐条去关——这正是有了规则表之后总开关仍要存在的
-    /// 理由。无法识别的取值一律回落 `none`，不报错：配置文件是手写的，写错一个词该
-    /// 退回「与装之前一致」，而不是画出个莫名其妙的东西。
-    ///
-    /// ⚠ 上一版的形状 id（`corner_triangle` / `outer_ring` …）**不做兼容别名**：
-    /// 那一版是标着实验性发出去的，让用户重新配一次即可。
+    /// 关掉即全部规则都不画。无法识别的取值回落 `none`、不报错，写错一个词就退回装之前的样子。
+    /// 早期实验性的形状 id（`corner_triangle` / `outer_ring` …）不做兼容别名。
     #[serde(default = "default_langbar_badge")]
     pub badge: String,
     /// 角标全局大小倍率（1.0 = 基准尺寸）。单条可用 `badges[].scale` 再乘一次。
     #[serde(default = "default_one")]
     pub badge_scale: f32,
-    /// 角标不透明度的**全局默认**（0~1）。单条可用 `badges[].alpha_light` / `alpha_dark` 覆盖。
+    /// 角标不透明度的全局默认（0~1）。单条可用 `badges[].alpha_light` / `alpha_dark` 覆盖。
     ///
-    /// 它同时是档位开关：`= 1.0` 走「实心 + 挖空」（标记周围切掉一圈主字），
-    /// `< 1.0` 走「半透明 + 保留主字」（笔画从标记里透出来）。两者是互斥的分离手段，
-    /// 详见 `wind_ui::langbar_icon::IconRenderer::badge_alpha`。该档位**逐条**判定，
-    /// 用的是这一条的有效不透明度。
-    ///
-    /// 出厂让全部角标共用一个值是审美上的统一（一个半遮一个实心会让人以为二者
-    /// 层级不同），不是技术限制。
+    /// 它同时是档位开关，逐条按有效不透明度判定：`= 1.0` 走「实心 + 挖空」（切掉周围一圈主字），
+    /// `< 1.0` 走「半透明 + 保留主字」，见 `wind_ui::langbar_icon::IconRenderer::badge_alpha`。
+    /// 出厂共用一个值是审美统一，不是技术限制。
     #[serde(default = "default_langbar_badge_alpha")]
     pub badge_alpha: f32,
     /// 角标规则表，顺序即优先级（见本结构体的文档）。
@@ -6824,7 +5726,7 @@ pub struct LangBarConfig {
     /// （主题 token `langbar_text_cn`，主题也没给则内置黑）。
     ///
     /// 优先级「用户非空 > 主题 > 内置」，四格各自独立回落；合并在协调器的
-    /// `effective_text_colors` 一处完成。非法色值记警告并只让**这一格**回落主题。
+    /// `effective_text_colors` 一处完成。非法色值记警告并只让这一格回落主题。
     /// `en` = 英文态标签（含不可输入态、CapsLock）。light/dark 指任务栏明暗。
     #[serde(default)]
     pub text_color_cn_light: String,
@@ -6842,18 +5744,14 @@ pub struct LangBarConfig {
 /// 一条角标规则（`[[ui.langbar.badges]]`）：某状态成立时，在某角落用某色画一个角标。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LangBarBadge {
-    /// 这条规则生效与否。
-    ///
-    /// **这是「某个状态不想被打扰」的落点**——例如中文标点是常态，很多人只想在切到
-    /// 英文标点时被提醒一下，把中文标点那条关掉即可。做成开关而不是让用户删掉整条：
-    /// 关掉保留颜色与位置，想回来时勾上就行，反复比选时差别很大。
+    /// 这条规则生效与否。「某个状态不想被打扰」的落点（如只想在英文标点时被提醒）；
+    /// 做成开关而非删条目，关掉仍保留颜色与位置。
     #[serde(default = "default_true")]
     pub enabled: bool,
     /// 什么时候画。取值见 `wind_ui::langbar_icon::BadgeState::as_id()`：
     /// `punct_cn`（中文标点）/ `punct_en`（英文标点）/ `full_width`（全角）。
     ///
-    /// ⚠ 与本段其余取值不同，**无法识别的状态会让整条规则被丢弃**（并记一条警告）。
-    /// 状态没有合理的默认值：回落到任意一个都是替用户瞎猜，画出来的东西他对不上因果。
+    /// 与本段其余取值不同，无法识别的状态会让整条规则被丢弃（并告警）：状态没有合理的默认值。
     #[serde(default)]
     pub state: String,
     /// 画在哪个角。取值见 `wind_ui::langbar_icon::Corner::as_id()`：
@@ -6862,37 +5760,27 @@ pub struct LangBarBadge {
     pub corner: String,
     /// 浅色任务栏上的颜色：`#RRGGBB`，或 `""`（与主字同色）。不透明度见 [`Self::alpha_light`]。
     ///
-    /// 亮暗分两个字段而不是一个：渲染本来就按「尺寸档 × 明暗两档」出全部变体，
-    /// 按主题取色是白拿的；而同一个色在浅色与深色任务栏上的可辨度可以差很远。
-    /// 出厂三条都写成亮暗同色——那三色本就是按「深浅两种任务栏上都立得住」挑的。
+    /// 亮暗分两个字段：同一个色在浅色与深色任务栏上的可辨度差很远，而渲染本就按明暗两档出变体。
+    /// 出厂三条亮暗同色，是按两种任务栏上都立得住挑的。解析失败只让这一项回落「与主字同色」并告警。
     ///
-    /// 解析失败回落「与主字同色」并记警告，只回落**这一项**：改错一个色值若连带把位置、
-    /// 大小一起打回默认，用户根本对不上因果。
-    ///
-    /// 旧写法 `auto` / `#RRGGBBAA`（末两位是本条不透明度）由
-    /// `Config::migrate_langbar_badge_colors_value` 迁为 `""` / `#RRGGBB` + `alpha_light`；
-    /// 定制层里没迁移的旧写法渲染侧仍能读，但只读不写。
+    /// 旧写法 `auto` / `#RRGGBBAA` 由 `Config::migrate_langbar_badge_colors_value` 迁为
+    /// `""` / `#RRGGBB` + `alpha_light`；定制层里未迁移的旧写法渲染侧仍能读。
     #[serde(default = "default_langbar_color_follow")]
     pub color_light: String,
     /// 深色任务栏上的颜色，语义同 [`Self::color_light`]。
     #[serde(default = "default_langbar_color_follow")]
     pub color_dark: String,
     /// 本条在浅色任务栏上自己的不透明度（0~1）。`None` = 跟随全局 `badge_alpha`。
-    ///
-    /// ⚠ 填 `1.0` 不是「最不透明」那么简单——它会把这一条切到**挖空档**
-    /// （角标实心 + 周围切掉一圈主字），与半遮是两种不同的画法，见
-    /// `wind_ui::langbar_icon::IconRenderer::badge_alpha`（语义同旧 8 位写法的 `FF`）。
+    /// 填 `1.0` 会把这一条切到挖空档（实心 + 切掉周围主字），见
+    /// `wind_ui::langbar_icon::IconRenderer::badge_alpha`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alpha_light: Option<f32>,
     /// 本条在深色任务栏上自己的不透明度，语义同 [`Self::alpha_light`]。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alpha_dark: Option<f32>,
-    /// 本条相对全局倍率的**额外**倍率（1.0 = 与其他角标同大）。
-    ///
-    /// 两级而不是一级：全局那一级答「角标整体要多大」，这一级答「这一条要不要比别人
-    /// 大或小」。**出厂三条都是 1.0**——三个状态标记同等重要，出厂不替用户分主次。
-    ///
-    /// `0` 或负数 = 这一条不画（与 `enabled = false` 等效，但后者才是给人用的表达）。
+    /// 本条相对全局倍率的额外倍率（1.0 = 与其他角标同大）。全局那级答「角标整体多大」，
+    /// 这级答「这一条要不要比别人大」；出厂三条都是 1.0，不替用户分主次。
+    /// `0` 或负数 = 这一条不画（与 `enabled = false` 等效，后者才是给人用的表达）。
     #[serde(default = "default_one")]
     pub scale: f32,
 }
@@ -6916,7 +5804,7 @@ fn default_langbar_color_follow() -> String {
 
 /// 出厂规则表：中文标点右下蓝、英文标点右下橙、全角右上玫红，亮暗同色、大小相同。
 ///
-/// 两条标点规则同占右下角**不冲突**：它们的状态互斥（同一时刻只可能命中一条），
+/// 两条标点规则同占右下角不冲突：它们的状态互斥（同一时刻只可能命中一条），
 /// 优先级规则处理的是「同时命中」，不是「配在同一角」。
 fn default_langbar_badges() -> Vec<LangBarBadge> {
     let rule = |state: &str, corner: &str, color: &str, scale: f32| LangBarBadge {
@@ -6966,12 +5854,8 @@ pub struct StatusIndicatorConfig {
     pub display_mode: String,
     /// 焦点切换到新的输入框时，是否也强制显示一次状态气泡（默认关）。
     ///
-    /// 与 `display_mode` 正交：`always` 本就在获焦时显示，本项对它无额外效果；真正改变行为的是
-    /// `temp`——原本只有用户主动切换中英/标点/全半角时才弹，开启后**换个输入框也弹一次**，
-    /// 用来提示「你现在切到的这个框，输入法是什么状态」。
-    ///
-    /// ⚠ 显示时会绕过 `show_status` 的文本去重：焦点切换恰恰是「状态文本没变但仍要重弹」的场景，
-    /// 走去重路径会让它在同状态下**完全不显示**。
+    /// 与 `display_mode` 正交：对 `always` 无额外效果；对 `temp` 是「换个输入框也弹一次」。
+    /// 显示时绕过 `show_status` 的文本去重，否则同状态下焦点切换完全不显示。
     #[serde(default)]
     pub show_on_focus: bool,
     /// 方案名显示样式："full"（全名，默认）| "short"（图标短称 icon_label，回退全名）。
@@ -7009,7 +5893,7 @@ pub struct StatusIndicatorConfig {
     /// `schema`（输入方案 / 中英）、`punct`（标点状态）、`full_width`（全半角）、
     /// `s2t`（简繁）、`caps`（大写锁定）。
     ///
-    /// **留空 = 全部显示**：既是"未配置"的合理默认，也让旧配置文件（无此键）行为不变。
+    /// 留空 = 全部显示：既是"未配置"的合理默认，也让旧配置文件（无此键）行为不变。
     /// 用列表而非逐项 bool，是为了后续增加状态项时不必再动配置结构。
     #[serde(default = "default_status_items")]
     pub items: Vec<String>,
@@ -7139,133 +6023,98 @@ pub struct UiCandidateConfig {
     pub per_page_extended: usize,
     #[serde(default)]
     pub layout: String,
-    /// 编码（组合区）显示方式。单一权威配置，取代旧的 inline_preedit + preedit_mode 组合。
+    /// 编码（组合区）显示方式。
     /// - "app_inline"（默认）：编码内嵌应用光标处，候选窗不显示 preedit 栏
     /// - "candidate_top"：候选窗顶部独立 preedit 栏
     /// - "candidate_inline"：编码作为候选窗首单元内联
     ///
-    /// ⚠ 后两种把编码的显示托付给候选窗，而候选窗在**宿主自绘候选**的场合根本不弹
-    /// （TSF UI-less 的全屏游戏 / SDL、D3D 独占全屏）。那种场合下本项自动降级为
-    /// `app_inline`，否则编码两条出口全断、一个字都看不见 —— 判据与理由见
-    /// `wind-coordinator` 的 `preedit_uses_placeholder` 及
+    /// 后两种依赖候选窗，宿主自绘候选的场合（TSF UI-less 全屏游戏 / SDL、D3D 独占全屏）自动降级为
+    /// `app_inline`，否则编码无处显示。见 `wind-coordinator` 的 `preedit_uses_placeholder` 及
     /// `docs/design/game-compat-tsf-uielement.md` §4.4 末。
     #[serde(default = "default_preedit_display")]
     pub preedit_display: String,
     /// 拼音编码里音节之间显示的分隔符（`xiao'peng'you` 里的 `'`），默认 `'`，可留空。
     ///
-    /// **只改显示**：应用里的组合串与候选窗编码栏都换，引擎内部的缓冲、手动分隔符 `'` 的
-    /// 输入与切分一概不变。Unreal Engine 等对资产名校验严格的程序不接受 `'`，留空或换成
-    /// 别的字符即可（GH#267）。只作用于主路拼音；临时英文等模式里的 `'` 是正文，不动。
+    /// 只改显示：应用里的组合串与编码栏都换，引擎缓冲、手动分隔符的输入与切分不变。
+    /// 用于 Unreal Engine 等不接受 `'` 的程序。只作用于主路拼音；临时英文等模式里的 `'` 是正文。
     #[serde(default = "default_syllable_separator")]
     pub syllable_separator: String,
     #[serde(default)]
     pub hide_window: bool,
     /// 候选文本字号：0（默认）= 跟随主题 `behavior.font_size`，>0 = 用户指定。
     ///
-    /// 0 可以当「跟随」哨兵，是因为 0 号字本身不是合法取值（R3「外观覆盖主题」）。
-    /// 旧的 `font_size_follow_theme` 开关已并入本键，迁移见
-    /// [`Config::migrate_font_size_follow_theme_value`]。
-    /// serde 缺省（0.0）与 [`Default`] 一致，缺键即跟随主题。
+    /// 0 号字本身不合法，故可作「跟随」哨兵（R3「外观覆盖主题」）。旧的 `font_size_follow_theme`
+    /// 已并入本键，迁移见 [`Config::migrate_font_size_follow_theme_value`]。
     #[serde(default)]
     pub font_size: f32,
     /// 翻页栏显示覆盖："" 跟随主题 / "hide" / "auto"(>1页) / "always"。
     ///
-    /// **可按排布分档**（见 [`ByLayout`]）：`"hide"` 横竖共用，`"h:hide v:always"` 分设。
-    /// 横排的翻页栏要挤占本就被全部候选共享的那一行，竖排本来就是多行、多一行代价小
-    /// ——「横排简洁、竖排信息多」是用户实际会提的诉求（论坛 #121）。
+    /// 可按排布分档（见 [`ByLayout`]）：`"hide"` 横竖共用，`"h:hide v:always"` 分设。横排的翻页栏
+    /// 挤占所有候选共享的那一行，竖排多一行代价小，两者常需不同取值。
     #[serde(default)]
     pub pager_bar_display: ByLayout<String>,
     /// 页码文字显示覆盖："" 跟随主题 / "show" / "hide"。
     #[serde(default)]
     pub page_number_display: ByLayout<String>,
-    /// 首显容差系数（**内部选项**，不进设置页）：首帧用了非权威坐标时，随后到达的权威
-    /// 坐标与它相差在 `行高 × 本系数` 以内就**不再校正**——校正本身才是抖动的观感来源，
-    /// 十几像素的偏差不动比"跳一下修正"更稳（多数输入法也是这么做的）。
-    /// 换行/重排的偏差通常 ≥2 个行高，远超此阈值，仍会正常校正。
-    /// 0 表示禁用该容差（任何偏差都校正，即旧行为）。默认 0.8。
+    /// 首显容差系数（内部选项，不进设置页）：首帧用了非权威坐标时，随后的权威坐标与它相差在
+    /// `行高 × 本系数` 以内就不再校正，十几像素不动比「跳一下修正」更稳。换行/重排的偏差通常
+    /// ≥2 个行高，仍会校正。0 = 禁用容差（任何偏差都校正）。默认 0.8。
     #[serde(default = "default_first_show_settle_ratio")]
     pub first_show_settle_ratio: f32,
-    /// 连续输入判定窗口（**内部选项**，毫秒）：两次按键间隔小于此值即视为"连续快速输入"，
+    /// 连续输入判定窗口（内部选项，毫秒）：两次按键间隔小于此值即视为"连续快速输入"，
     /// 此时 fast 档直接采信首条试探坐标、不再比对上一轮权威坐标。
     /// 依据是连打时光标顺序前移、不发生重排，且用户对"跟手"的敏感度远高于十几像素的偏差。
     /// 0 表示禁用该快路径。默认 100。
     #[serde(default = "default_fast_typing_window_ms")]
     pub fast_typing_window_ms: u64,
-    /// fast 档的首显兜底超时（**内部选项**，毫秒）：等不到试探/权威坐标就用现有坐标先显示。
+    /// fast 档的首显兜底超时（内部选项，毫秒）：等不到试探/权威坐标就用现有坐标先显示。默认 25。
     ///
-    /// 为什么必须远小于 wait 档的 150ms：实测 Word 从不发 `OnLayoutChange`（试探坐标无从产生），
-    /// 其组合坐标要 60~190ms 才到，而连打时组合只活 27~57ms——上屏即 `reset_first_show()` 作废
-    /// timer，150ms 兜底**永远等不到自己到期**，fast 档就此退化成 wait 档，候选窗 57/70 轮不显示。
-    /// 取小值让 fast 在这类宿主上退化成 instant（用旧坐标 + 放宽容差）而非干等。
-    /// 发 `OnLayoutChange` 的宿主（EverEdit/WPS）试探坐标 3~10ms 就到，不受本值影响。
-    /// 默认 25。
+    /// 必须远小于 wait 档的 150ms：有的宿主（如 Word）从不发 `OnLayoutChange`、组合坐标要上百毫秒
+    /// 才到，而连打时组合只活几十毫秒，上屏即作废 timer，150ms 兜底永远到不了期，候选窗大量不显示。
+    /// 取小值让 fast 在这类宿主上退化成 instant；发 `OnLayoutChange` 的宿主几毫秒就有试探坐标，不受影响。
     #[serde(default = "default_fast_first_show_fallback_ms")]
     pub fast_first_show_fallback_ms: u64,
-    /// 候选窗首显策略的**全局默认档**："fast"（默认）/ "wait" / "instant"。
+    /// 候选窗首显策略的全局默认档："fast"（默认）/ "wait" / "instant"，「快」与「准」的取舍：
+    /// - `fast`：等到坐标「可信」即放行（首帧信任门保底）；
+    /// - `wait`：一律等宿主 reflow 后的权威坐标，最稳但首显有固定延迟，连打时迟钝；
+    /// - `instant`：完全不等，沿用上一次坐标，光标移动过就会先错位再跳。
     ///
-    /// 语义是「快」与「准」之间的取舍，三档互斥：
-    /// - `fast`：等到坐标「可信」即放行（首帧信任门保底），实测常规连打首帧中位 7ms；
-    /// - `wait`：一律等宿主 reflow 后的权威坐标，最稳但首显恒定 85~95ms，连打时观感迟钝；
-    /// - `instant`：完全不等，沿用上一次坐标，最快但光标移动过就会先错位再跳。
-    ///
-    /// 右键菜单「应用独立配置 ▸ 候选窗首显」可为单个应用覆盖本值；那里的「跟随全局」
-    /// 一档＝清除覆盖、回到这里。认不出的值回落到默认档（等同没写）。
+    /// 右键菜单「应用独立配置 ▸ 候选窗首显」可按应用覆盖；「跟随全局」= 清除覆盖。认不出的值回落默认档。
     #[serde(default = "default_first_show_mode")]
     pub first_show_mode: String,
     /// 候选文本最大显示字数，超出截断（0=不限）。
     #[serde(default)]
     pub max_chars: usize,
-    /// **横排**候选窗的最小宽度，单位 dp（逻辑像素；0=关闭，跟随内容）。
+    /// 横排候选窗的最小宽度，单位 dp（0=关闭，跟随内容）。
     ///
-    /// 下限量的是**整个窗口**，不是单个候选：候选照常按内容紧凑排列并左对齐，凑不满的
-    /// 宽度留在窗口右侧空着。翻页栏、内边距、序号列这些窗口内的其它部件一并计入，故
-    /// 「窗口宽度不变」是可以直接达成的——这正是本项取代旧 `min_width_chars_*` 的理由：
-    /// 旧项把下限打在每个候选格上，横排时每格都被撑宽、格间距成倍放大，量的对象错了。
-    ///
-    /// 横竖两种排布各配一项（见 [`Self::min_window_width_vertical`]）：可用横向空间差一个
-    /// 数量级（竖排每行独占，横排全部候选共享一行），合理值不是同一个答案。
-    ///
-    /// **单位是 dp 不是字符**：本项量的是窗口而非文字，窗口宽度里还有序号列、各级内边距、
-    /// 翻页栏等与字号无关的部分，用字符数换算不出来。dp 随 DPI 缩放（×scale），在高分屏上
-    /// 自动等比放大。与 [`Self::max_chars`] 不冲突：后者仍封候选文字的上限。
+    /// 下限量的是整个窗口（含翻页栏、内边距、序号列），候选照常紧凑左对齐，凑不满的宽度留在右侧，
+    /// 从而能直接做到「窗口宽度不变」。单位是 dp 而非字符：窗口宽度里有与字号无关的部分；dp 随 DPI 缩放。
+    /// 横竖各配一项（见 [`Self::min_window_width_vertical`]）：可用横向空间差一个数量级。
+    /// 与 [`Self::max_chars`] 不冲突，后者仍封候选文字的上限。
     #[serde(default)]
     pub min_window_width_horizontal: u32,
-    /// **竖排**候选窗的最小宽度，单位 dp（0=关闭，跟随内容）。
-    ///
-    /// 语义、单位、衡量对象与 [`Self::min_window_width_horizontal`] 完全一致，仅作用排布
-    /// 不同——为什么分开配置见该字段文档。
-    ///
-    /// 与主题 `behavior.vertical_max_width`（竖排宽度上限）冲突时**下限优先**：用户显式配的
-    /// 抗抖动宽度不该被主题的裁切上限压回去。
+    /// 竖排候选窗的最小宽度，单位 dp（0=关闭，跟随内容）。语义同
+    /// [`Self::min_window_width_horizontal`]。与主题 `behavior.vertical_max_width` 冲突时下限优先：
+    /// 用户显式配的抗抖动宽度不该被主题的裁切上限压回去。
     #[serde(default)]
     pub min_window_width_vertical: u32,
-    /// **横排**候选窗的最小高度，单位 dp（0=关闭，跟随内容）。
+    /// 横排候选窗的最小高度，单位 dp（0=关闭，跟随内容）。窗口高度仍会随编码栏出现/消失而变，
+    /// 故对横排同样有意义。
     ///
-    /// 与宽度同为窗口级下限，凑不满的高度留空。横排候选虽只有一行，窗口高度仍会随编码栏
-    /// 出现/消失而变，故本项对横排同样有意义。
-    ///
-    /// 窗口被翻到光标**上方**时，多出的高度补在**顶部**：窗口上方显示时底边贴光标，空白
-    /// 压在下面会把候选整体顶离光标，位置反而随内容抖动——正是本项要消除的东西。
+    /// 窗口翻到光标上方时，多出的高度补在顶部：上方显示时底边贴光标，空白压在下面会把候选顶离光标。
     #[serde(default)]
     pub min_window_height_horizontal: u32,
-    /// **竖排**候选窗的最小高度，单位 dp（0=关闭，跟随内容）。
+    /// 竖排候选窗的最小高度，单位 dp（0=关闭，跟随内容）。
     ///
-    /// 与 [`Self::min_rows`] 是两种量法，可同时配、取两者较大者：`min_rows` 只数候选行，
-    /// 翻页栏、编码栏的出现/消失它管不着（真机反馈的正是翻页栏这一处）；本项量的是窗口
-    /// 总高，把这些一并罩住。只想稳住候选区、让翻页栏照常伸缩时仍该用 `min_rows`。
+    /// 与 [`Self::min_rows`] 可同时配、取较大者：`min_rows` 只数候选行，管不着翻页栏、编码栏的
+    /// 出现/消失；本项量窗口总高。只想稳住候选区、让翻页栏照常伸缩时用 `min_rows`。
     #[serde(default)]
     pub min_window_height_vertical: u32,
-    /// **竖排**候选窗的最小行数（0=关闭，跟随候选数量）。
+    /// 竖排候选窗的最小行数（0=关闭，跟随候选数量）。
     ///
-    /// 不足此数时补足等高的透明占位行，使窗口高度在候选数变化时保持不变。上限自动
-    /// 钳到当前生效的每页候选数（[`Self::per_page`] / [`Self::per_page_extended`]）——
-    /// 补出比一页还多的空行只会得到一个大半空白的窗口。
-    ///
-    /// 横排不适用（候选并列于一行，高度本就恒定）；候选为空的提示态（临拼/临英/网址
-    /// 刚进入）也不补足，那时窗口本就只有一行提示，撑成满高更突兀。
-    ///
-    /// 只稳住**候选区**：翻页栏、编码栏的出现/消失不在其量程内，窗口总高仍会跟着跳。
-    /// 要连这些一并罩住用 [`Self::min_window_height_vertical`]（两项可同时配，取较大者）。
+    /// 不足时补等高的透明占位行，上限钳到当前生效的每页候选数（[`Self::per_page`] /
+    /// [`Self::per_page_extended`]）。横排不适用；候选为空的提示态（临拼/临英/网址刚进入）不补。
+    /// 只稳住候选区，要连翻页栏、编码栏一并罩住用 [`Self::min_window_height_vertical`]。
     #[serde(default)]
     pub min_rows: usize,
     /// 候选展开（卷轴，出厂关）：候选多于一页时按翻页键，候选窗原地展开成多行网格，
@@ -7294,82 +6143,69 @@ pub struct UiCandidateConfig {
     #[serde(default = "default_true")]
     pub grid_pageupdown_screen: bool,
     /// 展开态的分类标签：`all` 全部 / `single` 单字 / `phrase` 词组 / `rare` 生僻 / `symbol` 符号。
-    /// 只决定**有哪些**，顺序固定按上面这个次序（「全部」恒在首位）。少于两个时不显示标签栏。
+    /// 只决定有哪些，顺序固定按上面这个次序（「全部」恒在首位）。少于两个时不显示标签栏。
     /// 未知名字忽略。
     #[serde(default = "default_grid_categories")]
     pub grid_categories: Vec<String>,
-    /// 上方注释条（默认关）：开启后注释模板里的**第一个字面 `\n`**（写在 `{…}` 之外）把注释
+    /// 上方注释条（默认关）：开启后注释模板里的第一个字面 `\n`（写在 `{…}` 之外）把注释
     /// 拆成上下两段，上段显示在候选上方一行，下段仍在候选右侧。关闭时不拆分，行为与本项
     /// 引入前逐字节一致。
     ///
     /// 全局一份：不进模式级 / 方案级三态，也不分横竖。
     #[serde(default)]
     pub comment_above: bool,
-    /// 自动把**词库自带的 `comment` 列**当注释源用（默认开）。
+    /// 自动把词库自带的 `comment` 列当注释源用（默认开）。
     ///
-    /// 方案声明的词库里若显式写了 `columns: [text, code, comment]`，那份注释本就是随词库
-    /// 分发的、作者想让人看到的东西，要用户再去注释词库列表里手工挂一遍纯属多余一步。关掉
-    /// 本开关则一条都不派生（已在 `[[ui.comment_dicts]]` 里留下的引用空壳一并失效，不报错）。
-    ///
-    /// 判据是**显式声明**：无 `columns:` 的词库一律不算（绝大多数码表是 `text\tcode\tweight`，
-    /// 按注释库的默认列序读会把编码整列当成注释）。见 `wind_reverse::declares_comment_column`。
-    ///
-    /// 与注释模板是同一件事的两半：模板决定显示什么，本键决定去哪儿查。
+    /// 词库显式写了 `columns: [text, code, comment]` 时，那份注释是作者想让人看到的，无需用户再手工
+    /// 挂一遍。判据是显式声明：无 `columns:` 的码表按默认列序读会把编码当注释，见
+    /// `wind_reverse::declares_comment_column`。关掉则一条都不派生，`[[ui.comment_dicts]]` 里的引用
+    /// 空壳一并失效。模板决定显示什么，本键决定去哪儿查。
     #[serde(default = "default_true")]
     pub auto_comment_dicts: bool,
-    /// **竖排**注释段的最大字数（0=不限），超出截断并加 `…`。
+    /// 竖排注释段的最大字数（0=不限），超出截断并加 `…`。
     ///
-    /// 默认 0：本项引入前注释段从无长度限制，非 0 的默认值会让存量用户的注释突然变短。
-    ///
-    /// 横竖各一份，与模板同理：横排全部候选共享一行宽度，竖排每行独占，长度预算差一个
-    /// 数量级。共用一份的话，为竖排放宽必然把横排也放宽。旧键 `comment_max_chars`
-    /// （横竖共用）已退役，值经 [`Config::migrate_comment_max_chars_value`] 抄进两份。
-    ///
-    /// 开启 [`Self::comment_above`] 后，上限按上下两段各自计算（两段互不挤占）。
+    /// 默认 0：非 0 默认会让存量用户的注释突然变短。横竖各一份：横排共享一行宽度，竖排每行独占，
+    /// 预算差一个数量级。旧键 `comment_max_chars` 经 [`Config::migrate_comment_max_chars_value`]
+    /// 抄进两份。开启 [`Self::comment_above`] 后上下两段各自计算。
     #[serde(default)]
     pub comment_max_chars_vertical: usize,
-    /// **横排**注释段的最大字数（0=不限）。见 [`Self::comment_max_chars_vertical`]；
+    /// 横排注释段的最大字数（0=不限）。见 [`Self::comment_max_chars_vertical`]；
     /// 开启 [`Self::comment_above`] 后同样按上下两段各自计算。
     #[serde(default)]
     pub comment_max_chars_horizontal: usize,
     /// 自定义序号标签，一槽一项（如 `["a","s","d"]`、`["Ⅰ","Ⅱ","Ⅲ"]`；空表=全部默认 1-9）。
     ///
-    /// **每槽是一个字符串而非一个字符**：序号标签本就有多字符形态（`(1)`、罗马数字、
-    /// 带 ZWJ 的组合 emoji），按 `char` 切会把它们拆散。这与主题侧
-    /// `views.index.labels` 同型——两者由协调器 `resolve_index_label` 三级裁决，
-    /// 类型必须一致，否则用户层永远表达不出主题层已支持的形态。
-    ///
-    /// 槽内**空串 = 该槽让位**（落到主题层，主题也没有才回退数字），故中间空槽有意义，
-    /// 不可在写回时按「遇空即停」截断。
+    /// 每槽是字符串而非字符：`(1)`、罗马数字、ZWJ emoji 都是多字符。须与主题 `views.index.labels`
+    /// 同型，由协调器 `resolve_index_label` 三级裁决。槽内空串 = 该槽让位给主题层，中间空槽有意义，
+    /// 写回时不可「遇空即停」截断。
     #[serde(default)]
     pub index_labels: Vec<String>,
-    /// 候选窗在光标上方时反转候选排列顺序。**仅竖排生效**：横排候选左右并列，
+    /// 候选窗在光标上方时反转候选排列顺序。仅竖排生效：横排候选左右并列，
     /// 反转与窗口在上在下无关，只会把读序倒过来，故对横排一律忽略。
     ///
     /// 反转生效期间 `highlight_up` / `highlight_down`（出厂的 ↑↓ 与 Shift+Tab/Tab）
-    /// 按**屏幕上看到的方向**走，与排列一致；翻页键不受影响（页与页之间无空间关系）。
+    /// 按屏幕上看到的方向走，与排列一致；翻页键不受影响（页与页之间无空间关系）。
     #[serde(default)]
     pub flip_when_above: bool,
     /// 候选窗在光标上方时交换编码栏与候选栏位置（编码区沉底贴光标）。与 flip_when_above 正交，可叠加。
     #[serde(default)]
     pub swap_preedit_when_above: bool,
-    /// 翻页栏并入**编码所在行**、右对齐显示（竖排省一行）。两种编码形态的落点不同、表现一致：
+    /// 翻页栏并入编码所在行、右对齐显示（竖排省一行）。两种编码形态的落点不同、表现一致：
     /// 独立编码栏（`candidate_top`）并进栏行右端，内联编码（`candidate_inline`）并进编码自己那一行。
     /// 横排下翻页栏本就落在行尾，此项无影响；蒙文旋转态维持底部独立行（并入会让箭头跟着转 90°）。
     #[serde(default)]
     pub pager_in_preedit: bool,
-    /// 双击候选窗空白处（编码栏 / 内边距）把候选窗当前画面截图复制到剪贴板（默认关，论坛 t109）。
+    /// 双击候选窗空白处（编码栏 / 内边距）把候选窗当前画面截图复制到剪贴板（默认关）。
     ///
-    /// 只认**空白处**：候选项在按下那一刻就选词上屏、候选窗随之消失，双击落不到第二下；
-    /// 翻页键同理会换页。空白处单击本来只起拖动，双击不会误伤选词。
+    /// 只认空白处：候选项按下即上屏、窗口消失，翻页键会换页；空白处单击只起拖动，双击不误伤。
     #[serde(default)]
     pub double_click_screenshot: bool,
     /// 候选窗定位方式："follow_caret"（默认，跟随光标）/ "fixed"（固定屏幕坐标）。
     /// fixed 下窗口不再随光标移动，也不再上翻（flip/swap_when_above 随之失去意义）。
     #[serde(default = "default_candidate_position_mode")]
     pub position_mode: String,
-    /// 候选窗相对光标的**用户偏移**（dp，X 正值向右，Y 正值恒为「远离光标」：下方定位向下推、
-    /// 上翻定位向上推），与主题 `window.position_offset` **相加**。0 = 不偏移。
+    /// 候选窗相对光标的用户偏移（dp，X 正值向右，Y 正值恒为「远离光标」：下方定位向下推、
+    /// 上翻定位向上推），与主题 `window.position_offset` 相加。0 = 不偏移。
     /// 只在跟随光标时生效；固定位置与拖动是显式意图，不叠加。
     #[serde(default)]
     pub offset_x: i32,
@@ -7382,7 +6218,7 @@ pub struct UiCandidateConfig {
     /// 主题自带的 `position_offset` 不受影响。仅作用于候选窗（macOS 用系统原生阴影，不经此项）。
     #[serde(default = "default_candidate_shadow")]
     pub shadow: String,
-    /// 固定模式下的**内容左上**屏幕坐标（不含阴影扩边），仅 position_mode="fixed" 生效。
+    /// 固定模式下的内容左上屏幕坐标（不含阴影扩边），仅 position_mode="fixed" 生效。
     /// 由用户拖动候选窗落盘，设置页刻意不暴露：手填绝对坐标既不直观又会与拖动互相覆盖
     /// （与 ui.status.custom_x/y 同一决策）。(0,0) 视作"尚未设定"，首次显示落到屏幕默认锚点。
     #[serde(default)]
@@ -7525,14 +6361,9 @@ impl UiCandidateConfig {
         PreeditDisplay::from_config(&self.preedit_display)
     }
 
-    /// 用户配置的第 `i` 个序号槽位（0 基）：仅当该槽位存在**且非空**时返回，否则 None。
-    /// 供协调器 `resolve_index_label` 裁决「用户 > 主题 > 默认」（None 时主题层接手）。
-    ///
-    /// 空串按 None 处理，与主题层同判据——这是「中间空槽让位」的落点：用户只想改第 1、
-    /// 第 4 槽时写 `["a","","","f"]`，中间两槽仍走主题。
-    ///
-    /// 此处刻意**不提供**「跳过主题直接回退数字」的便捷方法：那会让调用方绕开主题层，
-    /// 而三级裁决只有协调器持有主题槽位，是唯一有资格作答的地方。
+    /// 用户配置的第 `i` 个序号槽位（0 基）：仅当该槽位存在且非空时返回，否则 None。
+    /// 供协调器 `resolve_index_label` 裁决「用户 > 主题 > 默认」。空串按 None 处理，
+    /// 是「中间空槽让位」的落点。不提供「跳过主题直接回退数字」的方法：只有协调器持有主题槽位。
     pub fn user_index_label(&self, i: usize) -> Option<String> {
         self.index_labels.get(i).filter(|s| !s.is_empty()).cloned()
     }
@@ -7557,13 +6388,10 @@ impl UiCandidateConfig {
             .unwrap_or_else(|_| self.clone())
     }
 
-    /// 竖排最小行数的**生效值**：按每页候选数封顶（0=不补）。
+    /// 竖排最小行数的生效值：按每页候选数封顶（0=不补）。
     ///
-    /// 补出比一页还多的空行只会得到一个大半空白的窗口，故以 `per_page` 为上限。扩展档
-    /// （`per_page_extended`）若比主档更少，那一档仍可能补出略超一页的空行——为此在每次
-    /// 候选更新时重下发一遍不划算，两档差异通常只有一两条。
-    ///
-    /// 钳制放在配置层而不是 UI 层：候选窗只收到一串候选，不知道也不该知道分页概念。
+    /// 扩展档（`per_page_extended`）更少时仍可能补出略超一页的空行，为此每次候选更新重下发不划算。
+    /// 钳制放在配置层：候选窗不知道分页概念。
     pub fn effective_min_rows(&self) -> u32 {
         if self.min_rows == 0 {
             return 0;
@@ -7583,7 +6411,7 @@ impl UiCandidateConfig {
     /// 按 max_chars 截断候选显示文本（0=不限）。超出时截断并加省略号 [`TRUNCATION_MARK`]
     /// 提示"过长"（仅影响显示；上屏用完整原文，见 coordinator 候选下发）。
     ///
-    /// 「字」按**字素簇**计（口径同悬停提示的截断与折行）：按码位切会把 emoji ZWJ 序列、
+    /// 「字」按字素簇计（口径同悬停提示的截断与折行）：按码位切会把 emoji ZWJ 序列、
     /// 组合符、变体选择符拦腰切开，屏上冒出半个字形。
     pub fn truncate_display(&self, text: &str) -> String {
         truncate_graphemes(text, self.max_chars)
@@ -7629,45 +6457,29 @@ pub struct UiFontConfig {
     pub path: String,
     #[serde(default)]
     pub render_mode: String,
-    /// 主字体的**回退链**：`family` 里没有这个字时，按本表顺序找下一个。
+    /// 主字体的回退链：`family` 里没有这个字时按本表顺序找下一个。最终链 = `[family] + fallback`。
     ///
-    /// ★ 刻意保持 `family: String` 不变、把链尾单独放一个数组，而不是把 `family` 改成数组：
-    /// 改类型要配一层 Value 迁移，漏了就让老用户整份配置静默回落出厂值
-    /// （见 `docs/design/config-design-rules.md` 与该坑的历史）。分成两个键则**零迁移**，
-    /// 设置页现有的字体控件也不用动。最终链 = `[family] + fallback`。
+    /// 刻意不把 `family` 改成数组：改类型要配 Value 迁移，漏了老用户会整段回落出厂值；
+    /// 分成两个键零迁移，设置页字体控件也不用动。
     ///
-    /// ⛔ **不得加 `skip_serializing_if`**：本仓用它表达「这个键**退出**配置体系」
-    /// （见 `keys.key_actions_materialized` 与本文件里那几个废弃键）。加上之后
-    /// `Config::default()` 的序列化产物里没有它 ⇒ `registry_covers_every_config_key`
-    /// 的差集为空 ⇒ **守门测试静默放行**，而该键在 CLI、配置片段导入、设置页里全都够不着。
+    /// 不得加 `skip_serializing_if`：本仓用它表达「这个键退出配置体系」，加上后
+    /// `registry_covers_every_config_key` 会静默放行，该键在 CLI、片段导入、设置页里都够不着。
     #[serde(default)]
     pub fallback: Vec<String>,
-    /// 按**脚本**指派字体：键是脚本类名（`latin`/`greek`/`cyrillic`/`cjk`/`emoji`/
-    /// `digits`/`punct`），值是该类自己的字体链。
+    /// 按脚本指派字体：键是脚本类名（`latin`/`greek`/`cyrillic`/`cjk`/`emoji`/`digits`/`punct`），
+    /// 值是该类自己的字体链。
     ///
-    /// 与 [`Self::fallback`] 是两种机制，缺一不可：回退链只在「当前字体缺这个字」时触发，
-    /// 而绝大多数字体都带 ASCII 字形——蒙古文字体自己「有」英文时，回退链永远不触发，
-    /// 想换也换不掉。指派则是无条件的。
-    ///
-    /// ⚠️ 未列出的类**不是**「用默认字体」而是「不单独切段」——它们与其余文字同属默认链。
-    /// 两者结果相同但成本不同：不切段就不会为它们各调一次 `SetFontFamilyName`。
-    ///
-    /// 用 `BTreeMap` 而非 `HashMap`：序列化顺序要稳定，否则每次写盘键序都在变，
-    /// 配置文件的 diff 会无端变脏。
-    ///
-    /// 注册表里登记为 `Map`（见 `config_schema`）：Map 型键**本身就是叶子**，不下钻，
-    /// 于是 `latin`/`cjk` 这些是**数据**而不是配置项；顺带拿到 patch 的逐条合并语义
-    /// ——配置片段只加一类指派时不会整表替换掉用户已有的。
-    /// ⛔ 同样不得加 `skip_serializing_if`，理由见 [`Self::fallback`]。
+    /// 与 [`Self::fallback`] 缺一不可：回退链只在缺字时触发，字体自带 ASCII 时换不掉；指派是无条件的。
+    /// 未列出的类是「不单独切段」，与其余文字同属默认链，省掉多余的 `SetFontFamilyName`。
+    /// 用 `BTreeMap` 保证写盘键序稳定。注册表里登记为 `Map`：本身是叶子，`latin` 等是数据而非
+    /// 配置项，且 patch 逐条合并。同样不得加 `skip_serializing_if`，理由见 [`Self::fallback`]。
     #[serde(default)]
     pub scripts: BTreeMap<String, Vec<String>>,
-    /// 候选字体的**字重**（100–950，OpenType 口径；0 = 不指定，按常规 / 跟随主题）。
+    /// 候选字体的字重（100–950，OpenType 口径；0 = 不指定，按常规 / 跟随主题）。
     ///
-    /// 字重是独立维度而不是写进 `family`：DirectWrite 的 family 名不含字重（「思源宋体」
-    /// 下有七个字重的 face），GDI 时代的「思源宋体 SemiBold」这类名字查不到（看板 A2-1）。
-    /// 存量配置里那种旧名由渲染端解析兼容，名字里的字重在本键为 0 时生效。
-    /// 主题节点显式写的 `font_weight`（如选中加粗）仍胜过本键。
-    /// ⛔ 不得加 `skip_serializing_if`，理由见 [`Self::fallback`]。
+    /// 独立维度而非写进 `family`：DirectWrite 的 family 名不含字重，「思源宋体 SemiBold」这类
+    /// GDI 名字查不到。存量的这种旧名由渲染端兼容，本键为 0 时名字里的字重生效；主题节点显式写的
+    /// `font_weight` 仍胜过本键。不得加 `skip_serializing_if`，理由见 [`Self::fallback`]。
     #[serde(default)]
     pub weight: i32,
 }
@@ -7701,10 +6513,8 @@ impl Default for UiThemeConfig {
 /// 悬停提示配置（[ui.tooltip]）：延迟 + 有序段列表。
 ///
 /// 段列表取代了旧的六个开关（`code_enabled` / `pinyin_enabled` / `pinyin_heteronyms` /
-/// `pinyin_max_readings` / `chaizi_enabled` / `debug_enabled`）——那些开关只能选「哪几段」，
-/// 段的内容、顺序、标题、拆字与拼音的合并方式全写死在代码里。旧键由
-/// [`Config::migrate_tooltip_sections_value`] 迁成段列表。设计见
-/// `docs/design/candidate-tooltip-sections.md`。
+/// `pinyin_max_readings` / `chaizi_enabled` / `debug_enabled`），旧键由
+/// [`Config::migrate_tooltip_sections_value`] 迁移。设计见 `docs/design/candidate-tooltip-sections.md`。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TooltipConfig {
     /// 悬停提示总开关（默认开）。关掉后不再逐候选渲染气泡，段列表也不再计入按需加载的
@@ -7739,9 +6549,9 @@ pub struct TooltipSection {
     /// 段开关。保留「内置段关着」这种状态：设置页一键就能打开，不必删了再加。
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// 段名，**本身也是模板**（`编码{(${code_source})}`）。求值后为空 = 无标题行。
+    /// 段名，本身也是模板（`编码{(${code_source})}`）。求值后为空 = 无标题行。
     ///
-    /// 与段内容不同，段名里的字面文字**不随变量全空而消失**：`编码{(${code_source})}`
+    /// 与段内容不同，段名里的字面文字不随变量全空而消失：`编码{(${code_source})}`
     /// 在直接输入时就是 `编码`，不是空标题。
     #[serde(default)]
     pub label: String,
@@ -7753,7 +6563,7 @@ pub struct TooltipSection {
     /// 未知取值按 `""` 处理并告警（在协调器编译段列表处）。
     #[serde(default)]
     pub each: String,
-    /// 仅逐字段：按该变量（逐字上下文求值）是否非空把行**稳定**分成两组，非空组在前。
+    /// 仅逐字段：按该变量（逐字上下文求值）是否非空把行稳定分成两组，非空组在前。
     /// 空 = 不分组，保持原文顺序。
     #[serde(default)]
     pub promote: String,
@@ -7797,15 +6607,12 @@ const TIP_PINYIN: &str = "拼音";
 const TIP_CHAIZI: &str = "拆字";
 const TIP_DEBUG: &str = "调试";
 
-/// 出厂段列表。与 `data/config.toml` 的 `[[ui.tooltip.sections]]` 逐项相同（L1/L2 同源，
-/// 守门测试 `tooltip_sections_l1_matches_l2`）。
+/// 出厂段列表。与 `data/config.toml` 的 `[[ui.tooltip.sections]]` 逐项相同
+/// （守门测试 `tooltip_sections_l1_matches_l2`）。
 ///
-/// 「完整原文」置首：只在候选显示被截断时有值，平时整段不出现；出现时正是用户最想看的。
-/// 其后复现旧出厂外观：`[编码]`（非直接输入时带来源方案名）、`[拼音]` 逐字全读音，
-/// 拆字、调试关着。Unicode 段是新增能力，出厂关。
-///
-/// 「释义」段（论坛 t282）出厂开：全部适用注释库各出一条、每条一行（分隔符是真换行）。
-/// 没挂注释库或查不到时整段为空、不显示，故对没用注释库的用户零外观变化。
+/// 「完整原文」置首：只在候选显示被截断时有值，出现时正是用户最想看的。其后复现旧出厂外观
+/// （`[编码]`、`[拼音]`），拆字、调试、Unicode 关着。「释义」段出厂开：查不到时整段不显示，
+/// 对没用注释库的用户零外观变化。
 pub fn default_tooltip_sections() -> Vec<TooltipSection> {
     vec![
         TooltipSection::new("完整原文", "", "${full_text}"),
@@ -7818,7 +6625,7 @@ pub fn default_tooltip_sections() -> Vec<TooltipSection> {
     ]
 }
 
-/// 「释义」段加入之前（论坛 t282）的出厂段列表，**冻结**，只供
+/// 「释义」段加入之前的出厂段列表，冻结，只供
 /// [`Config::migrate_stale_factory_tooltip_sections_value`] 认出存量副本。出厂再变时不要改它。
 fn tooltip_sections_before_dict_all() -> Vec<TooltipSection> {
     vec![
@@ -7855,14 +6662,12 @@ impl Default for LegacyTooltipFlags {
     }
 }
 
-/// 旧开关组合 → 与之外观一致的段列表（设计 §8.1）。以出厂列表为底改写，因而老用户也拿到
-/// 新增的「完整原文」段（开）与 Unicode 段（关）。
+/// 旧开关组合 → 与之外观一致的段列表（设计 §8.1）。以出厂列表为底改写，老用户也拿到
+/// 「完整原文」段（开）与 Unicode 段（关）。
 ///
-/// 独立成 pub 函数而不是埋在 Value 层迁移里：协调器的对拍测试要拿同一份映射去比对
-/// 「旧实现输出 == 迁移出的段列表的新渲染输出」，映射若在测试里另写一份，对拍就只证明了
-/// 两份手写映射彼此一致。
+/// 独立成 pub 函数：协调器的对拍测试要用同一份映射，在测试里另写一份就只证明了两份手写映射一致。
 pub fn tooltip_sections_from_legacy(f: LegacyTooltipFlags) -> Vec<TooltipSection> {
-    // 读音数：旧实现 heteronyms=false 时只取首音，**先于** max_readings 判定。
+    // 读音数：旧实现 heteronyms=false 时只取首音，先于 max_readings 判定。
     let readings = if !f.heteronyms {
         "${readings:1}".to_string()
     } else if f.max_readings > 0 {
@@ -7924,11 +6729,10 @@ impl Default for TooltipConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PhraseConfig {
     /// 命令短语的前缀列举开关：敲前缀（如 `zz`、`co`）时列出以它开头的短语。关闭后只有编码
-    /// 完全相同的短语才出（GH#264：编码 `crr` 的短语不想在敲 `cr` 时冒出来）。默认开。
+    /// 完全相同的短语才出。默认开。
     ///
-    /// 与码表「精确匹配」（`single_code_input`）的关系：精确匹配只管纯码表方案，且本来就不列
-    /// 前缀；本开关对所有方案生效，拼音 / 混输靠它关前缀列举。精确匹配的「空码补全」兜底
-    /// 另有自己的开关，不受本项影响。
+    /// 码表「精确匹配」（`single_code_input`）只管纯码表方案；本开关对所有方案生效。
+    /// 精确匹配的「空码补全」兜底另有开关，不受本项影响。
     #[serde(default = "default_true")]
     pub prefix_match: bool,
     /// 触发前缀导航列举的最小输入长度（原 min_prefix_length）。默认 2。
@@ -7957,15 +6761,11 @@ pub struct StatsConfig {
     pub enabled: bool,
     #[serde(default = "default_true")]
     pub track_english: bool,
-    /// 打字速度的修正系数（只作用于**速度展示**，不影响任何字数统计）。
+    /// 打字速度的修正系数（只作用于速度展示，不影响字数统计）。
     ///
-    /// 采集期已经修掉三条结构性偏差（毫秒分母 / 段首口径对称 / 短码长词封顶，见
-    /// `wind_store::stats` 的「速度模型」），剩下这一条修不掉：**输入法无从知道用户
-    /// 打错了没有**——打错后退格重打，字符被计两遍而耗时只算一遍，方向恒为正偏差。
-    /// 故出厂取 < 1 做经验折价。
-    ///
-    /// ⚠️ 这不是「速度不好看就调大」的旋钮：把 ≥ 1 的值填进来只会让显示值重新偏离真实
-    /// 手速。暂不进设置页（无 GUI 入口），需要时改配置文件。
+    /// 采集期已修掉结构性偏差（见 `wind_store::stats` 的「速度模型」），剩下的修不掉：输入法不知道
+    /// 用户是否打错，退格重打的字计两遍、耗时只算一遍，恒为正偏差，故出厂取 < 1 做经验折价。
+    /// 填 ≥ 1 只会让显示值偏离真实手速。暂不进设置页。
     #[serde(default = "default_speed_factor")]
     pub speed_factor: f32,
 }
@@ -8016,13 +6816,10 @@ pub struct ExtensionEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DebugConfig {
-    /// 日志级别。空字符串等同 `info`（生产默认）。
-    /// 注意：`info` 级别日志不得包含用户输入内容、词库词条等隐私数据。
+    /// 日志级别。空字符串等同 `info`（生产默认）；`info` 不得包含用户输入、词条等隐私数据。
     ///
-    /// `off` = **整个日志功能关闭**：主日志文件不创建（不是"创建了但为空"），
-    /// `startup_stage.log` 也不写。用户选它是为了"这台机器上别留输入法的痕迹"，
-    /// 空文件同样是痕迹。判据的唯一实现在 `startup_trace::effective_log_level`——
-    /// 它同时被主日志的 EnvFilter 与启动轨迹的门控读取，不要在别处重算优先级链。
+    /// `off` = 整个日志功能关闭：主日志文件不创建，`startup_stage.log` 也不写，空文件同样是痕迹。
+    /// 判据唯一实现在 `startup_trace::effective_log_level`，不要在别处重算优先级链。
     #[serde(default)]
     pub log_level: String,
     /// 单个日志文件的大小上限（MB），超出后滚动。默认 10。
@@ -8055,43 +6852,27 @@ fn default_log_max_files() -> usize {
 
 // ──────────────── system（与操作系统集成的方式，非输入行为）────────────────
 
-/// 系统集成配置（`[system]`）。
-///
-/// 这个域装的是「我们**怎样向 Windows 登记自己**」，而不是输入行为——改这里的键会
-/// 改变系统层面的注册结果（注册名、关联等），因此每一项都需要管理员权限才能落地，
-/// 且对已启动的宿主进程不生效（宿主是在启动时读的）。
+/// 系统集成配置（`[system]`）：怎样向 Windows 登记自己，而不是输入行为。
+/// 改这里的键会改变系统注册结果，需要管理员权限，且对已启动的宿主进程不生效。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemConfig {
     /// Dota 2 兼容：把本输入法在系统里登记的名称改为 [`dota2_compat_name`] 指定的那个。
     ///
     /// [`dota2_compat_name`]: SystemConfig::dota2_compat_name
     ///
-    /// ★ 这不是玄学，是 Dota 2 那侧写死的判据。起源2引擎的 `imemanager.dll` 里有一张
-    /// **硬编码的输入法白名单**，按注册表中该输入法的 TSF Profile Description 做**全等**
-    /// 比对（`V_stricmp_fast`/`V_wcsicmp`）：命中的走「取候选 → 游戏自己画」，未命中的
-    /// 在 `WM_IME_NOTIFY` 第一道闸门就被打发到 `DefWindowProc`，于是候选永远取不到、
-    /// 还会多出一个系统默认 IME 小窗。判据与完整证据见
-    /// `docs/design/game-compat-tsf-uielement.md` §1.1。
-    ///
-    /// 代价是**语言栏和 Windows 设置里显示的名字会跟着变**。
-    ///
-    /// 出厂关闭：这是拿「系统里的显示名」换「一个游戏里的候选」，取舍不对称，
-    /// 只能由知情的用户自己决定。
+    /// Dota 2 的 `imemanager.dll` 按 TSF Profile Description 全等比对一张硬编码白名单，未命中的
+    /// 输入法取不到候选，还会多出系统默认 IME 小窗。见 `docs/design/game-compat-tsf-uielement.md` §1.1。
+    /// 代价是语言栏和 Windows 设置里显示的名字跟着变，所以出厂关闭，由知情的用户自己决定。
     #[serde(default)]
     pub dota2_compat: bool,
 
-    /// 开启 [`dota2_compat`] 后要登记的名称。
+    /// 开启 [`dota2_compat`] 后要登记的名称，出厂值见 [`DEFAULT_DOTA2_ALIAS`]。
     ///
-    /// **为什么开放成自由文本而不是内置一张表**：白名单上那 145 条都是别家输入法的
-    /// 名字，逐条实测下来行为还各不相同（`product_id` 决定走哪个兼容分支，有的分支
-    /// 会吞掉上屏后的第一个退格，见 `docs/design/game-compat-tsf-uielement.md` §1.3）。
-    /// 内置第二、第三个名字等于替用户选一种我们无法穷举验证的取舍；把字符串交出去，
-    /// 用户按自己玩的那个游戏、自己能忍的那个副作用去配。
+    /// 开放成自由文本而非内置表：白名单条目各自的 `product_id` 行为不同（有的会吞上屏后的第一个
+    /// 退格，见 `docs/design/game-compat-tsf-uielement.md` §1.3），无法逐条替用户验证取舍。
     ///
-    /// 出厂值见 [`DEFAULT_DOTA2_ALIAS`]，选它的三条理由也写在那儿。
-    ///
-    /// ⚠️ 留空 = 回落到出厂值，**不是**「关闭」——关闭走 [`dota2_compat`]。写注册表
-    /// 那侧还会做一遍清洗与长度校验，见 `wind_coordinator::tsf_profile_name`。
+    /// 留空 = 回落到出厂值，不是关闭；关闭走 [`dota2_compat`]。写注册表那侧还会做清洗与长度校验，
+    /// 见 `wind_coordinator::tsf_profile_name`。
     ///
     /// [`dota2_compat`]: SystemConfig::dota2_compat
     #[serde(default = "default_dota2_alias")]
@@ -8103,24 +6884,14 @@ fn default_dict_cache_policy() -> String {
     "lock".to_string()
 }
 
-/// `system.dota2_compat_name` 的出厂值，也是 Dota 2 白名单里我们选定的那条。
+/// `system.dota2_compat_name` 的出厂值，也是 Dota 2 白名单里我们选定的那条（第 90 条，
+/// `product_id=0x410000`）。
 ///
-/// ⛔ **必须与游戏内表逐字一致**。比对是全等的，差一个字符就不命中，而且没有任何
-/// 报错——表现为「开了开关也还是没候选」。下面 `dota2_alias_tests` 里有一条把游戏
-/// 二进制中提取的字节钉死的测试守着。
+/// 必须与游戏内表逐字一致：比对是全等的，差一个字符就静默不命中，由 `dota2_alias_tests`
+/// 钉住提取自游戏二进制的字节。选它是因为不含空格、括号、连字符（最常见的静默失效来源），
+/// 且是通用类别名而非产品品牌名；选取依据见 `docs/design/game-compat-tsf-uielement.md` §1.3。
 ///
-/// **为什么取这条**（白名单第 90 条，`canonical="Unknown"`，`product_id=0x410000`）：
-/// - 它**不含空格、括号、连字符**。表里多数条目长得像 `中文 (简体) - 郑码`，那种
-///   格式最常见的翻车方式就是括号写成全角、或空格多一个少一个，而且无从察觉；
-///   出厂值挑一条没有这些字符的，等于把最大的一类静默失效从默认路径上去掉。
-/// - 它是**通用类别名**，不是任何在世产品的品牌名，也不是某个具体码表方案名
-///   （曾用 `中文 (简体) - 郑码`，但本输入法并不提供郑码方案，那个名字对用户是误导）。
-/// - 行为上不吃亏：`0x410000`（兜底类）与原先的 `0x30000`（郑码）在「上屏后首个
-///   退格被吞」这件事上表现相同。全表只有一条分支不吞，但它对应的几个名字全是
-///   同一家在世产品的品牌名，不能拿来做出厂值（用户想自己填是另一回事）。
-///
-/// 定义在本 crate 而非 coordinator：serde 的 `default` 与常量必须是同一份，
-/// 分开写就多一个漂移源。
+/// 定义在本 crate：serde 的 `default` 与常量必须是同一份。
 pub const DEFAULT_DOTA2_ALIAS: &str = "拼音输入法";
 
 fn default_dota2_alias() -> String {
@@ -8129,28 +6900,19 @@ fn default_dota2_alias() -> String {
 
 /// `system.dota2_compat_name` 的长度上限（UTF-16 码元数，不含结尾 NUL）。
 ///
-/// **硬上限来自 C++ 侧**：`wind_tsf/src/Register.cpp` 读注册表用的是 `wchar_t[256]`
-/// 固定缓冲，值超过 255 个码元时 `RegQueryValueExW` 回 `ERROR_MORE_DATA`，那边按
-/// 「读不到」处理 ⇒ 重装/升级时别名保不住、静默写回真名。
-///
-/// 取 127 而不是 255 是留一半余量：白名单里最长的条目也才二十来个字符，127 已经
-/// 远超任何真实取值，而贴着硬上限走等于把一类只在重装时才暴露的故障留在门口。
-/// 放宽它必须先放宽 `Register.cpp` 那两个缓冲。
+/// 硬上限来自 `wind_tsf/src/Register.cpp` 的 `wchar_t[256]` 读缓冲：超过 255 码元时读不到，
+/// 重装/升级会静默写回真名。取 127 留一半余量；放宽它必须先放宽 `Register.cpp` 的两个缓冲。
 pub const DOTA2_ALIAS_MAX_LEN: usize = 127;
 
-/// 清洗并校验 `system.dota2_compat_name`。
+/// 清洗并校验 `system.dota2_compat_name`。放在本 crate：纯逻辑，且须与 [`DEFAULT_DOTA2_ALIAS`]
+/// 同源；`wind_coordinator::tsf_profile_name` 重导出本函数。
 ///
-/// 放在本 crate 而不是写注册表那侧：纯逻辑、与平台无关，且必须与 [`DEFAULT_DOTA2_ALIAS`]
-/// 同源。写注册表的 `wind_coordinator::tsf_profile_name` 重导出本函数。
+/// 只做三件事，各对应一种静默失效：
+/// - trim 首尾空白（游戏侧全等比对）；内部半角空格不动，白名单条目本就带。
+/// - 拒绝看不见的字符：见 [`is_invisible_troublemaker`]。
+/// - 长度上限：见 [`DOTA2_ALIAS_MAX_LEN`]。
 ///
-/// 只做三件事，每件都对应一种**静默失效**：
-/// - **trim**：从设置页文本框里粘进来的名字常带首尾空白，而游戏那侧是全等比对。
-///   内部的**半角空格**一个都不动——白名单里的名字本来就带半角空格。
-/// - **拒绝看不见的字符**：见 [`is_invisible_troublemaker`]。
-/// - **长度上限**：见 [`DOTA2_ALIAS_MAX_LEN`]。
-///
-/// 空串（或只有空白）**不是错误**，回落到 [`DEFAULT_DOTA2_ALIAS`]——与该字段的文档
-/// 一致：留空意为「用出厂值」，关闭要走 `system.dota2_compat` 开关。
+/// 空串（或只有空白）不是错误，回落到 [`DEFAULT_DOTA2_ALIAS`]。
 pub fn sanitize_dota2_alias(raw: &str) -> Result<String, String> {
     let t = raw.trim();
     if t.is_empty() {
@@ -8175,21 +6937,19 @@ pub fn sanitize_dota2_alias(raw: &str) -> Result<String, String> {
     Ok(t.to_string())
 }
 
-/// 这个字符会不会让「全等比对」静默落空。
-///
-/// 白名单里的条目只含普通可见字符与**半角空格**。用户多半是从网页或文档里复制条目，
-/// 而那些来源常夹带在界面上完全看不出来的字符：
+/// 这个字符会不会让「全等比对」静默落空。白名单条目只含普通可见字符与半角空格，
+/// 而从网页或文档复制常夹带看不出来的字符：
 ///
 /// | 字符 | 来源 | 不拦会怎样 |
 /// |---|---|---|
-/// | U+00A0 不断行空格 | 网页排版 | 看着就是个空格，比对不命中 |
-/// | U+3000 全角空格 | 中文输入法 | 同上，且比半角宽一点、肉眼难辨 |
-/// | U+200B 零宽空格 / U+FEFF | 复制粘贴、BOM | **完全不可见**，`trim()` 也不剪 |
+/// | U+00A0 不断行空格 | 网页排版 | 看着是空格，比对不命中 |
+/// | U+3000 全角空格 | 中文输入法 | 同上，肉眼难辨 |
+/// | U+200B 零宽空格 / U+FEFF | 复制粘贴、BOM | 完全不可见，`trim()` 也不剪 |
 /// | U+202A..U+202E 双向覆盖 | 混排文本 | 不可见，还会搅乱显示顺序 |
-/// | Cc 控制字符 | 粘贴多行 | 写进 `REG_SZ` 后语言栏显示成乱码 |
+/// | Cc 控制字符 | 粘贴多行 | 写进 `REG_SZ` 后语言栏显示乱码 |
 ///
-/// ⛔ 别把这些「顺手修好」（NBSP→半角空格之类）。猜错了就是替用户写下一个他没打算要的
-/// 名字，而且照样不命中；报错让他重敲一遍，代价小且结果确定。
+/// 别把这些「顺手修好」（NBSP→半角空格之类）：猜错就是替用户写了个照样不命中的名字，
+/// 报错让他重敲代价更小。
 fn is_invisible_troublemaker(c: char) -> bool {
     // 半角空格是唯一允许的空白：白名单里的条目就是用它分隔的。
     c.is_control()
@@ -8202,10 +6962,8 @@ fn is_invisible_troublemaker(c: char) -> bool {
             | '\u{FEFF}') // BOM / 零宽不断行空格
 }
 
-/// 「全局默认字符串」与「枚举 `#[default]`」是两处独立事实，各自都能单独改动。
-///
-/// 不一致的症状极其隐蔽：per-app 没配的应用走全局串、代码里直接 `NewlineStyle::default()`
-/// 的路径走枚举默认，两条路给出不同的行为，而两处单看都「没写错」。
+/// 「全局默认字符串」与「枚举 `#[default]`」是两处独立事实，必须一致：
+/// per-app 没配时走全局串，直接 `NewlineStyle::default()` 的路径走枚举默认，不一致就两条路行为不同。
 #[cfg(test)]
 mod global_default_guards {
     use super::*;
@@ -8221,10 +6979,6 @@ mod global_default_guards {
     }
 
     /// 同一条不变式，`first_show_mode` 那一对。
-    ///
-    /// ⚠ `default_first_show_mode` 的文档从一开始就写着「由
-    /// `global_first_show_mode_matches_enum_default` 钉住」，但那个测试**从未存在**——
-    /// 注释承诺的守门测试不写出来，就只是一句没有约束力的话。
     #[test]
     fn global_first_show_mode_matches_enum_default() {
         assert_eq!(
@@ -8239,20 +6993,16 @@ mod global_default_guards {
 mod bound_action_chinese_only_tests {
     use super::*;
 
-    /// [`BoundAction::only_in_chinese_mode`] 必须对 **每一个** A 类动词都表过态。
+    /// [`BoundAction::only_in_chinese_mode`] 必须对每一个 A 类动词都表过态。
     ///
-    /// 那个方法的 `Action(_)` 臂载荷是 `String`，编译期穷举不了，新增的动词会静默落进
-    /// 「两模式都吃」那一档——而那一档对只在中文态有意义的动作是错的（英文态凭空触发）。
-    /// 本测试就是那道编译期给不了的闸：预期表按 `DISPATCH_ACTIONS` 逐项列全，
-    /// 新增动词时这里会红，逼人当场表态。
-    ///
-    /// 结果同时决定两处（组合键要不要带 `HOTKEY_POLICY_CHINESE_ONLY`、分派端判不判
-    /// `chinese_mode`），见该方法的文档。
+    /// 那个方法的 `Action(_)` 载荷是 `String`，编译期穷举不了，新动词会静默落进「两模式都吃」。
+    /// 预期表按 `DISPATCH_ACTIONS` 逐项列全，新增动词时这里会红。结果同时决定组合键是否带
+    /// `HOTKEY_POLICY_CHINESE_ONLY` 与分派端是否判 `chinese_mode`。
     #[test]
     fn chinese_only_covers_every_dispatch_action() {
         // (动词, 是否只在中文态有意义)
         let expected: &[(&str, bool)] = &[
-            // 中英/方案切换：**恰恰**要在非中文态按得动，否则切过去回不来。
+            // 中英/方案切换：恰恰要在非中文态按得动，否则切过去回不来。
             ("toggle_mode", false),
             ("switch_engine", false),
             // 两模式下都该生效。
@@ -8290,8 +7040,8 @@ mod bound_action_chinese_only_tests {
 
     /// 进 overlay 的一族与字词范围恒为真；软键盘与切方案恒为假。
     ///
-    /// 软键盘那条不是顺手写的：它带 `CHINESE_ONLY` 的话英文态连开都开不出来，而面板画的
-    /// 是「键位 → 符号」，与中英态无关（C++ 侧为此专设了 `IsSoftKeyboard()` 总闸）。
+    /// 软键盘带 `CHINESE_ONLY` 的话英文态打不开，而面板画的「键位 → 符号」与中英态无关
+    /// （C++ 侧为此专设了 `IsSoftKeyboard()` 总闸）。
     #[test]
     fn chinese_only_matches_action_family() {
         for verb in [
@@ -8384,8 +7134,7 @@ mod comment_state_verb_tests {
 mod dota2_alias_tests;
 
 // 出厂值不全等于各字段类型的 Default（`dota2_compat_name` 非空），故手写。
-// ⚠️ 加新键时别图省事改回 derive：那会让本键静默变成空串，表现为「开了开关，
-// 系统里的名字被改成了空」——语言栏上就是一片空白，且没有任何报错。
+// 加新键时别改回 derive：那会让本键静默变成空串，开了开关后系统里的名字被改成空，且没有任何报错。
 impl Default for SystemConfig {
     fn default() -> Self {
         Self {
@@ -8398,7 +7147,7 @@ impl Default for SystemConfig {
 // ───────────────────────── 共享 default 助手 ─────────────────────────
 
 /// 整句 N-best 两个数量的出厂值：1 = 单条整句（N-best 之前的行为）。
-/// ⚠️ 与引擎 `pinyin::Config::default()` 同值。
+/// 须与引擎 `pinyin::Config::default()` 同值。
 fn default_sentence_count() -> u8 {
     1
 }
@@ -8458,21 +7207,18 @@ fn default_filter_mode() -> String {
 
 /// 含生僻字的词的出厂处置：整词放行。
 ///
-/// ⚠ 与 `wind_candidate::RarePhrasePolicy` 的 `#[default]`（以及它 `from_config` 的未知值
-/// 回落）是三处独立事实，必须一致——由 `config_default_matches_policy_default` 钉住
-/// （在 `wind-coordinator/tests/rare_phrase_contract.rs`：判据与配置两个 crate 互不依赖，
-/// 只有协调器同时看得见两边）。
+/// 与 `wind_candidate::RarePhrasePolicy` 的 `#[default]` 及 `from_config` 未知值回落必须一致，
+/// 由 `wind-coordinator/tests/rare_phrase_contract.rs` 的 `config_default_matches_policy_default`
+/// 钉住（只有协调器同时依赖两个 crate）。
 fn default_rare_phrase() -> String {
     "keep".to_string()
 }
 
-/// 上屏换行形式的**全局默认档**。
+/// 上屏换行形式的全局默认档。`keep` = 原样透传：不知道宿主要什么时不动用户数据；
+/// 富文本宿主（Word / WPS / RichEdit）由 compat.toml 的 `[[commit_newline]]` 出厂名单配 `cr`。
 ///
-/// `keep` = 原样透传：不知道宿主的文本模型要什么时，不动用户的数据。富文本宿主
-/// （Word / WPS / RichEdit）由 compat.toml 的 `[[commit_newline]]` 出厂名单配 `cr`。
-///
-/// ⚠ 与 `app_compat::NewlineStyle` 的 `#[default]` 是两处独立事实，必须一致——
-/// 由 `commit_newline_global_default_matches_enum_default` 钉住。
+/// 与 `app_compat::NewlineStyle` 的 `#[default]` 必须一致，由
+/// `commit_newline_global_default_matches_enum_default` 钉住。
 fn default_commit_newline() -> String {
     "keep".to_string()
 }
@@ -8493,24 +7239,20 @@ fn default_space_behavior() -> String {
     "commit".to_string()
 }
 
-/// 空码时按标点**出厂即丢弃废码**（与同族的 `enter_behavior` / `space_on_empty_behavior`
-/// 刻意不同，那两项仍是 `commit`——这不是漏改）。
+/// 空码时按标点出厂即丢弃废码（与 `enter_behavior` / `space_on_empty_behavior` 的 `commit`
+/// 刻意不同）。
 ///
-/// 判据是代价不对称：判错成 `commit` 会把一串没对应任何字的码插进正文，用户往往发出去才
-/// 发现、要退格删好几次；判错成 `clear` 只是少上屏了原码，而回车那条路仍旧给原码，一次
-/// 按键就能拿到。留着回车不改，是为了不把「获取原码」这个能力面整个封掉。
+/// 代价不对称：错判成 `commit` 会把废码插进正文、要退格好几次；错判成 `clear` 只是少上屏原码，
+/// 回车仍能一键拿到原码，「获取原码」的能力没有被封掉。
 fn default_punct_on_empty_behavior() -> String {
     "clear".to_string()
 }
 
-/// 出厂只放减号：它是唯一「既是英文标识符高频字符、又被出厂配成翻页键」的符号。
+/// 出厂只放减号：它是唯一既是英文标识符高频字符、又被出厂配成翻页键的符号。
 ///
-/// 同类候选（`_` `.` `/` `@`）刻意不放：它们出厂都**没有**会话身份（`page_keys` /
-/// `select_key_groups` / `select_char_keys` / `key_actions` 出厂展开后都够不着它们），
-/// 组码中按下走的是「顶码上屏 + 出符号」这条长期行为，没有「按了没反应」那格空白要填。
-/// 把它们一并改成入缓冲是在动一条每天都在用的既有行为，代价与收益不对称。
-///
-/// 要它们的用户自己往这串里加——那时让位判据照样护着自配的键组与分隔符。
+/// `_` `.` `/` `@` 出厂都没有会话身份，组码中按下走「顶码上屏 + 出符号」的既有行为，
+/// 没有「按了没反应」的空白要填，改动它们得不偿失。需要的用户自己加，让位判据照样护着
+/// 自配的键组与分隔符。
 fn default_buffer_symbol_chars() -> String {
     "-".to_string()
 }
@@ -8529,9 +7271,8 @@ fn default_shift_when_composing() -> String {
 
 /// 用户配置目录的就绪探测结果。
 ///
-/// 存在的意义是把「系统尚未就绪」与「用户确实没有配置」分开——两者此前都表现为
-/// [`Config::load`] 静默跳过用户层，然后 [`Config::active_schema`] 回退到系统预置方案，
-/// 用户看到的就是「设置好的方案重启后变回出厂方案」。
+/// 把「系统尚未就绪」与「用户确实没有配置」分开：两者若都静默跳过用户层，
+/// [`Config::active_schema`] 会回退到预置方案，表现为设置好的方案重启后变回出厂。
 #[derive(Debug)]
 pub enum UserConfigProbe {
     /// 便携模式：路径来自 exe 同目录，不依赖 known folder，恒就绪。
@@ -8543,11 +7284,10 @@ pub enum UserConfigProbe {
     RoamingUnavailable,
     /// 漫游根解析出来了但尚不存在（用户配置文件未挂载完成）。
     RoamingMissing(PathBuf),
-    /// 漫游根已就绪、但本用户的 `config.toml` 此刻还看不到，**而本地标记表明它本该存在**
-    /// （该用户此前确有用户配置）。这是开机早期漫游 profile 尚未挂载完的竞态，不是
-    /// 「用户没配置」——**必须继续等**，别把「没看到」当成「没有」而退回系统五笔。
+    /// 漫游根已就绪、但本用户的 `config.toml` 此刻还看不到，而本地标记表明它本该存在。
+    /// 这是开机早期漫游 profile 尚未挂载完的竞态，必须继续等，别把「没看到」当成「没有」而退回系统预置方案。
     ConfigPending { dir: PathBuf },
-    /// 漫游根已就绪。此时 `dir_exists`/`file_exists` 是**确定性事实**，
+    /// 漫游根已就绪。此时 `dir_exists`/`file_exists` 是确定性事实，
     /// 再等下去也不会变，故不属于需要重试的状态。
     Ready {
         dir: PathBuf,
@@ -8557,7 +7297,7 @@ pub enum UserConfigProbe {
 }
 
 impl UserConfigProbe {
-    /// 是否已到达「再等也不会变」的状态。`ConfigPending` **刻意排除**：它正是
+    /// 是否已到达「再等也不会变」的状态。`ConfigPending` 刻意排除：它正是
     /// 「本该有、暂时没看到」的可变态，要继续轮询等漫游挂载。
     pub fn is_settled(&self) -> bool {
         matches!(
@@ -8567,7 +7307,7 @@ impl UserConfigProbe {
     }
 }
 
-/// 定制版数据层的目录名，与 `data/` **同级**。
+/// 定制版数据层的目录名，与 `data/` 同级。
 pub const CUSTOM_DATA_DIR_NAME: &str = "data_custom";
 
 /// 定制版清单文件名。它在场与否就是「本机是不是定制版」的唯一判据。
@@ -8575,24 +7315,18 @@ pub const CUSTOM_MANIFEST_NAME: &str = "custom.toml";
 
 /// `data_custom/custom.toml` 的内容。
 ///
-/// 清单只负责**减法**（`hide`）与**身份**：加法与整表替换不需要声明，直接把文件放进
-/// `data_custom/` 对应位置即可。
+/// 清单只负责减法（`hide`）与身份；加法与整表替换直接把文件放进 `data_custom/` 对应位置。
 ///
-/// ⚠️ 刻意**不加** `deny_unknown_fields`：清单是第三方定制者手写、随定制包分发的数据，
-/// 未来版本新增段（如 `[dicts] hide`）时，旧程序必须能忽略而不是整层退场。代价是
-/// `[schema]`（少写一个 s）这类拼写错误会被静默忽略——那一类由 P3 的
-/// `wind_input config check --custom` 负责报出来，而不是靠这里把整个定制版判废。
+/// 刻意不加 `deny_unknown_fields`：清单是第三方手写、随定制包分发的数据，未来新增段时旧程序
+/// 必须能忽略而不是整层退场。代价是 `[schema]`（少写 s）之类拼写错误被静默忽略，
+/// 由 `wind_input config check --custom` 负责报出。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CustomManifest {
     /// 定制版身份，见 [`CustomIdentity`]。
     #[serde(default)]
     pub custom: CustomIdentity,
-    /// 方案减法清单。
-    ///
-    /// ⚠️ 与 `[schema].hidden` 是**两个正交的轴，不得合并**：`hidden` = 「不列进方案切换
-    /// 列表」（english / 快符仍可用、仍被 mix 引用）；本字段 = 「这个方案在本定制版里
-    /// 不存在」。拿 `hidden` 实现减法会让被隐藏的方案继续被 mix / special_modes /
-    /// `schema.active` 引用到。
+    /// 方案减法清单。与 `[schema].hidden` 是正交的两个轴，不得合并：`hidden` 只是不列进
+    /// 切换列表（仍可被 mix 引用）；本字段 = 这个方案在本定制版里不存在。
     #[serde(default)]
     pub schemas: CustomHideList,
     /// 主题减法清单。
@@ -8601,9 +7335,8 @@ pub struct CustomManifest {
     /// 设置界面减法清单：条目是选择器（`key:<配置键>`，可带尾部 `*`；`feature:<id>`），
     /// 由设置程序消费，core 只解析与校验。
     ///
-    /// ⚠️ 与上面两段**语义不同**：那两段是「不存在」，这一段只是「界面上不显示」——
-    /// 被隐藏的设置照常生效，值仍来自定制层 / 用户层。要关掉一个功能，定制者应在
-    /// `data_custom/config.toml` 里把值设好，再在这里把它藏起来；两件事不得合成一个开关。
+    /// 语义与上面两段不同：这里只是界面上不显示，被隐藏的设置照常生效。要关掉一个功能，
+    /// 定制者应在 `data_custom/config.toml` 里设好值再在这里隐藏，两件事不得合成一个开关。
     #[serde(default)]
     pub settings: CustomHideList,
 }
@@ -8620,10 +7353,8 @@ pub struct CustomIdentity {
     /// 定制包自身的版本。
     #[serde(default)]
     pub version: String,
-    /// 基于哪个主程序版本定制。
-    ///
-    /// 本期**只解析和保存，不做强制版本检查**——兼容性判定归 P3，届时由校验 CLI 与
-    /// 启动告警消费。现在就卡版本会让定制者每次主程序小版本更新都被迫改清单。
+    /// 基于哪个主程序版本定制。目前只解析和保存，不做强制版本检查（兼容性判定留给校验 CLI
+    /// 与启动告警），否则定制者每次主程序小版本更新都得改清单。
     #[serde(default)]
     pub base_version: String,
 }
@@ -8638,9 +7369,8 @@ pub struct CustomHideList {
 
 /// 一个资源层：层名 + 该层的根目录。见 [`Config::resource_layers_named`]。
 ///
-/// 层名是 `user` / `custom` / `data` 三个**固定字面量**（`&'static str` 而非 String：
-/// 值域封闭，写错就编译不过的那种封闭）。它同时是日志措辞（`覆盖生效[custom][schema]`）
-/// 与呈现层判据（主题列表的 builtin = 非 user 层）的来源，两处必须指同一件事。
+/// 层名是 `user` / `custom` / `data` 三个固定字面量。它同时是日志措辞
+/// （`覆盖生效[custom][schema]`）与呈现层判据（主题 builtin = 非 user 层）的来源，两处须指同一件事。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceLayer {
     /// 层名：`user` / `custom` / `data`。
@@ -8655,10 +7385,8 @@ impl ResourceLayer {
         Self { name, path }
     }
 
-    /// 层内子目录（`schemas` / `themes` / `opencc`），**层名不变**。
-    ///
-    /// 枚举点要的几乎都是「各层的某个子目录」，写成 `layers.map(|l| l.sub("themes"))`
-    /// 才不会在 map 里把层名丢掉——层名一丢，日志与 builtin 判定就只能靠猜路径前缀。
+    /// 层内子目录（`schemas` / `themes` / `opencc`），层名不变。
+    /// 写成 `layers.map(|l| l.sub("themes"))`，层名就不会在 map 里丢掉。
     pub fn sub(&self, sub: &str) -> Self {
         Self {
             name: self.name,
@@ -8674,23 +7402,13 @@ impl ResourceLayer {
 
 /// 四层配置的一次性快照：各层原始内容 + 一次真实加载的结果。
 ///
-/// # 为什么要有它
+/// 把「采样」与「取键」分开，同一次采样查多个键时答案来自同一个世界。快照是采样那一刻的
+/// 盘上状态，用完即弃。
 ///
-/// 追溯一个键要读 4 个层文件 + 跑一次完整 [`Config::load`]。把「采样」与「取键」分开，
-/// 一是让 [`Config::key_origin`] 的实现只剩一行，二是留出**同一次采样查多个键**的形态
-/// ——那时几个键的答案来自同一个世界，而逐键各采各的样时，用户正好在这中间改了配置
-/// 文件，前后两个键就会给出对不上的答案。
-///
-/// ⚠️ **不要拿它遍历整张注册表**（几百个键）来给设置页做「每项的来源」：那是把一次
-/// 排查用的重查询放进了常态路径。设置页要表达的「此项可被方案覆盖」是**静态**事实，
-/// 走 capability 快照，与本快照无关。
-///
-/// # 一致性边界
-///
-/// 快照是**采样那一刻**的盘上状态，不随后续文件改动更新。它服务于「现在解释一下」，
-/// 不是一个可以长期持有的视图——用完即弃。
+/// 不要拿它遍历整张注册表给设置页做「每项的来源」：这是排查用的重查询；「此项可被方案覆盖」
+/// 是静态事实，走 capability 快照。
 pub struct OriginSnapshot {
-    /// 各层：层名、配置文件路径、该层**整份**未合并的 TOML。从低到高。
+    /// 各层：层名、配置文件路径、该层整份未合并的 TOML。从低到高。
     layers: Vec<(&'static str, Option<PathBuf>, Option<toml::Value>)>,
     /// 一次真实 `load()` 结果的序列化形态（含 `normalize` 之后）。
     effective: toml::Value,
@@ -8746,11 +7464,8 @@ impl OriginSnapshot {
         let effective = value_at_path(&self.effective, key);
 
         // 归属判定：从高到低找第一个声明了的层，其值与生效值相同才算「就是它」。
-        //
-        // ★ 值相等这一步不能省。表类型跨层深合并时，最高声明层的值只是并集的一部分
-        // （user 写 `{a=1}`、data 写 `{b=2}`，生效值是 `{a=1,b=2}`），此时归属到 user
-        // 是错的——用户照着去改 user 层，改不动来自 data 的那一半。`normalize()` 改写过
-        // 的值同理。宁可报「指不到单独一层」，也不要报一个会把人带偏的层名。
+        // 值相等这步不能省：表类型深合并时最高声明层只是并集的一部分，`normalize()` 也会改写值；
+        // 宁可报「指不到单独一层」，也不报一个会把人带偏的层名。
         let effective_layer = layers
             .iter()
             .rev()
@@ -8778,61 +7493,44 @@ fn value_at_path(v: &toml::Value, key: &str) -> Option<toml::Value> {
     Some(cur.clone())
 }
 
-/// 一个配置键在**某一层**的声明情况。见 [`Config::key_origin`]。
+/// 一个配置键在某一层的声明情况。见 [`Config::key_origin`]。
 #[derive(Debug, Clone, PartialEq)]
 pub struct LayerOrigin {
-    /// 层名：`default` / `data` / `custom` / `user`。
-    ///
-    /// 后三个与 [`ResourceLayer::name`] 同名同义（日志 `覆盖生效[custom][…]` 里也是它们）；
-    /// `default` 是配置层独有的第四个——资源层没有「代码里的默认文件」这回事。
+    /// 层名：`default` / `data` / `custom` / `user`。后三个与 [`ResourceLayer::name`] 同名同义；
+    /// `default` 是配置层独有的（代码里的默认值）。
     pub layer: &'static str,
-    /// 该层配置文件的路径。`default` 层是代码里的默认值，没有文件，恒为 `None`。
-    ///
-    /// 层不存在（非定制版的 `custom`、漫游目录取不到的 `user`）时同样是 `None`，
-    /// 与 `value: None` 一起表示「这一层根本不在」。
+    /// 该层配置文件的路径。`default` 层恒为 `None`；层不存在（非定制版的 `custom`、
+    /// 漫游目录取不到的 `user`）时也是 `None`，与 `value: None` 一起表示「这一层不在」。
     pub path: Option<PathBuf>,
-    /// 该层**显式声明**的值；`None` = 这一层没写这个键（或该层不存在）。
+    /// 该层显式声明的值；`None` = 这一层没写这个键（或该层不存在）。
     ///
-    /// ⚠️ 不是「该层生效后的值」——层与层之间是深合并，单层的声明可能只是最终值的一部分。
+    /// 不是「该层生效后的值」：层与层之间是深合并，单层的声明可能只是最终值的一部分。
     pub value: Option<toml::Value>,
 }
 
 /// 一个配置键的来源追溯：每层各声明了什么、最终生效的是哪个。见 [`Config::key_origin`]。
 #[derive(Debug, Clone, PartialEq)]
 pub struct KeyOrigin {
-    /// 各层声明，**从低到高排列**（`default` → `data` → `custom` → `user`）。
-    ///
-    /// 顺序与 [`Config::resource_layers_named`] 相反是有意的：那个 API 服务于「逐层找文件，
-    /// 先找到的赢」，倒序最省事；而这里是给人看的，覆盖关系从下往上叠更符合直觉。
-    /// 恒含四个元素（层不存在时也占位），呈现端因此不必判断「这一层怎么没了」。
+    /// 各层声明，从低到高排列（`default` → `data` → `custom` → `user`），恒含四个元素
+    /// （层不存在也占位）。与 [`Config::resource_layers_named`] 顺序相反是有意的：这里给人看，
+    /// 覆盖关系从下往上叠更直观。
     pub layers: Vec<LayerOrigin>,
     /// 实际生效值，取自一次真实的 [`Config::load`]（含 `normalize` 归一化之后）。
-    ///
-    /// ★ **不是从 `layers` 推算的**：推算会漏掉 `normalize()` 的改写与段级降级的回落，
-    /// 而这两者恰好是「我明明设了值，为什么不是这个」最常见的两个答案。
+    /// 不从 `layers` 推算：那会漏掉 `normalize()` 的改写与段级降级的回落。
     pub effective: Option<toml::Value>,
-    /// 生效值来自哪一层。`None` 表示**指不到单独一层**，三种成因：
+    /// 生效值来自哪一层。`None` 表示指不到单独一层，三种成因：
     /// 表类型跨层深合并（生效值是多层的并集）、`normalize()` 改写过、或该键压根不存在。
     pub effective_layer: Option<&'static str>,
-    /// 本次加载中，该键是否被降级殃及（[`ConfigDegradation::taints`]）。
-    ///
-    /// 为真时**用户层的值没有进入生效值**——那一段整个回落了出厂默认，或所在文件语法
-    /// 不合法。这是「设置改了不生效」里最难自查的一种：配置文件里白纸黑字写着，
-    /// 程序却在用别的值。具体是哪一种，看 [`Self::syntax_error`]。
+    /// 本次加载中，该键是否被降级殃及（[`ConfigDegradation::taints`]）。为真时用户层的值
+    /// 没有进入生效值：所在段回落了出厂默认，或所在文件语法不合法，见 [`Self::syntax_error`]。
     pub degraded: bool,
-    /// `degraded` 为真且成因是**文件语法不合法**时，那条故障的一句话描述
+    /// `degraded` 为真且成因是文件语法不合法时，那条故障的一句话描述
     /// （[`UnparsableLayer::describe`]）；成因是段级降级时为 `None`。
     ///
-    /// ★ 呈现端必须分开讲这两种：段级降级要用户去改**那个键的类型**，语法故障要他去改
-    /// **那一行**。只给一个 bool 就只能讲其中一种，另一种的用户会被支去翻一个没问题的段。
-    ///
-    /// ★★ **本字段非 `None` 时不要照搬 `degraded` 去报「本次未生效」。**
-    /// 语法故障让 [`ConfigDegradation::taints`] 对任何路径恒为真——那是写盘闸的判据，
-    /// 保守方向选对了（不知道哪些键受影响就一律不写，损失为零）。但同一判据用于呈现
-    /// 就是在撒谎：被跳过的只是某几行，本键很可能好好地生效着。实跑撞见过一次——
-    /// `per_page` 明明取到了 user 层的值，却被报成「本次未生效」。
-    /// **保守的方向对写是安全，对读是错误**：呈现说错了，用户会去改一个没问题的键。
-    /// 正确做法是照常报 `effective_layer`，把语法故障降级为附加警示（见 `config describe`）。
+    /// 呈现端须分开讲：段级降级要用户改那个键的类型，语法故障要他改那一行。
+    /// 本字段非 `None` 时不要照搬 `degraded` 报「本次未生效」：语法故障让 `taints` 对任何路径
+    /// 恒为真，这对写盘闸是安全的保守，对呈现却是错的（本键很可能正常生效）。应照常报
+    /// `effective_layer`，把语法故障作为附加警示（见 `config describe`）。
     pub syntax_error: Option<String>,
 }
 
@@ -8858,14 +7556,9 @@ fn load_custom_manifest() -> Option<CustomManifest> {
     };
     match toml::from_str::<CustomManifest>(&text) {
         Ok(m) => {
-            // DEBUG 而非 INFO：面向用户的**权威摘要**只有一处——服务启动路径上的
-            // `wind_rpc::custom_edition::startup_summary()`（位置确定、含显示名）。这里再打
-            // 一行 INFO 会让读日志的人以为定制层被加载了两次，而两行内容还不完全一样。
-            //
-            // 保留这一行（不删）的理由：它记录的是「解析成功、层已启用」这个事实，且触发点
-            // 就是**第一次**问 `custom_manifest()` 的地方——排查「定制层什么时候才生效」
-            // 时，这个时间点本身就是线索；而非 service 的宿主（TSF DLL / 移动端 / CLI）
-            // 根本走不到那条启动摘要。
+            // DEBUG 而非 INFO：面向用户的权威摘要是服务启动路径上的
+            // `wind_rpc::custom_edition::startup_summary()`，这里再打 INFO 会像加载了两次。
+            // 保留它是因为非 service 宿主（TSF DLL / 移动端 / CLI）走不到那条摘要，且首次解析的时间点本身是线索。
             debug!(
                 "定制版 {} {}（基于 {}）",
                 if m.custom.id.is_empty() {
@@ -8893,11 +7586,8 @@ fn load_custom_manifest() -> Option<CustomManifest> {
 impl Config {
     /// 四层合并加载：默认值 → `data/config.toml` → `data_custom/config.toml` → 用户配置。
     ///
-    /// 合并方式：把各层的 `toml::Value`（默认值序列化得到）深合并（表递归、标量/数组后者覆盖），
-    /// 最后一次性反序列化为 `Config`。所有段都会被合并，不再静默丢弃；新增配置字段无需改合并代码。
-    ///
-    /// L2.5（定制层）只需写**差异键**，不必整份复制 `config.toml`——机制上支持深合并，
-    /// 差异越小跨版本存活率越高。
+    /// 各层 `toml::Value` 深合并（表递归、标量/数组后者覆盖），最后一次性反序列化，新增字段无需改合并代码。
+    /// 定制层只需写差异键，差异越小跨版本存活率越高。
     pub fn load(data_dir: Option<&Path>) -> anyhow::Result<Self> {
         // Layer 1: 代码默认值（序列化为 Value，保证所有字段存在）
         let mut merged = toml::Value::try_from(Self::default())?;
@@ -8939,8 +7629,8 @@ impl Config {
                     info!("Loaded user config: {}", user_config.display());
                 }
             }
-            // 漫游 known folder 解析失败。此前这里静默跳过整个用户层，配置退化为
-            // 「默认 ⊕ 系统层」，用户的 schema.active 等设置全部失效且无任何痕迹。
+            // 漫游 known folder 解析失败：用户层被跳过，必须留下 warn，否则 schema.active 等设置失效
+            // 却无任何痕迹。
             None => warn!("User config dir unavailable, user layer skipped"),
         }
 
@@ -8948,52 +7638,30 @@ impl Config {
         Self::migrate_force_vertical_value(&mut merged);
         Self::migrate_index_labels_value(&mut merged);
         Self::migrate_empty_code_behavior_value(&mut merged);
-        // ⚠️ `migrate_comment_max_chars_value` 等层内迁移**不在这里**，
-        // 它们在各层合并前就地跑（见 [`Self::migrate_user_layer_value`]）。判据不同：
-        // 那两条要问「用户写过新键吗」，而合并结果里的新键必然存在（L1 就是
-        // `Config::default()` 序列化出来的），在这里问永远得到「写过」，迁移一次都不会执行。
-        // 位置刻意在**四层合并之后、`try_into` 之前**：定制层 (L2.5) 里的旧值因此与用户层
-        // 一样被这一批迁移救到，白捡的——迁移作用在合并结果上，不认值来自哪一层。
-        // ⛔ 段级降级**不能**顶替上面这一族 `migrate_*_value`：迁移是「把旧值无损搬到新形态」，
-        // 降级是「把这一段整个丢掉换成出厂值」。已发布字段改类型仍必须写迁移，
-        // 降级只是最后一道兜底。
+        // 层内迁移（如 `migrate_comment_max_chars_value`）不在这里，见 [`Self::migrate_user_layer_value`]：
+        // 它们要问「这一层写过新键吗」，而合并结果里新键必然存在（L1 序列化而来）。
+        // 这一族放在合并之后、`try_into` 之前，定制层的旧值也一并被迁移。
+        // 段级降级不能顶替迁移：迁移是无损搬到新形态，降级是整段换成出厂值；已发布字段改类型
+        // 仍必须写迁移，降级只是兜底。
         let mut config = Self::deserialize_with_section_fallback(merged);
-        // 语法故障挂在段级降级**之后**：`deserialize_with_section_fallback` 整个改写
-        // `config.degradation`（它只填 sections/total_fallback，unparsable 恒空），
-        // 先挂会被它覆盖掉。两者可以同时发生——文件里既有笔误又有类型错时，
-        // 救回来的那部分内容仍可能带着类型不对的键。
+        // 语法故障挂在段级降级之后：`deserialize_with_section_fallback` 会整个改写
+        // `config.degradation`（unparsable 恒空），先挂会被覆盖。两者可同时发生。
         config.degradation.unparsable = unparsable;
         config.normalize();
         Ok(config)
     }
 
-    /// 反序列化 `merged`，失败时**只**把有毒的那一段替换成 L1 默认，其余配置原样保留。
+    /// 反序列化 `merged`，失败时只把有毒的那一段替换成 L1 默认，其余配置原样保留。
     ///
-    /// 为什么需要它：整份 `try_into` 是全有全无的——任何一层里一个类型不匹配的键都让
-    /// `load()` 返回 `Err`，而调用方几乎都是 `unwrap_or_default()`（`construct.rs`、
-    /// `apps/repl`、`wind-mobile`）⇒ 用户的方案/词库/按键/主题**一起**回落出厂值，
-    /// 只留一行日志。段的边界恰好是功能边界，用户感知到的应该是「按键设置回默认了」
-    /// 而不是「一切归零」。
+    /// 整份 `try_into` 是全有全无的，而调用方多为 `unwrap_or_default()`，一个类型错的键会让
+    /// 方案/词库/按键/主题一起回落出厂值；段边界即功能边界，降级应只影响那一块。
     ///
-    /// ★ 定位有毒段用的是**探针**（把待测的那一段贴到全默认的骨架上试），不是「逐段替换
-    /// 直到成功」。后者会误伤：若毒在 `keys`，替换 `input` 后仍然失败，此时无从区分 `input`
-    /// 是不是也有毒，只能连它一起降级——那是在丢用户配置。探针法对每段给出独立判定。
+    /// 定位用探针（把待测段贴到全默认骨架上试），不用「逐段替换直到成功」：后者无法区分多段
+    /// 是否都有毒，会误伤。探两层：顶层段判坏后对其直接子键再探，能定位到 `ui.font` 就不降
+    /// `ui` 整段；只递归这一层，再深收益递减且易把配置切成半新半旧。子键探不出则整段降级。
     ///
-    /// ★ 探两层：顶层段判坏之后，对它的**直接子键**再探一轮，能定位到 `ui.font` 就不要
-    /// 降 `ui` 整段。粒度不是锦上添花——`ui` 一段 99 个键、`schema` 88 个，整段回落等于
-    /// 候选窗尺寸、字体、主题、工具栏、注释模板一起没，离「一切归零」并不远，而缩小
-    /// 爆炸半径就是这套机制的全部意义。**只递归这一层**：再往下收益递减，而每多一层
-    /// 就多一份「把配置切碎成半新半旧」的风险。子键探不出结果（该段不是表、或毒在段
-    /// 自身的结构上）则退回整段降级。
-    ///
-    /// ⚠️ 成功路径**不是**零开销：`merged` 会被深 clone 一次。本机实测（259 个叶子键，
-    /// dev profile 已开优化）clone ≈ 24µs，`clone + try_into` ≈ 41µs——clone 占约六成。
-    ///
-    /// 这不是能省掉的：toml 0.8 只有 `impl Deserializer for Value`（**按值**消费），没有
-    /// `&Value` 的实现，`try_into` 失败后拿不回所有权，而失败路径必须拿着原值去做探针。
-    /// 相对于 `load()` 自身的两次文件 IO，这一次 clone 不在同一量级，故不值得为它改结构。
-    ///
-    /// 失败路径的探针次数：顶层段数 + 有毒段的子键数，均为个位到几十，只在异常时发生。
+    /// 成功路径会深 clone `merged` 一次（几十微秒）：toml 只有按值消费的 `Deserializer`，
+    /// 失败后拿不回原值做探针。相对 `load()` 的文件 IO 可忽略，不值得改结构。
     fn deserialize_with_section_fallback(merged: toml::Value) -> Config {
         let root_err = match merged.clone().try_into::<Config>() {
             Ok(config) => return config,
@@ -9027,7 +7695,7 @@ impl Config {
         match patched.try_into::<Config>() {
             Ok(mut config) if !bad.is_empty() => {
                 for (path, err) in &bad {
-                    // WARN 而非 INFO：这是**异常**，不是正常降级。压成 INFO 会掩盖真实的
+                    // WARN 而非 INFO：这是异常，不是正常降级。压成 INFO 会掩盖真实的
                     // 迁移缺失——本该写 `migrate_*_value` 的字段类型变更会在这里悄悄"自愈"。
                     warn!(
                         "配置段 [{path}] 解析失败，已回落出厂默认值（该段的用户设置本次不生效）；\
@@ -9063,20 +7731,12 @@ impl Config {
         }
     }
 
-    /// 存量迁移（**须在反序列化前**跑，字段已从 [`QuickInputConfig`] 移除、结构体上读不到）：
-    /// 废弃键 `schema.quick_input.enable_english = false` → 从内置 quick_mix 的 members 移除
-    /// `english`。
-    ///
-    /// 该键与 members 曾是双真相源；语义合并到 members 后，关掉过英文候选的存量用户
-    /// 必须在这里落成成员删除，否则升级后英文候选会自己冒回来。只认 false——true 是默认值，
-    /// 无需动作。
-    /// 存量迁移（**须在反序列化前**跑）：空码三键（`input.enter_behavior` /
+    /// 存量迁移（须在反序列化前跑）：空码三键（`input.enter_behavior` /
     /// `space_on_empty_behavior` / `punct_on_empty_behavior`）的值域收窄为 `commit | clear`，
-    /// 把设置端曾经误列的 `ignore` / `commit_and_input` 归一到 `commit`。
+    /// 把设置端曾误列的 `ignore` / `commit_and_input` 归一到 `commit`。
     ///
-    /// 那两个值**从未被实现过**：消费点只判 `== "clear"`，其余一律走 commit 分支。所以这条
-    /// 迁移是**零行为变更**，纯粹让存量配置落回合法值域——不做的话，设置页下拉「按当前值
-    /// 恢复选中项」匹配不到，会静默弹回首项，用户看到的是自己的配置被悄悄改了。
+    /// 那两个值从未实现（消费点只判 `== "clear"`），故零行为变更；不做的话设置页下拉匹配不到，
+    /// 会静默弹回首项。
     fn migrate_empty_code_behavior_value(merged: &mut toml::Value) {
         const KEYS: [&str; 3] = [
             "enter_behavior",
@@ -9086,9 +7746,8 @@ impl Config {
         let Some(input) = merged.get_mut("input").and_then(|i| i.as_table_mut()) else {
             return;
         };
-        // ★ 合法值域**取自注册表**，不在此处另抄一份。三键的值域并不相同（标点多一个
-        // `clear_no_input`），且日后还会加值；抄一份的后果是「新值加了，但迁移把存量配置里
-        // 的它抹回 commit」——只在升级过的机器上复现，本地怎么测都是绿的。
+        // 合法值域取自注册表，不另抄一份：三键的值域并不相同（标点多一个 `clear_no_input`），
+        // 且日后还会加值，抄一份会让迁移把存量配置里的新值抹回 commit。
         let allowed = |key: &str| -> &'static [&'static str] {
             match crate::config_schema::field(&format!("input.{key}")).map(|f| &f.ty) {
                 Some(crate::config_schema::FieldType::Enum(vals)) => vals,
@@ -9110,6 +7769,11 @@ impl Config {
         }
     }
 
+    /// 存量迁移（须在反序列化前跑，字段已从 [`QuickInputConfig`] 移除）：
+    /// 废弃键 `schema.quick_input.enable_english = false` → 从内置 quick_mix 的 members 移除 `english`。
+    ///
+    /// 语义已合并到 members，关掉过英文候选的存量用户必须落成成员删除，否则升级后英文候选会冒回来。
+    /// 只认 false（true 是默认值）。
     fn migrate_enable_english_value(merged: &mut toml::Value) {
         let disabled = merged
             .get("schema")
@@ -9138,16 +7802,11 @@ impl Config {
         info!("Migrated quick_input.enable_english=false into quick_mix members");
     }
 
-    /// 存量迁移（**须在反序列化前**跑）：`ui.candidate.index_labels` 由「字符串，每 char
-    /// 一槽」改为「字符串数组，每项一槽」，旧值按 char 拆成数组。
+    /// 存量迁移（须在反序列化前跑）：`ui.candidate.index_labels` 由「字符串，每 char 一槽」
+    /// 改为「字符串数组，每项一槽」，旧值按 char 拆成数组。
     ///
-    /// 这条迁移不可省。类型不匹配不是「这一项失效」而是 [`Self::load`] 里
-    /// `merged.try_into()?` **整体返回 Err**，而调用方多为 `unwrap_or_default()`
-    /// （`construct.rs`、repl、wind-mobile）——配过此项的用户会连方案、词库、按键
-    /// 一起静默回落出厂值，只留一行日志。
-    ///
-    /// 拆分按 `char` 而非字素簇：旧形态本就只能表达单 char 槽位，按 char 拆是对旧值的
-    /// **无损**还原；用字素簇反而会把旧配置里被拆散的组合序列错误地粘回一槽，改变行为。
+    /// 不可省：类型不匹配会让该段被降级，配过此项的用户整段回落出厂值。按 `char` 而非字素簇拆
+    /// 才是对旧值的无损还原。
     fn migrate_index_labels_value(merged: &mut toml::Value) {
         let Some(cand) = merged
             .get_mut("ui")
@@ -9169,18 +7828,11 @@ impl Config {
         info!("Migrated ui.candidate.index_labels string → {n} 个槽位数组");
     }
 
-    /// 存量迁移（**须在反序列化前**跑）：`ui.candidate.comment_max_chars`（横竖共用一份）
+    /// 存量迁移（层内、须在反序列化前跑）：`ui.candidate.comment_max_chars`（横竖共用）
     /// → `comment_max_chars_vertical` / `_horizontal` 各一份。
     ///
-    /// 只在新键**缺失**时抄旧值：用户若已写了新键，那是更明确的意图，不该被旧键盖掉。
-    ///
-    /// 抄完**摘掉旧键**，且写盘路径（`prune_user_config` / `set_user_value`）都先跑本函数：
-    /// 旧键留在文件里时，设置页把某一侧改回 0 = 出厂值 ⇒ 新键被删 ⇒ 下次 load 旧键又把它补回
-    /// 原值，用户的修改被静默打回。
-    ///
-    /// ★ 这条迁移不可省：它是**非零默认**的键（默认 0=不限，但配过非 0 值的人正是在意
-    /// 长度的那批），不迁移的表现是「升级后注释突然不再截断」——而这类回归无人会报 bug，
-    /// 用户只会觉得候选栏变宽了。
+    /// 只在新键缺失时抄旧值（新键是更明确的意图）。抄完摘掉旧键，且写盘路径（`prune_user_config` /
+    /// `set_user_value`）都先跑本函数：否则把某一侧改回 0 会删新键，下次 load 旧键又把它补回。
     fn migrate_comment_max_chars_value(merged: &mut toml::Value) {
         let Some(cand) = merged
             .get_mut("ui")
@@ -9207,24 +7859,14 @@ impl Config {
         }
     }
 
-    /// **层内**迁移：作用在单独一层的 `toml::Value` 上，在 `merge_value` **之前**跑。
+    /// 层内迁移：作用在单独一层的 `toml::Value` 上，在 `merge_value` 之前跑。
     ///
-    /// 与 [`Self::load`] 末尾那一族合并后迁移刻意分开，因为**判据不同**：
+    /// 与 [`Self::load`] 里合并后那一族刻意分开：L1 由 `Config::default()` 序列化，凡仍在结构体里的
+    /// 字段合并结果里都有，「新键不存在才写」的迁移放在那里永远不执行。只有在单层上问
+    /// `contains_key`，答案才是「这一层的作者写过吗」；设置页写回只写它管的键，新旧两键会在
+    /// 用户配置里长期并存，必须这样区分。
     ///
-    /// 合并后那批问的是「合并结果里有没有这个键」。而 L1 是
-    /// `toml::Value::try_from(Config::default())` —— 凡是**仍在结构体里**的字段，它必然
-    /// 都在。于是任何「新键还不存在才写」的迁移放到那里，`contains_key` 永远命中，
-    /// 一次都不会执行。这不是理论风险：`migrate_comment_max_chars_value` 就这么静默失效过
-    /// （配了 `comment_max_chars = 12` 的用户升级后两个新键仍是 0），
-    /// `migrate_show_code_hint_value` 起初照抄了同一个模式，也一样。
-    ///
-    /// 只有在**单独一层**上问 `contains_key`，答案才真正是「这一层的作者写过这个键吗」。
-    /// 对用户层来说就是「用户自己写过吗」—— 设置页写回时只写它管的那个键、不会顺手删掉
-    /// 旧键（`set_user_value` 先跑迁移的那几条除外），于是新旧两键会在用户配置里长期并存。少了这个区分，要么迁移不执行（旧键被
-    /// 忽略），要么改成旧键优先（用户在设置页的每次修改都在下次启动被打回），两条路都错。
-    ///
-    /// custom 层（L2.5）也跑一遍，保住「定制层里的旧值同样被救到」这个既有性质
-    /// —— 那是合并后迁移白捡的好处，换成层内跑就得显式保留。
+    /// custom 层（L2.5）也跑一遍，定制层里的旧值同样被迁移。
     fn migrate_user_layer_value(layer: &mut toml::Value) {
         Self::migrate_comment_max_chars_value(layer);
         Self::migrate_font_size_follow_theme_value(layer);
@@ -9234,16 +7876,12 @@ impl Config {
         Self::migrate_grammar_enabled_value(layer);
     }
 
-    /// 存量迁移（**层内**）：本层已手写 `[schema.pinyin.grammar]` 的 `weight`（非 0）与 `model`
-    /// （非空）、却没写 `enabled` → 补 `enabled = true`。
+    /// 存量迁移（层内）：本层手写了 `[schema.pinyin.grammar]` 的 `weight`（非 0）与 `model`（非空）、
+    /// 却没写 `enabled` → 补 `enabled = true`。
     ///
-    /// 为什么需要：`enabled` 在单层反序列化时缺省 true，但**分层合并后**不成立——桌面出厂层
-    /// （L2 `data/config.toml`）显式写了 `enabled = false`，用户层没写的键保留下层的值，
-    /// 于是只手写过 weight + model 的老用户升级后被出厂的 false 盖住、模型悄悄关掉。
-    /// 手写过这两项就是明确想开，补一个 true 才是「老配置照旧生效」。
-    ///
-    /// 已知边界：这样的用户在设置页把开关关掉，`enabled = false` 等于出厂值会被剪枝删掉，
-    /// 下次加载又被本迁移补回 true。要关只能删掉 weight / model 两行——他们本就是手改配置的人。
+    /// `enabled` 单层缺省为 true，但 L2 显式写了 `false`，分层合并后会把这类老配置的模型悄悄关掉。
+    /// 已知边界：这些用户在设置页关掉开关时，`false` 等于出厂值会被剪枝，下次又被补回 true；
+    /// 要关只能删掉 weight / model 两行。
     fn migrate_grammar_enabled_value(layer: &mut toml::Value) {
         let Some(g) = layer
             .get_mut("schema")
@@ -9271,12 +7909,11 @@ impl Config {
         }
     }
 
-    /// 存量迁移（**层内**）：本层的 `ui.tooltip.sections` 与「释义」段加入之前的旧出厂 6 段
-    /// （论坛 t282）逐项相等时，视为冗余剪掉，让这层跟随新出厂。
+    /// 存量迁移（层内）：本层的 `ui.tooltip.sections` 与「释义」段加入前的旧出厂 6 段逐项相等时，
+    /// 视为冗余剪掉，让这层跟随新出厂。
     ///
-    /// 以前这份副本会被 [`prune_redundant`] 当冗余删；出厂多了一段之后两边不再相等，它就成了
-    /// 删不掉的「自定义」，用户永远拿不到新段。比较按反序列化后的段（serde 缺省补齐），
-    /// 手写时省掉了 `promote = ""` 之类字段的同样认得；改过任何一处的不动。
+    /// 否则出厂多了一段后它就成了删不掉的「自定义」，用户永远拿不到新段。比较按反序列化后的段
+    /// （serde 缺省补齐）；改过任何一处的不动。
     fn migrate_stale_factory_tooltip_sections_value(layer: &mut toml::Value) {
         let Some(tip) = layer
             .get_mut("ui")
@@ -9297,23 +7934,17 @@ impl Config {
         }
     }
 
-    /// 存量迁移（**层内**、须在反序列化前跑）：`[ui.tooltip]` 的六个旧开关 → `sections`。
+    /// 存量迁移（层内、须在反序列化前跑）：`[ui.tooltip]` 的六个旧开关 → `sections`。
     ///
-    /// 按**这一层**写了什么判（判据同 [`Self::migrate_user_layer_value`] 的文档）：
+    /// 按这一层写了什么判（同 [`Self::migrate_user_layer_value`]）：
     /// - 本层没写任何旧键 → 不动；
-    /// - 本层已写 `sections` → 以它为准，旧键只清不迁（用户在新形态上的编辑比旧开关新）；
-    /// - 旧键的值全等于旧出厂值 → 只清不迁：用户没改过气泡，本层不该出现段列表；
-    /// - 否则按 [`tooltip_sections_from_legacy`] 生成段列表写入本层。本层没写的旧键取旧出厂值，
-    ///   与旧版「缺键即默认」的生效值一致。
+    /// - 本层已写 `sections` → 以它为准，旧键只清不迁；
+    /// - 旧键的值全等于旧出厂值 → 只清不迁；
+    /// - 否则按 [`tooltip_sections_from_legacy`] 生成段列表写入本层，没写的旧键取旧出厂值。
     ///
-    /// 旧键从本层移除。用户文件里的旧键另由 [`Config::prune_user_config`] 先迁移**落盘**、
-    /// 再按 [`RETIRED_KEYS`] 清除——只清不迁会把开过拆字、关过拼音的设置丢掉。
-    ///
-    /// 已知近似（同 [`Self::migrate_font_size_follow_theme_value`]）：本层缺的旧键按旧出厂值补，
-    /// 不去看下层（L2.5 定制层）写过什么。只在「定制版改过气泡开关 + 用户层也改过其中一部分」
-    /// 时有差别，结果是那几个开关回到出厂值。同理，「全等于旧出厂值即只清不迁」也不看下层：
-    /// 定制版开了拆字、用户在本层显式关掉（`chaizi_enabled = false`）时，本层不写段列表，生效的是
-    /// 定制层那份（拆字又开了）。仓内没有写这些旧键的定制层，按近似接受。
+    /// 旧键从本层移除。用户文件里的旧键由 [`Config::prune_user_config`] 先迁移落盘、再按
+    /// [`RETIRED_KEYS`] 清除。已知近似：不看下层（定制层）写过什么，只在定制版与用户层都改过
+    /// 这些开关时有差别；仓内没有写这些旧键的定制层，按近似接受。
     fn migrate_tooltip_sections_value(layer: &mut toml::Value) {
         const LEGACY_KEYS: [&str; 6] = [
             "code_enabled",
@@ -9371,15 +8002,14 @@ impl Config {
         }
     }
 
-    /// 存量迁移（**层内**）：`[[ui.langbar.badges]]` 的色值哨兵拆成「色值 + 不透明度」两键。
+    /// 存量迁移（层内）：`[[ui.langbar.badges]]` 的色值哨兵拆成「色值 + 不透明度」两键。
     ///
     /// 逐条、逐侧（light/dark）处理 `color_x`：
     /// - `auto`（不分大小写）→ `""`（与主字同色）；
     /// - `#RRGGBBAA`（`#` 可省）→ `#RRGGBB` + `alpha_x = AA/255`（`FF` 即 1.0，仍是挖空档）；
-    /// - 其余（6 位、空串、非法值）不动——非法值留给渲染侧记警告，迁移不替用户猜。
+    /// - 其余（6 位、空串、非法值）不动，非法值留给渲染侧告警。
     ///
-    /// 本层已显式写了 `alpha_x` 时不覆盖（新键是用户后来写的，比旧色值末两位更可信）。
-    /// 幂等：迁移后的形态再跑一遍不会命中任何分支。
+    /// 本层已显式写了 `alpha_x` 时不覆盖。幂等。
     fn migrate_langbar_badge_colors_value(layer: &mut toml::Value) {
         let Some(badges) = layer
             .get_mut("ui")
@@ -9427,27 +8057,17 @@ impl Config {
     /// 所以「关了跟随、字号保持 18」的用户文件里只剩 `follow = false`，字号要按它补回。
     const LEGACY_FONT_SIZE_DEFAULT: f64 = 18.0;
 
-    /// 存量迁移（**层内**、须在反序列化前跑）：`ui.candidate.font_size_follow_theme`（bool）
+    /// 存量迁移（层内、须在反序列化前跑）：`ui.candidate.font_size_follow_theme`（bool）
     /// + `font_size` 两处表达 → 只剩 `font_size`（0 = 跟随主题，>0 = 用户指定）。
     ///
-    /// 只在**旧键 `font_size_follow_theme` 真的还在这一层**时才动手：
-    /// - 写了 `follow = true`                → `font_size = 0`（旧语义下本层的字号被忽略）；
-    /// - 写了 `follow = false`               → 保留本层 `font_size`；本层没写则补旧出厂值 18
-    ///   （见 [`Self::LEGACY_FONT_SIZE_DEFAULT`] 的理由）；
-    /// - 旧键不存在                          → 不动，`font_size`（如果有）原样留给新语义读。
+    /// 只在旧键 `font_size_follow_theme` 真的还在这一层时才动手：
+    /// - `follow = true`  → `font_size = 0`；
+    /// - `follow = false` → 保留本层 `font_size`；本层没写则补旧出厂值（见 [`Self::LEGACY_FONT_SIZE_DEFAULT`]）；
+    /// - 旧键不存在 → 不动。
     ///
-    /// 迁移后旧键从本层移除。用户文件里的旧键另由 [`Config::prune_user_config`] 先迁移
-    /// **落盘**、再按 [`RETIRED_KEYS`] 清除——只清不迁会把 `follow = false` 用户的字号丢掉。
-    ///
-    /// ⚠️ 曾经有一档「没写 `follow`、但写了 `font_size`」→ 当作旧格式清零的分支（猜「旧默认
-    /// 即跟随，那个字号从未生效」）。这个判据在旧键刚退役时对真·旧文件成立，但迁移**没有
-    /// 一次性开关**、每次 `prune_user_config`/`load()` 都会重跑：新语义下用户自定义字号后落盘
-    /// 的形状——`font_size` 有值、`font_size_follow_theme` 键从未存在过——与「真旧文件缺 follow
-    /// 键」在字面上完全一样。于是任何人在设置页把字号改成非 0，下次启动都会被这档分支当成
-    /// 旧文件清回 0（`prune_user_config` 还会把清零结果写回磁盘），表现为「设置页改字号，
-    /// 保存当时生效、重启后又变回跟随主题」。旧键存在与否才是唯一站得住的判据——它是旧键，
-    /// 现行代码不会再写它，缺席即代表这一层要么从未配过字号、要么已经是新格式，两种情况都
-    /// 不该猜着清零。
+    /// 迁移后旧键从本层移除；用户文件里的旧键由 [`Config::prune_user_config`] 先迁移落盘、
+    /// 再按 [`RETIRED_KEYS`] 清除。不要加「没写 follow 但写了 font_size 就清零」的分支：迁移每次
+    /// 加载都重跑，新格式的自定义字号与那种旧文件字面上相同，会被反复清回 0。
     fn migrate_font_size_follow_theme_value(layer: &mut toml::Value) {
         let Some(cand) = layer
             .get_mut("ui")
@@ -9472,17 +8092,11 @@ impl Config {
         cand.insert("font_size".to_string(), size);
     }
 
-    /// 存量迁移（**须在反序列化前**跑，字段已从 [`QuickInputConfig`] 移除）：
-    /// 废弃键 `schema.quick_input.force_vertical` → 内置 quick_mix 的
-    /// [`MixModeConfig::candidate_layout`]。
+    /// 存量迁移（须在反序列化前跑，字段已从 [`QuickInputConfig`] 移除）：
+    /// 废弃键 `schema.quick_input.force_vertical` → 内置 quick_mix 的 [`MixModeConfig::candidate_layout`]。
     ///
-    /// 映射刻意**不对称**：
-    /// - `true`  → `"vertical"`（强制竖排）
-    /// - `false` → `"follow"`（**不是** `"horizontal"`）——旧布尔的 false 语义是「不强制」，
-    ///   即跟随全局；写成 horizontal 会把「没开过这个开关」的用户强行钉在横排上。
-    ///
-    /// 键不存在则不动，让 [`default_mix_modes`] 的出厂值（Vertical）生效。老版预置文件
-    /// 写的是 `force_vertical = true`，与出厂值同义，故未改过配置的用户升级后行为不变。
+    /// 映射刻意不对称：`true` → `"vertical"`；`false` → `"follow"` 而非 `"horizontal"`，
+    /// 旧布尔的 false 是「不强制」。键不存在则不动，出厂值（Vertical）与老预置的 `true` 同义。
     fn migrate_force_vertical_value(merged: &mut toml::Value) {
         let Some(forced) = merged
             .get("schema")
@@ -9517,22 +8131,11 @@ impl Config {
     }
 
     /// 系统预置配置的 TOML 值：代码默认(L1) ⊕ `data/config.toml`(L2)
-    /// ⊕ `data_custom/config.toml`(L2.5)，**不含用户层(L3)**。
+    /// ⊕ `data_custom/config.toml`(L2.5)，不含用户层(L3)。供 capability 的 `default` 来源。
     ///
-    /// 供 capability 的 `default` 来源——出厂默认 = L1⊕L2⊕L2.5。系统预置与定制层
-    /// 都可合法覆盖 L1（如 `schema.active`）。
-    ///
-    /// ★ **定制层必须进入这个计算，漏了就出事。** [`preset_for_pruning`] 与
-    /// [`materialize_key_actions`] 拿这个值去**删用户层的键**：
-    ///
-    /// - 定制层不进来 ⇒ 用户在定制版里把开关点到「定制默认」位会被判成「与默认不同」而
-    ///   写进用户层永久钉死，此后不再跟随定制层的任何更新；
-    /// - 反向算错则**静默删掉用户真实设置**。这颗雷本仓已引爆过一次（真机一份配置
-    ///   105 键中 62 键冗余，`schema.mix.auto_commit_block_on_pinyin` 已经中招）。
-    ///
-    /// ⚠️ **连带效应是正确行为，不要当 bug 修掉**：`capabilities::generate`（wind-rpc）
-    /// 也吃这个值，于是定制版设置页显示的「出厂默认」、以及「恢复默认」按钮的落点，
-    /// 都会变成**定制默认值**。这正是定制版用户应该看到的语义。
+    /// 定制层必须进入这个计算：[`preset_for_pruning`] 与 [`materialize_key_actions`] 拿它删用户层的键，
+    /// 漏了定制层会把「点回定制默认」写成永久钉死的用户值；算错则静默删掉用户真实设置。
+    /// 连带地，定制版设置页的「出厂默认」与「恢复默认」落点都是定制默认值，这是正确语义。
     ///
     /// [`preset_for_pruning`]: Self::preset_for_pruning
     /// [`materialize_key_actions`]: Self::materialize_key_actions
@@ -9547,10 +8150,8 @@ impl Config {
         if let Some(custom_dir) = Self::custom_data_dir() {
             let custom_config = custom_dir.join("config.toml");
             if let Some(mut v) = Self::read_toml_value(&custom_config) {
-                // 与 `load()` 的 L2.5 同一道迁移：否则定制层里旧格式的键（如只写了
-                // `font_size = 22`，旧语义下被 follow_theme 压住、`load()` 迁成 0）在这份
-                // 出厂基线里仍是 22，剪枝会把用户显式设的 22 当成「等于默认」删掉，
-                // 违反「清理前后 load 结果逐键相同」。
+                // 与 `load()` 的 L2.5 同一道迁移：否则定制层里旧格式的值在这份基线里未迁移，
+                // 剪枝会把用户显式设的同值当成「等于默认」删掉，违反「清理前后 load 结果逐键相同」。
                 Self::migrate_user_layer_value(&mut v);
                 merge_value(&mut merged, v);
             }
@@ -9558,22 +8159,12 @@ impl Config {
         Ok(merged)
     }
 
-    /// 「与默认相同即不落盘」判定所用的出厂默认（L1⊕L2⊕L2.5）。取不到则 `None`。
+    /// 「与默认相同即不落盘」判定所用的出厂默认（L1⊕L2⊕L2.5）。取不到则 `None`，
+    /// 调用方一律退化为「照常写入 / 不清理」。
     ///
-    /// ⚠️ **必须确认 `data/config.toml` 在场才返回 `Some`**：[`system_preset_value`] 传 `None`
-    /// 会退回纯 L1，而 L2 本就允许合法覆盖 L1（`schema.active` 等出厂值只写在 L2）。
-    /// 拿纯 L1 当"默认"去比对，会把用户显式设的值误判成默认而删掉，
-    /// `load()` 时再从 L2 回落成**另一个**值 —— 用户的设置被静默改写，比不清理坏得多。
-    ///
-    /// 这不是假想：`schema.mix.pinyin_only_overflow` 与 `auto_commit_block_on_pinyin` 就曾长期
-    /// L1/L2 不一致（已随本次修复对齐），此类漂移只要发生一次，纯 L1 比对就会开始吃用户配置。
-    ///
-    /// 返回 `None` 时调用方一律退化为「照常写入 / 不清理」，即旧行为。
-    ///
-    /// ⚠️ **闸门判据仍是「`data/config.toml` 在场」，加了定制层也不改。** `data_custom`
-    /// 单独在场而 `data/config.toml` 缺失时必须返回 `None`：L2 才是出厂基线的必要部分，
-    /// 定制层只写差异键，拿「L1⊕L2.5」这份残缺 preset 去删用户键正是上面那颗雷。
-    /// 定制层的值由 [`system_preset_value`] 自动带进来，无需在此另加分支。
+    /// 必须确认 `data/config.toml` 在场才返回 `Some`：L2 允许合法覆盖 L1（如 `schema.active`），
+    /// 拿纯 L1 或残缺的 L1⊕L2.5 去比对，会把用户显式设的值误删，`load()` 时回落成另一个值。
+    /// 定制层只写差异键，单独在场也必须返回 `None`；其值由 [`system_preset_value`] 自动带入。
     ///
     /// [`system_preset_value`]: Self::system_preset_value
     fn preset_for_pruning() -> Option<toml::Value> {
@@ -9586,26 +8177,22 @@ impl Config {
 
     /// 清理用户层里与出厂默认（L1⊕L2⊕L2.5）相同的冗余键，返回删除的键数。
     ///
-    /// **不变量：清理前后 `load()` 的结果逐键完全相同** —— 删掉的每个键，四层合并时都会从
-    /// L1⊕L2⊕L2.5 回落到同一个值。故本操作对当前行为零影响，只影响**将来**默认值变更能否到达该用户。
-    /// `set_user_value` 的同款收口负责不再产生新的冗余键，本函数负责清掉存量（该收口上线前
-    /// 积累的量很可观：真机一份配置 105 键中 62 键冗余）。
-    ///
-    /// 幂等——跑第二次删 0 个。`data/config.toml` 或用户层缺失时直接返回 0。
+    /// 不变量：清理前后 `load()` 的结果逐键相同，只影响将来默认值变更能否到达该用户。
+    /// `set_user_value` 负责不再产生新的冗余键，本函数清存量。幂等；`data/config.toml`
+    /// 或用户层缺失时返回 0。
     pub fn prune_user_config() -> anyhow::Result<usize> {
         let Some(dir) = Self::user_config_dir() else {
             return Ok(0);
         };
         let file = dir.join("config.toml");
-        // 严格解析，失败即**什么都不做**（本函数与 `materialize_key_actions` 同类：后台自动
-        // 跑的写盘，用户没要求任何事）。⛔ 不要改用 `parse_toml_lenient`：剪枝会整表写回，
-        // 拿容错救回的近似值当种子等于把被跳过的行永久删除。
+        // 严格解析，失败即什么都不做（与 `materialize_key_actions` 同类：后台自动跑的写盘）。
+        // 不要改用 `parse_toml_lenient`：剪枝会整表写回，容错救回的近似值当种子会永久删掉被跳过的行。
         let mut root = match std::fs::read_to_string(&file) {
             Err(_) => return Ok(0), // 没有用户配置 = 没什么可清理的
             Ok(s) => match toml::from_str::<toml::Value>(&s) {
                 Ok(v) => v,
                 Err(e) => {
-                    // 这条 WARN 是必要的：本函数在启动流程里排在任何一次 `load()` **之前**，
+                    // 这条 WARN 是必要的：本函数在启动流程里排在任何一次 `load()` 之前，
                     // 静默返回的话，日志里第一条与配置有关的记录要等到 materialize 那一步。
                     warn!(
                         "降级闸：用户配置 {} 语法不合法（{e}），已跳过「陈旧键清理」；\
@@ -9627,7 +8214,7 @@ impl Config {
         Self::migrate_comment_max_chars_value(&mut root);
         Self::migrate_grammar_enabled_value(&mut root);
         let migrated = usize::from(root != before);
-        // 退役键（[`RETIRED_KEYS`]）先清：它们与出厂默认无关，**不能**被 preset 取不到时的
+        // 退役键（[`RETIRED_KEYS`]）先清：它们与出厂默认无关，不能被 preset 取不到时的
         // 提前返回挡住——否则没装 data/config.toml 的环境永远清不掉。
         let mut removed = migrated + prune_retired(&mut root);
         // 冗余键需要出厂默认做逐键比对，取不到时跳过（安全降级为「不清理」的旧行为）。
@@ -9646,56 +8233,22 @@ impl Config {
         Ok(removed)
     }
 
-    /// **一次性物化**：把折算后的引导键绑定写进用户层 `keys.key_actions`，此后停止折算。
+    /// 一次性物化：把折算后的引导键绑定写进用户层 `keys.key_actions`，此后停止折算。
     /// 返回物化的绑定条数（0 = 已做过 / 条件不满足）。
     ///
-    /// # 为什么必须落盘，而不能继续「每次加载折算一次」
+    /// 必须落盘：`trigger_keys` 的出厂值住在 L2，设置页只写 `key_actions`，用户层没有能压制
+    /// L2 的键，「每次加载折算」会把用户删掉的绑定重新插回去。物化后 `key_actions` 是唯一真相源，
+    /// L2 的 `trigger_keys` 只作「恢复默认」的出厂声明。新用户（用户层文件不存在）也照常物化，
+    /// 否则删除依然会被折算复活。背景见 `docs/design/key-actions-materialization.md`。
     ///
-    /// 五处 `trigger_keys` 的出厂值住在 L2（`data/config.toml`），
-    /// [`Self::migrate_trigger_keys_into_key_actions`] 每次 `load()` 都把它们折算进
-    /// `keys.key_actions`。而设置页在「五c 全局层收编」之后**只写 `key_actions`、从不写
-    /// `trigger_keys`**——于是用户层根本没有一个能压制 L2 出厂值的键：
+    /// 四道安全闸，命中即什么都不做：
+    /// 1. 用户配置目录不可用（漫游未挂载）：用户层看起来是空的，照做会抹掉真实自定义。
+    /// 2. L2 `data/config.toml` 不在场：折算出的是残表，物化即永久丢失出厂绑定。
+    /// 3. 本次 `load()` 的 `keys` 段被降级：`bindings` 只剩出厂值，而写回是整表覆盖并置版本标记，
+    ///    用户自定义绑定会永久丢失。
+    /// 4. 用户 config.toml 语法不合法：发生在合并之前，闸三拦不到。
     ///
-    /// 1. 用户在设置页取消勾选 `` ` `` → 用户层 `key_actions` 里那条被删掉（真的删了）；
-    /// 2. 下次 `load()`：用户层没写过 `trigger_keys` ⇒ 深合并回落 L2 的 `["backtick"]`
-    ///    ⇒ 折算发现 `key_actions` 里没有 `backtick` ⇒ **重新插回去**；
-    /// 3. 折算唯一的守卫是 `contains_key`，它区分不了「用户配过别的」与「用户删掉了它」。
-    ///
-    /// 表现是「取消勾选保存后毫无效果，反引号照样触发，再点应用设置却说『没有变更』」
-    /// （最后那句来自设置页保存成功后 `base_config = current_config` 的乐观更新）。
-    /// 覆盖安装、备份还原都无法带走「我删过它」——**那个意图从来没有被写进任何地方**。
-    ///
-    /// 物化之后，`key_actions` 成为唯一真相源，删除就是普通的删除；L2 的 `trigger_keys`
-    /// 降级为出厂声明处，只供设置页「恢复默认」按 capability 读取。
-    ///
-    /// # 对新用户也必须跑
-    ///
-    /// 只迁移「已有 config.toml 的老用户」会让方案退化成没修：新装机器的用户层里永远没有
-    /// 实体条目，删除依然会被 L2 折算复活。故用户层文件不存在时按空表处理，照常物化。
-    ///
-    /// # 四道安全闸（缺一不可，且都退化为「什么都不做」）
-    ///
-    /// 1. **用户配置目录不可用**（漫游未挂载）→ 不动。此时用户层「看起来是空的」，
-    ///    照做会把出厂绑定物化成用户的全部绑定，抹掉他真实的自定义。同
-    ///    [`Self::prune_user_config`] 必须排在 `wait_user_config_ready` 之后的理由。
-    /// 2. **L2 `data/config.toml` 不在场** → 不动。折算结果依赖 L2 声明的出厂绑定，
-    ///    L2 缺席时折算出的是一张**残缺**的表，物化下去 = 用户永久丢失出厂绑定，
-    ///    而且标记一置位就再也不会补回来。这是本函数最危险的一条路径。
-    /// 3. **本次 `load()` 的 `keys` 段被降级** → 不动。与闸二同一个失效模式，但入口不同：
-    ///    段级降级（[`Self::deserialize_with_section_fallback`]）会把有毒的 `keys` 段换成
-    ///    L1 默认，于是 `bindings` 只剩出厂绑定，而 `materialize_into` 是**无条件整表覆盖**，
-    ///    还会顺手摘掉 `input.temp_pinyin/temp_english.trigger_keys` 与 `mix_modes[].trigger_keys`
-    ///    并打上一次性版本标记 ⇒ 用户的自定义绑定**永久**没了、且再也不会重跑自愈；
-    ///    毒若恰在 `key_actions` 里还会被自己覆盖掉，现场都不剩。
-    ///
-    ///    段级降级上线**之前**这条路不存在：那时 `load()` 直接返回 `Err`，下面那个 `?`
-    ///    就是保护，`main.rs` 只 warn 一句、一个字节都不写，用户改掉毒键即可复原。降级把
-    ///    `Err` 变成了「成功但内容残缺」，保护随之失效——所以必须在这里补回来。
-    /// 4. **用户 config.toml 语法不合法** → 不动。闸三管不到它：语法错误发生在四层合并
-    ///    **之前**（`read_toml_value`），那时 `degradation` 还是干净的，闸三照常放行。
-    ///    这是真机踩中的那一条，见函数体里的说明。
-    ///
-    /// 幂等：靠 `keys.key_actions_materialized` 版本号，不靠「看起来像迁移过了」的推断。
+    /// 幂等靠 `keys.key_actions_materialized` 版本号，不靠推断。
     pub fn materialize_key_actions() -> anyhow::Result<usize> {
         // 闸一：用户配置目录不可用。
         let Some(dir) = Self::user_config_dir() else {
@@ -9711,19 +8264,10 @@ impl Config {
             return Ok(0);
         }
         let file = dir.join("config.toml");
-        // 闸四：文件在盘上但**语法不合法** → 不动。
-        //
-        // ⛔ 这里曾写着「解析失败也按空表：那种情况下用户层本就不生效，物化不会额外
-        // 丢失什么」——**那个推理是错的，且真机上引爆过**。「本次加载不生效」说的是内存里
-        // 那一份，文件里的内容一个字都没少；拿空表当种子 `to_string_pretty` 写回去，
-        // 才是真正把它删掉。用户只在 config.toml 里重复写了一个字段，重启后整份配置
-        // 变成只含 key_actions 的空壳，全程无提示。
-        //
-        // 放大器：`already_materialized(空表)` 恒为 false ⇒ 每次启动都重跑一遍。
-        //
-        // 只用严格解析、不用 `parse_toml_lenient`：本函数要做的是**整表写回**，种子必须与
-        // 盘上内容逐字节对应。容错解析救回的是「够用来读」的近似值，拿它当写回种子
-        // 等于把被跳过的行永久删除——那是另一种形态的同一个 bug。
+        // 闸四：文件在盘上但语法不合法 → 不动。不能当空表继续：本次加载不生效只是内存态，
+        // 拿空表当种子写回才真正删掉文件内容；且空表恒判为未物化，每次启动都会重跑。
+        // 只用严格解析、不用 `parse_toml_lenient`：整表写回的种子必须与盘上内容逐字节对应，
+        // 容错解析跳过的行会被永久删除。
         let mut root = match std::fs::read_to_string(&file) {
             // 文件不存在 = 新用户，按空表继续（见上文「对新用户也必须跑」）。
             Err(_) => toml::Value::Table(Default::default()),
@@ -9748,15 +8292,13 @@ impl Config {
             return Ok(0);
         }
 
-        // 权威来源 = 一次完整 `load()`：它已跑完 normalize，`key_actions` 就是当前**生效**
+        // 权威来源 = 一次完整 `load()`：它已跑完 normalize，`key_actions` 就是当前生效
         // 的那张表（四层合并 ⊕ 折算 ⊕ 「用户显式配过的不被覆盖」）。这里绝不能自己再抄
         // 一遍折算规则——抄一份就是第二个真相源，本次修的正是这类问题。
         let cfg = Self::load(data_dir.as_deref())?;
-        // 闸三：`keys` 段本次被降级过 ⇒ `key_actions` 不是用户真实的绑定，是出厂残表。
-        // 判据用 `affects` 而不是精确相等——降级粒度可以细到 `keys.key_actions` 这一层。
-        // 判据走共用的 [`ConfigDegradation::blocks_write_back`]，四条写盘闸同一份实现、
-        // 同一条日志措辞。判 `keys` 而不是 `keys.key_actions`：本函数还会顺手摘掉
-        // `input.*.trigger_keys`，而 `bindings` 的正确性依赖整个 keys 段。
+        // 闸三：`keys` 段本次被降级过 ⇒ `key_actions` 是出厂残表而非用户绑定。判据用 `affects`
+        // （降级可细到 `keys.key_actions`），走共用的 [`ConfigDegradation::blocks_write_back`]。
+        // 判 `keys` 而非 `keys.key_actions`：本函数还会摘掉 `input.*.trigger_keys`。
         if cfg
             .degradation
             .blocks_write_back("keys", "key_actions 物化")
@@ -9787,12 +8329,11 @@ impl Config {
         Self::read_toml_value_reporting(path, "", &mut Vec::new())
     }
 
-    /// [`Self::read_toml_value`] 的**带诊断**版本：语法不合法时尽量救回，并把这件事
-    /// 记进 `unparsable`（`layer` 为空则只记日志不上报，供不关心诊断的调用方复用）。
+    /// [`Self::read_toml_value`] 的带诊断版本：语法不合法时尽量救回，并记进 `unparsable`
+    /// （`layer` 为空则只记日志不上报）。
     ///
-    /// ★ 「文件不存在」与「文件语法错」必须走出不同的结果。此前两者都返回 `None`，
-    /// 于是下游的 `unwrap_or_else(空表)` 对它们一视同仁——而对前者用空表是对的，
-    /// 对后者用空表就是**拿空表当种子覆盖用户配置**。本仓真机踩中的正是这一条。
+    /// 「文件不存在」与「文件语法错」必须走出不同的结果：下游对前者用空表是对的，
+    /// 对后者用空表就是拿空表当种子覆盖用户配置。
     fn read_toml_value_reporting(
         path: &Path,
         layer: &'static str,
@@ -9840,8 +8381,7 @@ impl Config {
             .as_ref()
             .and_then(|v| v.as_table())
             .map_or(0, |t| t.len());
-        // WARN 而非此前的 INFO：整层配置失效是**异常**。压成 INFO 的代价本仓已经付过——
-        // 用户配置被整表重写，而唯一的线索是一行默认不打印的 INFO。
+        // WARN 而非 INFO：整层配置失效是异常，默认不打印的 INFO 会让它无迹可查。
         if let Some(err) = &parsed.first_error {
             warn!(
                 "配置文件语法不合法 {}：{}（已跳过 {} 行，救回 {} 个顶层段）",
@@ -9864,14 +8404,10 @@ impl Config {
         parsed.value
     }
 
-    /// 反序列化后的归一化：修正无效值（如 per_page=0 视为未设置，回退默认）。
-    /// 归一化 + 存量迁移。**幂等**，且必须挂在「所有配置生效的必经之路」上，
-    /// 而不是只在 `load()` 里调一次。
+    /// 归一化 + 存量迁移（如 per_page=0 视为未设置）。幂等。
     ///
-    /// ★ 教训：迁移最初只在 `load()` 里跑，于是 `refresh_config_in_memory`
-    /// （设置页改配置后的生产路径，直接重建 bundle）拿到的 cfg 没经过折算——
-    /// 而消费点已改成只读新表，表现是「在设置页保存一次，引导键就全失效」。
-    /// 现由 `ConfigBundle::build` 统一调用，那是配置生效的单一入口。
+    /// 必须挂在所有配置生效的必经之路上，由 `ConfigBundle::build` 统一调用，而不只在 `load()`：
+    /// `refresh_config_in_memory` 直接重建 bundle，漏掉折算会让引导键在设置页保存后全部失效。
     pub fn normalize(&mut self) {
         if self.ui.candidate.per_page == 0 {
             self.ui.candidate.per_page = default_per_page();
@@ -9879,24 +8415,20 @@ impl Config {
         self.migrate_quick_mix_pinyin_member();
         self.migrate_quick_input_legacy_member();
         self.migrate_letter_trigger_keys();
-        // 须在 migrate_letter_trigger_keys **之后**：那一步先把字母项摘干净，
+        // 须在 migrate_letter_trigger_keys 之后：那一步先把字母项摘干净，
         // 这里看到的 trigger_keys 已只剩符号键。
         self.migrate_trigger_keys_into_key_actions();
         self.warn_legacy_schema_hotkeys();
-        // ⛔ 这里**不再**把四组键组配置折算进 `session_actions`。折算是**消费层的视图**，
-        // 不是存储层的改写——见 `KeysConfig::effective_session_actions` 的文档。
+        // 这里不把四组键组配置折算进 `session_actions`：折算是消费层的视图，不是存储层的改写，
+        // 见 `KeysConfig::effective_session_actions`。
         self.warn_legacy_special_modes();
     }
 
-    /// 残留的 `schema.special_modes` 告警（**不迁移**，见 `docs/redesign/overlay-mode-config.md` §5）。
+    /// 残留的 `schema.special_modes` 告警（不迁移，见 `docs/redesign/overlay-mode-config.md` §5）。
     ///
-    /// 该键已废弃：实例集合改由「带 `[overlay]` 段的已安装方案」定义。刻意不做自动迁移——
-    /// 呈现字段的新家是 `schema_overrides/{id}.toml`，而本函数所在的 `normalize` 是
-    /// **零 IO、幂等、纯内存**的（五c 立的口径：不写盘，回退一版就能工作），写盘型迁移要
-    /// 另起一套「一次性副作用 + 迁移状态标记」的机制，代价远超它能省下的那几行手工配置。
-    ///
-    /// 但也**不能静默丢弃**：用户的 config.toml 里那一段还在，看起来像仍然生效。
-    /// 一条 warn 是「让失效可见」的最低成本手段——这正是本仓反复栽过的「配了没反应」那类。
+    /// 该键已废弃，实例集合改由带 `[overlay]` 段的已安装方案定义。不做自动迁移：新家在
+    /// `schema_overrides/{id}.toml`，而 `normalize` 是零 IO、幂等、纯内存的，写盘型迁移代价过高。
+    /// 但不能静默丢弃，warn 让「配了没反应」可见。
     fn warn_legacy_special_modes(&mut self) {
         if self.schema.legacy_special_modes.is_empty() {
             return;
@@ -9927,15 +8459,11 @@ impl Config {
         self.schema.legacy_special_modes.clear();
     }
 
-    /// 残留的 `keys.schema_hotkeys` 告警（**不迁移**）。
+    /// 残留的 `keys.schema_hotkeys` 告警（不迁移）。
     ///
-    /// 该键已废弃：方案直达热键并入 `keys.key_actions` 的 `switch_schema:<方案id>`。
-    /// 刻意不做自动折算——保留一条兼容路径的代价是永远要维护两套配置形态的等价性，
-    /// 而它能省下的只是用户手改两行。处置与 [`Self::warn_legacy_special_modes`] 一致。
-    ///
-    /// 但也**不能静默丢弃**：用户的 config.toml 里那一段还在，看起来像仍然生效。
-    /// 一条 warn 是「让失效可见」的最低成本手段——「配了没反应且查不到原因」正是本仓
-    /// 反复栽过的那类缺陷，而这里恰好是唯一能让它可见的时机。
+    /// 该键已废弃，方案直达热键并入 `keys.key_actions` 的 `switch_schema:<方案id>`。不做折算：
+    /// 保留兼容路径要永远维护两套形态的等价性。处置同 [`Self::warn_legacy_special_modes`]，
+    /// warn 让失效可见。
     fn warn_legacy_schema_hotkeys(&mut self) {
         if self.keys.legacy_schema_hotkeys.is_empty() {
             return;
@@ -9963,45 +8491,22 @@ impl Config {
 
     /// 存量迁移：四处 `trigger_keys` → `keys.key_actions`（设计文档五c「全局层收编」）。
     ///
-    /// 折算在**内存里**做，不写回配置文件：与本文件其余 `migrate_*` 同策略。用户的
-    /// config.toml 保持原样，回退一个版本就能照常工作；旧字段的真正消失发生在用户下次
-    /// 用设置页保存时（GUI 按新的工作态全量写回）。
+    /// 只在内存里折算、不写回，与其余 `migrate_*` 同策略：回退一个版本仍能工作，旧字段在用户
+    /// 下次用设置页保存时消失。
     ///
-    /// # 冲突处置：先到先得，顺序必须复现 `try_activate_mode` 的**真实**调用顺序
+    /// 冲突处置为先到先得，顺序必须复现 `try_activate_mode` 的真实顺序：
+    /// 临英 > 临拼 > special > mix（见 `handle_lifecycle.rs`），以代码为准；顺序错了，同一个键
+    /// 配给多处的用户升级后会进错模式。未中选的几处也清空，免得留下静默失效的配置。
+    /// 已在 `keys.key_actions` 显式配过的键不覆盖。
     ///
-    /// ★ 那个顺序是 **临英 > 临拼 > special > mix**（`handle_lifecycle.rs` 里依次是
-    /// 临英触发键 → 临拼触发键 → 特殊模式 → mix）。设计文档 §1 曾写成
-    /// 「临英 > 快捷输入 > 临拼 > 特殊模式」，**是错的**——照那个顺序迁移会让
-    /// 「`;` 同时配给 mix 和临拼」的用户在升级后进错模式，且现象是「一直用的键突然
-    /// 变了功能」，极难联想到是迁移干的。以代码为准，不以文档为准。
-    ///
-    /// 同一个键被多处占用时，未中选的那几处也要清空——留在配置里同样是静默失效，
-    /// 而用户会以为它还生效（这正是本次收编要消除的问题之一）。
-    ///
-    /// 已在 `keys.key_actions` 里显式配过的键**不覆盖**：用户的新配置优先于存量迁移。
-    ///
-    /// # ⚠️ 它让 `key_actions` 成为**跨段折算**的产物（降级判据要知道这件事）
-    ///
-    /// 来源里的 `input.temp_english.trigger_keys` 一类住在 **`input` 段**，折算目标在
-    /// `keys` 段。于是段级降级把 `input` 换成出厂值时，`keys.key_actions` 里由本函数
-    /// 填进去的那几条也一起变成出厂值，而 `degradation.sections` 记的是 `input.*`——
-    /// 任何「只问 `keys.*`」的判据都够不着。
-    ///
-    /// 已知的消费者是 `wind-webdata` 的 `keys_overview`（设置页按键总览），它**刻意
-    /// 不把 `input` 段拉进判据**：本函数只对 `key_actions_materialized < VERSION` 的
-    /// 存量用户跑一次，是过渡态，而拉进去的代价是「存量用户 `input` 段一坏，按键总览
-    /// 整片消失」。这条取舍记在这里，是为了让下一个动本函数的人知道它有这么一个
-    /// 「跨段」的性质——**别把新的折算来源加成常驻的**，那会让上面那个取舍不再成立。
+    /// 它让 `key_actions` 成为跨段折算的产物：来源住在 `input` 段，段级降级换掉 `input` 时，
+    /// 这几条也随之变成出厂值，而只问 `keys.*` 的降级判据够不着。`wind-webdata` 的
+    /// `keys_overview` 刻意不把 `input` 拉进判据，前提是本折算只对未物化的存量用户跑一次；
+    /// 别把新的折算来源加成常驻的。
     fn migrate_trigger_keys_into_key_actions(&mut self) {
-        // ★ 已物化：`key_actions` 是唯一真相源，本折算必须彻底让位。
-        //
-        // 折算在这里多跑一次的代价不是「白做功」而是「复活用户删掉的绑定」：折算的守卫
-        // 只有 `key_actions.contains_key(k)`，它区分不了「用户配过别的」与「用户删掉了它」，
-        // 于是每次加载都把出厂绑定重新灌回去（见 `materialize_key_actions` 的文档）。
-        //
-        // 仍要清空 `trigger_keys`：`normalize()` 之后「trigger_keys 恒为空」是既有的
-        // 后置条件，消费端一律读 `key_actions`（handle_temp.rs / handle_mode.rs 等处的
-        // 注释均已声明不再读它）。留着非空值会让日后有人误以为它还是活的。
+        // 已物化：`key_actions` 是唯一真相源，本折算必须让位，否则守卫 `contains_key` 分不清
+        // 「配过别的」与「删掉了」，会复活用户删掉的绑定。仍要清空 `trigger_keys`，
+        // 维持 `normalize()` 后「trigger_keys 恒为空」的后置条件。
         if self.keys.key_actions_materialized >= KEY_ACTIONS_MATERIALIZE_VERSION {
             self.clear_all_trigger_keys();
             return;
@@ -10043,7 +8548,7 @@ impl Config {
             "rare_char".to_string(),
             "input.rare_char",
         );
-        // 特殊模式**不在此折算**：它的实例已不来自 `schema.special_modes`，引导键与直达
+        // 特殊模式不在此折算：它的实例已不来自 `schema.special_modes`，引导键与直达
         // 热键直接写在 `keys.key_actions` 里（`special:<方案id>`）。残留旧配置由
         // `warn_legacy_special_modes` 告警，不做迁移（见设计文档 §5）。
         for m in self.schema.mix_modes.iter_mut() {
@@ -10065,21 +8570,15 @@ impl Config {
                 debug!("配置迁移：{key:?} 已在 keys.key_actions 显式配置，保留用户设置");
                 continue;
             }
-            // debug 而非 info：本函数是**每次 `Config::load` 都跑的内存内归一化**（折算结果
-            // 不写回磁盘），故只要用户配置里还留着 trigger_keys，这两行就会在每一次读配置时
-            // 原样重复。按 info 打印会让日志看起来像「同一件事被反复做了 N 遍」——2026-08-12
-            // 就因此把「设置保存时 4 次配置全量重载」误判成服务端有冗余（实测每个 RPC 各加载
-            // 一次，本就如此）。真正异常的两种情况（键名解析不了 / 多处争用同一键）仍是 warn。
+            // debug 而非 info：本折算每次 `Config::load` 都跑且不写回，info 会让日志看起来像同一件事
+            // 被反复做了 N 遍。真正异常（键名解析不了 / 多处争用）仍是 warn。
             debug!("配置迁移：引导键 {key:?} → keys.key_actions = {action:?}");
             self.keys.key_actions.insert(key, action);
         }
     }
 
-    /// 清空六处 `trigger_keys`（内存态）。
-    ///
-    /// 维持 `normalize()` 的后置条件「折算之后 trigger_keys 恒为空」——已物化的用户走的是
-    /// 屏蔽分支，不再有 `drain` 把它们取走，须在此显式清掉。**只动内存**：磁盘上 L2 的
-    /// `trigger_keys` 是出厂声明处（设置页「恢复默认」按 capability 读它），必须留着。
+    /// 清空六处 `trigger_keys`（内存态），维持 `normalize()` 后置条件「trigger_keys 恒为空」。
+    /// 只动内存：磁盘上 L2 的 `trigger_keys` 是「恢复默认」读取的出厂声明处，必须留着。
     fn clear_all_trigger_keys(&mut self) {
         self.input.temp_english.trigger_keys.clear();
         self.input.temp_pinyin.trigger_keys.clear();
@@ -10091,16 +8590,9 @@ impl Config {
 
     /// 存量迁移：`trigger_keys` 里的单字母 → 方案级 [`BoundAction`]。
     ///
-    /// 引导键曾接受任意 a-z（`key_name_to_vk_with_letters`），字母的特殊能力现已收归
-    /// `schema.codetable.z_key_action`。**必须显式迁移**：解析端改成只认符号后，
-    /// `filter_map` 会把留在配置里的字母**静默丢弃**——用户的功能无声消失，且配置文件里
-    /// 那行还在，从现象完全看不出原因。
-    ///
-    /// `z` 折算成对应 action，其余字母只能丢弃（本项只管 z）——但要 `warn` 出来，
-    /// 让日志里留下痕迹。
-    ///
-    /// 归属优先级与老的模式激活链一致（临拼 > 特殊模式 > mix）：z 同时配在多处时，
-    /// 老实现里也是临拼先匹配。已显式配过 `z_key_action` 的不覆盖——用户的新配置优先。
+    /// 字母的特殊能力已收归 `schema.codetable.z_key_action`，解析端只认符号，不迁移字母就会被
+    /// `filter_map` 静默丢弃。`z` 折算成对应 action，其余字母丢弃并 `warn`。
+    /// 归属优先级同老的模式激活链（临拼 > 特殊模式 > mix）；已显式配过 `z_key_action` 的不覆盖。
     fn migrate_letter_trigger_keys(&mut self) {
         /// 摘掉 `keys` 里的所有单字母项，返回其中是否含 `z`。
         fn take_letters(keys: &mut Vec<String>, owner: &str) -> bool {
@@ -10161,10 +8653,8 @@ impl Config {
 
     /// 存量迁移：合并成员 `"quick_input"` → 细分来源 [`wind_quick_input::LEGACY_EXPANSION`]。
     ///
-    /// 快捷输入的四个来源（计算/日期/数字/重复）曾是一个不可分的成员，无法单独开关。
-    /// 拆分后旧值在原位展开，顺序与展开序一致——存量用户的候选序不变，只是从此可增删。
-    /// 对**所有** mix 生效（不限内置 quick_mix）：`"quick_input"` 是保留 id，任何 mix 里
-    /// 出现都只可能是这个含义。
+    /// 旧值在原位展开，顺序与展开序一致，存量用户的候选序不变。对所有 mix 生效：
+    /// `"quick_input"` 是保留 id，只可能是这个含义。
     fn migrate_quick_input_legacy_member(&mut self) {
         for m in self.schema.mix_modes.iter_mut() {
             let Some(at) = m
@@ -10186,10 +8676,8 @@ impl Config {
 
     /// 存量迁移：内置 `quick_mix` 的字面 `"pinyin"` 成员 → [`MIX_MEMBER_PRIMARY_PINYIN`] 占位符。
     ///
-    /// 背景：`members` 从未开放给用户（无 UI、data/config.toml 无 mix_modes 段），但设置页改
-    /// 「快捷输入激活键」时会把整个 mix_modes 数组连同 members 写回用户配置。故存量用户配置里的
-    /// 字面 `"pinyin"` 必是旧默认值残留、而非「就要全拼」的用户意图，替换为占位符是安全的。
-    /// 只认内置 quick_mix：用户自定义 mix 的字面 id 一律精确解释，不动。
+    /// `members` 从未开放给用户，存量配置里的字面 `"pinyin"` 只可能是设置页整组写回时带出的
+    /// 旧默认值，替换是安全的。用户自定义 mix 的字面 id 一律精确解释，不动。
     fn migrate_quick_mix_pinyin_member(&mut self) {
         for m in self
             .schema
@@ -10213,9 +8701,8 @@ impl Config {
 
     /// 宿主显式注入的 `(用户配置目录, 本地目录)`；没注入为 `None`（桌面恒如此）。
     ///
-    /// 给没有「漫游 / 本地」known folder 的平台用（Android 由宿主传入：用户目录放在用户文件
-    /// 管理器可达的位置，缓存与日志留在私有目录）。优先于便携、`datadir.conf` 与系统目录，
-    /// 取代此前靠改 `XDG_*` 环境变量骗 `dirs` crate 的做法。
+    /// 给没有「漫游 / 本地」known folder 的平台用（如 Android：用户目录放在文件管理器可达处，
+    /// 缓存与日志留在私有目录）。优先于便携、`datadir.conf` 与系统目录。
     fn dir_override() -> Option<(PathBuf, PathBuf)> {
         DIR_OVERRIDE.read().ok().and_then(|g| g.clone())
     }
@@ -10233,7 +8720,7 @@ impl Config {
     /// - 自定义数据目录（安装向导选定，落 `datadir.conf`）：该目录本身
     /// - 正常模式：漫游 `%APPDATA%\WindInput[Dev]`（随用户在多设备间同步）
     ///
-    /// 三者优先级即上述顺序。注意自定义目录**只影响本函数**——`local_dir()` 系
+    /// 三者优先级即上述顺序。注意自定义目录只影响本函数——`local_dir()` 系
     /// （cache / logs / state.toml）不跟随，详见 `variant::custom_userdata_dir`。
     pub fn user_config_dir() -> Option<PathBuf> {
         if let Some((user, _)) = Self::dir_override() {
@@ -10248,16 +8735,11 @@ impl Config {
         dirs::config_dir().map(|d| d.join(Self::app_dir_name()))
     }
 
-    /// 「用户配置目录取不到」时的错误文本——**把进程自己已经知道的事实写进去**。
+    /// 「用户配置目录取不到」时的错误文本，写进进程已知的事实（便携与否、安装根）。
     ///
-    /// 原文只有一句 `no user config dir`，它一路透传到设置页的「保存失败」气泡上。
-    /// 用户看不懂，维护者也无从判断，只能回头问「你是怎么装的、用户目录在哪」
-    /// （issue #120 的真实过程）——而这些事实全都在本进程手边。
-    ///
-    /// [`Self::user_config_dir`] 只有两条出口能返回 `None`，本函数按同样的分支给话术：
-    /// 便携模式下取不到安装根，或非便携下漫游 AppData 已知文件夹解析失败。
-    /// **`datadir.conf` 非法 / 目录建不出来一律回落默认、不会走到这里**，
-    /// 所以不能把它写成「你的自定义数据目录有问题」——那会把排查引向错误方向。
+    /// [`Self::user_config_dir`] 只有两条出口返回 `None`：便携模式取不到安装根，或非便携下漫游
+    /// AppData 解析失败。`datadir.conf` 非法 / 目录建不出来都回落默认、不会走到这里，
+    /// 所以话术不能指向自定义数据目录。
     fn no_user_config_dir_error() -> anyhow::Error {
         if crate::variant::is_portable() {
             return anyhow::anyhow!(
@@ -10274,10 +8756,8 @@ impl Config {
 
     /// 探测用户配置目录当前是否可用。纯查询，无副作用、不重试。
     ///
-    /// 判据刻意建在**漫游根目录**而非 `config.toml` 上：漫游根一旦可用，
-    /// 「我们的目录/文件在不在」就是确定性事实（全新安装本就没有 config.toml，
-    /// 它只在用户首次改设置时由 `set_user_value` 创建）。把判据建在文件上会让
-    /// 每个全新用户白等一个完整超时。
+    /// 判据建在漫游根目录而非 `config.toml` 上：全新安装本就没有 config.toml，
+    /// 建在文件上会让每个新用户白等一个完整超时。
     pub fn probe_user_config() -> UserConfigProbe {
         if crate::variant::is_portable() {
             return match crate::variant::portable_userdata_dir() {
@@ -10303,8 +8783,8 @@ impl Config {
         let dir = root.join(Self::app_dir_name());
         let file_exists = dir.join("config.toml").is_file();
         if !file_exists && Self::user_config_seen() {
-            // 看不到 config.toml，但本地标记说这用户此前确有配置：开机早期漫游
-            // profile 还没挂载完的竞态。继续等，别退回系统预置。
+            // 看不到 config.toml，但本地标记说这用户确有配置：开机早期漫游 profile 还没挂载完的竞态。
+            // 继续等，别退回系统预置。
             return UserConfigProbe::ConfigPending { dir };
         }
         UserConfigProbe::Ready {
@@ -10314,19 +8794,12 @@ impl Config {
         }
     }
 
-    /// 本地「用户配置曾存在」标记文件路径
-    /// （`%LOCALAPPDATA%\WindInput[Dev]\user_config.seen`）。
+    /// 本地「用户配置曾存在」标记文件路径（`%LOCALAPPDATA%\WindInput[Dev]\user_config.seen`）。
     ///
-    /// 放 `%LOCALAPPDATA%`（非漫游）是关键：它登录即挂载、不受漫游延迟影响
-    /// （日志能写出就是证据），故能可靠仲裁那个「可能迟到」的漫游 `config.toml`。
-    ///
-    /// ★ **便携模式恒 `None`**：整套机制只为仲裁漫游挂载竞态，而便携那一档的用户目录
-    /// 就在 exe 边上、不经漫游——[`Self::probe_user_config`] 第一个分支即返回 `Portable`，
-    /// **永远读不到这个标记**。偏偏 [`Self::local_dir`] 在便携下指向 `userdata/`，于是写端
-    /// 会在用户眼皮底下造一个从来没人读的文件（论坛 t150 的原帖就是在问它是什么、能不能删）。
-    ///
-    /// 闸门收在**路径这一处**而不是写端：读写两端共用它，加在写端只挡住了当下那一个调用点，
-    /// 日后任何新读者都会重新踩进来。已经落在老便携包里的那个文件删掉即可，程序不再生成。
+    /// 放非漫游目录：它登录即挂载，能可靠仲裁可能迟到的漫游 `config.toml`。
+    /// 便携模式恒 `None`：便携不经漫游，[`Self::probe_user_config`] 永远读不到它，而
+    /// [`Self::local_dir`] 指向用户可见目录，写了只会造出无人读的文件。闸门放在路径这一处，
+    /// 读写两端与日后新调用点都能挡住。
     fn user_config_marker_path() -> Option<PathBuf> {
         if crate::variant::is_portable() {
             return None;
@@ -10344,10 +8817,8 @@ impl Config {
 
     /// 若本用户当前确有 `config.toml`（即定制过设置），落下本地标记（幂等）。
     ///
-    /// **只应由服务启动路径调用一次**，绝不放进 [`load`](Self::load)：`load()` 在
-    /// 热重载/RPC 上高频调用、且被单元测试直接执行，从中写盘会污染真实
-    /// `%LOCALAPPDATA%`。写标记是「观察到真实用户配置」后的一次性副作用，
-    /// 收敛在服务二进制里。
+    /// 只应由服务启动路径调用一次，绝不放进 [`load`](Self::load)：`load()` 在热重载/RPC 上高频
+    /// 调用，且被单元测试直接执行，从中写盘会污染真实 `%LOCALAPPDATA%`。
     pub fn mark_user_config_seen_if_present() {
         // 只有确实看得到用户 config.toml 时才记；看不到就不记，避免把
         // 「漫游没挂载」误记成「用户有配置」而污染下次判断。
@@ -10374,11 +8845,8 @@ impl Config {
 
     /// 阻塞等待用户配置目录就绪，最多 `timeout`。返回是否就绪。
     ///
-    /// 只应在服务启动早期调用一次，且必须在 logger 初始化之后——否则探测日志全部丢失。
-    /// **不要**放进 `load()`：热重载与 RPC 也走 `load()`，在那些线程上阻塞会卡住输入。
-    ///
-    /// 超时后仍继续启动（降级为系统预置配置），不死等：输入法晚几秒可用尚可接受，
-    /// 完全起不来不可接受。
+    /// 只应在服务启动早期、logger 初始化之后调用一次。不要放进 `load()`：热重载与 RPC
+    /// 也走 `load()`，阻塞会卡住输入。超时后降级为系统预置配置继续启动，不死等。
     pub fn wait_user_config_ready(timeout: std::time::Duration) -> bool {
         Self::wait_until_settled(
             Self::probe_user_config,
@@ -10387,10 +8855,8 @@ impl Config {
         )
     }
 
-    /// [`Self::wait_user_config_ready`] 的可注入内核：探测源与轮询间隔都是参数。
-    ///
-    /// 抽出来是为了能测重试路径——真机上漫游根几乎总是就绪，重试分支在开发机
-    /// 永远走不到，而它恰恰是这个修复的目的所在，不能靠「上真机重启一次」来验证。
+    /// [`Self::wait_user_config_ready`] 的可注入内核：探测源与轮询间隔都是参数，
+    /// 以便测试开发机上走不到的重试分支。
     fn wait_until_settled(
         mut probe_fn: impl FnMut() -> UserConfigProbe,
         timeout: std::time::Duration,
@@ -10435,40 +8901,25 @@ impl Config {
         }
     }
 
-    /// 用户覆盖命中时的统一日志打点。
-    ///
-    /// 「用户目录同名文件整体替代安装目录自带文件」这条能力散落在多个解析函数里
-    /// （方案文件 / 词库 / 方案附属资源 / 双拼布局 / 主题 / 数据根文件），各函数的回退
-    /// 级数还不一样。排查「同一版程序、这台机器行为和出厂不一致」时，唯一可靠的线索就是
-    /// 「当时到底加载了哪个文件」——故所有解析点一律经此打点、共用同一措辞，便于按
-    /// `覆盖生效` 一次 grep 出全部生效的覆盖（`wind-theme` 的 `用户覆盖生效[theme]` 也含
-    /// 这个子串，故一条 grep 仍能全覆盖）。
+    /// 用户覆盖命中时的统一日志打点，[`Self::log_layer_override`] 的用户层专用入口，
+    /// 留给自己实现多级回落的解析点（`wind-engine` 的方案/词库解析）。
     ///
     /// `kind` 是资源类别（`schema` / `dict` / `resource` / `shuangpin` / `theme` / `data`），
-    /// `rel` 是方案/数据根下的相对路径。**只在命中用户层时调用**：未覆盖的默认安装
-    /// 不产生任何日志，故日志里出现即异常排查线索。
+    /// `rel` 是方案/数据根下的相对路径。只在命中用户层时调用，未覆盖的默认安装不产生日志。
+    /// 所有解析点共用 `覆盖生效` 措辞（`wind-theme` 的 `用户覆盖生效[theme]` 也含此子串），
+    /// 一次 grep 即可列出全部生效的覆盖。
     ///
-    /// `shadowed` 区分命中用户层的两种情形，**不可省**：安装目录也有同名文件时才是真的
-    /// 「覆盖自带数据」（记 info，排查目标）；安装目录没有时只是第三方方案自带资源走用户
-    /// 目录（记 debug）。二者都打 info 的话，一个第三方方案的几十个词库会把真正的覆盖淹掉。
-    ///
-    /// 这是 [`Self::log_layer_override`] 的**用户层专用**入口，保留给自己实现多级回落
-    /// 的解析点（`wind-engine` 的方案/词库解析）。多层解析请直接用带层名的那个。
+    /// `shadowed` 不可省：安装目录也有同名文件才是真覆盖（info）；没有时只是第三方方案资源
+    /// 走用户目录（debug），否则几十个词库会把真正的覆盖淹掉。
     pub fn log_user_override(kind: &str, rel: &str, path: &Path, shadowed: bool) {
         Self::log_layer_override("user", kind, rel, path, shadowed);
     }
 
     /// 覆盖命中时的统一日志打点，`layer` 为命中的层名（`user` / `custom` / `data`）。
     ///
-    /// 加层之后「覆盖生效」不再是二值的：同一个文件名可能来自用户层，也可能来自定制版
-    /// 自带的 `data_custom/`。排查「这台机器行为和出厂不一致」时，只知道「被覆盖了」而不
-    /// 知道**被谁**覆盖，等于把定制版和用户个人设置这两类完全不同的原因混成一团。
-    ///
-    /// 措辞统一为 `覆盖生效[层][类别]`，可按 `覆盖生效` 一次 grep 出全部生效的覆盖，
-    /// 也可按 `覆盖生效[custom]` 只看定制版带来的差异。
-    ///
-    /// `layer == "data"`（出厂自带、无人覆盖）**不打点**：那是绝大多数文件的常态，
-    /// 打了就是刷屏，且日志里"出现即线索"这条性质会随之失效。
+    /// 措辞统一为 `覆盖生效[层][类别]`，可按 `覆盖生效` grep 全部覆盖，或按 `覆盖生效[custom]`
+    /// 只看定制版带来的差异。`layer == "data"` 不打点：那是常态，打了就刷屏，
+    /// 「出现即线索」的性质也随之失效。
     pub fn log_layer_override(layer: &str, kind: &str, rel: &str, path: &Path, shadowed: bool) {
         if layer == "data" {
             return;
@@ -10493,11 +8944,8 @@ impl Config {
     }
 
     /// 「靠前的层优先、逐层回落」的解析内核。`sub` 为各层共同的子目录
-    /// （方案类资源传 `Some("schemas")`，数据根文件传 `None`）。
-    ///
-    /// 层序来自 [`Self::resource_layers_with`]：`user > custom > data`。
-    /// [`Self::resolve_data_file`] / [`Self::resolve_schema_resource`] 自动继承定制层，
-    /// 这也是本计划改动量小的原因——单文件读取绝大部分都经过这里。
+    /// （方案类资源传 `Some("schemas")`，数据根文件传 `None`）。层序来自
+    /// [`Self::resource_layers_with`]：`user > custom > data`。
     fn resolve_overridable(
         data_dir: Option<&Path>,
         sub: Option<&str>,
@@ -10519,7 +8967,7 @@ impl Config {
             if !p.is_file() {
                 continue;
             }
-            // `shadowed` = 「确实盖住了更靠后的某一层」，判据必须看**全部**后续层：
+            // `shadowed` = 「确实盖住了更靠后的某一层」，判据必须看全部后续层：
             // 用户层盖住 custom 层同样是「覆盖了自带数据」，只看 data 层会把它记成
             // 第三方自带资源（debug），于是定制版上最该被看见的那类覆盖反而不进日志。
             let shadowed = layers[i + 1..].iter().any(|b| under(&b.path).is_file());
@@ -10537,15 +8985,12 @@ impl Config {
         Self::resolve_overridable(data_dir, Some("schemas"), rel, "resource")
     }
 
-    /// 列出 `schemas/<sub>/` 下所有以 `suffix` 结尾的文件，**各层合并、靠前的层遮蔽同名者**。
+    /// 列出 `schemas/<sub>/` 下所有以 `suffix` 结尾的文件，各层合并、靠前的层遮蔽同名者。
     ///
-    /// 返回 `(相对 schemas/ 的路径, 绝对路径)`，按文件名字典序。相对路径用 `/` 分隔 ——
-    /// 它要写进配置（`[[ui.comment_dicts]].path`）并跨平台读回，反斜杠会在 TOML 里再撞一次
-    /// 转义。解析回来时 `Path::join` 两种分隔符都认，写出去只用一种。
-    ///
-    /// 与 [`Self::resolve_schema_resource`] 是同一层序的两面：那个回答「这个名字是哪一层
-    /// 的」，这个回答「一共有哪些名字」。设置页要列出可选项，必须用后者 —— 用前者只能
-    /// 验证用户已经手打对了的路径，那正是本函数要消掉的那步。
+    /// 返回 `(相对 schemas/ 的路径, 绝对路径)`，按文件名字典序。相对路径用 `/` 分隔：它要写进
+    /// 配置（`[[ui.comment_dicts]].path`）并跨平台读回，反斜杠会在 TOML 里撞转义。
+    /// 与 [`Self::resolve_schema_resource`] 同一层序：那个答「这个名字在哪一层」，这个答
+    /// 「一共有哪些名字」，设置页列可选项用后者。
     pub fn list_schema_resource_dir(
         data_dir: Option<&Path>,
         sub: &str,
@@ -10574,12 +9019,10 @@ impl Config {
         out
     }
 
-    /// 解析**数据根**下的程序自带文件（`system.phrases.toml` / `pinyin_map.txt` 等）：
-    /// 用户配置目录同名文件整体替代，回落安装目录 `data_dir/`。两处均无返回 None。
+    /// 解析数据根下的程序自带文件（`system.phrases.toml` / `pinyin_map.txt` 等）：
+    /// 按 `user > custom > data` 逐层找，整体替换语义（不做键级合并）。各层均无返回 None。
     ///
-    /// 与 [`Self::resolve_schema_resource`] 的差别只在根少一层 `schemas/`。这类文件是
-    /// **整体替换**语义（不做键级合并）——合并语义只有 `config.toml`（四层）与
-    /// `compat.toml`（字段级）两处，它们各有专用加载器，不走本函数。
+    /// 合并语义只有 `config.toml`（四层）与 `compat.toml`（字段级）两处，各有专用加载器，不走本函数。
     pub fn resolve_data_file(data_dir: Option<&Path>, rel: &str) -> Option<PathBuf> {
         Self::resolve_overridable(data_dir, None, rel, "data")
     }
@@ -10613,15 +9056,11 @@ impl Config {
         out
     }
 
-    /// 把**语法不合法**的配置原件另存一份，返回备份路径。
+    /// 把语法不合法的配置原件另存一份，返回备份路径。
     ///
-    /// 命名 `config.toml.corrupt-<YYYYMMDD-HHMMSS>.bak`，与原文件同目录——放同目录是为了
-    /// 让用户在「打开配置文件夹」时一眼看到它，扔进临时目录等于没备份。
-    ///
-    /// 内容由调用方传入而不是在这里重读：调用方刚读过，重读既多一次 IO，又打开了
-    /// 「读到的与备份的不是同一份」的竞态窗口。
-    ///
-    /// 失败只告警不中断：备份失败不该连累用户这次保存操作本身。
+    /// 命名 `config.toml.corrupt-<YYYYMMDD-HHMMSS>.bak`，与原文件同目录，便于用户在配置文件夹里
+    /// 看到。内容由调用方传入，避免重读的 IO 与「读到的与备份的不是同一份」的竞态。
+    /// 失败只告警，返回 `None`。
     fn backup_corrupt_config(file: &Path, content: &str) -> Option<PathBuf> {
         let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
         let name = format!(
@@ -10641,22 +9080,13 @@ impl Config {
         }
     }
 
-    /// 把单个配置项**部分合并**写入用户层 `config.toml`（%APPDATA%/WindInput/config.toml）。
+    /// 把单个配置项部分合并写入用户层 `config.toml`。只改 `path` 指定的项、保留文件里其它项，
+    /// 不写入未改动的默认/系统段。原子写（tmp + rename）。`path` 如 `["ui","candidate","preedit_display"]`。
     ///
-    /// 只改 `path` 指定的项、保留用户文件里其它已有项，**不写入未改动的默认/系统段**——
-    /// 用户层维持最小 diff，避免覆盖系统层/默认层的后续更新。
-    /// 原子写（tmp + rename）。`path` 如 `["ui","candidate","preedit_display"]`。
-    ///
-    /// ★ **值等于出厂默认（L1⊕L2⊕L2.5）时删除该键，而不是写入**（见
-    /// [`preset_for_pruning`](Self::preset_for_pruning)）。这条收口是上面那句「避免覆盖后续更新」
-    /// 唯一的兑现方式：此前无论值是什么都照写，用户把开关点回默认位就在用户层留下一个显式值，
-    /// 从此**永久钉死、不再跟随 L1/L2 的后续变更**。真机实测一份用户配置 105 个键里 62 个是这种
-    /// 冗余键，其中 `schema.mix.auto_commit_block_on_pinyin` 已经引爆：它在默认值还是 `false` 的
-    /// 版本被写入，之后默认改回 `true`，该用户却一直停在 `false`，顶码的拼音保护被静默卸掉。
-    ///
-    /// 语义取舍：加了这条之后，「用户显式选了与默认相同的值」无法与「跟随默认」区分。对配置系统
-    /// 而言后者才是正确语义；若将来要支持「锁定某值不随升级变化」（pin），需要另设表达方式，
-    /// **不要**靠退回「照原样写入」来实现——那等于把这 62 颗雷再埋回去。
+    /// 值等于出厂默认（L1⊕L2⊕L2.5，见 [`preset_for_pruning`](Self::preset_for_pruning)）时删除该键
+    /// 而不是写入：否则点回默认位就留下显式值，从此不再跟随默认值的后续变更。
+    /// 代价是「显式选了与默认相同的值」无法与「跟随默认」区分；若将来要支持锁定某值（pin），
+    /// 需另设表达方式，不要退回「照原样写入」。
     pub fn set_user_value(path: &[&str], value: toml::Value) -> anyhow::Result<()> {
         if path.is_empty() {
             anyhow::bail!("set_user_value: empty path");
@@ -10665,26 +9095,14 @@ impl Config {
         std::fs::create_dir_all(&dir)?;
         let file = dir.join("config.toml");
 
-        // 读现有用户层（partial）。
-        //
-        // ★ 这里与 [`Self::materialize_key_actions`] 的处置**刻意不同**，因为触发者不同：
-        // 那边是后台自动跑的（用户没要求任何事），语法不合法就什么都不做最安全；这边是
-        // 用户刚在设置页点了保存，直接不写会变成「点了没反应」——本仓反复栽过的那一类。
-        //
-        // 故走三步：容错解析救回尽量多的内容 → **先把原件备份出去** → 拿救回的部分当种子写回。
-        // 备份是这条路径能成立的前提：写回会永久丢掉被跳过的那几行，没有备份就是数据损毁。
+        // 读现有用户层。语法不合法时的处置与 [`Self::materialize_key_actions`] 刻意不同：
+        // 那边是后台自动跑，什么都不做最安全；这边是用户主动保存，不写就是「点了没反应」。
+        // 故：容错解析救回尽量多的内容 → 先备份原件 → 拿救回的部分当种子写回。
         let existing = std::fs::read_to_string(&file).unwrap_or_default();
         let parsed = parse_toml_lenient(&existing);
         if !parsed.is_clean() {
-            // ★ 备份**失败就拒绝写回**，不是记一句日志接着写。
-            //
-            // 备份是这条路径唯一的安全网：写回会把没救回的那几行永久删掉。备份失败还照写，
-            // 就是「无备份销毁数据」——比 materialize 那个 bug 更糟，因为那个至少还能从
-            // 别处恢复，这个是用户亲手点的保存把自己的配置吃了。
-            // 同本仓既有原则「拿不到可信的全量就别动」（见 `preset_for_pruning`）。
-            //
-            // 报 Err 而不是静默不写：这是用户主动发起的操作，他需要知道为什么没保存成功
-            // ——磁盘满/只读目录都是他能处理的问题，而「点了没反应」他处理不了。
+            // 备份失败就拒绝写回并报 Err：写回会永久删掉没救回的行，备份是唯一的安全网。
+            // 报错而非静默，是因为用户需要知道没保存成功（磁盘满 / 只读目录是他能处理的）。
             let backup = Self::backup_corrupt_config(&file, &existing).ok_or_else(|| {
                 anyhow::anyhow!(
                     "配置文件 {} 语法不合法，需要先备份原件才能保存，但备份写入失败\
@@ -10711,7 +9129,7 @@ impl Config {
         if !root.is_table() {
             root = toml::Value::Table(Default::default());
         }
-        // 旧字号开关若还在文件里（`prune_user_config` 没跑过），必须在写新值**之前**迁掉：
+        // 旧字号开关若还在文件里（`prune_user_config` 没跑过），必须在写新值之前迁掉：
         // 否则写入 `font_size = 0`（等于出厂值 ⇒ 被剪掉）后，残留的 `follow = false` 会在
         // 下次 load 被迁成 18，用户刚选的「跟随主题」被打回。
         Self::migrate_font_size_follow_theme_value(&mut root);
@@ -10721,13 +9139,13 @@ impl Config {
         Self::migrate_tooltip_sections_value(&mut root);
         // 注释字数旧键同理：竖排改回 0（出厂值 ⇒ 被剪掉）后，残留的旧键会在下次 load 补回原值。
         Self::migrate_comment_max_chars_value(&mut root);
-        // 语法模型总开关：老用户只写了 weight + model 时，要在写新值**之前**补上 enabled = true，
+        // 语法模型总开关：老用户只写了 weight + model 时，要在写新值之前补上 enabled = true，
         // 否则别的键的保存会把与出厂相同的 weight / model 剪掉，补 true 的依据就丢了。
         Self::migrate_grammar_enabled_value(&mut root);
         // 供落盘后通知钩子用：下方 set_nested 会 move 掉 value。
         let value_for_hook = value.clone();
         // 注释分配的单格 / 单个模板：按名字寻址，不走静态注册表（见 `CommentDynKey`）。
-        // 通知必须发**真实存在的路径**（分配的范围表 / 模板数组）——设置端镜像直接按路径写入，
+        // 通知必须发真实存在的路径（分配的范围表 / 模板数组）——设置端镜像直接按路径写入，
         // 虚拟键会在里面建出游离子树，之后被它整键写回覆盖。
         let joined = path.join(".");
         let mut dyn_notify: Option<(Vec<String>, toml::Value)> = None;
@@ -10755,7 +9173,7 @@ impl Config {
                 set_nested(t, path, value);
             }
         }
-        // 角标旧色值：放在 set_nested **之后**，盘上已有的与本次新传入的一并迁掉
+        // 角标旧色值：放在 set_nested 之后，盘上已有的与本次新传入的一并迁掉
         // （旧写法只读不写）；放在之前则新值里的 `auto` / 8 位色值会原样落盘。
         Self::migrate_langbar_badge_colors_value(&mut root);
 
@@ -10779,7 +9197,7 @@ impl Config {
     /// 把一个 [`CommentDynKey`](crate::config_schema::CommentDynKey) 写进用户层表；
     /// 空串＝删除（格回到下一层 / 删掉该用户模板）。
     ///
-    /// 返回落盘后**真实存在的**通知路径与该路径上的值。途经的值类型不对（`templates` 不是数组、
+    /// 返回落盘后真实存在的通知路径与该路径上的值。途经的值类型不对（`templates` 不是数组、
     /// 中间层不是表）时拒写：那是用户手改坏的内容，静默替换等于无备份销毁。
     fn apply_comment_dyn_key(
         root: &mut toml::Table,
@@ -10872,7 +9290,7 @@ impl Config {
         Self::set_user_value(path, toml::Value::Boolean(value))
     }
 
-    /// 本机**状态**目录（设计 `user-data-storage-redesign.md` §2.1）：机器写、不可再生、
+    /// 本机状态目录（设计 `user-data-storage-redesign.md` §2.1）：机器写、不可再生、
     /// 不漫游。`state.toml`、设备 id、锁、运行时快照、小文件都在这里。与 `cache/`（可删）
     /// 和 `logs/` 并列，本机根下只有这三个目录。
     pub fn state_dir() -> Option<PathBuf> {
@@ -10883,9 +9301,8 @@ impl Config {
     /// - 便携模式：`<exe目录>/localdata/`
     /// - 正常模式：`%LOCALAPPDATA%\WindInput[Dev]`（不随漫游同步）
     ///
-    /// ⚠️ 便携下它与 [`Self::user_config_dir`]（`<exe目录>/userdata/`）**不是同一个目录**。
-    /// 两者曾经收敛到 `userdata/`，于是备份用户数据要连带拖走上百 MB 的缓存与日志
-    /// （论坛 t120）。分家的完整理由见 [`crate::variant::portable_localdata_dir`]。
+    /// 便携下它与 [`Self::user_config_dir`]（`<exe目录>/userdata/`）不是同一个目录，免得备份
+    /// 用户数据时连带拖走缓存与日志。理由见 [`crate::variant::portable_localdata_dir`]。
     pub fn local_dir() -> Option<PathBuf> {
         if let Some((_, local)) = Self::dir_override() {
             return Some(local);
@@ -10903,14 +9320,11 @@ impl Config {
         Self::local_dir().map(|d| d.join("cache"))
     }
 
-    /// 日志目录。
+    /// 日志目录：[`Self::local_dir`] 下的 `logs`。
     /// - 便携模式：`<exe目录>/localdata/logs`
     /// - 正常模式：`%LOCALAPPDATA%\WindInput[Dev]\logs`
     ///
-    /// 两个分支现在只差 [`Self::local_dir`] 那一层，故不再各写一份：便携分支曾经绕开
-    /// `local_dir()` 直接从 `portable_userdata_dir()` 拼，两处得改两次，漏一处就是
-    /// 「日志和缓存分在两个目录」。TSF DLL 那份（`FileLogger::_BuildPaths`）在 C++ 里，
-    /// 合不进来，只能靠两边的注释互指。
+    /// TSF DLL 那份路径（`FileLogger::_BuildPaths`）在 C++ 里，改动须两边同步。
     pub fn log_dir() -> Option<PathBuf> {
         Self::local_dir().map(|d| d.join("logs"))
     }
@@ -10924,27 +9338,22 @@ impl Config {
 
     /// 定制版清单（`data_custom/custom.toml`）。`None` = 本机不是定制版。
     ///
-    /// **判据是清单文件可解析，不是 `data_custom/` 目录存在。** 隐式契约没有编译期约束，
-    /// 本仓已有 `datadir.conf` 整段断链（写端完整、读端一行不读，骗了用户半年）的前车之鉴；
-    /// 清单同时充当定制版身份（日志/关于页/报障）、减法清单与版本兼容判据。
+    /// 判据是清单文件可解析，不是 `data_custom/` 目录存在。清单同时充当定制版身份
+    /// （日志/关于页/报障）、减法清单与版本兼容判据。解析失败则整个 custom 层不启用，
+    /// 不做「半启用」：半解析的清单可能丢掉 `hide` 名单，让被删的方案冒出来，难以归因。
     ///
-    /// ⚠️ **解析失败 ⇒ 整个 custom 层不启用，而不是「半启用」。** 半解析出来的清单可能
-    /// 丢掉 `hide` 名单，于是定制版里本该被删掉的方案又冒出来，用户看到的是一堆自己
-    /// 从没见过的方案混在里面——诡异、难以归因。而「完全变回原版」这个现象足够明显，
-    /// 用户会立刻报障，故宁可整层退场。
-    ///
-    /// OnceLock 缓存：进程内只读一次盘。⚠️ 同一进程内改不了取值，故相关测试必须各占
-    /// 一个测试二进制（`tests/*.rs` 每个文件一个进程，见 `tests/datadir_conf.rs`）。
+    /// OnceLock 缓存，进程内只读一次盘，故相关测试必须各占一个测试二进制
+    /// （见 `tests/datadir_conf.rs`）。
     pub fn custom_manifest() -> Option<&'static CustomManifest> {
         static MANIFEST: OnceLock<Option<CustomManifest>> = OnceLock::new();
         MANIFEST.get_or_init(load_custom_manifest).as_ref()
     }
 
-    /// 定制版数据层目录（`<安装根>/data_custom`）。**清单在场且可解析时才返回 `Some`**。
+    /// 定制版数据层目录（`<安装根>/data_custom`）。清单在场且可解析时才返回 `Some`。
     ///
     /// 层序固定为 `data < data_custom < %APPDATA%`：`data_custom` 在安装目录下，
     /// 普通用户无写权限，只承担「随安装包分发的定制」职责；用户个人调整仍走 `%APPDATA%`。
-    /// **程序对本目录只读**，退役键清理、配置剪枝一律只作用于用户层。
+    /// 程序对本目录只读，退役键清理、配置剪枝一律只作用于用户层。
     pub fn custom_data_dir() -> Option<PathBuf> {
         Self::custom_manifest()?;
         crate::variant::install_root().map(|d| d.join(CUSTOM_DATA_DIR_NAME))
@@ -10952,18 +9361,12 @@ impl Config {
 
     /// 本定制版是否把方案 `id`「删掉了」（`data_custom/custom.toml` 的 `[schemas] hide`）。
     ///
-    /// ★ **与 `[schema].hidden` 是两个正交的轴，不得合并**（见 [`CustomManifest::schemas`]）：
-    /// `hidden` = 「不列进方案切换列表」，english / 快符仍可用、仍被 mix 引用、仍能被
-    /// `schema.active` 指到；本判据 = 「这个方案在本定制版里**不存在**」。拿 `hidden` 实现
-    /// 减法会让被删掉的方案继续被 mix / special_modes / `schema.active` 引用到。
+    /// 与 `[schema].hidden` 是正交的两个轴，不得合并（见 [`CustomManifest::schemas`]）：`hidden`
+    /// 只是不列进切换列表，仍可被 mix / `schema.active` 引用；hide 是「本定制版里不存在」。
     ///
-    /// ★ **hide 是绝对的：被 hide 的 id 在任何层都不存在**，`data/` 与 `data_custom/` 之外，
-    /// 也包括用户自己放在 `%APPDATA%\WindInput\schemas\` 里的同名文件。理由是契约 5 的措辞
-    /// 「这个方案在本定制版里不存在」——若 hide 只对安装层生效，用户层放一个同名文件就能
-    /// 让被删掉的方案复活，定制者的意图落空，而判定还得多带一个「命中的是哪一层」的分支。
-    /// **代价（明写在这里，别留白）**：用户无法用被 hide 的 id 给自己的方案命名——他放的
-    /// `wubi86.schema.toml` 会连同被删的内置方案一起消失，且现象与「文件没放对」难以区分。
-    /// 定制者因此应当只 hide 自己确实想删掉的**内置** id。
+    /// hide 是绝对的，对所有层生效，包括用户目录里的同名方案文件，否则用户层放一个同名文件
+    /// 就能让被删的方案复活。代价是用户无法用被 hide 的 id 命名自己的方案，且现象与
+    /// 「文件没放对」难以区分，所以定制者应只 hide 确实要删的内置 id。
     pub fn custom_hides_schema(id: &str) -> bool {
         Self::custom_manifest().is_some_and(|m| m.schemas.hide.iter().any(|h| h == id))
     }
@@ -10976,22 +9379,17 @@ impl Config {
 
     /// 资源层的有序列表：`[user?, custom?, data?]`，靠前者优先。
     ///
-    /// 这是**唯一**该被枚举点使用的层序来源。目录枚举（方案 / 主题 / 双拼布局 / opencc）
-    /// 各自维护一份自己的目录列表，漏接一处的现象是「定制版里那个方案静默不见了」——
-    /// 而这类缺陷在没有 `data_custom` 的开发机上永远复现不出来。用法示例：
+    /// 这是枚举点唯一该用的层序来源（方案 / 主题 / 双拼布局 / opencc）。各自写死目录列表的话，
+    /// 漏接 custom 层会让定制版里的方案静默不见，且在开发机上复现不出来。用法：
     ///
     /// ```ignore
-    /// // 原来：两个目录写死
-    /// let dirs = [user_dir.join("schemas"), data_dir.join("schemas")];
-    /// // 改后：层序统一，自动带上 custom 层
     /// let dirs: Vec<PathBuf> = Config::resource_layers_with(Some(data_dir))
     ///     .into_iter()
     ///     .map(|d| d.join("schemas"))
     ///     .collect();
     /// ```
     ///
-    /// data 层取 [`Self::data_dir`]；调用方手里已有 data 目录（便携/测试会传自定义路径）
-    /// 时用 [`Self::resource_layers_with`]。
+    /// data 层取 [`Self::data_dir`]；调用方已有 data 目录（便携/测试）时用 [`Self::resource_layers_with`]。
     pub fn resource_layers() -> Vec<PathBuf> {
         Self::resource_layers_with(Self::data_dir().as_deref())
     }
@@ -11004,24 +9402,19 @@ impl Config {
             .collect()
     }
 
-    /// 同 [`Self::resource_layers`]，但**带层名**（`user` / `custom` / `data`）。
+    /// 同 [`Self::resource_layers`]，但带层名（`user` / `custom` / `data`）。
     ///
-    /// 层名不是装饰：解析点要用它打 [`Self::log_layer_override`]（「被谁覆盖」是排查
-    /// 定制版行为差异的第一个问题），枚举点要用它区分「内置 vs 用户自带」（主题列表的
-    /// builtin 标记、方案可删判定）。**没有这个公开形态，每个枚举点都会自己猜层名**
-    /// ——猜法一旦分叉，日志里的 `custom` 就不再指同一件事。
+    /// 解析点用层名打 [`Self::log_layer_override`]，枚举点用它区分内置与用户自带（主题 builtin
+    /// 标记、方案可删判定）。统一由此取，免得各枚举点自己猜层名而分叉。
     pub fn resource_layers_named() -> Vec<ResourceLayer> {
         Self::resource_layers_named_with(Self::data_dir().as_deref())
     }
 
     /// 带层名的层序，data 层由调用方指定（`None` = 无 data 层，只剩 user/custom）。
     ///
-    /// custom 层刻意**不**由 `data_dir` 推导（如取它的兄弟目录）：清单的 OnceLock 缓存
-    /// 是进程级的，若目录随调用方参数变而清单不变，两者会失配——那种不一致只在传了
-    /// 自定义 data 目录的场合出现，最难查。这条也是 `None` 的正当用法：调用方手里只有
-    /// 「data 层的某个子目录」（如 `wind-engine` 的 `schemas_dir`）时，用 `None` 取
-    /// user/custom 两层、再把自己那份 data 层接到末尾，**好过从子目录 `parent()` 反推
-    /// 数据根**——反推是把层的兄弟关系埋进一个隐式契约里。
+    /// custom 层刻意不由 `data_dir` 推导：清单的 OnceLock 缓存是进程级的，随参数变的目录会与
+    /// 清单失配。调用方只有 data 层的某个子目录（如 `wind-engine` 的 `schemas_dir`）时，
+    /// 用 `None` 取 user/custom 再自行接上 data 层，别从子目录 `parent()` 反推数据根。
     pub fn resource_layers_named_with(data_dir: Option<&Path>) -> Vec<ResourceLayer> {
         let mut layers: Vec<ResourceLayer> = Vec::with_capacity(3);
         if let Some(u) = Self::user_config_dir() {
@@ -11036,26 +9429,16 @@ impl Config {
         layers
     }
 
-    /// 追溯一个配置键的来源：四层各声明了什么、最终生效的是哪一层的值。
+    /// 追溯一个配置键的来源：四层各声明了什么、最终生效的是哪一层的值。用于回答
+    /// 「我改的这个值为什么不生效」。
     ///
-    /// 回答的是**「我改的这个值为什么不生效」**——此前唯一的答案来源是 `config get`
-    /// 的最终值，而它恰好不包含「为什么」。四层里任何一层写了同名键都会静默改变结果，
-    /// 定制版还多夹一层（`data_custom`），排查时无从下手。
+    /// - 层的值是「该层显式写了什么」。表类型逐键深合并，单层常只是最终值的一部分，
+    ///   此时 `effective_layer` 为 `None`。
+    /// - `effective` 取自真实的 [`Self::load`]，含 `normalize()` 改写；段级降级时它是出厂默认，
+    ///   `degraded` 会说明用户值被丢了。
+    /// - 键不在任何层时四层全 `None`；调用方应先用 `config_schema::is_known_key` 挡掉拼错的键。
     ///
-    /// # 语义要点
-    ///
-    /// - **层的值是「该层显式写了什么」，不是「该层生效后是什么」。** 表类型逐键深合并，
-    ///   单层声明常常只是最终值的一部分——此时 `effective_layer` 为 `None`，因为确实
-    ///   指不到某一层。
-    /// - **`effective` 取自真实的 [`Self::load`]**，含 `normalize()` 的归一化改写；
-    ///   段级降级发生时它是出厂默认，而 `degraded` 会告诉你用户值被丢了。
-    /// - 键不存在于任何层（含默认层）时四层全 `None`——调用方应当先用
-    ///   `config_schema::is_known_key` 挡掉拼错的键，本函数不认识注册表。
-    ///
-    /// # 代价
-    ///
-    /// 每次调用做 4 次文件读 + 一次完整 `load()`。这是**排查用的单次查询**，不要放进
-    /// 热路径；需要批量时应当另做一个复用这一次 `load()` 的形态。
+    /// 每次调用做 4 次文件读 + 一次完整 `load()`，只用于排查，不要放进热路径。
     pub fn key_origin(key: &str, data_dir: Option<&Path>) -> anyhow::Result<KeyOrigin> {
         Ok(OriginSnapshot::capture(data_dir)?.key(key))
     }
@@ -11082,10 +9465,8 @@ mod tests;
 mod email_config_tests {
     use super::*;
 
-    /// 预置后缀与学习数据必须**同域**：两边都存 `@` 之后的部分。
-    ///
-    /// 一边带 `@` 一边不带，去重就永远对不上，表现是用户最常用的那个后缀在候选里
-    /// 出现两次（一条来自预置表、一条来自学习数据），且怎么用都消不掉。
+    /// 预置后缀与学习数据必须同域：两边都存 `@` 之后的部分，否则去重对不上，
+    /// 同一后缀在候选里出现两次。
     #[test]
     fn preset_suffixes_carry_no_at_sign() {
         let c = EmailConfig::default();
@@ -11116,10 +9497,8 @@ mod email_config_tests {
         assert!(qq < gmail, "国内常用后缀应排在国际之前");
     }
 
-    /// 用户清空后缀表 = 真的空表。
-    ///
-    /// 这是 AGENTS.md「出厂预置的落点必须是用户能清空的载体」那条的守护：`suffixes`
-    /// 是**数组字段**，上层整体覆盖，不像 map 字段那样被逐键深合并把出厂值合回来。
+    /// 用户清空后缀表 = 真的空表（AGENTS.md「出厂预置的落点必须是用户能清空的载体」）。
+    /// `suffixes` 是数组字段，上层整体覆盖，不会像 map 那样被深合并把出厂值合回来。
     /// 空表时邮箱模式仍可用，只是没有预置候选。
     #[test]
     fn empty_suffix_list_survives_deserialization() {
