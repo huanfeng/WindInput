@@ -4,25 +4,26 @@
 //!   `config` 与事件，从它的 stdout 收 `status`。
 //! - 协调器经 [`Tap`] 产出事件；这里一个转发线程把它们放进宿主的丢旧队列，再由写线程写管道。
 //!   按键线程从不碰管道。
-//! - 宿主崩溃按 [`Backoff`] 退避重启、频繁崩溃熔断；熔断后授权清零，协调器不再产出事件。
+//! - 宿主崩溃按 [`wind_supervise::backoff::Backoff`] 退避重启、频繁崩溃熔断；熔断后授权清零，协调器不再产出事件。
 //! - 宿主随本进程生死：Windows 放进 `KILL_ON_JOB_CLOSE` 的 Job（扩展作为宿主的子进程一并在内）；
 //!   其他平台宿主自设 `PR_SET_PDEATHSIG`，且 stdin EOF 即退出。
 //!
 //! 日志只记启停、崩溃、扩展状态变化，不记事件内容。
 
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{ChildStdin, ChildStdout, Command};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tracing::{error, info, warn};
 use wind_config::{Config, ExtensionsConfig};
-use wind_hook::backoff::{Backoff, Decision};
 use wind_hook::frame::{Frame, read_frame, write_frame};
 use wind_hook::msg::{ExtensionGrant, ExtensionStatus, Msg};
 use wind_hook::queue::{DropOldest, Pop};
 use wind_hook::tap::Tap;
 use wind_hook::tier::Grants;
+use wind_supervise::backoff::Decision;
+use wind_supervise::{Event, Job, Supervisor};
 
 /// 协调器 → 转发线程的通道容量。
 const TAP_CAP: usize = 1024;
@@ -51,20 +52,17 @@ pub struct Extensions {
     on_hook_changed: Box<dyn Fn() + Send + Sync>,
     state: Mutex<State>,
     status: Arc<Mutex<Vec<ExtensionStatus>>>,
-    #[cfg(windows)]
-    job: Option<job::Job>,
 }
 
 struct State {
     /// 应当运行的扩展与授权；空 = 宿主不该运行。
     want: Vec<ExtensionGrant>,
     host: Option<Host>,
-    backoff: Backoff,
-    next_start: Option<Instant>,
+    /// 宿主进程的监护（期望态、退避、熔断）；`host` 是进程在跑时的管道侧状态。
+    sup: Supervisor,
 }
 
 struct Host {
-    child: Child,
     queue: Arc<DropOldest<Msg>>,
     /// 写线程正卡在一次写上的起点。
     busy_since: Arc<Mutex<Option<Instant>>>,
@@ -81,20 +79,25 @@ impl Extensions {
         on_poll: Box<dyn Fn() + Send + Sync>,
     ) -> Arc<Extensions> {
         let rx = tap.connect(Grants::NONE, TAP_CAP);
+        let job = Job::kill_on_close()
+            .map_err(|e| warn!("扩展宿主的 Job 对象创建失败: {e}"))
+            .ok()
+            .map(Arc::new);
+        let sup = Supervisor::new(host_command)
+            .with_log(
+                Config::log_dir().map(|d| d.join("extension_host.log")),
+                HOST_LOG_MAX,
+            )
+            .with_job(job);
         let p = Arc::new(Extensions {
             tap,
             on_hook_changed,
             state: Mutex::new(State {
                 want: Vec::new(),
                 host: None,
-                backoff: Backoff::default(),
-                next_start: None,
+                sup,
             }),
             status: Arc::new(Mutex::new(Vec::new())),
-            #[cfg(windows)]
-            job: job::Job::kill_on_close()
-                .map_err(|e| warn!("扩展宿主的 Job 对象创建失败: {e}"))
-                .ok(),
         });
         {
             let p = p.clone();
@@ -126,27 +129,19 @@ impl Extensions {
     /// 服务即将重启或退出：关宿主，扩展会先收到 `lifecycle: stopping`（宿主发），有机会收尾。
     /// 最多等 `STOP_GRACE`，宿主退出即返回；没有宿主时立即返回。
     pub fn stop(&self) {
-        let host = {
+        let waiter = {
             let mut st = lock(&self.state);
             st.want.clear();
-            st.next_start = None;
-            st.host.take()
-        };
-        let Some(mut h) = host else {
-            return;
-        };
-        // 宿主收到 shutdown 会先向各扩展发 `lifecycle: stopping`，再收走它们。
-        h.queue.push_keep(Msg::Shutdown);
-        h.queue.close();
-        let deadline = Instant::now() + STOP_GRACE;
-        while Instant::now() < deadline {
-            if matches!(h.child.try_wait(), Ok(Some(_))) {
-                return;
+            if let Some(h) = st.host.take() {
+                // 宿主收到 shutdown 会先向各扩展发 `lifecycle: stopping`，再收走它们。
+                h.queue.push_keep(Msg::Shutdown);
+                h.queue.close();
             }
-            std::thread::sleep(Duration::from_millis(20));
+            st.sup.stop_background(STOP_GRACE)
+        };
+        if let Some(w) = waiter {
+            let _ = w.join();
         }
-        let _ = h.child.kill();
-        let _ = h.child.wait();
     }
 
     /// 配置变化（含启动时的初值）。授权有变时通知协调器（放锁之后）。
@@ -178,24 +173,26 @@ impl Extensions {
         st.want = want.clone();
         if want.is_empty() {
             self.tap.set_grants(Grants::NONE);
-            st.next_start = None;
-            st.backoff.reset();
             if let Some(h) = st.host.take() {
                 info!("扩展已全部停用，关闭扩展宿主");
-                stop_host(h);
+                h.queue.push_keep(Msg::Shutdown);
+                h.queue.close();
             }
+            // 宽限期后仍未退出就强杀；后台做，不卡调用方。
+            st.sup.stop_background(STOP_GRACE);
             lock(&self.status).clear();
             return true;
         }
         self.tap.set_grants(union(&want));
+        let now = Instant::now();
+        st.sup.set_wanted(true, now);
         match &st.host {
             Some(h) => {
                 h.queue.push_keep(Msg::Config { extensions: want });
             }
             None => {
                 // 用户改了配置 = 一次手动干预，熔断随之解除。
-                st.backoff.reset();
-                st.next_start = Some(Instant::now());
+                st.sup.retry(now);
             }
         }
         true
@@ -211,51 +208,53 @@ impl Extensions {
     /// 一次监护。返回是否要通知协调器（宿主刚起来，或熔断后授权清零）。
     fn tick_locked(&self, now: Instant) -> bool {
         let mut st = lock(&self.state);
-        if let Some(h) = &mut st.host {
-            match h.child.try_wait() {
-                Ok(Some(code)) => {
-                    warn!("扩展宿主意外退出: {code}");
+        match st.sup.tick(now) {
+            Some(Event::Exited { status, next }) => {
+                warn!("扩展宿主意外退出: {status}");
+                if let Some(h) = st.host.take() {
                     h.queue.close();
-                    st.host = None;
-                    return self.on_host_exit(&mut st, now);
                 }
-                Ok(None) => {
+                self.on_host_exit(next)
+            }
+            Some(Event::PollFailed(e)) => {
+                warn!("查询扩展宿主状态失败: {e}");
+                false
+            }
+            Some(Event::StartFailed { error, next }) => {
+                error!("扩展宿主启动失败: {error}");
+                self.on_host_exit(next)
+            }
+            Some(Event::Started {
+                stdin,
+                stdout,
+                warnings,
+            }) => {
+                for w in warnings {
+                    warn!("扩展宿主: {w}");
+                }
+                info!("扩展宿主已启动（{} 个扩展）", st.want.len());
+                let host = self.attach_host(&st.want, stdin, stdout);
+                st.host = Some(host);
+                true
+            }
+            None => {
+                if let Some(h) = &st.host {
                     let stalled = lock(&h.busy_since)
                         .is_some_and(|t| now.saturating_duration_since(t) >= STALL);
                     if stalled {
                         warn!("扩展宿主超过 {}s 不读消息，结束它", STALL.as_secs());
-                        let _ = h.child.kill();
+                        st.sup.kill();
                     }
                 }
-                Err(e) => warn!("查询扩展宿主状态失败: {e}"),
-            }
-            return false;
-        }
-        if st.want.is_empty() || !st.next_start.is_some_and(|t| t <= now) {
-            return false;
-        }
-        st.next_start = None;
-        st.backoff.on_start(now);
-        match self.spawn_host(&st.want) {
-            Ok(h) => {
-                info!("扩展宿主已启动（{} 个扩展）", st.want.len());
-                st.host = Some(h);
-                true
-            }
-            Err(e) => {
-                error!("扩展宿主启动失败: {e}");
-                self.on_host_exit(&mut st, now)
+                false
             }
         }
     }
 
     /// 返回是否熔断（授权随之清零，需要通知协调器）。
-    fn on_host_exit(&self, st: &mut State, now: Instant) -> bool {
-        match st.backoff.on_exit(now) {
-            Decision::RestartAfter(d) => {
-                st.next_start = Some(now + d);
-                false
-            }
+    fn on_host_exit(&self, next: Decision) -> bool {
+        match next {
+            Decision::RestartAfter(_) => false,
             Decision::Tripped => {
                 error!("扩展宿主频繁退出，已停止重启；修改扩展配置后会重新尝试");
                 self.tap.set_grants(Grants::NONE);
@@ -264,43 +263,8 @@ impl Extensions {
         }
     }
 
-    fn spawn_host(&self, want: &[ExtensionGrant]) -> Result<Host, String> {
-        let exe = std::env::current_exe()
-            .map_err(|e| format!("取本进程路径失败: {e}"))?
-            .with_file_name(host_exe_name());
-        if !exe.is_file() {
-            return Err(format!("找不到 {}", exe.display()));
-        }
-        let extensions_dir = extensions_dir().ok_or("取不到用户目录")?;
-        let mut cmd = Command::new(&exe);
-        cmd.arg("--extensions-dir")
-            .arg(&extensions_dir)
-            .arg("--core-version")
-            .arg(env!("CARGO_PKG_VERSION"))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(host_log());
-        if let Some(dir) = Config::log_dir() {
-            cmd.arg("--log-dir").arg(dir);
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| format!("启动 {}: {e}", exe.display()))?;
-        // 先入 Job 再下发配置：宿主收到配置才拉起扩展，扩展因此一定也在 Job 里。
-        #[cfg(windows)]
-        if let Some(job) = &self.job
-            && let Err(e) = job.assign(&child)
-        {
-            warn!("扩展宿主加入 Job 失败（本进程崩溃时它可能残留）: {e}");
-        }
-        let stdin = child.stdin.take().ok_or("拿不到宿主 stdin")?;
-        let stdout = child.stdout.take().ok_or("拿不到宿主 stdout")?;
+    /// 宿主进程已拉起（监护器已把它放进 Job）：配好队列、写线程、读线程，先下发配置。
+    fn attach_host(&self, want: &[ExtensionGrant], stdin: ChildStdin, stdout: ChildStdout) -> Host {
         let queue = Arc::new(DropOldest::new(QUEUE_CAP));
         queue.push_keep(Msg::Config {
             extensions: want.to_vec(),
@@ -308,11 +272,7 @@ impl Extensions {
         let busy_since = Arc::new(Mutex::new(None));
         spawn_writer(queue.clone(), stdin, busy_since.clone());
         self.spawn_reader(stdout);
-        Ok(Host {
-            child,
-            queue,
-            busy_since,
-        })
+        Host { queue, busy_since }
     }
 
     fn spawn_reader(&self, mut stdout: ChildStdout) {
@@ -389,21 +349,24 @@ pub fn extensions_dir() -> Option<PathBuf> {
     Config::user_config_dir().map(|d| d.join("extensions"))
 }
 
-fn host_log() -> Stdio {
-    let Some(dir) = Config::log_dir() else {
-        return Stdio::null();
-    };
-    let path = dir.join("extension_host.log");
-    if std::fs::metadata(&path).is_ok_and(|m| m.len() > HOST_LOG_MAX) {
-        let _ = std::fs::rename(&path, dir.join("extension_host.old.log"));
+/// 拉起宿主的命令（stdio、日志、Job 由监护器配）。
+fn host_command() -> Result<Command, String> {
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("取本进程路径失败: {e}"))?
+        .with_file_name(host_exe_name());
+    if !exe.is_file() {
+        return Err(format!("找不到 {}", exe.display()));
     }
-    let _ = std::fs::create_dir_all(&dir);
-    std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map(Stdio::from)
-        .unwrap_or_else(|_| Stdio::null())
+    let extensions_dir = extensions_dir().ok_or("取不到用户目录")?;
+    let mut cmd = Command::new(&exe);
+    cmd.arg("--extensions-dir")
+        .arg(&extensions_dir)
+        .arg("--core-version")
+        .arg(env!("CARGO_PKG_VERSION"));
+    if let Some(dir) = Config::log_dir() {
+        cmd.arg("--log-dir").arg(dir);
+    }
+    Ok(cmd)
 }
 
 fn spawn_writer(
@@ -432,72 +395,6 @@ fn spawn_writer(
             }
             // stdin 随之关闭：宿主读到 EOF，收走扩展后退出。
         });
-}
-
-/// 发 `shutdown` 并关队列，宽限期后仍未退出就强杀。后台做，不卡调用方。
-fn stop_host(mut h: Host) {
-    h.queue.push_keep(Msg::Shutdown);
-    h.queue.close();
-    let _ = std::thread::Builder::new()
-        .name("extensions-stop".into())
-        .spawn(move || {
-            let deadline = Instant::now() + STOP_GRACE;
-            while Instant::now() < deadline {
-                if matches!(h.child.try_wait(), Ok(Some(_))) {
-                    return;
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            let _ = h.child.kill();
-            let _ = h.child.wait();
-        });
-}
-
-#[cfg(windows)]
-mod job {
-    use std::os::windows::io::AsRawHandle;
-    use std::process::Child;
-
-    use windows::Win32::Foundation::{CloseHandle, HANDLE};
-    use windows::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-        SetInformationJobObject,
-    };
-    use windows::core::PCWSTR;
-
-    /// 本进程退出（含崩溃）时句柄随之关闭，系统结束 Job 内全部进程。
-    pub struct Job(HANDLE);
-
-    // SAFETY: Job 句柄只用于 AssignProcessToJobObject，内核对象句柄可跨线程使用。
-    unsafe impl Send for Job {}
-    unsafe impl Sync for Job {}
-
-    impl Job {
-        pub fn kill_on_close() -> windows::core::Result<Job> {
-            // SAFETY: 标准 Win32 调用；info 在调用期间有效。
-            unsafe {
-                let h = CreateJobObjectW(None, PCWSTR::null())?;
-                let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-                if let Err(e) = SetInformationJobObject(
-                    h,
-                    JobObjectExtendedLimitInformation,
-                    &info as *const _ as *const core::ffi::c_void,
-                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-                ) {
-                    let _ = CloseHandle(h);
-                    return Err(e);
-                }
-                Ok(Job(h))
-            }
-        }
-
-        pub fn assign(&self, child: &Child) -> windows::core::Result<()> {
-            // SAFETY: child 句柄在调用期间有效。
-            unsafe { AssignProcessToJobObject(self.0, HANDLE(child.as_raw_handle())) }
-        }
-    }
 }
 
 #[cfg(test)]

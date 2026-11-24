@@ -33,6 +33,7 @@ members = [
     "crates/wind-wdict",
     "crates/wind-rpc",
     "crates/wind-hook",
+    "crates/wind-supervise",
     "apps/service",
     "apps/extension_host",
     "apps/rpc",

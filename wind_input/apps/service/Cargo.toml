@@ -29,6 +29,7 @@ wind-ui = { path = "../../crates/wind-ui" }
 wind-theme = { path = "../../crates/wind-theme" }
 wind-rpc = { path = "../../crates/wind-rpc" }
 wind-hook = { path = "../../crates/wind-hook" }
+wind-supervise = { path = "../../crates/wind-supervise" }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }

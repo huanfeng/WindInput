@@ -2519,6 +2519,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "wind-supervise"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "windows",
+]
+
+[[package]]
 name = "wind-theme"
 version = "0.1.0"
 dependencies = [
@@ -2676,11 +2684,10 @@ dependencies = [
 name = "wind_extension_host"
 version = "0.1.0"
 dependencies = [
- "libc",
  "serde_json",
  "tempfile",
  "wind-hook",
- "windows",
+ "wind-supervise",
  "winresource",
 ]
 
@@ -2712,6 +2719,7 @@ dependencies = [
  "wind-ipc",
  "wind-rpc",
  "wind-store",
+ "wind-supervise",
  "wind-theme",
  "wind-ui",
  "wind-webdata",

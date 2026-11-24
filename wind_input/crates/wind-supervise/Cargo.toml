@@ -1,0 +1,16 @@
+[package]
+name = "wind-supervise"
+version.workspace = true
+edition.workspace = true
+license = "MPL-2.0"
+
+[dependencies]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true }
+
+[lints]
+workspace = true

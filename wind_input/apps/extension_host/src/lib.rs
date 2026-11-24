@@ -5,7 +5,7 @@
 //!   stdin EOF 即核心已退出，宿主收走全部扩展后退出。
 //! - 与扩展：每个扩展一对 stdio 匿名管道，各配一个写线程（丢旧队列 → 管道）和一个读线程
 //!   （握手、订阅、ping）。扩展的 stderr 追加到 `<log_dir>/extension-<id>.log`。
-//! - 监护：崩溃按 [`Backoff`] 退避重启、熔断；写管道卡住超过 [`STALL`] 视为卡死，结束后按崩溃计。
+//! - 监护：崩溃按 [`wind_supervise::backoff::Backoff`] 退避重启、熔断；写管道卡住超过 [`STALL`] 视为卡死，结束后按崩溃计。
 //! - 扩展随宿主生死：Windows 放进宿主自建的 `KILL_ON_JOB_CLOSE` Job（嵌套在核心那个 Job 里）；
 //!   Linux 设 `PR_SET_PDEATHSIG`。宿主被强杀时扩展也一并结束，不靠扩展自觉处理 stdin EOF。
 //!
@@ -13,14 +13,13 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::path::PathBuf;
+use std::process::{ChildStdin, ChildStdout, Command};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use wind_hook::PROTOCOL_VERSION;
-use wind_hook::backoff::{Backoff, Decision};
 use wind_hook::frame::{Frame, read_frame, write_frame};
 use wind_hook::manifest::{self, Manifest};
 use wind_hook::msg::{ExtensionGrant, ExtensionStatus, LifecycleEvent, Msg, lifecycle};
@@ -28,6 +27,8 @@ use wind_hook::options;
 use wind_hook::queue::{DropOldest, Pop};
 use wind_hook::tap::now_ms;
 use wind_hook::tier::{Grants, trim};
+use wind_supervise::backoff::Decision;
+use wind_supervise::{Event, Job, Supervisor};
 
 /// 每个扩展的待写队列长度。按键再快每秒也就几十条，几百条够扛住一两秒的卡顿。
 const QUEUE_CAP: usize = 256;
@@ -52,12 +53,8 @@ macro_rules! log {
 
 /// 入口：阻塞直到核心关闭 stdin 或发来 `shutdown`。返回进程退出码。
 pub fn run(opts: Opts) -> i32 {
-    #[cfg(target_os = "linux")]
-    // SAFETY: prctl(PR_SET_PDEATHSIG) 只设置本进程属性，无内存安全影响。
-    unsafe {
-        // 核心被 SIGKILL 时 stdin 也会断，这里只是让退出更及时。
-        libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
-    }
+    // 核心被 SIGKILL 时 stdin 也会断，这里只是让退出更及时。
+    wind_supervise::die_with_parent();
     let host = Arc::new(Host::new(opts, Box::new(io::stdout())));
     let sup = {
         let host = host.clone();
@@ -178,11 +175,6 @@ impl Link {
     }
 }
 
-struct Running {
-    child: Child,
-    link: Arc<Link>,
-}
-
 struct Slot {
     manifest: Option<Manifest>,
     error: Option<String>,
@@ -190,10 +182,11 @@ struct Slot {
     /// 核心配置里用户设过的选项（未校验）。
     options: Options,
     state: State,
-    backoff: Backoff,
     restarts: u32,
-    next_start: Option<Instant>,
-    run: Option<Running>,
+    /// 清单有效才有：监护扩展进程（期望态、退避、熔断）。
+    sup: Option<Supervisor>,
+    /// 进程在跑时的管道侧状态。
+    link: Option<Arc<Link>>,
 }
 
 impl Slot {
@@ -216,8 +209,8 @@ pub struct Host {
     /// 核心最近发来的终端在线/焦点状态，补发理由同 `last_mode`。
     last_presence: Arc<Mutex<Option<Msg>>>,
     stop: AtomicBool,
-    #[cfg(windows)]
-    job: Option<job::Job>,
+    /// 宿主被强杀时系统据此结束全部扩展（Windows）。
+    job: Option<Arc<Job>>,
 }
 
 fn lifecycle_msg(event: &str) -> Msg {
@@ -240,10 +233,10 @@ impl Host {
             last_mode: Arc::new(Mutex::new(None)),
             last_presence: Arc::new(Mutex::new(None)),
             stop: AtomicBool::new(false),
-            #[cfg(windows)]
-            job: job::Job::kill_on_close()
+            job: Job::kill_on_close()
                 .map_err(|e| log!("创建 Job 对象失败（宿主被强杀时扩展可能残留）: {e}"))
-                .ok(),
+                .ok()
+                .map(Arc::new),
         }
     }
 
@@ -275,10 +268,10 @@ impl Host {
             _ => {}
         }
         for slot in lock(&self.slots).values() {
-            if let Some(run) = &slot.run
-                && trim(msg, run.link.config_grants()).is_some()
+            if let Some(link) = &slot.link
+                && trim(msg, link.config_grants()).is_some()
             {
-                run.link.queue.push(msg.clone());
+                link.queue.push(msg.clone());
             }
         }
     }
@@ -286,8 +279,8 @@ impl Host {
     /// 给全部运行中的扩展发一条不可淘汰的状态消息（经写线程按授权/订阅过滤）。
     fn broadcast_keep(&self, msg: Msg) {
         for slot in lock(&self.slots).values() {
-            if let Some(run) = &slot.run {
-                run.link.queue.push_keep(msg.clone());
+            if let Some(link) = &slot.link {
+                link.queue.push_keep(msg.clone());
             }
         }
     }
@@ -309,8 +302,11 @@ impl Host {
         for id in removed {
             if let Some(slot) = slots.remove(&id) {
                 log!("停用扩展 {id}");
-                if let Some(run) = slot.run {
-                    stop_running(run);
+                if let Some(link) = &slot.link {
+                    link.queue.close();
+                }
+                if let Some(mut sup) = slot.sup {
+                    sup.stop_background(STOP_GRACE);
                 }
             }
         }
@@ -323,11 +319,9 @@ impl Host {
                 Some(slot) => {
                     slot.grants = grants;
                     slot.options = opts;
-                    if let Some(run) = &slot.run {
-                        run.link
-                            .config_grants
-                            .store(grants.bits(), Ordering::Relaxed);
-                        run.link.update_options(slot.effective_options());
+                    if let Some(link) = &slot.link {
+                        link.config_grants.store(grants.bits(), Ordering::Relaxed);
+                        link.update_options(slot.effective_options());
                     }
                 }
                 None => {
@@ -352,16 +346,20 @@ impl Host {
         if let Some(e) = &error {
             log!("扩展 {id} 无效: {e}");
         }
+        let sup = manifest.as_ref().map(|m| {
+            let mut sup = self.supervisor(id, m);
+            sup.set_wanted(true, Instant::now());
+            sup
+        });
         Slot {
             manifest,
             error,
             grants,
             options,
             state,
-            backoff: Backoff::default(),
             restarts: 0,
-            next_start: (state == State::Starting).then(Instant::now),
-            run: None,
+            sup,
+            link: None,
         }
     }
 
@@ -379,39 +377,43 @@ impl Host {
         let mut changed = false;
         let mut slots = lock(&self.slots);
         for (id, slot) in slots.iter_mut() {
-            if let Some(run) = &mut slot.run {
-                match run.child.try_wait() {
-                    Ok(Some(status)) => {
-                        log!("扩展 {id} 退出: {status}");
-                        run.link.queue.close();
-                        slot.run = None;
-                        self.on_exit(id, slot, now);
-                        changed = true;
+            let Some(sup) = &mut slot.sup else {
+                continue;
+            };
+            match sup.tick(now) {
+                Some(Event::Exited { status, next }) => {
+                    log!("扩展 {id} 退出: {status}");
+                    if let Some(link) = slot.link.take() {
+                        link.queue.close();
                     }
-                    Ok(None) => {
-                        if run.link.stalled(now) {
-                            log!("扩展 {id} 超过 {}s 不读事件，结束它", STALL.as_secs());
-                            let _ = run.child.kill();
-                        }
-                    }
-                    Err(e) => log!("查询扩展 {id} 状态失败: {e}"),
+                    self.on_exit(id, slot, next);
+                    changed = true;
                 }
-            } else if slot.next_start.is_some_and(|t| t <= now) {
-                slot.next_start = None;
-                changed = true;
-                match self.spawn(id, slot) {
-                    Ok(run) => {
-                        log!("扩展 {id} 已启动");
-                        slot.run = Some(run);
-                        slot.state = State::Running;
-                        slot.error = None;
-                        slot.backoff.on_start(now);
+                Some(Event::PollFailed(e)) => log!("查询扩展 {id} 状态失败: {e}"),
+                Some(Event::Started {
+                    stdin,
+                    stdout,
+                    warnings,
+                }) => {
+                    for w in warnings {
+                        log!("扩展 {id} {w}");
                     }
-                    Err(e) => {
-                        log!("扩展 {id} 启动失败: {e}");
-                        slot.error = Some(e);
-                        slot.backoff.on_start(now);
-                        self.on_exit(id, slot, now);
+                    log!("扩展 {id} 已启动");
+                    self.attach(slot, stdin, stdout);
+                    slot.state = State::Running;
+                    slot.error = None;
+                    changed = true;
+                }
+                Some(Event::StartFailed { error, next }) => {
+                    log!("扩展 {id} 启动失败: {error}");
+                    slot.error = Some(error);
+                    self.on_exit(id, slot, next);
+                    changed = true;
+                }
+                None => {
+                    if slot.link.as_ref().is_some_and(|l| l.stalled(now)) {
+                        log!("扩展 {id} 超过 {}s 不读事件，结束它", STALL.as_secs());
+                        sup.kill();
                     }
                 }
             }
@@ -419,17 +421,15 @@ impl Host {
         changed
     }
 
-    fn on_exit(&self, id: &str, slot: &mut Slot, now: Instant) {
-        match slot.backoff.on_exit(now) {
-            Decision::RestartAfter(d) => {
+    fn on_exit(&self, id: &str, slot: &mut Slot, next: Decision) {
+        match next {
+            Decision::RestartAfter(_) => {
                 slot.state = State::Backoff;
                 slot.restarts += 1;
-                slot.next_start = Some(now + d);
             }
             Decision::Tripped => {
                 log!("扩展 {id} 频繁退出，已熔断");
                 slot.state = State::Tripped;
-                slot.next_start = None;
                 if slot.error.is_none() {
                     slot.error = Some("短时间内多次异常退出，已停止重启".into());
                 }
@@ -437,47 +437,35 @@ impl Host {
         }
     }
 
-    fn spawn(&self, id: &str, slot: &Slot) -> Result<Running, String> {
-        let m = slot.manifest.as_ref().ok_or("没有清单")?;
-        let mut cmd = Command::new(&m.exe);
-        cmd.args(&m.args)
-            .current_dir(&m.dir)
-            .env("WIND_EXTENSION_ID", id)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(self.extension_log(id));
-        #[cfg(target_os = "linux")]
-        {
-            use std::os::unix::process::CommandExt;
-            // SAFETY: pre_exec 闭包里只调异步信号安全的 prctl。
-            unsafe {
-                cmd.pre_exec(|| {
-                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
-                    Ok(())
-                });
-            }
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| format!("启动 {:?} 失败: {e}", m.exe))?;
-        #[cfg(windows)]
-        if let Some(job) = &self.job
-            && let Err(e) = job.assign(&child)
-        {
-            log!("扩展 {id} 加入 Job 失败: {e}");
-        }
-        let stdin = child.stdin.take().ok_or("拿不到扩展 stdin")?;
-        let stdout = child.stdout.take().ok_or("拿不到扩展 stdout")?;
+    /// 扩展进程的监护器：命令、日志、Job 都在这里配好（Job 在监护器里先于调用方下发任何东西）。
+    fn supervisor(&self, id: &str, m: &Manifest) -> Supervisor {
+        let (id, exe, args, dir) = (id.to_string(), m.exe.clone(), m.args.clone(), m.dir.clone());
+        let log = self
+            .opts
+            .log_dir
+            .as_ref()
+            .map(|d| d.join(format!("extension-{id}.log")));
+        Supervisor::new(move || {
+            let mut cmd = Command::new(&exe);
+            cmd.args(&args)
+                .current_dir(&dir)
+                .env("WIND_EXTENSION_ID", &id);
+            wind_supervise::die_with_parent_on(&mut cmd);
+            Ok(cmd)
+        })
+        .with_log(log, LOG_MAX)
+        .with_job(self.job.clone())
+    }
+
+    /// 扩展进程已拉起：建链路、起读写线程。
+    fn attach(&self, slot: &mut Slot, stdin: ChildStdin, stdout: ChildStdout) {
+        let Some(m) = slot.manifest.as_ref() else {
+            return;
+        };
         let link = Arc::new(Link::new(slot.grants, slot.effective_options()));
-        spawn_writer(id, link.clone(), stdin);
+        spawn_writer(&m.id, link.clone(), stdin);
         spawn_reader(
-            id,
+            &m.id,
             link.clone(),
             stdout,
             self.opts.core_version.clone(),
@@ -485,24 +473,7 @@ impl Host {
             self.last_mode.clone(),
             self.last_presence.clone(),
         );
-        Ok(Running { child, link })
-    }
-
-    fn extension_log(&self, id: &str) -> Stdio {
-        let Some(dir) = &self.opts.log_dir else {
-            return Stdio::null();
-        };
-        let path = dir.join(format!("extension-{id}.log"));
-        if std::fs::metadata(&path).is_ok_and(|m| m.len() > LOG_MAX) {
-            let _ = std::fs::rename(&path, dir.join(format!("extension-{id}.old.log")));
-        }
-        match open_append(&path) {
-            Ok(f) => Stdio::from(f),
-            Err(e) => {
-                log!("打开扩展日志 {path:?} 失败: {e}");
-                Stdio::null()
-            }
-        }
+        slot.link = Some(link);
     }
 
     fn send_status(&self) {
@@ -512,7 +483,7 @@ impl Host {
                 id: id.clone(),
                 state: s.state.name().into(),
                 restarts: s.restarts,
-                dropped: s.run.as_ref().map_or(0, |r| r.link.queue.total_dropped()),
+                dropped: s.link.as_ref().map_or(0, |l| l.queue.total_dropped()),
                 error: s.error.clone(),
             })
             .collect();
@@ -524,42 +495,20 @@ impl Host {
 
     fn shutdown(&self) {
         self.stop.store(true, Ordering::Relaxed);
-        let runs: Vec<Running> = lock(&self.slots)
+        let handles: Vec<_> = lock(&self.slots)
             .values_mut()
-            .filter_map(|s| s.run.take())
+            .filter_map(|s| {
+                // 关队列让写线程退出（扩展随之读到 EOF），宽限期后仍未退出就强杀。
+                if let Some(link) = s.link.take() {
+                    link.queue.close();
+                }
+                s.sup.as_mut().and_then(|p| p.stop_background(STOP_GRACE))
+            })
             .collect();
-        let handles: Vec<_> = runs.into_iter().map(stop_running).collect();
         for h in handles {
             let _ = h.join();
         }
     }
-}
-
-fn open_append(path: &Path) -> io::Result<std::fs::File> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-}
-
-/// 关队列让写线程退出（扩展随之读到 EOF），宽限期后仍未退出就强杀。在后台线程里做，
-/// 不卡调用方；返回句柄供关机时等待。
-fn stop_running(mut run: Running) -> std::thread::JoinHandle<()> {
-    run.link.queue.close();
-    std::thread::spawn(move || {
-        let deadline = Instant::now() + STOP_GRACE;
-        while Instant::now() < deadline {
-            if matches!(run.child.try_wait(), Ok(Some(_))) {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let _ = run.child.kill();
-        let _ = run.child.wait();
-    })
 }
 
 fn spawn_writer(id: &str, link: Arc<Link>, mut stdin: ChildStdin) {
@@ -673,51 +622,4 @@ fn spawn_reader(
                 }
             }
         });
-}
-
-#[cfg(windows)]
-mod job {
-    use std::os::windows::io::AsRawHandle;
-    use std::process::Child;
-
-    use windows::Win32::Foundation::{CloseHandle, HANDLE};
-    use windows::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-        SetInformationJobObject,
-    };
-    use windows::core::PCWSTR;
-
-    /// 本进程退出（含被强杀）时句柄随之关闭，系统结束 Job 内全部扩展。
-    pub struct Job(HANDLE);
-
-    // SAFETY: Job 句柄只用于 AssignProcessToJobObject，内核对象句柄可跨线程使用。
-    unsafe impl Send for Job {}
-    unsafe impl Sync for Job {}
-
-    impl Job {
-        pub fn kill_on_close() -> windows::core::Result<Job> {
-            // SAFETY: 标准 Win32 调用；info 在调用期间有效。
-            unsafe {
-                let h = CreateJobObjectW(None, PCWSTR::null())?;
-                let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-                if let Err(e) = SetInformationJobObject(
-                    h,
-                    JobObjectExtendedLimitInformation,
-                    &info as *const _ as *const core::ffi::c_void,
-                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-                ) {
-                    let _ = CloseHandle(h);
-                    return Err(e);
-                }
-                Ok(Job(h))
-            }
-        }
-
-        pub fn assign(&self, child: &Child) -> windows::core::Result<()> {
-            // SAFETY: child 句柄在调用期间有效。
-            unsafe { AssignProcessToJobObject(self.0, HANDLE(child.as_raw_handle())) }
-        }
-    }
 }
