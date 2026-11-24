@@ -101,6 +101,7 @@ impl SyncSettings {
                 if !(u.starts_with("http://") || u.starts_with("https://")) {
                     return Err("WebDAV 地址须以 http:// 或 https:// 开头".into());
                 }
+                check_url("WebDAV 地址", u)?;
             }
             Some(Backend::S3 {
                 endpoint,
@@ -111,6 +112,7 @@ impl SyncSettings {
                 if endpoint.trim().is_empty() {
                     return Err("S3 endpoint 不能为空".into());
                 }
+                check_url("S3 endpoint", endpoint.trim())?;
                 if bucket.trim().is_empty() {
                     return Err("S3 bucket 不能为空".into());
                 }
@@ -121,6 +123,56 @@ impl SyncSettings {
         }
         Ok(())
     }
+}
+
+/// 取 URL 的 authority（scheme 之后到首个 `/ ? #` 之前）。没有 scheme 返回 None。
+fn authority(url: &str) -> Option<(&str, &str)> {
+    let (scheme, rest) = url.split_once("://")?;
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    Some((scheme, &rest[..end]))
+}
+
+/// authority 里的主机部分（去端口、去 IPv6 方括号）。
+fn host_of(auth: &str) -> &str {
+    if let Some(r) = auth.strip_prefix('[') {
+        return r.split(']').next().unwrap_or("");
+    }
+    auth.rsplit_once(':').map_or(auth, |(h, _)| h)
+}
+
+/// 本机或私网地址（明文 http 只允许发往这里）。
+fn is_local_host(host: &str) -> bool {
+    use std::net::IpAddr;
+    let h = host.to_ascii_lowercase();
+    if h == "localhost" {
+        return true;
+    }
+    match h.parse::<IpAddr>() {
+        Ok(IpAddr::V4(a)) => a.is_loopback() || a.is_private() || a.is_link_local(),
+        Ok(IpAddr::V6(a)) => {
+            let seg0 = a.segments()[0];
+            a.is_loopback() || (seg0 & 0xfe00) == 0xfc00 || (seg0 & 0xffc0) == 0xfe80
+        }
+        Err(_) => false,
+    }
+}
+
+/// 存储地址的安全检查：不得带 `user:pass@`（凭据只走机密存储）；明文 http 只允许本机 / 私网。
+fn check_url(label: &str, url: &str) -> Result<(), String> {
+    let Some((scheme, auth)) = authority(url) else {
+        return Ok(()); // 缺 scheme 等由各自的格式检查报
+    };
+    if auth.contains('@') {
+        return Err(format!(
+            "{label}不能在地址里写用户名或密码（user:pass@），请分开填写"
+        ));
+    }
+    if scheme.eq_ignore_ascii_case("http") && !is_local_host(host_of(auth)) {
+        return Err(format!(
+            "{label}使用明文 http 会泄露凭据，请改用 https（仅本机或私网地址允许 http）"
+        ));
+    }
+    Ok(())
 }
 
 /// 设置端经 `sync.command` 发起的操作。
@@ -134,6 +186,8 @@ pub enum Op {
     ExportKey,
     ResetRemote,
     SetSecret,
+    /// 确认大批量删除（同步因护栏停止后）：下一轮放行一次。
+    ConfirmMassDelete,
 }
 
 impl Op {
@@ -392,6 +446,73 @@ mod tests {
         assert!(s.validate().is_ok());
         s.interval_min = 0;
         assert!(s.validate().is_err());
+    }
+
+    fn webdav(url: &str) -> SyncSettings {
+        SyncSettings {
+            backend: Some(Backend::Webdav {
+                url: url.into(),
+                user: "u".into(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn validate_rejects_userinfo_in_urls() {
+        for u in [
+            "https://user:pass@dav.example.com/x",
+            "https://user@dav.example.com/x",
+            "http://a:b@127.0.0.1/x",
+        ] {
+            let e = webdav(u).validate().unwrap_err();
+            assert!(e.contains("用户名或密码"), "{u}: {e}");
+        }
+        let mut s = webdav("https://dav.example.com/a@b");
+        assert!(s.validate().is_ok(), "路径里的 @ 不是 userinfo");
+        s.backend = Some(Backend::S3 {
+            endpoint: "https://k:s@s3.example.com".into(),
+            region: String::new(),
+            bucket: "b".into(),
+            prefix: String::new(),
+            access_key_id: "AK".into(),
+            path_style: false,
+        });
+        assert!(s.validate().is_err());
+    }
+
+    #[test]
+    fn validate_allows_plain_http_only_for_local_hosts() {
+        for u in [
+            "http://localhost:8080/dav",
+            "http://127.0.0.1/x",
+            "http://10.1.2.3/x",
+            "http://172.16.0.9/x",
+            "http://192.168.1.5:5005/x",
+            "http://[::1]:80/x",
+            "http://169.254.1.1/x",
+        ] {
+            assert!(webdav(u).validate().is_ok(), "{u}");
+        }
+        for u in [
+            "http://dav.example.com/x",
+            "http://8.8.8.8/x",
+            "http://172.32.0.1/x",
+            "http://192.169.0.1/x",
+            "http://localhost.evil.com/x",
+        ] {
+            let e = webdav(u).validate().unwrap_err();
+            assert!(e.contains("https"), "{u}: {e}");
+        }
+        assert!(webdav("https://dav.example.com/x").validate().is_ok());
+    }
+
+    #[test]
+    fn confirm_mass_delete_op_wire_name() {
+        assert_eq!(
+            Op::parse("confirm_mass_delete"),
+            Some(Op::ConfirmMassDelete)
+        );
     }
 
     #[test]
