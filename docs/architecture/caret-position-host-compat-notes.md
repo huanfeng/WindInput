@@ -79,6 +79,11 @@ QQNT、Excel、WPS 表格、EverEdit、记事本上暴露出**八种互不相同
 
 修法是让**组合前的空闲上报坐标**（按键前的光标位置，即真正的组合起点）抢在宿主之前锁定。
 
+同类还有 **Beyond Compare（`BCompare.exe`）**：组合期间的坐标与 compStart 恒为窗口左上角附近的固定值，
+与真实位置无关。对 `stale_probe_guard` 宿主，组合期间不仅 probe 不收，普通 `caret_update` 也整条
+不采信（缓存还原为组合前的空闲上报），否则首显对了、几十毫秒后第一帧 `caret_update` 又把候选窗
+重锁回错位。没有空闲上报时本守卫不生效。
+
 > ⚠ 判据用 `!shown`（本轮尚未下发过）而**不是** `is_first_frame`：兜底 timer 到期那条路径先置了
 > `show_authorized`，`is_first_frame` 已为 false，绑在它上面会整条漏掉——症状是「第三个字好了、
 > 第二个字仍挪一格」。
@@ -116,6 +121,17 @@ QQ 的 reported compStart 正常且稳定，但同一按键后会先后出现：
 反复改成 `start → selection → start`。`QQ.exe` 的出厂规则启用 `composition_start_pair_guard`；仅当
 前帧确为 `TSF_COMPOSITION`、其 caret 等于本帧 reported compStart、且该点仍等于已锁起点时，
 后续 `TSF_SELECTION` 才被判成正常组合跨度而禁止重锁。UI 的右边界钳制只放大了观感，不是根因。
+
+QQ 的另外两个事实，决定了重锁判据的写法：
+
+- **判据问宿主，不问自己**：「起点没错」的依据是宿主前后两帧报的 compStart 一致，而不是拿已锁的
+  `composition_start` 与它比。后者有三个写入者，其中两个写的是「候选窗画在哪」，与宿主值差 2px
+  就会让相等判据整条失效。
+- **输入框整体移动时，QQ 会如实改报 compStart**（x 不变、y 随框移动）。此时前后两帧不同、要重锁，
+  而对开了 `composition_start_pair_guard` 的宿主，重锁目标取宿主本帧报的 compStart；取 caret
+  会把锚点锁到组合末端，之后 guard 反而把这个错锚点钉住。
+- 组合区换行后 QQ 会补发一帧 `TSF_CACHED`，带着第一行行尾的陈旧坐标。只认
+  `TSF_COMPOSITION → TSF_SELECTION` 帧对的判据管不到它。
 
 ### F 类：游戏宿主——`GetTextExt` 返回**固定**垃圾值
 
@@ -319,6 +335,52 @@ B 屏的任务栏。
 逐键抖动（一会儿 `D3dExclusive`、一会儿 `Covering`），会让候选窗在上下方之间反复跳。
 （判 D3D 独占态仍是它的正当用途，`foreground.rs` 判据①靠 300ms TTL 压住抖动。）
 
+## 二·六、组合矩形（`composition_rect`）的三种形态
+
+组合矩形是宿主对整个组合范围的测量。它可信时直接取左下角作锚点：单行时 `left` 是组合起点、
+`bottom` 是行底；跨行时 `left` 落在最后一行行首。compStart 做不到这一点：它把组合折叠到起点，
+跨行后仍停在第一行（QQ、飞书、记事本实测均如此，三者的 `caret.y` 恒等于 `rect.bottom`），这是
+候选窗「换行后回不去」的根源。同行内 `left` 恒定，所以矩形每帧更新，不受「同一组合只锁一次」约束
+（例外是 H 类 Tabby，见上）。
+
+可信要同时满足两条（`handle_caret_update` 的 `rect_anchor`）：
+
+1. **是范围不是点**：宽度 > `INSERTION_POINT_MAX_WIDTH`（4px）。光标宽 0~2px，真包围盒最窄也是
+   一个字符宽（16~17px），中间是空带。
+2. **覆盖当前插入行**：`caret.y <= rect.bottom`。只返回首行的宿主会在换行后违反它，此时回退既有逻辑。
+
+不可信的两种形态，处理不同：
+
+| 形态 | 代表 | 含义 | 处理 |
+|---|---|---|---|
+| **整帧退化**（宽或高为 0） | Word 的 `tsf_cached` 帧 | 这次 `GetTextExt` 没算出布局，同帧的 caret 与 compStart 也不可信 | 抑制大偏移逃生阀，否则它与同期 selection 帧（差 100+px）交替到达，锚点来回抖 |
+| **插入点形态**（宽 1~2px） | WPS 文字（w=2）、WPS 表格 / Excel（w=1） | 宿主给不出组合范围，compStart 跟着插入点右移 | 见下 |
+
+插入点形态的宿主分两种，**数据完全一样、期望相反**，只能按宿主声明：
+
+- **WPS 文字**要钉住起点。若放任大偏移逃生阀，打字时锚点被漂移的 compStart 一路推远，删除时
+  逐字回退每步只有十几像素，永远够不到 3 倍行高的重锁阈值，锚点永久卡住。故 per-app
+  `pin_anchor_when_start_drifts` 同时抑制逃生阀；跨行时 x 保持钉住、y 跟随 caret 所在行。
+- **Excel / WPS 表格**每输入一个字就换一次 docMgr，候选窗本就该跟着单元格走，靠的正是逃生阀。
+  `pin_anchor_when_start_drifts` 曾做成全局默认，当场弄坏 Excel 的跟随。
+
+大偏移逃生阀（caret 偏离已锁起点超过 3 倍行高才重锁）有已知盲区：偏差落在 `tol_x`（约 2 倍行高）
+与 3 倍行高之间时 reshow 会触发、位置却仍取钉住的起点。阈值不能再往下调（会把逐字前移当成锚点
+错误），真遇到这个区间要换证据。有可信矩形时逃生阀整段跳过。
+
+## 二·七、非 TSF 坐标来源
+
+- **`gui_caret`**（`GetGUIThreadInfo`）可能是任务栏等别处残留的 Win32 光标。它够格当「没有更好
+  选择时的兜底位置」，不够格解除首帧信任门（`caret_cache_verified`）。它与 TSF 的 compStart 不同源，
+  锁组合起点时的 500px 同源校验对它不适用：此时直接采信 compStart。
+- **Java 被动客户端**（如 JTable 未进入编辑）按键时 DLL 退到 `gui_caret`，拿到的是窗口客户区原点；
+  TSF probe 报的是 Windows 输入编辑框的位置，它不随单元格移动，常恰好等于上一轮权威坐标而被判
+  「未 reflow」。此时 probe 仍应替换掉非 TSF 的缓存，否则兜底到期时候选窗先闪到屏幕左边。
+- **`tsf_default_pos`**：宿主不知道插入点在哪（如 Illustrator 画布），DLL 报宿主的默认位置。缓存装着
+  它时不算「对应当前插入点」，`caret_cache_verified` 必须清为 false，否则下一次组合会走 25ms 短兜底，
+  先在上一次 `gui_caret` 位置闪一下再跳到默认位置。代价是该宿主恒 arm 600ms 长兜底：默认位置帧
+  通常几十毫秒内就到并消费掉兜底，但 `IsHostDefaultPosition` 失败关闭时会等满 600ms。
+
 ## 三、必测矩阵
 
 **每次改动候选窗定位相关代码，以下组合都要跑一遍。** 单个宿主全绿完全不能说明问题——本轮
@@ -407,6 +469,11 @@ caret_probe → 拒绝: 该宿主 composition rect 恒陈旧，改用组合前�
   同一轮里 DLL 已经用 `CARET_SRC_PRE_REFLOW` 标出了重排前的那一帧，probe 与它逐位相同即未重排。
   分界线是「拿 pre_reflow **定位置**」（2026-08-01 翻车，错位被 settle 容差固定）与「拿它
   **否决别人**」（只会多等一轮，方向安全）——两者相反，别混为一谈。
+- **组合矩形可信判据写成 `left >= caret.x`**（「起点在插入点左边」）：只在单行成立，换行后 caret
+  回到行首恰好等于 `left`，真范围被误判成插入点（Excel 实测 w=402 的矩形被丢弃）。改为按宽度判，
+  见 §二·六。
+- **大偏移逃生阀拿已锁的 `composition_start` 与宿主上报的 compStart 比**：见 E 类，问宿主前后两帧，
+  别问自己。
 - **靠单个宿主验证**：见第三节。
 
 ## 六、相关文件
