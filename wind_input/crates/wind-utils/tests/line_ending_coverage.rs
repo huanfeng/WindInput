@@ -38,14 +38,6 @@ use std::path::{Path, PathBuf};
 /// 加条目之前先问：这个文件按行解析的是不是用户能拿到、能编辑、能从别的系统
 /// 搬过来的文本？是的话就该修，不是加白名单。
 const ALLOWED: &[(&str, &str)] = &[
-    // ---- 整个文件只在 cfg(test) 下编译，且读的是构建产物 ----
-    // 整文件测试模块在声明处（pinyin/mod.rs 的 #[cfg(test)] mod）才带 cfg(test)，
-    // 文件内没有 #[cfg(test)] 可供 strip_tests 剥除，守卫于是把它当生产代码。
-    // 它读的是 gen-data 产出的 base.dict.yaml（我们自己生成、LF），不是用户文件。
-    (
-        "crates/wind-engine/src/pinyin/step4_skip_tests.rs",
-        "整文件测试模块，读 gen-data 产物",
-    ),
     // ---- 构建期工具：读的是我们从上游拉下来的数据，不是用户文件 ----
     // 上游（rime / opencc / unicode 数据）用 LF 或 CRLF，不会是孤立 \r；
     // 且构建期解析异常会当场让构建失败或产出明显异常，不存在「运行时静默」。
@@ -220,22 +212,33 @@ const KNOWN_GAPS: &[(&str, &str)] = &[
 /// `wind-webdata/src/lib.rs` 就是这么漏掉 `dict_yaml_name` 的：它在第二个 test mod
 /// 之后，行首无缩进，是实打实的生产代码。
 ///
-/// 现在逐块跳过：行首 `#[cfg(test)]` 进入跳过态，遇到**整行恰好是** `}` 结束。
+/// 现在逐块跳过：行首 `#[cfg(test)]` 进入跳过态，遇到**整行恰好是** `}` 结束；
+/// 条目首行以 `;` 结尾（外移的 `mod tests;`）则只跳这一行。
 ///
 /// 判据不能只看 `starts_with('}')`：`app_compat.rs` 的测试里有个跨行字符串字面量，
 /// 其中一行正是 `}"`，那会让跳过态提前结束、把后面的测试代码当成生产代码报出来。
 fn strip_tests(src: &str) -> String {
     let mut out = String::with_capacity(src.len());
     let mut skipping = false;
+    let mut at_item_head = false;
     for line in src.split_inclusive('\n') {
         if !skipping {
             if line.starts_with("#[cfg(test)]") {
                 skipping = true;
+                at_item_head = true;
                 continue;
             }
             out.push_str(line);
-        } else if line.trim_end() == "}" {
+        } else if at_item_head && line.starts_with("#[") {
+            // 条目上连着的其他属性（如 `#[path = "…"]`）。
+        } else if at_item_head && line.trim_end().ends_with(';') {
+            // 单行条目（`mod tests;`、`use …;`）：只跳这一行，否则会吞掉后面的生产代码。
             skipping = false;
+        } else {
+            at_item_head = false;
+            if line.trim_end() == "}" {
+                skipping = false;
+            }
         }
     }
     out
@@ -312,7 +315,7 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     for e in rd.flatten() {
         let p = e.path();
         if p.is_dir() {
-            // tests/ 与 target/ 不扫
+            // tests/ 与 target/ 不扫；外移的测试模块（*_tests.rs）同理
             let name = p
                 .file_name()
                 .unwrap_or_default()
@@ -322,7 +325,9 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
                 continue;
             }
             rust_files(&p, out);
-        } else if p.extension().is_some_and(|x| x == "rs") {
+        } else if p.extension().is_some_and(|x| x == "rs")
+            && !p.to_string_lossy().ends_with("_tests.rs")
+        {
             out.push(p);
         }
     }

@@ -49,11 +49,11 @@ const CONFIG_LOAD_SITES: &[(&str, usize, &str)] = &[
         "cmd_export 已闸（is_degraded ⇒ 拒绝导出）；load_value 只读单键显示",
     ),
     (
-        "apps/service/src/config_cli/custom_check.rs",
+        "apps/service/src/config_cli/custom_check_tests.rs",
         1,
         "**不是调用点**：`config check --custom` 全程不加载本机配置（它体检的是别人的\
          定制包），那一处是 `check_never_touches_the_user_layer` 里的**禁用词字面量**，\
-         正好用来钉住这一点。真新增调用点时次数会变成 2，本闸门照常拦",
+         正好用来钉住这一点。custom_check.rs 本体真新增调用点时会作为新文件报出",
     ),
     (
         "apps/service/src/main.rs",

@@ -1,0 +1,281 @@
+use super::*;
+use wind_ui_types::SpanStyle;
+
+const BODY: Rgba = [150, 150, 150, 255];
+
+fn styled() -> StyledText {
+    let mut t = StyledText::new();
+    t.push(
+        "kao",
+        &SpanStyle {
+            role: Some("code_hint"),
+            ..Default::default()
+        },
+    );
+    t.push(
+        "(",
+        &SpanStyle {
+            role: Some("literal"),
+            ..Default::default()
+        },
+    );
+    t.push(
+        "x",
+        &SpanStyle {
+            role: Some("pinyin"),
+            color: Some(std::sync::Arc::new(wind_theme::InlineColor::parse(
+                "#FF0000",
+            ))),
+            ..Default::default()
+        },
+    );
+    t
+}
+
+/// 没配角色、只有内联色那段被保留；解析到正文色的全部丢弃。
+#[test]
+fn keeps_only_runs_that_differ_from_body() {
+    let theme = Resolved::default();
+    let runs = color_runs(
+        &theme,
+        &RvNode::default(),
+        false,
+        TextState::Normal,
+        BODY,
+        &styled(),
+    );
+    assert_eq!(
+        runs,
+        vec![ColorRun {
+            start: 4,
+            end: 5,
+            rgba: [255, 0, 0, 255]
+        }]
+    );
+}
+
+/// 不配角色的主题 × 无色模板（有角色、无内联色）一段都不留。
+#[test]
+fn unroled_theme_yields_no_runs() {
+    let mut t = StyledText::new();
+    t.push(
+        "kao",
+        &SpanStyle {
+            role: Some("code_hint"),
+            ..Default::default()
+        },
+    );
+    let runs = color_runs(
+        &Resolved::default(),
+        &RvNode::default(),
+        false,
+        TextState::Selected,
+        BODY,
+        &t,
+    );
+    assert!(runs.is_empty());
+}
+
+// ───────────────────── candidate_backdrop ─────────────────────
+
+const WHITE: Rgba = [255, 255, 255, 255];
+
+fn bg(c: Rgba) -> RvNode {
+    RvNode {
+        bg_color: Some(c),
+        ..Default::default()
+    }
+}
+
+fn patched(base: RvNode, selected: Option<RvNode>, hover: Option<RvNode>) -> RvNode {
+    RvNode {
+        selected: selected.map(Box::new),
+        hover: hover.map(Box::new),
+        ..base
+    }
+}
+
+fn views(window: RvNode, list: RvNode, item: RvNode, text: RvNode) -> RvViews {
+    RvViews {
+        window,
+        candidate_list: list,
+        item,
+        text,
+        ..Default::default()
+    }
+}
+
+/// 半透明各层按 窗口 → 列表 → 候选项 → 正文叶子 的顺序逐层叠上去，结果不透明。
+#[test]
+fn backdrop_composites_layers_in_order() {
+    let (list, item, text) = ([0, 0, 255, 128], [255, 0, 0, 64], [0, 255, 0, 32]);
+    let v = views(bg(WHITE), bg(list), bg(item), bg(text));
+    let co = wind_theme::composite_over;
+    let want = co(text, co(item, co(list, WHITE)));
+    assert_eq!(candidate_backdrop(&v, TextState::Normal), Some(want));
+    assert_eq!(want[3], 255);
+    // 顺序真有影响：反着叠得到别的颜色，上式才钉得住层序。
+    assert_ne!(want, co(list, co(item, co(text, WHITE))));
+}
+
+/// 窗口底未配走出厂白；常态候选项不配底色就不参与合成。
+#[test]
+fn backdrop_defaults_to_factory_window_bg() {
+    let v = RvViews::default();
+    assert_eq!(
+        candidate_backdrop(&v, TextState::Normal),
+        Some(wind_theme::fallback::WINDOW_BG)
+    );
+}
+
+/// 窗口底半透明（透到桌面）：底色不可知。
+#[test]
+fn backdrop_none_when_window_translucent() {
+    let v = views(
+        bg([255, 255, 255, 254]),
+        RvNode::default(),
+        RvNode::default(),
+        RvNode::default(),
+    );
+    assert_eq!(candidate_backdrop(&v, TextState::Normal), None);
+    assert_eq!(candidate_backdrop(&v, TextState::Selected), None);
+}
+
+/// 任一层带渐变 / 背景图 / 覆盖图：底色不可知。
+#[test]
+fn backdrop_none_when_any_layer_has_art() {
+    let gradient = || RvNode {
+        bg_gradient: Some(wind_theme::RvGradient {
+            kind: "linear".into(),
+            angle: 0.0,
+            stops: vec![(WHITE, 0.0), ([0, 0, 0, 255], 1.0)],
+        }),
+        ..Default::default()
+    };
+    let image = || RvNode {
+        bg_image: Some(Default::default()),
+        ..Default::default()
+    };
+    let layers = || RvNode {
+        layers: vec![Default::default()],
+        ..Default::default()
+    };
+    for (what, art) in [
+        ("渐变", gradient()),
+        ("背景图", image()),
+        ("覆盖图", layers()),
+    ] {
+        let d = RvNode::default;
+        for (at, v) in [
+            ("窗口", views(art.clone(), d(), d(), d())),
+            ("列表", views(d(), art.clone(), d(), d())),
+            ("候选项", views(d(), d(), art.clone(), d())),
+            ("正文", views(d(), d(), d(), art.clone())),
+        ] {
+            assert_eq!(
+                candidate_backdrop(&v, TextState::Normal),
+                None,
+                "{at}{what}"
+            );
+        }
+    }
+    // 候选项的状态 patch 带图：只影响该状态。
+    let v = views(
+        RvNode::default(),
+        RvNode::default(),
+        patched(RvNode::default(), Some(image()), None),
+        RvNode::default(),
+    );
+    assert_eq!(candidate_backdrop(&v, TextState::Selected), None);
+    assert!(candidate_backdrop(&v, TextState::Normal).is_some());
+    assert!(candidate_backdrop(&v, TextState::Hover).is_some());
+}
+
+/// 选中 / 悬停态候选项不配底色时走出厂兜底（悬停 HOVER_BG、选中 SELECTED_BG），配了用配的。
+#[test]
+fn backdrop_state_item_bg_falls_back_to_factory() {
+    use wind_theme::fallback::{HOVER_BG, SELECTED_BG};
+    let plain = RvViews::default();
+    assert_eq!(candidate_backdrop(&plain, TextState::Hover), Some(HOVER_BG));
+    assert_eq!(
+        candidate_backdrop(&plain, TextState::Selected),
+        Some(SELECTED_BG)
+    );
+    const MINE: Rgba = [10, 20, 30, 255];
+    let v = views(
+        RvNode::default(),
+        RvNode::default(),
+        patched(bg([1, 2, 3, 255]), Some(bg(MINE)), Some(bg(MINE))),
+        RvNode::default(),
+    );
+    assert_eq!(candidate_backdrop(&v, TextState::Hover), Some(MINE));
+    assert_eq!(candidate_backdrop(&v, TextState::Selected), Some(MINE));
+    assert_eq!(
+        candidate_backdrop(&v, TextState::Normal),
+        Some([1, 2, 3, 255])
+    );
+}
+
+/// 正文叶子的底色叠在最上：状态 patch 的优先，未配回退基态的。
+#[test]
+fn backdrop_text_leaf_bg_on_top() {
+    const BASE: Rgba = [0, 128, 0, 255];
+    const SEL: Rgba = [128, 0, 0, 255];
+    let v = views(
+        RvNode::default(),
+        RvNode::default(),
+        RvNode::default(),
+        patched(bg(BASE), Some(bg(SEL)), None),
+    );
+    assert_eq!(candidate_backdrop(&v, TextState::Normal), Some(BASE));
+    assert_eq!(candidate_backdrop(&v, TextState::Selected), Some(SEL));
+    assert_eq!(
+        candidate_backdrop(&v, TextState::Hover),
+        Some(BASE),
+        "悬停 patch 没配正文底：沿用基态"
+    );
+}
+
+/// 分隔符标记透传到求色：配了 separator 单独着色，没配与变量同色（相邻两段同色仍各占一段）。
+#[test]
+fn separator_flag_reaches_span_color() {
+    const RED: Rgba = [255, 0, 0, 255];
+    const BLUE: Rgba = [0, 0, 255, 255];
+    let var = SpanStyle {
+        role: Some("chaizi_all"),
+        ..Default::default()
+    };
+    let sep = SpanStyle {
+        separator: true,
+        ..var.clone()
+    };
+    let mut t = StyledText::new();
+    t.push("ab", &var);
+    t.push("/", &sep);
+    t.push("c", &var);
+    let runs_with = |roles: &[(&str, Rgba)]| {
+        let node = RvNode {
+            roles: roles.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+            ..Default::default()
+        };
+        color_runs(
+            &Resolved::default(),
+            &node,
+            false,
+            TextState::Normal,
+            BODY,
+            &t,
+        )
+        .into_iter()
+        .map(|r| (r.start, r.end, r.rgba))
+        .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        runs_with(&[("chaizi_all", RED), ("separator", BLUE)]),
+        vec![(0, 2, RED), (2, 3, BLUE), (3, 4, RED)]
+    );
+    assert_eq!(
+        runs_with(&[("chaizi_all", RED)]),
+        vec![(0, 2, RED), (2, 3, RED), (3, 4, RED)]
+    );
+}

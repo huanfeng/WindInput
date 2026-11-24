@@ -32,7 +32,10 @@ fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
                 continue;
             }
             rs_files(&p, out);
-        } else if p.extension().is_some_and(|x| x == "rs") {
+        } else if p.extension().is_some_and(|x| x == "rs")
+            && !p.to_string_lossy().ends_with("_tests.rs")
+        {
+            // 外移的测试模块（*_tests.rs）不是读取点。
             out.push(p);
         }
     }
