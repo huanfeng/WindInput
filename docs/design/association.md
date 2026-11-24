@@ -331,6 +331,25 @@ N-1 条」上。而 `PassThrough` / `NotHandled` 这一格，问一次就够。
 （`enter_aux_code`），给的是 `Consumed` 而非透传——用户看到的同样是「按了没反应」，
 但机制不同（键被干净吃掉、不丢键）。要不要让它在联想态做点别的是另一个问题。
 
+其余几条事实（自 `assoc_release_on_passthrough` 的注释迁来）：
+
+- **Ctrl/Alt 组合刻意不排除**：联想态下 Ctrl+S 等同样落 `PassThrough`（TSF 的 `ctrl_alt_cleanup`
+  分支已吃下转发），改判后 C++ 经 `_ReplayKeyToHost` 重放，物理修饰键仍按着，宿主
+  `GetKeyState` 能还原组合语义。macOS 侧对照基线是 `passThrough` 臂：`clearThenPassThrough`
+  只在前缀为空时多清一次 marked text（正是占位符），无文本丢失、无消费差异。
+- **「唯一出口」只对桌面与 macOS 成立**：移动端 `wind-mobile` 的 `key_down` 直调内层
+  `handle_key_event`，本收口与 `adopt_orphaned_placeholder` 都不生效，且 `edit_ops.rs` 会把
+  `ClearCompositionThenPassThrough` 降级成吃键。移动端没有「吃了再吐」问题，不是活缺陷。
+- **邻居状态同病，刻意不管**：空码补全（缓冲空 + 候选非空 + 非联想）按 Del/Home/End 会走到
+  同形的「吃了再吐」，但那批候选用户确实在看，「顺带收窗」未必对。日后报障别顺手把判据放宽成
+  「候选非空」，该单独定收窗语义。
+- **曝光面**：C++ `_TryConsumeSkipKey` 只比对 skip 表队首且没有超时。联想窗生命周期内每个
+  Del / Home / End / ←→ / Insert 与 Ctrl/Alt 组合都走重放；注入若没回到我们的 sink（前台已换、
+  UIPI 拦截），队首残留会挡住后续全部 skip（含自动配对合成的右符号）。这是既有隐患，根治需
+  C++ 侧按值扫描或加 TTL，未做。
+- **不加 `AtomicBool` 镜像省 state 锁**：透传是英文模式每个字母的常态返回值，判联想态要多取
+  一次 state 锁；但联想的真相源是候选自身，镜像与候选失步会造成「联想窗关不掉」这类难查缺陷。
+
 #### 3.3.2 Shift+字母进临时英文
 
 `try_activate_mode` 里的临英分支原先要求 `candidates.is_empty()`，加上函数开头那句

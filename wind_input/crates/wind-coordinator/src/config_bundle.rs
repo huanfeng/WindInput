@@ -1,7 +1,6 @@
 //! [`ConfigBundle`]：配置 + 其轻量派生缓存的不可变快照，运行时整体原子替换以支持热重载。
 //!
-//! `build` 是**所有**配置生效的必经之路（启动、热重载、RPC 改配置、测试直接构造）。
-//! （自 coordinator.rs 平移，纯搬运。）
+//! `build` 是所有配置生效的必经之路（启动、热重载、RPC 改配置、测试直接构造）。
 
 use tracing::warn;
 use wind_config::Config;
@@ -41,12 +40,9 @@ pub(crate) fn parse_jump_out_keys(list: &[String]) -> std::collections::HashSet<
 
 /// 解析英文大小写档位循环的触发键名 → VK。空串 / 未知名 → `None`（＝功能关闭）。
 ///
-/// 值域刻意与 [`parse_jump_out_keys`] 同族（都是非可打印功能键，不在 keymap 的 OEM 符号
-/// 键表里），另加 `capslock`——它是 Windows 上的推荐值，也是唯一走全局钩子那条独立路径的键。
-///
-/// ⚠️ **未知键名要告警**：本函数只负责解析，告警在 `ConfigBundle::from_config` 的调用点，
-/// 那里才知道用户原本写的是什么。静默回落成「功能关闭」正是本仓反复栽过的
-/// 「拧了没反应的旋钮」。
+/// 值域与 [`parse_jump_out_keys`] 同族（非可打印功能键），另加 `capslock`（Windows 推荐值，
+/// 走全局钩子的独立路径）。未知键名的告警在 [`ConfigBundle::build`] 的调用点，静默回落成
+/// 「功能关闭」会让用户以为开了。
 pub(crate) fn parse_case_cycle_key(name: &str) -> Option<u32> {
     match name.trim().to_lowercase().as_str() {
         "" => None,
@@ -71,53 +67,43 @@ pub(crate) fn parse_jump_out_on_right_symbol(list: &[String]) -> bool {
 pub(crate) struct ConfigBundle {
     pub(crate) config: Config,
     pub(crate) compiled_hotkeys: CompiledHotkeys,
-    /// 会话态按键绑定（`keys.session_actions` 编译一次）。**不只是导航**——二期起还装
-    /// `cancel`，故不叫 `nav_keys`。动作值域在 `wind-config`，表在 `wind-keys`，两者由
-    /// 本结构体所在的 crate 拼起来（唯一同时看得见两边的地方）。
+    /// 会话态按键绑定（`keys.session_actions` 编译一次），不只是导航（还有 `cancel` 等）。
+    /// 动作值域在 `wind-config`、表在 `wind-keys`，本 crate 是唯一同时看得见两边的地方。
     pub(crate) session_keys: keymap::KeyBinds<wind_config::SessionAction>,
     pub(crate) cn_pairs: Vec<(char, char)>,
     pub(crate) en_pairs: Vec<(char, char)>,
     /// 配对跳出键的 VK 码集合（预解析自 `auto_pair.jump_out_keys`，空=不启用）。
     pub(crate) jump_out_keys: std::collections::HashSet<u32>,
     /// 英文大小写档位循环的触发键 VK（预解析自 `input.english_case_cycle_key`）。
-    /// `None` = 功能关闭——**键即开关**，此外没有第二个闸门。
+    /// `None` = 功能关闭：键即开关，没有第二个闸门。
     pub(crate) english_case_cycle_vk: Option<u32>,
-    /// 整句切换键（预解析自 `schema.pinyin.sentence_cycle_key`）。`None` = 功能关闭 ——
-    /// **键即开关**，同 `english_case_cycle_vk`。带 `shift` 位：`shift+tab` 与 `tab` 是两个键。
+    /// 整句切换键（预解析自 `schema.pinyin.sentence_cycle_key`）。`None` = 功能关闭，键即开关。
+    /// 带 `shift` 位：`shift+tab` 与 `tab` 是两个键。
     pub(crate) sentence_cycle_key: Option<keymap::SessionKey>,
     /// 输入右符号本身是否跳出（`jump_out_keys` 含 `right_symbol`）。对称配对不受此项影响。
     pub(crate) jump_out_on_right_symbol: bool,
-    /// 「英半列有自定义标点映射」的源字符集合（预解析自 `punct.custom_mappings`，空=英文模式
-    /// 行为与历史一致）。这是 DLL 吃键与本侧出字的**同源判据**，且在英文标点键的热路径上每键
-    /// 都要查——故预计算，别在按键时重新遍历 `custom_mappings`。有序集合使推送字节可复现。
+    /// 英文模式下需 DLL 吃键转发的标点源字符（见 `build` 的合成）。DLL 吃键与本侧出字的同源
+    /// 判据，热路径上每键都查，故预计算。有序集合使推送字节可复现。
     pub(crate) custom_en_punct_chars: std::collections::BTreeSet<char>,
-    /// 「中文模式下产物就是原样半角 ASCII、该让 DLL **透传不吃**」的标点集合
-    /// （见 `wind_punct::chinese_passthrough_punct_chars`；空 = 行为与历史一致）。
-    ///
-    /// 与上一个字段方向相反、成因同根：吃了再原样吐回去，在非 TSF-aware 宿主上会被当成
-    /// 虚拟键码（B-9）。同样是 DLL 吃键与本侧 `should_handle_key` 的**同源判据**，
-    /// 同样在热路径上每键要查，故一并预计算。
+    /// 中文模式下产物就是原样半角 ASCII、该让 DLL 透传不吃的标点集合
+    /// （见 `wind_punct::chinese_passthrough_punct_chars`）。吃了再吐在非 TSF-aware 宿主上会被
+    /// 当成虚拟键码。DLL 吃键与本侧 `should_handle_key` 的同源判据，故预计算。
     pub(crate) cn_passthrough_punct_chars: std::collections::BTreeSet<char>,
-    /// 同上，但用于**英文标点态**（中文输入模式 + 标点切英文）。是上一份的**超集**：
-    /// 那个态不走中文标点表，`,` `.` `;` 这些的产物也是原样 ASCII。
-    /// 两份都推给 DLL，由它按当下标点态选用——标点态是运行时状态，不进配置快照。
+    /// 同上，用于英文标点态（中文输入模式 + 标点切英文），是上一份的超集。两份都推给 DLL，
+    /// 由它按当下标点态选用（标点态是运行时状态，不进配置快照）。
     pub(crate) en_passthrough_punct_chars: std::collections::BTreeSet<char>,
     /// 空格行配了自定义映射的列（位掩码，全局表 ∪ 各方案表）。中文模式空缓冲时 DLL 据此
     /// 吃下空格（`CONFIG_KEY_SPACE_CUSTOM_COLS`），本侧对吃下的空格必须出字、不能透传。
     pub(crate) space_custom_cols: u8,
     /// 分层按键配置的解析器（当前只收全局 `keys.key_actions` 的预编译引导键表）。
     ///
-    /// 与 `session_keys` 同源的理由：动作值域在 `wind-config`、键名解析在 `wind-keys`，
-    /// 本 crate 是唯一同时看得见两者的地方。设计见
-    /// `docs/design/key-resolver-unification.md`。
+    /// 放在本 crate 的理由同 `session_keys`。设计见 `docs/design/key-resolver-unification.md`。
     pub(crate) key_resolver: crate::key_resolver::KeyResolver,
-    /// **所有**方案 `[session_actions]` 里绑过的键 VK（并集，已滤显式 `none`）。
+    /// 所有方案 `[session_actions]` 里绑过的键 VK（并集，已滤显式 `none`）。
     ///
-    /// 供需要「任一方案绑过没有」的消费者用，当前是 `Coordinator::capslock_bound`
-    /// （决定装不装 CapsLock 全局钩子）。★ 那里**必须**用并集而不是活跃方案那一份：
-    /// 钩子是进程级资源且 `SetWindowsHookExW` 重复装会留下卸不掉的旧钩子，按活跃方案
-    /// 取值就成了「切方案反复装卸」。同 `schema_bound_modifier_vks` 那条理由，只是它
-    /// 落在 Rust 侧而非 C++ 边界。
+    /// 当前消费者是 `Coordinator::capslock_bound`（决定装不装 CapsLock 全局钩子），必须用并集：
+    /// 钩子是进程级资源，`SetWindowsHookExW` 重复装会留下卸不掉的旧钩子，按活跃方案取值就成了
+    /// 切方案反复装卸。
     pub(crate) schema_session_vks: std::collections::BTreeSet<u32>,
     /// 悬停提示（`ui.tooltip.*`）的预解析形态：段模板在这里解析一次，候选循环里只渲染。
     pub(crate) tooltip: crate::tooltip::CompiledTooltip,
@@ -125,20 +111,12 @@ pub(crate) struct ConfigBundle {
 
 /// 所有方案 `[key_actions]` 里绑过的纯修饰键 VK（并集）。
 ///
-/// 取并集而非活跃方案那一份：`CompiledHotkeys` 随 activation 推给 C++，按活跃方案裁剪
-/// 就得在每次切方案后重推，漏一次的表现是「刚切完方案这个键不灵、点下别的窗口又灵了」。
-/// 并集是静态的，代价只是别的方案里多转发一个不动作的 keyup（keydown 侧纯修饰键一律
-/// 放行，宿主无感）。理由详见 [`EngineManager::all_key_action_keys`]。
+/// 取并集而非活跃方案那一份：`CompiledHotkeys` 随 activation 推给 C++，按活跃方案裁剪就得
+/// 每次切方案后重推。代价只是别的方案里多转发一个不动作的 keyup。详见
+/// [`EngineManager::all_key_action_keys`]。
 ///
-/// ⚠️ **枚举源是 `available`，overlay 方案（`hidden = true`）不在内——这是自洽，不是漏。**
-/// overlay 方案的 `[key_actions]` 没有消费路径：`active_key_actions()` 按 `EngineManager`
-/// 的**活跃方案**取表，而进特殊模式只改 `State.active`（`ModeKind::Special`），不动活跃方案
-/// ⇒ overlay 模式下查的仍是主方案那张表。把枚举源换成 `installed_schemas` 会让一批查不到
-/// 消费点的键进转发集，是纯粹的多余转发。
-///
-/// ⇒ 将来真要支持 overlay 自己的 `[key_actions]`，**枚举源与消费路径两处都得改**；
-/// 届时若把本函数收编成 `reachability()`，那个名字承诺「全集」而实现只覆盖 `available`，
-/// 需要一并处置（叫 `reachability_of_available()`，或在注释里写明）。
+/// 枚举源是 `available`，overlay 方案（`hidden = true`）不在内，这是自洽的：进特殊模式不动
+/// 活跃方案，overlay 的 `[key_actions]` 没有消费路径。将来要支持它，枚举源与消费路径两处都得改。
 /// 见 `docs/design/key-resolver-unification.md` §8。
 pub(crate) fn schema_bound_modifier_vks(mgr: &EngineManager) -> std::collections::BTreeSet<u32> {
     mgr.all_key_action_keys()
@@ -149,10 +127,7 @@ pub(crate) fn schema_bound_modifier_vks(mgr: &EngineManager) -> std::collections
 
 /// 加载期告警：`keys.session_actions` 里认不出的键名 / 动词。
 ///
-/// ★ 静默忽略与「这个功能坏了」完全同形——用户无从分辨自己拼错了、还是该功能压根没实现。
-/// 这是 `is_supported_key_action` 当初立的口径，本表沿用。
-///
-/// 分两条报而不是合并成一条：键名错与动词错的修法不同，合并后用户还要自己二选一去试。
+/// 静默忽略会让用户分不清是拼错了还是功能没实现。键名错与动词错分两条报，修法不同。
 fn warn_unknown_session_actions(config: &Config) {
     for (name, verb) in &config.keys.session_actions {
         if wind_config::SessionAction::parse_checked(verb).is_none() {
@@ -176,63 +151,40 @@ fn warn_unknown_session_actions(config: &Config) {
     }
 }
 
-/// 跨方案的按键**并集**：可达性的数据源。
+/// 跨方案的按键并集：可达性的数据源。
 ///
-/// ★ 与「当前方案下这个键干什么」是两回事，别混用。语义表按活跃方案查
-/// （`Coordinator::bound_action_with_source` / `session_action_for`）；本结构回答的是
-/// 「这个键要不要送到服务端 / 要不要装进程级资源」，必须覆盖**所有**方案，否则切方案后
-/// 手里是旧表，表现为「刚切完方案这个键不灵、点下别的窗口又灵了」。
+/// 与「当前方案下这个键干什么」（`Coordinator::bound_action_with_source` / `session_action_for`，
+/// 按活跃方案查）是两回事。本结构回答「这个键要不要送到服务端 / 装进程级资源」，必须覆盖所有
+/// 方案：这些推送只在握手与热重载发生、切方案不推，按活跃方案取值则切方案后手里是旧表。
 ///
-/// 在配置生效期算一次（构造 / 热重载），不是热路径——但它要 `read_schema` 扫全部可用方案，
-/// 别在按键路径上调。
+/// 在配置生效期算一次；它要扫全部方案文件，别在按键路径上调。
 #[derive(Default)]
 pub(crate) struct SchemaKeyUnion {
     /// 所有方案 `[key_actions]` 里绑过的纯修饰键 VK。
     pub(crate) modifier_vks: std::collections::BTreeSet<u32>,
-    /// 所有方案 `[session_actions]` 里绑过的**键名**（`EngineManager` 侧已滤掉显式 `none`）。
-    ///
-    /// 存键名而非 VK：编译 TSF 转发条目要区分 `shift+tab` 与 `tab`，而 VK 集合把
-    /// `shift+` 前缀丢了。VK 形式在 `ConfigBundle` 里另存一份供快速判定。
+    /// 所有方案 `[session_actions]` 里绑过的键名（已滤显式 `none`）。存键名而非 VK：编译 TSF
+    /// 转发条目要区分 `shift+tab` 与 `tab`。VK 形式在 `ConfigBundle` 里另存一份。
     pub(crate) session_key_names: std::collections::BTreeSet<String>,
-    /// 所有方案 `[punct.custom_mappings]` 里配了**英半列**的源字符。
+    /// 所有方案 `[punct.custom_mappings]` 里配了英半列的源字符（`CONFIG_KEY_CUSTOM_EN_PUNCT`）。
     ///
-    /// 与上面两项同一条理由，只是这次的资源在 C++ 那边：`CONFIG_KEY_CUSTOM_EN_PUNCT` 只在
-    /// 握手与配置热重载时推送，**切方案不推**。按活跃方案裁剪就得给五条切方案路径各接一次
-    /// 推送，漏一条的表现是「刚切完方案这个键不灵」——正是本结构存在的那个坑。
-    ///
-    /// 并集在这里是**安全**的，理由现成：集合内没配英半自定义的键会原样出 ASCII，与透传
-    /// 等价（见 `push_custom_en_punct_config` 与 `wind_punct::english_smart_source_chars`
-    /// 的文档）。代价只是英文模式下多转发几个标点键。
+    /// 并集是安全的：没配英半自定义的键会原样出 ASCII，与透传等价（见
+    /// `push_custom_en_punct_config`）。代价只是英文模式下多转发几个标点键。
     pub(crate) punct_en_chars: std::collections::BTreeSet<char>,
-    /// 所有**已安装**方案的码元集里，**可作首码**的非字母字符（并集）。
+    /// 所有已安装方案的码元集里可作首码的非字母字符（并集）。
     ///
-    /// ★ 方向与上面三项**相反**：那些是「多收几个键」（并集 = 更保守 = 安全），这一项是
-    /// 要从「该透传的集合」里**减去**。凡任一方案把它当码元首码，空缓冲按下就要开始组码，
-    /// 透传掉就是「切到那个方案后再也打不出字」。故这里取并集同样是保守侧——宁可少透传
-    /// 几个键（退回旧的吃键行为），不可多透传一个。
-    ///
-    /// 并集而非活跃方案那一份的理由同 `punct_en_chars`：`CONFIG_KEY_CN_PASSTHROUGH_PUNCT`
-    /// 只在握手与热重载推送、**切方案不推**。
+    /// 方向与上面几项相反：它要从透传集合里减去。任一方案把它当首码，空缓冲按下就要开始组码，
+    /// 透传掉就是切到那个方案后打不出字。取并集同样是保守侧：宁可少透传，不可多透传。
     pub(crate) leading_code_chars: std::collections::BTreeSet<char>,
-    /// 所有**已安装**方案（含 overlay）`[key_actions]` 里绑过的键 VK（并集）。
+    /// 所有已安装方案（含 overlay）`[key_actions]` 里绑过的键 VK（并集），同样用于从透传集合
+    /// 里减去：引导键（`special:*` / `mix` / 临拼 / 临英）空缓冲时就生效，透传掉那个模式就进不去。
     ///
-    /// ⚠️ 枚举源是 `installed_schemas()` 而非 `available`，与同为减数的
-    /// [`Self::leading_code_chars`] 保持一致——overlay 方案（快符等）不进 `available`，
-    /// 但它被激活时 `[key_actions]` 是生效的。漏一个减数就是「那个模式再也进不去」。
-    /// 这与 `modifier_vks` 用 `available` 是**两种情况**：那个是加数（多转发无害）。
-    ///
-    /// 同样用于从透传集合里减去：`special:*` / `mix` / 临拼 / 临英这些引导键**空缓冲时
-    /// 就生效**，透传掉等于「那个模式再也进不去」，且不报错。
-    ///
-    /// ⚠️ 只需排除「空缓冲也生效」的那类。翻页 / 次选 / 以词定字等会话态绑定不必在此排除
-    /// ——两侧的透传闸门本就带 `!hasInputSession`。这里按 `key_actions` 整表排除是**偏保守**
-    /// 的取舍：该表里也可能有只在会话中生效的动词，多排除几个只是少透传，不构成缺陷。
+    /// 枚举源是 `installed_schemas()` 而非 `available`：减数漏了有害，而 `modifier_vks` 是加数，
+    /// 用 `available` 无害。按整表排除偏保守（表里也可能有只在会话中生效的动词），只是少透传。
     pub(crate) key_action_vks: std::collections::BTreeSet<u32>,
     /// 任一**已安装**方案的 `[punct] custom_mappings` 覆盖过的标点源字符（并集）。
     ///
-    /// 第三个减数，与前两个同一条理由。`effective_punct` 在方案声明了该表时是**整表替换**
-    /// （连 `custom_enabled` 一起换），全局表完全不参与 ⇒ 只看全局表的话，方案配的键会被
-    /// 透传掉、方案里那一格静默失效且零日志。同 `punct_en_chars` 已经接上的那条链。
+    /// 第三个减数。`effective_punct` 在方案声明了该表时整表替换（连 `custom_enabled` 一起换），
+    /// 只看全局表会让方案配的键被透传掉、静默失效。
     pub(crate) custom_covered_chars: std::collections::BTreeSet<char>,
     /// 任一**已安装**方案的自定义标点表里，空格行配了值的列（位并集，见
     /// `wind_punct::custom_space_cols`）。理由同上一项：方案表整表替换，只看全局表会漏。
@@ -278,10 +230,8 @@ pub(crate) fn schema_custom_space_cols(mgr: &EngineManager) -> u8 {
 /// 任一已安装方案的自定义标点表覆盖过的源字符（并集）。见
 /// [`SchemaKeyUnion::custom_covered_chars`]。
 ///
-/// 写法与 [`schema_custom_en_punct_chars`] 逐条对齐：给每个方案造一份「只含该方案表」的
-/// `PunctConfig`（与 `effective_punct` 合成生效配置的方式一致，整表替换连开关一起换），
-/// 再去问**同一个**判据函数 `wind_punct::custom_covered_punct_chars`。
-/// 不在此另写一份「哪一列非空」——那会是第四份，迟早与出字侧漂移。
+/// 写法与 [`schema_custom_en_punct_chars`] 对齐：给每个方案造一份只含该方案表的 `PunctConfig`，
+/// 再问同一个判据函数 `wind_punct::custom_covered_punct_chars`，不另写一份以免与出字侧漂移。
 pub(crate) fn schema_custom_covered_punct_chars(
     mgr: &EngineManager,
 ) -> std::collections::BTreeSet<char> {
@@ -306,19 +256,11 @@ pub(crate) fn schema_custom_covered_punct_chars(
 ///
 /// 只收非字母：字母本就是默认码元，与标点集合不可能相交，白扫一遍。
 ///
-/// 混输方案在这里取到的是它**自身**的 `[engine.codetable]`（通常为空 → 被跳过），而不是
-/// 主码表子引擎那份；但主方案本身也在 `installed_schemas()` 里、会被单独扫到，并集不变。
-/// 枚举源用 `installed_schemas()` 而非 `available`，理由同
-/// [`schema_custom_en_punct_chars`]：overlay 方案（快符等）不进 `available`，
-/// 而它们恰恰是最可能把符号配成码元的一类。
+/// 混输方案取到的是它自身的 `[engine.codetable]`（通常为空），但主方案本身也会被单独扫到，
+/// 并集不变。枚举源用 `installed_schemas()`：overlay 方案（快符等）最可能把符号配成码元。
 ///
-/// ⛔ **必须走 `schema_lead_inputs`（纯 TOML 读），不能用 `input_chars_of`**：后者会
-/// `ensure_loaded` → `build_engine`，把方案的码表 / 词库整个熔出来。而 `EngineManager`
-/// 的懒加载是明写的设计（只同步构建活跃方案，其余交给 `prewarm_schema` 后台预热），
-/// 本函数的三个调用点——`Coordinator::new`、`refresh_config_in_memory`、
-/// `reload_user_config`——全在不该阻塞的路径上：装了四套方案的用户每次保存设置都要重熔
-/// 全部词库，内存也白白常驻。两者对本函数的结果逐字等价（`input_chars` 为空时
-/// `CodeCharSet::new` 回落 `default_alpha`，照样被下面那道 `is_default_alpha()` 跳过）。
+/// 必须走 `schema_lead_inputs`（纯 TOML 读），不能用 `input_chars_of`：后者会构建引擎、把码表
+/// 词库整个载入，而本函数的调用点（构造、配置刷新、热重载）都不该阻塞，也不该让非活跃方案常驻。
 pub(crate) fn schema_leading_code_chars(mgr: &EngineManager) -> std::collections::BTreeSet<char> {
     let mut out = std::collections::BTreeSet::new();
     for id in mgr.installed_schemas() {
@@ -326,8 +268,7 @@ pub(crate) fn schema_leading_code_chars(mgr: &EngineManager) -> std::collections
         let Some((cs, wildcard)) = mgr.schema_lead_inputs(&id) else {
             continue;
         };
-        // 符号通配键同样可作首码（论坛 t302），不在 `input_chars` 里也得算上：映射成原样
-        // ASCII 的反引号会进透传集，首位按下 DLL 直接放给宿主，通配根本收不到。
+        // 符号通配键同样可作首码，不在 `input_chars` 里也得算上，否则会进透传集、首位收不到。
         out.extend(wildcard);
         if cs.is_default_alpha() {
             continue; // 默认集只有字母，不可能与标点相撞
@@ -341,15 +282,11 @@ pub(crate) fn schema_leading_code_chars(mgr: &EngineManager) -> std::collections
     out
 }
 
-/// 所有**已安装**方案的方案级标点表里，配了英半列的源字符（并集）。
+/// 所有已安装方案的方案级标点表里，配了英半列的源字符（并集）。
 ///
-/// ⚠️ 枚举源是 `installed_schemas()` 而非 `available`：overlay 方案（`hidden = true`）不进
-/// `available`，而快符这类方案恰恰是最想配自己符号表的一类。这与 `all_key_action_keys` 用
-/// `available` 是**两种情况**——那里的键在 overlay 下查不到消费点，本表的键则实打实要出字
-/// （`effective_punct` 走 `effective_data_schema`，特殊模式正是它照顾的对象）。
-///
-/// ★ 判据复用 [`wind_punct::custom_english_punct_chars`] 而不是在此另写一份「哪一列非空」：
-/// 吃键判据与出字判据必须同源，两份迟早漂移成「吃了再吐」丢键。
+/// 枚举源是 `installed_schemas()`：overlay 方案（快符等）的标点表在特殊模式下实打实要出字
+/// （`effective_punct` 走 `effective_data_schema`），与 `all_key_action_keys` 用 `available` 不同。
+/// 判据复用 [`wind_punct::custom_english_punct_chars`]，吃键与出字必须同源。
 pub(crate) fn schema_custom_en_punct_chars(
     mgr: &EngineManager,
 ) -> std::collections::BTreeSet<char> {
@@ -358,8 +295,7 @@ pub(crate) fn schema_custom_en_punct_chars(
         let Some(table) = mgr.behavior_for(&id).punct_custom_mappings.clone() else {
             continue; // 跟随全局 ⇒ 已由全局那份贡献，不重复算
         };
-        // 造一份「只含该方案表」的 PunctConfig 去问同一个判据函数，与 `effective_punct`
-        // 合成生效配置的方式保持一致（整表替换连开关一起换）。
+        // 只含该方案表的 PunctConfig，与 `effective_punct` 一致（整表替换连开关一起换）。
         let punct = wind_config::config::PunctConfig {
             custom_enabled: !table.is_empty(),
             custom_mappings: table,
@@ -371,24 +307,19 @@ pub(crate) fn schema_custom_en_punct_chars(
 }
 
 impl ConfigBundle {
-    /// `schema_keys` 打包两份跨方案并集（见 [`SchemaKeyUnion`]）。
-    /// 其中 `modifier_vks` = 所有方案 `[key_actions]` 里出现过的**纯修饰键** VK
-    /// （见 [`Coordinator::schema_bound_modifier_vks`]）。它们要追加进 `key_up` 转发集，
-    /// 否则 TSF 根本不把这些键的 keyup 送过来——`CompiledHotkeys` 编译自全局 config，
-    /// 方案文件不在其中，这是 keyup 类绑定唯一的可达性来源。
+    /// `schema_keys` 是跨方案并集（见 [`SchemaKeyUnion`]）。其中 `modifier_vks`
+    /// （见 [`schema_bound_modifier_vks`]）要追加进 `key_up` 转发集：`CompiledHotkeys` 编译自全局
+    /// config，这是方案里 keyup 类绑定唯一的可达性来源。
     pub(crate) fn build(mut config: Config, schema_keys: &SchemaKeyUnion) -> Self {
-        // 归一化 + 存量迁移。放在这里而不是只在 `Config::load()` 里：本函数是**所有**
-        // 配置生效的必经之路（启动、热重载、RPC 改配置后的 `refresh_config_in_memory`、
-        // 测试直接构造）。挂在 load 上会漏掉后三条——设置页保存一次就绕过了迁移，
-        // 而消费点已改成只读新表，表现是「保存后引导键全失效」。`normalize` 幂等。
+        // 归一化 + 存量迁移放在这里而非 `Config::load()`：挂在 load 上会漏掉 RPC 改配置等路径，
+        // 设置页保存一次就绕过迁移。`normalize` 幂等。
         config.normalize();
         let mut compiled_hotkeys = hotkey::Compiler::new(config.clone()).compile();
-        // action 用专门的 `schema_bound` 而不是 `toggle_mode`：`is_toggle_mode_keycode` 按
-        // action 过滤，混用会让「只在某方案里绑了 rshift」的键在所有方案里都切中英文
-        // （与 `select_key_groups` 那次踩的是同一个坑，见该函数的 ⚠ 注释）。
+        // action 用 `schema_bound` 而非 `toggle_mode`：`is_toggle_mode_keycode` 按 action 过滤，
+        // 混用会让只在某方案里绑了 rshift 的键在所有方案里都切中英文。
         for vk in &schema_keys.modifier_vks {
-            // 修饰键的 hash 要带通用位+具体位，与 `compile_toggle_mode_key` 同构：
-            // C++ `GetCurrentModifiers()` 对修饰键同时返回两者，只带一边匹配不上。
+            // 修饰键的 hash 带通用位+具体位（同 `compile_toggle_mode_key`）：C++
+            // `GetCurrentModifiers()` 对修饰键同时返回两者。
             if let Some(hash) = hotkey::compile_modifier_key_up_hash(*vk) {
                 compiled_hotkeys.key_up.push(hotkey::HotkeyEntry {
                     tsf_hash: hash,
@@ -397,14 +328,9 @@ impl ConfigBundle {
                 });
             }
         }
-        // 方案级 `[session_actions]` 的键也要进转发表，否则 TSF 根本不把它们送到服务端，
-        // 表现是「方案里配了完全没反应」。与 modifier_vks 同一条理由（取并集而非活跃方案
-        // 那一份），但这批键形态更杂——编译规则走 `hotkey::compile_session_key`，与全局
-        // 那段**同源**，避免「同一个键名全局能用、写进方案就不转发」。
-        //
-        // 去重按 `tsf_hash`：全局已登记过的键不再追加。重复条目本身不改变行为（`.find()`
-        // 先到先得，而两条一模一样），但会让推给 C++ 的表凭空变大，也让「切方案前后推送
-        // 字节不变」这条验证手段失去意义。
+        // 方案级 `[session_actions]` 的键也要进转发表（取并集），否则 TSF 不把它们送到服务端。
+        // 编译走 `hotkey::compile_session_key`，与全局那段同源。按 `tsf_hash` 去重，避免推给 C++
+        // 的表凭空变大。
         let mut schema_session_vks = std::collections::BTreeSet::new();
         {
             let mut seen_up: std::collections::HashSet<u32> =
@@ -431,20 +357,9 @@ impl ConfigBundle {
             }
         }
         warn_unknown_session_actions(&config);
-        // 会话态按键绑定。数据源是 `effective_session_actions()`＝四组键组配置的展开结果
-        // ⊕ `session_actions`（后者优先）。
-        //
-        // ★ 合并只在这里发生，**配置文件里两套各自保持原样**——设置页的四个勾选框读的正是
-        // 存储层，折算若写回存储，界面就永远显示为空。判据见该函数的文档。
-        //
-        // ★ 这里是两个 crate 的接缝：动作值域（`SessionAction`）在 `wind-config`，绑定表
-        // （`KeyBinds`）在 `wind-keys`，而 `wind-config` 不能反向依赖 `wind-keys`（后者经
-        // `wind-cmdbar` 依赖它，加进去成环）。本函数是唯一同时看得见两者的地方。
-        //
-        // 表**直接持有 `SessionAction`**，不再翻译成某个中间枚举——一期那层 `NavAction`
-        // 映射在加 `cancel` 时立刻成了瓶颈（新动词没有对应的 `NavAction`）。
-        // 显式 `none` 与写错的动词都在此过滤掉；后者由上一行的 `warn_unknown_session_actions`
-        // 报出来，静默忽略与「功能坏了」完全同形。
+        // 会话态按键绑定：`effective_session_actions()` = 四组键组配置的展开 ⊕ `session_actions`
+        // （后者优先）。合并只在这里发生，不写回存储：设置页的勾选框读的是存储层。
+        // 表直接持有 `SessionAction`；显式 `none` 与写错的动词在此过滤（后者已由上一行告警）。
         let effective_session = config.effective_session_actions();
         let session_keys =
             keymap::KeyBinds::from_binds(effective_session.iter().filter_map(|(name, verb)| {
@@ -457,61 +372,46 @@ impl ConfigBundle {
         let english_case_cycle_vk = parse_case_cycle_key(&config.input.english_case_cycle_key);
         if english_case_cycle_vk.is_none() && !config.input.english_case_cycle_key.trim().is_empty()
         {
-            // 写了值却解析不出来 ⇒ 用户以为开了、实际是关的。不告警就是静默失效。
+            // 写了值却解析不出来：用户以为开了，实际是关的。
             warn!(
                 "input.english_case_cycle_key = {:?} 不是可识别的键名，英文大小写档位循环按关闭处理；                 可用值：capslock / tab / enter / space / escape（Windows 建议 capslock，macOS 建议 tab）",
                 config.input.english_case_cycle_key
             );
         }
-        // 整句切换键：与会话动作同一张键名表（`session_key_name_to_vk`），组合期间 C++ 本就
-        // 把这些键转发过来。写了值却解析不出来 ⇒ 用户以为开了、实际是关的，必须告警。
+        // 整句切换键与会话动作同一张键名表（`session_key_name_to_vk`），组合期间 C++ 本就转发。
         let sentence_cycle_key = parse_sentence_cycle_key(
             "schema.pinyin.sentence_cycle_key",
             &config.schema.pinyin.sentence_cycle_key,
         );
-        // 码表那把键按**方案**折叠、运行期现取（见 `Coordinator::active_sentence_cycle_key`），
-        // 这里只为全局值把「写错了键名」说出来；方案里写错的同样按关闭处理。
+        // 码表那把键按方案折叠、运行期现取（见 `Coordinator::active_sentence_cycle_key`），
+        // 这里只为全局值告警。
         parse_sentence_cycle_key(
             "schema.codetable.sentence_cycle_key",
             &config.schema.codetable.sentence_cycle_key,
         );
         let jump_out_on_right_symbol =
             parse_jump_out_on_right_symbol(&config.input.auto_pair.jump_out_keys);
-        // 英文模式下需要 DLL 吃下转发的标点键 = 「全局配了英半列自定义」∪「英文智能符号参与集」
-        // ∪「**任一方案**配了英半列自定义」。三个来源都是「英文半角下 DLL 默认透传、core 却
-        // 需要收到」的键，合并成一份推送即可（DLL 侧判据是数据驱动的字符集查表，集合变大自动
-        // 多吃，无需改 C++）。
-        //
-        // 第三项取跨方案**并集**而非活跃方案那一份，理由见 [`SchemaKeyUnion::punct_en_chars`]。
+        // 英文模式下需要 DLL 吃下转发的标点键 = 全局英半列自定义 ∪ 英文智能符号参与集 ∪
+        // 任一方案的英半列自定义（并集理由见 [`SchemaKeyUnion::punct_en_chars`]）。
         let custom_en_punct_chars: std::collections::BTreeSet<char> =
             wind_punct::custom_english_punct_chars(&config.input.punct)
                 .into_iter()
                 .chain(wind_punct::english_smart_source_chars(&config.input))
                 .chain(schema_keys.punct_en_chars.iter().copied())
                 .collect();
-        // 预编译放在 `normalize()` 之后：`trigger_keys` 收编等存量迁移会往 `key_actions`
-        // 折算，早于迁移编译就会漏掉那批键。
+        // 预编译须在 `normalize()` 之后：存量迁移会往 `key_actions` 折算。
         let key_resolver = crate::key_resolver::KeyResolver::build(&config);
-        // 中文模式下该**透传不吃**的标点（B-9）。两层判据合成，缺一层都是静默失效：
-        //
-        //   ① 标点转换层（`wind_punct`）：自定义映射 / 中文标点表 / 全半角 三步里
-        //      任何一步会改写它 ⇒ 必须吃。转换器只用来 peek，不推进引号交替态，
-        //      故临时建一个即可，与运行期那份互不影响。
-        //   ② 按键占用层（此处）：**空缓冲时也生效**的绑定 —— 方案码元首码与引导键 ——
-        //      占住的键必须吃。这层数据在方案码元集和 `keys.key_actions` 里，
-        //      `wind_punct` 只吃 `InputConfig`，看不见。
-        //
-        // 会话态绑定（翻页 / 次选 / 以词定字）**不必**在此排除：两侧的透传闸门本就带
-        // `!hasInputSession`，那些键在空缓冲下本就该交还宿主。
-        // 层②：按键占用 + 方案级自定义表。两个标点态共用同一道过滤——两者都与标点态无关。
+        // 中文模式下该透传不吃的标点，两层判据合成，缺一层都是静默失效：
+        //   ① 标点转换层（`wind_punct`）：自定义映射 / 中文标点表 / 全半角任一步会改写它则必须吃。
+        //      转换器只用来 peek、不推进引号交替态，临时建一个即可。
+        //   ② 按键占用层（下面的过滤）：空缓冲也生效的绑定（方案首码、引导键）与方案级自定义表。
+        //      会话态绑定不必排除，两侧透传闸门本就带 `!hasInputSession`。两个标点态共用这道过滤。
         let not_occupied = |ch: char| -> bool {
-            // 任一方案的自定义标点表覆盖了它 ⇒ 要出方案配的值，必须吃。全局表由
-            // `wind_punct` 那层判，这里补的是**方案级**（整表替换，全局表不参与）那半。
+            // 方案级自定义表覆盖了它（全局表由 `wind_punct` 那层判）。
             if schema_keys.custom_covered_chars.contains(&ch) {
                 return false;
             }
-            // 任一方案把它当码元首码 ⇒ 空缓冲按下要开始组码，透传就是「切到那个方案
-            // 后再也打不出字」。跨方案并集，理由见 `SchemaKeyUnion::leading_code_chars`。
+            // 任一方案把它当码元首码，见 `SchemaKeyUnion::leading_code_chars`。
             if schema_keys.leading_code_chars.contains(&ch) {
                 return false;
             }
@@ -519,8 +419,7 @@ impl ConfigBundle {
                 // 反查不到说明它不是主键盘标点键产出的，来路不明就别透传。
                 return false;
             };
-            // 引导键（`special:*` / `mix` / 临拼 / 临英）空缓冲时就生效。方案层取并集，
-            // 全局层查预编译好的 `key_resolver`——两层都要，`bound_action_for` 就是这么链的。
+            // 引导键：方案层取并集，全局层查 `key_resolver`，与 `bound_action_for` 的链一致。
             !schema_keys.key_action_vks.contains(&vk) && key_resolver.global_lead(vk).is_none()
         };
         let cn_passthrough_punct_chars: std::collections::BTreeSet<char> =
@@ -531,25 +430,19 @@ impl ConfigBundle {
             .into_iter()
             .filter(|&ch| not_occupied(ch))
             .collect();
-        // 英文标点态那份（更大的超集，见 `wind_punct::english_passthrough_punct_chars`）。
-        // 两份都要推给 DLL，由它按**当下**标点态选用——标点态是运行时状态，进不了配置快照。
+        // 英文标点态那份（超集，见 `wind_punct::english_passthrough_punct_chars`）。
         let en_passthrough_punct_chars: std::collections::BTreeSet<char> =
             wind_punct::english_passthrough_punct_chars(&config.input)
                 .into_iter()
                 .filter(|&ch| not_occupied(ch))
                 .collect();
-        // 取并集同 `custom_en_punct_chars`：推送只在握手与重载发生、切方案不推。多吃的那几列
-        // 由出字侧兜住（吃下的空格即使产物是半角也照样上屏），不会吃了再吐。
+        // 取并集同 `custom_en_punct_chars`；多吃的列由出字侧兜住（吃下的空格照样上屏）。
         let space_custom_cols = wind_punct::custom_space_cols(
             &wind_transform::punctuation::PunctuationConverter::new(),
             &config.input.punct,
         ) | schema_keys.space_custom_cols;
-        // ⚠️ `input.rare_char.include_blocks` **不在这里解析**：它与 `exclude_blocks`
-        // 一样是「按名字点名字符类」，两者在 `EngineManager` 装配 `CharsetRegistry` 时
-        // 一并吃进去（`charset_assembly::ExternalRefs`），拼错的名字也在那里统一 warn。
-        //
-        // ★ 全进程只装配一份 registry。在这里再解析一次的话，同一个 key 可能在免词频
-        // 和生僻准入下解析出不同的类，而这种不一致没有任何报错。
+        // `input.rare_char.include_blocks` 不在这里解析：它在 `EngineManager` 装配
+        // `CharsetRegistry` 时统一吃进去并告警。全进程只装配一份，重复解析可能得出不一致的类。
         let tooltip = crate::tooltip::CompiledTooltip::compile(&config.ui.tooltip);
         Self {
             config,
@@ -572,7 +465,7 @@ impl ConfigBundle {
     }
 }
 
-/// 解析整句切换键。空串 = 关闭；写了值却认不出 ⇒ 告警后按关闭处理（用户以为开了、实际是关的）。
+/// 解析整句切换键。空串 = 关闭；写了值却认不出则告警后按关闭处理。
 pub(crate) fn parse_sentence_cycle_key(path: &str, raw: &str) -> Option<keymap::SessionKey> {
     let raw = raw.trim();
     if raw.is_empty() {

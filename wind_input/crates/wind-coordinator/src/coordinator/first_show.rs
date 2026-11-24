@@ -1,27 +1,21 @@
 //! 候选窗首显闸门：延迟首显判定与释放 + 共享兜底 timer。
 //!
-//! coordinator 的**子模块**（非平级）：首显族重度读写父模块私有字段
-//!（pending_first_show / candidate_shown / caret_cache_verified 等），子模块对父
-//! 私有项可见，平级模块则须放开字段可见性——封装以此为界。
-//!（自 coordinator.rs 平移，纯搬运。）
+//! coordinator 的子模块（非平级）：首显族重度读写父模块私有字段
+//!（pending_first_show / candidate_shown / caret_cache_verified 等），做成子模块才不必放开可见性。
+//! 宿主行为背景见 `docs/architecture/caret-position-host-compat-notes.md`。
 
 use super::*;
 
 impl Coordinator {
-    /// 候选窗**已在显示**时，解开「组合起点」的两把锁（`composition_start` 与
-    /// `locked_rect_anchor`），**不动**显示状态（`shown_anchor` / `caret_baseline` 保留）。
+    /// 候选窗已在显示时，解开组合起点的两把锁（`composition_start` 与 `locked_rect_anchor`），
+    /// 不动显示状态（`shown_anchor` / `caret_baseline` 保留）。
     ///
-    /// 用于联想接龙：连续打字时「打码 → 上屏 → 联想 → 又打码」，候选窗全程不隐藏，
-    /// `reset_first_show` 一次都不会被调到，可宿主那边每次上屏后都是**新建一个占位组合**、
-    /// 起点右移了一个字宽。两把锁不解，「同一组合起点只锁首个」就把候选窗钉在第一次的位置：
-    /// 日志里 `reshow: dx=24` 每次都判出来了，下发位置却恒取被钉住的旧起点，窗口越离越远
-    /// （论坛 t251 后续，2026-09-30 靶机记事本实测 1355 不动、光标走到 1466）。
+    /// 用于联想接龙：候选窗全程不隐藏、`reset_first_show` 不会被调到，而宿主每次上屏后新建的
+    /// 占位组合起点已右移；不解锁则候选窗钉在第一次的位置。解锁后下一帧重新锁定并 reshow，
+    /// 其间候选窗留在原处（`hold_anchor`）。
     ///
-    /// **窗口没显示时不解**：那是首显流程，锁由 `reset_first_show` 管，且本帧刚到的组合起点
-    /// 可能正是首显要用的坐标——清了会让首显闸门以为坐标未就绪。
-    ///
-    /// 解锁后下一帧宿主上报的组合矩形 / compStart 会重新锁定并 reshow 到新起点；在那一帧到达
-    /// 之前候选窗留在原处（`hold_anchor`），最多晚一个 caret_update，不会闪。
+    /// 窗口没显示时不解：那是首显流程，锁由 `reset_first_show` 管，本帧的组合起点可能正是
+    /// 首显要用的坐标。
     pub(crate) fn unpin_composition_anchor_if_shown(&self) {
         if !*self
             .candidate_shown
@@ -40,7 +34,7 @@ impl Coordinator {
             .unwrap_or_else(|e| e.into_inner()) = (0, 0, false);
     }
 
-    /// 两把组合起点锁是否都还锁着（**仅测试用**，另一半见 `debug_mark_coords_ready`）。
+    /// 两把组合起点锁是否都还锁着（仅测试用，另一半见 `debug_mark_coords_ready`）。
     #[cfg(test)]
     pub(crate) fn debug_anchor_locks(&self) -> (bool, bool) {
         (
@@ -55,7 +49,7 @@ impl Coordinator {
         )
     }
 
-    /// 把两把锁都置成锁着，并标记候选窗已在显示（**仅测试用**）。
+    /// 把两把锁都置成锁着，并标记候选窗已在显示（仅测试用）。
     #[cfg(test)]
     pub(crate) fn debug_lock_anchors(&self, shown: bool) {
         *self
@@ -74,23 +68,9 @@ impl Coordinator {
 
     /// 复位首显延迟状态（候选窗隐藏 / 组合结束）：下次新组合重新延迟首显，并作废未触发的兜底 timer。
     pub(crate) fn reset_first_show(&self) {
-        // ★ 上屏改变了插入点，缓存里那份是**上屏前**的——五笔满码自动上屏后立刻开新组合时
-        // 尤其明显：缓存是 4 个字母末尾的位置，而上屏的汉字比它们窄（微信实测 20px）。
-        //
-        // 多数宿主靠 probe 在兜底到期前把缓存刷新掉就补救了，但配了 `stale_probe_guard` 的
-        // 宿主 probe 恒陈旧、整条不收，只能等权威 caret_update（微信实测 190ms），兜底早就
-        // 拿旧值把候选窗显示出去了 ⇒ 190ms 后再退回 20px。看起来正好该在这里把「缓存可信」
-        // 清掉、让首显改等权威坐标——**试过，实测灾难，勿再来**。
-        //
-        // 代价是那个死结的第四次复发：**兜底超时长于组合寿命 ⇒ 被本函数作废而永不到期**。
-        // 清 verified ⇒ 下一个组合走 600ms 长兜底，而长按 d 时每个组合只活 ~128ms（typematic
-        // 32ms/键 × 五笔 4 码自动上屏）⇒ 兜底永远等不到自己到期。微信实测：长按十几秒打出几十
-        // 个字，候选窗位置只变了 4 次、一直停在几百像素之外，同一份日志里 600ms 长兜底命中 249
-        // 次、「保持长兜底计时」183 次。
-        //
-        // ★ 而且这个死结在该宿主上**无解**：微信的权威坐标要 190ms 才到，长按的组合寿命是
-        // 128ms——「等得到正确坐标」与「在组合内显示出来」互斥，任何介于两者之间的超时都只是
-        // 换个地方卡住。20px 的一次性抖动 vs 候选窗停在几百像素外不动，取前者。
+        // 这里刻意不清 `caret_cache_verified`：上屏后缓存虽陈旧，但清掉会让下一组合走长兜底，
+        // 而长按时组合寿命短于兜底超时，兜底被本函数反复作废、候选窗永远停在原地。接受上屏后
+        // 一次性的小幅抖动。见 docs/architecture/caret-position-host-compat-notes.md 的「已否定的方向」。
         self.first_show_was_provisional
             .store(false, std::sync::atomic::Ordering::Relaxed);
         self.first_show_extended
@@ -118,15 +98,12 @@ impl Coordinator {
             .composition_start
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = (0, 0, false);
-        // 矩形那条路的锁同步清掉——它与上面那位是**两把锁**（见字段注释），漏清这一处的后果是
-        // 下一组合的矩形锚点整条失效、候选窗钉在上一组合的位置。
+        // 矩形那条路是另一把锁（见字段注释），漏清会让候选窗钉在上一组合的位置。
         *self
             .locked_rect_anchor
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = (0, 0, false);
-        // pre_reflow 基准同理：它描述「**本轮**组合重排前光标在哪」，组合一结束就没有意义，
-        // 留着会让下一轮的 probe 拿上一轮的重排前坐标做比较（多数情况下不等 ⇒ 判据恒放行，
-        // 等于没加；少数情况下恰好相等 ⇒ 无故拖到兜底）。
+        // pre_reflow 基准只描述本轮组合，留着会让下一轮 probe 拿错基准比较。
         *self
             .last_pre_reflow_probe
             .lock()
@@ -135,8 +112,7 @@ impl Coordinator {
             .pre_reflow_comp_start
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = (0, 0, false);
-        // 候选窗显示锚点同理：它描述的是「这一轮候选窗画在哪」，组合一结束就失效。
-        // 不清会让下一轮的非坐标重绘复用上一轮的位置。
+        // 显示锚点同理，不清会让下一轮的非坐标重绘复用上一轮的位置。
         *self.shown_anchor.lock().unwrap_or_else(|e| e.into_inner()) = (0, 0, false);
         *self
             .caret_baseline
@@ -147,19 +123,12 @@ impl Coordinator {
     /// 推迟首次显示候选窗：标记 pending 并启动兜底 timer。token 比对使后续按键的 arm 自动作废
     /// 旧 timer。handle_caret_pending 握手会把 wait 档延到 600ms（应对 OnLayoutChange burst 慢的应用）。
     pub(super) fn arm_pending_first_show(&self) {
-        // ★ 首帧信任门：`fast` 的短兜底建立在「手里的坐标 ≈ 当前插入点」之上，而焦点刚到达 /
-        // 用户刚移动过光标时这个前提不成立（见 `caret_cache_verified`）。此时拿旧坐标首显
-        // 必然是一次可见的错位加一次跳，「快」反而有害，让位给长兜底等权威坐标。
+        // 首帧信任门：`fast` 的短兜底以「缓存坐标 ≈ 当前插入点」为前提，焦点刚到达或光标刚移动
+        // 时不成立（见 `caret_cache_verified`），此时改走长兜底等权威坐标。
         //
-        // ⚠⚠ **长等待一旦开始就不因后续按键重置**，这是本门能否成立的关键：闸门在候选窗
-        // 显示前对**每一个字母**都会调到这里（`is_first_frame` 一直为真），而
-        // `arm_pending_first_show_with_timeout` 每次都 bump token 重新计时。若照常重置，
-        // 用户多打几个字母就把这段等待反复推后，长兜底静默退化回短兜底、错位照旧——正是
-        // 「兜底超时长于组合寿命 ⇒ 永不到期」那个死结的镜像。Excel 建单元格编辑上下文要
-        // 558ms，其间用户往往已经敲了三五个字母。
-        //
-        // 反过来，长等待到期后就**不再续**（`pending` 被 fire 消费掉，`extended` 保持置位），
-        // 用旧坐标首显仍优于候选窗一直不出现。
+        // 长等待一旦开始就不因后续按键重置：首显前每个字母都会调到这里，若照常 bump token，
+        // 多打几个字母就把等待反复推后（Excel 建编辑上下文要半秒多）。长等待到期后也不再续，
+        // 用旧坐标首显仍优于不出现。
         if self.first_show_needs_long_wait() {
             let already_waiting = *self
                 .pending_first_show
@@ -183,15 +152,11 @@ impl Coordinator {
         self.arm_pending_first_show_with_timeout(self.first_show_fallback_ms());
     }
 
-    /// 当前焦点应用**实际生效**的首显档位：per-app 规则优先，未配则回落全局
-    /// `ui.candidate.first_show_mode`（认不出的值再回落到枚举默认档）。
+    /// 当前焦点应用实际生效的首显档位：per-app 规则优先，未配则回落全局
+    /// `ui.candidate.first_show_mode`（认不出的值回落枚举默认档）。
     ///
-    /// ★ 全局默认档可配之后，「档位是什么」就有了两个来源，必须收成一个函数：判据一旦
-    /// 分散在各消费点（本仓有 5 条首显通路），改一处漏一处的表现是「某条路仍按旧档位
-    /// 走」，而首显逻辑的错都只表现为位置或时机不对，没有任何报错。
-    ///
-    /// ⚠ 先取 `active_compat` 的值并**释放锁**再读配置：`rt()` 内部另有锁，两把锁在此
-    /// 嵌套会引入一个新的持有序。
+    /// 各首显通路都须经此函数取档位，判据分散会让某条路静默按旧档位走。
+    /// 先取 `active_compat` 并释放锁再读配置：`rt()` 内部另有锁，嵌套会引入新的持有序。
     pub(crate) fn effective_first_show_mode(&self) -> wind_config::app_compat::FirstShowMode {
         let per_app = self
             .active_compat
@@ -208,18 +173,12 @@ impl Coordinator {
 
     /// 把一帧**不用于显示决策**的试探坐标收进缓存，返回是否真的收下。
     ///
-    /// 缓存（`state.caret_x/y`）是兜底首显的坐标来源：`reset_first_show` 每次上屏都会把
-    /// `composition_start` 清掉，于是下一轮的兜底走的正是这份缓存（见 `notify_ui_update`
-    /// 里 `in_app && cs.2` 那个三元）。它若陈旧，候选窗就钉在原地。
+    /// 缓存（`state.caret_x/y`）是兜底首显的坐标来源（`composition_start` 每次上屏都被清掉）。
+    /// 连续快速上屏时可能一条权威 caret_update 都不来（C 类宿主），试探坐标虽是 reflow 前的，
+    /// 也远好过陈旧缓存。
     ///
-    /// 实测（2026-09-02 记事本 + 五笔长按 d）：连续快速上屏时宿主的 `OnLayoutChange` 被
-    /// 50ms debounce 压住，整段**一条权威 caret_update 都不来**，缓存停在 456px 之外，
-    /// 每轮兜底都用它首显。试探坐标虽是 reflow 前的（偏差 ~30px），但远好过那份旧值。
-    ///
-    /// 两类不收：
-    /// - 退化帧（`h<=0`）：宿主尚未 reflow 的空 rect，收了会污染缓存。
-    /// - 配了 `stale_probe_guard` 的宿主：它们组合期间上报的 rect 可能停在**上一次组合**
-    ///   的位置（微信实测差 136~419px），收进缓存等于把陈旧值扩散到兜底路径上。
+    /// 两类不收：退化帧（`h<=0`）；配了 `stale_probe_guard` 的宿主（组合期 rect 可能停在上一次
+    /// 组合的位置）。
     pub(super) fn absorb_probe_coords(&self, data: &CaretData) -> bool {
         if data.height <= 0 {
             return false;
@@ -240,9 +199,8 @@ impl Coordinator {
         state.caret_y = probe.y;
         state.caret_height = probe.height;
         state.caret_source = probe.source;
-        // ★ 缓存自此装的是试探坐标，不再是「组合前的空闲上报」——那个身份到此为止。
-        // 不清位会让 `caret_cache_is_fresh_idle_report` 继续为真，于是 idle_anchor 逃生口
-        // 拿一份已被 probe 改写的坐标当「按键前光标」用，还会把它锁成组合起点。
+        // 缓存不再是组合前的空闲上报；不清位会让 idle_anchor 逃生口把 probe 坐标当按键前光标
+        // 用，并锁成组合起点。
         self.caret_cache_is_idle_report
             .store(false, std::sync::atomic::Ordering::Relaxed);
         true
@@ -260,32 +218,12 @@ impl Coordinator {
                 .load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// 缓存里装的是**本次组合开始前、宿主经 TSF 主动上报的空闲光标位置**，可直接当首显锚点。
+    /// 该宿主的组合期试探坐标（probe）不可信、整条不收（`stale_probe_guard`）。
     ///
-    /// 这是首显闸门第三个「不必等」的逃生口，补的是 ③ `coords_ready` 在连打时的死角：③ 依赖
-    /// 的组合起点被 `reset_first_show` 每次上屏清掉，重新锁定又要等组合期间的权威 caret_update
-    /// ——正是 fast 档等不到的那个东西（实测各宿主 53~73ms，而 fast 兜底只有 25ms）。
-    ///
-    /// 「不必等」在这里是字面意义上的：兜底到期后用的就是 `state.caret_x/y` 这份缓存，和立即
-    /// 显示用的是同一个坐标。25ms 内既然等不到更好的，等待就只是把首显推迟 25ms。
-    ///
-    /// 两个标志必须同时成立，各自答不同的问题，缺一不可：
-    /// - `caret_cache_is_idle_report`：缓存的**出身**是组合前的空闲上报（不是组合期间的 probe，
-    ///   也不是焦点事件随包携带的坐标）。
-    /// - `caret_cache_verified`：这份缓存**够格直接拿来定位**（限 TSF 通道，且未被切窗口 /
-    ///   点击移光标作废）。
-    ///
-    /// 该宿主的组合期试探坐标（probe）不可信，整条不收（`stale_probe_guard`）。
-    ///
-    /// ★ 它同时是「能不能拿组合前的空闲上报抢跑首显」的判据，两件事是**对偶**的：
-    /// - probe **可信**的宿主：等那 25ms 让 probe 说话更准——它是宿主在本次组合里现测的，
-    ///   而空闲上报是按键之前的。EverEdit 实测空闲上报滞后一拍（点击移光标后既不发
-    ///   caret_update 也不发 selection_changed，缓存停在上一次），probe 却在 1ms 后就给出
-    ///   了正确位置；拿空闲上报抢跑 ⇒ 候选窗恒慢一拍。
-    /// - probe **不可信**的宿主：空闲上报是唯一可信来源，抢跑无损失（微信）。
-    ///
-    /// ⚠ 判据是**结构性**的（这个宿主的 probe 收不收），不是「这一帧准不准」那种位置启发式
-    /// ——后者已被真机连续推翻四次，见 `handle_caret_probe` 第三道判据的注释。
+    /// 它同时是「能否拿组合前的空闲上报抢跑首显」的判据：probe 可信的宿主应等 probe（它是本次
+    /// 组合现测的，空闲上报可能滞后一拍）；不可信的宿主空闲上报是唯一可信来源，抢跑无损失。
+    /// 判据是结构性的（按宿主），不是逐帧的位置启发式，见
+    /// docs/architecture/caret-position-host-compat-notes.md 的「已否定的方向」。
     pub(super) fn probe_is_untrusted(&self) -> bool {
         self.active_compat
             .lock()
@@ -293,6 +231,14 @@ impl Coordinator {
             .stale_probe_guard
     }
 
+    /// 缓存里装的是本次组合开始前、宿主经 TSF 主动上报的空闲光标位置，可直接当首显锚点。
+    ///
+    /// 首显闸门的第三个逃生口，补 `coords_ready` 在连打时的死角：组合起点每次上屏被清掉，
+    /// 重新锁定要等的权威 caret_update 比 fast 兜底慢。兜底到期用的本就是这份缓存，等也白等。
+    ///
+    /// 两个标志缺一不可：`caret_cache_is_idle_report` 答缓存的出身（组合前空闲上报，而非 probe
+    /// 或焦点事件携带的坐标）；`caret_cache_verified` 答它够不够格直接定位（限 TSF 通道、未被
+    /// 切窗口 / 点击作废）。
     pub(super) fn caret_cache_is_fresh_idle_report(&self) -> bool {
         self.caret_cache_is_idle_report
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -301,11 +247,7 @@ impl Coordinator {
                 .load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// 本次 arm **实际**会用的超时值。
-    ///
-    /// 存在的唯一理由是给首显闸门的日志用：闸门原本直接打印 `first_show_fallback_ms()`，
-    /// 而信任门命中时真正 arm 的是长兜底——日志说 25ms、实际等 600ms，排查时会被带偏。
-    /// **判据分散在两处（一处算日志、一处定行为）就必然分叉**，故收敛到同一个函数。
+    /// 本次 arm 实际会用的超时值，供首显闸门打日志，保证日志与行为同源。
     pub(super) fn planned_first_show_timeout_ms(&self) -> u64 {
         if self.first_show_needs_long_wait() {
             FIRST_SHOW_LONG_FALLBACK_MS
@@ -374,10 +316,8 @@ impl Coordinator {
             || !state.input_buffer.is_empty()
             || self.mode_indicator_text(&state).is_some();
         if has_content {
-            // 用的既然是旧坐标，就必须按「非权威」记账，否则随后到达的权威坐标会被 3px 常规容差
-            // 判成需要校正而跳一下——兜底路径本来就是抖动最容易被看见的地方。
-            // 置位在 has_content 内：没真显示就不该留下"用过非权威坐标"的账。
-            // 上屏刚前移过插入点：旧坐标确定陈旧，不留「用过非权威坐标」的账（见字段注释）。
+            // 用的是旧坐标，按「非权威」记账，随后的权威坐标才享放宽容差、不跳一下；
+            // 没真显示就不记。上屏刚前移过插入点时旧坐标确定陈旧，不记（见字段注释）。
             let after_commit = self
                 .first_show_after_commit
                 .swap(false, std::sync::atomic::Ordering::Relaxed);
@@ -396,19 +336,11 @@ impl Coordinator {
 /// 一条待办：`(到期时刻, token, 协调器弱引用)`。
 type TimerEntry = (std::time::Instant, u64, std::sync::Weak<Coordinator>);
 
-/// 覆盖式定时器：**每个协调器**只保留最近一次 arm 的待触发任务。首显兜底与焦点气泡的锚点
-/// 超时（`status_placement`）各用一个实例，互不顶替——两者的待办同时存在是常态。
+/// 覆盖式定时器：每个协调器只保留最近一次 arm 的待办，单线程服务。首显兜底与焦点气泡的锚点
+/// 超时（`status_placement`）各用一个实例，互不顶替。
 ///
-/// 按协调器分槽（`Weak::ptr_eq`）而不是全进程一个槽：生产里只有一个协调器，两者等价；但
-/// 同进程多个协调器（并行跑的测试）共用一个槽时，后 arm 的会把别人的待办顶掉，那边的超时
-/// 就永远不来。
-///
-/// 此前每次 arm 都 `thread::spawn` 一个线程去 `sleep`，靠 token 让被取代的那些醒来后自行
-/// 放弃——日志实测一小时创建两千余个线程。既然 token 已经保证「只有最新一次有效」，被作废
-/// 的任务就没有理由继续占着线程；改成覆盖式待办后语义反而更直白：每个协调器至多一条待办。
-///
-/// 本线程只做「等到点 + 回调」，**绝不在此执行可能阻塞的调用**（如前台窗口探测）——
-/// 一次慢调用就会拖垮兜底的 150ms 时限。需要后台跑阻塞探测的场景另行处理。
+/// 按协调器分槽（`Weak::ptr_eq`）：同进程多个协调器（并行测试）共用一个槽会互相顶掉待办。
+/// 本线程只做「等到点 + 回调」，不得执行可能阻塞的调用，否则会拖垮兜底时限。
 struct OneShotTimer {
     /// 各协调器的待办（每个协调器至多一条）；空 = 空闲。
     pending: Mutex<Vec<TimerEntry>>,
@@ -453,8 +385,7 @@ pub(super) fn arm_focus_tip_timer(
 }
 
 impl OneShotTimer {
-    /// 覆盖式登记：同一协调器新的 arm 直接顶掉它旧的那条（与原先"旧线程靠 token 自行作废"
-    /// 等价）；别的协调器的待办不受影响。
+    /// 覆盖式登记：同一协调器新的 arm 顶掉它旧的那条，别的协调器的待办不受影响。
     fn arm(&self, deadline: std::time::Instant, token: u64, coord: std::sync::Weak<Coordinator>) {
         let mut g = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         g.retain(|(_, _, w)| !w.ptr_eq(&coord));
@@ -511,8 +442,7 @@ mod first_show_timer_tests {
         }
     }
 
-    /// 覆盖式登记：这是取代「spawn 多个线程靠 token 自行作废」的等价语义——
-    /// 待办任何时刻只有一个，且必须是最近一次 arm 的那个。
+    /// 覆盖式登记：待办任何时刻只有一个，且是最近一次 arm 的那个。
     #[test]
     fn arm_replaces_previous_pending() {
         let t = idle_timer();

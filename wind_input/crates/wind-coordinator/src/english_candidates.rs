@@ -1,87 +1,27 @@
-//! 英文候选的**头部候选**（输入原文 + 大小写变形）——临时英文与英文方案共用；快捷输入的
-//! 英文成员读临英那份开关、同样经这里生成（A2-3b，见 `update_mix_candidates`）。
-//!
+//! 英文候选的头部候选（输入原文 + 大小写变形）：临时英文与英文方案共用；快捷输入的英文成员
+//! 读临英那份开关，同样经这里生成（见 `update_mix_candidates`）。
 //! 设计见 `docs/design/schema-scoped-behavior.md` §5。
 //!
-//! # 为什么是共用函数
+//! 两条路径（`handle_temp.rs` 的临英、`handle_candidate.rs` 的主输入路）配置各自独立，但产出
+//! 必须逐字节相同：分歧只允许出现在「要不要生成」，不允许出现在「生成什么」。
 //!
-//! 两条路径（`handle_temp.rs` 的临英、`handle_candidate.rs` 的主输入路）的**配置各自独立**
-//! （四个键，两侧各一对，默认值还刻意相反），但**产出必须逐字节相同**——否则同一串输入在
-//! 两个入口给出的候选不一样，而用户根本不知道自己此刻在哪条路径上。
+//! 头部候选不带 `source` / `code`：它们没有词库来源，写端 `record_selection_in` 据此不记词频，
+//! 否则会写出读端永远查不中的孤儿键。
 //!
-//! 配置分开、实现共用：分歧只允许出现在「要不要生成」，不允许出现在「生成什么」。
-//! 两份实现分叉只是时间问题——`phrase_owns_code` 的注释里已记过一次同型教训。
-//!
-//! # 为什么头部候选**不带** `source` / `code`
-//!
-//! 它们没有词库来源。写端 `record_selection_in` 的守卫是 `cand.source != English { return }`，
-//! 据此把它们排除在词频之外；否则会写出「读端按候选码永远查不中」的孤儿键
-//! （与「短语有文本无码位恒不记词频」同一先例）。
-//!
-//! # 为什么调用方必须把它们钉在词库段**之前**
-//!
-//! 「首候选恒是所打原文」是这条能力的全部意义：打词库里没有的词时，原文是唯一能上屏的
-//! 东西。词频重排若作用到整个列表，用户按空格就会上屏一个他没打的词。故两处调用方都
-//! 只对**词库段**跑 `apply_freq_rerank_in` / `apply_shadow_in`。
+//! 调用方必须把它们钉在词库段之前，且只对词库段跑 `apply_freq_rerank_in` / `apply_shadow_in`：
+//! 打词库里没有的词时原文是唯一能上屏的东西，重排整列会让空格上屏一个没打的词。
 
 use crate::key_convert::en_case_variants;
 use wind_candidate::{Candidate, CandidateSource};
 use wind_config::config::RawCandidateMode;
 
-/// [`RawCandidateMode`] 的落点：这一次输入要不要产出「原文」那条头部候选。
-///
-/// 两侧调用方（主输入路 / 临英）都经本函数，档位语义因此只有一份实现——同本模块
-/// 「配置分开、实现共用」的纪律：分歧只允许出现在*要不要生成*，不允许出现在*生成什么*。
-///
-/// # `InDict` 的判据：`dict` 里有没有与原文**字面**相同的**英文词库**候选
-///
-/// 判据用字面相等（`==`），**不是** `eq_ignore_ascii_case`、**也不是** `is_exact_code`，
-/// 理由见 [`RawCandidateMode`] 的类型文档（`he'll` 的 code 同为 `hell`；`usa` 的字面不在
-/// 词库里）。口径与紧邻调用点的 [`merge_head_with_dict`] 一致，两处必须同进同退：那里按字面
-/// 让词库同名词占据头部格，判据也按字面认定「同名候选存在」。
-///
-/// ★ **必须先按 `source` 收到英文词库来源上**，只比 `text` 会被短语误判。主输入路传进来的
-/// 是**整张候选表**，走到这里时短语/命令/组候选已经并进去了（`finalize_candidates` 还把
-/// `$` 语法展开成了显示文本）；只要有一条短语的文本恰好等于所打原文，`in_dict` 就会在
-/// 「这个词根本不在英文词库里」时产出原文候选，而且紧接着的精确去重还会把用户那条短语从
-/// 列表里抹掉、换上一条无来源的原文候选。`case_follow_input` 的投影跑在整列上、也会改写
-/// 短语文本，误判面比看上去更大。
-///
-/// ⚠️ 这是**防御性**的：出厂 `english.schema.toml` 写着 `[phrases] enabled = false`
-/// （理由见该文件——`date` / `tel` / `em` 这类既是短语码也是英文词，打英文时会莫名跳出
-/// 中文内容），故出厂配置下英文方案根本不出短语候选，这条守卫在端到端层面**测不出来**，
-/// 单元测试 `in_dict_ignores_non_dictionary_sources` 直接喂判据一张含短语的表来钉它。
-/// 定制层或第三方英文方案一旦打开 `[phrases]`，它就是实打实的。
-///
-/// 收到 `source` 上之后，两个调用点的答案才真正同口径——这正是本模块「产出必须逐字节
-/// 相同」那条纪律要求的。
-///
-/// ⚠️ `dict` 必须已过 shadow 删除与大小写投影：
-/// - 用户把某个词隐藏掉了，它就不该再让原文候选冒出来；
-/// - 投影会改写候选文本，判据在投影前后求值的结果不同（见调用点注释）。
-///
-/// ⚠️ **`dict` 为空要区分「问过没命中」与「根本没问」**。临英在
-/// `show_candidates = false` 时压根不查词库（`overlay_engine_schema` 返回 `None`），
-/// 那种情况下判据无从回答，调用方须退回 [`RawCandidateMode::Always`] 而不是让它恒假
-/// ——否则「原文那条在候选关闭时仍是『空格上屏什么』的依据」这条既有语义就断了。
 /// 词组分词生效时，[`RawCandidateMode::Always`] 降级成 [`RawCandidateMode::InDict`]。
 ///
-/// # 为什么降级而不是一刀切「不产」
+/// 含分词符的串是查询语法而非内容，打 `ip'pro` 得到字面 `ip'pro` 并恒占首位不是任何人想要的；
+/// 但 `o'clock` / `you're` 这类原文又真是词库词，故降级而非一刀切不产。
 ///
-/// `Always` 档的立论前提是「英文引擎输入即内容，打词库里没有的词时原文是唯一能上屏的
-/// 东西」。含分词符的串**不是内容、是查询语法**，那个前提不成立——打 `ip'pro` 得到字面
-/// `ip'pro` 不是任何人想要的，而出厂 `Always` 下它还恒占首位、把真正想要的词组挤到
-/// 第二条起（临英更甚：`case_variants` 出厂开着，首三条是 `Ip'pro` / `ip'pro` / `IP'PRO`）。
-///
-/// 但**一刀切不产会误伤**：`o'clock` / `you're` / `O'Reilly` 这类串既含分词符、原文又
-/// 真是词库词，它们本该保住首位。降级成 `InDict` 的「原文字面是不是词库词」判据两边都
-/// 照顾到了，而 `InDict` / `Off` 两档行为完全不变——三档天然共存，不需要新旋钮。
-///
-/// # ⚠️ `phrase_active` 必须由调用方传，不能在这里嗅 `raw.contains('\'')`
-///
-/// 临英开了 `allow_symbols` 且把 `'` 列进 `symbol_chars` 时，`don't` 是**正常的字面输入**
-/// （那是该配置存在的意义），与词组分词无关，不该被本规则管。判据是「本作用域的分词开关
-/// 开着**且**这串里确实有分词符」，只有调用方知道前一半。
+/// `phrase_active` 必须由调用方传，不能在这里嗅 `raw.contains('\'')`：临英开了 `allow_symbols`
+/// 且列了 `'` 时，`don't` 是正常的字面输入，与分词无关。
 pub(crate) fn raw_mode_under_phrase_seg(
     mode: RawCandidateMode,
     phrase_active: bool,
@@ -93,15 +33,19 @@ pub(crate) fn raw_mode_under_phrase_seg(
     }
 }
 
-/// 这一次输入要不要产出原文条（档位语义见上方 [`raw_mode_under_phrase_seg`] 前的说明）。
+/// [`RawCandidateMode`] 的落点：这一次输入要不要产出「原文」那条头部候选。两侧调用方都经
+/// 本函数，档位语义只有一份实现。
 ///
-/// # 被「屏蔽这个词」的原文仍算词库词
+/// `InDict` 的判据：`dict` 里有没有与原文字面相同（`==`，理由见 [`RawCandidateMode`]）的英文
+/// 词库候选，口径与 [`merge_head_with_dict`] 一致。必须先按 `source` 收到英文词库来源上：主输入路
+/// 传进来的是整张候选表，短语文本恰好等于原文时会误判，随后的精确去重还会抹掉那条短语。出厂英文
+/// 方案关了短语，端到端测不出，由 `in_dict_ignores_non_dictionary_sources` 钉住。
 ///
-/// 屏蔽滤掉的是词库那条候选，不是用户打原文的权利（§8 第 11 条：输入原文那一条不受屏蔽）。
-/// 只看 `dict` 的话，打全一个被屏蔽的词时 `InDict` 判据恒假、原文条跟着消失，空格上屏的
-/// 就成了别的词。故 `blocked`（该英文数据方案的屏蔽集，键是词库原文）里的词按它**本来会显示
-/// 的样子**再比一次：字面相同，或开着大小写跟随（`follow_case`）时投影后与原文相同
-/// （屏蔽 `help` 后打 `Help`）——与没屏蔽时 `dict` 那条投影后的判据同口径。
+/// `dict` 必须已过 shadow 删除与大小写投影。`dict` 为空要区分「问过没命中」与「根本没问」：
+/// 临英 `show_candidates = false` 时不查词库，调用方须退回 [`RawCandidateMode::Always`]。
+///
+/// 被屏蔽的词仍算词库词（屏蔽不剥夺打原文的权利）：`blocked`（该英文数据方案的屏蔽集）里的词
+/// 按它本来会显示的样子再比一次，即字面相同，或开着 `follow_case` 时投影后与原文相同。
 pub(crate) fn wants_raw_candidate(
     mode: RawCandidateMode,
     raw: &str,
@@ -133,9 +77,8 @@ pub(crate) fn wants_raw_candidate(
 /// `with_raw` / `with_variants` 由调用方按**自己那一侧**的配置传入
 /// （临英 `input.temp_english.*`，英文方案 `schema.english.*`）。
 ///
-/// 两者都为 `false`，或 `raw` 为空时返回空表——调用方据此走「无头部候选」的既有路径。
-/// ⚠️ 两者都关且词库无命中时最终候选会是空的，那不是缺陷，但上屏出口必须能接住
-/// （见 §5.5：临英空格臂判的是「实际候选是否为空」，不是本配置）。
+/// 两者都为 `false` 或 `raw` 为空时返回空表。两者都关且词库无命中时最终候选为空，上屏出口
+/// 必须能接住（设计 §5.5：临英空格臂判的是实际候选是否为空）。
 pub(crate) fn english_head_candidates(
     raw: &str,
     with_raw: bool,
@@ -153,8 +96,7 @@ pub(crate) fn english_head_candidates(
     }
     if with_variants {
         for v in en_case_variants(raw) {
-            // `en_case_variants` 已剔除与原文相同者；这里再挡一次是为了 `with_raw = false`
-            // 时不重复——那种配置下原文不入列，但变形里可能恰好有一条等于原文。
+            // `en_case_variants` 已剔除与原文相同者，这里是纵深防御。
             if v == raw && with_raw {
                 continue;
             }
@@ -173,18 +115,11 @@ pub(crate) fn english_head_candidates(
 /// 头部候选并入词库段（英文方案主路 / 临英 / 快捷输入英文成员三路共用）：返回
 /// `头部段 ++ 剩余词库段`。
 ///
-/// 头部某条与**英文词库**候选字面相同时，由那条词库候选**占据头部那一格**（保留来源 /
-/// 编码 / 释义等属性），不再另出一条无来源的头部候选。位置语义不变：头部仍钉在词库段
-/// 之前、不受调频（词库段的重排早已算完，这里只是把同名那条挪到头部那一格）。
+/// 头部某条与英文词库候选字面相同时，由那条词库候选占据头部那一格（保留来源 / 编码 / 释义），
+/// 位置语义不变。只认 `source == English`：短语 / 命令等同名项不是这个词本身（命令顶到头部会
+/// 把上屏原文变成执行动作），照旧被头部吃掉，口径同 [`wants_raw_candidate`]。
 ///
-/// 此前是精确去重：词库同名词被头部**吃掉**，那一格只剩一条无来源、无码、无释义的原文。
-///
-/// 只认 `source == English`：短语 / 命令等同名项不是「这个词」本身（命令的文本是显示标签，
-/// 顶到头部会把「上屏原文」变成「执行动作」），照旧被头部吃掉——与 [`wants_raw_candidate`]
-/// 的 `InDict` 判据同一口径（只认英文词库来源、按字面）。
-///
-/// 记账不受影响：占位后它就是一条普通词库候选，按词库来源记词频；没被占位的头部候选
-/// 仍经 `english_head_dict_word` 找回词库词记账（dc03ba4c）。
+/// 占位后按词库来源记词频；没被占位的头部候选经 `english_head_dict_word` 找回词库词记账。
 pub(crate) fn merge_head_with_dict(
     head: Vec<Candidate>,
     mut dict: Vec<Candidate>,
@@ -194,8 +129,7 @@ pub(crate) fn merge_head_with_dict(
     }
     let mut out = Vec::with_capacity(head.len() + dict.len());
     for h in head {
-        // 同名的有多条时（投影把词库的 `asp` 改写成 `ASP`，词库里又有真 `ASP`），先取
-        // **没被改写**的那条：它才是字面上就是这个词的词库词，投影出来的那条只是形态撞了名。
+        // 同名多条时（投影把 `asp` 改成 `ASP`，词库里又有真 `ASP`）先取没被改写的那条。
         let same = |c: &Candidate| c.source == CandidateSource::English && c.text == h.text;
         match dict
             .iter()
@@ -215,8 +149,7 @@ pub(crate) fn merge_head_with_dict(
 
 /// 英文候选的大小写档位：CapsLock 在英文输入态临时切换的三档（见 `input.english_case_cycle`）。
 ///
-/// `Default` 档才跑逐位投影；另两档整条套形，此时投影不再参与——用户显式要了一种形态，
-/// 再按输入形态改写它就是在推翻用户刚下的指令。
+/// `Default` 档才跑逐位投影；另两档整条套形，不再按输入形态改写用户显式要的形态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum CaseVariant {
     #[default]
@@ -238,27 +171,12 @@ impl CaseVariant {
 
 /// 把候选投影成用户所打的大小写形态；返回 `None` = 不投影（调用方保留原文）。
 ///
-/// # 规则（**单向**：只投影大写，不投影小写）
+/// 单向规则：逐位比较公共前缀，输入位是大写则候选该位改大写，小写则原样不动；任一位忽略
+/// 大小写不相等则整条放弃。超出输入长度的后缀保留词库原文。
 ///
-/// 逐位比较输入 `raw` 与候选 `cand` 的公共前缀：输入位是大写字母且与候选位忽略大小写
-/// 相等 → 候选该位改大写；输入位是小写 → 候选该位**原样不动**；任一位忽略大小写都不相等
-/// → **整条放弃投影**。超出输入长度的后缀一律保留词库原文。
-///
-/// ## 为什么小写不投影
-///
-/// 词库里 `China` / `iPhone` / `I` 这类条目的大写是词本身的一部分。双向投影会让打 `chi`
-/// 的用户再也打不出 `China`——而他并没有表达「我要小写」的意思，小写只是默认击键形态。
-/// 大写则相反：按下 Shift 是一个显式动作，那才是用户的意图表达。
-///
-/// ## 为什么「不对应」要整条放弃，而不是跳过该位
-///
-/// 英文引擎是大小写不敏感的**前缀**匹配，正常词库候选必然逐位对应；对不上的只会是短语 /
-/// 命令 / `$` 展开这类没有前缀关系的条目。对它们逐位跳过会产出既非词库形态、也非用户所打
-/// 的杂合体（`WoWzy` 一类），而整条放弃恰好把它们原样留下。
-///
-/// ## 为什么无大写时返回 `None` 而不是原串
-///
-/// 绝大多数击键都是全小写，这是逐键热路径——`None` 让调用方零分配地走原路。
+/// 小写不投影：`China` / `iPhone` 的大写是词本身的一部分，小写只是默认击键形态，而 Shift 才是
+/// 显式意图。不对应整条放弃：对不上的只会是短语 / 命令 / `$` 展开这类无前缀关系的条目，逐位
+/// 跳过会产出杂合体。无大写时返回 `None`，让逐键热路径零分配。
 pub(crate) fn project_to_input_case(raw: &str, cand: &str) -> Option<String> {
     if !raw.chars().any(|c| c.is_ascii_uppercase()) {
         return None;
@@ -286,23 +204,19 @@ pub(crate) fn project_to_input_case(raw: &str, cand: &str) -> Option<String> {
 
 /// 对整列候选应用大小写处理：`Default` 档跑逐位投影，另两档整条套形。
 ///
-/// ★ **必须排在词频重排与候选调整之后**：两者都以候选 `text` 为键，先改写文本会让读写两端
-/// 用不同的键，英文词频与置顶**静默失效**。被改写的候选一律把原文留在
-/// [`Candidate::case_source`] 里，记账走 [`Candidate::freq_text`]。
+/// 必须排在词频重排与候选调整之后：两者以 `text` 为键，先改写会让英文词频与置顶静默失效。
+/// 被改写的候选把原文留在 [`Candidate::case_source`]，记账走 [`Candidate::freq_text`]。
 ///
-/// ★ 调用方须在本函数**之后**再去重：投影会让词库的 `hi` 变成 `Hi`，与头部原文候选撞车。
-/// 返回**是否改写过任何一条**——调用方据此决定要不要再跑一次去重（逐键热路径，
-/// 全小写击键占绝大多数，那时一条也不会改写，去重的 HashSet 分配可以整个省掉）。
+/// 调用方须在之后再去重（投影会让 `hi` 变成 `Hi`，与头部原文撞车）。返回是否改写过任何一条，
+/// 没改写时可省掉去重。
 pub(crate) fn apply_english_case(cands: &mut [Candidate], raw: &str, variant: CaseVariant) -> bool {
     let mut changed = false;
     for c in cands.iter_mut() {
-        // 先还原成词库原文：档位切换必须**可逆**。从「全大写」回「默认」时，若拿 `HILL`
-        // 去投影，`Hi` 的小写位不改大写位（单向规则）⇒ 结果还是 `HILL`，档位再也切不回来。
-        // 逐键路径上候选是新建的（`case_source` 恒 None），这一步是纵深防御 + 让本函数幂等。
+        // 先还原成词库原文，档位切换才可逆（单向规则下拿 `HILL` 投影回不到默认档），也让本函数幂等。
         if let Some(orig) = &c.case_source
             && c.text != *orig
         {
-            // 还原本身就是一次改写（`HILL` → `hill`），调用方据 `changed` 决定要不要重去重。
+            // 还原本身也是一次改写。
             changed = true;
             c.text = orig.clone();
         }
@@ -319,8 +233,7 @@ pub(crate) fn apply_english_case(cands: &mut [Candidate], raw: &str, variant: Ca
         };
         if let Some(text) = projected {
             changed = true;
-            // 只在首次改写时记原文：档位切换会连续改写同一批候选（每次按键重建候选表时
-            // case_source 恒为 None，这里是纵深防御——保住的是「原文」而非「上一档的形态」。
+            // 只在首次改写时记原文，保住的是原文而非上一档的形态。
             if c.case_source.is_none() {
                 c.case_source = Some(std::mem::replace(&mut c.text, text));
             } else {
@@ -331,15 +244,10 @@ pub(crate) fn apply_english_case(cands: &mut [Candidate], raw: &str, variant: Ca
     changed
 }
 
-/// 按**精确文本**去重，保序保留首条。
+/// 按精确文本去重，保序保留首条。大小写处理之后必须再跑一次，否则会出现两条一模一样的行。
 ///
-/// 大小写处理之后必须再跑一次：投影会把词库的 `hi` 改写成 `Hi`，与头部原文候选撞车；
-/// 全大写/全小写档更会把三条大小写变形塌成同一条。去重若仍停在改写之前，候选窗里就会
-/// 出现两条一模一样的行。
-///
-/// 同名的几条里有**没被改写**的（`case_source` 为空）时由它占那一格：词库同时有 `asp` 与
-/// `ASP`、输入 `ASP` 时，投影出来的 `asp` 可能因词频更高排在前面，保留首条就把真 `ASP`
-/// 吃掉了（论坛 t281 审查）。占格保留那一格的 `natural_order`，位次语义不变。
+/// 同名几条里有没被改写的（`case_source` 为空）时由它占那一格：词库同时有 `asp` 与 `ASP`、
+/// 输入 `ASP` 时，投影出来的那条可能排在前面而吃掉真 `ASP`。占格保留那一格的 `natural_order`。
 pub(crate) fn dedup_by_text(cands: &mut Vec<Candidate>) {
     let mut first: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut keep = vec![true; cands.len()];
@@ -362,7 +270,7 @@ pub(crate) fn dedup_by_text(cands: &mut Vec<Candidate>) {
     cands.retain(|_| it.next().unwrap_or(true));
 }
 
-/// 这条候选是不是**英文头部候选**（所打原文 / 它的大小写变形）：无来源、无码、非短语 /
+/// 这条候选是不是英文头部候选（所打原文 / 它的大小写变形）：无来源、无码、非短语 /
 /// 命令 / emoji，且文本是缓冲 `buf` 的某种大小写形态。
 ///
 /// 头部候选由 [`english_head_candidates`] 生成，候选身上没有「我是头部」的标记，只能按
@@ -378,31 +286,22 @@ pub(crate) fn is_english_head_candidate(cand: &Candidate, buf: &str) -> bool {
         && cand.freq_text().eq_ignore_ascii_case(buf)
 }
 
-/// 「按一个完整词库码精确查词」的取数上限——头部候选找对应词库词（A2-39②）与英文词频
-/// 召回验证（A2-39③）共用。
+/// 「按一个完整词库码精确查词」的取数上限：头部候选找对应词库词与英文词频召回验证共用。
 ///
-/// 同码的词库条目只是同一个词的几种大小写写法（`us` / `US`），而引擎把精确码命中排在
-/// 前缀补全之前，8 条绰绰有余。⚠️ 它只管**返回**几条：码表引擎内部查词库时按
-/// `max(limit, 50)` 取数再截断（`CodeTableEngine::convert`），调小它省不了查询本身。
+/// 同码条目只是同一个词的几种大小写写法，精确码命中排在前缀补全之前，8 条足够。它只管返回几条，
+/// 码表引擎内部按 `max(limit, 50)` 取数再截断，调小它省不了查询本身。
 pub(crate) const ENGLISH_EXACT_LOOKUP_LIMIT: usize = 8;
 
 impl crate::coordinator::Coordinator {
-    /// 头部候选（所打原文 / 大小写变形）对应的**英文词库词**——记词频用（A2-39②）。
+    /// 头部候选（所打原文 / 大小写变形）对应的英文词库词，记词频用。
     ///
-    /// 打全 `translation` 时，词库里的 `translation` 被头部候选按字面去重吃掉，用户上屏的
-    /// 是头部那条（原文 `Translation` 或变形 `translation`）。头部候选没有词库来源，写端
-    /// 若只认来源，这次上屏就一条都不记——而「打全再上屏」恰是最常见的用法。
+    /// 没被词库词占位的头部候选（如原文 `Translation`、打 `usa` 对应词库 `USA`）没有词库来源，
+    /// 不找回则「打全再上屏」这最常见的用法一条都不记。找回规则见 [`Self::english_exact_dict_word`]；
+    /// 返回的 `text` 换成实际上屏的头部文本、词库原文留在 `case_source`（同大小写投影的表示法）。
+    /// 临英的上屏历史不经本函数，由 `record_temp_english_selection` 直接记。
     ///
-    /// 按英文词库的键规则找回它：码 = 小写化的缓冲（词库 code 列恒小写），在**精确码**命中里
-    /// 先找字面相同的，再找仅大小写不同的（打 `usa` 上屏，记到词库的 `USA`）。找到就返回
-    /// 那条词库候选，但 `text` 换成**实际上屏的头部文本**、词库原文留在 `case_source`——与
-    /// 大小写投影同一个表示法：`freq_text()` 是词频键，`text` 仍是用户看见的形态。
-    /// 快捷输入与英文方案经 `record_selection_cand_in` 记账，那里历史取 `text`；临英的
-    /// 上屏历史不经本函数，由 `record_temp_english_selection` 直接记实际上屏文本。
-    ///
-    /// 找不到（纯原文，不是词库词）返回 `None`，调用方照旧不记词频：词频是**已有候选的排序
-    /// 维度**，不是词条来源——记下来就是读端永远查不中的孤儿键
-    /// （`temp_english_literal_text_is_not_recorded` 钉着）。想让自造词参与排序，该走加词。
+    /// 找不到（不是词库词）返回 `None`，调用方不记词频：记下来是读端永远查不中的孤儿键
+    /// （`temp_english_literal_text_is_not_recorded`）。
     ///
     /// `cand` 不是头部候选（有来源 / 有码 / 短语 / emoji，或文本不是缓冲的大小写形态）、
     /// 或 `engine_schema` 不记词频（调频关且未开 `record_always`）时直接 `None`，不查词库。
@@ -416,10 +315,8 @@ impl crate::coordinator::Coordinator {
             return None;
         }
         let head_text = cand.freq_text();
-        // 不记词频就不查：结果只用来记词频，而写端本来也会因开关关着而不写。先判开关，
-        // 关着时连这次查询与它的副作用（临英的上屏历史）都不发生，行为与改前逐字相同。
-        // ⚠️ 判据是写端的 `records()` 而非 `enabled`：这里是**写端**的一环，用 `enabled` 会让
-        // 「仅记录次数」（`record_always`）在最常见的「打全词按空格」下一条都不记（论坛 t278）。
+        // 不记词频就不查。判据是写端的 `records()` 而非 `enabled`，否则「仅记录次数」
+        // （`record_always`）在打全词按空格时一条都不记。
         if !self.engine_mgr.freq_settings_for(engine_schema).records() {
             return None;
         }
@@ -430,7 +327,7 @@ impl crate::coordinator::Coordinator {
         Some(word)
     }
 
-    /// 按英文词库的键规则找 `head_text` 对应的词库词：码 = 小写化的缓冲，在**精确码**命中里先找
+    /// 按英文词库的键规则找 `head_text` 对应的词库词：码 = 小写化的缓冲，在精确码命中里先找
     /// 字面相同的，再找仅大小写不同的。返回词库原样的那条候选（`text` 即词库原文）。
     /// 记词频（[`Self::english_head_dict_word`]）与右键删除头部原文候选（`delete_target`，它只收
     /// 字面相同的那支）共用。

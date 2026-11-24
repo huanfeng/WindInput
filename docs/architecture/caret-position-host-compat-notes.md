@@ -426,6 +426,12 @@ composition 的才准，所以不能一律关掉。
 - 开关为 `false` 时协调器返回 `Consumed`、完全不发 `UpdateComposition`，DLL 不建 composition，选中内容
   保留；坐标退到 `GetCaretPosition` 的回退链（GUITHREADINFO → GetCaretPos → 上次已知位置 → 窗口中心估计）。
 - 已否定：建了 composition 再折叠成插入点。只要对 composition 做操作，选中内容就会被清空，且与宿主有关。
+- 开关为 `false` 时后续 ↑↓ / Enter / Esc 的转发靠 C++ 的独立位 `_hotkeyModeSession` 撑起输入会话
+  （`SetCandidateSessionActive` 置位）。已否定：复用 `_hasCandidates`。加词窗一弹出宿主文档就丢焦点，
+  `CleanupInputStateForDocChange` → `ResetComposingState()` 会当场把它清零，那几个键又透传给宿主。
+- 开关为 `true` 时占位由协调器在进入模式时自己发出，不能指望出口的 `with_composition_placeholder`
+  补：那条只在非 `app_inline` 时走，而出厂 `preedit_display = "app_inline"`。零长度 range 回退化矩形
+  （height=0）的宿主（如 WPS）上会因此失去坐标来源。
 - 出厂只关加词：报障场景就是 Ctrl+= 造词吃掉选中文字；加词弹的是预览窗，对坐标精度不敏感，靶机实测
   关掉后选中内容保住、记事本下预览窗位置仍正确。另几项弹候选列表，错位代价更大且缺实测数据，保持开，
   这也是做成逐模式开关的原因。
