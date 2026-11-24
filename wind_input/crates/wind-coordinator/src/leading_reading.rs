@@ -9,7 +9,7 @@
 //! 查完立刻还原缓冲，候选的 `consumed_length` 换算回原始缓冲，选词、续打、词频记账全走现成的分步上屏。
 //! 缓冲没有被改写过，编码栏显示的始终是用户打的那串。
 //!
-//! 电脑端要的是「移光标」那套（[`crate::handle_candidate`] 的 `cursor_by_syllable`），与本模块无关。
+//! 光标默认不参与引擎查询；`input.caret_scoped_candidates` 打开时按光标截断，与本模块的读法改写无关。
 
 use wind_bridge::handler::KeyAction;
 use wind_engine::pinyin::syllable::STANDARD_SYLLABLES;

@@ -612,8 +612,8 @@ pub(crate) struct State {
     pub(crate) english_case_variant: crate::english_candidates::CaseVariant,
     /// 编码区光标：`input_buffer` 内的字节偏移，定义域 `[0, input_buffer.len()]`。
     /// 恒指向剩余编码内部——已转换前缀（`committed_text`）是只读前缀，光标进不去（Home 只到
-    /// 剩余编码开头）。光标**不参与引擎查询**：`update_candidates` 恒查整串，移动光标不重算
-    /// 候选（对齐 Go `inputCursorPos`）。所有读写走 `preedit_cursor::BufEdit`，勿裸改。
+    /// 剩余编码开头）。光标默认不参与引擎查询；`input.caret_scoped_candidates` 打开时，
+    /// 普通拼音（含双拼）按中间光标截断查询。所有读写走 `preedit_cursor::BufEdit`，勿裸改。
     pub(crate) input_cursor_pos: usize,
     /// 手机端展开页「首单元读法」的当前选择（见 [`crate::leading_reading`]）：只对**记录它时的那份
     /// 缓冲**有效——缓冲一变（打字、退格、选词吃掉前缀）就自动失效，不用在十几处清缓冲的地方逐个复位。
@@ -6018,6 +6018,9 @@ impl Coordinator {
     }
 
     pub(crate) fn caret_moved_action(&self, state: &mut State) -> KeyAction {
+        if self.rt().config.input.caret_scoped_candidates && self.engine_mgr.is_pinyin() {
+            self.update_candidates(state);
+        }
         let text = state.preedit.clone();
         let caret_pos = self.composition_caret(state);
         self.notify_ui_update(state);
@@ -6221,7 +6224,7 @@ impl Coordinator {
             //
             // `caret_right` 在**末尾**改为上屏高亮候选（macOS「→ 进选词」）；无候选时没有
             // 可上屏的东西，纯吞键——组合进行中把 → 交给宿主会移动宿主光标，与组合区错位。
-            // 移动成功只刷新组合区（caret 位置变了，缓冲与候选都没变，无需重查）。
+            // 移动成功默认只刷新组合区；`input.caret_scoped_candidates` 打开时重查光标前缀。
             wind_config::SessionAction::CaretLeft | wind_config::SessionAction::CaretRight(_) => {
                 if state.active.is_some() || !Self::has_input_session(state) {
                     return None;

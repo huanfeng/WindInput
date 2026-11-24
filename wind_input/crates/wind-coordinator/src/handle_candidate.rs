@@ -2834,21 +2834,12 @@ impl Coordinator {
         }
     }
 
-    /// 根据输入缓冲更新候选（动态分级加载：首次小批量，翻页到边界再扩展）。
-    /// 返回输入结局（全码自动上屏 / 满码空码清空）；多数调用方忽略，仅正向输入字母时消费。
-    /// 光标限定查询的截断位（字节）：`Some(n)` = 本轮候选只按 `input_buffer[..n]` 去问引擎。
-    ///
-    /// 手机端的拼音「中间修正」：光标挪到某个音节后面，候选就只剩这个音节（及其前缀）的字，
-    /// 选中后上屏、后半截留在编码栏续打（复用分步上屏，见 `partial`）。
-    ///
-    /// ⚠️ **默认关**（[`cursor_by_syllable`]）：电脑端 ←/→ 移光标**不改候选**是既有行为
-    /// （`State::input_cursor_pos` 注释：光标不参与引擎查询）。这是给电脑端「移光标改拼音」准备的
-    /// 机制，打开它之前不会改变任何现有行为；手机端不走它，用 [`crate::leading_reading`]。
-    /// 电脑端接入时只需调 [`set_cursor_by_syllable`]（由配置项驱动），下游无需再动。
-    /// 仅限普通输入的拼音方案；overlay 模式（临时拼音等）与码表方案不进。
+    /// 返回光标限定查询的截断位（字节）；由 `input.caret_scoped_candidates` 门控，默认关闭。
+    /// 仅非 overlay 的拼音方案（含双拼）在光标严格位于中间字符边界时返回 `Some`；
+    /// 码表与混输恒为 `None`，其余情况按整串查询。
     fn query_cut(&self, state: &State) -> Option<usize> {
         cut_position(
-            cursor_by_syllable(),
+            self.rt().config.input.caret_scoped_candidates,
             &state.input_buffer,
             state.input_cursor_pos,
             Self::overlay_caret_parts(state).is_none() && self.engine_mgr.is_pinyin(),
@@ -2889,7 +2880,7 @@ impl Coordinator {
         let result = self.build_candidates(state, limit);
         state.input_buffer = full;
         state.input_buffer_cased = full_cased;
-        for c in &mut state.candidates {
+        for c in state.candidates.iter_mut().chain(&mut state.sentence_pool) {
             if c.consumed_length == 0 || c.consumed_length > cut {
                 c.consumed_length = cut;
             }
@@ -2903,7 +2894,7 @@ impl Coordinator {
             // 不补后半截，编码栏就只剩光标前那几个字母（`fang` 吞掉 `xiang`）。
             let tail = tail_after_letters(&body, cut);
             if !tail.is_empty() {
-                for c in &mut state.candidates {
+                for c in state.candidates.iter_mut().chain(&mut state.sentence_pool) {
                     if let Some(own) = c.meta.preedit_split.as_deref() {
                         c.meta.preedit_split = Some(format!("{own}'{tail}").into());
                     }
@@ -2914,6 +2905,8 @@ impl Coordinator {
         result
     }
 
+    /// 根据输入缓冲更新候选（动态分级加载：首次小批量，翻页到边界再扩展）。
+    /// 返回输入结局（全码自动上屏 / 满码空码清空）；多数调用方忽略，仅正向输入字母时消费。
     pub(crate) fn update_candidates(&self, state: &mut State) -> InputOutcome {
         let outcome = self.refill_candidates(state);
         self.grid_resume(state);
@@ -9460,27 +9453,14 @@ pub(crate) fn tail_after_letters(body: &str, letters: usize) -> String {
     String::new()
 }
 
-static CURSOR_BY_SYLLABLE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-/// 打开 / 关闭「拼音按音节移光标、候选只查光标前一段」。默认关；电脑端的配置项接入时调用。
-pub fn set_cursor_by_syllable(on: bool) {
-    CURSOR_BY_SYLLABLE.store(on, std::sync::atomic::Ordering::Relaxed);
-}
-
-pub(crate) fn cursor_by_syllable() -> bool {
-    CURSOR_BY_SYLLABLE.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-/// [`Coordinator::query_cut`] 的判据（纯函数，便于测试）：只有手机端、光标严格落在编码中间
-/// 且在字符边界、普通拼音输入时才截断。
+/// [`Coordinator::query_cut`] 的判据：开关打开、普通拼音、光标严格在中间且位于字符边界时截断。
 pub(crate) fn cut_position(
-    mobile: bool,
+    enabled: bool,
     buffer: &str,
     cursor: usize,
     plain_pinyin: bool,
 ) -> Option<usize> {
-    (mobile
+    (enabled
         && plain_pinyin
         && cursor > 0
         && cursor < buffer.len()
@@ -9523,7 +9503,7 @@ mod mobile_limit_tests {
     }
 
     #[test]
-    fn cut_position_only_for_mobile_pinyin_with_cursor_inside() {
+    fn cut_position_only_for_enabled_pinyin_with_cursor_inside() {
         assert_eq!(
             crate::handle_candidate::cut_position(true, "fangxiang", 4, true),
             Some(4)
@@ -9541,7 +9521,7 @@ mod mobile_limit_tests {
         assert_eq!(
             crate::handle_candidate::cut_position(false, "fangxiang", 4, true),
             None,
-            "电脑端不改既有行为"
+            "开关关闭不改既有行为"
         );
         assert_eq!(
             crate::handle_candidate::cut_position(true, "fangxiang", 4, false),

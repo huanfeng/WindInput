@@ -4368,6 +4368,9 @@ impl Default for CaretPlacementConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InputConfig {
+    /// 普通拼音（含双拼）按光标前缀检索候选，选中后保留余码；默认关闭。
+    #[serde(default)]
+    pub caret_scoped_candidates: bool,
     #[serde(default = "default_filter_mode")]
     pub filter_mode: String,
     /// 含生僻字的**词**要不要吃 `filter_mode` 这一刀：`keep`（出厂，整词放行）/ `filter`
@@ -4639,6 +4642,7 @@ impl InputConfig {
 impl Default for InputConfig {
     fn default() -> Self {
         Self {
+            caret_scoped_candidates: false,
             filter_mode: "smart".to_string(),
             rare_phrase: default_rare_phrase(),
             commit_newline: default_commit_newline(),

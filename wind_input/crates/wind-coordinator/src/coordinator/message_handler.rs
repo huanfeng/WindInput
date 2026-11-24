@@ -2202,9 +2202,9 @@ impl MessageHandler for Coordinator {
                 // 左右键若被配成翻页/高亮等会话动作，或被展开网格接管，上面的
                 // `apply_session_action` 已先行拦截，走不到这里。
                 //
-                // 移动后默认只刷新 caret：光标不参与引擎查询，候选与 preedit 文本均不变，
+                // 移动后默认只刷新 caret：光标默认不参与引擎查询，候选与 preedit 文本均不变，
                 // 但自绘编码栏要据新 caret 重画插入符，所以仍须 `notify_ui_update`。
-                // `cursor_by_syllable` 开关打开时例外：光标在中间时候选只查光标前一段
+                // `caret_scoped_candidates` 开关打开时例外：光标在中间时候选只查光标前一段
                 // （`query_cut`），移动后必须重算。
                 if state.input_buffer.is_empty() {
                     if state.committed_text.is_empty() {
@@ -2234,16 +2234,7 @@ impl MessageHandler for Coordinator {
                         }
                     };
                     if moved {
-                        if crate::handle_candidate::cursor_by_syllable() {
-                            self.update_candidates(&mut state);
-                        }
-                        let display = state.preedit.clone();
-                        let caret_pos = self.composition_caret(&state);
-                        self.notify_ui_update(&state);
-                        KeyAction::UpdateComposition {
-                            caret_pos,
-                            text: display,
-                        }
+                        self.caret_moved_action(&mut state)
                     } else {
                         KeyAction::Consumed
                     }

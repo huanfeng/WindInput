@@ -7,7 +7,7 @@
 
 | 能力 | 现状 |
 |---|---|
-| 主路光标 | **基建完整**：`state.input_cursor_pos`（`input_buffer` 内字节偏移），读写走 `preedit_cursor::BufEdit`；光标不参与引擎查询，中间插入后按整串重算——对齐 Go 光标模型。`caret_utf16` / 显示串映射 / 大小写影子串都在 `preedit_cursor.rs` |
+| 主路光标 | **基建完整**：`state.input_cursor_pos`（`input_buffer` 内字节偏移），读写走 `preedit_cursor::BufEdit`；光标默认不参与引擎查询；`input.caret_scoped_candidates = true` 时，普通拼音（含双拼）按中间光标前缀查询、选中保留余码；两端仍查整串。`caret_utf16` / 显示串映射 / 大小写影子串都在 `preedit_cursor.rs` |
 | 退格 | 主路与 mix 已按光标删（`BufEdit`），不是只会吞末尾 |
 | ←→ 出厂语义 | `highlight_keys = ["arrows", "tab"]` → 移动高亮；展开态（网格）下 ←→ / Esc 被 `grid_key_action` 先行截走 |
 | ↑↓ 展开 | `page_next` 首按展开网格（`try_expand_grid`），展开后 ↑↓ 变行移动（网格键接管） |
@@ -63,7 +63,7 @@ left = "caret_left"             # 仅 ← 换；→↑↓ 不写 = 回落 highli
 ## 测试计划
 
 - 动词 parse：`caret_left` / `caret_right` 往返；未知值仍落 `None`。
-- 主路：末尾按 ← 光标进编码 → 继续打字插入中间 → 候选按整串重算；`caret_right` 到末尾再按 = 上屏高亮候选（含选词副作用）；开头 `caret_left` 吞键。
+- 主路：末尾按 ← 光标进编码 → 继续打字插入中间 → 候选默认按整串重算（开启 `input.caret_scoped_candidates` 时按光标截断）；`caret_right` 到末尾再按 = 上屏高亮候选（含选词副作用）；开头 `caret_left` 吞键。
 - 让位：临拼 / 快捷输入里 ←→ 仍走各自光标臂；展开态 ←→ 仍是网格键。
 - 配方端到端：按 B 档配置打 `hi` → `←` → `a`（缓冲变 `hai`，候选按整串重查出「海」）→ `→` ×2（右移到末尾、再按上屏「海」）——整条序列确定性钉住。
 
