@@ -55,7 +55,7 @@ fn dict_var_reads_builtin() {
     assert_eq!(comment(&co, &rl, "${dict_all}", &word("猫")), "");
 }
 
-// ───────────── `${dict_all}`（论坛 t282） ─────────────
+// ───────────── `${dict_all}` ─────────────
 
 /// 挂两个注释库：英汉释义 + IT 术语，都收了 `configure`。
 fn two_comment_libs(tag: &str) -> (PathBuf, wind_reverse::ReverseLookup) {
@@ -171,7 +171,7 @@ fn empty_dict_all_drops_its_optional_group() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// ★ 论坛 t281：输入 `ASP` 时词库的 `asp`（毒蛇）被投影成 `ASP`，不得贴上 IT 库里缩写
+/// 输入 `ASP` 时词库的 `asp`（毒蛇）被投影成 `ASP`，不得贴上 IT 库里缩写
 /// `ASP` 的释义——`${dict}`、`${dict_all}` 都按词库原文 `asp` 查、回退不升格。
 #[test]
 fn case_projected_candidate_queries_dictionary_original() {
@@ -223,8 +223,8 @@ fn case_projected_candidate_queries_dictionary_original() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// 头部候选（用户所打原文，非词库词）被大小写档改写时按**显示文本**查、只往小写回退
-/// （论坛 t281 审查）：全大写档打 `asp` → `ASP` 查得到缩写；全小写档打 `ASP` → `asp`
+/// 头部候选（用户所打原文，非词库词）被大小写档改写时按显示文本查、只往小写回退：
+/// 全大写档打 `asp` → `ASP` 查得到缩写；全小写档打 `ASP` → `asp`
 /// 不得升格贴上缩写的释义。
 #[test]
 fn case_variant_head_candidate_queries_display_text() {
@@ -274,19 +274,14 @@ fn dict_all_obeys_comment_max_chars() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// ★ 核心：双拼方案下 `${shuangpin}` 给出用户实际要敲的键。
+/// 双拼方案下 `${shuangpin}` 给出用户实际要敲的键。
 #[test]
 fn shuangpin_code_under_shuangpin_schema() {
     let co = coord("shuangpin");
     assert_eq!(eval(&co, "shuangpin", &nihao()).as_deref(), Some("nihc"));
 }
 
-/// ★★ **全拼方案下照样出双拼编码** —— 本轮放宽范围的核心。
-///
-/// 早先只认活跃方案、全拼下恒空，理由是「全拼的击键就是拼音本身，显示是冗余」。
-/// 那句话对「本方案击键」成立，对「双拼编码」不成立：GH#128 的原话是「有时忘记了
-/// 还能看下」，而正在用双拼打字的人刚敲完码不会忘 —— 会忘并且想看一眼的，多半是
-/// **用全拼打字、正往双拼迁移**的人，他们恰恰是这个功能最主要的受众。
+/// 全拼方案下照样出双拼编码：主要受众是用全拼打字、正往双拼迁移的人，不能只认活跃方案。
 ///
 /// 布局来源走回退链（`shuangpin_hint_schema`）：活跃方案不是双拼时，落到
 /// `primary_pinyin` 或 `available` 里首个双拼方案。此处 available 含 `shuangpin`。
@@ -314,10 +309,9 @@ fn no_shuangpin_schema_installed_yields_empty() {
     );
 }
 
-/// ★ 别名等价：`code`/`code_all` 必须与 `code_rev`/`code_rev_all` 走同一个分支。
+/// 别名等价：`code`/`code_all` 必须与 `code_rev`/`code_rev_all` 走同一个分支。
 ///
-/// 老用户模板里写的是 `${code}`，而 `render_nodes` 对未知变量名原样回显——别名断了
-/// 的表现不是「没反应」，是候选旁边直接显示出字面 `${code}` 四个字符。
+/// 老模板写的是 `${code}`，`render_nodes` 对未知变量名原样回显，别名断了候选旁就显示字面 `${code}`。
 #[test]
 fn legacy_names_are_aliases() {
     let co = coord("shuangpin");
@@ -335,7 +329,7 @@ fn legacy_names_are_aliases() {
     }
 }
 
-/// 门控：候选不是拼音来源时，三个编码变量一律为**空串**而非 None。
+/// 门控：候选不是拼音来源时，三个编码变量一律为空串而非 None。
 ///
 /// 空串才会让 `${code_hint|code_rev}` 这样的回退链继续往下试；None 会中断回退并
 /// 回显变量名。
@@ -362,12 +356,8 @@ fn shuangpin_var_has_no_gate() {
     assert_eq!(eval(&co, "shuangpin", &nihao()).as_deref(), Some("nihc"));
 }
 
-/// ★ 两个入口的**词汇表必须一致**：注释段认得的变量名，cmdbar 反查
-/// （`dict.rev`）也要认得，反之亦然。源码注释把这条写成了硬要求——
-/// 「用户在注释模板里学会的写法要能原样用在 `dict.rev(format=…)` 里」。
-///
-/// 不一致的表现不是「少个功能」：`render_nodes` 对未知变量名原样回显，所以在
-/// 反查模板里写一个只有注释段认得的变量，**上屏文本里会混进字面 `${code_schema}`**。
+/// 两个入口的词汇表必须一致：注释段认得的变量名，cmdbar 反查（`dict.rev`）也要认得，
+/// 反之亦然。否则 `render_nodes` 原样回显未知变量，上屏文本里会混进字面 `${code_schema}`。
 #[test]
 fn both_entries_share_the_same_vocabulary() {
     let co = coord("shuangpin");
@@ -379,8 +369,7 @@ fn both_entries_share_the_same_vocabulary() {
             "{name} 在 dict.rev 入口应是已知变量名，否则上屏文本会混进字面 ${{{name}}}"
         );
     }
-    // `code_hint` 是注释段**独有**的（裸文本没有候选身份，拿不到引擎产的提示），
-    // 这条不对称是刻意的，一并钉住免得哪天被“顺手补齐”。
+    // `code_hint` 是注释段独有的（裸文本没有候选身份），这条不对称是刻意的，别顺手补齐。
     assert_eq!(
         co.eval_text_var("code_hint", None, "你好", &rev),
         None,
@@ -388,12 +377,11 @@ fn both_entries_share_the_same_vocabulary() {
     );
 }
 
-/// ★ `chaizi_code_all`（t207）—— 与 `chaizi_all` 对称，逐字反查编码，不限字数。
+/// `chaizi_code_all` 与 `chaizi_all` 对称，逐字反查编码、不限字数。
 ///
-/// 两处 match（候选注释 `eval_var` / 裸文本 `eval_text_var`）都要认得这个名字，
-/// 且都不受 `single`（仅单字）门控——这正是它与 `chaizi_code` 的分工差异。
-/// 测试环境的 `ReverseLookup::default()` 没有拆字数据，产出恒为空串，这里只钉
-/// 「已知变量名、且不受单字门控」，实际取值由 wind-reverse::codes_of 的单测钉住。
+/// `eval_var` / `eval_text_var` 两处都要认得它，且不受 `single`（仅单字）门控，这是它与
+/// `chaizi_code` 的分工差异。测试环境无拆字数据，只钉「已知变量名、不受单字门控」，
+/// 取值由 wind-reverse::codes_of 的单测钉住。
 #[test]
 fn chaizi_code_all_is_known_and_not_single_gated() {
     let co = coord("shuangpin");
@@ -416,17 +404,9 @@ fn chaizi_code_all_is_known_and_not_single_gated() {
     );
 }
 
-/// ⚠️ **本入口的 `code_schema` 只有「是不是已知变量名」被测到，产出的值没有。**
-///
-/// 上面两条测试用仓库自带的 `data/` 建 Coordinator，而那里没有任何拼音词库
-/// （词库在 `build_dev/data`，本机构建产物）。于是 `word_pinyin_syllables("你好")`
-/// 推不出读音、返回空，`code_schema` 在裸文本入口恒为空串——断言只能比较
-/// `Some("") == Some("")`，抓得住「match arm 被删」，抓不住「算出来的值是错的」。
-///
-/// 代码路径本身是对的（`generate_word_pinyin` 经 `SpacedCode` 产出空格分隔的**无声调**
-/// 音节，与 `ShuangpinReverse::encode_all` 的输入契约吻合），但那是读出来的结论，
-/// 不是测试钉住的。要真正覆盖，得照 `shuangpin_separator.rs` 的做法 gate 在
-/// `build_dev/data` 上另写一条。
+/// 本入口的 `code_schema` 只测到「是已知变量名」，没测到产出值：仓库自带 `data/` 无拼音词库，
+/// 裸文本入口恒为空串，抓得住 match arm 被删、抓不住值算错。要覆盖取值得照
+/// `shuangpin_separator.rs` 的做法 gate 在 `build_dev/data` 上另写一条。
 ///
 /// 裸文本入口的别名同样要等价。
 #[test]

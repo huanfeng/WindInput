@@ -8,17 +8,11 @@ use wind_config::Config;
 use wind_keys::keymap;
 use wind_store::Store;
 
-/// ★★ 自提交打点必须覆盖**一切真落屏**的返回变体，不只 `InsertText` 那两种。
+/// 自提交打点必须覆盖一切真落屏的返回变体，不只 `InsertText` 那两种。
 ///
-/// 真机现场（2026-09-02，记事本 + 五笔，长按 d）：满码自动上屏走
-/// `CommitThenDeferComposition`（TSF 日志 `Processing CommitThenDefer: commit=大
-/// defer=d`）。此前打点只认 `InsertText`/`InsertTextWithCursor` ⇒ 这条路不打点
-/// ⇒ 紧随其后的 `SelectionChanged` 被回声过滤判成「用户移动光标」（日志
-/// `since_self_commit=Some(162.9s)`）⇒ 清 `caret_cache_verified` ⇒ 下一键信任门
-/// 命中、arm 600ms 长兜底 ⇒ 而五笔 4 码一组、typematic 32ms 一键，组合寿命仅
-/// ~128ms，600ms timer **永远等不到到期**就被下次上屏作废 ⇒ **候选窗一次都不显示**。
-///
-/// 一个漏打的点，末端表现是「打字时候选窗根本不出来」，中间隔着四层，没有任何报错。
+/// 漏打一种（如满码自动上屏的 `CommitThenDeferComposition`），末端表现是长按打字时
+/// 候选窗一次都不显示，链路见 docs/architecture/caret-position-host-compat-notes.md 的
+/// 「日志判据速查」第 8 条。
 #[test]
 fn self_commit_is_marked_for_every_landed_variant() {
     use wind_bridge::handler::KeyAction;
@@ -60,7 +54,7 @@ fn self_commit_is_marked_for_every_landed_variant() {
     }
 }
 
-/// 反向对照：**尚未落屏**的组合更新不得打点——否则回声宽限期会被无谓刷新，
+/// 反向对照：尚未落屏的组合更新不得打点——否则回声宽限期会被无谓刷新，
 /// 用户真正移动光标时反而识别不出来（那正是 `caret_cache_verified` 要清位的时机）。
 #[test]
 fn self_commit_is_not_marked_before_text_lands() {
@@ -78,8 +72,7 @@ fn self_commit_is_not_marked_before_text_lands() {
 
 /// 英文取码 = 单词本身的小写；三类非法输入取空码（让加词中止）。
 ///
-/// 「含空白」那条是重点：带空格的串当 key 会让前缀查询永远命中不到——加进去的词一个
-/// 都打不出来，而界面毫无异常。拼音侧正因为这个坑栽过一次。
+/// 「含空白」是重点：带空格的串当 key 前缀查询永远命中不到，加进去的词打不出来。
 #[test]
 fn english_add_word_code_is_lowercased_word() {
     let f = Coordinator::english_add_word_code;
@@ -104,15 +97,12 @@ fn coord(tag: &str) -> Arc<Coordinator> {
     coord_with_clip(tag, "")
 }
 
-/// 假剪贴板：`clipboard_get_text` 恒返回构造时给的串，并**记下被读了几次**。
+/// 假剪贴板：`clipboard_get_text` 恒返回构造时给的串，并记下被读了几次。
 ///
-/// ⚠️ 每个测试协调器都必须注入它（`coord` 默认注入空串），否则桌面默认实现
-/// （`desktop-ui` 是默认 feature）会去读**开发机真实剪贴板**——本机跑测试的结果随
-/// 剪贴板内容漂移，而 CI 在 Linux 上恒读到空，于是这类失败只在本机出现、且看着像
-/// 随机失败。
+/// 每个测试协调器都必须注入它（`coord` 默认注入空串），否则默认 feature `desktop-ui`
+/// 会读开发机真实剪贴板，结果随剪贴板内容漂移。
 ///
-/// 计数是惰性读取的唯一守门：读一次最坏 40ms 且发生在按键线程上，多读一次不会有任何
-/// 报错，只会让用户按 Ctrl+= 时卡一下（2026-09-03 的真实反馈）。
+/// 计数是惰性读取的唯一守门：读一次最坏 40ms 且在按键线程上，多读只会让 Ctrl+= 卡一下。
 struct MockClip(String, Arc<std::sync::atomic::AtomicUsize>);
 impl crate::host_services::HostServices for MockClip {
     fn clipboard_get_text(&self) -> anyhow::Result<String> {
@@ -484,17 +474,13 @@ fn build_args_quotes_values_with_whitespace() {
     );
 }
 
-/// 拼音方案下含非汉字的词**不取码**，加词中止，不留坏数据。
+/// 拼音方案下含非汉字的词不取码，加词中止，不留坏数据。
 ///
-/// 病灶：`gen_pinyin` 的 `filter_map` 静默跳过无读音字符，「你好a」产出 `ni hao`——
-/// 码覆盖不全，且（在 split 修复前）还带着空格落成 key，词彻底打不出来。快捷加词的
-/// 字符池直接取最近上屏字符，中英混输下「你好a」这种一抓一个准。
+/// `gen_pinyin` 的 `filter_map` 静默跳过无读音字符，「你好a」会产出覆盖不全的 `ni hao`；
+/// 快捷加词的字符池取最近上屏字符，中英混输下很常见。与纯英文取空码一致。
 ///
-/// 同时补上一处不一致：**纯**英文取码本就为空、早已中止，只有混合的情况漏了过去。
-///
-/// ⚠️ 本测试**必须用真实词库**：headless 无引擎时 `is_pinyin` 判false、reverse 表也空，
-/// 取码恒为空串 —— 那样「断言空码」会因为完全错误的原因通过，成为典型假绿。故对照组
-/// （纯汉字词必须取得出码）是这条测试的命脉，不能省。
+/// 必须用真实词库：headless 无引擎时取码恒为空串，「断言空码」会假绿，故对照组
+/// （纯汉字词必须取得出码）不能省。
 #[test]
 fn pinyin_rejects_non_han_word_and_adds_han_word() {
     let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data");
@@ -562,11 +548,11 @@ fn pinyin_rejects_non_han_word_and_adds_han_word() {
 // ──────────────────────────────────────────────────────────────────────
 
 /// 存储域（扁平 key + boundary）→ 展示域（带空格音节码）的转换语义。
-/// 拼音方案下这一步此前完全没做，Ctrl+Shift+= 的对话框才会预填出 `nihao`。
+/// 拼音方案下少了这一步，Ctrl+Shift+= 的对话框会预填出 `nihao`。
 #[test]
 fn display_code_restores_syllable_spaces() {
     use super::display_code;
-    // 拼音多音节：boundary 的 bit 位是各音节起始**字节**偏移（ni|hao → {0,2}）
+    // 拼音多音节：boundary 的 bit 位是各音节起始字节偏移（ni|hao → {0,2}）
     assert_eq!(display_code("nihao", 0b101), "ni hao");
     assert_eq!(display_code("chongqing", 0b100001), "chong qing");
     // 码表码 boundary 恒 0 → 恒等变换，五笔等方案不受影响
@@ -576,10 +562,9 @@ fn display_code_restores_syllable_spaces() {
     assert_eq!(display_code("", 0), "");
 }
 
-/// `add_word_code` 与 `add_word_boundary` 必须**成对**读出。
+/// `add_word_code` 与 `add_word_boundary` 必须成对读出。
 ///
-/// 本次 bug 的形态正是「字段在 State 里、但消费端只读了一半」——boundary 一直被算出来
-/// 并存着，三个显示/传参点却都只取扁平 code。这条测试钉的就是这一步不再退化。
+/// 三个显示/传参点只取扁平 code、丢掉 boundary，音节空格就没了。
 #[test]
 fn add_word_display_code_reads_boundary_from_state() {
     let c = coord("display_code_state");
@@ -602,9 +587,7 @@ fn add_word_display_code_reads_boundary_from_state() {
 
 /// 带空格的码进参数串必须被引号包住。
 ///
-/// 这是本次改动**新走通**的组合：在此之前 code 恒无空格，`build_settings_args` 的加引号
-/// 分支从来只有 `--text`（剪贴板整段）会碰到。不加引号则 CommandLineToArgvW 会把
-/// `--code=ni hao` 切成两个 argv，设置端只收得到 `--code=ni`——比不带空格更糟。
+/// 不加引号 CommandLineToArgvW 会把 `--code=ni hao` 切成两个 argv，设置端只收到 `--code=ni`。
 #[test]
 fn prefill_args_quote_spaced_code() {
     use super::display_code;
@@ -618,7 +601,7 @@ fn prefill_args_quote_spaced_code() {
 
 // ── 剪贴板加词来源（Ctrl+= 的 Tab 切换 / Ctrl+Shift+= 的默认来源） ──────────
 
-/// Ctrl+= 默认仍是最近输入；Tab 切到剪贴板后**整段全选**（而非沿用默认 2 字）。
+/// Ctrl+= 默认仍是最近输入；Tab 切到剪贴板后整段全选（而非沿用默认 2 字）。
 #[test]
 fn tab_switches_to_clipboard_and_selects_whole() {
     let c = coord_with_clip("tabclip", "量子纠缠态");
@@ -640,7 +623,7 @@ fn tab_switches_to_clipboard_and_selects_whole() {
     assert_eq!(c.add_word_current_word(&st), "你好");
 }
 
-/// 剪贴板来源下 ↓ 砍的是**尾部**——方向搞反会得到「子纠缠态」，且不报任何错。
+/// 剪贴板来源下 ↓ 砍的是尾部——方向搞反会得到「子纠缠态」，且不报任何错。
 #[test]
 fn clipboard_source_trims_from_tail() {
     let c = coord_with_clip("cliptrim", "量子纠缠态");
@@ -654,7 +637,7 @@ fn clipboard_source_trims_from_tail() {
     assert_eq!(c.add_word_current_word(&st), "量子纠");
 }
 
-/// 最近输入为空、剪贴板有内容 ⇒ 进入时**自动落在剪贴板一侧**，但仍切得回来。
+/// 最近输入为空、剪贴板有内容 ⇒ 进入时自动落在剪贴板一侧，但仍切得回来。
 #[test]
 fn enter_auto_lands_on_clipboard_when_no_recent() {
     let c = coord_with_clip("autoclip", "量子纠缠");
@@ -681,13 +664,13 @@ fn enter_keeps_recent_when_available() {
     }
 }
 
-/// 剪贴板不可用时 Tab **照样切得过去**，切过去是剪贴板侧的空态（不是原地不动）。
+/// 剪贴板不可用时 Tab 照样切得过去，切过去是剪贴板侧的空态（不是原地不动）。
 ///
-/// ⛔ 此前的「空则不许切」守卫已推翻：两个来源必须对称，否则 Tab 时灵时不灵。
+/// 两个来源必须对称，不能「空则不许切」，否则 Tab 时灵时不灵。
 #[test]
 fn tab_switches_even_when_clipboard_unusable() {
     // 空 / 全空白 / 多行：三种都归到「剪贴板无可用内容」这一个可见状态。
-    // ⚠️ 超长**不在此列**——它已改为截取前 ADD_WORD_MAX_LEN 字，见
+    // 超长不在此列——截取前 ADD_WORD_MAX_LEN 字，见
     // `overlong_clipboard_is_truncated_not_rejected`。
     for (tag, clip) in [
         ("clipempty", "".to_string()),
@@ -698,7 +681,7 @@ fn tab_switches_even_when_clipboard_unusable() {
         push_commits(&c, &["你", "好"]);
         let mut st = c.state.lock().unwrap();
         c.enter_add_word_mode(&mut st);
-        // 这里**不断言剪贴板池**：惰性读取后，有最近上屏时此刻根本还没读过剪贴板
+        // 这里不断言剪贴板池：惰性读取后，有最近上屏时此刻根本还没读过剪贴板
         // （那正是 `entering_with_recent_input_never_reads_clipboard` 守着的事）。
         // 「不合规 ⇒ 空池」由下面切过去之后的 `add_word_len == 0` 验。
         c.toggle_add_word_source(&mut st);
@@ -726,7 +709,7 @@ fn clipboard_at_max_len_is_usable() {
     assert_eq!(c.add_word_current_word(&st), word);
 }
 
-/// 剪贴板池在**进入模式时定格**：Tab 用的是 State 里的池，不再现读剪贴板
+/// 剪贴板池在进入模式时定格：Tab 用的是 State 里的池，不再现读剪贴板
 /// （读一次最坏 40ms，见 clipboard_add_word_chars）。
 #[test]
 fn tab_uses_frozen_pool_not_a_fresh_read() {
@@ -744,7 +727,7 @@ fn tab_uses_frozen_pool_not_a_fresh_read() {
 }
 
 /// 退出加词模式必须连剪贴板池与来源一起清——留着会让下一次进入时首屏直接显示
-/// **上一次**的剪贴板内容（`enter` 虽会重读池，但 `from_clip` 残留为真即错位）。
+/// 上一次的剪贴板内容（`enter` 虽会重读池，但 `from_clip` 残留为真即错位）。
 #[test]
 fn exit_clears_clipboard_source() {
     let c = coord_with_clip("clipexit", "残留");
@@ -761,10 +744,8 @@ fn exit_clears_clipboard_source() {
     );
 }
 
-/// 超长剪贴板**截断取前 N 字**，不再整段作废。
-///
-/// 原先超过上限就当作「无可用内容」，于是复制一句话按 Tab 切过去只看到空态——可用户
-/// 要的那个词往往就在开头。截断方向与剪贴板来源「取开头 N 字、↓ 砍尾」一致。
+/// 超长剪贴板截断取前 N 字，不整段作废：复制一句话时要的词往往在开头。
+/// 截断方向与剪贴板来源「取开头 N 字、↓ 砍尾」一致。
 #[test]
 fn overlong_clipboard_is_truncated_not_rejected() {
     let long: String = "量子纠缠态的测量与坍缩过程很复杂".to_string();
@@ -786,13 +767,10 @@ fn overlong_clipboard_is_truncated_not_rejected() {
     assert_eq!(word, head, "超长剪贴板须截断取用，不得回退最近输入");
 }
 
-/// ★★★ 有最近上屏时进入加词模式**一次剪贴板都不读**。
+/// 有最近上屏时进入加词模式一次剪贴板都不读。
 ///
-/// 这是「Ctrl+= 有时明显卡顿」的守门（2026-09-03 用户反馈）：读一次最坏 sleep 重试
-/// 40ms，且发生在**按键线程**上、恰好与 C++ 建立占位 composition 同一拍。多数人进来
-/// 是要加刚打的字、根本不按 Tab，那 40ms 纯属白付。
-///
-/// 多读一次不会有任何报错，只会让用户觉得卡——只有这条计数断言拦得住回归。
+/// 读一次最坏 40ms，且在按键线程上、与 C++ 建立占位 composition 同一拍；多数人进来是加
+/// 刚打的字、不按 Tab。多读不会报错只会卡，只有这条计数断言拦得住。
 #[test]
 fn entering_with_recent_input_never_reads_clipboard() {
     let (c, reads) = coord_counting_clip("lazyenter", "剪贴内容");
@@ -810,7 +788,7 @@ fn entering_with_recent_input_never_reads_clipboard() {
     assert_eq!(reads.load(Ordering::Relaxed), 0, "调词长不得读剪贴板");
 }
 
-/// 没有最近上屏时**才**读一次（那时要靠它决定自动落点），且此后不再重复读。
+/// 没有最近上屏时才读一次（那时要靠它决定自动落点），且此后不再重复读。
 #[test]
 fn clipboard_is_read_once_and_reused() {
     let (c, reads) = coord_counting_clip("lazyonce", "量子纠缠");
@@ -845,12 +823,10 @@ fn tab_reads_clipboard_on_demand() {
     assert_eq!(reads.load(Ordering::Relaxed), 1, "只读那一次");
 }
 
-/// ★★ ESC 在**任何一种状态**下都必须退出加词模式。
+/// ESC 在任何一种状态下都必须退出加词模式。
 ///
-/// 2026-09-03 用户反馈「进入这个模式后按 ESC 不退出了」。协调器这一侧的分派本身没变，
-/// 但它此前从没有测试——ESC 走的是 `handle_add_word_key` 的第一条臂，而那条臂只要被
-/// 前面任何一个新增分支抢走（或 `add_word_active` 被别处清掉），表现就是「面板还在、
-/// 按键没反应」，没有任何报错。
+/// ESC 走 `handle_add_word_key` 的第一条臂，被前面新增分支抢走（或 `add_word_active`
+/// 被别处清掉）时表现为面板还在、按键没反应。
 #[test]
 fn escape_exits_from_every_state() {
     // ① 最近上屏来源 ② 剪贴板来源 ③ 两侧都空的空态
@@ -891,10 +867,9 @@ fn backspace_exits_like_escape() {
     assert!(!st.add_word_active, "退格应与 ESC 同样退出");
 }
 
-/// 面板是**三行**，且操作提示落在 `comment` 而非 `text`。
+/// 面板是三行，且操作提示落在 `comment` 而非 `text`。
 ///
-/// 后者是配色判据：放 text 会用候选正文色，面板上最不重要的一行反而最显眼。颜色不对
-/// 不会报任何错，只能靠这条断言盯着。
+/// 放 text 会用候选正文色，面板上最不重要的一行反而最显眼。
 #[test]
 fn panel_hint_is_a_dim_third_row() {
     let c = coord_with_clip("panelrows", "剪贴内容");
@@ -914,7 +889,7 @@ fn panel_hint_is_a_dim_third_row() {
     assert!(rows.iter().all(|r| r.no_index), "三行都不显序号");
 }
 
-/// 面板在两个来源下**长得一样**：来源后缀与 Tab 提示恒显示，与哪一侧有没有内容无关。
+/// 面板在两个来源下长得一样：来源后缀与 Tab 提示恒显示，与哪一侧有没有内容无关。
 #[test]
 fn panel_looks_the_same_on_both_sources() {
     // 两侧都空：仍带来源后缀、仍提示 Tab
@@ -942,7 +917,7 @@ fn panel_looks_the_same_on_both_sources() {
     );
 }
 
-/// Ctrl+Shift+= 的来源优先级与 Ctrl+= **相反**：剪贴板优先、整段作词。
+/// Ctrl+Shift+= 的来源优先级与 Ctrl+= 相反：剪贴板优先、整段作词。
 #[test]
 fn from_history_prefers_clipboard() {
     let c = coord_with_clip("histclip", "量子纠缠");
@@ -954,7 +929,7 @@ fn from_history_prefers_clipboard() {
 /// 剪贴板不可用则回退最近输入（默认 2 字）——「如果剪贴板为空，则以最新输入的数据」。
 #[test]
 fn from_history_falls_back_to_recent() {
-    // ⚠️ 超长**不在此列**：它已改为截断取用，不再回退（见
+    // 超长不在此列：它已改为截断取用，不再回退（见
     // `overlong_clipboard_is_truncated_not_rejected`）。
     for (tag, clip) in [
         ("histempty", "".to_string()),
@@ -994,7 +969,7 @@ fn from_history_does_not_enter_add_word_mode() {
 fn sanitize_trims_but_never_truncates() {
     use super::sanitize_dict_add_text;
     assert_eq!(sanitize_dict_add_text("  你好 \r\n").unwrap(), "你好");
-    // 首尾换行属无损清理；**内部**换行则拒绝，不做一行化（宁可不加也不加错）。
+    // 首尾换行属无损清理；内部换行则拒绝，不做一行化（宁可不加也不加错）。
     assert!(
         sanitize_dict_add_text("你好\n世界").is_err(),
         "内含换行应拒绝"
@@ -1030,7 +1005,7 @@ fn derivable_word_rejects_non_han_and_overlong() {
     );
 }
 
-/// GH#171：码表方案只用中文部分取码，非汉字可以混在词里（姓名+手机号）。
+/// 码表方案只用中文部分取码，非汉字可以混在词里（姓名+手机号）。
 #[test]
 fn codetable_derivable_word_allows_non_han_around_han() {
     use super::{ADD_WORD_MAX_LEN, ADD_WORD_MAX_TEXT_LEN, check_derivable_word};
@@ -1039,7 +1014,7 @@ fn codetable_derivable_word_allows_non_han_around_han() {
     // 「有没有可取码的字」不在这里判（〇 这类有码的非汉字这里看不出来），交给取码；
     // 纯数字在取码那一步失败，见 `codetable_dict_add_derives_code_from_han_part`。
     assert!(check_derivable_word("二〇二六", false).is_ok());
-    // 字数上限按**汉字**数算（它才是编码规则的上界）。
+    // 字数上限按汉字数算（它才是编码规则的上界）。
     let han: String = std::iter::repeat_n('好', ADD_WORD_MAX_LEN).collect();
     assert!(check_derivable_word(&format!("{han}123"), false).is_ok());
     let han: String = std::iter::repeat_n('好', ADD_WORD_MAX_LEN + 1).collect();
@@ -1049,7 +1024,7 @@ fn codetable_derivable_word_allows_non_han_around_han() {
     assert!(check_derivable_word(&text, false).is_err());
 }
 
-/// GH#171 端到端：五笔下 `dict.add("张三13800138000")`（不给码）按「张三」的码入库。
+/// 端到端：五笔下 `dict.add("张三13800138000")`（不给码）按「张三」的码入库。
 #[test]
 fn codetable_dict_add_derives_code_from_han_part() {
     let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data");
@@ -1115,7 +1090,7 @@ fn dict_add_with_explicit_code_writes_user_word() {
     assert_eq!(recs[0].text, "(╯°□°)╯");
 }
 
-/// 推导路径：headless 无引擎 → 取码为空 → 报错且**不写库**（不留空码孤儿记录）。
+/// 推导路径：headless 无引擎 → 取码为空 → 报错且不写库（不留空码孤儿记录）。
 /// 这是 `coad` 的实际形态（`dict.add(clip())`，只有一个参数）。
 #[test]
 fn dict_add_without_code_takes_derive_path_and_reports() {

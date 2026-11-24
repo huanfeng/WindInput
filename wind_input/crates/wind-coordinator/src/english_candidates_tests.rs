@@ -15,11 +15,10 @@ fn phrase_cand(text: &str) -> Candidate {
     }
 }
 
-/// `InDict` 只认**英文词库来源**：文本相同但来源是短语的那条不得让判据成立。
+/// `InDict` 只认英文词库来源：文本相同但来源是短语的那条不得让判据成立。
 ///
-/// 出厂英文方案不加载短语（`english.schema.toml` 的 `[phrases] enabled = false`），
-/// 所以这条守卫在端到端层面测不出来——必须在这里直接喂判据一张含短语的表。
-/// 定制层或第三方方案打开 `[phrases]` 后它才会真的被走到。
+/// 出厂英文方案不加载短语（`[phrases] enabled = false`），端到端测不出，只能直接喂判据
+/// 含短语的表；定制层或第三方方案打开 `[phrases]` 后才会走到。
 #[test]
 fn in_dict_ignores_non_dictionary_sources() {
     let raw = "zzq";
@@ -131,10 +130,9 @@ fn empty_input_yields_nothing() {
     assert!(english_head_candidates("", true, true).is_empty());
 }
 
-/// 头部候选**不带** `source` / `code`：写端据此把它们排除在词频之外。
+/// 头部候选不带 `source` / `code`：写端据此把它们排除在词频之外。
 ///
-/// 这条不是形式检查——带上 source 的后果是往词频表里写一批读端永远查不中的孤儿键，
-/// 且完全静默。
+/// 带上 source 会往词频表里静默写一批读端永远查不中的孤儿键。
 #[test]
 fn head_candidates_carry_no_source_or_code() {
     for c in english_head_candidates("Hel", true, true) {
@@ -164,7 +162,7 @@ fn all_lowercase_input_projects_nothing() {
     assert_eq!(project_to_input_case("", "hill"), None);
 }
 
-/// ★ 单向：小写位不把词库自带的大写压下去，否则 `China` / `iPhone` 再也打不出来。
+/// 单向：小写位不把词库自带的大写压下去，否则 `China` / `iPhone` 再也打不出来。
 #[test]
 fn lowercase_never_overwrites_dict_case() {
     assert_eq!(
@@ -179,7 +177,7 @@ fn lowercase_never_overwrites_dict_case() {
     );
 }
 
-/// ★ 字母不对应 ⇒ 整条放弃，不产出杂合体。
+/// 字母不对应 ⇒ 整条放弃，不产出杂合体。
 #[test]
 fn mismatched_letters_abandon_whole_candidate() {
     assert_eq!(project_to_input_case("Wo", "xyz"), None);
@@ -211,7 +209,7 @@ fn variant_cycles_back_to_default() {
     assert_eq!(v.next(), CaseVariant::Default);
 }
 
-/// ★★ 记账文本恒是投影**前**的词库原文——两端不同源就是英文词频静默失效。
+/// 记账文本恒是投影前的词库原文——两端不同源就是英文词频静默失效。
 #[test]
 fn projection_keeps_original_text_for_freq() {
     let mut cands = vec![Candidate {
@@ -268,7 +266,7 @@ fn dedup_keeps_first_occurrence() {
     assert_eq!(texts(&v), vec!["Hi", "hi", "HI"]);
 }
 
-/// 头部格由同名**英文词库**候选占据；同名短语不算（照旧被头部吃掉），其余词库段保序。
+/// 头部格由同名英文词库候选占据；同名短语不算（照旧被头部吃掉），其余词库段保序。
 #[test]
 fn merge_head_keeps_dict_word_in_head_slot() {
     let mut word = dict_cand("hello");
@@ -297,8 +295,8 @@ fn merge_head_keeps_dict_word_in_head_slot() {
     );
 }
 
-/// 词库同时有 `asp`（词频更高）与 `ASP`，输入 `ASP`：投影后的 `asp` 与真 `ASP` 同名
-/// （论坛 t281 审查）。占据头部格的必须是**没被改写**的真 `ASP`，投影出来的那条被吃掉。
+/// 词库同时有 `asp`（词频更高）与 `ASP`，输入 `ASP`：投影后的 `asp` 与真 `ASP` 同名。
+/// 占据头部格的必须是没被改写的真 `ASP`，投影出来的那条被吃掉。
 #[test]
 fn merge_head_prefers_unrewritten_dict_word() {
     let mut dict = vec![dict_cand("asp"), dict_cand("ASP")];
@@ -317,7 +315,7 @@ fn merge_head_prefers_unrewritten_dict_word() {
     );
 }
 
-/// 改写后同名时保留未被改写的那条，且占**首次出现的那一格**（位次不变）。
+/// 改写后同名时保留未被改写的那条，且占首次出现的那一格（位次不变）。
 #[test]
 fn dedup_prefers_unrewritten_and_keeps_slot() {
     let mut v = vec![dict_cand("asp"), dict_cand("help"), dict_cand("ASP")];

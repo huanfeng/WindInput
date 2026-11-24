@@ -1,10 +1,8 @@
 //! 邮箱模式与两模式共用补全候选源的 crate 内行为测试（白盒，零 RPC、零词库）。
 //!
-//! 刻意用 `new_headless_with_store`（不传 data_dir）而不是集成测试里的
-//! `new_headless(cfg, Some(&data_dir()))`：后者在没有 `build_dev/data` 的 worktree 里
-//! 会走 `has_schemas()` 的跳过分支，**整族静默变绿**（AGENTS.md 那条「0.0x 秒全绿＝假绿」）。
-//! 邮箱模式不依赖任何词库——它的候选来自预置后缀表与学习数据——所以没有理由把测试
-//! 绑在词库上。
+//! 刻意用 `new_headless_with_store`（不传 data_dir）：`new_headless(cfg, Some(&data_dir()))`
+//! 在没有 `build_dev/data` 的 worktree 里会走 `has_schemas()` 跳过分支、整族静默变绿。
+//! 邮箱模式的候选来自预置后缀表与学习数据，不依赖词库。
 
 use std::sync::Arc;
 
@@ -60,8 +58,7 @@ fn press_digit(c: &Coordinator, ch: char) -> KeyAction {
 
 /// `@` = Shift+2。C++ 侧把它归 Punctuation，中文模式无条件吃键，故这一帧一定到得了 Rust。
 ///
-/// 从 `VK_0` 派生而不是写 `0x32`：keymap 只导出区间端点（`VK_0`/`VK_9`），而 AGENTS.md
-/// 那条「禁止裸十六进制」管的是**从哪里得到这个数**，不是算不算术。
+/// 从 `VK_0` 派生而不是写 `0x32`：keymap 只导出区间端点（`VK_0`/`VK_9`）。
 fn press_at(c: &Coordinator) -> KeyAction {
     c.handle_key_event(&key(wind_keys::keymap::VK_0 + 2, MOD_SHIFT))
 }
@@ -237,11 +234,9 @@ fn empty_suffix_list_still_lets_the_user_type_freely() {
     assert_eq!(committed(&act).as_deref(), Some("a@qq"));
 }
 
-/// **回车恒上屏缓冲原文**，即使候选里有更"完整"的那一条。
+/// 回车恒上屏缓冲原文，即使候选里有更"完整"的那一条。
 ///
-/// 这是实机反馈修出来的：一期把空格与回车并成一条路，于是打了一半的邮箱再也上不了屏
-/// ——打 `abc@gm` 想就这么上屏，回车却给出 `abc@gmail.com`。回车是用户**否决候选**的
-/// 出口，补全猜错时他手上必须还有一个键能拿回原文。
+/// 回车是用户否决候选的出口：打 `abc@gm` 想就这么上屏，不能给出 `abc@gmail.com`。
 #[test]
 fn enter_commits_the_raw_buffer_even_when_a_candidate_is_highlighted() {
     let (c, _s) = coord_with("enter_raw", email_cfg());
@@ -262,10 +257,9 @@ fn enter_commits_the_raw_buffer_even_when_a_candidate_is_highlighted() {
     );
 }
 
-/// 同一个缓冲状态下，空格与回车必须给出**不同**的结果。
+/// 同一个缓冲状态下，空格与回车必须给出不同的结果。
 ///
-/// 分开写这一条是因为上一条单独看会被「候选恰好等于原文」蒙混过去：两个键都返回
-/// `a@g` 时它也是绿的。这里把两条路并排跑，直接钉住「它们不是同一条路」。
+/// 上一条单独看会被「候选恰好等于原文」蒙混过去，这里并排跑两条路钉住它们不同。
 #[test]
 fn space_and_enter_diverge_on_the_same_buffer() {
     let mut out = Vec::new();
@@ -346,11 +340,10 @@ fn committing_learns_the_suffix_without_the_username() {
     );
 }
 
-/// 回车上屏半截后缀时**不学**它 —— 否则下次补全会先递一条垃圾。
+/// 回车上屏半截后缀时不学它 —— 否则下次补全会先递一条垃圾。
 ///
-/// 「打一半就上屏」是回车带来的正常用法（见 `mode_completion.rs` 文件头分工表）。
-/// 若把 `gm` 也学进去，下次打 `x@g` 时它会作为「学过的」排在 `gmail.com` 前面，
-/// 而用户根本没有 `@gm` 这个邮箱。
+/// 「打一半就上屏」是回车的正常用法（见 `mode_completion.rs` 文件头）；学了 `gm`，
+/// 下次打 `x@g` 它会排在 `gmail.com` 前面。
 #[test]
 fn a_half_typed_suffix_is_committed_but_not_learned() {
     let (c, store) = coord_with("halflearn", email_cfg());
@@ -377,7 +370,7 @@ fn a_half_typed_suffix_is_committed_but_not_learned() {
     );
 }
 
-/// 反过来：回车上屏一个**表外的完整域名**时必须学 —— 这正是「自定义后缀也能学」的场景。
+/// 反过来：回车上屏一个表外的完整域名时必须学 —— 这正是「自定义后缀也能学」的场景。
 #[test]
 fn a_custom_full_domain_committed_by_enter_is_learned() {
     let (c, store) = coord_with("customlearn", email_cfg());
@@ -504,8 +497,7 @@ fn split_helpers_use_the_last_at_sign() {
 
 // ═════════════════════ 网址模式：历史补全（§5.1） ═════════════════════
 //
-// 与邮箱共用 `mode_completion.rs` 的候选源与上屏语义，故并在同一个文件里测——两者
-// 分叉正是那份共用代码要防的事，测试分家等于把对照关系也拆了。
+// 与邮箱共用 `mode_completion.rs` 的候选源与上屏语义，并在同一文件测以保留对照关系。
 
 /// 开了网址模式的配置。`history` 控制第二道开关。
 fn url_cfg(history: bool) -> Config {
@@ -529,7 +521,7 @@ fn url_history_off_keeps_the_old_behaviour_exactly() {
     // 出厂态：历史关着 ⇒ 恒无候选 ⇒ 空格上屏缓冲原文，与加补全之前逐字相同。
     // 这是「不惊动既有用户」那半条承诺的守护测试。
     let (c, store) = coord_with("url_off", url_cfg(false));
-    // 库里先埋一条历史，证明关着时**连查都不查**，而不是查出来再丢掉。
+    // 库里先埋一条历史，证明关着时连查都不查，而不是查出来再丢掉。
     store
         .record_completion(CompletionKind::UrlHistory, "www.example.com")
         .unwrap();
@@ -612,15 +604,10 @@ fn a_candidate_identical_to_the_buffer_is_not_offered() {
     );
 }
 
-/// 达到上限后**仍然学得进新网址**，被挤掉的是除它以外最冷的那条。
+/// 达到上限后仍然学得进新网址，被挤掉的是除它以外最冷的那条。
 ///
-/// ⚠️ 这条用例最初把相反的行为钉成了预期（「刚上屏的 count=1，该出局」），审查时才发现
-/// 那等于把一个结构性缺陷写成契约：调用方是「先记一条、再裁到上限」，而新条目次数恒为
-/// 1、在次数降序里垫底，于是表一满就**每次上屏都把自己刚写的那条删掉**——历史从此冻结，
-/// 还每次白付一次写事务加一次全表排序。
-///
-/// ★ 判据：一条断言「符合当前实现」不等于「符合应有行为」。把行为钉成契约之前先问一句
-/// 「这个行为一直持续下去，用户会得到什么」。
+/// 调用方是「先记一条、再裁到上限」，新条目次数恒为 1、在降序里垫底；若裁掉它，
+/// 表一满就每次上屏都删掉刚写的那条，历史从此冻结。
 #[test]
 fn a_full_history_still_learns_new_urls() {
     let mut cfg = url_cfg(true);
@@ -648,12 +635,10 @@ fn a_full_history_still_learns_new_urls() {
     );
 }
 
-/// 退出网址模式后**不得**留下幽灵候选。
+/// 退出网址模式后不得留下幽灵候选。
 ///
-/// 加历史补全之前 `exit_url_mode` 漏清 `candidates` 是无害的（那时恒无候选）；接上
-/// `update_url_candidates` 之后，残留候选会在候选窗已隐藏的情况下被下一次空格命中
-/// 「有候选则选词」分支，凭空再上屏一条历史网址。数字选词键、翻页键与
-/// `has_input_session` 同样会被这批看不见的候选骗过。
+/// 残留候选会在候选窗已隐藏时被下一次空格命中「有候选则选词」，凭空上屏一条历史网址；
+/// 数字选词键、翻页键与 `has_input_session` 同样会被骗过。
 #[test]
 fn leaving_url_mode_leaves_no_ghost_candidates() {
     let (c, store) = coord_with("ghost", url_cfg(true));
@@ -678,7 +663,7 @@ fn leaving_url_mode_leaves_no_ghost_candidates() {
     press(&c, wind_keys::keymap::VK_ESCAPE);
     assert!(c.debug_page_texts().is_empty(), "Esc 退出后候选必须清空");
 
-    // ③ 退格删空退出 —— 这条最狠：空缓冲时列的是**整张**历史表。
+    // ③ 退格删空退出 —— 这条最狠：空缓冲时列的是整张历史表。
     enter_url(&c);
     for _ in 0..4 {
         press(&c, wind_keys::keymap::VK_BACK);
@@ -691,7 +676,7 @@ fn leaving_url_mode_leaves_no_ghost_candidates() {
     );
 }
 
-// ───────────────────────── 临时英文转交（GH#162）─────────────────────────
+// ───────────────────────── 临时英文转交 ─────────────────────────
 
 /// Shift+字母：起手进临时英文（五笔用户名超过四码时，正常流早已顶字上屏，只能走这条）。
 fn press_shift_letter(c: &Coordinator, ch: char) -> KeyAction {

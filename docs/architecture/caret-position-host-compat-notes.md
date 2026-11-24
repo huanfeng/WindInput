@@ -506,6 +506,11 @@ caret_probe → 拒绝: 该宿主 composition rect 恒陈旧，改用组合前�
    `context GetScreenExt` ——越界校验拒掉（`判为垃圾坐标，不采信`）或 `GetScreenExt 不可用`
    都会让二级降级失败关闭，退回兜底坐标。
 
+8. **长按 / 连打时候选窗一次都不显示？** 看 `SelectionChanged` 是否被回声过滤判成「用户移动光标」
+   （`since_self_commit` 远大于一次按键间隔）。自提交打点必须覆盖一切真落屏的返回变体（含满码自动上屏的
+   `CommitThenDeferComposition`），漏一种就会清掉 `caret_cache_verified`，下一组合 arm 600ms 长兜底，
+   而五笔长按时组合寿命仅约 128ms（4 码 × typematic 约 32ms），兜底永不到期。
+
 一个统计口径的提醒：**连打时每打一个字光标本就前移一个字宽，随之而来的 reshow 是正确的跟随，
 不是漂移。** 统计漂移率时必须只看「首显后、下一次按键前」的位置变化，否则会把正常跟随算成缺陷
 （本轮首版分析脚本因此把漂移率报成 25.2%，实际 3.6%）。

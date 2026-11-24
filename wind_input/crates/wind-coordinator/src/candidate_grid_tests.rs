@@ -645,7 +645,7 @@ fn number_key_selects_in_the_highlighted_row() {
 
 /// 打出 `code`（大写键码）并展开（真实词库）。词库缺失返回 `None`。
 ///
-/// 分类用例用 `shijian`：它同时有单字与词组（实测 100 / 15）；`yi` 这类完整单音节一个
+/// 分类用例用 `shijian`：它同时有单字与词组；`yi` 这类完整单音节一个
 /// 词组都没有，测不到词组那一支。
 fn typed_expanded(code: &str) -> Option<(Arc<Coordinator>, Receiver<UiCommand>)> {
     if !data_dir().join("schemas/pinyin.schema.toml").exists() {

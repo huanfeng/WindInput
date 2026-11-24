@@ -23,11 +23,10 @@ fn btn(id: &str, label: &str) -> ToolbarButtonSpec {
     }
 }
 
-/// 留空 = **全部显示**，按值域的声明顺序。
+/// 留空 = 全部显示，按值域的声明顺序。
 ///
-/// 断言写死字面序列而不是拿 `DEFAULT_TOOLBAR_ITEMS` 对拍：后者跟着实现一起改，
-/// 对拍恒绿，钉不住具体是哪几格、什么顺序。下面 `l1_default_items_are_a_full_cover`
-/// 反过来拿这条当基准——两条一起才形成「值域、出厂排布、留空兜底」的三方对齐。
+/// 断言写死字面序列而不是拿 `DEFAULT_TOOLBAR_ITEMS` 对拍（后者跟实现一起改，对拍恒绿）。
+/// `l1_default_items_are_a_full_cover` 拿这条当基准。
 #[test]
 fn empty_means_every_item() {
     assert_eq!(
@@ -95,16 +94,13 @@ fn whitespace_is_tolerated_and_blanks_are_silent() {
     );
 }
 
-/// L1（`Config::default()`）写死的那一行必须**覆盖全集**：把 `-` 前缀（「在这个位置，
+/// L1（`Config::default()`）写死的那一行必须覆盖全集：把 `-` 前缀（「在这个位置，
 /// 但不显示」）剥掉之后，它解析出的序列应与「留空」逐项相同。
 ///
-/// ⚠️ 断言从早先的「L1 == 留空」改成了这条：出厂排布如今**刻意**关掉了 `s2t`
-/// （简繁是少数人才用的功能），两者不再相等。但「关掉某几格」与「压根没写这几格」
-/// 是两回事——后者会让设置页里那几格跳回声明序位（位置信息丢了），也让往值域加新格
-/// 时忘记同步 `DEFAULT_TOOLBAR_SHOWN` 这件事无人发现。剥前缀再比，恰好只放过前者。
+/// 出厂排布刻意关掉了 `s2t`，但「关掉某几格」与「压根没写」不同：后者会让那几格在设置页
+/// 跳回声明序位，也让加新格时忘了同步 `DEFAULT_TOOLBAR_SHOWN` 无人发现。剥前缀再比只放过前者。
 ///
-/// ⚠️ 这条**只管 L1**。它读的是 Rust 侧默认值，全程不碰 `data/config.toml`；
-/// L1↔L2 一致由 wind-config 侧的 `data_config_toml_*` 那组守门负责（只有那里读得到 L2）。
+/// 只管 L1（Rust 侧默认值）；L1↔L2 一致由 wind-config 的 `data_config_toml_*` 守门负责。
 #[test]
 fn l1_default_items_are_a_full_cover() {
     let factory = wind_config::Config::default().ui.toolbar.items;
@@ -115,19 +111,15 @@ fn l1_default_items_are_a_full_cover() {
     assert_eq!(parse_toolbar_items(&all_shown, &[]), parse(&[]));
 }
 
-/// 条目的值域散在几处：`TOOLBAR_ITEM_KEYS`（配置层**值域**）、本函数的 match 臂、
-/// `DEFAULT_TOOLBAR_ITEMS`（协议层**默认项**）、`DEFAULT_TOOLBAR_SHOWN` 与
+/// 条目的值域散在几处：`TOOLBAR_ITEM_KEYS`（配置层值域）、本函数的 match 臂、
+/// `DEFAULT_TOOLBAR_ITEMS`（协议层默认项）、`DEFAULT_TOOLBAR_SHOWN` 与
 /// `data/config.toml` 那一行（配置层默认项）。
 ///
-/// ★ **「出厂不显示某格」不在这条的管辖内**：那件事由 `DEFAULT_TOOLBAR_SHOWN` 里的
-/// `-` 前缀表达（当前是 `-s2t`），值域与协议层默认项都仍然是全集。所以这里断言的是
-/// 覆盖与顺序，不是「出厂长什么样」——后者归 `l1_default_items_are_a_full_cover`
-/// 与 wind-config 侧的 L1↔L2 守门。两件事分开，往值域里加一格才不会自动改变
-/// 任何人的工具栏外观。
+/// 「出厂不显示某格」不归这条管：它由 `DEFAULT_TOOLBAR_SHOWN` 的 `-` 前缀表达，值域与
+/// 协议层默认项仍是全集，这样往值域加一格不会改变任何人的工具栏外观。
 ///
-/// 钉住的两条：**每个登记的键都必须被解析认识**（只改常量没改 match 的话，
-/// 那个新键会被当成"未知条目"静默跳过，表现为"配了没反应"），以及**默认项按同样的
-/// 相对顺序出现在值域里**（顺序错位会让默认工具栏的格子排布与声明不符）。
+/// 钉住两条：每个登记的键都被解析认识（只改常量没改 match 会静默跳过新键），以及默认项
+/// 按同样的相对顺序出现在值域里。
 #[test]
 fn every_registered_key_is_parsable_and_keeps_default_order() {
     let keys: Vec<String> = wind_config::TOOLBAR_ITEM_KEYS
@@ -160,18 +152,17 @@ fn dash_prefix_hides_the_item() {
     );
 }
 
-/// ★ 前缀存在的**全部理由**：关掉再打开，位置不变。
+/// 前缀存在的全部理由：关掉再打开，位置不变。
 ///
-/// 这条模拟设置页的一个来回——用户把 full_width 拖到第 2 位、关掉、再打开。
-/// 若关闭时把它从数组里删掉，重新打开只能补在声明序位（第 3 位），用户看到的是
-/// 「我排好的顺序，关一下再开就乱了」。
+/// 模拟设置页一个来回：full_width 拖到第 2 位、关掉、再打开。若关闭时从数组删掉，
+/// 重新打开只能补在声明序位（第 3 位）。
 #[test]
 fn toggling_off_and_on_preserves_position() {
     let off = ["mode", "-full_width", "punct"];
     let on = ["mode", "full_width", "punct"];
     // 关着时不渲染它。
     assert_eq!(parse(&off), vec![ToolbarItem::Mode, ToolbarItem::Punct]);
-    // 打开后回到**原位**（第 2 位），而不是声明序里的位置。
+    // 打开后回到原位（第 2 位），而不是声明序里的位置。
     assert_eq!(
         parse(&on),
         vec![
@@ -204,8 +195,7 @@ fn dash_prefix_works_on_custom_items() {
 
 /// 前缀不掩盖拼写错误：`-punkt` 与 `punkt` 是同一个错，都该跳过。
 ///
-/// （告警内容不便断言，这里钉的是「不因为带了前缀就被当成合法的关闭项」——
-/// 若实现改成「见 `-` 就 continue」，本条仍绿，但下一条会红。）
+/// 钉的是不因带前缀就被当成合法关闭项；实现改成「见 `-` 就 continue」时本条仍绿、下一条会红。
 #[test]
 fn dash_prefix_does_not_legitimize_typos() {
     assert_eq!(
@@ -222,8 +212,7 @@ fn double_dash_is_a_typo_not_a_double_negative() {
 
 /// 全部关闭 → 展开为空 → 回落全集。
 ///
-/// ⚠️ 这条只在**手写配置**时可达：设置页那侧有「至少留一格」的闸门。留着兜底是因为
-/// 一条只剩拖动柄的空条看着像 bug，而用户多半不知道是自己配出来的。
+/// 只在手写配置时可达（设置页有「至少留一格」的闸门）；兜底是因为只剩拖动柄的空条看着像 bug。
 #[test]
 fn all_disabled_falls_back_to_full_set() {
     assert_eq!(
@@ -251,7 +240,7 @@ fn custom_button_resolves_by_id_at_any_position() {
     );
 }
 
-/// index 是**在 buttons 数组里的下标**，不是在 items 里的位置——点击回指靠它。
+/// index 是在 buttons 数组里的下标，不是在 items 里的位置——点击回指靠它。
 #[test]
 fn custom_index_points_into_buttons_array() {
     let buttons = [btn("a", "甲"), btn("b", "乙")];
@@ -266,7 +255,7 @@ fn custom_index_points_into_buttons_array() {
     assert_eq!(idx, vec![1, 0], "下标须指向 buttons，与 items 里的顺序无关");
 }
 
-/// ★ 四种「配了不出现」必须各自可分辨（都只表现为"我的按钮没了"）：
+/// 四种「配了不出现」必须各自可分辨（都只表现为"我的按钮没了"）：
 /// 悬空引用 / 被 enabled 关掉 / label 为空 / 前缀写错。
 #[test]
 fn custom_button_vanishes_only_for_these_reasons() {
@@ -298,10 +287,9 @@ fn custom_button_vanishes_only_for_these_reasons() {
     );
 }
 
-/// label 按**显示宽度**截断：一个汉字或两个 ASCII。
+/// label 按显示宽度截断：一个汉字或两个 ASCII。
 ///
-/// 与语言栏图标主字的 `icon_label_trunc` 现在是**同一条规则**（issue #85 起两处
-/// 都按显示宽度收），只是上限常量各留一个。理由见 `toolbar_label_trunc` 的文档。
+/// 与语言栏图标主字的 `icon_label_trunc` 同一条规则，只是上限常量各留一个。理由见 `toolbar_label_trunc` 的文档。
 #[test]
 fn custom_label_truncates_by_display_width() {
     let cases = [
@@ -326,7 +314,7 @@ fn custom_label_truncates_by_display_width() {
 
 /// 光在 `buttons` 里定义不等于要显示：`items` 是显示与顺序的唯一真相源。
 ///
-/// 反过来说，`items` 留空时回落的是**内置全集**，不含任何自定义按钮——否则用户
+/// 反过来说，`items` 留空时回落的是内置全集，不含任何自定义按钮——否则用户
 /// 没法"先定义好、暂时不放上去"。
 #[test]
 fn defining_a_button_does_not_show_it() {

@@ -172,7 +172,7 @@ caret_offset_x = 9
 initial_mode = "chinese"
 "#;
 
-/// 论坛 t270：AutoHotkey 同一进程的两个 GUI 窗口（类名不同）各自命中自己的规则——持续类
+/// AutoHotkey 同一进程的两个 GUI 窗口（类名不同）各自命中自己的规则——持续类
 /// （caret_offset）随焦点即时刷新，进入类（initial_mode）在两窗口间切换时也重算。
 #[test]
 fn ahk_two_windows_of_one_process_each_hit_their_own_rule() {
@@ -223,7 +223,7 @@ fn get_current_mode_uses_the_class_it_was_given() {
     assert!(cn, "同步回传必须已按 B 的规则（中文）");
 }
 
-/// GH#175：出厂规则换成类名通配后，Edge 焦点下协调器自己发的占位与推给 DLL 的兜底占位
+/// 出厂规则换成类名通配后，Edge 焦点下协调器自己发的占位与推给 DLL 的兜底占位
 /// 都是 ZWSP；同一 token 换到非 Chromium 窗口时持续类字段刷新、DLL 配置重推。
 #[test]
 fn chromium_class_wildcard_gives_zwsp_and_repushes_on_window_change() {
@@ -263,7 +263,7 @@ fn chromium_class_wildcard_gives_zwsp_and_repushes_on_window_change() {
     );
 }
 
-/// GH#175 第三档：`blank`（U+2800）——协调器自己发的占位与推给 DLL 的档位（2）都要跟上。
+/// 第三档：`blank`（U+2800）——协调器自己发的占位与推给 DLL 的档位（2）都要跟上。
 /// 钉钉在线表格一类「靠出现内容进入编辑态」的宿主用它（ZWSP 被当成没内容）。
 #[test]
 fn blank_rule_gives_braille_blank_and_pushes_kind_2() {
@@ -354,7 +354,7 @@ fn shipped_rules_push_paste_to_weixin() {
     assert_eq!(pushed_multiline(&cap), Some(true));
 }
 
-/// 进入类字段只在「命中的带窗口条件的**进入类**规则集合」变了时重算：只管占位的类名规则
+/// 进入类字段只在「命中的带窗口条件的进入类规则集合」变了时重算：只管占位的类名规则
 /// 命中与否（VS Code 里弹出原生对话框）不算切进来，进程规则配的 initial_mode 不得冲掉手切。
 #[test]
 fn non_entry_window_rules_do_not_make_a_same_process_switch_count_as_entering() {
@@ -426,7 +426,7 @@ initial_punct = "english"
 }
 
 /// P3 真有标题之后，端到端走 focus_gained：持续类字段随标题即时刷新，进入类字段在仅标题
-/// 变化时**永不**重算（用户手切的中英态保留），同步段 `get_current_mode` 与重型段同源。
+/// 变化时永不重算（用户手切的中英态保留），同步段 `get_current_mode` 与重型段同源。
 #[test]
 fn title_rules_follow_the_title_but_title_only_changes_never_reapply_the_initial_mode() {
     let c = coord_with_rules(
@@ -825,7 +825,7 @@ fn suppressed(c: &Coordinator) -> bool {
 
 const PASSWORD_MASK: u64 = 1 << 31;
 
-/// 同一 token 换窗口时密码抑制**只降不升**：DLL 那份门控还是按旧窗口算的、新值的重推还在
+/// 同一 token 换窗口时密码抑制只降不升：DLL 那份门控还是按旧窗口算的、新值的重推还在
 /// 路上，服务端当场置位就是 core 抑制而 DLL 照吃（违反 core.suppress ⊆ C++.suppress）。
 /// 置位等 DLL 下一次 input_state_report。首次带类名获焦（握手按空窗口算）同理。
 #[test]

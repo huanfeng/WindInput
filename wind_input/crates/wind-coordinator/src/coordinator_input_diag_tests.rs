@@ -111,11 +111,11 @@ fn toggle_hud_flips_visibility() {
     assert!(!c.input_diag_hud_visible.load(Relaxed));
 }
 
-/// 开关的初值取自配置（`input.password_force_english`，t197）：配置关掉时，构造出的
-/// 协调器遇到密码位也不抑制——此前构造处硬编码 `true`，菜单关掉后重启服务又勾回。
+/// 开关的初值取自配置（`input.password_force_english`）：配置关掉时，构造出的协调器遇到
+/// 密码位也不抑制，否则菜单关掉后重启服务又勾回。
 ///
-/// 菜单切换写盘 / 热重载保持见 `tests/password_force_english_persist.rs`（要重定向用户
-/// 目录，只能单开测试二进制；本模块的用例一律不走写盘路径，免得改到真实用户配置）。
+/// 菜单切换写盘 / 热重载保持见 `tests/password_force_english_persist.rs`（要重定向用户目录，
+/// 只能单开测试二进制；本模块不走写盘路径）。
 #[test]
 fn config_off_constructs_without_suppress() {
     use std::sync::atomic::Ordering::Relaxed;
@@ -132,7 +132,7 @@ fn config_off_constructs_without_suppress() {
     );
 }
 
-/// 关掉开关须立即解除**已生效**的抑制，不能等下一次焦点上报——用户正对着那个
+/// 关掉开关须立即解除已生效的抑制，不能等下一次焦点上报——用户正对着那个
 /// 被误判的框点菜单，点完就要能打中文。
 #[test]
 fn switching_off_clears_active_suppress() {
@@ -161,23 +161,18 @@ fn focus_lost_clears_password_suppress() {
     );
 }
 
-/// 回归（2026-07-27）：Chromium 网页密码框必须强制英文，**即便上报的 disabled=true**。
+/// Chromium 网页密码框必须强制英文，即便上报的 disabled=true。
 ///
-/// 此前判据里有一条 `&& !disabled`，本意是「compartment 禁用时 DLL 已全放行、抑制 moot」。
-/// 但 DLL 放行看的是**线程级** KEYBOARD_DISABLED，而 Windows 侧当时往 `disabled` 字段传的
-/// 是 **context 级**的 `_focusIsPassword` —— 网页密码框恒为 true，于是抑制被自我否决：
-/// 键没被放行、中文照打，高级菜单的开关看着像坏了。
-///
-/// ⚠ 本用例的要害是 `disabled=true`。改动前所有密码框用例都传 false（macOS 只发 mask、
-/// 不发 disabled，走的正是那条路），恰好绕开失效分支，所以旧代码测试全绿。
-/// **动这条判据时必须保住这个取值**，否则回归保护形同虚设。
+/// DLL 放行看的是线程级 KEYBOARD_DISABLED，而 `disabled` 字段可能是 context 级判定（网页
+/// 密码框恒为 true），判据里加 `&& !disabled` 会让抑制自我否决。本用例的要害就是
+/// `disabled=true`，改动时必须保住这个取值。
 #[test]
 fn password_scope_suppresses_even_when_disabled_flag_set() {
     let mut cfg = Config::default();
     cfg.input.default.chinese_mode = true;
     let c = Coordinator::new_headless(cfg, None);
 
-    // disabled=true + 密码位：正是 Chromium 网页密码框改动前的上报组合。
+    // disabled=true + 密码位：Chromium 网页密码框的上报组合。
     c.apply_input_diag(4321, true, 1, 1 << 31);
     assert!(
         c.password_suppress
@@ -197,7 +192,7 @@ fn password_scope_suppresses_even_when_disabled_flag_set() {
     );
 }
 
-/// t197：Gecko 系（Zen）页面无输入焦点时置 context 级 KEYBOARD_DISABLED，宿主原始 scope 只有
+/// Gecko 系（Zen）页面无输入焦点时置 context 级 KEYBOARD_DISABLED，宿主原始 scope 只有
 /// IS_DEFAULT。DLL 折位后 mask=0x80000001、reason 字节=4。展示与提示语必须说「被禁用」而不是
 /// 「密码框」，抑制行为则与密码框一致（Chromium 密码框靠同一信号）。
 #[test]
@@ -222,7 +217,7 @@ fn context_disabled_is_shown_apart_from_host_password() {
     c.apply_input_diag(1, false, 2, 0x8000_0001);
     assert_eq!(c.input_block(), InputBlock::Password);
 
-    // Chromium 网页密码框：context 禁用 + IS_PRIVATE（rawScope=0x2000000000000000，靶机实测），
+    // Chromium 网页密码框：context 禁用 + IS_PRIVATE（rawScope=0x2000000000000000），
     // 宿主虽没明说密码，两个信号同时出现按密码框展示——图标提示不能说「被应用禁用」。
     c.apply_input_diag(1, false, 4, 0x8000_0000 | (1 << 61));
     assert_eq!(
@@ -247,12 +242,10 @@ fn context_disabled_tooltip_does_not_claim_password() {
     assert!(tip.contains("禁用"), "应说明是被应用禁用: {tip}");
 }
 
-/// disabled 只参与 `reason_from` 的展示推导，**不参与** suppress 决策——单一来源。
+/// disabled 只参与 `reason_from` 的展示推导，不参与 suppress 决策——单一来源。
 ///
-/// 本用例取代旧的 `compartment_disabled_does_not_set_suppress`：那条断言同样的输入
-/// （disabled=true + 密码位）**不该**置 suppress，把「compartment 禁用 ⇒ DLL 已放行所有键」
-/// 这条前提固化成了契约。前提只对**线程级** KEYBOARD_DISABLED 成立，而当时 Windows 侧
-/// 往该字段传的是 context 级的密码框判定 —— 契约锁住的恰是 bug 本身。reason 断言保留。
+/// 「compartment 禁用 ⇒ DLL 已放行所有键」只对线程级 KEYBOARD_DISABLED 成立，
+/// 不能拿它免掉 suppress。
 #[test]
 fn disabled_flag_drives_reason_display_not_suppression() {
     use std::sync::atomic::Ordering::Relaxed;
@@ -302,7 +295,7 @@ fn disabled_switch_defeats_password_scope() {
     );
 }
 
-// ── 按应用覆盖（compat.toml 的 password_force_english，A2-37 / t197）──
+// ── 按应用覆盖（compat.toml 的 password_force_english）──
 
 /// 给 pid 登记进程名并装上该进程的 `password_force_english` 规则。
 fn pfe_rule(c: &Coordinator, pid: u32, name: &str, v: Option<bool>) {
@@ -365,7 +358,7 @@ fn per_app_no_rule_follows_global() {
     assert!(!c.password_force_english_for_pid(0));
 }
 
-/// ★ 不变量 core.suppress ⊆ C++.suppress：逐客户端推给 DLL 的值与服务端判定出自
+/// 不变量 core.suppress ⊆ C++.suppress：逐客户端推给 DLL 的值与服务端判定出自
 /// 同一个函数。这里对每个客户端比对「推送值」与「同 pid 下服务端算出的 suppress」。
 #[test]
 fn per_client_push_matches_server_judgement() {
@@ -443,7 +436,7 @@ fn pushed_pfe(cap: &std::sync::mpsc::Receiver<Vec<u8>>) -> Option<bool> {
     }
 }
 
-/// PID 复用：推送通道握手早于主管道校正进程名时，握手按**旧名**算了门控。校正真的
+/// PID 复用：推送通道握手早于主管道校正进程名时，握手按旧名算了门控。校正真的
 /// 改写了缓存 ⇒ 必须给该进程的客户端补推按新名算的值；别的进程不受打扰。
 #[test]
 fn revalidated_pid_name_repushes_password_gate_to_that_process() {
@@ -475,9 +468,8 @@ fn revalidated_pid_name_repushes_password_gate_to_that_process() {
     assert_eq!(pushed_pfe(&cap), None, "名字没变不补推");
 }
 
-/// ★ 任何一次整表重载（不只是密码框那一项菜单）都要重推门控：用户手写了
-/// `password_force_english`，随后点了一个**别的**菜单项 / 拖了一下候选窗，服务端判定
-/// 已按新规则走，推给该客户端的值必须跟上——否则打破 core.suppress ⊆ C++.suppress。
+/// 任何一次整表重载（不只是密码框那一项菜单）都要重推门控：用户手改配置后点了别的
+/// 菜单项，推给客户端的值也必须跟上，否则打破 core.suppress ⊆ C++.suppress。
 #[test]
 fn any_compat_reload_repushes_password_gate_for_hand_written_rule() {
     let dir = std::env::temp_dir().join(format!("wind_pfe_reload_{}", std::process::id()));

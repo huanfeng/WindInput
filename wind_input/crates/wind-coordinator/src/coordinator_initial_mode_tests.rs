@@ -8,10 +8,8 @@ fn coord_with(f: impl FnOnce(&mut Config)) -> Arc<Coordinator> {
 }
 
 /// 注入焦点进程（headless 下 OpenProcess 取不到真实进程名，手动填缓存）。
-/// 夹具语义＝「焦点与**模式归属**都已落在这个进程上」，即真实 focus_gained 跑完之后
-/// 的稳态。两个字段都要设：`active_compat.pid` 是「焦点在哪」，`mode_scope` 是
-/// 「初始模式该按谁算」，生产里由重型段一起推进（过渡窗口除外）。
-/// 只设前者会让 `crossed` 判据读到陈旧的 `mode_scope`，测试便不再对应任何真实状态。
+/// 夹具语义＝焦点与模式归属都已落在这个进程上（focus_gained 跑完后的稳态）。
+/// `active_compat.pid` 与 `mode_scope` 都要设，只设前者 `crossed` 会读到陈旧的 `mode_scope`。
 fn set_focus_proc(c: &Arc<Coordinator>, pid: u32, name: &str) {
     c.active_compat.lock().unwrap().pid = pid;
     c.pid_names.lock().unwrap().insert(pid, name.to_string());
@@ -132,9 +130,8 @@ fn get_current_mode_switches_per_app_on_cache_hit() {
         cfg.input.default.state_scope = "app".into();
         cfg.input.default.chinese_mode = true;
     });
-    // 焦点原本在别的进程。同步段先于重型段的 update_active_compat 执行，此刻
-    // active_compat.pid 仍是**上一个**进程——`crossed` 判据正是靠这一点识别「跨进程
-    // 切入」。故夹具必须把旧进程留在 active_compat 里，只把新进程名喂进 pid_names。
+    // 同步段先于重型段的 update_active_compat 执行，此刻 active_compat.pid 仍是上一个
+    // 进程，`crossed` 靠这点识别跨进程切入；故夹具只把新进程名喂进 pid_names。
     set_focus_proc(&c, 1, "other.exe");
     c.pid_names
         .lock()
@@ -178,10 +175,10 @@ fn set_rule(
     }]);
 }
 
-/// 应用规则**压过** per-app 记忆表。
+/// 应用规则压过 per-app 记忆表。
 ///
-/// 顺序反了（规则排记忆表之后）对 Everything / Listary 这类**常驻隐藏式**进程等于
-/// 只在开机后第一次唤出时生效：进程不退出，会话级记忆表里「首次」永远只有一次。
+/// 顺序反了，Everything / Listary 这类常驻隐藏式进程的规则只在开机后第一次唤出时生效
+/// （进程不退出，会话级记忆表里「首次」只有一次）。
 #[test]
 fn app_rule_beats_per_app_memory() {
     use wind_config::app_compat::InitialMode as IM;
@@ -217,16 +214,15 @@ fn reapply_gate_matrix() {
     assert!(!should_reapply_initial(true, false, false, false, false));
     // 进入规则应用（Word → Everything）。
     assert!(should_reapply_initial(true, false, false, true, false));
-    // **离开**规则应用（Everything → Word）：只看 new_has_rule 会漏掉这条，
+    // 离开规则应用（Everything → Word）：只看 new_has_rule 会漏掉这条，
     // 表现为 Everything 的英文残留给之后的每一个应用。
     assert!(should_reapply_initial(true, false, true, false, false));
     // per_app 既有语义不受规则影响。
     assert!(should_reapply_initial(true, true, false, false, false));
 
-    // ── 壳过渡窗口一票否决（2026-08-18）──
-    // 点任务栏 / Alt+Tab 切入 explorer.exe：即便它配了 initial_mode 规则、也确实是
-    // 跨进程切入，仍不重算——用户点它是为了去别处。上面每一条为真的组合都要被否掉，
-    // 否则「一票否决」就退化成了「参与投票」。
+    // ── 壳过渡窗口一票否决 ──
+    // 点任务栏 / Alt+Tab 切入 explorer.exe：即便配了规则、确是跨进程切入也不重算。
+    // 上面每一条为真的组合都要被否掉。
     assert!(!should_reapply_initial(true, false, false, true, true));
     assert!(!should_reapply_initial(true, false, true, false, true));
     assert!(!should_reapply_initial(true, true, false, false, true));
@@ -235,9 +231,8 @@ fn reapply_gate_matrix() {
 
 /// 端到端：作用域外窗口的 focus_gained 不得改动中英状态，桌面窗口必须照改。
 ///
-/// 单测 `reapply_gate_matrix` 只锁住纯判据；这条锁住**接线**——判据写对了但取错窗口类、
-/// 或压根没把 `window_class` 传进来，矩阵测试照样全绿。本仓已有多次「门控退化后测试
-/// 仍全绿」的先例，两层都要有。
+/// `reapply_gate_matrix` 只锁纯判据；这条锁接线——取错窗口类或没传 `window_class`，
+/// 矩阵测试照样全绿。
 #[test]
 fn out_of_scope_window_skips_initial_mode_but_desktop_does_not() {
     use wind_config::app_compat::{
@@ -301,10 +296,8 @@ fn out_of_scope_window_skips_initial_mode_but_desktop_does_not() {
         "桌面必须照常套用 initial_mode=english"
     );
 
-    // ★★★ 拿不到窗口类：**保持现状**。
-    // 这是 2026-08-18 17:24:08 现场的直接钉子——explorer 新起 TSF 连接后的头一个
-    // focus_gained 没有窗口类（caret 也退到 last_known），旧判据（黑名单）把它放行、
-    // 当场套上英文规则，用户看到图标闪「英」。信息缺失时的正确答案是「别动」。
+    // 拿不到窗口类：保持现状（explorer 新起 TSF 连接的头一个 focus_gained 就是这样，见
+    // docs/architecture/app-compat-host-notes.md 的「初始模式作用域」）。
     let c = build();
     c.handle_focus_gained(&focus(""));
     assert!(
@@ -312,12 +305,8 @@ fn out_of_scope_window_skips_initial_mode_but_desktop_does_not() {
         "窗口类为空 = 不知道焦点在哪，必须保持现状而不是按规则重算"
     );
 
-    // ★★ 按**生产真实顺序**再走一遍：同步段 get_current_mode 先跑（DLL 正阻塞等它），
-    // 重型段 handle_focus_gained 后跑。上面那三条只调了重型段，于是「同步段没挡」这个
-    // 缺陷可以全程不被发现——实测就是这样：日志显示重型段已跳过，图标照样切成英文，
-    // 因为真正改掉状态的是先跑的那一个。
-    //
-    // 「按应用套用初始模式」有**两个落点**，测试必须两个都走，否则等于只测了一半。
+    // 按生产顺序再走一遍：同步段 get_current_mode 先跑（DLL 阻塞等它），重型段
+    // handle_focus_gained 后跑。初始模式有这两个落点，只测重型段会漏掉同步段没挡。
     let c = build();
     let (chinese, _, _) = c.get_current_mode(token(200), "Shell_TrayWnd", "");
     assert!(chinese, "同步段也必须跳过作用域外的窗口");
@@ -335,12 +324,10 @@ fn out_of_scope_window_skips_initial_mode_but_desktop_does_not() {
     assert!(!c.state.lock().unwrap().chinese_mode);
 }
 
-/// ★★ 作用域外的窗口**不得消费掉「跨进程切入」这个一次性事件**。
+/// 作用域外的窗口不得消费掉「跨进程切入」这个一次性事件。
 ///
-/// 真实序列：记事本 → 点任务栏（作用域外，跳过）→ 真正回到桌面。两次焦点是**同一个
-/// explorer 进程**，若用 `active_compat.pid` 判 `crossed`，第一次就把它变成 explorer，
-/// 第二次便成了「同进程」，桌面配的 initial_mode 永远不生效——这正是修完作用域门控
-/// 之后冒出来的第二级缺陷（2026-08-18 实测：DLL 报了 Progman，服务端毫无反应）。
+/// 记事本 → 点任务栏（作用域外，跳过）→ 回到桌面：两次焦点同属 explorer 进程。若用
+/// `active_compat.pid` 判 `crossed`，第二次成了同进程，桌面的 initial_mode 永不生效。
 #[test]
 fn out_of_scope_window_does_not_consume_the_cross_process_transition() {
     use wind_config::app_compat::{
@@ -389,7 +376,7 @@ fn out_of_scope_window_does_not_consume_the_cross_process_transition() {
     c.handle_focus_gained(&focus("Shell_TrayWnd"));
     assert!(c.state.lock().unwrap().chinese_mode, "任务栏不该改模式");
 
-    // ② 真正回到桌面：**同一个 explorer pid**，仍必须算作跨进程切入并套用英文。
+    // ② 真正回到桌面：同一个 explorer pid，仍必须算作跨进程切入并套用英文。
     let (chinese, _, _) = c.get_current_mode(token(200), "Progman", "");
     assert!(
         !chinese,
@@ -445,16 +432,11 @@ fn get_current_mode_rule_applies_only_on_cross_process_switch() {
     );
 }
 
-/// ★★ 同步段与重型段对「初始模式」必须给出**同一个**答案。
+/// 同步段与重型段对「初始模式」必须给出同一个答案。
 ///
-/// 真实场景：桌面配 `initial_mode = "english"`，从桌面切到无规则的记事本。
-/// 同步段曾只处理「规则表/记忆表命中」，两者都没命中就保持现状——而现状正是桌面留下的
-/// 英文，于是 DLL 先拿到「英」、3~5ms 后才被重型段改成「中」。后果：DLL 据此写
-/// OPENCLOSE compartment，系统语言指示器闪一下；且这几毫秒里到达的首键按英文处理，
-/// 而同步回传的全部意义就是消除这个首键竞态。
-///
-/// 断言写成「两者相等」而不是「等于某个具体值」：要钉的是**一致性**这个不变量，
-/// 钉死具体值会让将来调整默认模式时这条测试变成噪声。
+/// 场景：桌面配 `initial_mode = "english"`，切到无规则的记事本。若同步段两表都没命中就
+/// 保持桌面留下的英文，DLL 先拿到「英」、几毫秒后才被重型段改成「中」：语言指示器闪一下，
+/// 首键按英文处理。断言写成「两者相等」，钉的是一致性而非具体值。
 #[test]
 fn sync_and_heavy_paths_agree_on_initial_mode() {
     use wind_config::app_compat::InitialMode as IM;
@@ -506,8 +488,8 @@ fn sync_and_heavy_paths_agree_on_initial_mode() {
 
 /// 三档的优先级与「未激活时不表态」。
 ///
-/// 优先级不是随意排的：线程级禁用时引擎压根收不到键，密码框次之，两者都不成立才轮到
-/// 「焦点不在可编辑控件里」。排错了不会有编译或测试信号，只会让 tooltip / 变淡呈现错档。
+/// 线程级禁用时引擎收不到键，密码框次之，最后才是「焦点不在可编辑控件里」。
+/// 排错了只会让 tooltip / 变淡呈现错档，没有别的信号。
 #[test]
 fn input_block_priority_and_inactive_short_circuit() {
     let c = coord_with(|_| {});
@@ -547,8 +529,8 @@ fn input_block_priority_and_inactive_short_circuit() {
 }
 
 /// `pid_names` 是一次写入、永不失效的缓存，而 Windows 会复用已退出进程的 PID。
-/// 连接时校正是它唯一的自愈时机——没有它，「B 复用了 A 的 pid」之后 B 会被永久
-/// 当成 A，整条 per-app 链（compat 规则 + 中英记忆）一起错且无任何自愈路径。
+/// 连接时校正是唯一的自愈时机，否则 B 复用 A 的 pid 后会被永久当成 A，
+/// 整条 per-app 链（compat 规则 + 中英记忆）一起错。
 #[test]
 fn pid_name_cache_is_corrected_on_reconnect() {
     let c = coord_with(|_| {});
@@ -565,7 +547,7 @@ fn pid_name_cache_is_corrected_on_reconnect() {
         "PID 复用后必须纠正，否则新进程会一直套用旧进程的 per-app 配置"
     );
 
-    // ⚠ 现查为空时**保留缓存**：macOS 的 process_name 恒为空串，名字由 `.app`
+    // 现查为空时保留缓存：macOS 的 process_name 恒为空串，名字由 `.app`
     // 随焦点事件送进来。清掉会让 compat 规则在下一次 focus_gained 之前全部失配。
     c.revalidate_pid_name(4242, "");
     assert_eq!(
@@ -583,15 +565,10 @@ fn pid_name_cache_is_corrected_on_reconnect() {
     );
 }
 
-/// ★★ 噪声层的 `CtxLost` **不得**让图标显「英」，只有权威的 `NoEditCtx` 才可以。
+/// 噪声层的 `CtxLost` 不得让图标显「英」，只有权威的 `NoEditCtx` 才可以。
 ///
-/// 实测缺陷（2026-08-18，本重构自己引入的）：
-///   `handle_focus_lost reason=CtxLost` → 200ms 后 `input_block → NoEditContext`
-///   → 图标发布「英」，而那次焦点根本没离开可编辑控件。
-/// 根子是我把判定收归 Rust 时直接读了 `has_edit_context`——那个量被 CtxLost 置假，
-/// 用于工具栏可以（翻错了 50ms 防抖吸收），用于持续可见的图标就是误报。
-///
-/// 这条测试同时钉住「工具栏仍然要跟着 CtxLost 隐藏」，防止有人把两者又合并回去。
+/// `has_edit_context` 会被 CtxLost 置假：用于工具栏可以（翻错由防抖吸收），用于持续可见的
+/// 图标就是误报。同时钉住工具栏仍要跟着 CtxLost 隐藏，防止两者又合并。
 #[test]
 fn ctx_lost_is_noise_for_icon_but_still_hides_toolbar() {
     use wind_bridge::handler::FocusLostReason;
@@ -629,15 +606,11 @@ fn ctx_lost_is_noise_for_icon_but_still_hides_toolbar() {
     );
 }
 
-/// ★★★ 三个档位里**只有罕见的两档**该把图标覆盖成「英」。
+/// 三个档位里只有罕见的两档该把图标覆盖成「英」。
 ///
-/// `NoEditContext` 是日常状态：实测 VS Code 8 分钟发 35 次 `NoEditCtx`（每换一次
-/// docMgr 一次）。让它翻图标，用户看到的是图标自己在抖。且此刻图标显示什么都不影响
-/// 功能——焦点不在输入控件上，敲键盘本来就没有落点。
-///
-/// 这条与 `ctx_lost_is_noise_for_icon_but_still_hides_toolbar` 分工不同：那条钉的是
-/// **档位判定**（哪个信号能置位），这条钉的是**呈现映射**（置位了要不要变英）。
-/// 两者都写对才不闪，只测一层会漏。
+/// `NoEditContext` 是日常状态，翻图标就是图标自己在抖，依据见
+/// docs/design/mode-icon-label-config.md 的「不可输入态跟随英文标签」。
+/// `ctx_lost_is_noise_for_icon_but_still_hides_toolbar` 钉档位判定，这条钉呈现映射，两层都要。
 #[test]
 fn only_rare_blocks_show_english_on_icon() {
     assert!(!InputBlock::None.shows_english());
@@ -659,10 +632,9 @@ fn only_rare_blocks_show_english_on_icon() {
     assert!(!InputBlock::NoEditContext.dims_icon());
 }
 
-/// 呈现档位的**两个方向不对称**：进入要稳够 INPUT_BLOCK_DELAY，恢复立即。
+/// 呈现档位的两个方向不对称：进入要稳够 INPUT_BLOCK_DELAY，恢复立即。
 ///
-/// 这条钉的是「误显英很刺眼、晚显英无感」这个取舍本身。写成对称迟滞会让
-/// QQ 密码框那种 180ms churn 把图标打得一闪一闪，那正是当初加迟滞的起因。
+/// 取舍：误显英很刺眼、晚显英无感。对称迟滞会让 QQ 密码框的焦点反复把图标打得一闪一闪。
 #[test]
 fn effective_input_block_is_asymmetric() {
     let c = coord_with(|_| {});
@@ -729,9 +701,8 @@ fn langbar_tooltip_covers_every_branch() {
     set(false, false);
     assert_eq!(c.langbar_tooltip(), "清风输入法 - 英文模式 (Caps Lock 关)");
 
-    // ★★ 不可输入那两档要先稳够 INPUT_BLOCK_DELAY 才呈现——tooltip 与图标读**同一个**
-    // effective_input_block，所以文案也跟着迟滞。这是对的：图标还显着方案标签、
-    // tooltip 却已经说「密码框」，那才是错位。第一次调用起计时，等到期后再断言。
+    // tooltip 与图标读同一个 effective_input_block，文案也跟着迟滞，二者才不会错位。
+    // 第一次调用起计时，等到期后再断言。
     c.password_suppress
         .store(true, std::sync::atomic::Ordering::Relaxed);
     set(true, false);
@@ -756,12 +727,11 @@ fn langbar_tooltip_covers_every_branch() {
     assert_eq!(c.langbar_tooltip(), "清风输入法 - 已禁用");
     c.last_input_diag.lock().unwrap().disabled = false;
     // 先让闸门回到 None 再测下一档：从「已禁用」直接转向另一个非 None 档走的是
-    // **进入**方向，仍会呈现旧值——那是闸门的正确行为，不是本条要测的东西。
+    // 进入方向，仍会呈现旧值——那是闸门的正确行为，不是本条要测的东西。
     assert_eq!(c.langbar_tooltip(), "清风输入法 - 中文模式");
 
-    // NoEditContext 刻意**不**单独成档：它已不再让图标显「英」（是日常状态），
-    // tooltip 再提就与看到的对不上。**必须等稳够之后再断言**——迟滞期内不变是
-    // 闸门的功劳，证明不了这一档没被单独处理。
+    // NoEditContext 刻意不单独成档（图标不显「英」，tooltip 也不提）。必须等稳够再断言，
+    // 迟滞期内不变证明不了这一档没被单独处理。
     c.state.lock().unwrap().focus_no_edit_ctx = true;
     set(true, false);
     std::thread::sleep(INPUT_BLOCK_DELAY + std::time::Duration::from_millis(30));
@@ -831,11 +801,11 @@ fn toggle_mode_keeps_caps_when_cancel_disabled() {
     assert!(!s.chinese_mode, "配置关保持原翻转语义");
 }
 
-/// 论坛 t283：取消大写之后落到哪个模式（`input.capslock.mode_after_cancel`）。
+/// 取消大写之后落到哪个模式（`input.capslock.mode_after_cancel`）。
 ///
 /// 注入 CapsLock 走真实 SendInput，单测里取消恒失败，故判定收成纯函数单独钉。
-/// 矩阵的两条硬约束：出厂值 `chinese` 必须逐字保留旧行为——Shift 归位中文、
-/// Ctrl+空格 按它自己请求的方向；`english` 两条路都进英文（楼主要的就是这个）。
+/// 两条硬约束：出厂值 `chinese` 下 Shift 归位中文、Ctrl+空格 按它自己请求的方向；
+/// `english` 两条路都进英文。
 #[test]
 fn mode_after_caps_cancel_matrix() {
     use super::CapsCancelSwitch::{Directed, System, Toggle};
@@ -881,7 +851,7 @@ fn mode_after_caps_cancel_matrix() {
     }
 }
 
-/// `CMD_SYSTEM_MODE_SWITCH` 的来源分派：只有**用户按出来的**切换才吃
+/// `CMD_SYSTEM_MODE_SWITCH` 的来源分派：只有用户按出来的切换才吃
 /// `mode_after_cancel` 的改写，宿主写 compartment / 菜单 / 旧版 DLL 无 Ctrl 的一律
 /// 按请求落地——否则 CapsLock 恰好开着时，宿主请求的「中文」会被 `english` 落成英文。
 #[test]

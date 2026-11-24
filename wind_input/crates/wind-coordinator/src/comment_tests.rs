@@ -17,10 +17,8 @@ fn echo_arg() -> impl Fn(&str, Option<&str>) -> Option<String> {
 
 // ---------------- 出厂零回归 ----------------
 
-/// ★★ 出厂模板 `${code_hint|code}` 必须与本功能引入前的硬编码行为逐字节一致：
-/// 引擎产的剩余编码优先，为空则回退到主码表反查码，两者皆空则不显示。
-///
-/// 这是整个改动的零回归闸门 —— 存量用户升级后不该看到任何变化。
+/// 出厂模板 `${code_hint|code}` 必须与模板化前的硬编码行为逐字节一致：引擎产的剩余编码
+/// 优先，为空则回退到主码表反查码，两者皆空则不显示。存量用户升级后不该看到变化。
 #[test]
 fn default_template_reproduces_legacy_behavior() {
     const T: &str = "${code_hint|code_rev|shuangpin}";
@@ -43,9 +41,8 @@ fn default_template_reproduces_legacy_behavior() {
         "wq"
     );
     // ③ 都没有 → 不显示。
-    // ⚠️ 三个变量**都要列出来**：`ev()` 对未列出的名字返回 `None`，而 `None` 的语义是
-    // 「未知变量名」，渲染层会原样回显 ${shuangpin} 让人看见拼写错误。漏列一个，
-    // 这条断言拿到的就是那串字面文本 —— 与真机行为无关，纯属夹具没喂全。
+    // 三个变量都要列出来：`ev()` 对未列出的名字返回 `None`（未知变量名），渲染层会原样
+    // 回显 ${shuangpin}，断言拿到的就是字面文本——那是夹具没喂全，不是真机行为。
     assert_eq!(
         render(
             T,
@@ -55,8 +52,7 @@ fn default_template_reproduces_legacy_behavior() {
         ""
     );
 
-    // ★ 第三段 `shuangpin` 是本轮新加的，必须证明它**不打扰老用户**：
-    // 只要前两段任一非空，它就不参与。配了主码表的用户升级后所见分毫不变。
+    // 第三段 `shuangpin` 不打扰老用户：前两段任一非空它就不参与。
     assert_eq!(
         render(
             T,
@@ -66,8 +62,7 @@ fn default_template_reproduces_legacy_behavior() {
         "wq",
         "有反查码时不该被击键码顶掉"
     );
-    // ④ 前两段皆空时才轮到它 —— 那一格此前是空的（没配主码表的双拼用户），
-    // 所以这不是回归，是把空白填上。
+    // ④ 前两段皆空时才轮到它（没配主码表的双拼用户），填的是原本的空白。
     assert_eq!(
         render(
             T,
@@ -92,7 +87,7 @@ fn plain_variable_and_literal_text() {
     );
 }
 
-/// ★ 整个模板是隐式可选段：变量全空时**连字面文本一起**不显示，
+/// 整个模板是隐式可选段：变量全空时连字面文本一起不显示，
 /// 否则会剩下一个孤零零的 `拼:`。
 #[test]
 fn all_vars_empty_hides_literal_text_too() {
@@ -114,10 +109,10 @@ fn fallback_takes_first_non_empty() {
     assert_eq!(render("${a|b}", 0, &e), "");
 }
 
-/// ★★ 可选段：段内变量全空则**整段消失**，含段内的装饰字符。
+/// 可选段：段内变量全空则整段消失，含段内的装饰字符。
 ///
-/// 这是 `{}` 存在的全部理由 —— 没有它，`${code}{ (${pinyin})}` 在拼音为空时会显示
-/// `wq ()`，而空括号要配对解析才删得掉，靠 trim / 折叠空白救不了。
+/// 这是 `{}` 存在的理由：否则 `${code}{ (${pinyin})}` 在拼音为空时显示 `wq ()`，
+/// 空括号靠 trim / 折叠空白删不掉。
 #[test]
 fn optional_group_vanishes_when_all_its_vars_empty() {
     const T: &str = "${code}{ (${pinyin})}";
@@ -132,7 +127,7 @@ fn optional_group_vanishes_when_all_its_vars_empty() {
     );
 }
 
-/// 段内只要有**一个**变量非空，整段保留（空的那个按空串替换）。
+/// 段内只要有一个变量非空，整段保留（空的那个按空串替换）。
 #[test]
 fn group_survives_if_any_var_filled() {
     const T: &str = "{(拼: ${pinyin} ${chaizi})}";
@@ -148,7 +143,7 @@ fn group_survives_if_any_var_filled() {
     assert_eq!(render(T, 0, ev(&[("pinyin", ""), ("chaizi", "")])), "");
 }
 
-/// 空变量只吞**一个**紧邻空白——吞到底会把用户有意排的版式抹平。
+/// 空变量只吞一个紧邻空白——吞到底会把用户有意排的版式抹平。
 #[test]
 fn empty_var_eats_exactly_one_space() {
     assert_eq!(
@@ -163,7 +158,7 @@ fn empty_var_eats_exactly_one_space() {
     );
 }
 
-/// ★ 段内变量的 `}` 不得被误当作段结束符——扫描段边界时必须跳过 `${…}`。
+/// 段内变量的 `}` 不得被误当作段结束符——扫描段边界时必须跳过 `${…}`。
 /// 写错会让 `{(${pinyin})}` 解析成段 `(${pinyin`，后面 `)}` 变字面文本。
 #[test]
 fn group_scan_skips_variable_braces() {
@@ -175,7 +170,7 @@ fn group_scan_skips_variable_braces() {
     assert_eq!(render("{[${a}]}", 0, ev(&[("a", "")])), "");
 }
 
-/// ★ 可选段可嵌套：内段只管自己的变量，外段在内外任一变量非空时保留。
+/// 可选段可嵌套：内段只管自己的变量，外段在内外任一变量非空时保留。
 /// 悬停提示「拆字 / 拼音」合并段的模板 `{${chaizi}{ [${chaizi_code}]}\t}` 就是这个形态；
 /// 不配对的话内段会吞掉外段的右括号，`\t}` 沦为字面文本。
 #[test]
@@ -209,10 +204,9 @@ fn uncounted_var_renders_but_does_not_fill() {
 
 // ---------------- 变量参数 `${name:arg}` ----------------
 
-/// ★★ 参数**不 trim**：`${chaizi_all: · }` 里那两个空格正是用户要的分隔符。
+/// 参数不 trim：`${chaizi_all: · }` 里那两个空格正是用户要的分隔符。
 ///
-/// 名字仍 trim（`${ pinyin }` 这种手滑要认）。两者规则不同是有意的 ——
-/// 名字的空白一定是手滑，参数的空白一定是内容。
+/// 名字仍 trim（`${ pinyin }` 这种手滑要认）：名字的空白是手滑，参数的空白是内容。
 #[test]
 fn variable_arg_preserves_whitespace_but_name_is_trimmed() {
     assert_eq!(
@@ -222,7 +216,7 @@ fn variable_arg_preserves_whitespace_but_name_is_trimmed() {
     assert_eq!(render("${ pinyin }", 0, echo_arg()), "pinyin<∅>");
 }
 
-/// 只切**第一个**冒号——分隔符本身可以含冒号。
+/// 只切第一个冒号——分隔符本身可以含冒号。
 #[test]
 fn variable_arg_splits_on_first_colon_only() {
     assert_eq!(render("${x:a:b}", 0, echo_arg()), "x<a:b>");
@@ -246,9 +240,9 @@ fn arg_works_inside_fallback_chain() {
     assert_eq!(render("${a:x|b:y}", 0, e), "B<y>");
 }
 
-/// ★ 未知变量名**原样回显**并计作已填充 —— 拼错一定看得见。
+/// 未知变量名原样回显并计作已填充 —— 拼错一定看得见。
 ///
-/// 若把未知当空处理，用户得到的是「配了没反应」，得去翻文档才知道是拼写错误。
+/// 若当空处理，用户只看到「配了没反应」。
 #[test]
 fn unknown_variable_is_echoed_verbatim() {
     assert_eq!(
@@ -306,10 +300,8 @@ fn boundary_splits_syllables() {
     );
 }
 
-/// ★ `boundary == 0` 的语义是「**无边界信息**」而非「单音节」：不得把 `code` 整串当一个
-/// 音节，而要**降级到推断路径**（此前是降级到逐字首音，本轮改为推断）。
-///
-/// 若把 0 当成「整串一个音节」，五笔码 `wqvb` 会被当作一个拼音音节送去筛读音表。
+/// `boundary == 0` 的语义是「无边界信息」而非「单音节」：要降级到推断路径，
+/// 否则五笔码 `wqvb` 会被当作一个拼音音节送去筛读音表。
 #[test]
 fn zero_boundary_falls_through_to_inference() {
     let c = Candidate {
@@ -339,11 +331,8 @@ fn zero_boundary_falls_through_to_inference() {
     );
 }
 
-/// ★★ 非拼音来源（五笔候选）走**引擎按词推断**，而不是直接退到逐字首音。
-///
-/// 这是本轮修的核心 bug：`boundary` 在码表方案下恒为 0、`code` 是形码，此前该路径直接
-/// 落到「逐字最常用读音」，于是「行长」显示成 `xíng cháng`（两个字都错）——而五笔用户
-/// 正是注音功能最主要的受众。断言落在**有没有把推断结果当音节传下去**上。
+/// 非拼音来源（五笔候选）走引擎按词推断，而不是直接退到逐字首音——后者会把「行长」
+/// 注成 `xíng cháng`。断言落在有没有把推断结果当音节传下去上。
 ///
 /// 顺带钉住：即便 `boundary` 恰好有值也不得当拼音边界用（那是别的编码域的字段值）。
 #[test]
@@ -398,7 +387,7 @@ fn failed_inference_falls_back_to_per_char_readings() {
     );
 }
 
-/// ★ 拼音来源候选**优先用词条真值，不走推断**。
+/// 拼音来源候选优先用词条真值，不走推断。
 ///
 /// 词条自带的 `code`+`boundary` 比枚举笛卡尔积回查词典更可靠也更省。
 /// 闭包里 panic 是断言手段：一旦实现改成无条件先推断，会以「不该被调用」失败。

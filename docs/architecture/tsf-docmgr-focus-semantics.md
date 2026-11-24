@@ -27,6 +27,7 @@
 | Excel | cell-select → cell-edit 时把**同一个** DocMgr 置空再设回（指针不变、间隔 6ms）；输入完焦点还会落到**公式编辑栏**这个另一个 DocMgr |
 | 资源管理器地址栏 | 同一个 transient DocMgr（`dynFlags=0x20`）连续多次获焦，实测 `focusSession` 26→27→28 全是 `0x219BC540` |
 | VSCode | 一次应用切换伴随 5 次 DocMgr 焦点事件 |
+| 跨宿主切换（如 Windows Terminal → 记事本） | 旧宿主的 `focus_lost`（`OnKillThreadFocus`）比新宿主的 `focus_gained` 晚约 100ms 才到。服务端按客户端归属判陈旧、丢弃它对激活态的改动；菜单刚弹出时到达的焦点事件另有守卫期豁免 |
 
 > **DocMgr 级是噪声层**。在失焦那一刻无从区分「抖动」与「真的换了文档」，所以清理必须
 > 推迟到「另一个文档拿到焦点」时执行——这样抖动自然被判为同一文档而跳过。

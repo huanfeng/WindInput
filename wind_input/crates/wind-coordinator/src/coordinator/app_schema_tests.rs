@@ -107,8 +107,8 @@ fn warm_zb_then_back_to_za(c: &Arc<Coordinator>) {
     assert!(c.engine_mgr.is_loaded("zb"), "前置：zb 已暖");
 }
 
-/// 等 `cond` 成立，最多 2s。**只用来给旧实现的反例留出显现的时间**：各测试在新实现下的
-/// 通过与否不取决于它等了多久（见各用例的说明），故不是靠时序碰运气的测试。
+/// 等 `cond` 成立，最多 2s。只用来给错误实现的反例留出显现时间；正确实现下各用例的
+/// 结论与等待时长无关。
 fn wait_until(mut cond: impl FnMut() -> bool) -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     loop {
@@ -122,13 +122,10 @@ fn wait_until(mut cond: impl FnMut() -> bool) -> bool {
     }
 }
 
-/// ★ 锁序：`schema_toggle_origin` 与 `parked_toggle` 永不同时持有。
+/// 锁序：`schema_toggle_origin` 与 `parked_toggle` 永不同时持有。
 ///
-/// 复现旧实现的死锁形状：一条线程持着 `parked_toggle`（旧实现后段的持锁形态），另一条
-/// 线程跑 `switch_schema_light`。旧实现前段 take 走记录后**仍持着 origin** 去等 parked，
-/// 于是 origin 在主线程放掉 parked 之前永远取不到——主线程若此时去取 origin 就是死锁；
-/// 这里用 `try_lock` 观察而不真的去等。新实现 take 完即放锁：只要后台线程被调度到，
-/// 主线程必然看到「origin 可取且记录已被取走」，与等待时长无关。
+/// 主线程持 `parked_toggle`，后台跑 `switch_schema_light`：若它 take 走记录后仍持着 origin
+/// 去等 parked，就构成死锁形状（这里用 `try_lock` 观察而不真等）。正确实现 take 完即放锁。
 #[test]
 fn toggle_record_locks_are_never_held_together() {
     let (c, dir) = fixture("locks");
@@ -170,13 +167,11 @@ fn toggle_record_locks_are_never_held_together() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// ★ 冷方案延后切换的「检查 + 切换」与焦点切入互斥。
+/// 冷方案延后切换的「检查 + 切换」与焦点切入互斥。
 ///
-/// 主线程持 `switch_lock` 扮演「焦点线程正处在一次切入的比较 + 切换中」，后台线程带着
-/// 此刻仍有效的代际来做延后切换；随后焦点线程完成这次切入（代际 +1，目标仍是 za）。
-/// 旧实现不等锁：代际检查早已通过、直接切到 zb——把方案切回一个已作废的目标。
-/// 新实现被锁挡住，拿到锁时代际已变，放弃。无论后台线程何时被调度，新实现的结论都
-/// 相同（它只可能在主线程放锁之后做检查）。
+/// 主线程持 `switch_lock` 扮演「焦点切入进行中」，后台带着此刻有效的代际做延后切换，
+/// 随后切入完成（代际 +1，目标 za）。不等锁的实现会切到已作废的 zb；正确实现拿到锁时
+/// 代际已变，放弃。
 #[test]
 fn deferred_switch_cannot_interleave_with_a_focus_switch() {
     let (c, dir) = fixture("race");
@@ -201,7 +196,7 @@ fn deferred_switch_cannot_interleave_with_a_focus_switch() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// ★ 焦点切入触发的轻量切换**只丢弃**缓冲：那一刻 active token 已是新宿主，按
+/// 焦点切入触发的轻量切换只丢弃缓冲：那一刻 active token 已是新宿主，按
 /// `commit_on_switch` 上屏会把旧应用的码打进新应用。上屏语义只留给冷方案加载完成那条路。
 #[test]
 fn focus_switch_discards_pending_input_but_deferred_switch_commits() {

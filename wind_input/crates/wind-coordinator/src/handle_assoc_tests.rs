@@ -1,4 +1,4 @@
-//! 只测**端到端测不到的那几件**：配置默认、编码栏标识、自动隐藏计时、UI 下发。
+//! 只测端到端测不到的那几件：配置默认、编码栏标识、自动隐藏计时、UI 下发。
 //!
 //! 按键行为一律不在这里测——联想候选住在 `state.candidates` 里，翻页/高亮/
 //! 二三候选/数字选词走的都是主输入路的既有分支，验它们必须有真实词库，
@@ -14,10 +14,8 @@ fn coord_smart() -> Arc<Coordinator> {
 
 /// 同上，但可以再改几项配置。
 ///
-/// ⚠️ **显式开 `punct`**：桌面基线里它是关的（实体键盘上标点一键可达）。本模块的
-/// 单测大多需要「联想能出候选」这个前提，而 headless 下唯一不依赖词库的源就是标点
-/// ——不开的话它们测的就成了一片空候选，全部静默失去意义（2026-08-16 实测红 10 条）。
-/// 桌面出厂不出标点这件事本身，由 wind-assoc 的
+/// 显式开 `punct`（桌面基线是关的）：headless 下唯一不依赖词库的联想源就是标点，不开的话
+/// 大多用例测的是空候选、静默失去意义。桌面出厂不出标点由 wind-assoc 的
 /// `desktop_smart_yields_no_punct_by_default` 钉。
 fn coord_with(tweak: impl FnOnce(&mut Config)) -> Arc<Coordinator> {
     let mut cfg = Config::default();
@@ -116,7 +114,7 @@ fn texts(c: &Coordinator) -> Vec<String> {
     c.debug_assoc_texts()
 }
 
-/// GH#175：联想态挂的占位组合跟随焦点应用的 compat 规则——Edge（规则 zwsp）下是 ZWSP，
+/// 联想态挂的占位组合跟随焦点应用的 compat 规则——Edge（规则 zwsp）下是 ZWSP，
 /// 未配规则的应用仍是空格。变异检验：`assoc_composition` 改回常量空格 ⇒ 红。
 #[test]
 fn assoc_placeholder_follows_the_focused_apps_rule() {
@@ -354,7 +352,7 @@ fn assoc_none_mounts_no_placeholder_but_keeps_the_session_flag() {
 }
 
 /// 无占位联想（`none`）时，宿主上屏后上报的远处光标只落缓存、不重新锚定候选窗
-/// （WPS 实测联想窗会飘到 (1643,756) 一类位置）；有占位组合时照常走显示决策。
+/// （否则 WPS 下联想窗会飘到远处）；有占位组合时照常走显示决策。
 /// 变异检验：去掉 `message_handler` 里的 `bare_assoc` 判断 ⇒ 第一段红。
 #[test]
 fn bare_assoc_ignores_far_caret_reports_for_anchoring() {
@@ -398,7 +396,7 @@ fn bare_assoc_ignores_far_caret_reports_for_anchoring() {
     }
 }
 
-/// ★ 桌面默认关，而且**是靠基线段本身就是 `"off"`**——不再有哨兵值参与。
+/// 桌面默认关，而且是靠基线段本身就是 `"off"`——不再有哨兵值参与。
 ///
 /// 断言前提值本身：`[input.association]` 一旦又被写成某个平台哨兵，这里立刻报出来。
 /// 平台差异的唯一落点是 `[mobile.association]`，桌面构建根本不读它
@@ -416,7 +414,7 @@ fn desktop_defaults_to_off() {
     assert!(!enter(&c, "你好"), "桌面不该进联想");
 }
 
-/// **反向对照**：显式开启后确实进得去。少了它，上面那条可能只是因为联想压根不工作。
+/// 反向对照：显式开启后确实进得去。少了它，上面那条可能只是因为联想压根不工作。
 #[test]
 fn smart_kind_enters() {
     let c = coord_smart();
@@ -439,7 +437,7 @@ fn candidates_carry_assoc_source() {
     assert!(st.assoc_active());
 }
 
-/// 普通候选**不该**被认成联想（`assoc_active` 的反向对照）。
+/// 普通候选不该被认成联想（`assoc_active` 的反向对照）。
 #[test]
 fn normal_candidates_are_not_assoc() {
     let c = coord_smart();
@@ -455,9 +453,9 @@ fn normal_candidates_are_not_assoc() {
     assert!(texts(&c).is_empty());
 }
 
-/// **非嵌入模式**：编码栏标识进联想时填上、退出时随候选一并清掉。
+/// 非嵌入模式：编码栏标识进联想时填上、退出时随候选一并清掉。
 ///
-/// ⚠️ 它借用 `state.preedit`——那个字段平时装真实编码，清理漏了就会留到下一次打字。
+/// 它借用 `state.preedit`——那个字段平时装真实编码，清理漏了就会留到下一次打字。
 #[test]
 fn hint_fills_and_clears_when_not_inline() {
     let c = coord_with(|cfg| {
@@ -475,11 +473,9 @@ fn hint_fills_and_clears_when_not_inline() {
     );
 }
 
-/// ★★★ **嵌入模式下不给标识**——候选窗本来就没有编码栏，凭空多一栏会让窗口高度
-/// 一跳。而联想是上屏后自动弹的，用户没做任何操作就看见窗口变高又变矮，
-/// 比没有标识更烦（2026-08-16 用户反馈）。
+/// 嵌入模式下不给标识：候选窗本来没有编码栏，联想自动弹出时凭空多一栏会让窗口变高又变矮。
 ///
-/// `app_inline` 是**出厂默认**，所以这条覆盖的是绝大多数用户的实际路径。
+/// `app_inline` 是出厂默认，所以这条覆盖的是绝大多数用户的实际路径。
 #[test]
 fn no_hint_when_inline() {
     let c = coord_smart(); // Config::default() ⇒ preedit_display = app_inline
@@ -512,10 +508,9 @@ fn hide_timer_closes_the_window() {
     assert!(c.state.lock().unwrap().preedit.is_empty(), "标识一并清掉");
 }
 
-/// ★ 退出联想态必须作废未触发的计时。
+/// 退出联想态必须作废未触发的计时。
 ///
-/// 不作废的话它会在**下一轮**联想里提前把窗收掉——现象是「有时联想刚出来就没了」，
-/// 且只在两次上屏间隔短于 `hide_after_ms` 时复现，是最难对着日志复盘的那类。
+/// 不作废的话它会在下一轮联想里提前把窗收掉（两次上屏间隔短于 `hide_after_ms` 时）。
 #[test]
 fn exiting_invalidates_pending_hide_timer() {
     let c = coord_smart();
@@ -580,12 +575,10 @@ fn zero_hide_after_ms_keeps_it_open() {
     assert!(!texts(&c).is_empty());
 }
 
-/// ★★★ 超时收窗必须留下「宿主组合成了孤儿」的标记。
+/// 超时收窗必须留下「宿主组合成了孤儿」的标记。
 ///
-/// 真机实证（2026-09-03，记事本 pid 70300）：超时 5.8 秒后按回车，TSF 侧仍是
-/// `composing=1 candidates=1 inputSession=1`——键被判「有会话」吃下并转发，服务端
-/// 此刻已不在联想态、回落到 `PassThrough`，于是 `eaten=0` 的「吃了再吐」翻转，
-/// 不补发 `WM_KEYDOWN` 的宿主直接丢键。
+/// 超时收窗后 TSF 侧仍是 `composing=1 inputSession=1`，下一键被 DLL 吃下转发，服务端已
+/// 回落 `PassThrough`，「吃了再吐」时不补发 `WM_KEYDOWN` 的宿主直接丢键。
 #[test]
 fn timeout_leaves_placeholder_orphaned() {
     use std::sync::atomic::Ordering;
@@ -603,7 +596,7 @@ fn timeout_leaves_placeholder_orphaned() {
     );
 }
 
-/// **反向对照**：按键路径退出联想不留标记——它自己就带着收口动作回宿主。
+/// 反向对照：按键路径退出联想不留标记——它自己就带着收口动作回宿主。
 ///
 /// 少了这条，上一条测试在「一进联想态就置位」这种接错线下照样绿。
 #[test]
@@ -646,8 +639,8 @@ fn entering_assoc_keeps_anchor_when_window_is_not_shown() {
     assert_eq!(c.debug_anchor_locks(), (true, true));
 }
 
-/// 联想态下越界数字键：收掉联想、只出该数字，**与 `keys.overflow.number_key` 无关**
-/// （论坛 t251）。三档都测：`ignore` 会吞键、`commit*` 会把联想首项顶上屏，都是错的。
+/// 联想态下越界数字键：收掉联想、只出该数字，与 `keys.overflow.number_key` 无关
+/// 三档都测：`ignore` 会吞键、`commit*` 会把联想首项顶上屏，都是错的。
 #[test]
 fn overflow_digit_exits_assoc_and_emits_only_the_digit() {
     for behavior in ["ignore", "commit", "commit_and_input", "clear_and_input"] {
@@ -702,12 +695,10 @@ fn passthrough_untouched_without_orphan() {
     ));
 }
 
-/// ★★ 不碰宿主组合的动作**必须把标记留着**。
+/// 不碰宿主组合的动作必须把标记留着。
 ///
-/// 「任何按键都撤标记」会让超时后先按一个热键的用户永远收不掉那个组合：
-/// `StatusUpdate` 明确不结束组合——那正是「切了方案编码还挂在应用里」的根因
-/// （见 `schema_switch_key_action`）；`MoveCursorRight` / `DeletePair` 在 C++ 侧
-/// 同样不碰组合、连 `_hasCandidates` 都不清。
+/// 「任何按键都撤标记」会让超时后先按热键的用户永远收不掉组合：`StatusUpdate` 不结束组合
+/// （见 `schema_switch_key_action`），`MoveCursorRight` / `DeletePair` 在 C++ 侧也不碰组合。
 #[test]
 fn non_composition_actions_keep_the_orphan() {
     use std::sync::atomic::Ordering;
@@ -755,7 +746,7 @@ fn composition_absorbing_actions_clear_the_orphan() {
     }
 }
 
-/// ★ 联想候选真的被推到了候选窗上——本功能可见的那一半。
+/// 联想候选真的被推到了候选窗上——本功能可见的那一半。
 ///
 /// 预置 caret 绕开首显闸门：headless 无宿主坐标，首帧会被拦下不下发。
 #[test]
@@ -783,10 +774,10 @@ fn candidates_reach_the_candidate_window() {
     assert_eq!(items.first().map(String::as_str), Some("，"));
 }
 
-/// 联想态**不画模式标记**：候选旁边挂个「拼」会让用户以为自己还在打字。
+/// 联想态不画模式标记：候选旁边挂个「拼」会让用户以为自己还在打字。
 ///
-/// 这一条不需要为联想加任何判据——「有候选即隐藏标记」本就适用。曾为它加过
-/// `|| assoc_active()`，结果让「空则隐藏」守卫在联想态成立，把整个候选窗收掉了。
+/// 不需要为联想加判据，「有候选即隐藏标记」本就适用；加 `|| assoc_active()` 会让
+/// 「空则隐藏」守卫在联想态成立、把整个候选窗收掉。
 #[test]
 fn no_mode_label_in_assoc() {
     let mut cfg = Config::default();

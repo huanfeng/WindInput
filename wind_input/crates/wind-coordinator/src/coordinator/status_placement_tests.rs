@@ -124,7 +124,7 @@ fn placement_table() {
 
 // ── show_tip：兜底 ─────────────────────────────────────────────────────────
 
-/// ★ 回归：出厂兜底 `last` 下，无效坐标的路径与本功能引入前**逐条一致**——仍按跟随光标
+/// 出厂兜底 `last` 下，无效坐标的路径与无此功能时一致：仍按跟随光标
 /// 下发，坐标是 `resolve_caret_for_ui` 回退后的最近一次有效坐标；从未有过有效坐标时原样
 /// 下发无效坐标（UI 侧临时显示）。
 #[test]
@@ -145,7 +145,7 @@ fn last_fallback_keeps_previous_behavior_for_invalid_caret() {
 }
 
 /// 兜底 `hide`：坐标无效时不显示；坐标有效时照常显示（hide 不是「关掉气泡」）。
-/// ⚠ 判的是**原始**坐标：即便有最近一次有效坐标可回退，这次无效也不显示。
+/// 判的是原始坐标：即便有最近一次有效坐标可回退，这次无效也不显示。
 #[test]
 fn hide_fallback_suppresses_only_invalid_caret() {
     let (c, rx) = coord("follow_caret", "hide");
@@ -222,7 +222,7 @@ fn rule_beats_global() {
     assert_eq!(tips(&rx)[0].3, StatusTipPlacement::Fixed { x: 500, y: 600 });
 }
 
-/// ★ 方式与坐标同层：规则 fixed 但还没摆过（0,0）时用**规则的** (0,0) 哨兵，
+/// 方式与坐标同层：规则 fixed 但还没摆过（0,0）时用规则的 (0,0) 哨兵，
 /// 不是全局那份为别的应用摆的 (500,600)。
 #[test]
 fn rule_mode_and_coords_come_from_the_same_layer() {
@@ -397,7 +397,7 @@ fn focus_tip_without_anchor_fallback_never_times_out() {
     }
 }
 
-/// 锚点**模式**（不是兜底）：不读 caret，焦点气泡直接显示，不挂起。
+/// 锚点模式（不是兜底）：不读 caret，焦点气泡直接显示，不挂起。
 #[test]
 fn focus_tip_anchor_mode_shows_immediately() {
     let (c, rx) = coord("window_center", "last");

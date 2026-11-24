@@ -198,7 +198,7 @@ fn code_section_off_leaves_temp_pinyin_code_rev_as_consumer() {
     assert!(!derive(&unreachable).reverse_index);
 }
 
-/// 混输类型出厂给码表编码：只在**装了混输方案**时算消费者，纯拼音用户不为它常驻反查索引；
+/// 混输类型出厂给码表编码：只在装了混输方案时算消费者，纯拼音用户不为它常驻反查索引；
 /// 混输改成只要剩余编码后也不要。
 #[test]
 fn mixed_type_counts_only_with_mixed_schema() {
@@ -997,7 +997,7 @@ fn reverse_render_min_len_filters_codes() {
     );
 }
 
-/// 写一个配了拆字库、但库文件**不存在**的码表方案。
+/// 写一个配了拆字库、但库文件不存在的码表方案。
 fn missing_chaizi_fixture(tag: &str, id: &str) -> PathBuf {
     let dir = schema_fixture(tag, id, true);
     std::fs::remove_file(dir.join(format!("schemas/{id}/chaizi.txt"))).unwrap();

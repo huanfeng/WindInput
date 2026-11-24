@@ -1,8 +1,6 @@
-//! 失焦事件的客户端归属校验：旧宿主迟到的 focus_lost 不得清掉新宿主刚建立的激活态。
-//!
-//! 复现自 2026-07-26 的工具栏缺陷——从 Windows Terminal 切到记事本，记事本
-//! focus_gained 让工具栏显示，86ms 后 Terminal 的 OnKillThreadFocus 才发出 focus_lost，
-//! 把 `ime_active` 清成 false，工具栏闪一下即隐藏。
+//! 失焦事件的客户端归属校验：旧宿主迟到的 focus_lost 不得清掉新宿主刚建立的激活态，
+//! 否则跨宿主切换后工具栏闪一下即隐藏。迟到时序见
+//! docs/architecture/tsf-docmgr-focus-semantics.md 的「实测：宿主内部的 DocMgr 抖动是常态」。
 use super::*;
 
 /// 已有宿主 `token` 处于激活态、且焦点在可编辑控件里的协调器。
@@ -68,11 +66,9 @@ fn ctx_lost_never_touches_input_buffer() {
     );
 }
 
-/// 陈旧失焦被丢弃时，四种 reason 都不得改动任何**输入/激活**状态。
+/// 陈旧失焦被丢弃时，四种 reason 都不得改动任何输入/激活状态。
 ///
-/// ⚠️ 菜单是刻意的例外（见 `stale_focus_lost_still_closes_menu`）：关菜单在 stale 判定
-/// 之前执行，因为「这条失焦不该动激活态」不等于「没发生焦点变动」。往本测试里补断言时
-/// 别顺手把菜单也算进"任何状态"。
+/// 菜单是刻意的例外（见 `stale_focus_lost_still_closes_menu`），补断言时别把菜单算进来。
 #[test]
 fn stale_focus_lost_is_inert_for_all_reasons() {
     for reason in [
@@ -144,13 +140,11 @@ fn own_ime_deactivated_clears_activation() {
 
 // ———————————————— 焦点变化关闭菜单 ————————————————
 //
-// 菜单是模态 UI，任何焦点变动都该终结它；而输入态清理必须保守。此前两者绑在同一个
-// `clears_input` 上，于是 CtxLost 豁免 / 陈旧失焦丢弃这两道为保护输入态而设的闸门
-// 顺带把关菜单也吞了——表现为「切走窗口菜单还挂着」。以下几条守住解耦后的语义。
+// 菜单是模态 UI，任何焦点变动都该终结它；输入态清理则必须保守。两者不能共用
+// `clears_input`，否则 CtxLost 豁免 / 陈旧失焦丢弃会顺带吞掉关菜单，切走窗口菜单还挂着。
 
 /// 构造「菜单已打开 `age` 时长」的状态。
-/// `checked_sub` 失败（机器刚启动不足 `age`）时落到 `None`，守卫按"无时间戳=不豁免"
-/// 处理，与本组测试期望的方向一致，故无需特殊处理。
+/// `checked_sub` 失败（开机不足 `age`）时落到 `None`，守卫按不豁免处理，与本组期望一致。
 fn open_menu(c: &Coordinator, age: std::time::Duration) {
     let mut s = c.state.lock().unwrap();
     s.menu_open = true;
@@ -162,7 +156,7 @@ fn open_menu_settled(c: &Coordinator) {
     open_menu(c, crate::handle_menu::MENU_FOCUS_GUARD * 4);
 }
 
-/// `CtxLost` 是本组的关键用例：它**不清输入态**（Excel 首字符防线），但**必须关菜单**。
+/// `CtxLost` 是本组的关键用例：它不清输入态（Excel 首字符防线），但必须关菜单。
 /// 两者从此各行其是——这正是本次解耦要证明的事。
 #[test]
 fn ctx_lost_closes_menu_but_keeps_input() {
@@ -180,9 +174,8 @@ fn ctx_lost_closes_menu_but_keeps_input() {
     );
 }
 
-/// 陈旧失焦同样要关菜单：判成 stale 只说明「这条失焦不该动激活态」，
-/// 不说明「没发生焦点变动」。跨宿主切换时旧宿主的失焦恒被判 stale，
-/// 若跟着一起丢弃，切走应用后菜单就永远挂着。
+/// 陈旧失焦同样要关菜单：stale 只说明不该动激活态，不说明没发生焦点变动。
+/// 跨宿主切换时旧宿主的失焦恒被判 stale，跟着丢弃的话菜单就永远挂着。
 #[test]
 fn stale_focus_lost_still_closes_menu() {
     let c = activated(NOTEPAD);
@@ -218,13 +211,11 @@ fn focus_gained_closes_menu() {
     assert!(!c.state.lock().unwrap().menu_open);
 }
 
-/// 守卫期：菜单刚弹出时到达的焦点事件是「打开菜单这个动作本身」的尾迹，不是用户切走。
-/// 跨宿主切换时旧宿主 focus_lost 实测晚约 100ms，从任务栏语言栏图标点开菜单正落在这个
-/// 窗口里——不豁免就会「菜单弹出即消失」。
+/// 守卫期：菜单刚弹出时到达的焦点事件是打开菜单这一动作的尾迹（旧宿主 focus_lost 迟到），
+/// 不豁免就会菜单弹出即消失。
 ///
-/// 用 `CtxLost` 而非 `Thread`：后者走 `clears_input` 分支，那里会无条件复位菜单态
-/// （因为 `notify_ui_hide` 已把窗口隐藏，留 `menu_open=true` 反而状态不一致），
-/// 刻意不受守卫保护，拿它测守卫会测错对象。
+/// 用 `CtxLost` 而非 `Thread`：后者走 `clears_input` 分支，会无条件复位菜单态（窗口已被
+/// `notify_ui_hide` 隐藏），刻意不受守卫保护，拿它测守卫会测错对象。
 #[test]
 fn menu_survives_focus_event_within_guard() {
     let c = activated(NOTEPAD);

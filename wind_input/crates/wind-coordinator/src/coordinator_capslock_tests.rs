@@ -41,7 +41,7 @@ fn kev_caps(key_code: u32, event_type: u8) -> KeyEventData {
 
 /// 每键 toggles 快照校准镜像：英文模式（TSF 不吃 VK_CAPITAL）或在其它应用/输入法
 /// 期间切换大写时，专门的状态通知不会到达、镜像陈旧——此校准是 cancel_on_mode_switch
-/// 在"英文+大写"场景能生效的前提（真机回归：切方案取消不了 CapsLock 的根因）。
+/// 在"英文+大写"场景能生效的前提。
 #[test]
 fn key_event_toggles_recalibrates_caps_mirror() {
     let c = coord_cn();
@@ -96,7 +96,7 @@ fn capslock_on_punct_no_session_passthrough() {
     );
 }
 
-/// GH#197：中文 + CapsLock + 英文配对开 → 配对键与「英文 + 大写」同样出一对、可跳出。
+/// 中文 + CapsLock + 英文配对开 → 配对键与「英文 + 大写」同样出一对、可跳出。
 /// DLL 对配对键开了透传例外（`_IsEnglishHalfEatenPunctKey`）吃下转发，此处若仍
 /// PassThrough 就是「吃了再吐」，配对静默失效。
 #[test]
@@ -157,9 +157,8 @@ fn capslock_off_punct_commits_chinese_punct() {
 /// press1 把中文符号放进 TSF 组合（hold 预览态），press2 必须返回
 /// `CommitReplacingHeld` 而非普通 `InsertText`。
 ///
-/// 两者在 IPC 载荷上完全同构，C++ 端只能靠这个 action 带的 flags 位判断该
-/// **覆盖**还是**追加** held 符号。退回 InsertText 的后果是 press2 打出「，,」
-/// ——中文符号被并入前缀跟着一起上屏了。
+/// 两者 IPC 载荷同构，C++ 端只靠 action 的 flags 位判断覆盖还是追加 held 符号；
+/// 退回 InsertText 会打出「，,」。
 #[test]
 fn smart_symbol_hold_press2_replaces_held_symbol() {
     let mut cfg = Config::default();
@@ -278,12 +277,10 @@ fn coord_with_capslock(verb: &str) -> Arc<Coordinator> {
     Coordinator::new_headless(cfg, None)
 }
 
-/// ★ 双动作修复的判据：keyup 到达即证明钩子没吃这个键。
+/// keyup 到达即证明钩子没吃这个键，服务端一律服从钩子的结论，否则翻页与转大写同时生效。
 ///
-/// 回归 2026-08-31 报障「翻页与转大写同时生效，且偶发」：闸门 `SHOULD_EAT` 由服务端在
-/// `notify_ui_update` 里置位、钩子在按键瞬间读取，中间隔着一整个 IPC 往返，
-/// `notify_ui_hide` / `handle_focus_lost` 又会无条件归零 ⇒ 不一致的窗口无法消除。
-/// 解法不是缩小窗口，而是让服务端一律服从钩子的结论。
+/// `SHOULD_EAT` 由服务端置位、钩子在按键瞬间读取，中间隔着 IPC 往返且会被隐藏/失焦归零，
+/// 不一致窗口无法消除，只能以钩子为准。
 #[test]
 fn capslock_key_up_defers_to_hook_when_installed() {
     // 钩子装着：CapsLock 的 keyup 不再执行会话动作（系统已经翻转，别再抢）。
@@ -309,10 +306,10 @@ fn capslock_key_up_defers_to_hook_when_installed() {
     }
 }
 
-/// ★ 钩子漏吃那一次，状态同步分支只校准镜像，**不得**毁掉正在打的编码。
+/// 钩子漏吃那一次，状态同步分支只校准镜像，不得毁掉正在打的编码。
 ///
-/// 配了会话绑定的用户按 CapsLock 的意图不是切大写；系统的翻转撤不回，但没有理由再由
-/// 我们把编码上屏/丢弃（`take_input_on_mode_switch`）。现象是「翻页时编码莫名没了」。
+/// 配了会话绑定的用户按 CapsLock 不是想切大写；系统的翻转撤不回，但不该再把编码
+/// 上屏/丢弃（`take_input_on_mode_switch`），否则翻页时编码莫名没了。
 #[test]
 fn capslock_state_sync_keeps_pending_input_when_bound() {
     let c = coord_with_capslock("page_prev");
@@ -618,12 +615,10 @@ fn caps_on_upper_respects_commit_on_switch_off() {
     assert!(c.state.lock().unwrap().input_buffer.is_empty());
 }
 
-/// ★ `capslock = "select_candidate:N"` 必须走得到选词出口。
+/// `capslock = "select_candidate:N"` 必须走得到选词出口。
 ///
-/// 回归 2026-08-31 报障「CapsLock 配选第 3 候选完全无作用」：`handle_select_key_up` 的门
-/// 曾硬编码 `VK_LSHIFT..=VK_RCONTROL`，而 CapsLock（0x14）与那四个键**不连号**，被挡在
-/// 门外；`apply_session_action` 对选词类动词又一律 `return None`（overflow 语义归各自的
-/// 消费点），于是两条路都是终点。
+/// CapsLock（0x14）与 `VK_LSHIFT..=VK_RCONTROL` 不连号，`handle_select_key_up` 的门若按
+/// 那个区间写就挡在门外；`apply_session_action` 对选词类动词又返回 None，绑定成死配置。
 #[test]
 fn capslock_select_candidate_reaches_select_key_up() {
     let c = coord_with_capslock("select_candidate:3");
@@ -644,8 +639,7 @@ fn capslock_select_candidate_reaches_select_key_up() {
 }
 
 /// 门的值域取 `is_key_up_only_vk` 这个单一真相源，不再各写一份区间。
-/// 守卫「以后有人图省事改回 `VK_LSHIFT..=VK_RCONTROL`」——那样写没有任何报错，
-/// 只是 CapsLock 的选词绑定重新变成死配置。
+/// 改回 `VK_LSHIFT..=VK_RCONTROL` 不会报错，只会让 CapsLock 的选词绑定变成死配置。
 #[test]
 fn select_key_up_gate_covers_all_key_up_only_vks() {
     for vk in [
