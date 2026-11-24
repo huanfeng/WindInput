@@ -49,6 +49,10 @@ pub struct Entry {
     pub deleted: bool,
     pub lamport: u64,
     pub device: String,
+    /// 本条版本合并/保存为冲突副本时已吸收的其它版本的 hash：持有这些版本的旧条目
+    /// 不再被当作并发修改。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub absorbed: Vec<String>,
 }
 
 impl Entry {
@@ -111,6 +115,7 @@ mod tests {
                 deleted: false,
                 lamport: 3,
                 device: "d1".into(),
+                absorbed: vec![],
             },
         );
         Manifest {

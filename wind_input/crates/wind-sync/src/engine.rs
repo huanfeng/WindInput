@@ -221,8 +221,11 @@ fn run(
         deleted: hash.is_empty(),
         lamport,
         device: me.clone(),
+        absorbed: Vec::new(),
     };
     let mut outs: Vec<Out> = Vec::new();
+    // 范围外的冲突副本：只写本地，不进状态与清单
+    let mut untracked: Vec<(String, Vec<u8>)> = Vec::new();
 
     for (path, action) in plan {
         let base = base_of(&path);
@@ -306,8 +309,10 @@ fn run(
                     Some(m) => {
                         lamport += 1;
                         let write = (m.content != contents[&path]).then(|| m.content.clone());
+                        let mut entry = mk(&content_hash(&m.content), base, lamport);
+                        entry.absorbed = vec![r.hash.clone()];
                         outs.push(Out {
-                            entry: mk(&content_hash(&m.content), base, lamport),
+                            entry,
                             write,
                             delete: false,
                             upload: Some(m.content),
@@ -326,6 +331,134 @@ fn run(
                     None => conflict_with = r,
                 }
             }
+            Action::Multi(cands) => {
+                let local_bytes = contents.get(&path);
+                let local_changed = hashes.get(&path).map(String::as_str) != base.as_deref();
+                if cands.iter().all(|c| c.deleted) {
+                    if local_bytes.is_some() && local_changed {
+                        lamport += 1;
+                        outs.push(Out {
+                            entry: mk(&hashes[&path], base, lamport),
+                            write: None,
+                            delete: false,
+                            upload: Some(contents[&path].clone()),
+                            path: path.clone(),
+                        });
+                        rep.uploaded.push(path);
+                    } else if local_bytes.is_some() {
+                        outs.push(Out {
+                            entry: Entry {
+                                base,
+                                ..cands[0].clone()
+                            },
+                            write: None,
+                            delete: true,
+                            upload: None,
+                            path: path.clone(),
+                        });
+                        rep.deleted_local.push(path);
+                    }
+                    continue;
+                }
+                // 一删一改：忽略删除，保留各个修改（cands 已按新到旧）
+                let mut live: Vec<(Entry, Vec<u8>)> = Vec::new();
+                for c in cands.iter().filter(|c| !c.deleted) {
+                    if let Some(b) = fetch_blob(backend, dek, &c.hash, &mut rep.warnings)? {
+                        live.push((c.clone(), b));
+                    }
+                }
+                if live.is_empty() {
+                    continue;
+                }
+                let (mut acc, others): (Vec<u8>, &[(Entry, Vec<u8>)]) = match local_bytes {
+                    Some(l) if local_changed => (l.clone(), &live[..]),
+                    _ => (live[0].1.clone(), &live[1..]),
+                };
+                let base_bytes = match &base {
+                    Some(h) => fetch_blob(backend, dek, h, &mut rep.warnings)?,
+                    None => None,
+                };
+                let mut keys = Vec::new();
+                let mut copies: Vec<(&Entry, &Vec<u8>)> = Vec::new();
+                let mut merged_any = false;
+                for (e, bytes) in others {
+                    if content_hash(bytes) == content_hash(&acc) {
+                        continue;
+                    }
+                    match merge::merge(&path, base_bytes.as_deref(), &acc, bytes) {
+                        Some(m) => {
+                            merged_any = true;
+                            keys.extend(m.conflicts);
+                            acc = m.content;
+                        }
+                        None => copies.push((e, bytes)),
+                    }
+                }
+                let acc_hash = content_hash(&acc);
+                let changed_locally = local_bytes != Some(&acc);
+                if !merged_any && copies.is_empty() && acc_hash == live[0].0.hash {
+                    // 结果就是最新的那个远端版本：领养它
+                    outs.push(Out {
+                        entry: Entry {
+                            base,
+                            ..live[0].0.clone()
+                        },
+                        write: changed_locally.then(|| acc.clone()),
+                        delete: false,
+                        upload: None,
+                        path: path.clone(),
+                    });
+                    rep.downloaded.push(path);
+                    continue;
+                }
+                lamport += 1;
+                let mut entry = mk(&acc_hash, base, lamport);
+                entry.absorbed = live.iter().map(|(e, _)| e.hash.clone()).collect();
+                outs.push(Out {
+                    entry,
+                    write: changed_locally.then(|| acc.clone()),
+                    delete: false,
+                    upload: Some(acc),
+                    path: path.clone(),
+                });
+                if merged_any {
+                    rep.merged.push(path.clone());
+                } else {
+                    rep.uploaded.push(path.clone());
+                }
+                if !keys.is_empty() {
+                    rep.conflicts.push(ConflictInfo {
+                        path: path.clone(),
+                        copy: None,
+                        keys,
+                    });
+                }
+                for (e, bytes) in copies {
+                    let copy =
+                        merge::conflict_copy_name(&path, &e.device, &merge::date_string(ctx.now));
+                    let tracked = in_scope(&copy);
+                    if tracked {
+                        lamport += 1;
+                    }
+                    if tracked {
+                        outs.push(Out {
+                            entry: mk(&content_hash(bytes), None, lamport),
+                            write: Some(bytes.clone()),
+                            delete: false,
+                            upload: Some(bytes.clone()),
+                            path: copy.clone(),
+                        });
+                    } else {
+                        untracked.push((copy.clone(), bytes.clone()));
+                    }
+                    rep.conflicts.push(ConflictInfo {
+                        path: path.clone(),
+                        copy: Some(copy),
+                        keys: vec![],
+                    });
+                }
+                continue;
+            }
             Action::ConflictCopy(r) => conflict_with = r,
         }
         let r = conflict_with;
@@ -336,8 +469,10 @@ fn run(
             let copy = merge::conflict_copy_name(&path, &r.device, &merge::date_string(ctx.now));
             lamport += 1;
             // 本地版本胜出，重新以更高 lamport 发布
+            let mut entry = mk(&hashes[&path], base, lamport);
+            entry.absorbed = vec![r.hash.clone()];
             outs.push(Out {
-                entry: mk(&hashes[&path], base, lamport),
+                entry,
                 write: None,
                 delete: false,
                 upload: Some(contents[&path].clone()),
@@ -347,13 +482,17 @@ fn run(
             if tracked {
                 lamport += 1;
             }
-            outs.push(Out {
-                entry: mk(&content_hash(&remote_bytes), None, lamport),
-                write: Some(remote_bytes.clone()),
-                delete: false,
-                upload: tracked.then_some(remote_bytes),
-                path: copy.clone(),
-            });
+            if tracked {
+                outs.push(Out {
+                    entry: mk(&content_hash(&remote_bytes), None, lamport),
+                    write: Some(remote_bytes.clone()),
+                    delete: false,
+                    upload: Some(remote_bytes),
+                    path: copy.clone(),
+                });
+            } else {
+                untracked.push((copy.clone(), remote_bytes));
+            }
             rep.uploaded.push(path.clone());
             rep.conflicts.push(ConflictInfo {
                 path,
@@ -364,10 +503,11 @@ fn run(
     }
 
     // 4. 写本地（一批写入、一批删除）
-    let writes: Vec<(String, Vec<u8>)> = outs
+    let mut writes: Vec<(String, Vec<u8>)> = outs
         .iter()
         .filter_map(|o| o.write.clone().map(|w| (o.path.clone(), w)))
         .collect();
+    writes.extend(untracked);
     let dels: Vec<String> = outs
         .iter()
         .filter(|o| o.delete)

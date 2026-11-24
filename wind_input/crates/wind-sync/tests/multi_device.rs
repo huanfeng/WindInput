@@ -505,3 +505,156 @@ fn gc_removes_only_old_unreferenced_blobs() {
     n.ok(&b);
     assert_eq!(n.local.text("themes/a.json").unwrap(), "v4");
 }
+
+// ───────────── 并发多版本（A、C 互不知情，B 同时看到两者）─────────────
+
+/// 把 `from` 里某前缀下的对象拷到 `to`。
+fn copy_prefix(from: &MemBackend, to: &MemBackend, prefix: &str) {
+    for k in from.keys(prefix) {
+        to.raw_put(&k, from.raw_get(&k).unwrap());
+    }
+}
+
+fn fork(b: &MemBackend) -> MemBackend {
+    let f = MemBackend::new();
+    copy_prefix(b, &f, "");
+    f
+}
+
+/// dev0(A) 与 dev2(C) 并发改同一文件；C 看不到 A 且 lamport 更大。返回真实后端。
+/// 之后 dev1(B) 同时看到两者。
+fn concurrent_a_c(path: &str, base: &str, a: &str, c: &str) -> (MemBackend, Vec<Dev>) {
+    let (b, mut d) = setup(3);
+    d[0].local.set(path, base);
+    d[0].ok(&b);
+    d[1].ok(&b);
+    d[2].ok(&b);
+    let pre = fork(&b);
+    d[0].local.set(path, a);
+    d[0].ok(&b);
+    // C 在看不到 A 的后端上改两次（lamport 更大），再把自己的对象放回真实后端
+    d[2].local.set(path, "tmp");
+    d[2].ok(&pre);
+    d[2].local.set(path, c);
+    d[2].ok(&pre);
+    copy_prefix(&pre, &b, &manifest::blobs_prefix());
+    copy_prefix(&pre, &b, &format!("{}/devices/dev2/", manifest::ROOT));
+    (b, d)
+}
+
+#[test]
+fn three_devices_concurrent_dict_edits_all_survive() {
+    let (b, mut d) = setup(3);
+    d[0].local.set(UD, &dict(&["k\t基\t1"]));
+    d[0].ok(&b);
+    d[1].ok(&b);
+    d[2].ok(&b);
+    let pre = fork(&b);
+    d[0].local.set(UD, &dict(&["k\t基\t1", "a\t甲\t1"]));
+    d[0].ok(&b);
+    d[2].local.set(UD, &dict(&["k\t基\t1", "c\t丙\t1"]));
+    d[2].ok(&pre);
+    d[2].local
+        .set(UD, &dict(&["k\t基\t1", "c\t丙\t1", "c2\t丙二\t1"]));
+    d[2].ok(&pre);
+    copy_prefix(&pre, &b, &manifest::blobs_prefix());
+    copy_prefix(&pre, &b, &format!("{}/devices/dev2/", manifest::ROOT));
+    d[1].local.set(UD, &dict(&["k\t基\t1", "b\t乙\t1"]));
+    let r = d[1].ok(&b);
+    assert_eq!(r.merged, vec![UD.to_string()]);
+    for _ in 0..2 {
+        for dev in d.iter_mut() {
+            dev.ok(&b);
+        }
+    }
+    let t = d[0].local.text(UD).unwrap();
+    for want in ["k\t基", "a\t甲", "b\t乙", "c\t丙\t", "c2\t丙二"] {
+        assert!(t.contains(want), "{want} 丢失: {t}");
+    }
+    assert_eq!(d[1].local.text(UD).unwrap(), t);
+    assert_eq!(d[2].local.text(UD).unwrap(), t);
+}
+
+#[test]
+fn three_devices_concurrent_theme_edits_make_two_copies() {
+    let (b, mut d) = concurrent_a_c("themes/x.json", "v0", "vA", "vC");
+    d[1].local.set("themes/x.json", "vB");
+    let r = d[1].ok(&b);
+    let mut copies: Vec<String> = r.conflicts.iter().filter_map(|c| c.copy.clone()).collect();
+    copies.sort();
+    assert_eq!(
+        copies,
+        vec![
+            "themes/x.conflict-dev0-2026-11-24.json",
+            "themes/x.conflict-dev2-2026-11-24.json"
+        ]
+    );
+    assert_eq!(d[1].local.text("themes/x.json").unwrap(), "vB");
+    assert_eq!(d[1].local.text(&copies[0]).unwrap(), "vA");
+    assert_eq!(d[1].local.text(&copies[1]).unwrap(), "vC");
+    // 传播且收敛
+    for _ in 0..2 {
+        d[0].ok(&b);
+        d[2].ok(&b);
+        d[1].ok(&b);
+    }
+    for dev in &d {
+        assert_eq!(dev.local.text("themes/x.json").unwrap(), "vB");
+        assert_eq!(dev.local.text(&copies[0]).unwrap(), "vA");
+        assert_eq!(dev.local.text(&copies[1]).unwrap(), "vC");
+        assert_eq!(dev.local.files.len(), 3);
+    }
+}
+
+#[test]
+fn unchanged_b_does_not_lose_lower_lamport_version() {
+    // 原缺陷场景：B 本地未改，只看到 A(低) 与 C(高)
+    let (b, mut d) = concurrent_a_c("themes/x.json", "v0", "vA", "vC");
+    let r = d[1].ok(&b);
+    assert_eq!(d[1].local.text("themes/x.json").unwrap(), "vC");
+    assert_eq!(r.conflicts.len(), 1);
+    let copy = r.conflicts[0].copy.clone().unwrap();
+    assert_eq!(
+        d[1].local.text(&copy).unwrap(),
+        "vA",
+        "A 的修改必须留有副本"
+    );
+}
+
+#[test]
+fn absorbed_old_entry_does_not_trigger_copy_again() {
+    let (b, mut d) = setup(3);
+    d[0].local.set("themes/x.json", "v0");
+    d[0].ok(&b);
+    d[1].ok(&b);
+    d[2].ok(&b);
+    d[0].local.set("themes/x.json", "vA");
+    d[0].ok(&b);
+    d[2].local.set("themes/x.json", "vC");
+    let r = d[2].ok(&b); // C 看到 A 并生成副本、吸收 A
+    assert_eq!(r.conflicts.len(), 1);
+    // B 此时同时看到 A 的旧条目与 C 的新条目：A 已被吸收，不再冲突
+    let r = d[1].ok(&b);
+    assert!(r.conflicts.is_empty(), "{:?}", r.conflicts);
+    assert_eq!(d[1].local.text("themes/x.json").unwrap(), "vC");
+    assert_eq!(d[1].local.files.len(), 2, "只有原文件和 C 生成的那一份副本");
+}
+
+#[test]
+fn lamport_advances_past_remote_lamports() {
+    let (b, mut d) = setup(2);
+    d[0].local.set("themes/a.json", "1");
+    for i in 0..5 {
+        d[0].local.set("themes/a.json", &format!("{i}"));
+        d[0].ok(&b);
+    }
+    let remote_max = d[0].state.lamport;
+    assert!(remote_max >= 5);
+    d[1].local.set("themes/b.json", "new");
+    d[1].ok(&b);
+    assert!(
+        d[1].state.lamport > remote_max,
+        "接收清单后 lamport 要越过对方"
+    );
+    assert!(d[1].state.files["themes/b.json"].lamport > remote_max);
+}
