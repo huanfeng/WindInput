@@ -68,10 +68,7 @@ fn langbar_text_absent_is_none() {
 
 /// footer_bar 的禁用态 patch 要一路活到 RvNode —— 翻页箭头灰显色的唯一来源。
 ///
-/// 这里从前根本不建：schema 收得下（footer_bar 是 ViewNode，带 disabled）、主题编辑器
-/// 也把「禁用态」面板开给了它、预览照着画，唯独引擎 resolve 不建、渲染层硬用全局
-/// text_hint。表现是主题作者在面板上配了没反应，且预览与实机对不上 —— 又一例
-/// 「配置项存在但无人消费」。
+/// 少建这一份时，主题编辑器的「禁用态」面板配了没反应、预览与实机对不上。
 #[test]
 fn footer_bar_disabled_state_survives_resolve() {
     let text = "[footer_bar.disabled]\ncolor = \"#FF0000\"\n";
@@ -127,8 +124,8 @@ background = { gradient = { stops = [{ color = "#0000FF", pos = 0.5 }] } }
     );
 }
 
-/// 缺 `pos` 的 stop 按序号均分（与主题编辑器同口径；全缺时同 CSS）；此前缺省 0，
-/// 全部 stop 挤在起点，整块退化成最后一色的纯色。显式给了 pos 的照旧。
+/// 缺 `pos` 的 stop 按序号均分（与主题编辑器同口径；全缺时同 CSS）；缺省成 0 的话全部 stop
+/// 挤在起点，整块退化成最后一色的纯色。显式给了 pos 的照旧。
 #[test]
 fn test_gradient_missing_pos_spreads_evenly() {
     let text = r##"
@@ -171,7 +168,7 @@ fn test_index_labels_survive_resolve() {
 }
 
 /// 菜单颜色语义：节点显式值优先，未配回退 palette token（与候选窗一致）。
-/// 历史上 popup_menu.rs 只读 token、无视 [menu.*] 节点色，主题里写的颜色全不生效。
+/// 渲染层只读 token 时，主题里写的 `[menu.*]` 颜色全不生效。
 #[test]
 fn test_menu_node_colors_override_palette() {
     let text = "\
@@ -269,8 +266,8 @@ radius = 6
 
 /// 强调条条高比：显式值透传；未配 / 越界一律落默认 0.6。
 ///
-/// ⚠️ 这条锁的是「未配 ≠ 0.0」。`RvViews` derive 的 Default 会给 0.0，若 resolve
-/// 不显式写默认值，所有未配该项的主题（含全部内置主题）强调条会塌成 2px 细线。
+/// 钉住「未配 ≠ 0.0」：`RvViews` derive 的 Default 是 0.0，resolve 不显式写默认值时，
+/// 所有未配该项的主题强调条会塌成 2px 细线。
 #[test]
 fn test_accent_bar_height_ratio_defaults_and_clamps() {
     let build = |accent: &str| {
@@ -304,11 +301,8 @@ fn test_accent_bar_height_ratio_defaults_and_clamps() {
 
 /// 内置主题真实加载出的条高比必须**可用**（0 < r ≤ 1），不会塌成 2px 细线。
 ///
-/// 这条原先写作「内置主题都没写 height_ratio，故都应等于 0.6」——把「守住默认值」
-/// 借「主题恰好没配」当载体。msime 后来显式配了条高比，载体作废、测试误红，可
-/// resolve 的默认值逻辑一行没动。故此处只锁「值可用」这个与主题选值无关的性质；
-/// 「未配→0.6」由上面的 `..._defaults_and_clamps` 用受控文本正面覆盖，且下面单独
-/// 用 default（确未配）再钉一次，两者互不牵连。
+/// 只钉「值可用」这个与主题选值无关的性质：内置主题可能显式配条高比。
+/// 「未配→0.6」由 `..._defaults_and_clamps` 与下面的 default 用例正面覆盖。
 #[test]
 fn test_builtin_themes_get_usable_accent_ratio() {
     for name in ["default", "msime"] {
@@ -485,11 +479,10 @@ fn divider_defaults_to_separator_and_can_be_overridden() {
     assert!(v.divider.margin.left.is_some() && v.divider.margin.bottom.is_some());
 }
 
-/// 四个「此前渲染层不读自身盒模型」的节点：背景与边框须完整进 RvNode。
+/// 四个自带盒模型的节点：背景与边框须完整进 RvNode。
 ///
-/// preedit_bar / mode_label 的圆角原先借用 item.border_radius（调候选项圆角会连带
-/// 改预编辑栏）；candidate_list / footer_bar 连背景边框都没接线。渲染侧已补齐，
-/// 这里锁数据通路——防止日后在 resolve 里加节点白名单时又把它们漏掉。
+/// 防止日后在 resolve 里加节点白名单时把它们漏掉：漏掉时圆角会借用 `item.border_radius`
+/// 或背景边框直接丢失。
 #[test]
 fn test_container_nodes_carry_own_box_model() {
     let text = "\
@@ -552,8 +545,8 @@ border = { color = \"#888888\" }
     assert_eq!(v2.mode_label.border_radius, None);
 }
 
-/// 工具栏整条外框圆角/线宽：此前只提取了 border.color，radius/width 解析到
-/// schema 就断了 —— 编辑器把两个控件都开放着，实机却毫无变化。
+/// 工具栏整条外框圆角/线宽要解析进 RvNode：只取 border.color 时，编辑器开放的
+/// 两个控件在实机上毫无变化。
 #[test]
 fn test_toolbar_border_radius_and_width_extracted() {
     let text = "\

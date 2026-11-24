@@ -30,10 +30,8 @@ fn open_store(dir: &std::path::Path, tag: &str) -> Store {
 
 /// 补全学习数据（邮箱后缀 + 网址历史）必须随整机备份走一个来回。
 ///
-/// 这两类是**键不带方案的全局段**，不在 `list_data_schemas()` 的逐 schema 循环里
-/// ——漏登记 `create_backup` 的话备份包里压根没有它们，而备份与还原都不会报错，
-/// 用户换机后才发现学的东西全没了。`common_chars` 当年就是这么漏在
-/// `RESTORE_SECTIONS` 里的。
+/// 这两类是键不带方案的全局段，不在 `list_data_schemas()` 的逐 schema 循环里：漏登记
+/// `create_backup` 时备份与还原都不报错，用户换机后才发现学的东西全没了。
 #[test]
 fn backup_roundtrip_carries_completion_learning_data() {
     use wind_store::completion::CompletionKind;
@@ -155,9 +153,8 @@ fn wdat_bytes(code: &str, text: &str) -> Vec<u8> {
 
 /// 把 mtime 拨回替换前，并校验「大小 + mtime」确已逐字段相同。
 ///
-/// 与 `wind_dict::reader_pool` 里那个同名夹具同一个理由：池的 `(大小, mtime)` 判据
-/// 在正常时序下本就能认出替换，不把前提做成确定的，测试就只是在测那道判据，
-/// 把这里的通知删掉照样绿。
+/// 池的 `(大小, mtime)` 判据在正常时序下本就能认出替换，不把前提做成确定的，测的就只是
+/// 那道判据，删掉通知照样绿（同 `wind_dict::reader_pool` 的同名夹具）。
 fn force_same_stamp(path: &std::path::Path, before: &std::fs::Metadata) {
     fs::File::options()
         .write(true)
@@ -179,8 +176,8 @@ fn force_same_stamp(path: &std::path::Path, before: &std::fs::Metadata) {
 
 /// 方案导入覆盖 sidecar `.wdat` 后，运行中的引擎不得再拿到旧内容。
 ///
-/// 包里可以只带 `.wdat`（见 `collect_packs_wdat_only_dict`），而那种词库是**直接走
-/// `reader_pool` 打开**的——导入时正在跑的引擎手里还攥着旧映射。
+/// 包里可以只带 `.wdat`（见 `collect_packs_wdat_only_dict`），那种词库直接走 `reader_pool`
+/// 打开，导入时运行中的引擎手里还攥着旧映射。
 #[test]
 fn importing_a_pooled_wdat_invalidates_the_reader() {
     let t = tempfile::tempdir().unwrap();
@@ -209,8 +206,7 @@ fn importing_a_pooled_wdat_invalidates_the_reader() {
 /// 备份还原覆盖 sidecar `.wdat` 后同理——还原的 `schema_file` 来自
 /// `walk_dir(user_schemas_dir)`，同样囊括 `.wdat`。
 ///
-/// 与上一条分开写：导入与还原是**两个**写盘口，各挂各的通知，合成一条就会「漏一个
-/// 还能过」。两条共用夹具故同住一个模块。
+/// 导入与还原是两个写盘口、各挂各的通知，合成一条就会漏一个还能过。
 #[test]
 fn restoring_a_pooled_wdat_invalidates_the_reader() {
     let t = tempfile::tempdir().unwrap();
@@ -668,10 +664,9 @@ fn section_of_maps_compat_and_schema_override_under_existing_sections() {
     assert_eq!(section_of("schema_override_file"), "schemas");
 }
 
-/// ★ 字符类的用户层进备份包、还原回库——**换机器之后用户调过的类不能静默丢失**。
+/// 字符类的用户层进备份包、还原回库：换机器之后用户调过的类不能静默丢失。
 ///
-/// 与 `compat.toml` / `schema_overrides/` 同类；不同的是它在库里而不是目录里，
-/// 故不走 `user_*_dir`，走 store 的 list / set。文本原样进出，一个字节都不能动。
+/// 它在库里而不是目录里，故走 store 的 list / set 而不是 `user_*_dir`。文本原样进出。
 #[test]
 fn quick_format_is_backed_up_and_restored() {
     let t = tempfile::tempdir().unwrap();

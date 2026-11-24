@@ -1,18 +1,12 @@
 //! 导入端对行尾不挑食：同一份内容，无论行尾是 `\n` / `\r\n` / 孤立 `\r`，
 //! 每个解析入口都必须给出完全相同的结果。
 //!
-//! **为什么专门立一组测试**：全仓按行解析走的是 `str::lines()` 语义（只认 `\n`、
-//! 顺带剥掉紧邻其前的 `\r`），孤立 `\r` 因此不算换行，整份文件被当成一行。
-//! 2026-09-17 实测的三种症状没有一种会提到行尾，最坏的一种还是**静默成功**：
-//! TSV 提示「导入成功、只进 1 条」、`skipped` 仍是 0。修法见
-//! `wind_utils::text::normalize_input`。
+//! 全仓按行解析走 `str::lines()` 语义（只认 `\n`），孤立 `\r` 不算换行、整份文件被当成
+//! 一行，最坏的症状是静默成功（只进 1 条、`skipped` 为 0）。修法见
+//! `wind_utils::text::normalize_input`；漏归一化的守卫在 `wind-utils/tests/line_ending_coverage.rs`。
 //!
-//! 末尾的 `every_text_entry_point_normalizes` 是守卫：新增一个吃全文的 `pub fn`
-//! 却忘了归一化，它会红。
-//!
-//! ⚠️ **样本一律在代码里构造，不要改用仓库里的 fixture 文件**：git 的 `core.autocrlf`
-//! 会在 checkout 时按平台改写文件行尾，同一份 fixture 在 Windows 和 Linux 上行尾不同，
-//! 这组测试就会变成「测 git 配置」而不是测解析器。
+//! 样本一律在代码里构造，不用 fixture 文件：git 的 `core.autocrlf` 会按平台改写行尾，
+//! 测的就成了 git 配置。
 
 use wind_store::import_formats::{
     CodePolicy, DictFormat, detect_dict_format, parse_words_auto, parse_words_rime, parse_words_tsv,
@@ -151,14 +145,14 @@ fn parse_phrase_text_ignores_line_endings() {
     same_across_endings("phrase_text", PHRASE, parse_phrase_text);
 }
 
-// ---- 症状回归：这些是修之前 CR 文件的真实表现，不许回去 ----
+// ---- 症状回归：未归一化时 CR 文件的真实表现，不许回去 ----
 
 #[test]
 fn cr_tsv_no_longer_silently_imports_one_row() {
     let cr = TSV.replace('\n', "\r");
     let (fmt, rows, skipped) = parse_words_auto(&cr, CodePolicy::default()).expect("应能解析");
     assert_eq!(fmt, DictFormat::Tsv);
-    // 修之前：rows=1、skipped=0、不报错 —— 界面显示「导入成功」，实际只进一条
+    // 未归一化时：rows=1、skipped=0、不报错 —— 界面显示「导入成功」，实际只进一条
     assert_eq!(rows.len(), 3, "CR 行尾的 TSV 应完整导入 3 条");
     assert_eq!(skipped, 0);
     assert_eq!(rows[2].text, "你好");
@@ -168,7 +162,7 @@ fn cr_tsv_no_longer_silently_imports_one_row() {
 #[test]
 fn cr_rime_is_no_longer_misdetected_as_tsv() {
     let cr = RIME.replace('\n', "\r");
-    // 修之前：全文一行必含 TAB → has_tsv_line 命中 → 误判 Tsv → 0 条
+    // 未归一化时：全文一行必含 TAB → has_tsv_line 命中 → 误判 Tsv → 0 条
     assert_eq!(detect_dict_format(&cr), DictFormat::Rime);
     let (_, rows, _) = parse_words_auto(&cr, CodePolicy::default()).expect("应能解析");
     assert_eq!(rows.len(), 2);
@@ -177,11 +171,9 @@ fn cr_rime_is_no_longer_misdetected_as_tsv() {
 #[test]
 fn cr_wdict_no_longer_blames_the_version() {
     let cr = dict_sample().replace('\n', "\r");
-    // 修之前：报「不支持的 WindDict 版本（需 version: 1）」，把人引向去改 version
+    // 未归一化时：报「不支持的 WindDict 版本（需 version: 1）」，把人引向去改 version
     let (rows, _) = parse_words_wdict(&cr).expect("不该再报版本错");
     assert_eq!(rows.len(), 2);
 }
 
-// 守卫已挪到 wind-utils/tests/line_ending_coverage.rs：原先这里那版按「参数叫 text
-// + 零缩进 pub fn」扫描，漏掉了 impl 块里的全部关联方法（整机备份恢复的四个 JSONL
-// 入口就是这么被放过的），判据也不对。新版按「函数体里有 .lines()」扫全 workspace。
+// 漏归一化的守卫在 wind-utils/tests/line_ending_coverage.rs（按「函数体里有 .lines()」扫全 workspace）。

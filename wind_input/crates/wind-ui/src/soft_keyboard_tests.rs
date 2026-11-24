@@ -1,10 +1,8 @@
 use super::*;
 
-/// 默认位置落在**协调器给的那块屏**上，而不是主屏。
+/// 默认位置落在协调器给的那块屏上，而不是主屏（`SPI_GETWORKAREA` 恒取主显示器工作区）。
 ///
-/// 此前 `default_origin` 只认 `SPI_GETWORKAREA`——那个 API 取的恒是主显示器工作区，
-/// 于是"在副屏打字、软键盘开在主屏"。副屏在主屏左侧时工作区坐标为负，落点必须
-/// 跟着为负；钳到 0 就会把面板推回主屏（工具栏那边 `corner_in_work_area` 踩过同一个坑）。
+/// 副屏在主屏左侧时工作区坐标为负，落点必须跟着为负；钳到 0 就会把面板推回主屏。
 #[test]
 fn default_origin_follows_given_work_area() {
     // 左侧副屏：虚拟桌面 x ∈ [-1920, 0)，工作区 (−1920, 0, 0, 1040)。
@@ -14,17 +12,15 @@ fn default_origin_follows_given_work_area() {
     assert!(x < 0, "落点必须留在左侧副屏上，不得被推回主屏");
 }
 
-/// 副屏首次打开（还没有任何位置记忆）时，DPI 探针点必须落在**那块副屏**上。
+/// 副屏首次打开（还没有任何位置记忆）时，DPI 探针点必须落在那块副屏上。
 ///
-/// 用户实测：主副屏缩放不同，第一次在副屏点开软键盘尺寸就是错的（按主屏缩放排的），
-/// 鼠标一碰又好了，拖动过一次之后永久好了。根因是 `ensure_scale` 当时只判两级，
-/// `anchor_br`/`origin` 双 `None` 时落到 `(0, 0)`——那是主屏。后两个"又好了"分别是
-/// 够到了 `LastOrigin` 和 `Anchor` 两级，把缺失的第三级掩盖成了"偶发"。
+/// 否则主副屏缩放不同时，首次在副屏打开按主屏缩放排版；有了 `LastOrigin` / `Anchor` 后
+/// 才变对，表现成「偶发」。
 #[test]
 fn probe_point_follows_work_area_when_nothing_is_remembered() {
     // 左侧副屏：工作区 (−1920, 0, 0, 1040)，坐标为负。
-    // 从**入口条件**（还没摆过 = 无锚点，没画过 = 无上一帧落点）走完整条链，
-    // 而不是直接构造 `DefaultIn`——后者会跳过 `pick`，正好漏掉出问题的那一步。
+    // 从入口条件（无锚点、无上一帧落点）走完整条链，而不是直接构造 `DefaultIn`——
+    // 后者会跳过 `pick`，正好漏掉出问题的那一步。
     let at = Placement::pick(None, None, Some((-1920, 0, 0, 1040)));
     let (x, y) = at.probe_point();
     assert!(
@@ -98,9 +94,8 @@ fn default_origin_clamps_to_top_when_panel_is_taller_than_work_area() {
 
 /// 锚点 → 落点：同一锚点下，尺寸不同（切面）算出的右下角恒等。
 ///
-/// 软键盘各面键数不同 ⇒ 面板宽高随切面变。存左上角的话切一次面就朝右下长一截，
-/// 表现为"切个面板还跑位"。与工具栏 `anchor_keeps_bottom_right_fixed_across_orientation`
-/// 是同一个不变量。
+/// 软键盘各面键数不同 ⇒ 面板宽高随切面变，存左上角的话切一次面就朝右下长一截。
+/// 与工具栏 `anchor_keeps_bottom_right_fixed_across_orientation` 是同一个不变量。
 #[test]
 fn anchor_keeps_bottom_right_fixed_across_pages() {
     const RIGHT: i32 = 1600;
@@ -151,15 +146,11 @@ fn only_output_keys_repeat() {
     assert!(!repeats(SOFT_TAG_CTRL), "粘滞 Ctrl 不重复");
 }
 
-/// tag 分段判据必须是**闭区间**——开区间会把后加的段整段吞掉。
+/// tag 分段判据必须是闭区间——开区间会把后加的段整段吞掉。
 ///
-/// 钉的是 0.120 周期的真实缺陷：`dispatch` 里写的是 `tag >= SOFT_TAG_PAGE_BASE`，
-/// 于是 `SOFT_TAG_TAB_VIEWPORT`（330_002，在 200_000 与 400_000 之间）掉进翻页分支，
-/// 算出 `i = 130_002` 发出 `SoftKeyboardPage(130002)`，被协调器的越界检查挡下，
-/// 只留一条 warn ⇒ 用户点标签行留白**什么都没发生**。
-///
-/// ⚠️ 将来往 `SOFT_TAG_PAGE_BASE..SOFT_TAG_CLOSE` **之外**再加新的 tag 段时，
-/// 照着补一条断言：编译器管不了整型常量的分段，只有这里能拦。
+/// 写成 `tag >= SOFT_TAG_PAGE_BASE` 时 `SOFT_TAG_TAB_VIEWPORT` 掉进翻页分支、被协调器越界
+/// 检查挡下，点标签行留白什么都没发生。往 `SOFT_TAG_PAGE_BASE..SOFT_TAG_CLOSE` 之外再加
+/// tag 段时照着补一条断言：编译器管不了整型常量的分段。
 #[test]
 fn tag_ranges_are_closed_so_later_segments_are_not_swallowed() {
     assert!(is_page_tag(SOFT_TAG_PAGE_BASE), "第 0 个面");
@@ -250,8 +241,7 @@ fn pin_icons_rasterize_with_ink() {
 }
 
 /// 钉住按钮真正画出图：按 `build` 里同样的节点形状（定宽定高 + 圆角 + 负 margin）绘制，
-/// 中心一带必须有墨。图曾挂在一个空子容器上，高度塌成 0，被裁得只剩顶上一条线——
-/// 而上一条测试只验 SVG 能栅格化，验不出这个。
+/// 中心一带必须有墨：图挂在空子容器上时高度塌成 0、只剩顶上一条线，上一条测试验不出。
 #[test]
 fn pin_button_paints_its_icon() {
     use crate::text::dwrite::TextRenderer;
@@ -297,8 +287,8 @@ fn slot_labels_use_the_printed_symbol() {
 fn scroll_only_moves_when_the_tab_is_off_screen() {
     let w = [80.0f32; 8]; // 每项 80，间隙 0 ⇒ 内容 640
     let view = 200.0;
-    // 已完整可见 ⇒ 一动不动。★ 这条是「用户滚不动标签行」那个 bug 的守门：
-    //   若这里返回了别的值，每帧都会把滚动量拽回去。
+    // 已完整可见 ⇒ 一动不动。不这样的话
+    // 每帧都会把滚动量拽回去，用户滚不动标签行。
     assert_eq!(scroll_to_show(&w, 0.0, 1, 0.0, view), 0.0);
     // 在右边界之外 ⇒ 贴右露出：第 3 项右缘 4*80=320，减去视口 200
     assert_eq!(scroll_to_show(&w, 0.0, 3, 0.0, view), 120.0);

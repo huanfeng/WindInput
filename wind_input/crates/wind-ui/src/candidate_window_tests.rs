@@ -36,8 +36,7 @@ fn present_repaints_when_size_changed_with_same_byte_count() {
 
 /// 主题位置偏移的方向语义：正值恒为「远离光标」——下方向下、上方向上。
 ///
-/// 上方若照抄下方的加号，上翻时偏移会把窗口**压向**光标，与配置意图相反。
-/// 这类符号错误从现象很难反推（只有触发上翻的场景才露馅），故直接锁死。
+/// 上方若照抄下方的加号，上翻时偏移会把窗口压向光标；只有上翻场景才露馅，故直接锁死。
 #[test]
 fn position_offset_always_pushes_away_from_caret() {
     // 下方：正值下移
@@ -52,11 +51,10 @@ fn position_offset_always_pushes_away_from_caret() {
     assert_eq!(CandidateWindow::apply_offset_y(300, true, -6), 306);
 }
 
-/// **净锚点不含 Y 偏移**——这是「偏移不左右上下翻转决策」的地基。
+/// 净锚点不含 Y 偏移——这是「偏移不左右上下翻转决策」的地基。
 ///
-/// `below_ok`/`above_ok` 拿锚点跟工作区边界比：锚点一旦含偏移，off_y 越大两个条件
-/// 越难成立，本该上翻的场景会被判成「上方也放不下」，落回下方再被钳到屏幕底、
-/// 压住光标——表现就是「下方正常、上方遮盖」。故锁死锚点与 off_y 无关。
+/// `below_ok`/`above_ok` 拿锚点跟工作区边界比：锚点含偏移时本该上翻的场景会被判成「上方也
+/// 放不下」，落回下方再被钳到屏幕底、压住光标。
 #[test]
 fn caret_anchors_are_independent_of_y_offset() {
     let (caret_x, caret_y, caret_h, win_h) = (100, 200, 20, 80);
@@ -72,8 +70,7 @@ fn caret_anchors_are_independent_of_y_offset() {
 
 /// 「上方反转候选」只对竖排成立，横排必须原样保持 1..n。
 ///
-/// 横排候选是左右并列，"反转"跟窗口在光标上方还是下方没有任何关系，只会把读序
-/// 倒过来（1 跑到最右）。两个开关正交，故一并锁死 swap 不受排列方向影响。
+/// 横排候选左右并列，"反转"只会把读序倒过来（1 跑到最右）。两个开关正交。
 #[test]
 fn flip_when_above_applies_to_vertical_only() {
     // (above, vertical, flip, swap) -> (flip_cands, swap_bands)
@@ -133,10 +130,9 @@ fn clamped_caret_is_safe_to_split() {
 
 /// 固定位置的两个坐标系必须严格互逆。
 ///
-/// 落盘的 custom_x/y 是**内容**左上，Win32 定位用的是**窗口**左上（含软阴影扩边）：
-/// 固定定位走 content→window，拖动落定上报走 window→content。若两者不互逆，
-/// 每轮「拖动 → 落盘 → 重新显示」都会多减一次阴影，候选窗每次重显都往左上爬一点——
-/// 这种漂移从现象极难反推，故在此直接锁死。
+/// 落盘的 custom_x/y 是内容左上，Win32 定位用窗口左上（含软阴影扩边）：固定定位走
+/// content→window，拖动落定走 window→content。不互逆时每轮「拖动 → 落盘 → 重显」都多减
+/// 一次阴影，候选窗往左上爬。
 #[cfg(windows)]
 #[test]
 fn content_window_coord_roundtrip_is_lossless() {

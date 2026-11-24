@@ -108,8 +108,7 @@ fn failed_import_leaves_target_untouched() {
 
 /// 就位后的校验失败要整体回滚：装不上的新版不能把用户原来的主题顶掉。
 ///
-/// 这一步只能在包已经就位、旧目录还没删的那个窗口里做，所以回滚也只能在这里做
-/// ——调用方拿到失败时，手上已经没有旧内容了。
+/// 这一步只能在包已就位、旧目录还没删的窗口里做：调用方拿到失败时手上已没有旧内容。
 #[test]
 fn verify_failure_rolls_back_to_previous_theme() {
     let t = tempfile::tempdir().unwrap();

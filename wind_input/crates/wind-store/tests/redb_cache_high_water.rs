@@ -1,39 +1,14 @@
 //! redb 读缓存的**高水位**行为：全表读之后它涨上去，就不会再落下来。
 //!
-//! 这条是「导入大词库之后内存占用变高」那类反馈的正主。它与派生缓存的峰值不是一回事——
-//! 派生缓存的几百 MB 是**构建期**的，函数返回即还给系统（2026-09-22 靶机实测：重建雾凇
-//! merged 缓存峰值 491 MB，4 秒后落回 35.9 MB）；而 redb 读缓存是**长期常驻**的：
+//! 读缓存的性质（堆上页、只增不减、脏页晋升，上界 `min(读缓存配额, 被读到过的页字节)`）
+//! 与回收手法见 `docs/design/memory-footprint.md` §6.1。配额是 `DEFAULT_CACHE_SIZE_BYTES`
+//! 的 90%（redb 2.x 按 9:1 切读/写）。
 //!
-//! - 页是堆上的 `Arc<[u8]>`（redb 2.x 不是 mmap），全额计进进程私有内存；
-//! - 每次读未命中就插入，**只有越过上限才淘汰**，唯一的整体清空是库文件扩容；
-//! - 事务刷盘时脏页被直接晋升进读缓存，所以批量导入写过的页当场变常驻。
+//! 别拿 RSS 降不降当「释放了」的判据：glibc 不把 4 KiB 小块还给 OS，那是 `evict` / `hold`
+//! 两组用同尺寸探针去证的。必须一个阶段一个进程：同进程里前一阶段的分配器保留量会盖住
+//! 差值。
 //!
-//! 上界 = `min(读缓存配额, 被读到过的页字节)`，而后者随用户导入单调变大。
-//! 配额是 `DEFAULT_CACHE_SIZE_BYTES` 的 90%（redb 2.x 按 9:1 切读/写）。
-//!
-//! # 实测结论（2026-09-22，本机 19 万条 / 库 32.6 MB）
-//!
-//! | 阶段 | RSS |
-//! |---|---|
-//! | 只开库不读 | 4.5 MB |
-//! | 全表扫一次 | 31.1 MB |
-//! | 再扫到顶 | 45.6 MB ← 不再涨，也不落 |
-//!
-//! **导入 / 全表扫之后，这笔内存在进程活着期间一直不还。** 唯一的释放手段是丢弃
-//! `Database`（`Store::pause`），`WIND_HW=evict` 与 `hold` 两组证明了它真的释放：
-//! 填满缓存后再要 40 MB 同尺寸小块，不释放的一组 RSS 涨 15.2 MB，`pause` 过的一组
-//! **涨 0.0 MB**——那 40 MB 全部由释放出来的空间供给。
-//!
-//! ⚠️ 别拿 RSS 降不降当判据：`pause` 之后 RSS 一动不动（glibc 不把 4 KiB 小块还给 OS）。
-//! 「释放了」与「还给 OS 了」是两件事，本用例只能证前者。
-//!
-//! # 为什么必须一个阶段一个进程
-//!
-//! 首版把三个阶段写在一个测试里，量出来的数字是废的：关库之后 RSS 一点没降——分配器
-//! 不把空闲块还给 OS，于是「缓存涨了多少」被前一阶段的保留量盖住了。同进程里测不出
-//! 这个差值，只能各起一个进程、各自从干净的堆开始。
-//!
-//! 手动跑（三步，顺序不能换）：
+//! 手动跑（顺序不能换）：
 //! ```text
 //! cd wind_input
 //! M=--ignored\ --nocapture; T="cargo test -p wind-store --release --test redb_cache_high_water"
@@ -69,8 +44,7 @@ fn rss_mb() -> f64 {
     pages * 4096.0 / 1024.0 / 1024.0
 }
 
-/// 原 `perf_cache_size.rs`（已随 P2b 删除）同款夹具：2~4 音节轮换，贴近真实拼音词库的键分布。
-/// 换成等长串会让页的填充率失真，库大小跟着失真。
+/// 2~4 音节轮换，贴近真实拼音词库的键分布；换成等长串会让页填充率和库大小失真。
 fn legacy_rows(data: &[(String, String)]) -> Vec<(CompletionKind, String, u32, i64)> {
     data.iter()
         .map(|(code, _)| (K, code.clone(), 1, 0))
@@ -118,8 +92,7 @@ fn the_page_cache_is_a_high_water_mark() {
             );
         }
         // 导入这一趟：脏页晋升 + 索引回查，两头都在填读缓存。
-        // 末尾用「关库重开」验证这笔内存能不能要回来——那正是 `Store::pause` + `resume`
-        // 做的事（丢弃 `Database` ⇒ `PagedCachedFile` 一起 drop）。
+        // 末尾用「关库重开」验证这笔内存能不能要回来，即 `Store::pause` + `resume` 做的事。
         Ok("import") => {
             let _ = std::fs::remove_file(&db);
             let data = rows();
@@ -160,16 +133,9 @@ fn the_page_cache_is_a_high_water_mark() {
             }
             println!("[scan]  ↑ 只涨不落即为高水位");
         }
-        // ★ 「缓存到底有没有被释放」的判据。
-        //
-        // 不能看 RSS 降不降：Linux 下 glibc 不把空闲块还给 OS（redb 的页是 4 KiB 的
-        // `Arc<[u8]>`，属于小块，走不到 `munmap` 那条路），drop 之后 RSS 一动不动。
-        // 靶机上 Windows 的 491 MB 峰值能落回，是因为那里有大量 >512 KiB 的大块走
-        // VirtualAlloc——两者不能互相外推。
-        //
-        // 换个问法就干净了：**释放出来的空间，后来的分配能不能用上**。
-        // 填满缓存后再要 PROBE MB，若 RSS 几乎不涨，说明那块空间已经归还给分配器、
-        // 被复用了 ⇒ 缓存确实被释放。`WIND_HW=hold` 是对照组（不释放，RSS 必须涨满）。
+        // 「缓存到底有没有被释放」的判据：不看 RSS（glibc 不把 4 KiB 小块还给 OS），而看
+        // 释放出来的空间能否被后来的分配复用——填满缓存后再要 PROBE MB，RSS 几乎不涨即已释放。
+        // `WIND_HW=hold` 是对照组（不释放，RSS 必须涨满）。
         Ok(mode @ ("evict" | "hold")) => {
             const PROBE: usize = 40 * 1024 * 1024;
             let s = Store::open(&db).expect("开库");
@@ -181,10 +147,8 @@ fn the_page_cache_is_a_high_water_mark() {
                 s.pause().expect("暂停");
             }
             let after = rss_mb();
-            // ⚠️ 探针必须与 redb 的页**同尺寸**（4 KiB 的许多小块），不能是一次 40 MB
-            // 的大分配：glibc 对超过 `M_MMAP_THRESHOLD`（默认 128 KiB）的请求直接走
-            // `mmap`，压根不看 free list，于是两组都会老老实实涨满 40 MB，什么也证明不了
-            // ——这正是本用例第一版的错。写满才触达物理页。
+            // 探针必须与 redb 的页同尺寸（4 KiB 的许多小块）：超过 `M_MMAP_THRESHOLD`
+            // （默认 128 KiB）的大分配直接走 `mmap`、不看 free list，两组都会涨满。写满才触达物理页。
             const PAGE: usize = 4096;
             let mut probe: Vec<Vec<u8>> = (0..PROBE / PAGE).map(|_| vec![1u8; PAGE]).collect();
             probe.iter_mut().for_each(|b| b[0] = 2);
@@ -206,7 +170,7 @@ fn the_page_cache_is_a_high_water_mark() {
                 println!("[evict] resume 后仍可查（{n} 条）");
             }
         }
-        // ★ 空闲回收 + 整理堆（协调器 `heap_trim.rs` 接在 reclaimer 钩子上）能不能让 RSS
+        // 空闲回收 + 整理堆（协调器 `heap_trim.rs` 接在 reclaimer 钩子上）能不能让 RSS
         // 真正落回。上面 evict 证的是「释放了」，这里证「还给 OS 了」。
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
         Ok("trim") => {
@@ -227,9 +191,9 @@ fn the_page_cache_is_a_high_water_mark() {
                 "[trim] 开库 {opened:.1} → 全表扫 {filled:.1} → 丢缓存 {dropped:.1} → malloc_trim {trimmed:.1} MB"
             );
         }
-        // ★ S3 的后台扫描那档：19 万条全表扫一遍 → `mark_scan_pending_rows` → 等过短档，由回收
-        // 线程丢缓存并调钩子 malloc_trim（与协调器登记的 `heap_trim::release_free_heap` 同形）。
-        // 与 `trim` 的差别：只扫一遍（建索引就是一遍），回收走的是生产路径而不是手调两步。
+        // 后台扫描那档：全表扫一遍 → `mark_scan_pending_rows` → 等过短档，由回收线程丢缓存并调
+        // 钩子 malloc_trim（与协调器的 `heap_trim::release_free_heap` 同形）。与 `trim` 的差别：
+        // 只扫一遍，回收走生产路径而不是手调两步。
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
         Ok("scanreclaim") => {
             use std::time::Duration;

@@ -28,9 +28,8 @@ fn tooltip() -> Tooltip {
     Tooltip::new(tx).expect("创建气泡窗口（非 Windows 下是内存桩）")
 }
 
-/// ★ 外观零回归的约束在「画的是同一串文本」：渲染路径没改（仍是 `render_to_bgra(&str)`
-/// 画一个叶节点），故只要 `TooltipDoc` 扁平化出的文本与旧版逐字节相同，像素就相同。
-/// 像素本身不在这里比——同一串文本自己比自己证明不了任何事。
+/// 外观零回归的约束在「画的是同一串文本」：渲染路径仍是 `render_to_bgra(&str)` 画一个
+/// 叶节点，只要 `TooltipDoc` 扁平化出的文本不变，像素就不变。
 #[test]
 fn doc_flattens_to_the_legacy_string() {
     let legacy = "[完整原文]\n一二三四五\n六七\n[拼音]\n你：nǐ\n好：hǎo/hào";
@@ -284,7 +283,7 @@ fn mouse_leave(t: &Tooltip) {
 }
 
 /// 菜单关闭、留下气泡并重挂跟踪后，系统当场投来的离开是伪的（光标仍在气泡上）：气泡
-/// 留下，跟踪清掉等下一次移动重挂。靶机实测左键点气泡关菜单时正是这条把气泡藏掉。
+/// 留下，跟踪清掉等下一次移动重挂。左键点气泡关菜单时走的就是这条。
 #[test]
 fn spurious_leave_after_menu_close_keeps_tip() {
     let (mut t, _rx) = tooltip_with_rx(true);

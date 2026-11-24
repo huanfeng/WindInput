@@ -18,12 +18,10 @@ fn disabled_by_default_stays_inactive() {
     assert!(!ah.is_active());
 }
 
-/// 光标移出后，计时应从**移出那一刻**起算满 delay。
+/// 光标移出后，计时应从移出那一刻起算满 delay。
 ///
-/// 这条锁的是消息循环从轮询改事件驱动时最容易丢的行为。轮询年代占用期间每 ~8ms
-/// 顺延一次，「离开时刻 + delay」是免费得来的；事件驱动下 tick 变稀疏，若不显式处理
-/// 移出沿，离开时读到的是**上一次唤醒时**设的 deadline——它多半已经过期，工具栏会在
-/// 光标刚移开的瞬间就开始淡出，而不是等满 5 秒。
+/// 事件驱动下 tick 稀疏，不显式处理移出沿的话，离开时读到的是上一次唤醒时设的 deadline，
+/// 多半已经过期，工具栏会在光标刚移开就开始淡出，而不是等满 5 秒。
 #[test]
 fn leaving_toolbar_restarts_timer_from_departure() {
     let (mut ah, t0) = armed();
@@ -100,12 +98,6 @@ fn cursor_inside_extends_deadline() {
     // 已过原 deadline，但光标在内 → 顺延而非淡出
     assert_eq!(ah.tick_at(t0 + 6 * SEC, true, false), AutoHideAction::None);
     // 移出（t0+10s）→ 计时从这一刻起算，见 leaving_toolbar_restarts_timer_from_departure。
-    //
-    // 本行原先断言 t0+11s 就该淡出，即「deadline 由最后一次光标在内的 tick 决定」。
-    // 那是 ~8ms 轮询的副产品：那时两次 tick 相差 8ms，「最后一次在内」与「移出时刻」
-    // 无从区分，断言碰巧成立。循环改事件驱动后 tick 变稀疏，两者相差可达数秒，按旧
-    // 断言就成了「光标在栏上停久一点，一移开工具栏立刻开始消失」——与「自动隐藏延迟
-    // 5 秒」对用户的含义相反。故改按移出时刻起算。
     assert_eq!(
         ah.tick_at(t0 + 10 * SEC, false, false),
         AutoHideAction::None

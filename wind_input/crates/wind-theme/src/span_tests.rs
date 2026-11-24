@@ -459,7 +459,7 @@ fn every_factory_theme_resolves_the_contract() {
 
 use crate::palette::{composite_over as over, contrast_ratio as contrast};
 
-/// ★ `_base` 的出厂角色色（§18），按与渲染同一口径的 `span_color` 在**全部出厂主题** × 亮暗下逐格求色：
+/// `_base` 的出厂角色色（§18），按与渲染同一口径的 `span_color` 在全部出厂主题 × 亮暗下逐格求色：
 /// - 注释**不上色**（用户要求保持原外观）：各变量角色在常态 / 选中 / 悬停都等于注释正文色；
 /// - 气泡各角色真的着了色（≠ 正文色），且按不透明底 ≥ 4.5（同 §5.4 的对比度表）、半透明底叠在
 ///   纯白桌面上的最坏情况 ≥ 3.5；段名里的变量另算一遍。

@@ -8,10 +8,9 @@ fn tmp(name: &str) -> std::path::PathBuf {
 
 /// 临时词导入必须认 `WordIo::boundary`，而不只认 code 里的空格。
 ///
-/// ★★ 样本是**单音节**，这不是随手挑的：`join_code_by_boundary("xian", 0b1)` 产出的
-/// 仍是无空格的 `xian`，`split_spaced_code` 拿回来就是 0 —— 空格载体从原理上表达不了
-/// 单音节边界。只认空格的实现会把导入闸口求解出的边界**静默丢掉**，而闸口那边照样
-/// 把它记成「已补齐」。对照组 `gong` 锁住另一半：不给显式边界时行为逐字节不变。
+/// 样本特意选单音节：`join_code_by_boundary("xian", 0b1)` 仍是无空格的 `xian`，空格载体
+/// 表达不了单音节边界，只认空格的实现会静默丢掉闸口求出的边界。对照组 `gong` 钉住
+/// 不给显式边界时行为不变。
 #[test]
 fn temp_word_import_honors_explicit_boundary() {
     let path = tmp("wind_tw_explicit_b.redb");
@@ -50,9 +49,7 @@ fn temp_word_import_honors_explicit_boundary() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// **临时词的每一条写路径都要维护索引。**
-///
-/// 主表写了、索引没写 ⇒ 那个词简拼静默召不回。六条路径逐一验证。
+/// 临时词的每一条写路径都要维护索引：主表写了、索引没写，该词简拼就静默召不回。
 #[test]
 fn every_temp_write_path_maintains_the_index() {
     let p = tmp("wind_temp_abbrev_paths.redb");
@@ -88,9 +85,8 @@ fn every_temp_write_path_maintains_the_index() {
     s.remove_temp_word("py", "xianning", "西安宁").unwrap();
     assert!(hit("xan").is_empty(), "remove 应删索引");
 
-    // ④ evict_temp_words：淘汰排序键是 (count, created_at, weight)，主键 count。
-    // 让"你好"的 count 领先"好呀"一次，淘汰结果就不再依赖两次 learn 是否落在同一秒——
-    // 否则 created_at 打平时才退到 weight 比大小，慢 CI（如 macOS 共享 runner）跨秒即可打破这个假设而偶发翻车。
+    // ④ evict_temp_words：淘汰排序主键是 count。让"你好"多用一次，结果就不依赖两次
+    // learn 是否落在同一秒（created_at 打平时退到 weight，慢 CI 跨秒会偶发翻车）。
     s.learn_temp_word("py", "nihao", "你好", 0, 0b101).unwrap();
     s.learn_temp_word("py", "haoya", "好呀", 10, 0b1001)
         .unwrap();
@@ -209,12 +205,10 @@ fn test_increment_if_exists() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// **用过的词不能和没用过的词一起被随机淘汰。**
+/// 用过的词不能和没用过的词一起被随机淘汰。
 ///
-/// 自动造词写入的 weight 恒为 `LEARN_ADD_WEIGHT`，真实库里整片并列；只按 weight 排时
-/// 实际顺序退化成 redb 的 key 字典序。此处三条词权重故意全同、且**字典序与使用次数相反**
-/// （用得最多的 code 是 "a"，排字典序第一个）—— 排序键一旦退回纯 weight，被删的头两条
-/// 就是 a/b，用了 3 次的「常用」当场消失。
+/// 三条词权重全同、且字典序与使用次数相反（用得最多的是 "a"）：排序键一旦退回纯 weight，
+/// 实际顺序就是 redb 的 key 字典序，用了 3 次的词会被删掉。
 #[test]
 fn evict_keeps_the_used_word_when_weights_are_all_equal() {
     let path = tmp("wind_tw_evict_count.redb");
@@ -236,16 +230,13 @@ fn evict_keeps_the_used_word_when_weights_are_all_equal() {
 
 /// count 与 weight 都相同时按 `created_at` 升序淘汰（先造的先走）。
 ///
-/// 这一维覆盖的正是淘汰的主力人群——自动造词产出的 `count=1` + `weight=800` 那批，
-/// 它们在前两个键上全等，只剩 `created_at` 能定序。`learn_temp_word` 取的是当下秒数、
-/// 且对已存在记录沿用旧值，故此处直接写表构造隔秒的两条。
+/// 自动造词产出的 `count=1` + `weight=800` 那批在前两个键上全等，只剩 `created_at` 定序。
+/// `learn_temp_word` 取当下秒数且沿用已有记录的旧值，故直接构造隔秒的两条。
 #[test]
 fn evict_falls_back_to_created_at_when_count_and_weight_tie() {
     let path = tmp("wind_tw_evict_ca.redb");
     let s = Store::open(&path).unwrap();
-    // 该被淘汰的是 created_at 更早的 zz_old，而它的 key 字典序排在后面：排序键一旦
-    // 漏掉 created_at，稳定排序会保持 range 的字典序，删掉的就变成 aa_new。
-    // P1 起临时词在运行时引擎：用带时刻的操作直接造（created_at 取操作时刻）。
+    // 该淘汰的 zz_old 字典序在后：排序键漏掉 created_at 时，删掉的会变成 aa_new。
     use wind_userdata::engine::Op;
     use wind_userdata::record::{OpKind, Payload, Target};
     let mut ops = Vec::new();
@@ -270,8 +261,8 @@ fn evict_falls_back_to_created_at_when_count_and_weight_tie() {
 }
 
 /// 没删到词就不能动代次：代次一变，`UserTextIndex` / 联想索引就整表重扫用户词。
-/// 协调器每 64 次造词调一次淘汰，绝大多数时候词数远在上限内——空提交照样 bump 的话，
-/// 等于每 64 次造词白白触发一轮全表重建（及其分配器高水位）。
+/// 协调器每 64 次造词调一次淘汰，多数时候词数远在上限内，空提交照样 bump 就等于
+/// 每 64 次造词白白重建一轮。
 #[test]
 fn evict_without_deletion_keeps_words_generation() {
     let path = tmp("wind_tw_evict_nogen.redb");

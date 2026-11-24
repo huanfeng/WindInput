@@ -91,7 +91,7 @@ path = "wb/main.dict.yaml"
     assert!(src.is_file());
 }
 
-/// ★ 多个系统目录（`data_custom` 在前、`data` 在后）：
+/// 多个系统目录（`data_custom` 在前、`data` 在后）：
 ///
 /// 1. 只存在于 `data_custom` 的方案不得判成 `Missing`——只传 data 层时，定制版的方案
 ///    导出会得到一个空包/全进 missing，用户拿它装不回去；
@@ -144,9 +144,8 @@ fn custom_layer_counts_as_system_not_missing() {
         "同名文件靠前的层（custom）胜出"
     );
 
-    // 删除路径（include_system=false）：非根的系统命中只记引用。根方案本身按既有
-    // 语义仍会进 pack（包必须自含方案文件），但删除侧另有 user_dir 前缀守卫，
-    // 这里只断言资源不会被当成可删的用户文件。
+    // 删除路径（include_system=false）：非根的系统命中只记引用；根方案本身仍进 pack，
+    // 删除侧另有 user_dir 前缀守卫，这里只断言资源不会被当成可删的用户文件。
     let del = collect_package_files("tiger", &user, &sys, None, false).unwrap();
     assert!(
         del.system_refs
@@ -1161,11 +1160,10 @@ fn import_rejects_path_traversal_and_wrong_kind() {
     assert!(err.contains("备份包"), "误选备份包应有针对性提示: {err}");
 }
 
-// ───────── 方案文件**内容**里的越界路径（2026-08-22 实测三条腿）─────────
+// ───────── 方案文件内容里的越界路径 ─────────
 //
-// 归档条目名的守卫（`import_rejects_path_traversal_and_wrong_kind`）拦不住这一类：
-// 恶意包的条目名可以完全干净，越界路径藏在 `evil.schema.toml` 的**内容**里。
-// 方案文件落盘之后容易被当成「本机配置」，可它是同一个包带进来的同一份外来数据。
+// 归档条目名的守卫（`import_rejects_path_traversal_and_wrong_kind`）拦不住这一类：越界路径
+// 可以藏在 `evil.schema.toml` 的内容里。方案文件落盘后仍是同一个包带进来的外来数据。
 
 /// 造一个条目名干净、内容越界的用户方案；同时在 user_dir 之外放一个受害文件。
 fn evil_schema_fixture(root: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
@@ -1182,11 +1180,10 @@ fn evil_schema_fixture(root: &std::path::Path) -> (std::path::PathBuf, std::path
     (user, victim)
 }
 
-/// ★★ 删除方案不得删掉 user_dir 之外的文件。
+/// 删除方案不得删掉 user_dir 之外的文件。
 ///
-/// 修复前实测：`DELETED = ["evil.schema.toml", "../victim.txt"]`，受害文件真没了。
-/// 两道守卫各挡一层——`is_safe_rel` 让它进不了 plan，`delete_package` 里规范化后的
-/// `starts_with` 是纵深第二道（原来那道是**词法**比较，对 `..` 恒为 true）。
+/// 两道守卫各挡一层：`is_safe_rel` 让它进不了 plan，`delete_package` 里规范化后的
+/// `starts_with` 是纵深第二道（词法比较对 `..` 恒为 true，不能用）。
 #[test]
 fn delete_never_escapes_user_dir_via_schema_content() {
     let t = tempfile::tempdir().unwrap();
@@ -1201,7 +1198,7 @@ fn delete_never_escapes_user_dir_via_schema_content() {
     );
 }
 
-/// ★★ 导出不得把 user_dir 之外的文件打进包——导出的包正是要发给别人的。
+/// 导出不得把 user_dir 之外的文件打进包——导出的包正是要发给别人的。
 #[test]
 fn export_never_packs_files_outside_user_dir() {
     let t = tempfile::tempdir().unwrap();
@@ -1316,16 +1313,9 @@ fn limited_read_rejects_oversized_entry() {
     assert!(err.contains("超过上限"), "{err}");
 }
 
-/// ★★ 上一条**测不出**「有没有把超额部分读进内存」——先 `read_to_end` 再判长度同样
-/// 会报错、同样绿。而这正是本次修复的要点：不设界的害处是内存被撑爆，不是没报错。
-///
-/// 试过用耗时当判据，**实测不成立**：200 MB 全零解压只要 0.5 秒，任何不假红的阈值
-/// 都区分不开两种实现（去掉 `take()` 后那条测试照样通过）。要做出可区分的时间差，
-/// 得把炸弹造到 GB 级，那反过来会让正常路径也变慢、还挑机器。
-///
-/// 「读了多少」是资源性质，运行时观察不到，故改用本仓既有的**源码扫描守卫**
-/// （同 `handle_mode.rs` 的 `schema_switch_finish_guard`）：钉住 `Read::take` 还在。
-/// 判据弱，但它诚实——比一条永远绿的计时断言强。
+/// 上一条测不出「有没有把超额部分读进内存」：先 `read_to_end` 再判长度同样报错、同样绿。
+/// 读了多少在运行时观察不到，计时也区分不开（解压太快），故用源码扫描守卫钉住
+/// `Read::take` 还在。判据弱，但比一条永远绿的计时断言强。
 #[test]
 fn limited_read_bounds_the_read_itself() {
     const SRC: &str = include_str!("bundle.rs");

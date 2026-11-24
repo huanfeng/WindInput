@@ -3,12 +3,8 @@ use std::path::PathBuf;
 
 /// 真实 opencc 数据目录（`build_dev/data/opencc`）。
 ///
-/// ⚠️ 这里原本只写**两级** `../../build_dev/...`，解析到 `wind_input/build_dev/data/opencc`
-/// ——那个目录不存在，于是本文件所有依赖真实数据的用例长期静默走「跳过」分支、
-/// 计数照常绿，判据只有耗时。仓库根才是 `build_dev` 的位置（三级：
-/// crates/wind-transform → crates → wind_input → 仓库根）。同款坑见
-/// `wind-engine/tests/engine_manager.rs` 的同名函数，那边早已修正。
-/// 两处都试，取真的有数据的那一个。
+/// `build_dev` 在仓库根（三级 `../../../`）；只写两级会落到不存在的目录，所有依赖真实数据
+/// 的用例静默走「跳过」分支照样绿。两处都试，取真的有数据的那一个。
 fn opencc_dir() -> PathBuf {
     let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let root = base.join("../../../build_dev/data/opencc");
@@ -36,8 +32,7 @@ fn test_s2t_standard_conversion() {
 
 /// 繁 → 简（`input.t2s`「繁入简出」用的链）。
 ///
-/// 判据刻意选**繁简不同形**的字：`人`/`工`/`一` 这类同形字在两个方向都恒等，
-/// 拿它们断言会让「链根本没加载成功」也照样绿（同 s2t 收口那次踩过的假绿）。
+/// 判据刻意选繁简不同形的字：`人`/`工`/`一` 这类同形字两个方向都恒等，链没加载成功也照样绿。
 #[test]
 fn t2s_converts_traditional_to_simplified() {
     let dir = opencc_dir();
@@ -55,9 +50,9 @@ fn t2s_converts_traditional_to_simplified() {
     }
 }
 
-/// 1对多变体表是**简→繁方向独有**的资产：`STVariants.octrie` 就躺在同一个目录里，
-/// 按名 load 在 t2s 下也会成功，于是 `variants_of` 会拿简体键去查繁体输入、恒不命中。
-/// 一个静默恒空的能力比明确的 `None` 难查得多，故由链的方向挡住它。
+/// 1对多变体表是简→繁方向独有的资产：`STVariants.octrie` 在同一目录里，按名 load 在 t2s 下
+/// 也会成功，`variants_of` 就会拿简体键查繁体输入、恒不命中。静默恒空比明确的 `None` 难查，
+/// 故由链的方向挡住它。
 #[test]
 fn t2s_chain_has_no_variant_table() {
     let dir = opencc_dir();
@@ -182,14 +177,10 @@ fn build_octrie(pairs: &[(&str, &str)]) -> Vec<u8> {
     out
 }
 
-/// ★ 定制层只放一本 `STPhrases.octrie` 时，链的其余部分必须落回出厂那一层。
+/// 定制层只放一本 `STPhrases.octrie` 时，链的其余部分必须落回出厂那一层。
 ///
-/// 这是实测出来的静默失效：`load_variant` 的组内判据是「至少一本加载成功」
-/// (`if !group.is_empty()`)，故「先选中一个目录再整份加载」会拿一条只有词组表的
-/// **残链**当胜利——输入「简体字转换测试」一个字都不转，而日志上只有一行「命中定制层」。
-/// 定制者只想改几个词组的繁体写法，放一本 STPhrases 是最自然的做法。
-///
-/// 夹具全部自造（不依赖 build_dev 的真实 opencc 数据），故本用例永远真的在跑。
+/// `load_variant` 的组内判据是「至少一本加载成功」，「先选中一个目录再整份加载」会拿只有
+/// 词组表的残链当胜利，一个字都不转。夹具全部自造，故本用例不会因缺数据而跳过。
 #[test]
 fn resolved_chain_falls_back_per_file_not_per_directory() {
     let base = std::env::temp_dir().join(format!("wind-s2t-layers-{}", std::process::id()));

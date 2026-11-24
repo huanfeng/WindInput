@@ -179,13 +179,10 @@ fn merge_deep_overrides() {
     assert_eq!(w.get("radius").unwrap().as_integer(), Some(6)); // over 覆盖
 }
 
-/// **inline table** 同样深合并——子主题只写其中一个键，base 的其余键必须留下。
+/// inline table 同样深合并——子主题只写其中一个键，base 的其余键必须留下。
 ///
-/// 上面那条测的是表节点（`[window]`）层。inline table 是另一种书写形态，主题里
-/// 大量用于 `prev_image = { ref, mode, tint, ... }`、`border = { width, color }`
-/// 这类聚合值。若这层退化成整表替换，子主题写 `{ tint = "…" }` 换个颜色就会顺手
-/// 抹掉 `ref`，箭头静默退化成文字 ‹ ›：主题照常加载、无报错、无日志，只有肉眼
-/// 能发现。故与表节点层分开各钉一次。
+/// 退化成整表替换时，子主题写 `prev_image = { tint = "…" }` 会顺手抹掉 `ref`，箭头静默
+/// 退化成文字 ‹ ›、无报错无日志，故与表节点层分开各钉一次。
 #[test]
 fn merge_deep_overrides_inline_tables() {
     let base: Value = toml::from_str(
@@ -224,8 +221,8 @@ fn footer<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
 
 /// 派生主题写了翻页字符 → 继承来的箭头图让位，字符才是作者要的东西。
 ///
-/// 这条不成立的话，任何 `base = "_base"` 的主题写 `prev_char` 都石沉大海，而
-/// 补救动作（`prev_image = { ref = "" }` 抵消一个自己没写过的默认值）无从猜起。
+/// 不成立的话 `base = "_base"` 的主题写 `prev_char` 都石沉大海，而补救写法
+/// （`prev_image = { ref = "" }`）无从猜起。
 #[test]
 fn explicit_char_drops_inherited_arrow_image() {
     let m = merged(
@@ -322,10 +319,8 @@ fn load_chain(tag: &str, base_toml: &str, derived_toml: &str) -> crate::schema::
 
 /// base 写简写、派生只覆盖其中一边时，其余三边必须还在。
 ///
-/// 归一化若排在整条链合并之后，这里是「非表 vs 表」的覆盖：`padding = [6, 8]` 整个被
-/// `{ left = 20 }` 顶掉，上右下凭空消失。`_base` 里简写用得到处都是（`padding = [6, 8]`、
-/// `margin = { left = 8 }`…），派生主题只想挪一边内边距是再常见不过的写法，两者一撞
-/// 就丢值，且主题照常加载、无报错无日志。
+/// 归一化若排在整条链合并之后，`padding = [6, 8]` 会被 `{ left = 20 }` 整个顶掉、上右下凭空
+/// 消失，且主题照常加载、无报错无日志。
 #[test]
 fn shorthand_in_base_survives_partial_override() {
     let t = load_chain(
@@ -343,10 +338,9 @@ fn shorthand_in_base_survives_partial_override() {
 
 /// 派生主题写一个纯色背景，就该把 base 那层的背景图盖掉 —— 整体重置，不是只换底色。
 ///
-/// 绘制顺序是底色 → 渐变 → 边框 → 背景图（`wind-ui/src/view.rs`），继承来的图若留着，
-/// 正好盖在派生刚写的底色上，表现是「派生的背景覆盖不生效」，而作者要抵消的是一个
-/// 自己从没写过的值。`background = "#0f0"` 这种标量写法在合并时是「标量 vs 表」，
-/// 靠的就是整体替换语义 —— 归一化若在合并前把它展成 `{ color = … }`，这条就没了。
+/// 绘制顺序是底色 → 渐变 → 边框 → 背景图（`wind-ui/src/view.rs`），继承来的图留着就盖在
+/// 派生的底色上。标量写法靠合并时「标量 vs 表」的整体替换语义——归一化若在合并前把它展成
+/// `{ color = … }`，这条就没了。
 #[test]
 fn scalar_background_in_derived_resets_inherited_image() {
     let t = load_chain(
@@ -364,10 +358,9 @@ fn scalar_background_in_derived_resets_inherited_image() {
 
 /// 派生主题把 slice_repeat 写错时，要退回拉伸，而不是静默继承 base 的 repeat。
 ///
-/// `expand_axes` 的注释承诺「认不出的形态一律丢弃 ⇒ 两轴拉伸」。它从前产出的是**空表**,
-/// 单层看没问题, 一进 base 深合并就什么也盖不住 —— 于是承诺反过来了: 作者写错一个值,
-/// 继承的 repeat 照旧生效, 而他以为自己把它关掉了。prev_image/layers 这类字段的归一化
-/// 排在合并之前（fill 里的那份已随背景一起延后），所以这条只在这几个字段上现形。
+/// `expand_axes` 承诺「认不出的形态一律丢弃 ⇒ 两轴拉伸」：若产出空表，进 base 深合并后
+/// 什么也盖不住，继承的 repeat 照旧生效。prev_image/layers 这类字段的归一化排在合并之前，
+/// 所以只在这几个字段上现形。
 #[test]
 fn bad_slice_repeat_in_derived_falls_back_to_stretch() {
     let t = load_chain(
@@ -395,9 +388,8 @@ fn bad_slice_repeat_in_derived_falls_back_to_stretch() {
 
 /// `[views.toolbar.button.mode.chinese]` 里的简写同样要展开。
 ///
-/// 归一化从前只把**扁平**的 `chinese`/`english` 搬进 `mode`，对已存在的 `mode` 表既不
-/// 递归也不合并（直接整块替换）。于是这种写法里的 `padding = 5` 走到 serde 是
-/// `invalid type: integer 5`，**整份主题加载失败**。
+/// 归一化对已存在的 `mode` 表也要递归，否则 `padding = 5` 到 serde 是
+/// `invalid type: integer 5`，整份主题加载失败。
 #[test]
 fn shorthand_inside_nested_toolbar_mode_is_expanded() {
     let t = load_chain(
@@ -432,9 +424,8 @@ fn shorthand_inside_nested_toolbar_mode_is_expanded() {
 
 /// 两层用不同书写形态（base 规范嵌套 / 派生扁平）时，两边的节点都要留下。
 ///
-/// 归一化排在合并之后的话，这两种形态在合并阶段是互不相干的两个键，最后归一化时
-/// `views` 被整块替换，base 那份连同里面别的节点一起蒸发 —— 箭头看着还对（派生自己
-/// 写了），丢的是 `views.item` 这类没人会去核对的东西。
+/// 归一化排在合并之后的话，两种形态在合并阶段是互不相干的两个键，最后 `views` 被整块
+/// 替换，base 那份连同 `views.item` 这类节点一起蒸发。
 #[test]
 fn mixed_writing_forms_keep_both_sides() {
     let t = load_chain(
@@ -455,9 +446,8 @@ fn mixed_writing_forms_keep_both_sides() {
     );
 }
 
-/// 规范嵌套形态里写简写不该炸：`normalize_node` 从前不作用于已存在的 `views` 表，
-/// 于是 `[views.window] padding = 6` 走到 serde 那里是 `invalid type: integer 6`,
-/// **整份主题加载失败**（不是这一项失效，是全盘皆输）。
+/// 规范嵌套形态里写简写不该炸：`normalize_node` 也要作用于已存在的 `views` 表，否则
+/// `[views.window] padding = 6` 到 serde 是 `invalid type: integer 6`，整份主题加载失败。
 #[test]
 fn shorthand_inside_nested_views_is_expanded() {
     let t = load_chain(
@@ -478,10 +468,8 @@ fn shorthand_inside_nested_views_is_expanded() {
 
 /// 走**真实加载链**（写盘 → load_typed_dirs → 合并 → normalize → 类型化）验一次让位。
 ///
-/// 上面那几条都直接调 `drop_inherited_arrow_images`，于是把 `load_merged_dirs_at` 里那行
-/// 调用删掉，它们一条都不会红 —— 而「字段/规则存在但没接到链上」正是这两笔修的 bug 本体
-/// （渲染层不读 prev_char），同一个坑不能在测试侧再踩一次。这条从磁盘上的两份 toml 出发，
-/// 挂得住调用点、normalize 与类型化整条链。
+/// 上面几条直接调 `drop_inherited_arrow_images`，删掉 `load_merged_dirs_at` 里那行调用
+/// 它们不会红；这条从磁盘上两份 toml 出发，挂住调用点、normalize 与类型化整条链。
 #[test]
 fn inherited_image_yields_through_the_real_load_chain() {
     let dir = std::env::temp_dir().join(format!("wind_theme_arrow_chain_{}", std::process::id()));
