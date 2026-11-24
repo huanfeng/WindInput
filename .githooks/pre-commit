@@ -50,3 +50,10 @@ if [ -n "$bad" ]; then
 fi
 
 echo "[pre-commit] fmt OK"
+
+# 注释增量提示：只扫本次新增的行，只提示不拦截（拦截会逼人走 --no-verify）。
+hints=$(git diff --cached -U0 --diff-filter=AM -- '*.rs' | awk -v MAX=12 -f "$ROOT/.githooks/comment-lint.awk")
+if [ -n "$hints" ]; then
+    echo "[pre-commit] 注释提示（不拦截；约定见 AGENTS.md「注释与测试组织」）："
+    printf '%s\n' "$hints"
+fi
