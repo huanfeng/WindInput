@@ -59,9 +59,7 @@ impl SyllableTrie {
     /// 只影响 [`Self::match_at`]，即「切分时这段码算不算一条边」；
     /// `is_syllable`/`is_prefix` 保持严格，见 [`Self::fuzzy_root`] 的说明。
     /// 由 `PinyinEngine::with_fuzzy` 在构造期调用一次，不进按键热路径。
-    /// ⚠️ **整表替换，不是累加**：`with_fuzzy` 是链式 builder，可以被调第二次。若只累加，
-    /// 前一次配置里那些「后来被关掉的组」的拼写会残留在图上，表现为「模糊音某组关了却还
-    /// 生效」——而且只在链式调用两次时才复现，极难查。
+    /// 整表替换，不是累加：`with_fuzzy` 可被链式调用两次，累加会让已关掉的组残留生效。
     pub fn load_fuzzy_spellings(&mut self, spellings: &[String]) {
         self.fuzzy_root = TrieNode::default();
         self.has_fuzzy = !spellings.is_empty();
@@ -157,14 +155,14 @@ pub const STANDARD_SYLLABLES: &[&str] = &[
     // （`Candidate::is_zero_weight_reading`，nun/zhei 同理）；嗲(dia=182) 有权重，`dx` 仍首选嗲
     // ——小鹤 dx 就是 dia，这是方案定义本身。
     //
-    // 刻意**不收**（词库 41448 / 8105 里有、但不是普通话规范音节）：
+    // 刻意不收（词库 41448 / 8105 里有、但不是普通话规范音节）：
     // - `yai`(崖)：台湾国语读音，普通话读 yá；`lvan`(娈孪挛)：普通话读 luán，lüan 不是
     //   普通话音节，且补了会破坏 `spelling.rs` 的 ü 归一化穷尽性前提；
     // - `nia`(娘)、`pia`(啪)、`fong`(甮)、`wong`(𥥈)、`fiao`(覅)：方言 / 象声，《现汉》不作
     //   普通话音节（fiao 仅标〈方〉）；
     // - `eh`(诶)：rime 对 ê 的转写，不是《汉语拼音方案》拼式；
     // - `biang`(𰻝)：不在《通用规范汉字表》。
-    // 另有实测代价：补 `eh`/`wong`/`fong`/`pia` 后，`eh`→「恶化」、`wong`→「我能够」这类
+    // 另有代价：补 `eh`/`wong`/`fong`/`pia` 后，`eh`→「恶化」、`wong`→「我能够」这类
     // 简拼 / 残码打法整屏只剩一个生僻字。
     "dia", "sei", "cei",
 ];
@@ -228,12 +226,10 @@ impl SyllableTrie {
     }
 }
 
-/// 拼音词条码 `code` 能否切回**合法全拼音节序列**——临时词自动晋升进用户库前的校验
-/// （协调层 `maybe_promote_temp`）。
-///
-/// 旧版 ②b 混合整句按击键混合码造词（`bzdnihao`、边界按击键逐字母记），这类记录打不出来，
-/// 晋升进用户库就成了永久坏码。判据：
-/// - 有边界：按**记录自己的**边界切（[`super::mixed_abbrev::syllables_from_boundary`]，与简拼、
+/// 拼音词条码 `code` 能否切回合法全拼音节序列——临时词自动晋升进用户库前的校验
+/// （协调层 `maybe_promote_temp`），挡住按击键混合码造出的记录（`bzdnihao`），
+/// 免得它晋升成用户库里的永久坏码。判据：
+/// - 有边界：按记录自己的边界切（[`super::mixed_abbrev::syllables_from_boundary`]，与简拼、
 ///   混合判据同一个切法），每段都须是标准音节（[`SyllableTrie::is_syllable`]，不含模糊拼写层）；
 /// - 边界为 0（无信息：手输码、v1 遗留、拼接超 64 字节或任一段缺边界时造词置 0）或码长超 64
 ///   （边界表达不下）：退而问「整码能否被标准音节表切满」（[`super::dag::Dag::build_strict`]）。

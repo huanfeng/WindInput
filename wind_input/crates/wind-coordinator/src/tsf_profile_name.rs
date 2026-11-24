@@ -1,19 +1,12 @@
 //! TSF 语言配置文件显示名（HKLM）的读写——`system.dota2_compat` 的落地动作。
 //!
-//! **为什么要改这个名字**：Dota 2（起源2 引擎）的 `imemanager.dll` 内置一张硬编码的
-//! 输入法白名单，按注册表里该输入法的 TSF Profile Description 做**全等**比对
-//! （`V_stricmp_fast`/`V_wcsicmp`，非子串）。命中的走「取候选 → 游戏自己画」；
-//! 未命中的在 `WM_IME_NOTIFY` 第一道闸门就被打发到 `DefWindowProc`，于是候选永远
-//! 取不到，还会多出一个系统默认 IME 小窗。这是游戏那侧写死的，数据侧绕不过去——
-//! 完整证据与九条已实测证伪的方向见 `docs/design/game-compat-tsf-uielement.md` §1.1。
+//! Dota 2 的 `imemanager.dll` 按 TSF Profile Description 全等匹配一张硬编码的输入法白名单，
+//! 未命中就取不到候选。这是游戏侧写死的，只能改名绕过；证据与证伪过的方向见
+//! `docs/design/game-compat-tsf-uielement.md` §1.1。
 //!
-//! ⚠️ 写的是 **HKLM**，必须以管理员权限运行；非提权进程会得到 `ERROR_ACCESS_DENIED`（5）。
-//! 调用方（设置程序）负责用 `runas` 提权拉起 `wind_input system dota2-compat on|off`。
-//!
-//! ⚠️ 名字本身由调用方**显式传入**，本模块不读配置——理由同 `system_cli` 文件头：
-//! 提权到另一个管理员账户时读到的 `%APPDATA%` 未必是拧开关那个用户的。
-//!
-//! ⚠️ 生效时机：宿主是在**自己启动时**读这个名字的，改完必须重启游戏。
+//! 写的是 HKLM，须管理员权限（否则 `ERROR_ACCESS_DENIED`）；设置程序负责用 `runas` 拉起
+//! `wind_input system dota2-compat on|off`。名字由调用方显式传入、本模块不读配置：提权到
+//! 另一个管理员账户时读到的 `%APPDATA%` 未必是拧开关那个用户的。游戏启动时读名字，改完须重启游戏。
 
 use std::io;
 
@@ -24,8 +17,8 @@ use crate::direct_switch::tip_guid_strings;
 
 /// Dota 2 白名单里选定的默认别名。
 ///
-/// 自 2026-09 起这只是**出厂值**：用户可在 `system.dota2_compat_name` 里改成表里的
-/// 任何一条（理由见该字段的文档）。真值定义在 `wind-config`，与 serde 的 default 同源。
+/// 只是出厂值：用户可在 `system.dota2_compat_name` 里改成表里的任何一条。
+/// 真值定义在 `wind-config`，与 serde 的 default 同源。
 pub use wind_config::DEFAULT_DOTA2_ALIAS as DOTA2_ALIAS;
 
 /// 别名清洗与校验。定义在 `wind-config`（纯逻辑、与注册表无关，且要跟出厂值同源），
@@ -34,13 +27,9 @@ pub use wind_config::sanitize_dota2_alias as sanitize_alias;
 
 /// 「当前登记的这个名字是我们自己写上去的」的记录值名，落在本应用自己的 HKLM 键下。
 ///
-/// **为什么需要它**：`RegisterProfile()` 无条件覆盖 `Description`，安装/升级重跑一次
-/// 就会把用户的别名冲掉（设置页仍显示「已开启」，用户只会在某次更新后发现游戏里又
-/// 打不出字）。C++ 侧原先靠「当前值是否等于那个硬编码别名」来决定要不要保留——名字
-/// 可配置之后这条判据失效，故改为由本模块把选定的名字记下来，C++ 读它比对。
-///
-/// ⛔ 别把 C++ 那侧放宽成「保留任何非真名的值」：那会把误写与脏值也一并固化下来。
-/// 读取方见 `wind_tsf/src/Register.cpp` 的 `_ProfileNameToRegister()`。
+/// `RegisterProfile()` 无条件覆盖 `Description`，安装/升级会冲掉用户的别名；C++ 侧
+/// （`wind_tsf/src/Register.cpp` 的 `_ProfileNameToRegister()`）读这条记录，当前值等于它才保留。
+/// 别把那侧放宽成「保留任何非真名的值」，那会把误写与脏值也固化下来。
 const ALIAS_VALUE: &str = "Dota2CompatAlias";
 
 /// 本应用在 HKLM 下的自有键。与 `wind_tsf/include/Globals.h` 的 `WIND_APP_REGKEY`
@@ -54,10 +43,8 @@ const LANGID_SUBKEY: &str = "0x00000804";
 
 /// 本输入法的真实显示名。
 ///
-/// ⚠️ **跨语言重复，无编译期约束**：必须与 `wind_tsf/include/Globals.h` 的
-/// `TEXTSERVICE_NAME` 逐字一致。改那边要同步改这里，否则关闭开关后名字会被还原成
-/// 一个错的字符串（且只在用户关开关时才暴露）。与本文件复用的 `tip_guid_strings()`
-/// 同一性质的约定——那边也是照抄 `Globals.cpp` 的 GUID。
+/// 须与 `wind_tsf/include/Globals.h` 的 `TEXTSERVICE_NAME` 逐字一致（跨语言、无编译期约束），
+/// 否则关闭开关时名字会被还原成错的字符串。
 fn real_name() -> &'static str {
     if wind_config::variant::is_dev() {
         "清风输入法 (开发版)"
@@ -94,18 +81,14 @@ pub fn current_description() -> io::Result<Option<String>> {
 /// 幂等：已经是目标值时直接回 `Ok(false)`（未改动），便于调用方少弹一次 UAC 之外的噪音。
 /// 返回 `Ok(true)` 表示确实写了。
 ///
-/// ⚠️ 记录值（[`ALIAS_VALUE`]）与 `Description` **不是原子写**：中间失败会留下
-/// 「名字改了、记录没跟上」。取舍是让记录值滞后而非抢先——记录值多了会让
-/// `RegisterProfile` 保留一个并不存在的别名（无害，下次落地即纠正），记录值少了
-/// 只是退化回「重装冲掉别名」的老行为。故先写 `Description` 再写记录值。
+/// 记录值（[`ALIAS_VALUE`]）与 `Description` 不是原子写，故先写 `Description` 再写记录值：
+/// 中途失败时记录值滞后，最坏只是重装冲掉别名，不会让 `RegisterProfile` 保留一个不存在的名字。
 pub fn set_dota2_compat(enabled: bool, alias: &str) -> io::Result<bool> {
     let target = if enabled {
         let t =
             sanitize_alias(alias).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-        // ⛔ 别名不能等于真实名。那样记录值里存的就是真实名，`Register.cpp` 的
-        // 「等于记录值就保留」恒成立 —— 当下无害（值本来就一样），但真实名将来一改
-        // （版本号、品牌、`TEXTSERVICE_NAME` 调整），profile 就被永久钉在旧名上且无提示。
-        // 何况「登记成自己的真名」正是**关闭**的语义，走开关即可。
+        // 别名不能等于真实名：否则记录值存的是真实名，将来 `TEXTSERVICE_NAME` 一改，
+        // profile 会被 `Register.cpp` 永久钉在旧名上。登记成真名本就是「关闭」的语义。
         if t == real_name() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -121,7 +104,7 @@ pub fn set_dota2_compat(enabled: bool, alias: &str) -> io::Result<bool> {
     };
     let path = profile_key_path();
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-    // 只开已存在的键，**不创建**：键不在说明 TSF 组件根本没注册，此时凭空造一个
+    // 只开已存在的键，不创建：键不在说明 TSF 组件根本没注册，此时凭空造一个
     // 半截的 LanguageProfile 只会让系统多出一个点不开的输入法条目。
     let key = hklm.open_subkey_with_flags(&path, KEY_READ | KEY_SET_VALUE)?;
     let unchanged = key
@@ -130,22 +113,16 @@ pub fn set_dota2_compat(enabled: bool, alias: &str) -> io::Result<bool> {
     if !unchanged {
         key.set_value("Description", &target)?;
     }
-    // 即便 Description 没变也要把记录值补上：旧版本装机改过名却没有这个值，
-    // 不补就永远补不上（幂等分支每次都提前 return），重装照样冲掉用户的别名。
+    // Description 没变也要补记录值：旧版本改过名的机器没有这个值，不补就永远补不上。
     record_alias(enabled.then_some(target.as_str()))?;
     Ok(!unchanged)
 }
 
 /// 系统侧的当前状态 —— 「注册表里到底是什么」的单一出口。
 ///
-/// **为什么设置程序要读它**：设置页此前的基线全部来自 config.toml，从不看注册表，
-/// 于是两者一旦漂移就永远自愈不了 —— `base == now` 恒成立 ⇒ 不判脏 ⇒ 落地动作直接
-/// return，用户唯一的出路是「关掉再打开」两次 UAC，而界面没有任何提示说要这么做。
-/// 漂移来源不止一处：升级重注册、别的输入法、手工改注册表。
-///
-/// 设置程序跑在普通用户上下文，读 HKLM 不需要提权，故它经 `system dota2-compat
-/// status --json` 拿这份快照。⛔ 别让它自己去拼注册表路径 —— 那要把 CLSID/profile
-/// GUID 再抄一份，是新的漂移源。
+/// 设置程序以它而不是 config.toml 为基线，注册表被升级重注册、别的输入法或手工改动
+/// 漂移后才能判脏并重新落地。它经 `system dota2-compat status --json`（读 HKLM 无需提权）
+/// 拿这份快照；别让它自己拼注册表路径，那要把 CLSID/profile GUID 再抄一份。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AliasStatus {
     /// TSF LanguageProfile 键在不在。反注册之后（升级过程中）它会整个消失。
@@ -182,8 +159,7 @@ impl AliasStatus {
 
     /// 系统里此刻用的是哪个别名。未启用时回 `None`。
     ///
-    /// 优先取记录值：它是我们自己写的、跨重注册也在；`description` 只是回退，
-    /// 用于老装机（2026-09 之前开的兼容还没有记录值）。
+    /// 优先取记录值（跨重注册也在）；`description` 是给还没有记录值的老装机的回退。
     pub fn alias_now(&self) -> Option<&str> {
         if !self.enabled_now() {
             return None;
@@ -194,8 +170,7 @@ impl AliasStatus {
 
 /// 读回已登记的别名。没开兼容（或老版本装机）时回 `Ok(None)`。
 ///
-/// 供 `system dota2-compat status` 展示：排查「升级后别名没了」时第一个要看的就是它
-/// ——`Register.cpp` 能不能在重装后认出用户的选择，全靠这个值在不在。
+/// 供 `system dota2-compat status` 展示：`Register.cpp` 重装后能否认出用户的别名全靠它。
 pub fn recorded_alias() -> io::Result<Option<String>> {
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
     match hklm.open_subkey_with_flags(app_key_path(), KEY_READ) {
@@ -212,9 +187,8 @@ pub fn recorded_alias() -> io::Result<Option<String>> {
 
 /// 写下（或清掉）「我们登记的别名」这条记录。
 ///
-/// 键不存在时**创建**——与上面 LanguageProfile 那条相反：那是系统的键，不在就意味着
-/// 没注册；这是我们自己的键，三个部署方都会写 `InstallDir` 到这儿，但便携/手工部署
-/// 下未必已经建好，缺了就自己建，不该因此让整个开关失败。
+/// 键不存在时创建（与 LanguageProfile 相反）：这是本应用自己的键，便携/手工部署下未必已建好，
+/// 不该因此让整个开关失败。
 fn record_alias(alias: Option<&str>) -> io::Result<()> {
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
     let (key, _) = hklm.create_subkey(app_key_path())?;

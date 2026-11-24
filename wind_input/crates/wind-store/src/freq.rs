@@ -1,13 +1,13 @@
-//! 用户词频（redb）—— 与权重**彻底解耦**的新模型
+//! 用户词频（redb）—— 与权重解耦
 //!
-//! 见 docs/redesign/frequency.md：词频只记真实数据 `{count, last_used}`，不再加到 weight、
-//! 不再有 streak/boost。作为**排序独立维度**：码表用 count（used-first），拼音用衰减分。
+//! 见 docs/redesign/frequency.md：词频只记真实数据 `{count, last_used}`，不加到 weight。
+//! 作为排序独立维度：码表用 count（used-first），拼音用衰减后的位置提升
+//! （`docs/design/freq-rerank-model.md`）。
 //!
 //! redb FREQ 表，key=`"{schema}\0{code}\0{text}"`（store.md §2，统一 \0 分隔），value 定长 12B
 //! （count u32 + last_used i64）。
 //!
-//! 说明：本文件另保留 legacy `FreqTracker`（文件式，供 coordinator 过渡期使用），将在
-//! coordinator 接通 redb 词频时移除。
+//! 本文件另保留 legacy `FreqTracker`（文件式），目前只有它自己的单测在用。
 
 use crate::store::Store;
 use serde::{Deserialize, Serialize};
@@ -57,12 +57,9 @@ impl FreqProfile {
         (-std::f64::consts::LN_2 * age_hours / self.half_life_hours).exp()
     }
 
-    /// ⚠️ **当前生产路径不再调用本函数**（仅其自身单测使用）。
-    ///
-    /// 拼音侧已改为**位置提升**模型（`docs/design/freq-rerank-model.md`），只取
-    /// [`Self::decay_factor`]，不做打分。本函数连同它依赖的 `base_scale` / `recency_peak`
-    /// 两个配置项一并成为死链——保留而非删除，是因为删配置项要跨仓改 `wind-setting`
-    /// 的五道守门测试，且将来若恢复打分模型可直接复用。
+    /// 当前生产路径不调用本函数（仅其自身单测使用）：拼音侧只取 [`Self::decay_factor`]
+    /// 做位置提升。连同 `base_scale` / `recency_peak` 两个配置项暂留，删配置项要跨仓改
+    /// `wind-setting` 的守门测试。
     ///
     /// 拼音词频衰减分（frequency.md §4）：
     /// `(base_scale * log2(count+1) + recency_peak) * exp(-ln2*age/half_life)`。
@@ -280,9 +277,9 @@ impl Store {
     }
 }
 
-// ───────────────────────── legacy（过渡期，待 coordinator 接通后移除）─────────────────────────
+// ───────────────────────── legacy（无生产调用方）─────────────────────────
 
-/// 运行时词频跟踪器（文件式，简化模型；coordinator 过渡期使用，新代码请用 Store 的 redb 词频）。
+/// 运行时词频跟踪器（文件式，简化模型；无生产调用方，新代码请用 Store 的 redb 词频）。
 pub struct FreqTracker {
     freq_map: RwLock<HashMap<String, u32>>,
     profile: FreqProfile,

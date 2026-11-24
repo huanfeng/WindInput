@@ -1,7 +1,7 @@
 //! 触发键名 ↔ 虚拟键码（VK）统一映射。
 //!
 //! 所有独占模式（临时拼音 / 快捷输入 / 特殊模式）共用此表，避免各写各的键名解析
-//! 导致「某模式认得 backslash、某模式不认」的不一致（曾因此使特殊模式无法触发）。
+//! 导致「某模式认得 backslash、某模式不认」。
 //!
 //! 单一真相源是 [`KEY_TABLE`]：每行用具名 VK 常量声明「VK + 组合区前缀字符 + 键名别名」，
 //! [`key_name_to_vk`] 与 [`vk_to_prefix_char`] 两个方向均由它派生，新增键只改一处。
@@ -76,9 +76,9 @@ pub struct SessionKey {
     pub printable: bool,
 }
 
-/// 会话态功能键名 → VK。**不含符号键**（那些走 [`KEY_TABLE`]，且 `printable = true`）。
+/// 会话态功能键名 → VK。不含符号键（那些走 [`KEY_TABLE`]，且 `printable = true`）。
 ///
-/// 只收「有会话时确实需要重新绑定」的键。刻意**不收** `enter` / `space` / `backspace`：
+/// 只收「有会话时确实需要重新绑定」的键。刻意不收 `enter` / `space` / `backspace`：
 /// 它们各自已有专属的策略参数（`input.enter_behavior` / `input.space_on_empty_behavior` /
 /// 退格粒度），那是枚举形状而非绑定形状，混进本表会形成两个真相源。理由见
 /// docs/design/session-key-actions.md §6.1。
@@ -99,8 +99,8 @@ const SESSION_FUNCTION_KEYS: &[(&str, u32)] = &[
     ("capslock", VK_CAPITAL),
     ("caps", VK_CAPITAL),
     // 纯修饰键：作二三候选键时走 keyup 轻敲（`select_key_groups = ["lrctrl"]` 的收编形态）。
-    // ⚠️ 别名须与 `wind_config::hotkey::session_key_to_vk` 逐字一致——两份表漂移会让绑定
-    // 「进了 TSF 转发白名单却查不到动作」，无任何报错。一期漏了这四个，三期补上。
+    // 别名须与 `wind_config::hotkey::session_key_to_vk` 逐字一致——两份表漂移会让绑定
+    // 「进了 TSF 转发白名单却查不到动作」，无任何报错。
     ("lshift", VK_LSHIFT),
     ("rshift", VK_RSHIFT),
     ("lctrl", VK_LCONTROL),
@@ -124,7 +124,7 @@ const SESSION_FUNCTION_KEYS: &[(&str, u32)] = &[
 
 /// 会话态键名 → [`SessionKey`]。大小写与首尾空白不敏感；不认的名字返回 `None`。
 ///
-/// 支持单个 `shift+` 前缀（`shift+tab`）。**刻意不认 `ctrl+` / `alt+`**：带这两个修饰的
+/// 支持单个 `shift+` 前缀（`shift+tab`）。刻意不认 `ctrl+` / `alt+`：带这两个修饰的
 /// 组合键归 `keys.key_actions`（key_down 热键表）——它们无会话时同样要能触发，与本表
 /// 「只在组合输入期间改写键义」的语义不同，混收会让同一个组合键有两个注册入口。
 pub fn session_key_name_to_vk(name: &str) -> Option<SessionKey> {
@@ -140,7 +140,7 @@ pub fn session_key_name_to_vk(name: &str) -> Option<SessionKey> {
             printable: false,
         });
     }
-    // ★ 字母里**只收 z**，且 `printable: true`（它确实产出字符，文本模式下要让位）。
+    // 字母里只收 z，且 `printable: true`（它确实产出字符，文本模式下要让位）。
     // 键名表另一半在 `wind_config::hotkey::session_key_to_vk`，那里写着为什么只收 z。
     // 两处漂移的表现是「进了 TSF 转发白名单却查不到动作」，靠
     // `session_key_tables_agree_across_crates` 守门。
@@ -158,13 +158,13 @@ pub fn session_key_name_to_vk(name: &str) -> Option<SessionKey> {
     })
 }
 
-/// 该 VK 是否**只有 keyup 到得了服务端**（纯修饰键与 CapsLock）。
+/// 该 VK 是否只有 keyup 到得了服务端（纯修饰键与 CapsLock）。
 ///
 /// 这批键绑任何功能都只能走 keyup 轻敲：keydown 不能吃（吃掉会让 AutoCAD 看不到修饰键）、
 /// keydown 上判定会让 `Ctrl+A` 的第一下误触发、宿主对按住的键重复发 keydown 会连续触发。
 /// 详见 docs/design/schema-key-actions.md §4.4。
 ///
-/// ⚠️ CapsLock 与那四个修饰键**不连号**，故不能用 `VK_LSHIFT..=VK_RCONTROL` 区间判定
+/// CapsLock 与那四个修饰键不连号，故不能用 `VK_LSHIFT..=VK_RCONTROL` 区间判定
 /// ——那样写会把 CapsLock 漏成「可走 keydown」，而 C++ 侧压根不发它的 keydown。
 pub fn is_key_up_only_vk(vk: u32) -> bool {
     matches!(vk, VK_LSHIFT..=VK_RCONTROL | VK_CAPITAL)
@@ -193,15 +193,9 @@ struct Bind<A> {
 /// 配置驱动的会话态按键分类器。从 `keys.session_actions` 编译一次，普通模式与所有 overlay
 /// 模式共用 [`classify`](KeyBinds::classify)，消除各处硬编码的翻页/高亮/取消判断。
 ///
-/// # 为什么对动作类型泛型
-///
-/// 动作值域（`SessionAction`）住在 `wind-config`，而本 crate 是它的**下游**——
-/// `wind-config` 经 `wind-cmdbar` 反向依赖本 crate，写死类型就得加依赖，那会成环。
-/// 泛型让本表只管「键名 → 命中」这件事，动作是什么由调用方（协调器，唯一同时看得见
-/// 两个 crate 的地方）决定。
-///
-/// 一期只有导航动词时这里写死的是 `NavAction`，二期加 `cancel` 时立刻不够用了——
-/// ★ 判据：**一张「键 → 动作」的表，动作类型就不该由表来规定**。
+/// 对动作类型泛型：动作值域（`SessionAction`）住在 `wind-config`，而 `wind-config` 经
+/// `wind-cmdbar` 反向依赖本 crate，写死类型会成环。本表只管「键名 → 命中」，动作由调用方
+/// （协调器）决定。
 #[derive(Clone)]
 pub struct KeyBinds<A> {
     binds: Vec<Bind<A>>,
@@ -235,10 +229,8 @@ impl<A> Bind<A> {
 impl SessionKey {
     /// 这条键定义是否匹配一次按键事件。
     ///
-    /// ★ **匹配规则的单一来源**：[`KeyBinds::classify`] 的 `.find()` 谓词走本方法，方案级
-    /// `[session_actions]` 按键名逐条比对时也走本方法。三个条件（VK、shift、可打印键在
-    /// 文本模式下让位）分散成两份的表现是「同一个键在方案级和全局下行为不一致」，而那种
-    /// 不一致只在同时配了两层的用户那里复现。
+    /// 匹配规则的单一来源：[`KeyBinds::classify`] 与方案级 `[session_actions]` 的逐条比对都走
+    /// 本方法，分散成两份会让同一个键在方案级和全局下行为不一致。
     pub fn matches(&self, key_code: u32, shift: bool, include_printable: bool) -> bool {
         self.vk == key_code && self.shift == shift && (include_printable || !self.printable)
     }
@@ -247,17 +239,13 @@ impl SessionKey {
 impl<A: Clone> KeyBinds<A> {
     /// 从 (键名, 动作) 对编译。键名解析走 [`session_key_name_to_vk`]。
     ///
-    /// 数据源是 `keys.session_actions`（旧的 `page_keys` / `highlight_keys` 组名已在
-    /// `Config::normalize` 里折算进那张表）。本函数只认**已解析好的动作**，不解析动词
-    /// 字符串——动词值域住在 `wind-config` 的 `SessionAction`，而本 crate 是它的下游；
-    /// 在这里再写一份解析就是两处慢慢漂移。映射由协调器做，那里同时依赖两个 crate。
+    /// 数据源是 `keys.session_actions`（`page_keys` / `highlight_keys` 组名已在 `Config::normalize`
+    /// 折算进来）。只认已解析好的动作，动词解析由协调器做（理由同类型文档）。
     ///
-    /// ★ **顺序即优先级**：[`classify`](Self::classify) 用 `.find()` 取第一个匹配，同一个
-    /// (键, shift) 被声明两次时**先来的赢**。旧实现按「page 组全部 push 完再 push highlight
-    /// 组」建表，于是 `tab` 两组都配时 page 赢——调用方的折算必须复现这条，否则用户会
-    /// 遇到「一直用的 Tab 突然从翻页变成移高亮」。
+    /// 顺序即优先级：[`classify`](Self::classify) 用 `.find()` 取第一个匹配，同一 (键, shift)
+    /// 声明两次时先来的赢。调用方折算时须保持 page 组在 highlight 组之前（`tab` 两组都配时翻页）。
     ///
-    /// 不认的键名**静默跳过**：本函数无日志依赖，告警由调用方在加载期发（那里才分得清
+    /// 不认的键名静默跳过：本函数无日志依赖，告警由调用方在加载期发（那里才分得清
     /// 「拼错了」与「显式 none」）。
     pub fn from_binds<'a>(binds: impl IntoIterator<Item = (&'a str, A)>) -> Self {
         let binds = binds
@@ -365,7 +353,7 @@ pub fn key_name_to_vk(name: &str) -> Option<u32> {
 
 /// 同 [`key_name_to_vk`]，但额外接受单字母 a-z。
 ///
-/// **不再供引导键使用**——引导键（临拼 / 特殊模式 / 临时 mix 的 `trigger_keys`）一律只认
+/// 不供引导键使用——引导键（临拼 / 特殊模式 / 临时 mix 的 `trigger_keys`）一律只认
 /// 符号键，字母的特殊能力走方案级 `schema.codetable.z_key_action`。当前唯一消费者是
 /// `key_inject`（按键注入按名字找 VK，与引导键语义无关）。
 pub fn key_name_to_vk_with_letters(name: &str) -> Option<u32> {
@@ -381,11 +369,10 @@ pub fn key_name_to_vk_with_letters(name: &str) -> Option<u32> {
     None
 }
 
-/// 全部符号键的「规范名 + 组合区字符」。规范名取 [`KEY_TABLE`] 每行的**首个**别名。
+/// 全部符号键的「规范名 + 组合区字符」。规范名取 [`KEY_TABLE`] 每行的首个别名。
 ///
-/// 供跨仓边界回答「这个键在某方案里是不是码元」——设置页只认键名，而码元集是字符集，
-/// 两边需要一张对照表。放在这里而不是让设置页自己拼：`KEY_TABLE` 增删时，那边不会
-/// 跟着改，表现为新键的冲突提示永远不出（跨仓契约无编译期约束，本仓已栽过）。
+/// 供设置页回答「这个键在某方案里是不是码元」（设置页只认键名，码元集是字符集）。
+/// 放在这里而不让设置页自己拼：跨仓无编译期约束，`KEY_TABLE` 增删时那边不会跟着改。
 pub fn symbol_keys() -> impl Iterator<Item = (&'static str, char)> {
     KEY_TABLE.iter().filter_map(|d| {
         let name = d.names.first()?;
@@ -396,16 +383,9 @@ pub fn symbol_keys() -> impl Iterator<Item = (&'static str, char)> {
 /// 纯修饰键名 → VK（`lshift` / `rshift` / `lctrl` / `rctrl`，别名见实现）。
 /// 大小写与首尾空白不敏感；非修饰键返回 None。
 ///
-/// # 为什么单开一张表，不并进 [`KEY_TABLE`]
-///
-/// `KEY_TABLE` 是**引导键**的配置解析入口（`trigger_keys` 五处、`special_trigger_vk`），
-/// 而引导键走 keydown。修饰键在 keydown 上根本不工作——它必须走 keyup 轻敲
-/// （keydown 不能吃、`Ctrl+A` 的第一下会误触发、按住会连触发，见
-/// `KeyEventSink.cpp::_IsPureModifierKey`）。并进去就等于让引导键的设置项接受一个
-/// 「配得上、永远不触发」的值，与临拼触发键里那个失效的 `z` 选项同型（已修，勿再造）。
-///
-/// 另一半理由是 `KeyDef.prefix`：修饰键没有字符，填什么都是假的，而 `vk_to_prefix_char`
-/// 拿它写组合区。
+/// 不并进 [`KEY_TABLE`]：那是走 keydown 的引导键的解析入口，而修饰键必须走 keyup 轻敲
+/// （见 [`is_key_up_only_vk`]），并进去会让引导键设置项接受一个永远不触发的值；修饰键也
+/// 没有可填进 `KeyDef.prefix` 的字符。
 ///
 /// 当前唯一消费者是方案级 `[key_actions]`（见 `Coordinator::bound_action_for`）。
 pub fn modifier_name_to_vk(name: &str) -> Option<u32> {
@@ -443,12 +423,8 @@ pub fn vk_to_prefix_char(vk: u32) -> Option<char> {
 
 /// 同 [`vk_to_prefix_char`]，但字母 VK 返回其小写字母。
 ///
-/// 与 [`key_name_to_vk`] 拒绝字母**不矛盾**——两者方向与职责不同：
-/// - `key_name_to_vk`（名字 → VK）是**配置解析**，必须严格。认了字母就等于允许把编码键
-///   配成引导键，而全局配置无从表达「这张码表里它是死码」。
-/// - `vk_to_prefix_char*`（VK → 字符）是**呈现**，字母有天然合法的显示形态。z 经方案级
-///   `z_key_action` 进模式后，组合区要显示用户按下的那个 `z`；用不带字母的版本会得到
-///   空前缀，用户看不到自己按了什么。
+/// 与 [`key_name_to_vk`] 拒绝字母不矛盾：那是配置解析，认字母等于允许把编码键配成引导键；
+/// 这是呈现，z 经 `z_key_action` 进模式后组合区要显示用户按下的那个 `z`。
 pub fn vk_to_prefix_char_with_letters(vk: u32) -> Option<char> {
     if let Some(c) = vk_to_prefix_char(vk) {
         return Some(c);

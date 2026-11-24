@@ -1,8 +1,7 @@
 //! 词典管理器：拥有 CompositeDict，作为引擎的统一查询面。
 //!
-//! 见 docs/redesign/dict.md。Rust 采用"每方案引擎各持一个 composite"的模型
-//! （EngineManager 已按方案缓存引擎），故 DictManager 是每方案 composite 的持有者 +
-//! 查询入口，而非 Go 那种"单 composite + 切换时换层"。
+//! 见 docs/redesign/dict.md。每方案引擎各持一个 composite（EngineManager 按方案缓存引擎），
+//! DictManager 是它的持有者 + 查询入口，切方案不换层。
 //!
 //! 词频（排序独立维度，frequency.md）与 shadow（Provider，引擎排序后应用）不在查询层。
 
@@ -70,7 +69,7 @@ impl DictManager {
         self.composite.search_abbrev_exact(abbrev, limit)
     }
 
-    /// 是否存在**严格长于** `prefix` 的编码（跨层，见 `DictLayer::has_longer_code`）。
+    /// 是否存在严格长于 `prefix` 的编码（跨层，见 `DictLayer::has_longer_code`）。
     pub fn has_longer_code(&self, prefix: &str) -> bool {
         self.composite.has_longer_code(prefix)
     }
@@ -88,7 +87,7 @@ impl DictManager {
     }
 
     /// 全量枚举各启用层的 `(code, text, weight)`，供离线索引构建。
-    /// ⚠️ O(全表)，只在索引构建这类一次性场合调用，绝不能进按键链路。
+    /// O(全表)，只在索引构建这类一次性场合调用，绝不能进按键链路。
     pub fn for_each_entry(&self, f: &mut dyn FnMut(&str, &str, i32)) {
         self.composite.for_each_entry(f);
     }
@@ -116,14 +115,14 @@ pub struct SystemDictLayer {
     enabled: std::sync::atomic::AtomicBool,
     /// 层级基序档位（见 DictLayer::base_order）。设计者经 [[dictionaries]].base_order 配置。
     base_order: i32,
-    /// 默认权重（`[[dictionaries]].default_weight`）：Some(w) 时**覆盖**本库所有条目的权重为 w。
-    /// 用于**无权重的附加库**——与带权重主库合并、按权重排序时，让其条目落在设计者选定的权重档，
+    /// 默认权重（`[[dictionaries]].default_weight`）：Some(w) 时覆盖本库所有条目的权重为 w。
+    /// 用于无权重的附加库——与带权重主库合并、按权重排序时，让其条目落在设计者选定的权重档，
     /// 而非因 weight=0 全部沉底。None = 用词库自身权重。
     default_weight: Option<i32>,
     /// 权重归一化（方案级 `[weight_spec]`，施加到本方案全部词库层）：Some 时把权重映射回
     /// 约定值域 `0~WEIGHT_RANGE_MAX`，使其与短语权重同轴可比。None = 不归一化（守约词库的常态）。
     ///
-    /// 与 `default_weight` 的分工：后者**抹平**整库权重（退化为文件顺序），前者**保序压缩**。
+    /// 与 `default_weight` 的分工：后者抹平整库权重（退化为文件顺序），前者保序压缩。
     /// 两者同时配时 `default_weight` 优先——它是更强的声明（「本库不参与权重排序」）。
     weight_norm: Option<crate::WeightNorm>,
     /// 越界告警的一次性闸门。见 [`SystemDictLayer::warn_out_of_range`]。
@@ -170,7 +169,7 @@ impl SystemDictLayer {
 
     /// 本层最终对外的权重：`default_weight` 覆盖 > `weight_norm` 归一化 > 词库原值。
     ///
-    /// ⚠️ 在**查询时**换算而非加载时改写：词库可能是 mmap 共享的只读产物（wdat），改不得；
+    /// 在查询时换算而非加载时改写：词库可能是 mmap 共享的只读产物（wdat），改不得；
     /// 且同一份词库可被多个方案以不同 `weight_spec` 引用。每次查询至多 `limit` 条、
     /// 每条两次 `ln`，开销可忽略。
     #[inline]
@@ -191,20 +190,10 @@ impl SystemDictLayer {
 
     /// 「权重越界且未配归一化」的一次性告警。
     ///
-    /// ## 为什么在**查询期**而不是加载期
-    ///
-    /// 加载期已有一份诊断（`ParseStats::log_weight_range`），但它只在**解析 yaml** 时触发，
-    /// 而词库一旦建了 `.wdat` 缓存就直接 mmap、不再解析。于是「老词库 + 新版本」这个最需要
-    /// 报警的组合**一次也不会响**（实测：首次加载报一次，删掉缓存才会再报）。
-    /// 查询期看到的是真实流过的权重，绕开了缓存这一层。
-    ///
-    /// ## 为什么需要它
-    ///
-    /// 协调器已删除 `PHRASE_WEIGHT_BASE`(40M)，短语改按自身权重与码表候选同场竞争。
-    /// 那个比较成立的前提是双方同轴：短语在 `0~10000`（默认 1000），本仓自产词库亦然
-    /// （五笔主库 median 941 / max 9999）。而 Rime 生态导入的方案常是未归一的原始词频
-    /// （虎码 p99=343,880），不配方案级 `[weight_spec]` 就会让短语全线沉底——**且没有任何
-    /// 报错**，用户只看到「我的短语突然没了」。本告警是这条静默失效路径上唯一的提示。
+    /// 短语按自身权重（`0~10000`）与码表候选同场竞争；未归一的导入词库不配 `[weight_spec]`
+    /// 会让短语静默沉底，本告警是唯一提示。放在查询期而非加载期：词库建了 `.wdat` 缓存后
+    /// 就不再解析 yaml，解析期诊断（`ParseStats::log_weight_range`）不会再响。
+    /// 见 `docs/design/dict-weight-normalization.md` §4.1。
     ///
     /// 只报一次：热路径上，且同一库的越界条目往往成千上万。
     /// 不打候选文本，只打词库名与权重数值（日志隐私红线）。
@@ -269,23 +258,15 @@ impl DictLayer for SystemDictLayer {
     }
 
     /// 词库文件路径 + 它的缓存摘要（[`crate::cache_fp::cache_digest`]：有 `.fp` 走内容指纹，
-    /// 无则 `大小:mtime`）+ **wdat 自身的 `大小:mtime`** + **两项权重换算参数**。
+    /// 无则 `大小:mtime`）+ wdat 自身的 `大小:mtime` + 两项权重换算参数。
     ///
     /// 换算参数必须在内：`for_each_entry` 报的是换算后的权重，同一个 wdat 换了
     /// `default_weight` / `weight_spec`，枚举出的权重就变了，只哈希文件会复用旧权重的索引。
     /// 内存词库（wdat 写失败的降级形态）没有稳定的磁盘产物 ⇒ `None`。
     ///
-    /// # 为什么 `.fp` 之外还要 wdat 自身的 `大小:mtime`
-    ///
-    /// `.fp` 是 wdat 旁边的另一个文件，与 wdat **不是原子地一起换**：重建 wdat 之后写 `.fp`
-    /// 失败，盘上就是「新 wdat + 旧 `.fp`」，只看 `.fp` 的摘要与换内容之前逐字相同，
-    /// 词组索引会静默召回已删掉的词组。wdat 只经整体替换（rename），换内容必改 mtime。
-    /// 代价是「内容没变、wdat 被重写」时多重建一次词组索引（百毫秒级）。
-    ///
-    /// ⚠️ 只混进**本方法**，不改共用的 `cache_digest`：后者是 `.wridx` 的指纹源，改它会让
-    /// 全体用户的反查索引白重建一次（大词库峰值数百 MB）。`.fp` 那一侧自 S2 起由内容寻址
-    /// 根治：重建永远写新文件名，旧 `.fp` 不可能挂到新 wdat 旁；本方法混入的 `大小:mtime`
-    /// 仍挡住「实际文件被外部原地改写」这一种现场。
+    /// wdat 自身的 `大小:mtime` 挡住「文件被外部原地改写」而 `.fp` 摘要不变的情形；代价是
+    /// wdat 内容没变但被重写时多重建一次词组索引（百毫秒级）。只混进本方法、不改共用的
+    /// `cache_digest`：后者是 `.wridx` 的指纹源，改它会让全体用户的反查索引白重建一次。
     fn entries_digest(&self) -> Option<String> {
         let p = self.dict.source_file()?;
         let own = match std::fs::metadata(p) {
@@ -319,10 +300,8 @@ impl DictLayer for SystemDictLayer {
                 text: hit.text,
                 code: code.to_string(),
                 weight: self.effective_weight(hit.weight),
-                // 归一化会改写 `weight`，原值留在这里——否则排查问题时看到的数与词库里
-                // 的数对不上，而「候选权重为什么是这个」正是最常问的问题。
-                // `weight_layer` 同理，但答的是另一个问题：这个权重出自**哪本词库**。
-                // 跨层合并会让 weight 与 code 分属不同层，只看数字分不出来（见该字段文档）。
+                // 归一化会改写 `weight`，原值留给调试段对照词库文件；`weight_layer` 记权重出自
+                // 哪本词库（跨层合并后 weight 与 code 可能分属不同层）。
                 meta: CandidateMeta {
                     raw_weight: hit.weight,
                     weight_layer: Some(self.name.clone()),
@@ -350,9 +329,7 @@ impl DictLayer for SystemDictLayer {
                 text: hit.text,
                 code: hit.code,
                 weight: self.effective_weight(hit.weight),
-                // 归一化会改写 `weight`，原值留在这里——否则排查问题时看到的数与词库里
-                // 的数对不上，而「候选权重为什么是这个」正是最常问的问题。
-                // `weight_layer` 同理，但答的是另一个问题：这个权重出自**哪本词库**。
+                // 原值与来源层留给调试段，同 `search`。
                 meta: CandidateMeta {
                     raw_weight: hit.weight,
                     weight_layer: Some(self.name.clone()),

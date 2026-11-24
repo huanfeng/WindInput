@@ -3,23 +3,20 @@
 //! 气泡 = 有序段列表，每段 = 段名模板 + 段内容模板，语法与变量沿用注释段（[`crate::comment`]），
 //! 不另起一套。本模块只加两样注释段没有的东西：
 //!
-//! - **逐字求值**（`each = "han" | "char"`）：段内容对每个字求值一次、每字一行。拼音段、拆字段
-//!   天然是逐字的；有了它，「拆字 / 拼音」合并只是一行模板，不必再像旧 `merge_chaizi_pinyin`
-//!   那样在代码里按字对齐两段。
-//! - **`promote`**：按某变量是否非空把逐字行稳定分成两组。合并段靠它复现旧行序（有拆字的字
-//!   在前，拆字库未收录的补在末尾）。
+//! - 逐字求值（`each = "han" | "char"`）：段内容对每个字求值一次、每字一行，「拆字 / 拼音」
+//!   合并因此只是一行模板。
+//! - `promote`：按某变量是否非空把逐字行稳定分成两组（如有拆字的字在前、未收录的补在末尾）。
 //!
 //! 变量分层取值，先到先得：只依赖候选文本的气泡变量（`full_text` / `unicode_all`，本模块
 //! 自答）→ 逐字专属变量（[`char_var`]）→ 调用方注入的候选上下文变量（`word_code` /
 //! `code_source` / `debug`）→ 注释段那套词汇。逐字上下文取不到的再回落候选上下文
-//! （设计 §4.1：允许但通常没有意义，不报错）。
+//! （允许但通常没有意义，不报错）。
 //!
 //! # 原始行与显示行
 //!
-//! 段内容先求出**原始行**，再经「单行截断（`max_chars`）→ 折行（`wrap_width`）」得到
-//! **显示行**（[`TooltipLine`]，`raw` 指回原始行下标）。截断与折行只是给人看的：原始行随
-//! [`RenderedTooltip::raw`] 一并返回，复制 / 上屏取它。原始行**不进** [`TooltipDoc`]——
-//! 它要下发给 UI，而原始行可能很长（完整原文），没必要每次按键都给 UI 复制一份。
+//! 段内容先求出原始行，再经「单行截断（`max_chars`）→ 折行（`wrap_width`）」得到显示行
+//! （[`TooltipLine`]，`raw` 指回原始行下标）。复制 / 上屏取原始行（随 [`RenderedTooltip::raw`]
+//! 返回）；原始行不进要下发给 UI 的 [`TooltipDoc`]，免得每次按键都复制一份长原文。
 //!
 //! 解析在配置快照里做一次（[`CompiledTooltip::compile`]，随 `ConfigBundle` 重建），
 //! 候选循环里只渲染。设计见 `docs/design/candidate-tooltip-sections.md`。
@@ -390,7 +387,7 @@ fn is_break_char(g: &str) -> bool {
 ///
 /// 当前行为空时不折：宽度不足一个全角字（`width = 1`）时，那个字独占一行而不是死循环。
 fn wrap(line: &str, width: usize, first_offset: usize) -> Vec<(usize, usize)> {
-    // 一段连续字素簇 → 字节区间（去掉尾部空白，同旧版的 `trim_end`）。
+    // 一段连续字素簇 → 字节区间（去掉尾部空白）。
     let range = |cur: &[(usize, &str, usize)], trim: bool| -> (usize, usize) {
         let start = cur[0].0;
         let end = cur.last().map_or(start, |(o, g, _)| o + g.len());
@@ -463,8 +460,7 @@ pub(crate) const TOOLTIP_COORD_VAR_NAMES: &[&str] = &["word_code", "code_source"
 
 /// 逐字上下文里气泡专属的变量。`None` = 不是这里的变量（交给下一层）。
 ///
-/// - `readings[:N]` —— 该字全部读音（最常用在前）以 `/` 连接，`N` 限前 N 个。取代旧
-///   `pinyin_heteronyms`（= `:1`）与 `pinyin_max_readings`（= `:N`）。`N` 不是正整数时按不限。
+/// - `readings[:N]` —— 该字全部读音（最常用在前）以 `/` 连接，`N` 限前 N 个；`N` 不是正整数时按不限。
 /// - `unicode` —— 码位，`U+597D`；非 BMP 照写五 / 六位（`U+2A6D6`）。
 pub(crate) fn char_var(
     name: &str,

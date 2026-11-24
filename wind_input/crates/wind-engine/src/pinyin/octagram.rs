@@ -3,9 +3,9 @@
 //!
 //! 查询流程复刻 `ref/librime-octagram/src/octagram.cc::Query`：
 //! 取前文尾部 ≤N 字与当前词首部 ≤N 字，把 context 从最长逐字缩短、每轮查一次，
-//! 对所有命中取**最大分**。
+//! 对所有命中取最大分。
 //!
-//! 分数的**量纲映射不能照抄**，见 [`OctagramConfig`] 的长注释。
+//! 分数的量纲映射不能照抄，见 [`OctagramConfig`] 的长注释。
 
 use std::path::Path;
 
@@ -17,55 +17,28 @@ use super::grammar::Grammar;
 
 /// 打分参数。
 ///
-/// ## ★★★ 为什么不能照抄 octagram 的常数
+/// 打分形态是 `weight × (ln(频次) − baseline)`，未命中时 `ln` 部分取 0。不能照抄 octagram 的
+/// −12：那是每转移固定罚，而我们的 [`super::lattice::WORD_PENALTY`] 已在扮演每词罚，且
+/// `log_prob = ln(freq / DICT_TOTAL)` 为负、抵消不了，照抄会按词数重罚长句。须同时满足：
 ///
-/// octagram 的语义是：**未命中** `= non_collocation_penalty (−12)`，
-/// **命中** `= ln(频次) + collocation_penalty (−12)`。两者共用同一个 −12，
-/// 所以那个常数实际是**每转移的固定罚**，而 `ln(频次)` 是纯增益。
+/// ① 未命中不能优于命中（否则奖励无搭配记录的碎片）；② 不能每转移重罚。
+/// 两者只是量级冲突：保持符号语义，把 `weight` 压小让每词额外罚落在 1~2。
+/// 标定过程见 `docs/design/language-model-integration.md` §7「标定路上踩的两个坑」。
 ///
-/// 而我们这一侧 [`super::lattice::WORD_PENALTY`]（= 3.0）**已经在扮演每词固定罚**，
-/// 且它是连同 `DICT_TOTAL` 一起被 `pinyin_eval` 标定出来的。直接照搬 −12，
-/// 每词罚会变成 15，词数偏好整个崩掉。
-///
-/// 量纲也对不上：librime 的 `entry_weight = ln(freq)`，我们的
-/// `log_prob = ln(freq / DICT_TOTAL)`，差着 `ln(DICT_TOTAL) ≈ 19.3`。
-///
-/// ## ★★★ 两条约束，以及它们为什么只能靠 `weight` 调和
-///
-/// 打分形态是 `weight × (ln(频次) − baseline)`，未命中时 `ln` 部分取 0，
-/// 于是未命中恰为 `−weight × baseline`。这个式子要同时满足两条约束：
-///
-/// **① 未命中不能优于命中。** 否则奖励的是「碎片」——完全没有搭配记录的组合拿 0 分，
-/// 反而赢过有记录但频次中等的正确词组。实测教训：一版让未命中返回 0 之后，
-/// 「建议修改」输给了「见一修改」、「他的意思就是」输给了「他的一死就是」。
-///
-/// **② 不能每转移重罚。** 否则按词数惩罚长句。实测教训：`weight=1, baseline=12`
-/// （即照搬 octagram 的 −12）时，`pinyin_eval` 的 D 类（简拼混合**长句**）
-/// top-1 从 12.20% 崩到 3.90%，而 A/B/C（短词）纹丝不动——差异恰好落在词数上。
-///
-/// librime 能直接用 −12 满足①而不触发②，是因为它的 `entry_weight = ln(freq)` 是
-/// **正值**（6.9~19.7），词数增加时 `Σln(freq)` 同步增长、把固定罚抵消掉；
-/// 我们的 `log_prob = ln(freq / DICT_TOTAL)` 本来就是负的，抵消不了。
-///
-/// ⇒ 两条约束并不真正冲突，冲突的是**量级**。保持 octagram 的符号语义（①），
-/// 把 `weight` 压小让每词额外罚落在 1~2 而非 12（②）。
-/// `baseline` 取实测 `ln(频次)` 中位数（8.34，设计文档 §2.2.3b）。
-///
-/// - `weight = 0` ⇒ **完全无影响**，逐位退化回接入前。这是标定的安全起点，也是当前默认。
+/// - `weight = 0` ⇒ 完全无影响，逐位退化回不挂模型。
 #[derive(Debug, Clone)]
 pub struct OctagramConfig {
-    /// 整体权重。**0 = 关闭**（逐位等价于不挂模型）。
+    /// 整体权重。0 = 关闭（逐位等价于不挂模型）。
     pub weight: f64,
     /// 命中时的零点：`ln(频次)` 高于它得正分、低于它得负分。
-    /// 取实测中位数 8.34，使命中项的期望≈0，从而不改变词数偏好。
+    /// 取 `ln(频次)` 中位数 8.34（设计文档 §2.2.3），使命中项的期望≈0，不改变词数偏好。
     pub baseline: f64,
     /// context 与 word 各取几个字，对齐 `collocation_max_length`。
     pub collocation_max_length: usize,
     /// 搭配总长不足此值且非整串匹配时，额外扣 [`Self::weak_extra_penalty`]。
     ///
-    /// ⚠️ octagram 默认 3，那是给**词级**模型（bgw）用的。
-    /// 我们实测 `bgc` 是纯 2-gram（设计文档 §2.2.3d），搭配总长恒为 2，
-    /// 默认 3 会让**每一次命中都被判为 weak**。故这里默认 2。
+    /// octagram 默认 3 是给词级模型（bgw）用的；`bgc` 是纯 2-gram（设计文档 §2.2.3），
+    /// 搭配总长恒为 2，取 3 会让每次命中都判为 weak。故默认 2。
     pub collocation_min_length: usize,
     /// 弱搭配的额外扣分，对齐 `weak_collocation_penalty − collocation_penalty`（= 12）。
     pub weak_extra_penalty: f64,
@@ -76,9 +49,9 @@ pub struct OctagramConfig {
 impl Default for OctagramConfig {
     fn default() -> Self {
         Self {
-            // 默认关闭：接上模型但不改变任何结果，留给标定逐步放开。
+            // 默认关闭：接上模型但不改变任何结果。
             weight: 0.0,
-            // 实测 ln(频次) 的中位数（设计文档 §2.2.3b）
+            // ln(频次) 的中位数（设计文档 §2.2.3）
             baseline: 8.34,
             collocation_max_length: 4,
             collocation_min_length: 2,
@@ -91,7 +64,7 @@ impl Default for OctagramConfig {
 /// context 逐级缩短后在 trie 中的一个落点。
 ///
 /// `ctx_ptr` 必须一并记住：`whole` 判据（整串匹配豁免 weak 罚）问的是
-/// 「**这一级是不是最长的那一级**」，而最长级可能 traverse 失败被跳过，
+/// 「这一级是不是最长的那一级」，而最长级可能 traverse 失败被跳过，
 /// 此时数组下标 0 已经不是最长级了。用 `ctx_ptr == 0` 判才是对的。
 #[derive(Clone, Copy)]
 struct CtxLevel {
@@ -104,27 +77,13 @@ struct CtxLevel {
 
 /// 每线程的搭配查询缓存。
 ///
-/// ## 为什么会有重复劳动
+/// [`OctagramGrammar::best_collocation`] 分两半：context 半（尾部 n 字 → 编码 → 逐级 traverse）
+/// 只依赖 context，word 半（首部 n 字 → 编码）只依赖 `node.word`，而 `decode_beam` 会对每个
+/// node / 每条线重算。两者都是纯函数，缓存不改变任何打分（验收判据：评测指标逐位不变）。
 ///
-/// `decode_beam` 的循环是 `for node { for src } }`，而 [`OctagramGrammar::best_collocation`]
-/// 内部天然分成互不相干的两半：
-///
-/// - **context 半**（取尾部 n 字 → 编码 → 逐级 traverse）只依赖 context，
-///   却在该起点下的**每个 node** 上被重算一遍；
-/// - **word 半**（取首部 n 字 → 编码）只依赖 `node.word`，
-///   却在 beam 的**每条线**上被重算一遍。
-///
-/// 两者都是纯函数的结果，缓存起来**不改变任何打分**——所以本优化的验收判据是硬的：
-/// 评测指标逐位不变，只有耗时下降。
-///
-/// ## 容量与失效
-///
-/// context 侧取 `BEAM_WIDTH + 1 = 8` 格：内层一轮最多轮询 beam 宽度条不同的
-/// context，多一格避免边界上整轮失效。word 侧只需**单格**——内层循环里 word 恒定，
-/// 命中率天然是 `(线数−1)/线数`。
-///
-/// `db_id` 是 [`GramDb`] 的地址：同进程可能同时活着多个 grammar 实例（不同方案），
-/// 换实例时整体清空，宁可重算也不能跨模型串用落点。
+/// context 侧取 `BEAM_WIDTH + 1` 格（一轮最多轮询 beam 宽度条 context，多一格防边界整轮失效）；
+/// word 侧单格即可（内层循环里 word 恒定）。`db_id` 是 [`GramDb`] 的地址：换实例时整体清空，
+/// 不能跨模型串用落点。
 struct QueryCache {
     db_id: usize,
     ctx_keys: Vec<String>,
@@ -280,12 +239,9 @@ impl OctagramGrammar {
             }
             let slot = self.fill_ctx_levels(&mut cache, context, n);
             if cache.ctx_levels[slot].is_empty() {
-                // 一级都没走通 ⇒ 与改造前「while 循环全程 traverse 失败」同义。
-                // 但 is_rear 那一查只依赖 word，仍须照做。
-                //
-                // ★ 必须再 `max(0.0)`：句末分是 `ln(频次) − rear_penalty`，**可能为负**，
-                // 而改造前它是在初值为 0 的 `best` 上做 max 的，负值取不走。
-                // 这里直接 return 会把负分泄出去——两处都得保住那个 0 下界。
+                // 一级都没走通，但 is_rear 那一查只依赖 word，仍须照做。
+                // 必须再 `max(0.0)`：句末分 `ln(频次) − rear_penalty` 可能为负，与下面在
+                // 初值 0 的 `best` 上取 max 一样，两处都得保住 0 下界。
                 return 0.0f64.max(self.rear_only(&cache, is_rear));
             }
 

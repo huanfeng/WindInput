@@ -34,7 +34,7 @@ impl EnglishEngine {
 
     /// 词组分词索引的落盘目录（`None` = 不落盘，堆上建）。见 [`LazyPhraseIndex`] 的「落盘」一节。
     ///
-    /// ⚠️ 必须在 [`Self::with_phrase_seg`] **之前**调用：那边一开就起预热线程，线程手里攥着
+    /// 必须在 [`Self::with_phrase_seg`] 之前调用：那边一开就起预热线程，线程手里攥着
     /// 的是当时那个 `LazyPhraseIndex`，之后再换就是白建一份、按键时再建一份。
     pub fn with_phrase_cache_dir(mut self, dir: Option<std::path::PathBuf>) -> Self {
         debug_assert!(
@@ -45,10 +45,10 @@ impl EnglishEngine {
         self
     }
 
-    /// 开启词组分词输入并指定分词符（t42）。
+    /// 开启词组分词输入并指定分词符。
     ///
     /// 由构建方在引擎组装完毕后调用；`None` 保持关闭。开启时顺带把索引构建推给后台线程——
-    /// 不预热的话那笔全表扫描会恰好落在用户**第一次按下分词符**的那一刻。
+    /// 不预热的话那笔全表扫描会恰好落在用户第一次按下分词符的那一刻。
     pub fn with_phrase_seg(mut self, sep: Option<char>) -> Self {
         self.seg_sep = sep;
         if sep.is_some() {
@@ -66,15 +66,8 @@ impl EnglishEngine {
             return Vec::new();
         }
         let segs = split_segments(input, sep);
-        // ★ 单段照查，别在这里挡。
-        //
-        // 「单段等价于普通前缀补全、原路径已经做了」这个理由只对**不含分词符**的输入成立，
-        // 而那种输入在上面就被 `!input.contains(sep)` 挡掉了、根本走不到这里。能走到这里的
-        // 单段只有一种形状：`ip'`（用户刚按下分词符）。此时原路径拿 `ip'` 去查 code 前缀
-        // 必然落空（词库里没有 code 以 `ip'` 开头的条目），再把分词路径也挡掉，候选就整片
-        // 消失了——实测反馈正是「打到 ' 时变空候选」。
-        //
-        // 单段查询的语义是「列出首词以这一段开头的词组」，正是按下分词符时该看到的东西。
+        // 单段照查，别在这里挡：走到这里的单段只有 `ip'`（刚按下分词符）这一种，原路径拿它
+        // 查 code 前缀必然落空，再挡掉分词路径候选就整片消失。单段语义是「首词以这段开头的词组」。
         // 空 `segs`（整串只有分词符）由 `PhraseSegIndex::search` 自己挡。
         self.phrase
             .get(self.inner.dict_manager())
@@ -82,19 +75,14 @@ impl EnglishEngine {
     }
 }
 
-/// 剥离查询的命中**值不值得并进候选**：只收多词条目与含分词符的词。
+/// 剥离查询的命中值不值得并进候选：只收多词条目与含分词符的词。
 ///
-/// 剥离查询存在的唯一理由是「带分词符的串在某些词库里编码不含分词符」，它要接住的是两类：
-/// - **撇号词**：`o'clock` 在去撇号词库里 code 是 `oclock`，而 text 仍带着撇号；
-/// - **词组**：`mac'os` 剥成 `macos` 恰好命中拼接式编码的 `macOS Tahoe` 一族——分段路径对
-///   它们无能为力（`macOS` 在 text 里是**一个**词，段 `os` 无词可配），剥离是它们唯一的通路。
+/// 剥离查询要接住两类：撇号词（`o'clock` 在去撇号词库里 code 是 `oclock`）与拼接式编码的词组
+/// （`mac'os` → `macos` 命中 `macOS Tahoe`，分段路径配不上）。其余命中是不打分词符本来就有的
+/// 普通单词补全，放进来会铺满 `max_candidates`、挤掉用户要的词组。
 ///
-/// 这两类之外的命中一律是普通单词的前缀补全，而它们**不打分词符时本来就在**（直接打 `po`
-/// 就能出 pocket / pod / poem）。打了分词符还出它们不但没有新增信息，还会按词库权重铺满整个
-/// `max_candidates`，把用户真正用分词符请求的词组挤到看不见的地方。
-///
-/// ⚠️ 判据落在 **text** 而不是 code：这与 `english_phrase` 整个模块的立足点是同一条——词边界
-/// 只在 text 的空白里，code 那边两种编码方案并存（见该模块头部的表）。
+/// 判据落在 text 而不是 code：词边界只在 text 的空白里，code 那边两种编码方案并存
+/// （见 `english_phrase` 模块头）。
 fn stripped_hit_is_relevant(text: &str, sep: char) -> bool {
     text.contains(sep) || text.split_whitespace().nth(1).is_some()
 }
@@ -128,21 +116,10 @@ impl Engine for EnglishEngine {
         for c in &mut r.candidates {
             c.source = CandidateSource::English;
         }
-        // ★ 含分词符时追加两路候选，**词组分段在前、剥离查询在后**，三路统一按 text 去重。
-        //
-        // 顺序就是优先级：`natural_order` 在下游是同权重时的定序依据，而词库里 weight 相同的
-        // 条目成片存在（出厂词组大量 weight = 0），实际次序多半就由它定。用户按下分词符是在
-        // 表达「我要按段找词组」，分段候选理应压过「把分词符当没打过」的剥离候选。
-        //
-        // 去重必须**跨三路**：原路径与剥离路径可能命中同一条（同 text 两种编码），分段路径
-        // 与剥离路径更会成片相撞——`mac'os` 下 `Mac OS X` 既被分段路径召回（两段各配上一个
-        // 词），又被剥离串 `macos` 前缀命中 code `macosx`。
-        //
-        // ⚠️ 重复**到不了用户眼前**：协调器 `handle_candidate.rs` 那道按 text 的通用去重
-        // （带 `merged_codes` 归并）会接住。要在这里去重是因为紧跟着的
-        // `truncate(max_candidates)` 在引擎内——每条重复都白占一个名额，挤掉一条本可召回的
-        // 词组，而协调器再去重也变不回来。故本条的护栏在引擎单测，不在 e2e（按整表断言的
-        // e2e 实测恒绿，那是假护栏）。
+        // 含分词符时追加两路候选，词组分段在前、剥离查询在后（同权重条目成片存在，
+        // `natural_order` 即优先级；按段找词组是用户的明确意图）。三路统一按 text 去重：
+        // 协调器虽也去重，但引擎内紧跟着 `truncate(max_candidates)`，重复会白占名额。
+        // 护栏在引擎单测，按整表断言的 e2e 测不出这一点。
         if let Some(sep) = self.seg_sep
             && input.contains(sep)
         {
@@ -152,10 +129,8 @@ impl Engine for EnglishEngine {
 
             // ── 一、词组分段候选 ──────────────────────────────────────────────
             //
-            // ★ 为什么合并而不是「见到分词符就改走分词路径」：词库里有 57 条 code 本身含撇号
-            // （`you're` / `let's` / `O'Reilly`）。分词符取 `'` 时，劫持式实现会让这些词在打
-            // 全码时反而查不到——而它们原本是能精确命中的。合并则两边各查各的：`you'r` 由原
-            // 路径出 `you're`、分词路径出空；`envi'deg` 反过来。零回归。
+            // 合并而不是「见到分词符就改走分词路径」：词库里有 code 本身含撇号的词
+            // （`you're` / `O'Reilly`），劫持式实现会让它们打全码时反而查不到。
             for c in self.phrase_candidates(input, max_candidates) {
                 if seen.insert(c.text.clone()) {
                     extra.push(c);
@@ -164,14 +139,9 @@ impl Engine for EnglishEngine {
 
             // ── 二、剥掉分词符再查一次 ────────────────────────────────────────
             //
-            // 撇号词的编码在词库之间不统一，这是实打实的：出厂英文词库保留撇号（`o'clock`
-            // 的 code 就是 `o'clock`，57 条如此），而用户自制/第三方词库常把它去掉（实测靶机
-            // 那份 3.8 MB 词库里是 `o'clock → oclock`）。分词符对用户而言是**输入语法**，他打
-            // `o'clock` 时脑子里想的是那个词，不该被要求先知道自己这份词库是哪种编码方案。
-            //
-            // ★★ 但剥离命中必须过 [`stripped_hit_is_relevant`] 那道闸：不设闸的话 `p'o` 被剥成
-            // `po`，pocket / pod / poem …一整屏普通单词补全按词库权重灌进来，分段候选一条都挤不
-            // 进 `max_candidates`——实测反馈正是「打 `p'o` 出来的全是不相干的词」。
+            // 撇号词的编码在词库之间不统一（出厂词库 code 保留撇号，第三方词库常去掉），
+            // 分词符对用户是输入语法，不该要求他知道词库是哪种编码。剥离命中必须过
+            // [`stripped_hit_is_relevant`]，否则 `p'o` → `po` 的普通补全会灌满候选。
             let stripped: String = input.chars().filter(|c| *c != sep).collect();
             if !stripped.is_empty() {
                 for mut c in self.inner.convert(&stripped, max_candidates)?.candidates {
@@ -184,12 +154,8 @@ impl Engine for EnglishEngine {
             }
 
             if !extra.is_empty() {
-                // ★ 取原路径 `natural_order` 的**最大值**，不是它们的条数。
-                //
-                // 这两个数差着几个量级：`natural_order` 来自词库、是上万的序号（实测 `o'c` 的
-                // `o'clock` 拿到 12085），而条数只有个位数。按条数续号的话追加的候选会拿到
-                // 1..8，同权重时反而排在原路径候选**前面**——而原路径那条是带着分词符打全码
-                // 精确命中的撇号词，它该在最前。
+                // 从原路径 `natural_order` 的最大值续号而不是按条数：`natural_order` 是词库里
+                // 上万的序号，按条数续号会让追加候选同权重时排到原路径精确命中的撇号词前面。
                 let base = r
                     .candidates
                     .iter()
@@ -220,14 +186,9 @@ impl Engine for EnglishEngine {
 
     fn set_dict_enabled(&self, dict_id: &str, enabled: bool) -> bool {
         let claimed = self.inner.set_dict_enabled(dict_id, enabled);
-        // ★ 词组索引必须跟着词库走。
-        //
-        // 关闭方向走的是**热摘**（`unregister_layer`），返回 true 表示「目标已达成」⇒ 上层
-        // 不会重建引擎（见 `EngineManager::set_dict_enabled_live`）。索引是在引擎构造时建的，
-        // 没有这一行就会继续召回已禁用词库里的词组——出厂 `en_ext` 一本就带 779/787 条，
-        // 而同一串输入走原路径已经查不到它们了，表现为「关了没反应、重启才好」。
-        //
-        // 只在本引擎认领了这个 id 时作废：认领不了说明那是别的方案的库，与本索引无关。
+        // 词组索引必须跟着词库走：热摘返回 true 时上层不重建引擎（见
+        // `EngineManager::set_dict_enabled_live`），不作废就会继续召回已禁用词库里的词组。
+        // 只在本引擎认领了这个 id 时作废，认领不了说明是别的方案的库。
         if claimed {
             self.phrase.invalidate();
         }

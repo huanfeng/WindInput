@@ -8,38 +8,29 @@
 //!   flat（全拼扁平）  siyuan / xian        ← 存储主键
 //! ```
 //!
-//! [`SylSpan`] 把一个音节在这三者里的位置绑在一起。它此前叫 `ConvertedSyllable`、
-//! 只服务双拼一家（字段名 `sp_*` = shuangpin），而 raw↔flat 的往返需求遍布全拼、
-//! 分隔符、简拼各条路径 —— 缺少共用表示就演化出了各自的特设实现：
-//!
-//! | 现场 | 旧做法 |
-//! |---|---|
-//! | 双拼 | `map_consumed_length`，持有音节 span，**唯一正确的一处** |
-//! | 带 `'` 全拼 | `map_consumed_over_separators`，逐字节扫描数分隔符 |
-//! | 简拼 | 无映射 |
-//!
-//! 本模块把双拼里已建好的结构提升为通用表示，特设实现随之可以退役。
+//! [`SylSpan`] 把一个音节在这三者里的位置绑在一起，供双拼、带 `'` 全拼、简拼各条路径
+//! 共用 raw↔flat 的往返映射。
 
 use super::dag::Dag;
 use super::syllable::SyllableTrie;
 
 /// 一个音节在 raw / flat 两域的字节区间，外加它的音节文本本身。
 ///
-/// 区间均为 `[start, end)`。`raw` 与 `flat` 的差值来自那些**只占 raw 不占 flat** 的字节：
+/// 区间均为 `[start, end)`。`raw` 与 `flat` 的差值来自那些只占 raw 不占 flat 的字节：
 /// 分隔符 `'`、双拼里的击键（2 键 → 变长音节）。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SylSpan {
     /// 音节的全拼文本（如 `hao`）。
     pub pinyin: String,
-    /// 在**原始输入**（击键域）中的起始字节位。
+    /// 在原始输入（击键域）中的起始字节位。
     pub raw_start: usize,
     /// 在原始输入中的结束字节位（不含）。
     pub raw_end: usize,
-    /// 在**全拼扁平串**中的起始字节位。
+    /// 在全拼扁平串中的起始字节位。
     pub fp_start: usize,
     /// 在全拼扁平串中的结束字节位（不含）。
     pub fp_end: usize,
-    /// 用户**本义**音节：双拼转换器为本键对取了模糊对偶声母时（小鹤开 s↔sh，`sx` 里
+    /// 用户本义音节：双拼转换器为本键对取了模糊对偶声母时（小鹤开 s↔sh，`sx` 里
     /// `s` + ia/ua 都不成音节、读成 `shua`），按布局不开模糊该读的字面拼写（`sua`）。
     /// 其余情形（与 `pinyin` 相同、错音串垫底本就是字面读音、全拼）为 `None`。
     ///
@@ -53,7 +44,7 @@ pub struct SylSpan {
 /// `'` 是硬边界，音节不得跨越，故按它分段后各段独立切分——与
 /// `PinyinEngine::segment_with_separators` 同款，只是额外记录了两域偏移。
 ///
-/// 段内切分未覆盖的尾部（残码，如 `anx` 只切出 `an`）在两域**同步跳过**，
+/// 段内切分未覆盖的尾部（残码，如 `anx` 只切出 `an`）在两域同步跳过，
 /// 保证后续段的偏移仍对齐；否则 `xi'anx'y` 这类输入里第三段的位置会整体错位。
 pub fn spans_for_full_pinyin(input: &str, trie: &SyllableTrie) -> Vec<SylSpan> {
     let mut out = Vec::new();
@@ -87,14 +78,14 @@ pub fn spans_for_full_pinyin(input: &str, trie: &SyllableTrie) -> Vec<SylSpan> {
 
 /// flat 域的已消费字节数 → raw 域的对应字节数。
 ///
-/// 取**覆盖 `fp_consumed` 的那个音节**的 `raw_end`：候选消费的是整数个音节，
+/// 取覆盖 `fp_consumed` 的那个音节的 `raw_end`：候选消费的是整数个音节，
 /// 落在音节中间时算到该音节末尾。
 ///
-/// `raw` 用于一条收尾规则：**紧跟的分隔符归入已消费侧**（连续 `''` 一并吸收）。
+/// `raw` 用于一条收尾规则：紧跟的分隔符归入已消费侧（连续 `''` 一并吸收）。
 /// `xi'an` 选「西」消费 flat 2 字节，若只返回 2，协调器按原始缓冲切片后剩下 `'an`
 /// ——预编辑区会以分隔符开头。返回 3 才对。
 ///
-/// `fp_consumed` 超出全部 span 时从末个 span 起按字节续推。**正常不会发生**——
+/// `fp_consumed` 超出全部 span 时从末个 span 起按字节续推。正常不会发生——
 /// [`spans_for_full_pinyin`] 让残码也占 flat 位，故 span 的 flat 总长恒等于剥除 `'`
 /// 后的串长；这一支纯属防御，避免哪天构造侧改了语义就在这里返回错值。
 pub fn map_fp_to_raw(spans: &[SylSpan], fp_consumed: usize, raw: &str) -> usize {
@@ -170,10 +161,7 @@ mod tests {
         assert_eq!((hao.fp_start, hao.fp_end), (5, 8));
     }
 
-    /// **与被取代的 `map_consumed_over_separators` 逐例等价。**
-    ///
-    /// 用例原样搬自那个函数的测试，是本次替换的等价性判据——旧实现逐字节数分隔符，
-    /// 新实现按音节 span 定位，两者在这些边缘形态上必须给出同一答案。
+    /// 钉住分隔符边缘形态下 flat→raw 的映射（逐字节数分隔符的语义，按音节 span 定位求得）。
     #[test]
     fn map_fp_to_raw_matches_replaced_byte_scanner() {
         let t = trie();

@@ -1,10 +1,10 @@
 //! 背景图解码与填充缓存（九宫格/拉伸/平铺/center）。
 //!
-//! 与 Go 版 `internal/ui/viewbox_image_resolver.go` 对齐（精简）。线程局部使用（UI 单线程）。
+//! 线程局部使用（UI 单线程）。
 //! 源图解码后保留 unpremult RGBA 供采样；按 (源图, mode, slice, dest_w, dest_h) 缓存合成后的
-//! 目标位图（tiny-skia Pixmap，**BGRA 序 + 预乘**，可直接作 Pattern 填到 BGRA 缓冲）。
+//! 目标位图（tiny-skia Pixmap，BGRA 序 + 预乘，可直接作 Pattern 填到 BGRA 缓冲）。
 //!
-//! 图片源有两种形态：**文件路径**，以及主题里内嵌的 **`data:` URI**——主题编辑器上传的
+//! 图片源有两种形态：文件路径，以及主题里内嵌的 `data:` URI——主题编辑器上传的
 //! 图片会被打包成后者随 theme.toml 一起发布。两种形态在 `wind_theme` 的求值层与
 //! `theme_assets::asset_path` 里一路同等放行，最终都落到本模块解码。
 
@@ -37,12 +37,8 @@ fn compose(r: u8, g: u8, b: u8, a: u8, tint: [u8; 4], premult: bool) -> Premulti
     }
 }
 
-/// 解析 SVG 源为 usvg 树。**外部引用一律不解析**。
-///
-/// usvg 默认的 href 解析器会把 `<image href="C:/...">` 当本地文件读进来渲染（其文档
-/// 明写 "forbid access to local files (which is allowed by default)"）。主题可以来自
-/// 市场，是不可信内容——在内嵌 SVG 放行之前它到不了这里（导入只收 TOML 文本，图片
-/// 不落盘），放行之后这条路就通了，必须当场堵死。
+/// 解析 SVG 源为 usvg 树。外部引用一律不解析：usvg 默认会把 `<image href="C:/...">` 当本地
+/// 文件读进来渲染，而主题（尤其内嵌 SVG）是不可信内容。
 fn svg_tree(src: &str) -> Option<resvg::usvg::Tree> {
     let data = read_source_bytes(src)?;
     let opts = resvg::usvg::Options {
@@ -80,7 +76,7 @@ fn rasterize_svg(src: &str, w: u32, h: u32) -> Option<resvg::tiny_skia::Pixmap> 
 }
 
 /// SVG center / tile：单元 = 文档尺寸 × k（统一比例，不为凑整而纵横各拉一份；单元按
-/// ceil 取整，多出的边角透明）。**只栅格化目标盒里看得见的部分**——单元尺寸来自主题
+/// ceil 取整，多出的边角透明）。只栅格化目标盒里看得见的部分——单元尺寸来自主题
 /// （不可信），整单元栅格化可以大到分配不出来（4000² 文档 × 200% 就是 512 MB）：
 /// - center：直接把居中后的单元渲进 w×h 画布，越界的部分 resvg 自己裁掉；
 /// - tile：只渲 `min(单元, 盒)` 那么大一块，再按单元周期平铺——单元比盒大时，
@@ -148,10 +144,8 @@ fn data_uri_mime(src: &str) -> Option<&str> {
 
 /// 解码 `data:<mime>[;...];base64,<载荷>` 的载荷字节。
 ///
-/// 只认**标准字母表 + 带填充**的 base64：内嵌图片的唯一生产者是主题编辑器的
-/// `FileReader.readAsDataURL`，它产出的一定是这种。百分号编码与 URL-safe 变体没有
-/// 生产者，不实现——撞上时返回 None 走上层的「解码失败」告警，而不是静默画一块
-/// 空白让人无从查起。
+/// 只认标准字母表 + 带填充的 base64（唯一生产者主题编辑器的 `readAsDataURL` 产出的就是这种）。
+/// 其它变体返回 None，走上层的「解码失败」告警而不是静默画空白。
 fn decode_data_uri(src: &str) -> Option<Vec<u8>> {
     use base64::Engine as _;
     let rest = src.strip_prefix("data:")?;
@@ -214,9 +208,8 @@ fn decode_bitmap_bytes(bytes: &[u8], src: &str) -> Option<image::DynamicImage> {
 
 /// 是否 SVG：文件看扩展名，`data:` 看 MIME。
 ///
-/// 只看扩展名会漏掉 `data:image/svg+xml;base64,...`（它不以 `.svg` 结尾），把矢量图
-/// 丢进位图解码器 —— 那是必然失败且看不出原因的一条路。
-/// 源是否 SVG（皮肤接入层据此回退：皮肤窗体只收位图）。
+/// 只看扩展名会漏掉 `data:image/svg+xml;base64,...`，把矢量图丢进位图解码器。
+/// 皮肤接入层据此回退（皮肤窗体只收位图）。
 pub fn is_svg_source(src: &str) -> bool {
     is_svg(src)
 }
@@ -291,22 +284,12 @@ pub fn mode_code(mode: &str) -> u8 {
 
 /// 填充位图的字节预算。
 ///
-/// 候选窗的宽度随候选内容每次都在变，而填充缓存以**目标宽高**为键——宽度每变一个
-/// 像素就是一条新条目。实测宽 200→800、高 40 这一段就是 45.9 MB，只涨不落。
-/// 超预算即整体清空（同 `view.rs` 的 `SHADOW_CACHE`）：不做 LRU，因为淘汰谁都得重建，
-/// 而重建一张候选窗尺寸的填充只要 0.3 ms，不值得为此维护一份访问序。
+/// 填充缓存以目标宽高为键，候选窗宽度每变一个像素就是一条新条目。超预算即整体清空
+/// （同 `view.rs` 的 `SHADOW_CACHE`）：不做 LRU，重建一张候选窗尺寸的填充只要零点几毫秒。
 ///
-/// 取值两头受夹：
-/// - **下界**：必须显著大于一帧的工作集，否则清空会在同一帧内反复发生，把「只费内存」
-///   变成「每帧重建」。一帧的工作集不受本模块控制——layer 未写 size 时按原图尺寸填充
-///   （`view.rs` 的 `paint_layer`），再乘 DPI scale，单张大图就能吃掉一大截。
-/// - **上界**：定得太大，回收就白做了。实测（宽 200→800 扫一遍再回收，Linux glibc）：
-///   8 MiB 峰值 15.4 → 回收后 6.1、16 MiB 峰值 23.6 → 回收后 8.0，都完整落回起点；
-///   而 **32 MiB 峰值 39.4 → 回收后只到 36.5**——越过了 glibc 自动 trim 的门槛，内存
-///   虽已释放却不再归还 OS（`malloc_trim(0)` 能把它压回 5.8 MiB，印证确实只是没归还）。
-///
-/// 16 MiB 落在两者之间：装得下「一张 4 MiB 的 layer + 一帧候选窗（约 600 KiB）」还有
-/// 富余，又仍在会自动归还的那一侧。
+/// 下界须显著大于一帧的工作集（layer 未写 size 时按原图尺寸 × DPI 填充），否则同一帧内
+/// 反复清空；上界不能越过 glibc 自动 trim 的门槛，否则释放了也不归还 OS（32 MiB 已越过，
+/// 16 MiB 仍能完整落回）。16 MiB 装得下一张 4 MiB 的 layer + 一帧候选窗还有富余。
 const FILL_BUDGET_BYTES: usize = 16 * 1024 * 1024;
 
 /// 解码源图的字节预算。一张 985×255 的背景图解出来约 1 MB，够放几十张。
@@ -314,9 +297,7 @@ const SRC_BUDGET_BYTES: usize = 32 * 1024 * 1024;
 
 /// 闲置多久后整个丢掉。
 ///
-/// 预算只挡住「涨到多高」，挡不住「不用了也不落」——不打字的时候候选窗背景图仍占着
-/// 那几 MB。这条负责让它回落到零。30 秒：比一次连续输入的间隙长得多（重建代价才回来），
-/// 又短到用户端起茶杯的工夫内存就还回去了。
+/// 预算只挡住「涨到多高」，这条负责不打字时回落到零。30 秒远长于连续输入的间隙。
 pub const IDLE_EVICT_AFTER: Duration = Duration::from_secs(30);
 
 /// 动画装饰的帧预算（全部动画合计）。单个动画按调用方给的份额隔帧丢弃，见 [`crate::skin::FrameBudget`]。
@@ -362,12 +343,8 @@ struct Src {
 
 /// 图片源的内部句柄：把源字符串驻留成一个小整数，缓存键只带它。
 ///
-/// 源字符串可能是一条数百 KB 的 `data:` URI，而 `fill` 是每次重绘都要查一次的路径：
-/// 拿它直接作键，每次命中都要重新分配并拷贝整条 URI（旧实现的 `path.to_string()` 正是
-/// 如此）。驻留后每次仍要对源串哈希一遍（省掉的是那次拷贝，不是数量级），彻底摘掉得
-/// 在主题求值期就把句柄解析好塞进 `RvImage`，那是另一件事。
-///
-/// 用驻留句柄而非内容哈希：`ImgId` 是精确相等的，不存在两张图撞到同一张的可能。
+/// 源字符串可能是一条数百 KB 的 `data:` URI，直接作键会让每次重绘命中都拷贝整条 URI
+/// （驻留后仍要哈希一遍源串）。用驻留句柄而非内容哈希：精确相等，不会两张图撞成一张。
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 struct ImgId(u32);
 

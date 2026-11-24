@@ -51,7 +51,7 @@ impl CompositeDict {
     /// 按名注销词典层，返回是否真的摘掉了。
     ///
     /// 摘层会 drop 掉那个 `Box<dyn DictLayer>`，连带释放它持有的 `CachedDict`
-    /// —— 对 mmap 词库这是**释放文件句柄的唯一途径**（Windows 下文件被 mmap 期间
+    /// —— 对 mmap 词库这是释放文件句柄的唯一途径（Windows 下文件被 mmap 期间
     /// 删不掉，见 `reader_pool` 的模块注释）。返回值用于区分「摘掉了」与「本就没有」。
     pub fn unregister_layer(&self, name: &str) -> bool {
         let mut layers = self.layers.write().unwrap();
@@ -104,10 +104,8 @@ impl CompositeDict {
 
     /// 按声母串查找（简拼召回）：跨层合并去重，见 [`DictLayer::search_abbrev`]。
     ///
-    /// **走同一套 `merge_search`** 而不是各层结果直接拼接，是为了保住跨层合并语义：
-    /// 同一个词同时在用户层与临时层时，此前经 `search_prefix` 合并成一条、权重取 max；
-    /// 若改成拼接后由引擎「先到先得」去重，就会拿到用户层那条的原权重，排序静默变化。
-    /// 索引换的是取候选的代价，不该顺手改掉候选本身。
+    /// 走同一套 `merge_search` 而不是各层结果直接拼接，以保住跨层合并语义（同码同文权重取 max）；
+    /// 拼接后由引擎先到先得去重会让排序静默变化。
     pub fn search_abbrev(&self, abbrev: &str, limit: usize) -> Vec<Candidate> {
         self.merge_search(abbrev, limit, Query::Abbrev)
     }
@@ -149,11 +147,9 @@ impl CompositeDict {
             .any(|l| l.has_longer_code(prefix))
     }
 
-    /// 全量枚举各**启用**层的 `(code, text, weight)`，供离线索引构建
-    /// （见 `DictLayer::for_each_entry`）。**不去重、不排序**——跨层同 `(code, text)`
-    /// 会各报一次，由调用方按自己的语义合并；这里替它去重反而会丢掉「哪一层出的」这件事。
-    ///
-    /// ⚠️ O(全表)，绝不能出现在按键链路上。
+    /// 全量枚举各启用层的 `(code, text, weight)`，供离线索引构建（见 `DictLayer::for_each_entry`）。
+    /// 不去重、不排序：跨层同 `(code, text)` 各报一次，由调用方按自己的语义合并。
+    /// O(全表)，绝不能出现在按键链路上。
     pub fn for_each_entry(&self, f: &mut dyn FnMut(&str, &str, i32)) {
         let layers = self.layers.read().unwrap();
         for l in layers.iter().filter(|l| l.enabled()) {
@@ -161,11 +157,8 @@ impl CompositeDict {
         }
     }
 
-    /// [`Self::for_each_entry`] 全部输入的摘要：各**启用**层的
-    /// [`DictLayer::entries_digest`]，按层序。任一层说不清即 `None`（派生索引不落盘）。
-    ///
-    /// ⚠️ 过滤条件与层序必须与 `for_each_entry` 逐字一致——它回答的就是「那次枚举的输入
-    /// 是什么」。热摘 / 停用一本词库后，返回值随之改变，派生索引因此按新集合另取一份。
+    /// [`Self::for_each_entry`] 全部输入的摘要：各启用层的 [`DictLayer::entries_digest`]，按层序。
+    /// 任一层说不清即 `None`（派生索引不落盘）。过滤条件与层序必须与 `for_each_entry` 逐字一致。
     pub fn entries_digest(&self) -> Option<Vec<String>> {
         let layers = self.layers.read().unwrap();
         layers
@@ -176,22 +169,17 @@ impl CompositeDict {
     }
 
     /// 跨层合并：遍历各层收集候选，按 text 去重——
-    ///   - 保留**高优先级层**(先出现)的词条信息(code/natural_order)；
-    ///   - 但**继承后续层中同 text 的更高权重**(用户词不因低权重丢失码表词的自然排序位)；
-    ///   - 前缀查询时，同 text 多码取**最短码**(离输入最近)及其更小 natural_order；
-    ///   - 每层叠加该层 `base_order()`（设计者经 [[dictionaries]].base_order 配置），
-    ///     使等权/`base_sort=natural` 时按设计者指定的层间基序排列（取代旧的按注册位置偏移）。
-    ///
-    /// 与 Go composite.go `searchInternal` 对齐。
+    ///   - 保留高优先级层(先出现)的词条信息(code/natural_order)；
+    ///   - 同码时继承后续层的更高权重；
+    ///   - 前缀查询时，同 text 多码取最短码(离输入最近)及其更小 natural_order；
+    ///   - 每层写入该层 `base_order()`（[[dictionaries]].base_order），
+    ///     使等权/`base_sort=natural` 时按设计者指定的层间基序排列。
     fn merge_search(&self, query: &str, limit: usize, kind: Query) -> Vec<Candidate> {
         let layers = self.layers.read().unwrap();
         let mut results: Vec<Candidate> = Vec::new();
         let mut seen: HashMap<String, usize> = HashMap::new();
-        // 「同 text 取最短码」**只对前缀查询成立**：那时各层给的是不同长度的补全码，
-        // 取最短即「离输入最近」。精确与简拼查询给的都是整词码，谁短谁长没有这层含义。
-        //
-        // 简拼尤其不能换：候选的 code 必须留全拼码，词频记账走的正是它
-        // （见 step6「保留全拼码」那段——换成别层的码会让同一个词在两条流下各记各的）。
+        // 「同 text 取最短码」只对前缀查询成立（各层给的是不同长度的补全码）。精确与简拼给的
+        // 都是整词码；简拼尤其不能换，候选 code 必须留全拼码供词频记账。
         let is_prefix = matches!(kind, Query::Prefix | Query::PrefixCapped { .. });
         let by_code = matches!(kind, Query::Pattern { .. });
 
@@ -224,34 +212,19 @@ impl CompositeDict {
                     cand.text.clone()
                 };
                 if let Some(&idx) = seen.get(&key) {
-                    // 同 text 已存在：**编码也相同**时才继承更高权重。
-                    //
-                    // ## 权重属于 `(code, text)` 这个词条，不属于「字」
-                    //
-                    // 只有 code 也相同，两条才是同一个词条在不同词库里的两份记录，取 max 才
-                    // 有意义（也正是「多个词库收录同一条，按最高权重算」这条用户可见语义）。
-                    // 不同码位（简码 `a` 与全码 `ab`）是**两个独立词条**、各有各的权重；
-                    // 跨码位取 max 等于把两个条目的权重混成一个，让候选带着「别的码位的
-                    // 权重」参与排序——码表方案尤其不能这样，那里码长本身就是分档依据。
-                    //
-                    // code/natural_order/boundary 仍保留首个出现层（高优先层）的值。
-                    // boundary 随 code 走：用户层的码只配用户层的边界（用户手输码恒 0 →
-                    // 降级 DAG），不可从系统层「借」一个边界过来。
+                    // 同 text 已存在：编码也相同时才继承更高权重。权重属于 `(code, text)` 词条：
+                    // 不同码位（简码 `a` 与全码 `ab`）是两个独立词条，跨码位取 max 会让候选带着
+                    // 别的码位的权重排序，码表方案尤其不行。
+                    // code/natural_order/boundary 保留首个出现层的值；boundary 随 code 走，
+                    // 不可从系统层「借」边界给用户层的码。
                     let existing = &mut results[idx];
                     if cand.code == existing.code && cand.weight > existing.weight {
                         existing.weight = cand.weight;
-                        // 权重来源**必须随权重一起换**：不同步换会让调试段把权重记在错的库
-                        // 头上——那比不显示更糟，排查时会照着错的库名去翻词库文件。
+                        // 权重来源必须随权重一起换，否则调试段会把权重记在错的库头上。
                         existing.meta.weight_layer = cand.meta.weight_layer.take();
                     }
-                    // 被丢弃这条的**来源归属**并入幸存者。
-                    //
-                    // 这两个标记不是装饰：右键删除按它们决定去 `user_words` 还是 `temp_words`
-                    // 删，而 `redb` 的 `remove` 对不存在的 key 静默成功——丢掉标记的代价不是
-                    // 报错，是「点多少次都无作用」。用户层与临时层都注册在同一个 DictManager 里
-                    //（`manager.rs` 的 store_layers），同文时后注册的临时层整条被丢弃，
-                    // `is_temp_dict` 随之蒸发，删除便只删得掉用户词那一半。
-                    // 2026-09-03 用户实测「再也不好」即毁于这条路径的上游。
+                    // 被丢弃这条的来源归属并入幸存者：右键删除按这两个标记决定去 `user_words`
+                    // 还是 `temp_words` 删，而 redb 删不存在的 key 静默成功，丢了标记就删不掉。
                     existing.meta.is_user_dict |= cand.meta.is_user_dict;
                     existing.meta.is_temp_dict |= cand.meta.is_temp_dict;
                     // 被丢弃这条所占的码位并入幸存者：跨层同 text 常有不同码（用户层手输码 vs
@@ -260,14 +233,10 @@ impl CompositeDict {
                     // 只对得上其中一张表。
                     existing.absorb_codes_from(&cand);
                     // 前缀：保留最短码及其更早出现位置。
-                    // boundary 描述的是 code 的音节切分，**必须与 code 同进同出**——换了码却留着
-                    // 旧码的边界，会配出「A 层的 code + B 层的 boundary」这种自相矛盾的候选。
+                    // boundary 是 code 的音节切分，必须与 code 同进同出。
                     if is_prefix && cand.code.len() < existing.code.len() {
                         let old_code = std::mem::replace(&mut existing.code, cand.code.clone());
-                        // 换码＝**改换词条**，故 weight 与其来源层必须与 code 整组同换。
-                        // 留着旧码位的权重会配出「A 码位的编码 + B 码位的权重」这种混血候选
-                        // ——与上面「不跨码位取 max」是同一条原则的两个面：权重恒随它自己的
-                        // 码位走，不因去重而漂到别的码位上。
+                        // 换码即改换词条，weight 与其来源层须与 code 整组同换（权重恒随自己的码位走）。
                         existing.weight = cand.weight;
                         existing.meta.weight_layer = cand.meta.weight_layer.take();
                         existing.boundary = cand.boundary;

@@ -1,12 +1,10 @@
 //! 词典层接口
-//!
-//! 与 Go 版本 `wind_input/internal/dict/layer.go` 对齐。
 
 use std::cmp::Ordering;
 use wind_candidate::{Candidate, better};
 
 /// 词典层类型（数值越小优先级越高）。
-/// 注：Shadow（置顶/删除）**不是查询层**，而是 ShadowProvider，在引擎排序后应用
+/// 注：Shadow（置顶/删除）不是查询层，而是 ShadowProvider，在引擎排序后应用
 /// （见 docs/redesign/dict.md §2）——故不在此枚举中。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
@@ -16,16 +14,11 @@ pub enum LayerType {
     Temp = 2,   // 临时学习词
     Cell = 3,   // 单元词典
     System = 4, // 系统主词典
-    /// 自动造词的**草稿层**：滑窗切出、尚未被任何人用过的猜测词
-    /// （`docs/design/auto-phrase-draft-layer.md`）。
+    /// 自动造词的草稿层：滑窗切出、尚未被用过的猜测词（`docs/design/auto-phrase-draft-layer.md`）。
     ///
-    /// 数值排在 `System` **之后**，与「数值越小优先级越高」一致——草稿是未经验证的猜测，
-    /// 等权时该让位给一切真词。这也让 `CompositeDict::merge_search` 的跨层去重
-    /// 自动做对：同 text 时保留数值更小那层的 code，草稿不会盖掉真词。
-    ///
-    /// ⚠️ **取 5 而不是插在 `Temp` 与 `Cell` 之间**，是为了不改动任何现有档位的数值——
-    /// 那会连带改掉 `base_order` 的默认分档与 `register_layer` 的排序，
-    /// 为一个新层去动四个旧层不划算。
+    /// 排在 `System` 之后：等权时让位给一切真词，`CompositeDict::merge_search` 去重时也不会
+    /// 盖掉真词的 code。取 5 而不插在中间，是为了不改动现有档位的数值（`base_order` 默认分档
+    /// 与 `register_layer` 排序都依赖它们）。
     Draft = 5,
 }
 
@@ -67,23 +60,18 @@ pub trait DictLayer: Send + Sync {
         v
     }
 
-    /// **按声母串查找**（简拼召回）：返回该层里声母投影等于 `abbrev` 的词条。
+    /// 按声母串查找（简拼召回）：返回该层里声母投影等于 `abbrev` 的词条。
     ///
-    /// 返回的是**超集**，调用方仍须逐条过自己的判据（音节数、逐段全等、混合模式校验）。
-    /// 本方法只负责把「候选集」从全层缩到一个声母组——判据一律留在引擎侧，
-    /// 这样索引不会悄悄改变简拼的语义，只改变取候选的代价。
+    /// 返回的是超集，判据（音节数、逐段全等、混合模式校验）一律留在引擎侧逐条过。
+    /// 只有背后有声母索引的层才实现（`StoreUserLayer` / `StoreTempLayer`）；系统词库层由引擎
+    /// 直接调 `CachedDict::search_abbrev`，不经本接口。
     ///
-    /// 默认返回空：只有背后有声母索引的层才实现（当前是 `StoreUserLayer` /
-    /// `StoreTempLayer`）。系统词库层走的是另一条路——`CachedDict::search_abbrev`
-    /// 查 wdat 的 `AbbrevSection` 拿到**码**再回查，由引擎直接调用，不经本层接口。
-    ///
-    /// ⚠️ 默认实现返回空**而不是回退到全层枚举**：静默的全表扫正是简拼卡顿的根因，
-    /// 与其让新层不知不觉继承那个代价，不如让它召不回、在测试里立刻暴露。
+    /// 默认返回空而不是回退到全层枚举：静默的全表扫会造成简拼卡顿，宁可召不回、在测试里暴露。
     fn search_abbrev(&self, _abbrev: &str, _limit: usize) -> Vec<Candidate> {
         Vec::new()
     }
 
-    /// 声母串**恰为** `abbrev` 的词条：不含无边界词（`boundary == 0`）。`limit = 0` 不设上限。
+    /// 声母串恰为 `abbrev` 的词条：不含无边界词（`boundary == 0`）。`limit = 0` 不设上限。
     ///
     /// 与 [`Self::search_abbrev`] 的区别只在取数范围：那边为简拼召回服务，要连无边界词一起
     /// 交给引擎现切；这边给整句词图用，节点要求真值切分，无边界词必被拒收，不该占名额。
@@ -92,13 +80,11 @@ pub trait DictLayer: Send + Sync {
         Vec::new()
     }
 
-    /// 该层是否存在**严格长于** `prefix` 的编码——「更长后继」存在性判据，供上屏安全阀
-    /// （自动上屏 / 满码清空 / 顶码）使用：还能接着打就别急着替用户上屏。
+    /// 该层是否存在严格长于 `prefix` 的编码，供上屏安全阀（自动上屏 / 满码清空 / 顶码）使用：
+    /// 还能接着打就别急着替用户上屏。
     ///
-    /// 默认实现沿用「取一批前缀候选再看有没有更长 code」的老办法，仅为无法廉价判断的层
-    /// （redb / 内存 trie）兜底。它**受 limit 截断影响**：更长编码的候选权重偏低被挤出
-    /// 前 64 名时会漏判成 false。由有序结构支撑的层应覆盖本方法直接问索引，
-    /// 见 `SystemDictLayer`。
+    /// 默认实现取前 64 条前缀候选来看，受截断影响会漏判成 false，仅为 redb / 内存 trie 兜底；
+    /// 由有序结构支撑的层应覆盖本方法直接问索引，见 `SystemDictLayer`。
     fn has_longer_code(&self, prefix: &str) -> bool {
         let n = prefix.chars().count();
         self.search_prefix(prefix, 64)
@@ -106,40 +92,31 @@ pub trait DictLayer: Send + Sync {
             .any(|c| c.code.chars().count() > n)
     }
 
-    /// 全量枚举本层的 `(code, text, weight)`，供**离线索引构建**使用。
+    /// 全量枚举本层的 `(code, text, weight)`，供离线索引构建使用（码表整句简码索引
+    /// `wind_engine::codetable::sentence`、英文词组分词索引 `wind_engine::english_phrase`）。
     ///
-    /// 消费方（都是懒建 + 后台预热的一次性全表扫，各自有失效通路）：
-    /// - 码表整句的简码索引 `wind_engine::codetable::sentence`
-    /// - 英文词组分词索引 `wind_engine::english_phrase`（t42）
-    ///
-    /// ⚠️ **不是查询接口**：它是 O(全表) 的，绝不能出现在按键链路上。
-    /// 默认实现为空——与 [`Self::search_abbrev`] 同一取舍：默认「枚举不到」好过默认
-    /// 「静默全表扫」，让没有廉价枚举能力的层（redb / 内存 trie）在测试里立刻暴露，
-    /// 而不是不知不觉继承一份全表遍历的代价。
-    ///
-    /// `weight` 须是该层**对外的有效权重**（经 `default_weight` / `weight_norm` 换算后），
-    /// 与 [`Self::search`] 返回的候选同域——否则索引里的权重与查询结果对不上。
+    /// 不是查询接口：O(全表)，绝不能出现在按键链路上。默认为空，取舍同 [`Self::search_abbrev`]。
+    /// `weight` 须是该层对外的有效权重（经 `default_weight` / `weight_norm` 换算后），
+    /// 与 [`Self::search`] 返回的候选同域。
     fn for_each_entry(&self, _f: &mut dyn FnMut(&str, &str, i32)) {}
 
-    /// [`Self::for_each_entry`] 枚举结果的**稳定摘要**，供落盘的派生索引判定「盘上那份
-    /// 还对不对得上本层」（当前唯一消费方：英文词组分词索引 `.wphr`）。
+    /// [`Self::for_each_entry`] 枚举结果的稳定摘要，供落盘的派生索引（如英文词组分词索引
+    /// `.wphr`）判定盘上那份是否仍对得上本层。
     ///
-    /// - `Some(s)`：同一个 `s` 必须对应同一组枚举结果（**含权重换算**）；
-    /// - `None`：说不清（内存词库、没有稳定磁盘产物的层）⇒ 以它为源的派生索引**不落盘**，
-    ///   每次照旧全表扫——慢，但结果正确。
+    /// - `Some(s)`：同一个 `s` 必须对应同一组枚举结果（含权重换算）；
+    /// - `None`：说不清（内存词库等）⇒ 以它为源的派生索引不落盘，每次全表扫。
     ///
-    /// 默认 `None`，理由同 `for_each_entry` 默认为空：覆盖了 `for_each_entry` 却忘了覆盖
-    /// 本方法的层只会「没缓存」，不会把一份旧索引骗成新鲜的。反过来，**没有**覆盖
-    /// `for_each_entry` 的层（枚举恒空）要参与缓存，得自己显式声明，见 `StoreUserLayer`。
+    /// 默认 `None`：忘了覆盖的层只会「没缓存」，不会把旧索引骗成新鲜的。枚举恒空的层要参与
+    /// 缓存须显式声明，见 `StoreUserLayer`。
     fn entries_digest(&self) -> Option<String> {
         None
     }
 
-    /// **通配查询**（`docs/design/codetable-wildcard.md` §5.1）：`pattern` 中等于 `wildcard`
-    /// 的位匹配**恰好一个**任意码元，其余位字面匹配。`with_prefix` 时追加更长编码
+    /// 通配查询（`docs/design/codetable-wildcard.md` §5.1）：`pattern` 中等于 `wildcard`
+    /// 的位匹配恰好一个任意码元，其余位字面匹配。`with_prefix` 时追加更长编码
     /// （前 `pattern` 位匹配即可）的前缀补全。
     ///
-    /// 结果**等长档优先**（[`cmp_pattern`]），各层自己先按两档取额再返回：更长编码的权重
+    /// 结果等长档优先（[`cmp_pattern`]），各层自己先按两档取额再返回：更长编码的权重
     /// 常高于等长单字（词频 vs 字频），混排后截断会把等长结果挤出配额。
     ///
     /// 默认返回空——与 [`Self::search_abbrev`] 同一取舍：不支持的层（草稿层即刻意不支持，
@@ -164,13 +141,11 @@ pub trait DictLayer: Send + Sync {
     /// 取 `&self`（内部用原子标志），故无需重建引擎即可即时生效。
     fn set_enabled(&self, _enabled: bool) {}
 
-    /// 该层候选的**层级基序档位**：排序时 `base_order` 作为独立层级（weight 之后、
+    /// 该层候选的层级基序档位：排序时 `base_order` 作为独立层级（weight 之后、
     /// natural_order 之前，见 `candidate::better`/`by_natural`），值越小越靠前。
     ///
-    /// 默认按**层类型**给小整数档位：非系统层（命令/用户词/临时词/单元）恒排在系统词库层
-    /// 之前（等权时）。因是独立排序层级（非加进 natural_order），**小整数即可**分档——`-1`
-    /// 就能排在 `0` 前，与 natural_order 大小无关，无需魔法常量。系统层默认 0，由
-    /// `SystemDictLayer` 覆盖为 `[[dictionaries]].base_order`（设计者配 0/1/2… 小整数）。
+    /// 默认按层类型给负整数档位，使非系统层在等权时恒排在系统词库层之前。系统层默认 0，
+    /// 由 `SystemDictLayer` 覆盖为 `[[dictionaries]].base_order`。
     fn base_order(&self) -> i32 {
         match self.layer_type() {
             LayerType::Logic => -4,
@@ -202,7 +177,7 @@ pub trait MutableLayer: DictLayer {
 
 /// 协调器交给引擎的通配占位符。
 ///
-/// 通配键本身（`z`、`?`）不能直接当 pattern 的通配符：首位让位后进缓冲的 `z` 是**字面**
+/// 通配键本身（`z`、`?`）不能直接当 pattern 的通配符：首位让位后进缓冲的 `z` 是字面
 /// 码元，与后续作通配的 `z` 同形。协调器按裁决把「作通配的那几位」替换成本字符，
 /// 它不可能出现在任何码表编码里（码元来自物理按键，`\u{1}` 按不出来）。
 pub const WILDCARD_SLOT: char = '\u{1}';

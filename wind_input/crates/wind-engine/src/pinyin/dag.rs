@@ -1,7 +1,6 @@
 // Portions derived from librime / librime-octagram, Copyright (c) 2014 RIME Developers, BSD-3-Clause (see NOTICE.md).
 //! DAG 构建与最大匹配
 //!
-//! 与 Go 版本 `wind_input/internal/engine/pinyin/dag.go` 对齐。
 //! DP 最大匹配切分拼音音节。
 
 use crate::pinyin::syllable::SyllableTrie;
@@ -189,17 +188,12 @@ impl Dag {
 
 /// 切分图：把「从字节位置 p 出发有哪些音节」这一事实单独抽出来。
 ///
-/// 存在的理由：词图构建有两种切分来源，此前它们被写死成两套逻辑。
+/// 词图构建的两种切分来源统一成「图」：
 ///
-/// - **全拼**：`Dag` 里本就保留了全部路径（`nodes[i]` = 从 i 出发的所有边），
-///   但 `LatticeBuilder` 此前只消费 `maximum_match` 塌缩后的那一条，
-///   于是「西安交通大学」真值 `xi|an|jiao|tong|da|xue` 这条路径根本不存在，
-///   边界校验一开就把词整片逐出词图（Phase 1 实测 C 类 top-1 掉到 0.00%）。
-/// - **双拼 / 手动分隔符 `'`**：切分是**真值**、只有一条，绝不可让 DAG 重猜
-///   （`nihao` 5 键双拼解释为 `ni|ha|o`，重猜成 `ni|hao` 会让 5 键也能出「你好」）。
-///
-/// 两者的差别只是「图的形状」——多路径图 vs 线性链。抽出本类型后词图构建对二者
-/// 一视同仁，双拼路径的语义天然保持不变（链上只有一条路径，等价于原行为）。
+/// - 全拼：多路径图（`Dag` 的全部边）。只取 `maximum_match` 的一条会丢掉真值路径
+///   （「西安」`xi|an`），边界校验随之把词逐出词图。
+/// - 双拼 / 手动分隔符 `'`：切分是真值，退化为线性链，绝不可让 DAG 重猜
+///   （双拼 `nihao` 是 `ni|ha|o`，重猜成 `ni|hao` 会让 5 键也能出「你好」）。
 ///
 /// 边只存终点位置：音节本身恒为 `input[p..q]`，无须重复存储。
 pub struct SegGraph {
@@ -244,8 +238,7 @@ impl SegGraph {
                 }
             }
         }
-        // 歧义接缝普查：三重循环但每层度数极小（一个位置至多几条音节边），
-        // 实测规模远小于词典查询开销。
+        // 歧义接缝普查：三重循环但每层度数极小（一个位置至多几条音节边），远小于词典查询开销。
         let mut ambiguous: Vec<Vec<usize>> = vec![Vec::new(); len + 1];
         for p in 0..=len {
             let Some(from_p) = edges.get(p) else { continue };
@@ -469,16 +462,14 @@ impl SegGraph {
     /// 枚举 `p→q` 之间**恰好 `n` 条边**的全部路径，各返回音节起点偏移（相对 `p`），
     /// 形态与 [`Self::any_path`] 一致。
     ///
-    /// 与同族两个函数的分工——它们各自只处理**一条**路径（`mask_path` 验证给定的一条、
+    /// 与同族两个函数的分工——它们各自只处理一条路径（`mask_path` 验证给定的一条、
     /// `any_path` 任取最短的一条），本函数是**按约束求解**：调用方手上有一个来自图外的
-    /// 约束（词条的汉字数 = 音节数），它通常能把候选路径筛到唯一。
+    /// 约束（词条的汉字数 = 音节数），它通常能把候选路径筛到唯一；[`Self::maximum_match`]
+    /// 只看 code，在等长路径间（`xi|an` / `xian`）只能猜。
     /// 见 `docs/design/pinyin-entry-boundary-contract.md` §3.1。
     ///
-    /// ★ 这正是它与 [`Self::maximum_match`] 的分界：那个只看 code、在等长路径间无从取舍
-    /// （`xian` 切 `xi|an` 还是 `xian` 覆盖字符数相同），故只能算猜；有了 `n` 就是解方程。
-    ///
     /// `limit` 封顶结果数：分支爆炸只可能出现在畸形长码上（正常词条码 ≤ 12 字节、每位置
-    /// 至多几条音节边）。超限即截断，调用方按「多解」处理——**截断不可静默当成唯一解**。
+    /// 至多几条音节边）。超限即截断，调用方按「多解」处理——截断不可静默当成唯一解。
     pub fn paths_with_edges(&self, p: usize, q: usize, n: usize, limit: usize) -> Vec<Vec<usize>> {
         let mut out = Vec::new();
         if q < p || q > self.len || limit == 0 {

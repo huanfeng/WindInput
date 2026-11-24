@@ -1,23 +1,16 @@
-//! 装配：把 `charsets/*.yaml` 的解析结果与内置区块类编译成 [`CharsetRegistry`]。
+//! 装配：把 `charsets/*.yaml` 的解析结果编译成 [`CharsetRegistry`]。
 //!
 //! # 为什么装配点在 wind-engine
 //!
 //! `wind-config` 出 [`MergedClass`]（配置形态），`wind-candidate` 收 [`ClassSpec`]
-//! （判定形态），两个 crate **互不依赖**——这道边界是刻意的，判定层不该认识任何配置
-//! 格式（`19d8c80a` 把容器从 TOML 单文件换成 YAML 目录扫描时，判定层一行没动，靠的
-//! 就是它）。转换因此必须落在同时看得见两边的地方，本 crate 是其中最底层的一个。
+//! （判定形态），两个 crate 刻意互不依赖：判定层不该认识任何配置格式。转换因此落在
+//! 同时看得见两边的最底层 crate，即本 crate。
 //!
-//! # 合并顺序
+//! # 合并
 //!
-//! ```text
-//! 内置区块类（50 块 + 「其它」+ 「符号」）
-//!   ← charsets/*.yaml 按 key **字段级叠加**（不是替换）
-//!   ← enabled: false 的整类丢弃
-//! ```
-//!
-//! ★ 叠加而非替换，是为了让「给某个内置块配一条属性」这件事可行：用户写
-//! `key: 表情符号` + `no_freq: true`，得到的应当是**那个块加上免词频**，而不是一个
-//! 没有 `ranges` 的空类——后者会让配置看着生效、实际一个字符都命中不了。
+//! 全部类都来自 `charsets/*.yaml`（含生成的 Unicode 区块 `blocks.yaml`），按 key 字段级叠加
+//! 而非替换：用户写 `key: 表情符号` + `no_freq: true` 应得到那个块加上免词频，而不是一个
+//! 没有 `ranges`、一个字符都命中不了的空类。`enabled: false` 的整类丢弃。
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -26,9 +19,9 @@ use tracing::warn;
 use wind_candidate::{CharsetRegistry, ClassSpec, Scope};
 use wind_config::charset_def::{Commonality, DEFAULT_ORDER, MergedClass, ScopeKind, parse_ranges};
 
-/// 外部引用：配置里**按名字**指向字符类的那两个键。
+/// 外部引用：配置里按名字指向字符类的那两个键。
 ///
-/// ★ 它们与类上的 `no_freq` / `in_rare` 是同一件事的两个入口（设计文档 §2.2），
+/// 它们与类上的 `no_freq` / `in_rare` 是同一件事的两个入口（设计文档 §2.2），
 /// 在装配期合并成同一份类属性——判定层因此只有一套语义，不必知道某个类的免词频
 /// 是「类自己声明的」还是「被配置点名的」。
 #[derive(Debug, Clone, Copy, Default)]
@@ -126,16 +119,12 @@ pub fn assemble(
     data_dir: Option<&Path>,
     refs: ExternalRefs<'_>,
 ) -> CharsetRegistry {
-    // 全部类都来自配置——**代码里没有一份内置清单**。50 个 Unicode 区块在
-    // `data/charsets/blocks.yaml`（生成物），emoji 与常用汉字各有自己的文件。
-    //
-    // ⛔ 别在这里塞「配置缺失时的兜底类」：那就是第二个数据源，用户改了配置却发现
-    // 某些类改不动，而两处各自看都对。缺文件的表现是 `exclude_blocks` 里的名字解析
-    // 不出来 —— `apply_ref` 会把它 warn 出来。
+    // 代码里没有内置清单：区块在 `data/charsets/blocks.yaml`（生成物），emoji 与常用汉字各有文件。
+    // 别在这里塞「配置缺失时的兜底类」，那是第二个数据源；缺文件由 `apply_ref` 的未识别名 warn 暴露。
     let mut specs: BTreeMap<String, ClassSpec> = BTreeMap::new();
 
     for (key, mc) in defs {
-        // `enabled: false` 是**删除**的表达（字段级合并里 `merge_value` 表达不了删除，
+        // `enabled: false` 是删除的表达（字段级合并里 `merge_value` 表达不了删除，
         // 见设计文档 §4.1）。内置块类同样可以被这样关掉。
         if mc.def.enabled == Some(false) {
             specs.remove(key);
@@ -172,11 +161,8 @@ pub fn assemble(
             dropped.join(", ")
         );
     }
-    // ⚠️ 没有任何类表态常用性 ⇒ 常用/生僻判定整个不生效（一切兜底判常用）。
-    //
-    // 最常见的成因是**部署时 `data/charsets/` 没跟上**：旧的 data 目录配新的可执行文件。
-    // 失效方向是安全的（退化为不过滤，同 `CommonChars::is_empty()`），但用户看到的是
-    // 「生僻字模式什么都出不来」「检索范围过滤没反应」，而不会想到是少了个目录。
+    // 没有任何类表态常用性 ⇒ 常用/生僻判定整个不生效（退化为不过滤）。最常见成因是部署时
+    // `data/charsets/` 没跟上新的可执行文件，用户只会看到生僻字模式与检索范围过滤没反应。
     if reg
         .classes()
         .iter()
@@ -196,21 +182,12 @@ pub fn assemble(
     reg
 }
 
-/// ★★ 安全阀：一个类**配了作用域和「域外」判定、却一个成员都没有**时，撤销它的表态。
+/// 安全阀：一个类配了作用域和「域外」判定、却一个成员都没有时，撤销它的表态。
 ///
-/// # 为什么必须有这一条
-///
-/// `common_han` 的形态是「作用域 = 汉字，名单 = common_chars.txt，名单内常用、
-/// **域内名单外生僻**」。字表读不到时（路径变了、文件被删、定制包漏打），名单为空而
-/// 作用域还在 ⇒ **每一个汉字都落进「域内、名单外」⇒ 全部判生僻**，用户的候选被过滤到
-/// 几乎不剩。而全程只有一条 warn。
-///
-/// 失效方向必须是「这个类不表态」（回到没有它的样子），不是「反过来判」。同款防线是
-/// `CommonChars::is_empty()`——那里也是拿「出厂表没装进来」当作**退化为不过滤**的信号，
-/// 而不是拿空表去过滤。
-///
-/// ⚠️ 只对**同时有 scope 和 outside** 的类生效。纯段类成员为空只是它不命中任何字符，
-/// 没有「补集」这一半，本来就无害。
+/// 如 `common_han`（作用域 = 汉字，名单内常用、域内名单外生僻）的字表读不到时，名单为空会让
+/// 每个汉字都判生僻、候选几乎被滤光。失效方向必须是「不表态」而不是「反过来判」，同
+/// `CommonChars::is_empty()`。纯段类没有补集这一半，成员为空本就无害，故只管同时有
+/// scope 和 outside 的类。
 fn disarm_empty_scoped_classes(specs: &mut BTreeMap<String, ClassSpec>) {
     for c in specs.values_mut() {
         let is_complement_class = c.scope.is_some() && c.outside_common.is_some();
@@ -228,9 +205,8 @@ fn disarm_empty_scoped_classes(specs: &mut BTreeMap<String, ClassSpec>) {
 
 /// 按名字点名一批类，给它们打上并集属性。
 ///
-/// ⚠️ **必须 warn 未识别的名字**：这些名字是中文串，`表情符號`（繁体「號」）这种错法
-/// 肉眼极难分辨，而静默跳过的表现就是「配了没反应」，用户无从判断是名字写错还是功能
-/// 没生效。这条职责从 `Manager::parse_freq_exclude` 原样搬过来。
+/// 必须 warn 未识别的名字：`表情符號`（繁体「號」）这种错法肉眼极难分辨，
+/// 静默跳过只会表现为「配了没反应」。
 fn apply_ref(
     specs: &mut BTreeMap<String, ClassSpec>,
     names: &[String],
@@ -313,13 +289,10 @@ fn is_common(c: Commonality) -> bool {
     matches!(c, Commonality::Common)
 }
 
-/// 读 `file:` 指向的外部字表：`#` 注释行跳过，其余**逐 `char`** 收录。
+/// 读 `file:` 指向的外部字表：`#` 注释行跳过，其余逐 `char` 收录。
 ///
-/// ⚠️ **与内嵌列表体的「每行一个字素簇」刻意不同**，因为 `file:` 存在的唯一理由就是
-/// 兼容 `schemas/common_chars.txt`——那个文件是一行几十个字连写的，按「每行一簇」读
-/// 会把整行当成一个成员，结果是**一个字都命中不了**，而全程无报错。
-///
-/// ⇒ 要表达多码位簇（`👨‍👩‍👧`、`1️⃣`）就用内嵌列表体，`file:` 给不了这个表达力。
+/// 与内嵌列表体的「每行一个字素簇」刻意不同：`file:` 是为兼容一行几十字连写的
+/// `schemas/common_chars.txt`，按行读会一个字都命中不了。多码位簇（`👨‍👩‍👧`）请用内嵌列表体。
 fn load_member_file(key: &str, rel: &str, data_dir: Option<&Path>) -> Vec<String> {
     let Some(path) = wind_config::Config::resolve_schema_resource(data_dir, rel) else {
         warn!("字符类「{key}」的字表 {rel} 找不到，本类的外部成员为空");
