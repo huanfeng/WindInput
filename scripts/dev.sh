@@ -217,7 +217,7 @@ build_core() {
     local suffix="" prof="release"
     [ "$profile" = dev ] && { prof="dev-variant"; suffix="_dev"; }
     say "\n[core] 交叉编译 wind_input ($prof, $TARGET)..."
-    cargo_xwin build --profile "$prof" --target "$TARGET" -p wind_service -p wind_extension_host \
+    cargo_xwin build --profile "$prof" --target "$TARGET" -p wind_service -p wind_extension_host -p wind_sync_host \
         || { err "wind_input 构建失败!"; return 1; }
     local src="$(cargo_target_dir "$PROJECT_ROOT")/$TARGET/$prof/wind_input.exe"
     [ -f "$src" ] || { err "未找到产物: $src"; return 1; }
@@ -228,6 +228,11 @@ build_core() {
     [ -f "$host" ] || { err "未找到产物: $host"; return 1; }
     cp -f "$host" "$outdir/wind_input_ext${suffix}.exe"
     gray "已构建: wind_input_ext${suffix}.exe"
+    # 同步进程：同上，核心按 exe 同目录找它，名字随变体带后缀。
+    local syncx="$(cargo_target_dir "$PROJECT_ROOT")/$TARGET/$prof/wind_input_sync.exe"
+    [ -f "$syncx" ] || { err "未找到产物: $syncx"; return 1; }
+    cp -f "$syncx" "$outdir/wind_input_sync${suffix}.exe"
+    gray "已构建: wind_input_sync${suffix}.exe"
     # CLI 包装器 (wind_input config ...; 运行时自辨 dev/release exe, 两变体共用一份)
     [ -f "$PROJECT_ROOT/scripts/wind_cli.bat" ] && cp -f "$PROJECT_ROOT/scripts/wind_cli.bat" "$outdir/wind_cli.bat" && gray "已复制: wind_cli.bat"
 }
@@ -1148,7 +1153,8 @@ do_push_module() {
                  files=("${b[1]}" "${b[2]}") ;;                    # [0]=exe [1]=x64 dll [2]=x86 dll
         core)    files=("wind_input${sfx}.exe")
                  [ -f "$outdir/wind_cli.bat" ] && files+=("wind_cli.bat")   # CLI 包装器随核心
-                 [ -f "$outdir/wind_input_ext${sfx}.exe" ] && files+=("wind_input_ext${sfx}.exe") ;;
+                 [ -f "$outdir/wind_input_ext${sfx}.exe" ] && files+=("wind_input_ext${sfx}.exe")
+                 [ -f "$outdir/wind_input_sync${sfx}.exe" ] && files+=("wind_input_sync${sfx}.exe") ;;
         *)       err "未知模块: $mod（tsf|core）"; return 1 ;;
     esac
     local f

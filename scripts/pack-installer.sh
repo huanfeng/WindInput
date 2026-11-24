@@ -124,6 +124,8 @@ cp -rf "$BUILD_DIR/data"             "$STAGE/"
 [[ -f "$BUILD_DIR/wind_cli.bat" ]] && cp -f "$BUILD_DIR/wind_cli.bat" "$STAGE/"
 # 扩展宿主随核心分发（核心按同目录找它；缺了只是扩展不可用，不影响输入）。
 [[ -f "$BUILD_DIR/wind_input_ext.exe" ]] && cp -f "$BUILD_DIR/wind_input_ext.exe" "$STAGE/"
+# 同步进程同理（缺了只是数据同步不可用）。
+[[ -f "$BUILD_DIR/wind_input_sync.exe" ]] && cp -f "$BUILD_DIR/wind_input_sync.exe" "$STAGE/"
 for f in "${companions[@]}"; do
   [[ -f "$BUILD_DIR/$f" ]] && cp -f "$BUILD_DIR/$f" "$STAGE/"
 done

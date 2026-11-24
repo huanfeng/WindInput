@@ -67,7 +67,7 @@ rustPlatform.buildRustPackage {
   '';
 
   # 只构建服务二进制；linux-host 关掉桌面渲染路径（外部宿主 = Fcitx5 addon）。
-  cargoBuildFlags = [ "-p" "wind_service" ];
+  cargoBuildFlags = [ "-p" "wind_service" "-p" "wind_sync_host" ];
   buildFeatures = [ "linux-host" ];
 
   # 单元测试需要词库数据与宿主环境，打包阶段不跑（CI 已有专门的测试门）。
@@ -79,6 +79,9 @@ rustPlatform.buildRustPackage {
     [ -n "$bin" ] || { echo "找不到 wind_input 构建产物" >&2; exit 1; }
     mkdir -p $out/lib/windinput
     install -Dm755 "$bin" $out/lib/windinput/wind_input
+    syncbin=$(find target -type f -name wind_input_sync -path '*/release/*' -print -quit)
+    [ -n "$syncbin" ] || { echo "找不到 wind_input_sync 构建产物" >&2; exit 1; }
+    install -Dm755 "$syncbin" $out/lib/windinput/wind_input_sync
     ${lib.optionalString (data != null) ''
       cp -r ${data} $out/lib/windinput/data
     ''}

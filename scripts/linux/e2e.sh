@@ -44,7 +44,7 @@ if [[ -z "${SKIP_BUILD:-}" ]]; then
         cargo build -q -p wind_service --features linux-host)
     log "构建扩展宿主与假扩展…"
     (cd "$REPO/wind_input" && CARGO_TARGET_DIR="$TARGET_DIR" \
-        cargo build -q -p wind_extension_host --bins --examples)
+        cargo build -q -p wind_extension_host -p wind_sync_host --bins --examples)
     if [[ -z "${WIND_E2E_ONLY:-}" && -z "${WIND_E2E_SETTING:-}" && -d "$SETTING_REPO" ]]; then
         log "构建设置程序（$SETTING_REPO）…"
         (cd "$SETTING_REPO" && CARGO_TARGET_DIR="$SETTING_TARGET_DIR" cargo build -q)
@@ -76,6 +76,7 @@ trap cleanup EXIT
 cp "$SERVICE_BIN" "$W/svc/wind_input"
 # 扩展宿主与服务同目录（服务按 exe 同目录找它）。
 cp "$EXTENSION_HOST_BIN" "$W/svc/wind_input_ext"
+[[ -x "$TARGET_DIR/debug/wind_input_sync" ]] && cp "$TARGET_DIR/debug/wind_input_sync" "$W/svc/wind_input_sync"
 mkdir -p "$W/svc/data"
 for f in "$DATA_DIR"/*; do
     [[ "$(basename "$f")" == system.phrases.toml ]] || ln -s "$f" "$W/svc/data/"

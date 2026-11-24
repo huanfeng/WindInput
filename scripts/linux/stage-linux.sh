@@ -36,7 +36,8 @@ mkdir -p "$WORK_DIR"
 
 # ── 服务 ──
 (cd "$SRC_DIR/wind_input" && CARGO_TARGET_DIR="$SERVICE_TARGET" \
-    cargo build --release -p wind_service --features linux-host)
+    cargo build --release -p wind_service --features linux-host \
+    && cargo build --release -p wind_sync_host)
 
 # ── 设置程序 ──
 # 版本号与服务同源（docs/VERSION），不走 git——worktree 的 .git 指向宿主路径，容器里读不到。
@@ -55,6 +56,8 @@ DESTDIR="$S" cmake --install "$WORK_DIR/cmake"
 
 # ── 组装 ──
 install -Dm755 $SERVICE_TARGET/release/wind_input "$S/usr/lib/windinput/wind_input"
+# 数据同步进程：服务按 exe 同目录找它。
+install -Dm755 $SERVICE_TARGET/release/wind_input_sync "$S/usr/lib/windinput/wind_input_sync"
 mkdir -p "$S/usr/lib/windinput/data"
 cp -a "$DATA_DIR/." "$S/usr/lib/windinput/data/"
 # 应用兼容规则是平台专属策略：Windows 版 compat.toml 里全是 Windows 宿主的修正，不能随 Linux 包带。

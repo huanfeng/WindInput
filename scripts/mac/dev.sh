@@ -243,9 +243,11 @@ build_service() {
         bold "==> 编译 Rust service ($VARIANT, universal)"
         cargo_build_universal "$RUST_DIR" "$PROFILE_SUBDIR" wind_input \
             "${CARGO_BUILD_ARGS[@]}" -p wind_service || return 1
+        cargo_build_universal "$RUST_DIR" "$PROFILE_SUBDIR" wind_input_sync \
+            "${CARGO_BUILD_ARGS[@]}" -p wind_sync_host || return 1
     else
         bold "==> 编译 Rust service ($VARIANT)"
-        ( cd "$RUST_DIR" && cargo build "${CARGO_BUILD_ARGS[@]}" -p wind_service ) || return 1
+        ( cd "$RUST_DIR" && cargo build "${CARGO_BUILD_ARGS[@]}" -p wind_service -p wind_sync_host ) || return 1
     fi
     return 0
 }
@@ -1519,6 +1521,13 @@ service_install() {
     mkdir -p "$INSTALL_ROOT" "$LOG_DIR" "$HOME/Library/LaunchAgents"
     cp -f "$SRC_EXE" "$INSTALL_EXE"
     chmod +x "$INSTALL_EXE"
+    # 数据同步进程：服务按自身 exe 同目录找 wind_input_sync[_dev]（装后服务名是中文名，同步进程名不改）。
+    local SYNC_NAME="wind_input_sync"; [[ $DEV_VARIANT -eq 1 ]] && SYNC_NAME="wind_input_sync_dev"
+    if [[ -f "$SRC_DIR/wind_input_sync" ]]; then
+        cp -f "$SRC_DIR/wind_input_sync" "$INSTALL_ROOT/$SYNC_NAME"
+        chmod +x "$INSTALL_ROOT/$SYNC_NAME"
+        command -v codesign >/dev/null && codesign --force -s "${SIGN_IDENTITY:--}" "$INSTALL_ROOT/$SYNC_NAME" 2>/dev/null || true
+    fi
     # 原地重签: 跨机/同路径部署时内核 amfi 缓存上版 cdhash, 新二进制经 launchd 起来会校验失配。
     # --force 重签刷新; ad-hoc 幂等。SIGN_IDENTITY 设则用固定证书 (无头 ssh 需 SIGN_KEYCHAIN_PW 解锁)。
     if command -v codesign >/dev/null; then
@@ -2045,6 +2054,8 @@ pkg_build() {
     mkdir -p "$DEST/service"
     cp -R "$APP_BUNDLE"   "$DEST/"
     cp    "$SERVICE_BIN"  "$DEST/service/wind_input"
+    # 数据同步进程：与服务二进制同目录（缺了只是同步不可用）。
+    [[ -f "$(dirname "$SERVICE_BIN")/wind_input_sync" ]] && cp "$(dirname "$SERVICE_BIN")/wind_input_sync" "$DEST/service/wind_input_sync"
     cp -R "$SERVICE_DATA" "$DEST/service/data"
     # 安装脚本: 把 dev.sh 本身放进 payload, 再生成两个薄包装脚本 (postinstall 仍按
     # install_app.sh / install_service.sh 这两个名字调用)。包装脚本 re-exec dev.sh 的内部入口

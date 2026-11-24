@@ -43,7 +43,7 @@ for d in libc6 libstdc++6 libfcitx5core7 'fcitx5 (>= 5.0.14)'; do
 done
 
 # 关键文件
-for f in usr/lib/windinput/wind_input usr/lib/windinput/wind_setting \
+for f in usr/lib/windinput/wind_input usr/lib/windinput/wind_input_sync usr/lib/windinput/wind_setting \
          usr/share/fcitx5/addon/windinput.conf usr/share/fcitx5/inputmethod/windinput.conf \
          usr/share/applications/windinput-setting.desktop usr/share/mime/packages/windinput.xml \
          usr/lib/windinput/data/compat.toml usr/share/X11/xkb/symbols/windinput; do
@@ -104,7 +104,7 @@ while IFS= read -r f; do
         ok "$rel ($desc, glibc ≤ ${top:-无})"
     fi
 done < <(find "$R" -type f \( -perm /111 -o -name '*.so*' \))
-(( n >= 3 )) || bad "只找到 $n 个 ELF（期望 wind_input / wind_setting / libwindinput.so）"
+(( n >= 4 )) || bad "只找到 $n 个 ELF（期望 wind_input / wind_input_sync / wind_setting / libwindinput.so）"
 
 # 权限
 # 先取结果再判断：`find | grep -q` 在 pipefail 下，grep 一匹配就退出、find 吃 SIGPIPE(141)，

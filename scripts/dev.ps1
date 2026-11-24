@@ -229,7 +229,7 @@ function Build-Core ([string]$profile = "release", [string]$outdir = $null) {
     Say "`n[core] 构建 wind_input ($prof)..."
     Push-Location $ProjectRoot
     try {
-        cargo build --profile $prof -p wind_service -p wind_extension_host
+        cargo build --profile $prof -p wind_service -p wind_extension_host -p wind_sync_host
         if ($LASTEXITCODE -ne 0) { ErrMsg "wind_input 构建失败!"; return $false }
     } finally { Pop-Location }
     $src = Join-Path (Get-CargoTargetDir $ProjectRoot) "$prof\wind_input.exe"
@@ -242,6 +242,11 @@ function Build-Core ([string]$profile = "release", [string]$outdir = $null) {
     if (-not (Test-Path $hostExe)) { ErrMsg "未找到产物: $hostExe"; return $false }
     Copy-Item $hostExe "$outdir\wind_input_ext$suffix.exe" -Force
     Gray "已构建: wind_input_ext$suffix.exe"
+    # 同步进程：同上，核心按 exe 同目录找它，名字随变体带后缀。
+    $syncExe = Join-Path (Get-CargoTargetDir $ProjectRoot) "$prof\wind_input_sync.exe"
+    if (-not (Test-Path $syncExe)) { ErrMsg "未找到产物: $syncExe"; return $false }
+    Copy-Item $syncExe "$outdir\wind_input_sync$suffix.exe" -Force
+    Gray "已构建: wind_input_sync$suffix.exe"
     # CLI 包装器 (wind_input config ...; 运行时自辨 dev/release exe, 两变体共用一份)
     $cli = "$ProjectRoot\scripts\wind_cli.bat"
     if (Test-Path $cli) { Copy-Item $cli "$outdir\wind_cli.bat" -Force; Gray "已复制: wind_cli.bat" }
@@ -1429,6 +1434,7 @@ function Deploy-Full ([string]$profile = "release") {
         Copy-Replace $targetDir "wind_input$suffix.exe" "$outdir\wind_input$suffix.exe"
         if (Test-Path "$outdir\wind_cli.bat")      { Copy-Replace $targetDir "wind_cli.bat"      "$outdir\wind_cli.bat" }
         if (Test-Path "$outdir\wind_input_ext$suffix.exe") { Copy-Replace $targetDir "wind_input_ext$suffix.exe" "$outdir\wind_input_ext$suffix.exe" }
+        if (Test-Path "$outdir\wind_input_sync$suffix.exe") { Copy-Replace $targetDir "wind_input_sync$suffix.exe" "$outdir\wind_input_sync$suffix.exe" }
         foreach ($dll in (Get-ChildItem "$outdir\wind_tsf*.dll" -ErrorAction SilentlyContinue)) {
             Copy-Replace $targetDir $dll.Name $dll.FullName
         }
@@ -1465,7 +1471,7 @@ function Get-ModuleFiles ([string]$mod, [string]$suffix) {
     switch ($mod) {
         "tsf"     { @{ Required = @("wind_tsf$suffix.dll", "wind_tsf_x86${suffix}.dll"); Optional = @() } }
         # wind_cli.bat 两变体共用一份、且 Build-Core 里是"存在才复制", 故列为可选
-        "core"    { @{ Required = @("wind_input$suffix.exe"); Optional = @("wind_cli.bat", "wind_input_ext$suffix.exe") } }
+        "core"    { @{ Required = @("wind_input$suffix.exe"); Optional = @("wind_cli.bat", "wind_input_ext$suffix.exe", "wind_input_sync$suffix.exe") } }
         "setting" { @{ Required = @("wind_setting$suffix.exe"); Optional = @() } }
         # 便携启动器是单一二进制, 不带变体后缀 (运行时按同级有无 _dev exe 自辨变体)
         "portable" { @{ Required = @("wind_portable.exe"); Optional = @() } }
@@ -1618,6 +1624,7 @@ function Deploy-Portable ([string]$profile = "release") {
     Copy-Replace $root "wind_input$suffix.exe" "$outdir\wind_input$suffix.exe"
     if (Test-Path "$outdir\wind_cli.bat") { Copy-Replace $root "wind_cli.bat" "$outdir\wind_cli.bat" }
     if (Test-Path "$outdir\wind_input_ext$suffix.exe") { Copy-Replace $root "wind_input_ext$suffix.exe" "$outdir\wind_input_ext$suffix.exe" }
+    if (Test-Path "$outdir\wind_input_sync$suffix.exe") { Copy-Replace $root "wind_input_sync$suffix.exe" "$outdir\wind_input_sync$suffix.exe" }
     foreach ($dll in (Get-ChildItem "$outdir\wind_tsf*.dll" -ErrorAction SilentlyContinue)) {
         Copy-Replace $root $dll.Name $dll.FullName
     }
@@ -1851,7 +1858,7 @@ function New-InstallerConfig ([string]$profile, [string]$outdir, [string]$cfgPat
         $id = "WindInputDev"; $disp = "清风输入法 (开发版)"; $mainExe = "wind_input_dev.exe"
         $menu = "清风输入法 (开发版)"; $title = "清风输入法 (开发版) 安装向导"; $proto = "windinputdev"
         $settingExe = "wind_setting_dev.exe"
-        $procs = '["wind_setting_dev", "wind_portable", "wind_input_dev", "wind_input_ext_dev"]'
+        $procs = '["wind_setting_dev", "wind_portable", "wind_input_dev", "wind_input_ext_dev", "wind_input_sync_dev"]'
         $acl   = '["wind_tsf_dev.dll", "wind_tsf_x86_dev.dll"]'
         $clsid = "{99C2DEB0-5C57-45A2-9C63-FB54B34FD90A}"; $prof = "{99C2DEB1-5C57-45A2-9C63-FB54B34FD90A}"
         $dllX64 = "wind_tsf_dev.dll"; $dllX86 = "wind_tsf_x86_dev.dll"; $outName = "WindInputDev-Setup"
@@ -1859,7 +1866,7 @@ function New-InstallerConfig ([string]$profile, [string]$outdir, [string]$cfgPat
         $id = "WindInput"; $disp = "清风输入法"; $mainExe = "wind_input.exe"
         $menu = "清风输入法"; $title = "清风输入法 安装向导"; $proto = "windinput"
         $settingExe = "wind_setting.exe"
-        $procs = '["wind_setting", "wind_portable", "wind_input", "wind_input_ext"]'
+        $procs = '["wind_setting", "wind_portable", "wind_input", "wind_input_ext", "wind_input_sync"]'
         $acl   = '["wind_tsf.dll", "wind_tsf_x86.dll"]'
         $clsid = "{99C2EE30-5C57-45A2-9C63-FB54B34FD90A}"; $prof = "{99C2EE31-5C57-45A2-9C63-FB54B34FD90A}"
         $dllX64 = "wind_tsf.dll"; $dllX86 = "wind_tsf_x86.dll"; $outName = "WindInput-Setup"

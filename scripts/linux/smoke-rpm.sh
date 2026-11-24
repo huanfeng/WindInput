@@ -22,7 +22,7 @@ fi
 ok "依赖解析并安装成功"
 
 ADDON="$(rpm -ql windinput | grep '/fcitx5/libwindinput\.so$')"
-for f in /usr/lib/windinput/wind_input /usr/lib/windinput/wind_setting "$ADDON"; do
+for f in /usr/lib/windinput/wind_input /usr/lib/windinput/wind_input_sync /usr/lib/windinput/wind_setting "$ADDON"; do
     if ldd "$f" 2>/dev/null | grep -q 'not found'; then bad "$f 有缺失的动态库"; ldd "$f" | grep 'not found' >&2
     else ok "$f 动态库齐全"; fi
 done

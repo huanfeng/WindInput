@@ -38,7 +38,7 @@ for d in 'fcitx5 >= 5.0.14' 'libFcitx5Core.so.7' 'libstdc++.so.6' 'libc.so.6' 'f
 done
 
 # 关键文件（addon 必须在 %{_libdir}/fcitx5，即 rpm 系的 lib64，不是 Debian 多架构目录）
-for f in usr/lib/windinput/wind_input usr/lib/windinput/wind_setting \
+for f in usr/lib/windinput/wind_input usr/lib/windinput/wind_input_sync usr/lib/windinput/wind_setting \
          usr/lib64/fcitx5/libwindinput.so \
          usr/share/fcitx5/addon/windinput.conf usr/share/fcitx5/inputmethod/windinput.conf \
          usr/share/applications/windinput-setting.desktop usr/share/mime/packages/windinput.xml \
@@ -87,7 +87,7 @@ while IFS= read -r f; do
         ok "$rel ($desc, glibc ≤ ${top:-无})"
     fi
 done < <(find "$R" -type f \( -perm /111 -o -name '*.so*' \))
-(( n >= 3 )) || bad "只找到 $n 个 ELF（期望 wind_input / wind_setting / libwindinput.so）"
+(( n >= 4 )) || bad "只找到 $n 个 ELF（期望 wind_input / wind_input_sync / wind_setting / libwindinput.so）"
 
 # 权限：按 rpm 记录的模式查（cpio 解出来的受 umask 影响，不可信）。FILEMODES 是含文件类型位的十进制 st_mode。
 writable=""

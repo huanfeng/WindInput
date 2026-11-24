@@ -194,7 +194,7 @@ jobs:
           shopt -s failglob
           sudo apt-get install -y "$RUNNER_TEMP"/deb-out/windinput_*.deb
           rc=0
-          for f in /usr/lib/windinput/wind_input /usr/lib/windinput/wind_setting \
+          for f in /usr/lib/windinput/wind_input /usr/lib/windinput/wind_input_sync /usr/lib/windinput/wind_setting \
                    /usr/lib/*/fcitx5/libwindinput.so; do
             if ldd "$f" | grep 'not found'; then echo "::error::$f 有缺失的动态库"; rc=1; fi
           done
