@@ -2,6 +2,7 @@
 //!
 //! - [`backend`]：远端存储 trait 与带故障注入的内存后端
 //! - [`crypto`]：DEK、口令封装、对象加解密、blob id、`meta.json`
+//! - [`devices`]：设备名册（`devices/<dev>/info`）
 //! - [`manifest`]：每设备清单与远端布局
 //! - [`plan`]：逐文件裁决；[`merge`]：三方合并；[`scope`]：同步范围
 //! - [`engine`]：一次同步的编排；[`remote`]：初始化/加入/改口令/回收
@@ -9,6 +10,7 @@
 
 pub mod backend;
 pub mod crypto;
+pub mod devices;
 pub mod engine;
 pub mod error;
 pub mod local;

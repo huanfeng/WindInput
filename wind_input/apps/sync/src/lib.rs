@@ -6,6 +6,7 @@
 mod backends;
 mod errors;
 mod fsutil;
+mod hostname;
 mod link;
 mod local;
 mod log;

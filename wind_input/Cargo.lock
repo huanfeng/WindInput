@@ -3549,6 +3549,7 @@ dependencies = [
 name = "wind_sync_host"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "notify",
  "security-framework",
  "serde",

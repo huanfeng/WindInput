@@ -447,9 +447,10 @@ fn change_passphrase_and_reset_remote() {
     a.put("config.toml", "a = 9\n");
     a.cmd(Op::ResetRemote, json!({"confirm": true, "passphrase": "z"}))
         .unwrap();
-    assert_eq!(remote.keys("windinput-sync/v1/devices/").len(), 0);
-    assert_eq!(a.sync().phase, "idle");
+    // 重置后立即写回本机设备信息，清单要等下一轮
     assert_eq!(remote.keys("windinput-sync/v1/devices/").len(), 1);
+    assert_eq!(a.sync().phase, "idle");
+    assert_eq!(remote.keys("windinput-sync/v1/devices/").len(), 2);
     // 另一台用新口令重新加入（旧 DEK 沿用，已持有的也仍匹配）
     assert_eq!(
         b.cmd(Op::SetPassphrase, json!({"passphrase": "z"}))
@@ -737,4 +738,140 @@ fn mass_deletion_halts_with_readable_message_until_confirmed() {
         st[n..].iter().any(|s| s.phase == "syncing") && st.last().is_some_and(|s| s.phase == "idle")
     });
     assert_eq!(a.status().last_error, None);
+}
+
+fn named(name: &str) -> SyncSettings {
+    SyncSettings {
+        device_name: name.into(),
+        ..settings()
+    }
+}
+
+fn devices(n: &mut Node) -> Vec<Value> {
+    n.cmd(Op::ListDevices, Value::Null).unwrap()["devices"]
+        .as_array()
+        .unwrap()
+        .clone()
+}
+
+fn find<'a>(l: &'a [Value], name: &str) -> &'a Value {
+    l.iter()
+        .find(|d| d["name"] == name)
+        .unwrap_or_else(|| panic!("名册里没有 {name}: {l:?}"))
+}
+
+#[test]
+fn device_roster_lists_both_devices_with_self_marker() {
+    let remote = MemBackend::new();
+    let mut a = Node::with(&remote, false, named("办公室"));
+    let mut b = Node::with(&remote, false, settings());
+    a.setup("p");
+    b.setup("p");
+
+    let la = devices(&mut a);
+    assert_eq!(la.len(), 2, "{la:?}");
+    let me = find(&la, "办公室");
+    assert_eq!(me["is_self"], true);
+    assert_eq!(me["readable"], true);
+    assert_eq!(me["caps"], json!(["files"]));
+    assert!(["windows", "macos", "linux", "android"].contains(&me["platform"].as_str().unwrap()));
+    assert!(!me["app_version"].as_str().unwrap().is_empty());
+    assert!(me["last_seen"].as_u64().unwrap() > 1_700_000_000);
+    assert!(me["id"].as_str().unwrap().len() > 3);
+
+    // B 没填名字：用主机名（非空），在 A 看来不是本机
+    let lb = devices(&mut b);
+    let b_in_b = lb.iter().find(|d| d["is_self"] == true).unwrap();
+    assert!(!b_in_b["name"].as_str().unwrap().is_empty());
+    let b_in_a = la.iter().find(|d| d["id"] == b_in_b["id"]).unwrap();
+    assert_eq!(b_in_a["is_self"], false);
+    assert_eq!(b_in_a["name"], b_in_b["name"]);
+}
+
+#[test]
+fn renaming_is_published_immediately() {
+    let remote = MemBackend::new();
+    let mut a = Node::with(&remote, false, named("旧名"));
+    let mut b = Node::with(&remote, false, named("乙"));
+    a.setup("p");
+    b.setup("p");
+    assert!(find(&devices(&mut b), "旧名")["is_self"] == false);
+
+    a.tx.send(Input::Core(ToSync::Settings(named("新名"))))
+        .unwrap();
+    // A 的命令与设置变更按序经同一个主循环：A 回了执行结果，新名就已写出
+    devices(&mut a);
+    let l = devices(&mut b);
+    assert_eq!(find(&l, "新名")["is_self"], false);
+    assert!(l.iter().all(|d| d["name"] != "旧名"));
+}
+
+#[test]
+fn remove_device_requires_confirm_and_refuses_self() {
+    let remote = MemBackend::new();
+    let mut a = Node::with(&remote, false, named("甲"));
+    let mut b = Node::with(&remote, false, named("乙"));
+    a.setup("p");
+    b.setup("p");
+    let la = devices(&mut a);
+    let self_id = find(&la, "甲")["id"].as_str().unwrap().to_string();
+    let other_id = find(&la, "乙")["id"].as_str().unwrap().to_string();
+
+    let e = a
+        .cmd(Op::RemoveDevice, json!({"dev": other_id}))
+        .unwrap_err();
+    assert!(e.contains("confirm"), "{e}");
+    let e = a
+        .cmd(Op::RemoveDevice, json!({"dev": other_id, "confirm": false}))
+        .unwrap_err();
+    assert!(e.contains("confirm"), "{e}");
+    let e = a
+        .cmd(Op::RemoveDevice, json!({"dev": self_id, "confirm": true}))
+        .unwrap_err();
+    assert!(e.contains("本机"), "{e}");
+    assert!(a.cmd(Op::RemoveDevice, json!({"confirm": true})).is_err());
+    assert!(
+        a.cmd(Op::RemoveDevice, json!({"dev": "../x", "confirm": true}))
+            .is_err()
+    );
+    assert_eq!(devices(&mut a).len(), 2, "被拒的移除不得改动名册");
+}
+
+#[test]
+fn removed_device_disappears_and_comes_back_when_it_publishes_again() {
+    let remote = MemBackend::new();
+    let mut a = Node::with(&remote, false, named("甲"));
+    let mut b = Node::with(&remote, false, named("乙"));
+    a.setup("p");
+    b.setup("p");
+    a.put("config.toml", "a = 1\n");
+    a.sync();
+    b.sync();
+    let la = devices(&mut a);
+    let b_id = find(&la, "乙")["id"].as_str().unwrap().to_string();
+
+    let r = a
+        .cmd(Op::RemoveDevice, json!({"dev": b_id, "confirm": true}))
+        .unwrap();
+    assert_eq!(r["ok"], true);
+    let l = devices(&mut a);
+    assert_eq!(l.len(), 1, "{l:?}");
+
+    // 被移除的设备改了文件再同步：清单重新出现（info 要等下次刷新才写回，先读不出）
+    b.put("config.toml", "a = 2\n");
+    b.sync();
+    let l = devices(&mut a);
+    let back = l
+        .iter()
+        .find(|d| d["id"] == b_id.as_str())
+        .expect("重新出现");
+    assert_eq!(back["readable"], false);
+    assert_eq!(back["name"], "");
+}
+
+#[test]
+fn list_devices_needs_a_joined_device() {
+    let remote = MemBackend::new();
+    let mut a = Node::with(&remote, false, named("甲"));
+    assert!(a.cmd(Op::ListDevices, Value::Null).is_err());
 }

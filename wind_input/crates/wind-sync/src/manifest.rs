@@ -24,6 +24,15 @@ pub fn manifest_key(dev: &str, gen_: u64) -> String {
     format!("{ROOT}/devices/{dev}/manifest.{gen_}")
 }
 
+/// 设备信息对象：`devices/<dev>/info`（不是清单，引擎与回收都不读它）。
+pub fn device_info_key(dev: &str) -> String {
+    format!("{ROOT}/devices/{dev}/info")
+}
+/// 某设备目录前缀（含尾部 `/`，避免 `ab` 误匹配 `abc`）。
+pub fn device_dir_prefix(dev: &str) -> String {
+    format!("{ROOT}/devices/{dev}/")
+}
+
 /// 远端键是否安全：非空、无空段、无 `.`/`..` 段、无反斜杠与控制字符。
 /// 后端列出的键不可信（恶意或出错的服务端），删除/读取前要校验。
 pub fn safe_key(key: &str) -> bool {

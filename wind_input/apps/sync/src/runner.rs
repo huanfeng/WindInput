@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use wind_sync::crypto::{Dek, KdfParams, Meta, content_hash};
+use wind_sync::devices::{DeviceInfo, list_devices, put_device_info, remove_device};
 use wind_sync::scope::{ScopeFlags, in_scope};
 use wind_sync::state::backoff_secs;
 use wind_sync::{Backend, SyncCtx, SyncError, SyncReport, SyncState, manifest, remote, sync_once};
@@ -32,6 +33,7 @@ use crate::watch::{self, SharedScope};
 
 /// 主循环的输入。
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)] // 一次只在 channel 里排几个，不值得 Box
 pub enum Input {
     /// core 发来的帧（`Reply` 由读线程处理，不会出现在这里）。
     Core(ToSync),
@@ -53,6 +55,8 @@ pub struct Round {
     /// 本轮开始前的回声表快照：本轮扫描之后，这些旧条目就可以清掉了。
     echo_before: HashMap<String, String>,
     failures_before: u32,
+    /// 本轮成功写出的设备信息。
+    info_written: Option<DeviceInfo>,
 }
 
 impl std::fmt::Debug for Round {
@@ -137,6 +141,8 @@ pub struct Runner {
     periodic_at: Instant,
     conflicts: Vec<String>,
     last_sent: Option<Status>,
+    /// 最近一次写到远端名册的本机信息；换远端、进程重启后为空（下次必写）。
+    info_written: Option<DeviceInfo>,
     _watch: Option<watch::Watch>,
 }
 
@@ -187,6 +193,46 @@ fn mass_deletion_message(raw: &str) -> String {
     }
 }
 
+const DAY_SECS: u64 = 86400;
+
+fn platform() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "android") {
+        "android"
+    } else {
+        "linux"
+    }
+}
+
+/// 本机要写进名册的信息。
+fn local_info(settings: &SyncSettings, now: u64) -> DeviceInfo {
+    let name = settings.device_name.trim();
+    DeviceInfo {
+        name: if name.is_empty() {
+            crate::hostname::host_name()
+        } else {
+            name.to_string()
+        },
+        platform: platform().into(),
+        app_version: env!("CARGO_PKG_VERSION").into(),
+        caps: vec!["files".into()],
+        last_seen: now,
+    }
+}
+
+/// 名册里的本机信息是否需要重写：内容变了；`daily` 时另加「last_seen 与现在不在同一个 UTC 日」。
+fn info_stale(written: Option<&DeviceInfo>, want: &DeviceInfo, daily: bool) -> bool {
+    let Some(w) = written else { return true };
+    let same = DeviceInfo {
+        last_seen: w.last_seen,
+        ..want.clone()
+    } == *w;
+    !same || (daily && w.last_seen / DAY_SECS != want.last_seen / DAY_SECS)
+}
+
 impl Runner {
     pub fn new(mut cfg: Config, tx: Sender<Input>) -> Runner {
         let (secrets, secret_error) = match Secrets::load(&*cfg.secrets) {
@@ -229,6 +275,7 @@ impl Runner {
             periodic_at,
             conflicts: Vec::new(),
             last_sent: None,
+            info_written: None,
             _watch: watch.flatten(),
         }
     }
@@ -388,7 +435,11 @@ impl Runner {
                 log!("{e}");
             }
         }
+        let moved = backend_changed(self.settings.backend.as_ref(), s.backend.as_ref());
         self.settings = s;
+        if moved {
+            self.info_written = None;
+        }
         // 用户改了设置：解除停止态，稍后按新设置跑一轮
         if self.syncing {
             self.clear_halt_after_round = true;
@@ -397,6 +448,7 @@ impl Runner {
             self.save_state();
         }
         self.kick();
+        self.publish_info(false);
         self.report();
     }
 
@@ -457,6 +509,8 @@ impl Runner {
         ctx.gc = true;
         ctx.allow_mass_delete = allow_mass;
         let echo_before = lock(&self.echo).clone();
+        let want = local_info(&self.settings, now);
+        let write_info = info_stale(self.info_written.as_ref(), &want, true).then_some(want);
         let mut state = self.state.clone();
         let failures_before = state.retry.failures;
         let (factory, settings, password) = (
@@ -475,11 +529,29 @@ impl Runner {
         let spawned = std::thread::Builder::new()
             .name("sync-round".into())
             .spawn(move || {
+                let mut info_written = None;
                 let result = match factory.build(&settings, &password) {
                     Err(m) => Err(m),
-                    Ok(backend) => Ok(sync_once(&*backend, &mut local, &mut state, &dek, &ctx)),
+                    Ok(backend) => {
+                        let r = sync_once(&*backend, &mut local, &mut state, &dek, &ctx);
+                        if let (Ok(rep), Some(info)) = (&r, write_info)
+                            && !rep.skipped
+                        {
+                            match put_device_info(
+                                &*backend,
+                                &dek.devinfo_key(),
+                                &state.device,
+                                &info,
+                            ) {
+                                Ok(()) => info_written = Some(info),
+                                Err(e) => log!("写设备信息失败: {}", sync_error(&e)),
+                            }
+                        }
+                        Ok(r)
+                    }
                 };
                 let round = Round {
+                    info_written,
                     conflicts: local.conflict_files(),
                     state,
                     result,
@@ -508,6 +580,9 @@ impl Runner {
     fn finish_round(&mut self, r: Round) {
         self.syncing = false;
         self.state = r.state;
+        if r.info_written.is_some() {
+            self.info_written = r.info_written;
+        }
         if std::mem::take(&mut self.clear_halt_after_round) {
             self.state.retry.clear_halt();
         }
@@ -546,7 +621,26 @@ impl Runner {
             Err(e) => self.on_sync_error(e, r.failures_before, now),
         }
         self.save_state();
+        self.publish_info(false);
         self.report();
+    }
+
+    /// 把本机信息写进远端名册。`daily` 为假时只在内容变了（改名等）才写；失败只记日志，下一轮会重试。
+    fn publish_info(&mut self, daily: bool) {
+        if self.syncing || !self.configured() || !self.ready() {
+            return;
+        }
+        let want = local_info(&self.settings, now_unix());
+        if !info_stale(self.info_written.as_ref(), &want, daily) {
+            return;
+        }
+        let (Ok(dek), Ok(b)) = (self.dek(), self.fresh_backend(None)) else {
+            return;
+        };
+        match put_device_info(&*b, &dek.devinfo_key(), &self.state.device, &want) {
+            Ok(()) => self.info_written = Some(want),
+            Err(e) => log!("写设备信息失败: {}", sync_error(&e)),
+        }
     }
 
     fn on_sync_error(&mut self, e: SyncError, failures_before: u32, now: Instant) {
@@ -597,6 +691,7 @@ impl Runner {
                 | Op::ImportKey
                 | Op::ResetRemote
                 | Op::ConfirmMassDelete
+                | Op::RemoveDevice
         );
         if self.syncing && mutating {
             return Err(BUSY_MSG.into());
@@ -610,6 +705,8 @@ impl Runner {
             Op::ExportKey => self.cmd_export_key(),
             Op::SyncNow => self.cmd_sync_now(),
             Op::ResetRemote => self.cmd_reset_remote(args),
+            Op::ListDevices => self.cmd_list_devices(),
+            Op::RemoveDevice => self.cmd_remove_device(args),
         }
     }
 
@@ -674,8 +771,10 @@ impl Runner {
         self.save_secrets()?;
         if changed {
             self.state = SyncState::new_random();
+            self.info_written = None;
         }
         self.after_user_fix();
+        self.publish_info(false);
         Ok(())
     }
 
@@ -765,6 +864,47 @@ impl Runner {
         Ok(json!({ "queued": true }))
     }
 
+    fn cmd_list_devices(&self) -> Result<Value, String> {
+        let dek = self.dek().map_err(|_| "本机尚未加入加密同步".to_string())?;
+        let b = self.fresh_backend(None)?;
+        let list = list_devices(&*b, &dek.devinfo_key()).map_err(|e| sync_error(&e))?;
+        let devices: Vec<Value> = list
+            .into_iter()
+            .map(|(id, info)| {
+                let is_self = id == self.state.device;
+                match info {
+                    Ok(i) => json!({
+                        "id": id, "name": i.name, "platform": i.platform,
+                        "app_version": i.app_version, "caps": i.caps,
+                        "last_seen": i.last_seen, "is_self": is_self, "readable": true,
+                    }),
+                    Err(_) => json!({
+                        "id": id, "name": "", "platform": "", "app_version": "",
+                        "caps": [], "last_seen": 0, "is_self": is_self, "readable": false,
+                    }),
+                }
+            })
+            .collect();
+        Ok(json!({ "devices": devices }))
+    }
+
+    /// 删除某设备在远端的清单与设备信息。它若仍在运行，下次同步会重新出现。
+    fn cmd_remove_device(&mut self, args: &Value) -> Result<Value, String> {
+        if args.get("confirm").and_then(Value::as_bool) != Some(true) {
+            return Err("移除设备须明确确认（confirm=true）".into());
+        }
+        let dev = str_arg(args, "dev")
+            .filter(|d| !d.is_empty())
+            .ok_or("缺少参数 dev")?;
+        if dev == self.state.device {
+            return Err("不能移除本机".into());
+        }
+        let b = self.fresh_backend(None)?;
+        let removed = remove_device(&*b, dev).map_err(|e| sync_error(&e))?;
+        log!("已移除设备 {dev}（{removed} 个对象）");
+        Ok(json!({ "ok": true, "removed": removed }))
+    }
+
     /// 清空远端后以本机为准重新上传。需 `confirm: true` 与新口令；本机有 DEK 则沿用（已导出的密钥仍有效）。
     fn cmd_reset_remote(&mut self, args: &Value) -> Result<Value, String> {
         if args.get("confirm").and_then(Value::as_bool) != Some(true) {
@@ -781,7 +921,9 @@ impl Runner {
         self.save_secrets()?;
         // 远端已空：旧基线作废，所有本地文件当作新增上传
         self.state = SyncState::new_random();
+        self.info_written = None;
         self.after_user_fix();
+        self.publish_info(false);
         log!("远端已重置");
         Ok(json!({ "ok": true }))
     }
@@ -844,5 +986,34 @@ mod tests {
         let e = lock(&r.echo);
         assert!(!e.contains_key("config.toml"), "旧条目应被清: {e:?}");
         assert_eq!(e.get("themes/t/a.toml").map(String::as_str), Some("h2"));
+    }
+
+    fn info_at(t: u64) -> DeviceInfo {
+        local_info(&SyncSettings::default(), t)
+    }
+
+    /// 设备信息：没写过必写；同一 UTC 日不重写；跨日才刷新；改名随时写。
+    #[test]
+    fn device_info_refresh_rules() {
+        let d0 = 20_000 * DAY_SECS;
+        let written = info_at(d0 + 100);
+        assert!(info_stale(None, &info_at(d0), true));
+        assert!(!info_stale(
+            Some(&written),
+            &info_at(d0 + DAY_SECS - 101),
+            true
+        ));
+        assert!(info_stale(Some(&written), &info_at(d0 + DAY_SECS), true));
+        assert!(!info_stale(
+            Some(&written),
+            &info_at(d0 + 5 * DAY_SECS),
+            false
+        ));
+        let mut renamed = info_at(d0 + 200);
+        renamed.name = "别名".into();
+        assert!(info_stale(Some(&written), &renamed, false));
+        let mut caps = info_at(d0 + 200);
+        caps.caps.push("clip".into());
+        assert!(info_stale(Some(&written), &caps, false));
     }
 }
