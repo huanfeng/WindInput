@@ -2192,11 +2192,20 @@ impl MessageHandler for Coordinator {
                 self.accumulate_code_char(&mut state, ch, raw)
             }
             keymap::VK_LEFT | keymap::VK_RIGHT | keymap::VK_HOME | keymap::VK_END => {
-                // 编码区光标移动（对齐 Go handleCursorLeft/Right/Home/End 的三态语义）：
-                // ① 无组合 → 透传，宿主照常移动文档光标；② 有剩余编码 → 编码区内移动；
-                // ③ 已在边界 / 只剩只读的已转换前缀 → 吃掉不透传（否则宿主光标会跳出组合区）。
-                // 左右键若被用户配成翻页/高亮键，上面的 apply_session_action 已先行拦截，走不到这里
-                // ——「配了别的功能」即等价于放弃光标移动。
+                // 编码区光标移动逻辑。←/→ 按 rime 导航器语义：若光标在音节边界上则逐音节移动，
+                // 在音节中间按则单字符；无切分情况（双拼 / 单音节 / 码表单码）退回单字符。
+                //
+                // 三态对齐 Go handleCursorLeft/Right/Home/End：无组合时透传，宿主照常
+                // 移动文档光标；有剩余编码时在编码区内移动；已在边界或只剩只读的已转换
+                // 前缀时吞键，避免宿主光标跳出组合区。
+                //
+                // 左右键若被配成翻页/高亮等会话动作，或被展开网格接管，上面的
+                // `apply_session_action` 已先行拦截，走不到这里。
+                //
+                // 移动后默认只刷新 caret：光标不参与引擎查询，候选与 preedit 文本均不变，
+                // 但自绘编码栏要据新 caret 重画插入符，所以仍须 `notify_ui_update`。
+                // `cursor_by_syllable` 开关打开时例外：光标在中间时候选只查光标前一段
+                // （`query_cut`），移动后必须重算。
                 if state.input_buffer.is_empty() {
                     if state.committed_text.is_empty() {
                         KeyAction::PassThrough
@@ -2204,29 +2213,8 @@ impl MessageHandler for Coordinator {
                         KeyAction::Consumed
                     }
                 } else {
-                    // 手机端拼音：← 按音节跳（电脑端仍按字母，见 `query_cut` 的说明）。
-                    // 拆分串对不回缓冲（双拼等）→ None，退回按字母。
-                    let syllable_jump = (data.key_code == keymap::VK_LEFT
-                        && crate::handle_candidate::cursor_by_syllable()
-                        && self.engine_mgr.is_pinyin())
-                    .then(|| {
-                        let split = self
-                            .engine_mgr
-                            .convert(&state.input_buffer, 1)
-                            .preedit_pinyin;
-                        preedit_cursor::syllable_spans(&state.input_buffer, &split)
-                    })
-                    .flatten();
                     let st = &mut *state;
-                    if let Some(spans) = &syllable_jump {
-                        st.input_cursor_pos =
-                            preedit_cursor::syllable_left(spans, st.input_cursor_pos);
-                    }
-                    // ←/→ 按 rime 导航器语义：光标在音节边界上整音节跳，在音节中间按单字符
-                    // （见 `move_caret_syllable`）；无切分（双拼 / 单音节 / 码表单码）自然退回单字符。
-                    // 手机端的按音节左移（上面的 `syllable_jump`）优先，保持原样。
-                    let smart = (syllable_jump.is_none()
-                        && data.modifiers & MOD_SHIFT == 0
+                    let smart = (data.modifiers & MOD_SHIFT == 0
                         && matches!(data.key_code, keymap::VK_LEFT | keymap::VK_RIGHT))
                     .then(|| {
                         Self::move_caret_syllable(st, data.key_code == keymap::VK_RIGHT, true)
@@ -2239,7 +2227,6 @@ impl MessageHandler for Coordinator {
                             &mut st.input_cursor_pos,
                         );
                         match data.key_code {
-                            keymap::VK_LEFT if syllable_jump.is_some() => true,
                             keymap::VK_LEFT => ed.move_left(),
                             keymap::VK_RIGHT => ed.move_right(),
                             keymap::VK_HOME => ed.home(),
@@ -2247,10 +2234,6 @@ impl MessageHandler for Coordinator {
                         }
                     };
                     if moved {
-                        // 光标移动**不重算候选**（不调 update_candidates）：光标不参与引擎查询，
-                        // 候选与 preedit 文本均不变，只是 caret 位置变了。但仍须 notify_ui_update
-                        // ——自绘编码栏要据新 caret 重画插入符（"不重算候选" ≠ "不刷新 UI"）。
-                        // 手机端例外：光标在中间时候选只查光标前一段（`query_cut`），移动后必须重算。
                         if crate::handle_candidate::cursor_by_syllable() {
                             self.update_candidates(&mut state);
                         }
