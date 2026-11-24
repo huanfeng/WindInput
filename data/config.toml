@@ -664,6 +664,9 @@ history_max = 1000
 exclude_blocks = []
 
 [input]
+# 光标在编码中间时，候选只按光标前的内容查询，选中后余码保留。
+# 仅普通拼音（含双拼）生效；默认关闭，光标在开头或末尾时仍按整串查询。
+caret_scoped_candidates = false
 filter_mode = "smart"
 # rare_phrase：含生僻字的**词组**要不要吃 filter_mode 那一刀。keep(出厂) | filter
 #   keep    整词放行——词库收录的词照样打得出来，过滤只作用在单字上。

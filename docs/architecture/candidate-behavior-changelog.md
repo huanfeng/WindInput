@@ -27,6 +27,19 @@
 
 ---
 
+## 2026-11-24 · 可选按编码光标前缀检索候选（未发版）
+
+- 合入：待填；范围：普通拼音（含双拼），不含 overlay、码表和混输。
+- 变化：默认不变。开启后，`fang|xiang` 前：移动只刷新 caret，候选仍查 `fangxiang`；后：
+  候选按 `fang` 查询，选中前缀后汉字暂留组合区，`xiang` 保留续转；Home/End 到两端恢复整串查询。
+  Ctrl、会话动作与裸方向键移动同样刷新；前缀 N-best 切换后仍保留尾码和完整编码显示。
+- 触发条件：`input.caret_scoped_candidates = true`（出厂 false），光标严格在编码中间字符边界。
+  双拼允许停在键对中间：`vsg|o` 按 `vsg` 查，选中消费前三键的候选后保留 `o`。
+- 回退旧行为：`input.caret_scoped_candidates = false`。
+- 钉住的测试：`wind-coordinator/tests/caret_scoped_candidates.rs`（默认与实例隔离、前缀选词、
+  各移动入口、Home/End、双拼键对中间、整句切换、候选扩容）；原 `caret_syllable_jump` 保持默认行为。
+- 来源：内部（光标限定候选配置接入）。
+
 ## 2026-11-20 · 直接辅助码：退格重打不再冒出连打时没有的生僻字（0.133）
 
 - 合入：待填（push 前回填）；范围：双拼方案，`direct` 开（连续模式与逃生口下的串尾直接辅助都受影响），

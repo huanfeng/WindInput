@@ -423,6 +423,7 @@ static REGISTRY: &[ConfigField] = &[
     // 值域为区块名或预设组名（"emoji"），故是 StrList 而非 Enum——块表会随 Unicode 增长。
     f("schema.frequency.exclude_blocks", StrList),
     // -- input（输入行为）--
+    f("input.caret_scoped_candidates", Bool),
     f("input.filter_mode", Str),
     // 含生僻字的词要不要吃 filter_mode 那一刀（与它正交，不是它的第四个档）。
     f("input.rare_phrase", Enum(RARE_PHRASE_VALUES)),

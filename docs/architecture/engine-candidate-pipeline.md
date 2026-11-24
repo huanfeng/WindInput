@@ -21,6 +21,13 @@
                  └─ DictManager / CompositeDict   wind-dict —— 多层词库合并查询（§2）
 ```
 
+普通输入通过 `build_candidates_at_cursor` 包装候选构建：`input.caret_scoped_candidates`
+默认关闭，保持整串查询；开启后，仅非 overlay 的拼音（含双拼）在光标严格位于编码中间时，
+暂用光标前缀查询，再恢复完整缓冲。可见候选与 N-best 整句池的消费数均夹到截断位，
+候选拆分显示补回尾段；选词走既有 partial 分支，已选文字暂留组合区、余码继续转换。
+所有主路编码光标移动经 `caret_moved_action` 按开关重算，扩容与末页放宽也复用此包装。
+光标在开头或末尾仍查整串；双拼不额外限制到键对边界。
+
 ### 1.2 公共契约
 
 **`Engine` trait**（`wind-engine/src/engine.rs`）：核心方法 `convert(input, max_candidates) -> ConvertResult`，
