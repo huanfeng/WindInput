@@ -38,6 +38,7 @@ members = [
     "crates/wind-sync",
     "apps/service",
     "apps/extension_host",
+    "apps/sync",
     "apps/rpc",
     "apps/repl",
     "apps/wind-tools",

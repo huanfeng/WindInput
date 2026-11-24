@@ -1,0 +1,35 @@
+[package]
+name = "wind_sync_host"
+version.workspace = true
+edition.workspace = true
+
+# 数据同步进程 `wind_input_sync`：由 core 拉起，经 stdin/stdout 匿名管道通信（wind-sync-ipc）。
+# 网络、加密、文件监听都在这里，core 不依赖它们。设计见 docs/design/data-sync.md §3、§7。
+
+[[bin]]
+name = "wind_input_sync"
+path = "src/main.rs"
+
+[build-dependencies]
+# 仅 Windows 目标嵌入图标/版本信息
+winresource = "0.1"
+
+[dependencies]
+wind-sync = { path = "../../crates/wind-sync", features = ["net"] }
+wind-sync-ipc = { path = "../../crates/wind-sync-ipc" }
+wind-supervise = { path = "../../crates/wind-supervise" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = ["Win32_Security_Cryptography"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

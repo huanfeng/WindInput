@@ -40,6 +40,7 @@
 | `wind-bridge` | Named Pipe 服务器 + Push 管道，桥接 Rust 服务与 C++ TSF DLL | [AGENTS.md](wind_input/crates/wind-bridge/AGENTS.md) |
 | `wind-ipc` | IPC 协议定义与编解码（TSF 二进制协议 + JSON-RPC） | — |
 | `wind-hook` | 扩展程序通道（纯逻辑）：协议消息与帧、授权档位、扩展清单与选项校验；宿主进程在 `apps/extension_host`（产物 `wind_input_ext`），设计见 docs/design/extension-hook-channel.md | — |
+| `wind-sync` | 数据同步纯逻辑（加密、清单、裁决、合并；feature `net` 为 WebDAV/S3 后端）；进程外壳在 `apps/sync`（包 `wind_sync_host`，产物 `wind_input_sync`，带变体后缀），协议在 `wind-sync-ipc`，设计见 docs/design/data-sync.md | — |
 | `wind-keys` | 键名/VK 映射、导航键分类（纯逻辑）+ 按键注入（平台层）；**VK 常量 SSOT** | — |
 | `wind-candidate` | 候选词数据类型、排序与过滤 | — |
 | `wind-phrase` | 短语系统：静态/动态模板展开 + cmdbar 双路径 | — |
