@@ -1,12 +1,9 @@
 use super::*;
 
-/// ★★★ 每一个 `STATUS_*` 的位值都必须与 C++ 侧 `BinaryProtocol.h` 逐位相同。
+/// 每一个 `STATUS_*` 的位值都必须与 C++ 侧 `BinaryProtocol.h` 逐位相同。
 ///
-/// 这两份常量各写各的，靠的一直是注释里那句「位值必须与 XX 一致」—— 而注释挡不住
-/// 漂移：加位的人在一侧加完、另一侧忘了，或者两侧选了同一个空位给不同含义，**症状
-/// 全是静默的**（状态位被读成另一个状态，例如「热键会话」被读成「软键盘开着」）。
-///
-/// 所以这里不比注释，直接解析头文件。新增 `STATUS_*` 时两侧都要加，本条会替你记住。
+/// 两份常量各写各的，漂移时症状全是静默的（如「热键会话」被读成「软键盘开着」），
+/// 所以直接解析头文件比对。新增 `STATUS_*` 时两侧都要加。
 #[test]
 fn status_bits_match_the_cpp_header() {
     let header = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -110,8 +107,7 @@ fn mode_switch_source_decodes_wire_values() {
 
 /// 头部与表项的实际内存布局必须等于两端约定的常量。
 ///
-/// `repr(C, packed)` 下加字段不会报错，只会悄悄改变后续字段偏移——
-/// 而 C++ 侧是按固定偏移读的，届时读到的是错位的垃圾值。这条断言是唯一的拦截点。
+/// `repr(C, packed)` 下加字段不会报错，只会悄悄改变后续字段偏移，而 C++ 侧按固定偏移读。
 #[test]
 fn icon_shm_struct_sizes_match_declared() {
     assert_eq!(std::mem::size_of::<IconShmHeader>(), IconShmHeader::SIZE);
@@ -142,8 +138,7 @@ fn icon_shm_magic_reads_as_wico() {
 
 /// 布局自洽：表不越进 slot0，双 slot 不超出 SHM 总大小。
 ///
-/// 加尺寸档时最容易越界，而越界的后果是写穿到下一个 slot——
-/// 表现为某些档位的图标随机变成别的档位的内容，极难反查。
+/// 加尺寸档时最容易越界，写穿到下一个 slot 表现为某些档位的图标随机变成别档的内容。
 #[test]
 fn icon_shm_layout_fits_without_overlap() {
     let table_end = ICON_TABLE_OFFSET + IconVariant::SIZE * ICON_VARIANT_COUNT;
@@ -185,18 +180,16 @@ fn icon_variant_table_is_contiguous_and_complete() {
 }
 
 /// SHM 名的变体后缀走管道那套 `_dev`，不是应用目录那套 `Dev`。
-///
-/// 这两种风格混用过一次（macOS 侧），后果是 dev 变体两端各开各的共享内存、
-/// 全程握不上手且无任何报错。C++ 侧 `Globals.h` 的 `WIND_ICON_SHM_NAME` 必须逐字一致。
+/// 两种风格混用会让 dev 变体两端各开各的共享内存，握不上手且无任何报错。
+/// C++ 侧 `Globals.h` 的 `WIND_ICON_SHM_NAME` 必须逐字一致。
 #[test]
 fn icon_shm_name_uses_pipe_style_suffix() {
     assert_eq!(icon_shm_name(""), "Local\\WindInput_IconShm_v1");
     assert_eq!(icon_shm_name("_dev"), "Local\\WindInput_IconShm_v1_dev");
 }
 
-/// 版本号进了名字，所以 bump `ICON_SHM_VERSION` 会静默改掉 SHM 名——而 C++ 侧的
-/// `WIND_ICON_SHM_NAME` 是写死的字面量，跟不上就是「DLL 永远打不开 SHM」。
-/// 本测试让 bump 在这里先失败一次，逼着改的人去同步 `Globals.h`。
+/// 版本号进了名字，bump `ICON_SHM_VERSION` 会静默改掉 SHM 名，而 C++ 侧 `WIND_ICON_SHM_NAME`
+/// 是写死的字面量；本测试让 bump 在这里先失败，逼着同步 `Globals.h`。
 #[test]
 fn icon_shm_name_carries_current_version() {
     assert_eq!(
@@ -249,17 +242,16 @@ fn focus_bytes(with_source: Option<u8>) -> Vec<u8> {
     b
 }
 
-/// 尾部追加 `caret_source` 后，**旧 DLL 的 38 字节包必须照常解析**。
+/// 尾部追加 `caret_source` 后，旧 DLL 的 38 字节包必须照常解析。
 ///
-/// 这条不是形式主义：长度判据若图省事写成 `buf.len() < Self::SIZE`，每加一个尾部字段就会
-/// 把所有旧 DLL 整体拒掉，而表现是「切换应用后输入法毫无反应」——焦点事件根本没进 core，
-/// 日志上看不出是解码拒绝还是压根没收到。
+/// 长度判据若写成 `buf.len() < Self::SIZE`，每加一个尾部字段就会把所有旧 DLL 整体拒掉，
+/// 表现为「切换应用后输入法毫无反应」，日志上看不出是解码拒绝还是没收到。
 #[test]
 fn focus_gained_v1_38_bytes_still_parses_with_unknown_source() {
     let b = focus_bytes(None);
     assert_eq!(b.len(), 38, "本用例要覆盖的就是旧 DLL 的 38 字节形态");
     let fg = FocusGainedPayload::from_bytes(&b).expect("38 字节旧包必须能解析");
-    // CaretPayload 是 #[repr(packed)]，assert_eq! 会对字段取引用 → 非对齐引用编译错误。
+    // CaretPayload 是 #[repr(packed)]，assert_eq! 对字段取引用会触发非对齐引用编译错误，
     // 先按值拷到局部再断言。
     let (cx, cy, ch) = (fg.caret.x, fg.caret.y, fg.caret.height);
     assert_eq!(cx, 111);
@@ -275,7 +267,7 @@ fn focus_gained_v1_38_bytes_still_parses_with_unknown_source() {
     );
 }
 
-/// 39 字节新包读出真实来源，且**不影响任何既有字段的偏移**。
+/// 39 字节新包读出真实来源，且不影响任何既有字段的偏移。
 #[test]
 fn focus_gained_v2_39_bytes_reads_caret_source() {
     let b = focus_bytes(Some(caret_source::TSF_SELECTION as u8));
@@ -283,7 +275,7 @@ fn focus_gained_v2_39_bytes_reads_caret_source() {
     let fg = FocusGainedPayload::from_bytes(&b).expect("39 字节新包必须能解析");
     assert_eq!(fg.caret_source, caret_source::TSF_SELECTION);
     // 既有字段逐个复核：尾部追加的全部意义就是它们的偏移没动。
-    // （packed 字段先按值拷到局部，理由同上一个用例。）
+    // （packed 字段先按值拷到局部，理由同上。）
     let (cx, csx, csy) = (
         fg.caret.x,
         fg.caret.composition_start_x,
@@ -299,7 +291,7 @@ fn focus_gained_v2_39_bytes_reads_caret_source() {
     assert_eq!(FocusGainedPayload::SIZE, 39);
 }
 
-/// GUI 回退坐标**不属于** TSF 语义域——焦点气泡的可信度闸门整个建立在这个判定上。
+/// GUI 回退坐标不属于 TSF 语义域：焦点气泡的可信度闸门整个建立在这个判定上。
 #[test]
 fn gui_caret_is_not_tsf_domain() {
     assert!(caret_source::is_tsf(caret_source::TSF_SELECTION));
@@ -313,15 +305,13 @@ fn gui_caret_is_not_tsf_domain() {
     assert!(!caret_source::is_tsf(caret_source::LAST_KNOWN));
     assert!(!caret_source::is_tsf(caret_source::UNKNOWN));
     assert!(!caret_source::is_tsf(caret_source::PRE_REFLOW));
-    // ★ TSF_DEFAULT_POS 是**出自 TSF context 却判否**的那一个：宿主用退化矩形回答的
-    // 正是「这里没有插入点」。放进 TSF 域它就会被当权威坐标参与跟行与漂移校正，而它
-    // 整场组合恒为同一个屏幕角落像素，根本不随插入点移动。
+    // TSF_DEFAULT_POS 出自 TSF context 却判否：宿主用退化矩形回答的正是「这里没有插入点」，
+    // 整场组合恒为同一个屏幕角落，放进 TSF 域会被当权威坐标参与跟行与漂移校正。
     assert!(!caret_source::is_tsf(caret_source::TSF_DEFAULT_POS));
 }
 
-/// 来源名必须逐个有对应分支：`name()` 的 `_ => "unknown"` 兜底会把漏加的新来源静默
-/// 显示成 `unknown`，日志上与「旧 DLL / macOS 短包」无从区分——而定位问题恰恰全靠日志
-/// 里的 `src=` 分辨走的是哪条通道。
+/// 来源名必须逐个有对应分支：`name()` 的 `_ => "unknown"` 兜底会把漏加的新来源静默显示成
+/// `unknown`，日志上与「旧 DLL / macOS 短包」无从区分，而排查全靠日志里的 `src=`。
 #[test]
 fn every_caret_source_has_its_own_name() {
     let named = [
@@ -347,10 +337,8 @@ fn every_caret_source_has_its_own_name() {
 
 /// 坐标来源常量必须与 C++ 头文件逐值一致。
 ///
-/// 与 [`status_bits_match_the_cpp_header`] 同一条理由，但后果更隐蔽：状态位错了会整片
-/// 状态乱套，来源值错了只是**某一类坐标被当成了另一类**——例如 DLL 发 8
-/// （`TSF_DEFAULT_POS`）而 Rust 把 8 读成别的，`is_tsf` 就会给出相反的答案，候选窗定位
-/// 悄悄走错分支而日志一切正常。
+/// 与 [`status_bits_match_the_cpp_header`] 同一条理由，但后果更隐蔽：来源值错位时
+/// `is_tsf` 会给出相反的答案，候选窗定位悄悄走错分支而日志一切正常。
 #[test]
 fn caret_sources_match_the_cpp_header() {
     let header = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

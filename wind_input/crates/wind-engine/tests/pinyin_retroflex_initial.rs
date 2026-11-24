@@ -1,24 +1,10 @@
-//! 双字母声母（`zh`/`ch`/`sh`）作为**一个**简拼段。
+//! 双字母声母（`zh`/`ch`/`sh`）作为一个简拼段。
 //!
-//! 简拼域此前有一条硬假设：一个音节恰好占一个 ASCII 字母。于是 `zh` 只能被解释成
-//! `z`+`h` 两段，用户敲「这个」的 `zhge` 得到的是 3 音节词（之后个 / 镇魂歌），
-//! 而「这个」挂在键 `zg` 下、是 2 音节 —— 段数校验当场判否。
+//! 若假设一个音节恰占一个字母，`zhge` 会被切成 `z'h'ge` 三段，挂在 `zg` 键下的 2 音节
+//! 「这个」被段数校验判否。正确切法下 `zh|ge`→`zg`、`zh|y`→`zy`、`bai|ch|x`→`bcx` 都落到
+//! 已有的键上，索引不用动：双字母声母的投影首字母本来就是 z/c/s。
 //!
-//! 真机复现（`build_dev/data`，`wind_repl`，limit=300）：
-//!
-//! | 输入 | 组合区 | 结果 |
-//! |---|---|---|
-//! | `zg`     | `z'g`    | 「这个」第 1 |
-//! | `zhge`   | `z'h'ge` | 之后个 / 镇魂歌 / 泽火革，**无「这个」** |
-//! | `zhy`    | `z'h'y`  | 总会有 / 最好用，**无「这样」**（它挂在 `zy`） |
-//! | `baichx` | `bai'chx`| 只有 `bai` 的单字，**一条词都无** |
-//!
-//! 组合区把根因直接显示给了用户：`z'h'ge`。
-//!
-//! 修好后三者都落到已有的键上：`zh|ge`→`zg`、`zh|y`→`zy`、`bai|ch|x`→`bcx`，
-//! **索引一个字节都不用动**——双字母声母的投影首字母本来就是 z/c/s。
-//!
-//! 自带 wdat 夹具，不依赖 `build_dev/data`（同 `pinyin_mixed_abbrev.rs` 的理由）。
+//! 自带 wdat 夹具，不依赖 `build_dev/data`。
 
 use wind_dict::cached::CachedDict;
 use wind_dict::datformat::WdatWriter;
@@ -28,7 +14,7 @@ use wind_engine::pinyin::{Config as PyConfig, PinyinEngine};
 
 /// 夹具词表：码、词、权重、boundary（bit i = 位置 i 是音节起点）。
 ///
-/// 每个简拼键下都刻意放了**同键的竞争词**，用来钉住「双字母声母确实在收紧判据」：
+/// 每个简拼键下都刻意放了同键的竞争词，钉住双字母声母确实在收紧判据：
 /// `zhy` 只该出 zhe|… 的词，不该把 `zy` 键下 zi|…、zuo|… 的词一并捞回来。
 const ENTRIES: &[(&str, &str, i32, u64)] = &[
     ("zhege", "这个", 555006, 0b1001),          // zhe|ge        → 0,3
@@ -104,15 +90,14 @@ fn retroflex_initial_before_full_syllable() {
 
 /// 全是声母段、但其中一个是双字母：`zhy` = zh|y，投影键 `zy`。
 ///
-/// 这一条是**纯简拼路径表达不了**的形态（它逐字母切，只能给出 `z|h|y`），
-/// 所以混合路径那道「必须既有声母段又有音节段」的守卫要为它放行。
+/// 纯简拼路径逐字母切只能给出 `z|h|y`，表达不了这种形态，
+/// 所以混合路径「必须既有声母段又有音节段」的守卫要为它放行。
 #[test]
 fn retroflex_initial_in_all_initial_pattern() {
     let e = engine("all_initial");
     let t = texts(&e, "zhy");
     assert!(t.contains(&"这样".to_string()), "zhy 应出「这样」: {t:?}");
-    // 判据是**收紧**的：同在 `zy` 键下，`zhi|you` 的首音节以 zh 开头 ⇒ 该进；
-    // `zuo|yong` 不以 zh 开头 ⇒ 不该进。两条一起断言，才说明段校验真的在比 zh 而不是 z。
+    // 同在 `zy` 键下，`zhi|you` 该进、`zuo|yong` 不该进；两条一起断言才说明段校验比的是 zh 而不是 z。
     assert!(
         t.contains(&"只有".to_string()),
         "zhi|you 的首音节以 zh 开头，应进: {t:?}"
@@ -173,14 +158,12 @@ fn single_letter_initial_and_plain_paths_unchanged() {
     );
 }
 
-/// 两种解释**并存**：`zhy` 既该出 zh|y 的词，也不该丢掉 z|h|y 的纯简拼老结果。
-///
-/// 用户要的是「宽松」，不是「换一种严格」——老写法打惯了的人不能因此打不出词。
+/// 两种解释并存：`zhy` 既该出 zh|y 的词，也不该丢掉 z|h|y 的纯简拼老结果。
+/// 要的是宽松，不是换一种严格，老写法打惯的人不能因此打不出词。
 #[test]
 fn both_interpretations_coexist() {
     let e = engine("coexist");
-    // 「城市」cheng|shi 的两种打法都要活：`cs`（纯简拼，逐字母）与 `chs`（ch 作一段）。
-    // 用户要的是「宽松」，不是「换一种严格」——老写法打惯了的人不能因此打不出词。
+    // 「城市」cheng|shi 的两种打法都要活：`cs`（逐字母）与 `chs`（ch 作一段）。
     assert!(
         texts(&e, "cs").contains(&"城市".to_string()),
         "纯简拼 c|s 仍命中"
@@ -191,8 +174,7 @@ fn both_interpretations_coexist() {
     );
 }
 
-/// 模糊音关闭时，双字母声母段是**收紧**的：`zh` 不匹配 `z` 开头的音节。
-/// 开了 `zh_z` 才放宽 —— 与该开关的语义一致。
+/// 模糊音关闭时双字母声母段是收紧的：`zh` 不匹配 `z` 开头的音节；开了 `zh_z` 才放宽。
 #[test]
 fn retroflex_segment_relaxes_only_under_its_fuzzy_flag() {
     // 关：zh 段严格要求音节以 zh 开头，`zuo|yong` 进不来（见上一条测试）。

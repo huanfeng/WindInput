@@ -1,7 +1,6 @@
 /// 各平台只收自己的条目与全平台条目。
 ///
-/// 变异判据：把比对改回写死 `"windows"`，linux / macos 两行转红——那正是 macOS 与
-/// Linux 上显示 `notepad.exe` 词条的原形。
+/// 变异判据：把比对改回写死 `"windows"`，linux / macos 两行转红。
 #[test]
 fn platform_filter_follows_current_platform() {
     for cur in ["windows", "macos", "linux", "android"] {
@@ -171,16 +170,13 @@ fn fixed() -> DateTime<Local> {
     Local.with_ymd_and_hms(2026, 6, 14, 9, 5, 7).unwrap()
 }
 
-/// 测试用空剪贴板读取回调。
 /// 无宿主能力的求值环境（剪贴板与反查均返回空串）。
 fn no_clip() -> PhraseHost<'static> {
     PhraseHost::empty()
 }
 
-/// ★ 剪贴板反查（出厂 `cofc`）的端到端形状。
-///
-/// 锁两件事：**纯模板短语的 display 就是上屏文本**（无 `command_src`，不需要
-/// `type()`），以及**查不到时整条候选消失**而不是留一条空白的。
+/// 剪贴板反查（出厂 `cofc`）的端到端形状：纯模板短语的 display 就是上屏文本（无
+/// `command_src`，不需要 `type()`），查不到时整条候选消失而不是留一条空白的。
 #[test]
 fn clipboard_reverse_renders_and_drops_when_nothing_found() {
     let layer = PhraseLayer::from_records(vec![PhraseSeed {
@@ -226,9 +222,8 @@ fn clipboard_reverse_renders_and_drops_when_nothing_found() {
     );
 }
 
-/// ★ `$SS` 逐字反查：**元素个数即上限**，剪贴板不足位数时尾部元素整条消失。
-///
-/// 这是「限制 N 个字」的表达方式——不靠配置键，靠词条里写几个元素。
+/// `$SS` 逐字反查：元素个数即上限，剪贴板不足位数时尾部元素整条消失。
+/// 「限制 N 个字」不靠配置键，靠词条里写几个元素。
 #[test]
 fn reverse_group_drops_tail_when_clipboard_is_shorter() {
     let src =
@@ -269,11 +264,10 @@ fn test_expand_date() {
     assert_eq!(expand_template("$Y-$MM-$DD", &now).unwrap(), "2026-06-14");
 }
 
-/// ★ 年份四态（`$Y` `$YYYY` `$YY` `$YC`）与快捷输入格式表**同名同义**。
+/// 年份四态（`$Y` `$YYYY` `$YY` `$YC`）与快捷输入格式表同名同义。
 ///
-/// 直接拿 `QuickValues` 做对照，而不是各写各的期望值：这两处是用户眼里的同一套写法
-/// （文档也是这么承诺的），任一侧少一个名字或取值不同，症状都是「同样的模板抄到短语里
-/// 一条候选都不出」且日志干净——`expand_template` 遇未知变量整条作废。
+/// 直接拿 `QuickValues` 做对照：两处对用户是同一套写法，任一侧少名字或取值不同，症状都是
+/// 「同样的模板抄到短语里一条候选都不出」且日志干净（`expand_template` 遇未知变量整条作废）。
 #[test]
 fn test_expand_year_forms_agree_with_quick_format_table() {
     let now = fixed(); // 2026-06-14
@@ -327,10 +321,8 @@ fn test_expand_lunar() {
     assert_eq!(expand_template("$LZ年", &now).unwrap(), "马年");
 }
 
-/// ★ `$LF` 在非节日展开成**空串**，整条照常出——不是整条消失。
-///
-/// 用户写 `$LY年$LMD$LF` 要的是「节日当天追加节日名」，平常日子仍要得到日期。
-/// 曾经的 `None` 语义会让这类短语一年 355 天打不出来。
+/// `$LF` 在非节日展开成空串，整条照常出，不是整条消失：
+/// `$LY年$LMD$LF` 要的是「节日当天追加节日名」，平常日子仍要得到日期。
 #[test]
 fn test_expand_lunar_festival_is_empty_on_ordinary_days() {
     let plain = fixed(); // 2026-06-14 不是节日
@@ -353,10 +345,10 @@ fn test_expand_lunar_festival_is_empty_on_ordinary_days() {
     assert_eq!(expand_template("$LMD", &duanwu).unwrap(), "五月初五");
 }
 
-/// ★ 用户实际写的那条短语：紧邻的四个农历变量必须各自独立展开。
+/// 用户实际写的那条短语：紧邻的四个农历变量必须各自独立展开。
 ///
-/// 两件事同时压：变量名边界（`$LMD` 不能被切成 `$LM`+`D`、`$LY` 不能吞掉后面的 `$LZ`），
-/// 以及非节日下 `$LF` 不再毒杀整条。
+/// 同时压两件事：变量名边界（`$LMD` 不能被切成 `$LM`+`D`、`$LY` 不能吞掉后面的 `$LZ`），
+/// 以及非节日下 `$LF` 不毒杀整条。
 #[test]
 fn test_expand_adjacent_lunar_vars() {
     let plain = fixed(); // 2026-06-14 非节日
@@ -378,9 +370,8 @@ fn test_expand_adjacent_lunar_vars() {
     assert_eq!(expand_template("$LY|$LYN", &plain).unwrap(), "丙午|2026");
 }
 
-/// ★ 写错的变量名仍须整条作废——「取不到值给空串」不能退化成「什么都放行」。
-///
-/// 这两件事共用一个 `Option`，改 `$LF` 时最容易连带打穿这道保护。
+/// 写错的变量名仍须整条作废：「取不到值给空串」不能退化成「什么都放行」。
+/// 两者共用一个 `Option`，改 `$LF` 时最容易连带打穿这道保护。
 #[test]
 fn test_unknown_var_still_kills_template() {
     let now = fixed();
@@ -488,10 +479,10 @@ fn test_cmdbar_dual_path() {
     );
 }
 
-/// ★ **用户词库**里写 `{dict.rev(clip())}` 的完整两种结局。
+/// 用户词库里写 `{dict.rev(clip())}` 的完整两种结局。
 ///
-/// 这条路径与短语层是两套代码（`expand_dict_value` vs `lookup_at`），
-/// 短语层测绿**证明不了**词库路径也对 —— 用户正是把词条加在词库里的。
+/// 这条路径与短语层是两套代码（`expand_dict_value` vs `lookup_at`），短语层测绿证明不了
+/// 词库路径也对。
 #[test]
 fn dict_value_clipboard_reverse_both_outcomes() {
     let clip = |_n: i64| "好".to_string();
@@ -510,9 +501,8 @@ fn dict_value_clipboard_reverse_both_outcomes() {
         }
     );
 
-    // 查不到 → **绝不能**退回 `None`：词库路径的 `None` 语义是「这不是特殊语法，
-    // 保留原文」，于是候选会显示成源码字面 `{dict.rev(clip())}` 并原样上屏，
-    // 看起来就像「配了没生效」。必须是 Drop（该候选整条不出现）。
+    // 查不到 → 必须是 Drop（整条不出现），不能退回 `None`：词库路径的 `None` 语义是
+    // 「这不是特殊语法，保留原文」，候选会显示成源码字面 `{dict.rev(clip())}` 并原样上屏。
     let miss = |_t: &str, _f: &str, _m: usize| String::new();
     let host = PhraseHost {
         clip: &clip,
@@ -530,7 +520,7 @@ fn test_expand_dict_value_reuse() {
     // 词库候选复用短语 / cmdbar 的统一展开（对齐 Go dict.ValueExpander）。
     let now = fixed();
     let clip = no_clip();
-    // 简单模板变量 $Y年$M月$D日 → 展开为日期（用户 now 词条 bug 的正解）。
+    // 简单模板变量 $Y年$M月$D日 → 展开为日期。
     assert_eq!(
         expand_dict_value("$Y年$M月$D日", "now", now, &[], &clip),
         DictExpansion::Single {
@@ -574,11 +564,8 @@ fn test_expand_dict_value_reuse() {
     );
 }
 
-/// 静态短语的前缀命中要带**剩余编码**注释，与 marker 短语一致。
-///
-/// 真机现场：5 码短语 `zzsfz` 敲到 `zzsf` 时候选已出现，但看不出「还差一个 z」——
-/// 而同一串码下系统 `zz*` 的 `$SS` 分组是带提示的。`suffix` 早就算出来了，
-/// 只有 Literal/Template 两个分支没往 `PhraseHit` 上放。
+/// 静态短语的前缀命中要带剩余编码注释，与 marker 短语一致：5 码短语 `zzsfz` 敲到 `zzsf`
+/// 时要看得出「还差一个 z」。
 #[test]
 fn prefix_hit_carries_remaining_code_comment() {
     let mut map: HashMap<String, Vec<PhraseEntry>> = HashMap::new();
@@ -651,7 +638,7 @@ fn test_cmdbar_array_phrase_expands() {
     );
 }
 
-/// `$SS` 内嵌 `$CC`：每个命令成员是独立的命令候选，携**元素级**命令源（不是整组源）。
+/// `$SS` 内嵌 `$CC`：每个命令成员是独立的命令候选，携元素级命令源（不是整组源）。
 #[test]
 fn test_cmdbar_array_embedded_command_members() {
     let src =
@@ -859,7 +846,7 @@ fn test_prefix_nav_command_default_on_prefix_false_off() {
     assert_eq!(got[0].text, "百度");
     assert_eq!(got[0].comment, "bd");
     assert_eq!(got[0].nav_code.as_deref(), Some("cobd"));
-    // 命令 nav：携命令源（选中**直接执行**，非二级展开）。
+    // 命令 nav：携命令源（选中直接执行，非二级展开）。
     assert!(got[0].command_src.is_some());
 }
 
@@ -908,14 +895,11 @@ fn test_prefix_nav_includes_literal_template() {
     assert!(got[0].nav_code.is_none());
 }
 
-/// ★ 两条路径对同一条短语必须**同处置**——这是用户实际踩到的那个 bug。
+/// 精确与前缀两条路径对同一条短语必须同处置。
 ///
-/// 前缀路径曾是 `unwrap_or_else(|| t.clone())`「展开失败退回原文」，于是打全码一个候选
-/// 都没有、打前缀反而看得见字面 `$LY$LZ$LMD$LF` 且选中即原样上屏。同一条短语在两条
-/// 路径上现象相反，是最难被用户描述清楚的一类故障。
-///
-/// 用**写错的变量名**做样本而非 `$LF`：`$LF` 如今展开成空串、根本走不到失败分支，
-/// 拿它当样本这条测试会恒绿而压不住任何东西。
+/// 前缀路径若「展开失败退回原文」，会出现打全码无候选、打前缀反而看见字面 `$LY$LZ$LMD$LF`
+/// 且选中即原样上屏，现象相反、用户很难描述。用写错的变量名做样本：`$LF` 展开成空串，
+/// 走不到失败分支，拿它当样本会恒绿。
 #[test]
 fn test_prefix_and_exact_agree_on_broken_template() {
     let mut map: HashMap<String, Vec<PhraseEntry>> = HashMap::new();
@@ -942,9 +926,7 @@ fn test_prefix_and_exact_agree_on_broken_template() {
     assert!(exact.is_empty(), "精确路径同样应跳过该条");
 }
 
-/// ★ 含 `$LF` 的短语在**非节日**要照常出候选，两条路径都是。
-///
-/// 这是「一年 355 天打不出来」的正面覆盖：`$LF` 展开成空串而非毒杀整条。
+/// 含 `$LF` 的短语在非节日要照常出候选，两条路径都是。
 #[test]
 fn test_lunar_festival_phrase_survives_ordinary_days() {
     let mut map: HashMap<String, Vec<PhraseEntry>> = HashMap::new();
@@ -1018,17 +1000,14 @@ fn from_records_builds_lookup() {
     assert_eq!(hits[1].text, "北京市");
 }
 
-// 中文数字读法本身的用例已随实现迁往 wind-quick-input
-// （`test_small_int_to_chinese`）；此处保留 `test_expand_chinese` 覆盖模板端到端。
+// 中文数字读法本身的用例在 wind-quick-input（`test_small_int_to_chinese`）；
+// 此处保留 `test_expand_chinese` 覆盖模板端到端。
 
 /// 回归：`${VAR}` 旧式模板变量不得被 cmdbar 语法探测劫走。
 ///
-/// `has_top_level_brace` 曾只看 `{`、不看它前面的 `$`，于是 `${YC}年${MC}月${DC}日`
-/// 被判成命令栏语法 → 走 `evaluate` 求值 `YC` → 不在函数注册表 → `UnknownFunc`
-/// → 候选被静默丢弃（症状：`date`/`datm`/`zzrq` 的中文数字日期那条不再显示）。
-///
-/// **必须从 `lookup_at` 进**：它才覆盖 `is_cmdbar_grammar` 分发。只测 `expand_template`
-/// 纯函数的用例（如 `test_expand_template`）绕过分发，当年正是它让这个缺陷假绿通过 CI。
+/// `has_top_level_brace` 只看 `{` 不看前面的 `$` 时，`${YC}年${MC}月${DC}日` 会被判成命令栏
+/// 语法 → `UnknownFunc` → 候选被静默丢弃。必须从 `lookup_at` 进才覆盖 `is_cmdbar_grammar`
+/// 分发；只测 `expand_template` 纯函数会假绿。
 #[test]
 fn lookup_expands_brace_template_vars() {
     let mut map: HashMap<String, Vec<PhraseEntry>> = HashMap::new();
@@ -1059,8 +1038,8 @@ fn lookup_expands_brace_template_vars() {
 /// 两边若各改各的，用户换个写法就换个结果）。
 ///
 /// 日期挑了会分叉的几类：普通日、节日（`$LF` 非空）、闰月、元旦（农历年≠公历年）、
-/// 年底。两边都经 `lookup_at`，覆盖 `is_cmdbar_grammar` 分发。`$LF` 非节日时两边都
-/// 应当整条丢弃，故直接比较结果列表而不是逐个 unwrap。
+/// 年底。两边都经 `lookup_at`，覆盖 `is_cmdbar_grammar` 分发。非节日的 `$LF` 展开为空，
+/// 故直接比较结果列表而不是逐个 unwrap。
 #[test]
 fn date_tokens_match_template_vars() {
     const VARS: &[&str] = &[
@@ -1105,11 +1084,8 @@ fn date_tokens_match_template_vars() {
     }
 }
 
-/// 回归：系统短语 `uuid = '$uuid'` 曾因 `expand_var` 没有 `uuid` 分支而整条被丢弃
-/// （打全码无候选），前缀路径却回退显示字面 `$uuid`——同一根因两个相反现象。
-///
-/// **必须从 `lookup_at` 进**（同 `lookup_expands_brace_template_vars` 的理由）：
-/// 只测 `expand_template` 会绕过 `is_cmdbar_grammar` 分发。
+/// 回归：系统短语 `uuid = '$uuid'` 要能展开；`expand_var` 缺分支时打全码整条丢弃、前缀路径
+/// 却显示字面 `$uuid`。必须从 `lookup_at` 进，只测 `expand_template` 会绕过分发。
 #[test]
 fn lookup_expands_uuid_variable() {
     let mut map: HashMap<String, Vec<PhraseEntry>> = HashMap::new();

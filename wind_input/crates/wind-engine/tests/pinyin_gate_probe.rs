@@ -1,14 +1,13 @@
-//! 「精确整词闸门」（`WIND_GATE_EXACT_SENTENCE`）的定点探针 —— **测量工具，不是门禁**。
-//!
-//! 不做 `assert_eq!`，只打印各定点输入的前 3 候选，供闸门开/关对照。
+//! 「精确整词闸门」（`WIND_GATE_EXACT_SENTENCE`）的定点探针，测量工具，不是门禁：
+//! 只打印各定点输入的前 3 候选，供闸门开/关对照。
 //!
 //! ```text
 //! cargo test -p wind-engine --release --test pinyin_gate_probe -- --ignored --nocapture
 //! WIND_GATE_EXACT_SENTENCE=1 cargo test ... （同上）
 //! ```
 //!
-//! 会挂一个用户词「廉政提醒」（`lianzhengtixing`），因为这是用户的原始诉求：
-//! 用户词经 step 6 合并进候选后，闸门能否据此抑制整句「李安整体性」。
+//! 挂一个用户词「廉政提醒」（`lianzhengtixing`），看用户词经 step 6 合并后闸门能否据此
+//! 抑制整句「李安整体性」。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -83,9 +82,8 @@ fn gate_fixed_point_probe() {
                 "lianfenxi",
             ],
         ),
-        // 自选：整串输入**本身即词典整词**，但整句合成未必更差 —— 闸门在这些输入上
-        // 会直接掐掉整句，是探测负面影响的靶子。
-        // gonghe 取自 `mod.rs` step 1.5 注释里点名的例子（恭贺/共贺）。
+        // 自选：整串本身即词典整词，但整句未必更差，闸门会直接掐掉整句，是探测负面影响的靶子。
+        // gonghe：恭贺/共贺同码。
         (
             "自选：精确整词 vs 整句",
             &["gonghe", "yijian", "qishi", "yigeren", "sanbaiwushi"],
@@ -121,15 +119,9 @@ fn gate_fixed_point_probe() {
 
 // ---------------------------------------------------------------- 整句合成探针
 
-/// `pinyin_eval` **无法**测量本闸门的负面影响：其样本的 `input` 按构造就是某个词条自身的
-/// 编码，故「存在覆盖整串输入的精确整词」在该评测集上恒成立 —— 闸门必然触发，
-/// 而期望答案又恰好就是那个整词。**评测集在结构上偏向闸门**。
-///
-/// 本探针补上缺失的那一半：把两个真实词条的编码**拼接**成输入，期望答案是两词拼接的
-/// 结果（一个真正需要整句合成的输入）。闸门在这里只有当拼接串**碰巧**也是某个词条时
-/// 才触发 —— 那正是它伤人的形态。
-///
-/// 同样只打印数字，不做断言。
+/// `pinyin_eval` 的样本输入恒为某词条自身的编码，闸门必然触发且期望答案恰是那个整词，
+/// 结构上偏向闸门。本探针补另一半：拼接两个真实词条的编码，期望两词拼接的整句；
+/// 闸门只在拼接串碰巧也是词条时触发，那正是它伤人的形态。只打印数字，不做断言。
 #[test]
 #[ignore = "整句合成探针：依赖 build_dev 真实词库，用 --ignored 显式运行"]
 fn gate_sentence_composition_probe() {
@@ -222,8 +214,8 @@ fn gate_sentence_composition_probe() {
     );
 
     let (mut total, mut top1, mut top5, mut mrr) = (0usize, 0usize, 0usize, 0f64);
-    // 首选**不是**整句的样本数。闸门开时它包含「闸门掐掉了整句」的全部情形；
-    // 闸门关时它是「本就没解出整句」的基线量，两者相减即闸门的实际作用面。
+    // 首选不是整句的样本数。闸门开时含「闸门掐掉了整句」的全部情形，闸门关时是基线量，
+    // 两者相减即闸门的实际作用面。
     let mut no_sentence = 0usize;
     let mut no_sentence_top1 = 0usize;
     let mut misses: Vec<String> = Vec::new();

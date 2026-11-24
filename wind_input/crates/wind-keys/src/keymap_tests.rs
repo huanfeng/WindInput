@@ -5,7 +5,7 @@ fn name_aliases_resolve() {
     assert_eq!(key_name_to_vk("backtick"), Some(VK_BACKTICK));
     assert_eq!(key_name_to_vk("grave"), Some(VK_BACKTICK));
     assert_eq!(key_name_to_vk("`"), Some(VK_BACKTICK));
-    // 所有模式现在都认得 backslash（曾经的特殊模式不触发根因）。
+    // backslash 必须能解析：解析不了时依赖它的特殊模式不触发。
     assert_eq!(key_name_to_vk("backslash"), Some(VK_BACKSLASH));
     assert_eq!(key_name_to_vk("\\"), Some(VK_BACKSLASH));
     assert_eq!(key_name_to_vk("EQUALS"), Some(VK_EQUAL)); // 大小写不敏感
@@ -94,8 +94,7 @@ fn nav_classify_config_driven() {
 
 #[test]
 fn comma_period_pages() {
-    // 设置页提供 comma_period 选项，但组名曾未被识别（走 `_ => {}` 静默忽略）→
-    // 无翻页绑定，逗号/句号落到标点臂直接上屏。
+    // 设置页提供 comma_period 选项：组名不被识别时会静默无翻页绑定，逗号/句号直接上屏。
     let nk = NavKeys::from_binds([
         ("comma", NavAction::PagePrev),
         ("period", NavAction::PageNext),
@@ -137,7 +136,7 @@ fn capslock_resolves_as_key_up_only() {
         is_key_up_only_vk(k.vk),
         "CapsLock 只有 keyup 到得了服务端；漏判会让绑定挂在永不触发的 keydown 上"
     );
-    // ⚠️ 回归保护：CapsLock 与四个纯修饰键**不连号**，用区间判定会把它漏掉。
+    // 回归保护：CapsLock 与四个纯修饰键不连号，用区间判定会把它漏掉。
     assert!(!(VK_LSHIFT..=VK_RCONTROL).contains(&VK_CAPITAL));
 }
 
@@ -170,8 +169,8 @@ fn symbol_session_keys_are_printable() {
     }
 }
 
-/// 同一个 (键, shift) 被声明两次时**先来的赢**——`classify` 用 `.find()`。
-/// 配置折算依赖这条来复现「page 组优先于 highlight 组」的历史行为。
+/// 同一个 (键, shift) 被声明两次时先来的赢（`classify` 用 `.find()`）；
+/// 配置折算靠这条实现「page 组优先于 highlight 组」。
 #[test]
 fn first_bind_wins_for_duplicate_key() {
     let nk = NavKeys::from_binds([
@@ -189,9 +188,8 @@ fn prefix_char_roundtrip() {
     assert_eq!(vk_to_prefix_char(0x41), None); // 字母无前缀定义
 }
 
-/// 修饰键走**独立**的解析入口，不进 `KEY_TABLE`——后者是引导键（keydown）的配置
-/// 解析口，而修饰键只在 keyup 轻敲上工作。混在一起就会让引导键设置项接受一个
-/// 配得上却永不触发的值（临拼触发键里那个失效的 `z` 选项就是这么来的，已修）。
+/// 修饰键走独立的解析入口，不进 `KEY_TABLE`：后者是引导键（keydown）的配置解析口，而修饰键
+/// 只在 keyup 轻敲上工作，混在一起会让引导键设置项接受一个配得上却永不触发的值。
 #[test]
 fn modifier_names_resolve_only_via_dedicated_entry() {
     assert_eq!(modifier_name_to_vk("rshift"), Some(VK_RSHIFT));
@@ -199,7 +197,7 @@ fn modifier_names_resolve_only_via_dedicated_entry() {
     assert_eq!(modifier_name_to_vk(" lctrl "), Some(VK_LCONTROL)); // 首尾空白不敏感
     assert_eq!(modifier_name_to_vk("rcontrol"), Some(VK_RCONTROL)); // 别名
     assert_eq!(modifier_name_to_vk("backslash"), None); // 符号键不归它管
-    // 反向：引导键的解析口**不认**修饰键，否则 trigger_keys 里能配 rshift 却永不触发。
+    // 反向：引导键的解析口不认修饰键，否则 trigger_keys 里能配 rshift 却永不触发。
     assert_eq!(key_name_to_vk("rshift"), None);
     assert_eq!(key_name_to_vk_with_letters("rshift"), None);
 }
@@ -215,11 +213,11 @@ fn pure_modifier_vk_range_is_exact() {
     assert!(!is_pure_modifier_vk(VK_Z));
 }
 
-/// `symbol_keys()` 的键名是**跨仓契约**：设置页按这些名字匹配自己的下拉选项
-/// （`TRIGGER_KEY_OPTIONS`），对不上就表现为「提示永远不出」——静默降级，没人会发现。
+/// `symbol_keys()` 的键名是跨仓契约：设置页按这些名字匹配下拉选项（`TRIGGER_KEY_OPTIONS`），
+/// 对不上就静默表现为「提示永远不出」。
 ///
-/// 快照式断言而非「非空即可」：改 `KEY_TABLE` 某行的**首个**别名不会破坏本仓任何
-/// 功能（其余别名仍能解析），却会静默切断那条契约。这里红一下，提醒去同步设置页。
+/// 快照式断言而非「非空即可」：改 `KEY_TABLE` 某行的首个别名不破坏本仓功能，却会静默切断
+/// 那条契约；这里红一下，提醒去同步设置页。
 #[test]
 fn symbol_key_names_are_a_cross_repo_contract() {
     let names: Vec<&str> = symbol_keys().map(|(n, _)| n).collect();

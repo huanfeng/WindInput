@@ -1,12 +1,10 @@
 //! `${code_schema}` 的数据来源：候选的全拼 `code` + `boundary` → 本方案的双拼击键。
 //!
-//! 这条链路回答的是 GH#128 的问题「字或词的后面能不能显示双拼的编码」。它与
-//! `${code_rev}`（拿候选文本去码表词库查反向索引）**不是一回事**：双拼编码不存在于
-//! 任何词库里，双拼只是「全拼词库 + 一张键盘布局」，所以只能算，不能查。
+//! 与 `${code_rev}`（拿候选文本查码表反向索引）不同：双拼编码不存在于任何词库，只是「全拼
+//! 词库 + 一张键盘布局」，只能算不能查。
 //!
-//! ⚠️ 这些用例**不需要真词库**：`shuangpin_code_of` 只吃候选已经带着的 `code`/`boundary`
-//! 与方案的布局文件，不碰词典、不碰反查索引。故用仓库自带的 `data/` 作数据目录即可，
-//! 不像 `shuangpin_separator.rs` 那样要 gate 在 `build_dev/data` 上。
+//! 不需要真词库：`shuangpin_code_of` 只吃候选带的 `code`/`boundary` 与布局文件，故用仓库自带的
+//! `data/` 即可，不必 gate 在 `build_dev/data` 上。
 
 use std::path::PathBuf;
 
@@ -35,8 +33,8 @@ const NIHAO: u64 = 0b101;
 
 /// 双拼方案下，候选的全拼码被算成用户实际要敲的键。
 ///
-/// 小鹤下「你好」= `nihc`（`ni` 声母韵母各一键，`hao` = h + c）。这个值与
-/// `shuangpin_separator.rs` 里真机链路用的是同一个，两处对不上就是有一处错了。
+/// 小鹤下「你好」= `nihc`（`hao` = h + c），与 `shuangpin_separator.rs` 真机链路用的值相同，
+/// 两处对不上就是有一处错了。
 #[test]
 fn shuangpin_schema_gives_keystrokes() {
     let m = mgr("shuangpin");
@@ -50,15 +48,11 @@ fn shuangpin_schema_gives_keystrokes() {
     );
 }
 
-/// ★★ **活跃方案不是双拼时，回退到已装的双拼方案** —— 本轮放宽范围的核心。
+/// 活跃方案不是双拼时，回退到已装的双拼方案。
 ///
-/// 早先只认活跃方案，全拼/码表/混输一律恒空，理由是「击键就是 code 本身，显示是冗余」。
-/// 那句话对「本方案击键」成立，对「双拼编码」不成立：GH#128 的原话是「有时忘记了还能
-/// 看下」，而正在用双拼打字的人刚敲完码不会忘 —— 会忘并且想看一眼的，多半是用全拼
-/// 打字、正往双拼迁移的人。
-///
-/// 本函数是**引擎层 API**，只回答「这串拼音的双拼编码是什么」，不带候选来源门控；
-/// 「码表候选该不该显示它」是注释层 `${shuangpin}` 那道 `source == Pinyin` 的事。
+/// 想看双拼编码的多半是用全拼打字、正往双拼迁移的人，所以不能只认活跃方案。
+/// 本函数是引擎层 API，只回答「这串拼音的双拼编码是什么」，不带候选来源门控；
+/// 「码表候选该不该显示」是注释层 `${shuangpin}` 那道 `source == Pinyin` 的事。
 #[test]
 fn non_shuangpin_schemas_fall_back_to_installed_shuangpin() {
     for active in ["pinyin", "wubi86", "wubi86_pinyin"] {
@@ -98,27 +92,22 @@ fn primary_pinyin_wins_over_available_scan() {
     assert_eq!(m.shuangpin_code_of("nihao", NIHAO).as_deref(), Some("nihc"));
 }
 
-/// ★ `boundary == 0` 不出编码。
+/// `boundary == 0` 不出编码。
 ///
-/// 模糊音变体命中与用户手输码的词条一律置 0（引擎侧「模糊变体命中一律 boundary=0
-/// （不设防）」）。此时音节切分只能靠 DAG 猜，而它偏向少音节——`xian` 会被猜成一个
-/// 音节而不是 `xi|an`。切错了显示出来的编码就是**错的**：用户照着敲得到别的字。
-/// 宁可这一次不显示。
+/// 模糊音变体命中与用户手输码的词条 boundary 一律为 0，切分只能靠 DAG 猜且偏向少音节
+/// （`xian` 被猜成一个音节而非 `xi|an`）。切错了显示的编码就是错的，宁可不显示。
 #[test]
 fn zero_boundary_is_not_guessed() {
     let m = mgr("shuangpin");
     assert_eq!(m.shuangpin_code_of("nihao", 0), None);
     // 首位未置位同样是坏数据（第一个音节不从 0 开始），一样不猜。
     assert_eq!(m.shuangpin_code_of("nihao", 0b100), None);
-    // ★ 即使 code 本身正好就是一个合法音节，boundary == 0 也不出编码。
-    // 判据是「boundary 可不可信」，不是「这串能不能凑出音节」——按 code 长度分情况
-    // 就等于有了第二条规则，而两条规则迟早会对同一个候选给出不同答案。
+    // 即使 code 本身正好是一个合法音节，boundary == 0 也不出编码：判据是 boundary 可不可信，
+    // 按 code 长度分情况等于第二条规则，迟早与第一条对同一候选给出不同答案。
     assert_eq!(m.shuangpin_code_of("hao", 0), None, "单音节也不例外");
 }
 
-/// 查不到的音节 ⇒ 整串不出，不给半截。
-///
-/// 半截击键串是**错**的答案而不是不完整的答案。
+/// 查不到的音节 ⇒ 整串不出，不给半截：半截击键串是错的答案而不是不完整的答案。
 #[test]
 fn unknown_syllable_yields_nothing() {
     let m = mgr("shuangpin");
@@ -145,14 +134,11 @@ fn cache_hit_matches_first_build() {
     );
 }
 
-/// ★ 同一个方案 id、布局却变了——这是单槽缓存**按 id 比对救不了**的那一格。
+/// 同一个方案 id、布局却变了：单槽缓存按 id 比对救不了。
 ///
-/// 用户在设置页把双拼布局从小鹤换成微软，写的是 `schema_overrides/shuangpin.toml`，
-/// 方案 id 自始至终是 `shuangpin`。若只靠 `cache.0 == id` 判断，缓存永远命中，
-/// 候选后面会一直挂着小鹤的键——一个只在「改过布局的用户」身上出现、且看起来像
-/// 「编码显示错了」的 bug。`reload_from_config` 里那句失效就是为它而设。
-///
-/// 切换**活跃方案**反而不需要失效点：id 变了缓存自然 miss。两者别混为一谈。
+/// 设置页把双拼布局从小鹤换成微软写的是 `schema_overrides/shuangpin.toml`，方案 id 不变；
+/// 只靠 `cache.0 == id` 判断会一直挂着小鹤的键。`reload_from_config` 里的失效就是为它而设。
+/// 切换活跃方案则不需要失效点：id 变了缓存自然 miss。
 #[test]
 fn cache_is_invalidated_when_layout_changes_under_same_schema_id() {
     let dir = temp_data_dir("layout_swap");

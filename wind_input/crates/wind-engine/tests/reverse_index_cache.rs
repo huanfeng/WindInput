@@ -1,18 +1,10 @@
-//! `.wridx` 反查索引缓存的**接线层**验证：落盘 → 复用 → 失效。
+//! `.wridx` 反查索引缓存的接线层验证：落盘 → 复用 → 失效。
 //!
-//! # 为什么单元测试不够
+//! `reverseidx` 与 `cache_fp` 的单元测试分别证明了格式与指纹判据，但缓存路径怎么推、摘要从
+//! 哪几个文件取、复用分支走没走到，只有让真的 `EngineManager` 跑一遍才能回答。
 //!
-//! `reverseidx` 的单元测试证明了格式本身（读写往返、二分、边界），`cache_fp` 的证明了
-//! 指纹判据（摘要变/顺序变/tag 变即失效）。两者都对，接线仍可能是错的——
-//! 而接线恰恰是最容易出问题的一段：缓存路径怎么推、摘要从哪几个文件取、
-//! 复用分支到底走没走到。这些只有让**真的 `EngineManager` 跑一遍**才能回答。
-//!
-//! 本仓踩过的正是这一类：「配置四层就位、消费点却接在不可达的调用点上」。
-//!
-//! # 缓存根与用户实际运行环境不冲突
-//!
-//! 测试进程没有 `WIND_VARIANT`，`Config::cache_dir()` 落在 `%LOCALAPPDATA%\WindInput\cache`；
-//! 而用户跑的是 Dev 变体（`WindInputDev\cache`）。两者天然隔离，测试不会动到真实缓存。
+//! 测试进程没有 `WIND_VARIANT`，`Config::cache_dir()` 落在 `%LOCALAPPDATA%\WindInput\cache`，
+//! 与 Dev 变体（`WindInputDev\cache`）天然隔离，不会动到真实缓存。
 
 use std::path::{Path, PathBuf};
 
@@ -21,9 +13,7 @@ use wind_engine::EngineManager;
 
 const SCHEMA: &str = "wubi86";
 
-/// 三个测试共用同一份磁盘缓存文件，必须串行。并行跑会互相删改对方的文件，
-/// 表现为随机失败——本仓最不该引入的那类测试。
-///
+/// 三个测试共用同一份磁盘缓存文件，必须串行，否则互相删改文件随机失败。
 /// 中毒后取 `into_inner`：一个测试 panic 不该把其余两个变成看不懂的 poison 错误。
 static CACHE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -46,8 +36,7 @@ fn mgr(dir: &Path) -> EngineManager {
     EngineManager::new(&cfg, Some(dir))
 }
 
-/// 在缓存根里找本方案的 `.wridx`。刻意**不复制一遍路径推导逻辑**——
-/// 照抄一份就等于「两处各写一份、其中一处悄悄过时」，那正是本测试要防的事。
+/// 在缓存根里找本方案的 `.wridx`。刻意不复制路径推导逻辑，照抄一份会悄悄过时。
 fn find_wridx() -> Option<PathBuf> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         let Ok(rd) = std::fs::read_dir(dir) else {
@@ -89,11 +78,10 @@ fn snapshot(m: &EngineManager) -> (usize, Option<String>, bool, usize) {
     )
 }
 
-/// ★ 落盘 → 复用：第二次构建**不该重写文件**，且结果必须完全一致。
+/// 落盘 → 复用：第二次构建不该重写文件，且结果必须完全一致。
 ///
-/// 「文件字节与 mtime 都没变」是复用分支唯一可靠的外部证据——重建分支恒会 rename 覆盖。
-/// 只断言「结果一样」是不够的：重建一遍结果当然也一样，那样测试对「复用根本没生效」
-/// 这个真正的故障完全不敏感（而它的后果是每次启动多花一次全量构建）。
+/// 文件字节与 mtime 不变是复用分支唯一可靠的外部证据（重建分支恒会 rename 覆盖）；
+/// 只断言结果一样对「复用没生效」不敏感，而那会让每次启动多一次全量构建。
 #[test]
 fn reverse_index_is_persisted_then_reused_without_rewriting() {
     let _guard = serialized();
@@ -113,8 +101,7 @@ fn reverse_index_is_persisted_then_reused_without_rewriting() {
         let _ = std::fs::remove_file(b);
     }
     let m1 = mgr(&dir);
-    // 注意：返回值只说明「本次预热做了事」，**区分不了重建与复用**——
-    // 真正的判据是下面的 mtime 比对，别把这条当成「确实重建了」的证据。
+    // 返回值只说明本次预热做了事，区分不了重建与复用；判据是下面的 mtime 比对。
     assert!(m1.prewarm_reverse_index(SCHEMA), "新 manager 上预热应执行");
     let s1 = snapshot(&m1);
     assert!(s1.0 > 0, "真实词库上索引不该为空");
@@ -147,10 +134,8 @@ fn reverse_index_is_persisted_then_reused_without_rewriting() {
     );
 }
 
-/// 常驻与否必须**只由体积决定**，且两条路给出同样的查询结果。
-///
-/// 不写死「wubi86 应该常驻」——那会随词库更新而失效，且失效时错的是测试不是代码。
-/// 断言的是不变式本身。
+/// 常驻与否必须只由体积决定，且两条路给出同样的查询结果。
+/// 不写死「wubi86 应该常驻」，那会随词库更新失效；断言的是不变式本身。
 #[test]
 fn residency_follows_size_threshold_and_does_not_change_results() {
     let _guard = serialized();
@@ -179,22 +164,16 @@ fn residency_follows_size_threshold_and_does_not_change_results() {
     );
 }
 
-/// ★ 启用的词库集合变了 → 缓存必须失效并重建；改回去 → 必须重新命中。
+/// 启用的词库集合变了 → 缓存必须失效并重建；改回去 → 必须重新命中。
 ///
-/// 靠 `schema_overrides` 打开一个出厂 `default_enabled = false` 的扩展库来制造变化，
-/// 这正是用户在设置页里勾选扩展词库时发生的事。
+/// 靠 `schema_overrides` 打开一个出厂 `default_enabled = false` 的扩展库制造变化，
+/// 即用户在设置页勾选扩展词库时的情形。
 ///
-/// # 为什么不用「篡改某个 .wdat 的指纹」来模拟
+/// 不能用篡改 `.wdat.fp` 模拟：那份词库会先被判失效，`CachedDict::load_at_with` 从 yaml
+/// 重建并把 `.fp` 写回正确值，`reverse_index_source_digests` 读到的摘要一字未变。
 ///
-/// 试过，**测不出东西**：改坏 `.wdat.fp` 会让那份词库自身先被判定失效 →
-/// `CachedDict::load_at_with` 从 yaml 重建 wdat → 顺手把 `.fp` 写回正确值。
-/// 等 `reverse_index_source_digests` 去读时，破坏早已被撤销，摘要一字未变。
-/// 这是「测试以为自己在测 A，实际连 A 都没触发」的典型形态。
-///
-/// # 反向那条同样要紧
-///
-/// 只断言「会失效」的话，一个恒返回 `false` 的 `derived_cache_is_fresh` 也能过——
-/// 而那意味着每次启动全量重建，正是本次改动要消灭的东西。
+/// 反向那条同样要紧：只断言会失效，恒返回 `false` 的 `derived_cache_is_fresh` 也能过，
+/// 而那意味着每次启动全量重建。
 #[test]
 fn changing_the_enabled_dict_set_invalidates_and_reverting_hits_again() {
     let _guard = serialized();

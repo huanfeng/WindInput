@@ -1,8 +1,6 @@
-//! S2 的**真实词库**效果探针：造词前后、开关两态的整句对照。
+//! S2（整句认用户词）的真实词库效果探针：造词前后、开关两态的整句对照。
 //!
-//! 为什么单独有这个文件：`pinyin_eval` 只能证「无用户词时逐位零差异」，
-//! **证不了有用户词时更好** —— 评测集里没有用户数据（`freq-rerank-model.md:532` 已记过
-//! 这个盲区）。效果要另建探针集，`tests/pinyin_gate_probe.rs` 是现成先例。
+//! `pinyin_eval` 没有用户数据，只能证「无用户词时零差异」，证不了有用户词时更好，故另建探针。
 //!
 //! `#[ignore]`：依赖 `build_dev/data`（不随仓库分发）。
 //! 跑法：`cargo test -p wind-engine --test pinyin_sentence_user_words_probe -- --ignored --nocapture`
@@ -11,16 +9,11 @@ use std::sync::Arc;
 use wind_config::Config;
 use wind_engine::EngineManager;
 
-/// 真机场景（t134「盖伦」）。
+/// 「盖伦」场景。
 ///
-/// ⚠️ **「盖伦」在 cn_dicts 里本来就有**（`base.dict.yaml:84220`，w=237），同码的「概论」
-/// w=1217 —— 所以这不是「系统库没这个词」，是「它在同码里排第二」。而手动加词的出厂权重
-/// 恰好是 1200（`handle_addword.rs::ADD_WORD_WEIGHT`），比「概论」低 17 分。
-///
-/// 本探针量的就是**出厂路径够不够用**：用户造了词、开了开关，整句认不认。
-/// 加 `USER_NODE_BONUS`(+2.0) 之前，答案是「不认，要手工把权重调到 1300」——
-/// 那等于这个功能对默认路径上的用户不存在。加成之后 w=1200 那一行就该翻过来，
-/// **这一行是本探针的主断言**；它要是退回「有概论吗」，就是加成没生效或被改小了。
+/// 「盖伦」在系统词库里本就有（w=237），同码「概论」w=1217；手动加词的出厂权重是 1200
+/// （`handle_addword.rs::ADD_WORD_WEIGHT`），仍比「概论」低。本探针量出厂路径够不够用：
+/// 主断言是 w=1200 那一行就要让整句改变，退回「概论」说明 `USER_NODE_BONUS` 没生效或被改小。
 const INPUTS: &[&str] = &["yougailunma", "gailunhenqiang", "wanyigailun"];
 
 /// 权重梯度：0 = 不加用户词（对照），1200 = 手动加词出厂值，其余为用户手调。
@@ -80,7 +73,7 @@ fn user_word_changes_the_sentence_on_real_dict() {
                 .add_user_word("pinyin", "gailun", "盖伦", w, 0b1001)
                 .unwrap();
         }
-        // w=0 那一行用**关闭态**跑，正是「出厂什么样」的基线。
+        // w=0 那一行用关闭态跑，即出厂基线。
         let cfg = if w == 0 { &cfg_off } else { &cfg_on };
         let mgr = EngineManager::with_store(cfg, Some(&dir), Some(store));
 
@@ -101,7 +94,7 @@ fn user_word_changes_the_sentence_on_real_dict() {
         Some(w) => println!("\n⇒ 用户词权重达到 {w} 时整句开始改变"),
         None => println!("\n⇒ 梯度内整句始终未变"),
     }
-    // 主断言：**出厂路径**（手动加词 w=1200）就要能翻过来。
+    // 主断言：出厂路径（手动加词 w=1200）就要能翻过来。
     // 拉到 50000 才变说明加成没生效；完全不变说明这条路没接通。
     assert_eq!(
         changed_at,
@@ -110,10 +103,9 @@ fn user_word_changes_the_sentence_on_real_dict() {
     );
 }
 
-/// 开销：`add_store_nodes` 给**每个跨度**做一次 redb 点查，而这跑在按键路径上。
-///
-/// 三条整句通路都接了它（step 2 / 2b 混合 / 2c 残码），长串的跨度数是
-/// `O(n × max_word_len)`，所以「开 vs 关」的差值是这个功能的真实成本。
+/// 开销：`add_store_nodes` 给每个跨度做一次 redb 点查，跑在按键路径上。三条整句通路
+/// （step 2 / 2b 混合 / 2c 残码）都接了它，跨度数是 `O(n × max_word_len)`，「开 vs 关」的差值
+/// 就是这个功能的真实成本。
 #[test]
 #[ignore = "依赖 build_dev/data，且是计时用例"]
 fn store_node_lookup_cost_on_real_dict() {
@@ -177,15 +169,14 @@ fn store_node_lookup_cost_on_real_dict() {
     }
 }
 
-/// 用户反馈现场（`bcxrmzf` 丢前缀「拜城县」）：临时词 + 纯简拼长串，真实词库下的位次。
+/// 临时词「拜城县」+ 纯简拼长串 `bcxrmzf`，真实词库下的位次。
 ///
-/// 打印关 / 开两态的前 15 个候选（带整句名次），外加「拜城县」「拜城县人民政府」的位次。
-/// 开启态同时开 N-best（露 3 算 5），看它输了的话输给了谁。
+/// 打印关 / 开两态的前 15 个候选（带整句名次）及「拜城县」「拜城县人民政府」的位次；
+/// 开启态同时开 N-best（露 3 算 5），看输给了谁。
 ///
-/// ⚠️ 这里是**引擎层**顺序，不是界面顺序：协调器 `candidate_display_order` 还要按消费长度
-/// 优先整体重排一遍（`cmp_by_consumed`）。只吃掉前缀的部分候选（`baichx` 下的「白」
-/// consumed=3）在引擎层可以排在整串简拼词前面，界面上则相反——实测「拜城县」引擎层第 72、
-/// 界面第 1。量界面位次要走 `Coordinator` + `debug_all_candidate_texts`。
+/// 这里是引擎层顺序，不是界面顺序：协调器 `candidate_display_order` 还要按消费长度整体重排
+/// （`cmp_by_consumed`），只吃前缀的候选在引擎层可排在整串简拼词前，界面上相反。
+/// 量界面位次要走 `Coordinator` + `debug_all_candidate_texts`。
 #[test]
 #[ignore = "依赖 build_dev/data"]
 fn temp_word_in_abbrev_sentence_on_real_dict() {
@@ -245,13 +236,11 @@ fn temp_word_in_abbrev_sentence_on_real_dict() {
     }
 }
 
-/// 开销：用户词节点的**模糊分支**（`add_store_nodes` → `add_store_fuzzy_nodes`）。
+/// 开销：用户词节点的模糊分支（`add_store_nodes` → `add_store_fuzzy_nodes`）。
 ///
-/// 每个跨度 × 至多 4 条所打码切分 × 至多 64 个变体码（按码归并后）各一次 store 点查，
-/// 11 组模糊全开时是 S2 里最贵的一段。5000 条用户词模拟用久了的词库；4 / 6 / 8 音节
-/// 各一条，三种配置在同一进程里**交替**跑 3 轮，免得热身 / 频率漂移偏向某一态。
-///
-/// 模糊分支本身的增量要拿「去掉该分支」的构建另跑一遍对照（同一二进制里没有开关）。
+/// 每个跨度 × 至多 4 条切分 × 至多 64 个变体码各一次 store 点查，11 组模糊全开时是 S2 里
+/// 最贵的一段。5000 条用户词模拟用久了的词库；4 / 6 / 8 音节各一条，三种配置同进程交替跑
+/// 3 轮，免得热身/频率漂移偏向某一态。分支本身的增量要拿去掉该分支的构建另跑对照。
 #[test]
 #[ignore = "依赖 build_dev/data，且是计时用例（请用 --release）"]
 fn fuzzy_store_node_cost_on_real_dict() {

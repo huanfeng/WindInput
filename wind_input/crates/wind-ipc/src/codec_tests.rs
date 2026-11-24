@@ -2,26 +2,20 @@ use super::*;
 
 /// 从三种状态编码里取出 flags 字段（三者布局相同：header 之后第一个 u32）。
 fn flags_of(buf: &[u8]) -> u32 {
-    // 三种状态编码共用 `encode_status_update_ex`，布局相同：8 字节 header 之后
-    // 第一个 u32 就是 flags（小端）。偏移写错的话下面 `on ^ off` 那条断言会红 ——
-    // 取到别处的字节不可能恰好只差 STATUS_HOTKEY_SESSION 这一位。
+    // 偏移写错的话下面 `on ^ off` 那条断言会红：取到别处的字节不可能恰好只差
+    // STATUS_HOTKEY_SESSION 这一位。
     u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]])
 }
 
-/// ★★★ 三条状态通路**都**必须把 `hotkey_session` 编进 flags。
-///
-/// 这一位是 level-triggered 的：C++ 侧收到任何一条状态响应都会无条件镜像它。所以
-/// 「漏带」不等于「带 false 无害」——它会把一个正活着的会话当场清掉。可达场景：
-/// 加词开着时按 lshift 切中英，那条走 `encode_status_update` 的同步响应若不带本位，
-/// 加词的 Enter/Esc 立刻失灵。
-///
-/// 三个入口的参数全是 bool 且相邻，漏传/错位编译器不会报错，只能靠本条钉住。
 /// 「把会话位编码进一条状态消息」的三个入口的共同形状。
-///
-/// 抽成别名只为躲开 clippy::type_complexity——三个入口签名一致正是本用例的前提，
-/// 写成一个名字反而更说明这件事。
+/// 抽成别名只为躲开 clippy::type_complexity；三个入口签名一致正是本用例的前提。
 type StatusEncoder = Box<dyn Fn(bool) -> Vec<u8>>;
 
+/// 三条状态通路都必须把 `hotkey_session` 编进 flags。
+///
+/// 这一位是 level-triggered 的：C++ 侧收到任何状态响应都会无条件镜像它，漏带会把正活着的
+/// 会话当场清掉（如加词开着时 lshift 切中英，加词的 Enter/Esc 立刻失灵）。三个入口的参数
+/// 全是相邻的 bool，漏传/错位编译器不报错，只能靠本条钉住。
 #[test]
 fn every_status_encoding_carries_the_hotkey_session_bit() {
     let cases: [(&str, StatusEncoder); 3] = [
@@ -254,9 +248,8 @@ fn focus_gained_window_class_roundtrip_on_both_platform_shapes() {
     assert_eq!(decode_focus_gained_window_class(&win), "Shell_TrayWnd");
     assert_eq!(decode_focus_gained_bundle_id(&win), "");
 
-    // macOS 形态：两段都非空。★ 这条钉住「类名段必须顺序走过 bundleId」——
-    // 若哪天有人改回固定偏移，非空 bundleId 会让它读到垃圾，而定长字段全对、
-    // 编译与其它测试都不会有任何信号。
+    // macOS 形态：两段都非空。钉住类名段必须顺序走过 bundleId：改成固定偏移时非空 bundleId
+    // 会让它读到垃圾，而定长字段全对、别的测试没有信号。
     let mac = focus_payload_with_sections("com.apple.TextEdit", "NSWindow");
     assert_eq!(decode_focus_gained_bundle_id(&mac), "com.apple.TextEdit");
     assert_eq!(decode_focus_gained_window_class(&mac), "NSWindow");
@@ -305,7 +298,7 @@ fn focus_gained_window_title_roundtrip_on_both_platform_shapes() {
     );
     assert_eq!(decode_focus_gained_window_class(&win), "Chrome_WidgetWin_1");
     assert_eq!(decode_focus_gained_bundle_id(&win), "");
-    // ★ 非空 bundleId + 类名：标题段必须顺序走过前两段，固定偏移会读到垃圾。
+    // 非空 bundleId + 类名：标题段必须顺序走过前两段，固定偏移会读到垃圾。
     let mac = focus_payload_with_title("com.apple.TextEdit", "NSWindow", "Untitled");
     assert_eq!(decode_focus_gained_window_title(&mac), "Untitled");
     assert_eq!(decode_focus_gained_window_class(&mac), "NSWindow");
@@ -387,7 +380,7 @@ fn test_encode_host_render_setup_layout_matches_cpp() {
         event_name: "Local\\W_EVT".to_string(), // 11 B
     }];
     let buf = encode_host_render_setup(7, &entries);
-    // IpcHeader 8B: version u16 + command u16 + payload_len u32（以现有 IpcHeader::to_bytes 为准）
+    // IpcHeader 8B: version u16 + command u16 + payload_len u32
     let p = &buf[8..];
     // instanceId(4) + entryCount(4)
     assert_eq!(u32::from_le_bytes(p[0..4].try_into().unwrap()), 7);
@@ -429,7 +422,7 @@ fn test_host_render_hit_rect_layout() {
 #[test]
 fn test_encode_hold_composition_layout() {
     let buf = encode_hold_composition(500, "，");
-    // IpcHeader: 8 bytes (cmd u16 LE + version u16 LE + payload_len u32 LE)
+    // IpcHeader: 8 bytes (version u16 LE + cmd u16 LE + payload_len u32 LE)
     // payload: timeout_ms(4) + text_len(4) + "，"(3 UTF-8 bytes) = 11 bytes
     assert_eq!(buf.len(), 8 + 11);
     // cmd = 0x010A LE (at offset 2-4)
@@ -499,7 +492,7 @@ fn test_encode_commit_then_defer_layout() {
     );
 }
 
-/// GH#175：占位档位按 kind 原样编成 1 字节；值与 C++ `PlaceholderForKind` 一一对应。
+/// 占位档位按 kind 原样编成 1 字节；值与 C++ `PlaceholderForKind` 一一对应。
 #[test]
 fn composition_placeholder_value_is_the_kind_byte() {
     use crate::protocol::{

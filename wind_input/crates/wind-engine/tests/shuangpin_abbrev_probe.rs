@@ -1,21 +1,12 @@
-//! 「完整音节 + 末位残码」的候选标志位/权重探针 —— **测量工具，不是门禁**。
+//! 「完整音节 + 末位残码」的候选标志位/权重探针，测量工具，不是门禁。
 //!
 //! 门禁在 `wind-coordinator/tests/pinyin_short_context_sentence.rs`（残码排序由协调器定夺，
-//! 引擎级测不出来）。本文件只负责把中间量打出来，供改判据时标定。
+//! 引擎级测不出来）。本文件只把中间量打出来，供改判据时标定。
 //!
-//! ## 起因与最终结论
-//!
-//! 双拼打 `zdm`（zd=zai，m=「吗」的声母）首选是「在美国」而不是「在吗」。根因是
-//! **词库数据缺陷 + 层级硬闸门**两层叠加：「在吗」在 `base.dict.yaml:103576` 里 `w=0`，
-//! 命中 `demote_to_prefix_layer` 被踢进前缀层，而 `eff_prefix` 是层级键、跨层不比权重。
-//! 修复是给它开第二条生成路径（残码整句，走单字乘积绕开 w=0），见 step 2c / 6.5c。
-//!
-//! ## ⚠️ 两条**被实测推翻**的假设（勿再据此推理）
-//!
-//! - ~~`source_tier` 档 1 的 `!c.is_abbrev` 把末位带简拼的「在吗」一票踢出~~
-//!   —— 实测全部候选 `is_abbrev=false`，简拼判据压根没参与。
-//! - ~~折扣 `COMPLETION_WEIGHT_DISCOUNT` 把它压成了 0~~
-//!   —— `completion_penalized` 有 `.max(1.0)`，折扣**造不出 0**；0 是词库原值。
+//! 案例：双拼 `zdm`（zai + m）。词库里「在吗」w=0，命中 `demote_to_prefix_layer` 进前缀层，
+//! 而 `eff_prefix` 是层级键、跨层不比权重；由残码整句（step 2c / 6.5c，单字乘积绕开 w=0）救回。
+//! 已证伪、勿再据此推理：`source_tier` 的 `!c.is_abbrev` 并未参与（候选全是 `is_abbrev=false`）；
+//! `completion_penalized` 有 `.max(1.0)`，折扣造不出 0，0 是词库原值。
 //!
 //! ```text
 //! cargo test -p wind-engine --test shuangpin_abbrev_probe -- --ignored --nocapture
@@ -42,14 +33,12 @@ fn schema_config(schema: &str) -> Config {
     cfg
 }
 
-/// 6.5b 让位阈值的**标定**探针：残码整句 vs 最强「恰好用完残码」补全的分数比。
+/// 6.5b 让位阈值的标定探针：残码整句 vs 最强「恰好用完残码」补全的分数比。
 ///
-/// 6.5b 原本无条件让整句让位（降到 `补全max - 1`）。step 2c 的残码整句消费了整串、
-/// 自己就是「用完残码」的一方，被误伤（`zaim` 的「在吗」被压到 818）。但简单豁免又会
-/// 让高频字拼出的虚高合成解翻上来（`nih`→「你和」、`beijingd`→「背景的」）。
-///
-/// 判据取「整句 / 最强 d=1 补全」的倍数：倍数大 = 词库在这个码上给不出好答案，该信整句。
-/// 本探针批量打印该倍数，用于确认分界线两侧有没有反例。
+/// step 2c 的残码整句自己就消费了整串，无条件让位会误伤它（`zaim` 的「在吗」）；简单豁免又会
+/// 让高频字拼出的虚高合成解翻上来（`nih`→「你和」、`beijingd`→「背景的」）。判据取
+/// 「整句 / 最强 d=1 补全」的倍数，倍数大说明词库在这个码上给不出好答案，该信整句。
+/// 本探针批量打印该倍数，确认分界线两侧有没有反例。
 #[test]
 #[ignore = "标定探针：依赖 build_dev 真实词库，用 --ignored 显式运行"]
 fn sentence_yield_ratio_calibration() {
@@ -126,11 +115,10 @@ fn sentence_yield_ratio_calibration() {
     }
 }
 
-/// 残码整句的**分数**探针：整句是否生成、拿了多少 weight、与谁竞争。
+/// 残码整句的分数探针：整句是否生成、拿了多少 weight、与谁竞争。
 ///
-/// step 2c 放开门槛后，「在吗」由 Viterbi 拼出（`is_sentence=true`，绕开词条 w=0），
-/// 但它要在同层里压过 distance=1 的词典补全「再买」(819) 与 distance=2 的「在美国」(3699)。
-/// 本探针打出 `sent` 列以确认谁是整句，并给出各自的 weight 用于定夺让位手法。
+/// 「在吗」由 Viterbi 拼出（`is_sentence=true`），要在同层压过 distance=1 的「再买」与
+/// distance=2 的「在美国」。打出 `sent` 列与各自 weight，用于定夺让位手法。
 #[test]
 #[ignore = "定点探针：依赖 build_dev 真实词库，用 --ignored 显式运行"]
 fn trailing_partial_sentence_weight_probe() {
@@ -218,7 +206,7 @@ fn shuangpin_abbrev_flags_probe() {
                 c.weight,
             );
         }
-        // 「在吗」若存在，单独点名它的位置与标志——它是本次要救的候选
+        // 「在吗」若存在，单独点名它的位置与标志
         if let Some((i, c)) = cands.iter().enumerate().find(|(_, c)| c.text == "在吗") {
             println!(
                 "  ★「在吗」在第 {} 位：common={} prefix={} abbrev={} partial={} consumed={} weight={}",

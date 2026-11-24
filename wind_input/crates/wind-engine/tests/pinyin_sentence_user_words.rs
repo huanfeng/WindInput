@@ -1,12 +1,10 @@
 //! S2：用户上屏过的词（用户词 + 临时词）参与整句解码。
 //!
-//! 整句词图此前只从系统词库建（`lattice.rs::build` 只吃一个 `CachedDict`），用户词挂在
-//! `PinyinEngine::store_layers` 上、两者从不相交 ⇒ 自造词**根本没参与整句分词**：
-//! 「盖伦」单独打得出、「有盖伦吗」被打散（t134）；手动调过权重的词在整句里也不认（GH#93）。
+//! 整句词图从系统词库建，用户词挂在 `PinyinEngine::store_layers` 上，需由 `add_store_nodes`
+//! 并进图，否则「盖伦」单独打得出、「有盖伦吗」被打散，调过权重的词在整句里也不认。
 //!
-//! ⚠️ 出厂只出**一条**整句：用户词进图是赢者通吃，赢了整句就变、输了什么都看不见。
-//! 故本文件的断言都落在「整句那一条」上，
-//! 而不是「候选列表里有没有」—— 后者早就有了（step 6 的 store 层召回），不是本项要修的。
+//! 出厂只出一条整句，用户词进图是赢者通吃，故断言都落在「整句那一条」上，而不是「候选列表
+//! 里有没有」（那由 step 6 的 store 层召回负责）。
 //!
 //! 自带 wdat 夹具 + 真 redb store，不依赖 `build_dev/data`。
 
@@ -17,10 +15,8 @@ use wind_engine::Engine;
 use wind_engine::pinyin::{Config as PyConfig, PinyinEngine};
 use wind_store::Store;
 
-/// 系统词库：够组出一句「有盖伦吗」的竞争者，但**没有**「盖伦」这个词。
-///
-/// `gai`/`lun` 各自的单字都在，所以不开 S2 时整句会把它拆成两个单字（或别的组合），
-/// 这正是 t134 的现场。
+/// 系统词库：够组出一句「有盖伦吗」的竞争者，但没有「盖伦」这个词；
+/// `gai`/`lun` 的单字都在，不开 S2 时整句会把它拆开。
 fn sys_dict(tag: &str) -> CachedDict {
     let dir = std::env::temp_dir().join(format!("wind_s2_{tag}"));
     let _ = std::fs::remove_dir_all(&dir);
@@ -29,8 +25,7 @@ fn sys_dict(tag: &str) -> CachedDict {
 
     let mut w = WdatWriter::new();
     // 单字（虚词「有」「吗」给足权重，让整句本身成立）。
-    // ⚠️ 同一个 code 只能 `add_with_boundary` **一次**：writer 不去重，而 DAT 构建
-    // 假设编码唯一（`datformat.rs:114`「唯一编码 → 区间内至多一个 len==depth」），
+    // 同一个 code 只能 `add_with_boundary` 一次：writer 不去重，DAT 构建假设编码唯一，
     // 同码分两次加会在建树时越界 panic。故同码的词合并成一个 vec。
     for (code, entries) in [
         ("you", vec![("有", 500_000)]),
@@ -48,12 +43,11 @@ fn sys_dict(tag: &str) -> CachedDict {
                 .collect(),
         );
     }
-    // `gailun` 下放**真机的实际数值**：cn_dicts 里「概论」w=1217（`base.dict.yaml:84218`），
-    // 而手动加词的出厂权重是 1200（`handle_addword.rs::ADD_WORD_WEIGHT`）——**低 17 分**。
-    // 用户按设计流程走完（造词 + 开开关）后整句仍然不认，正是 `USER_NODE_BONUS` 要解决的。
+    // `gailun` 下取真实词库的数值：「概论」w=1217，比手动加词出厂权重 1200
+    // （`handle_addword.rs::ADD_WORD_WEIGHT`）高，靠 `USER_NODE_BONUS` 才翻得过。
     // gai|lun → 位 0/3
     w.add_with_boundary("gailun".into(), vec![("概论".into(), 1217, 0, 0b1001)]);
-    // 另给 `goulun` 放一个高权重系统词，供 GH#93（用户调权重覆盖系统词）单独用。
+    // 另给 `goulun` 放一个高权重系统词，供「调权重覆盖系统词」用例单独用。
     w.add_with_boundary("goulun".into(), vec![("狗论".into(), 90_000, 0, 0b1001)]);
     w.write(&wdat).unwrap();
     CachedDict::load_at(&dir.join("t.dict.yaml"), &wdat).expect("加载 wdat 夹具")
@@ -89,11 +83,10 @@ fn sentence(e: &PinyinEngine, input: &str) -> Option<String> {
         .map(|c| c.text)
 }
 
-/// t134：造过「盖伦」之后，整句里也要认它。
+/// 造过「盖伦」之后，整句里也要认它。
 ///
-/// ⚠️ 这一条同时钉住 [`USER_NODE_BONUS`] 的存在意义：用户词权重取的是**手动加词的出厂值
-/// 1200**，而同码的「概论」w=1217 比它高。没有那份加成时，用户按设计流程走完
-/// （造词 + 开开关）整句**仍然不认** —— 那等于这个功能对默认路径上的用户不存在。
+/// 同时钉住 [`USER_NODE_BONUS`] 的存在意义：用户词取手动加词出厂值 1200，低于同码「概论」
+/// 1217；没有加成时按设计流程走完（造词 + 开开关）整句仍不认。
 #[test]
 fn promoted_user_word_joins_the_sentence() {
     let s = store("joins");
@@ -115,11 +108,10 @@ fn promoted_user_word_joins_the_sentence() {
     );
 }
 
-/// GH#93：用户给**系统词库已有**的词调了权重，整句要认新权重。
+/// 用户给系统词库已有的词调了权重，整句要认新权重。
 ///
-/// 这一条钉的是 `add_store_nodes` 的第三条约束——同词同起点时取 `log_prob` 较大者，
-/// 而不是像简拼节点那样「已存在就跳过」。跳过的话用户词对所有已在系统库里的词完全无效，
-/// 而 GH#93 正是「整句输入无法记忆手动调整过的词」。
+/// 钉住 `add_store_nodes` 同词同起点时取 `log_prob` 较大者，而不是像简拼节点那样
+/// 「已存在就跳过」；跳过的话用户词对所有已在系统库里的词都无效。
 #[test]
 fn user_weight_overrides_the_same_word_from_system_dict() {
     // 对照：不加用户词时，系统库的「狗论」(w=90000) 本就赢下这一句。
@@ -141,11 +133,10 @@ fn user_weight_overrides_the_same_word_from_system_dict() {
     );
 }
 
-/// 加成是「势均力敌时胜出」，**不是碾压**：用户词不该压过真正的高频词。
+/// 加成是「势均力敌时胜出」，不是碾压：用户词不该压过真正的高频词。
 ///
-/// `USER_NODE_BONUS` = +2.0 ≈ weight ×7.4。出厂加词 1200 等效到 ~8900，翻得过同码的
-/// 中频词（概论 1217），但仍然输给 90000 那一档 —— 后者是「这个词就是比你那个常用得多」，
-/// 用户没有明确表态要改的情况下不该被掀翻。
+/// `USER_NODE_BONUS` = +2.0 ≈ weight ×7.4：出厂 1200 等效约 8900，翻得过概论 1217，
+/// 仍输给 90000 那一档；用户没明确表态时不该掀翻真正常用得多的词。
 #[test]
 fn bonus_wins_close_calls_but_does_not_crush_high_frequency_words() {
     let s = store("notcrush");
@@ -162,7 +153,7 @@ fn bonus_wins_close_calls_but_does_not_crush_high_frequency_words() {
 /// 残码整句（step 2c）也要认用户词：前半句用自造词、末尾还没打完，是最常见的形态。
 ///
 /// `yougailunm` = 有 + 盖伦 + 残码 `m`（由 `add_partial_final_nodes` 补成「吗」）。
-/// 两类节点在同一张图上各管各的跨度，这条用例钉住它们**能串起来**。
+/// 两类节点在同一张图上各管各的跨度，这条用例钉住它们能串起来。
 #[test]
 fn partial_final_sentence_also_uses_user_words() {
     let s = store("partial");
@@ -175,12 +166,9 @@ fn partial_final_sentence_also_uses_user_words() {
     );
 }
 
-/// **临时词也进图**：它是用户上屏过的词，「用过即转正」这道闸在草稿 → 临时那一跳。
-///
-/// 曾经钉的是反方向（临时词不进图），结果系统库没有的词手打一次后整句仍不认——
-/// 「拜城县」要用够晋升次数才进得了 `bcxrmzf` 的整句。见 `pinyin_sentence_user_words_abbrev.rs`。
-/// 权重取出厂自动学词值 800（coordinator `LEARN_ADD_WEIGHT`），比手动加词的 1200 更低，
-/// 同样要赢过「概论」1217。
+/// 临时词也进图：它是用户上屏过的词，「用过即转正」这道闸在草稿 → 临时那一跳；
+/// 否则系统库没有的词要用够晋升次数才进得了整句（见 `pinyin_sentence_user_words_abbrev.rs`）。
+/// 权重取出厂自动学词值 800（coordinator `LEARN_ADD_WEIGHT`），同样要赢过「概论」1217。
 #[test]
 fn temp_words_enter_the_lattice() {
     let s = store("temp");
@@ -190,7 +178,7 @@ fn temp_words_enter_the_lattice() {
     assert_eq!(got.as_deref(), Some("有盖伦吗"));
 }
 
-/// 硬约束：**无 boundary 的用户词不进图**（隐性造词 / 手输码）。
+/// 硬约束：无 boundary 的用户词不进图（隐性造词 / 手输码）。
 ///
 /// 与 `build` 对系统词的「`boundary == 0` 降级放行」相反：整句的每个节点都要求真值切分，
 /// 放进去等于让 Viterbi 按猜出来的切分组句。
@@ -221,9 +209,7 @@ fn user_words_with_incompatible_boundary_are_rejected() {
     );
 }
 
-/// 开关关闭时，整句结果与「根本没有 store 层」**逐位相同**。
-///
-/// 这是出厂默认路径上唯一要保的性质：老用户不该因为这次改动看到任何变化。
+/// 开关关闭时，整句结果与「根本没有 store 层」逐位相同：出厂默认路径上老用户不该看到变化。
 #[test]
 fn disabled_switch_is_bit_identical_to_no_store_layer() {
     let s = store("identical");
@@ -245,8 +231,8 @@ fn disabled_switch_is_bit_identical_to_no_store_layer() {
 /// weight 上限截断：导入词库可以带 `w=2e9`，那时 `ln(w/DICT_TOTAL)` 会变成正数，
 /// 比系统最大词还高近 5 个自然对数单位，整句会变成用户词拼接秀。
 ///
-/// 截断后它仍然赢（本就该赢），但赢的幅度落在词频轴内 —— 这里断言的是**不 panic、
-/// 不溢出、且行为与一个正常高权重用户词一致**。
+/// 截断后它仍然赢（本就该赢），但幅度落在词频轴内；断言不 panic、不溢出、
+/// 且行为与一个正常高权重用户词一致。
 #[test]
 fn extreme_weight_is_capped() {
     let s = store("cap");
@@ -269,8 +255,8 @@ fn extreme_weight_is_capped() {
 
 // ── 模糊音：用户词节点同样按模糊打法入图（`add_store_nodes` 的模糊分支）。
 //
-// 记录存规范码 + 规范码坐标的边界，整句按所打码点查 ⇒ 模糊打法下自造词进不了整句。
-// 系统词节点在 `build` 里早有模糊，用户词节点是缺的那一半。
+// 记录存规范码 + 规范码坐标的边界，整句按所打码点查，故模糊打法下需单独的模糊分支，
+// 自造词才进得了整句（系统词节点的模糊在 `build` 里）。
 
 /// [`engine`] + 模糊音 n=l。
 fn engine_n_l(tag: &str, s: Arc<Store>, on: bool, fuzzy: bool) -> PinyinEngine {
@@ -338,7 +324,7 @@ fn fuzzy_on_exact_typing_unchanged() {
     }
 }
 
-/// 模糊整句的**造词码**：整句 `code` 留所打码，`meta.learn_code` 是各节点规范码的拼接。
+/// 模糊整句的造词码：整句 `code` 留所打码，`meta.learn_code` 是各节点规范码的拼接。
 ///
 /// - 有「盖伦」用户词：S2 的用户词模糊节点，规范码 = 记录自身的码与边界；
 /// - 无用户词：系统词模糊节点「概论」（wdat 带真值边界 gai|lun），规范码取词条自带边界。
@@ -396,12 +382,12 @@ fn full_exact(e: &PinyinEngine) -> wind_candidate::Candidate {
         .expect("应产出整句")
 }
 
-/// 系统词模糊节点的词条边界与**变体边界**同域：有边界就必须对上某条切分展开出的变体边界，
+/// 系统词模糊节点的词条边界与变体边界同域：有边界就必须对上某条切分展开出的变体边界，
 /// 对上了造词码就带这份边界。
 ///
 /// 词条「西昂」登记的真值是 xi|ang（位 0/2）。只开 ian=iang 时 `xian` 只能整音节展开成
 /// `xiang`（位 0），切法对不上、不进图；开 an=ang 时 `xi|an → xi|ang` 对得上，造词码的边界
-/// 跟着走——否则学进去的「西昂多练」少一个音节，简拼索引算出的声母串是 `xdl` 而不是 `xadl`。
+/// 跟着走；否则学进去的「西昂多练」少一个音节，简拼索引算出的声母串是 `xdl` 而不是 `xadl`。
 #[test]
 fn system_fuzzy_node_boundary_must_match_variant_segmentation() {
     let dir = std::env::temp_dir().join("wind_s2_canon_entry_boundary");
@@ -446,8 +432,8 @@ fn system_fuzzy_node_boundary_must_match_variant_segmentation() {
     );
 }
 
-/// 残码整句（step 2c）同样带造词码：模糊节点取规范码，**残码位保持所打的那几个字母**
-/// （`LatticeNode::canon` 对残码节点恒 `None`——它补出的字读什么是预测，不是用户打出的码）。
+/// 残码整句（step 2c）同样带造词码：模糊节点取规范码，残码位保持所打的那几个字母
+/// （`LatticeNode::canon` 对残码节点恒 `None`：补出的字读什么是预测，不是用户打出的码）。
 #[test]
 fn partial_final_fuzzy_sentence_learn_code() {
     let s = store("fz_learn_partial");
@@ -512,7 +498,7 @@ fn sentence_with_code(e: &PinyinEngine, input: &str, code: &str) -> wind_candida
         .unwrap_or_else(|| panic!("{input} 应产出码为 {code} 的整句"))
 }
 
-/// step 2c 的**延迟定夺**档（1 个完整音节 + 残码，`short_sentence_pending`）同样带造词码。
+/// step 2c 的延迟定夺档（1 个完整音节 + 残码，`short_sentence_pending`）同样带造词码。
 ///
 /// `nunm`：`nun` 经 n=l 模糊命中「论」（规范码 lun），残码 `m` 补成「吗」。残码位保留所打字母。
 #[test]
@@ -532,7 +518,7 @@ fn deferred_partial_sentence_learn_code() {
     assert_eq!(c.meta.learn_code, Some(("lunm".to_string(), 0b1001)));
 }
 
-/// step 2b 混合整句：全拼段的模糊节点取规范码，**简拼段取回查出的完整全拼**（简拼节点的
+/// step 2b 混合整句：全拼段的模糊节点取规范码，简拼段取回查出的完整全拼（简拼节点的
 /// `canon` = 词条码 + 规范边界），整句造词码是完整全拼。
 #[test]
 fn mixed_abbrev_sentence_learn_code() {
@@ -556,8 +542,8 @@ fn mixed_abbrev_sentence_learn_code() {
     );
 }
 
-/// 出厂配置（模糊关）下混合整句同样带完整全拼造词码：只要有简拼段就带，此前为 None
-/// （造词退回整句 `code` = 击键串 `bzdgailun`）。
+/// 出厂配置（模糊关）下混合整句同样带完整全拼造词码：只要有简拼段就带，
+/// 不退回整句 `code`（击键串 `bzdgailun`）。
 #[test]
 fn mixed_abbrev_sentence_learn_code_without_fuzzy() {
     let dict = wdat_dict(

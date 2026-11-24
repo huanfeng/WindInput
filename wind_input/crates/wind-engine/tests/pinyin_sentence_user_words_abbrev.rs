@@ -1,13 +1,12 @@
-//! S2 补缺：**简拼整句**也认用户词，且**临时词**也算用户词。
+//! 简拼整句也认用户词，且临时词也算用户词。
 //!
-//! 现场（用户反馈）：「拜城县」系统词库里没有，用户手打上屏过一次 ⇒ 进了临时词库。
-//! 之后打 `bcxrmzf`，整句给的是别的前缀 +「人民政府」，拜城县进不来。两道闸叠在一起：
+//! 场景：系统词库没有的「拜城县」上屏过一次进了临时层，之后打 `bcxrmzf` 整句要能用上它。
+//! 需要两点同时成立：
 //!
-//! 1. `add_store_nodes` 只收**已晋升**的用户词，临时词被挡。可临时词本身就是「上屏过」
-//!    的词——「用过即转正」那道质量闸在**草稿 → 临时**这一跳，不在临时 → 用户。
-//!    滑窗杂词住在草稿层，那一层照旧不进图。
-//! 2. 简拼整句（step ②b）上的用户词点查用的是全拼码，简拼段（`bcx`）是声母串，
-//!    必然落空。系统词走 `add_abbrev_nodes` 查简拼索引，用户层一直缺这一半。
+//! 1. `add_store_nodes` 收临时词：临时词本身就是上屏过的词，「用过即转正」的质量闸在
+//!    草稿 → 临时这一跳；滑窗杂词住在草稿层，照旧不进图。
+//! 2. 简拼整句（step ②b）的用户词走简拼查询：按全拼码点查对声母串 `bcx` 必然落空，
+//!    系统词有 `add_abbrev_nodes`，用户层也要有对应的一半。
 //!
 //! 自带 wdat 夹具 + 真 redb store，不依赖 `build_dev/data`。
 
@@ -21,7 +20,7 @@ use wind_store::Store;
 /// bai|cheng|xian → 位 0/3/8
 const BCX_BOUNDARY: u64 = 0b100001001;
 
-/// 系统词库：`bcx` 下只有「不出现」，`rmzf` 下是「人民政府」。**没有**「拜城县」。
+/// 系统词库：`bcx` 下只有「不出现」，`rmzf` 下是「人民政府」，没有「拜城县」。
 fn sys_dict(tag: &str) -> CachedDict {
     let dir = std::env::temp_dir().join(format!("wind_s2abbr_{tag}"));
     let _ = std::fs::remove_dir_all(&dir);
@@ -73,7 +72,7 @@ fn sentence(e: &PinyinEngine, input: &str) -> Option<String> {
         .map(|c| c.text)
 }
 
-/// 用户反馈的原样现场：临时词 + 纯简拼长串。
+/// 临时词 + 纯简拼长串。
 #[test]
 fn temp_word_joins_abbrev_sentence() {
     let s = store("temp");
@@ -101,12 +100,11 @@ fn promoted_word_joins_abbrev_sentence() {
     assert_eq!(on.as_deref(), Some("拜城县人民政府"));
 }
 
-/// `boundary == 0` 的词（手输码、旧版扁平导入）算不出声母串，不能进简拼整句——整句节点要求
+/// `boundary == 0` 的词（手输码、旧版扁平导入）算不出声母串，不能进简拼整句：整句节点要求
 /// 真值切分（同 `add_store_nodes` 约束 2）。
 ///
-/// 两道闸：取数用 `search_abbrev_exact`，存储层就不交回无边界组；`syllables_from_boundary`
-/// 的切分校验是第二道。曾经只有后一道（旧查询连无边界组一起交回），那时变异验证过去掉它即红；
-/// 现在单去任一道都不会红，两道同时去掉才红。
+/// 两道闸：`search_abbrev_exact` 在存储层就不交回无边界组，`syllables_from_boundary` 的切分
+/// 校验是第二道。单去任一道不会红，两道同时去掉才红。
 #[test]
 fn abbrev_store_node_rejects_words_without_boundary() {
     let s = store("nobound");
@@ -120,11 +118,11 @@ fn abbrev_store_node_rejects_words_without_boundary() {
     );
 }
 
-/// 审查查出：用户层简拼查询曾带上限 8，而存储层**按索引键字典序**数够 8 条就返回、且会一并
-/// 扫「无边界组」（`boundary == 0` 的词按码首字母挂着）——截断发生在权重排序与判据之前。
+/// 用户层简拼查询不能在存储层按索引键字典序截断：那发生在权重排序与判据之前，还会把
+/// 无边界组（`boundary == 0` 的词按码首字母挂着）一并扫进来占名额。
 ///
-/// 场景一：用户手动加过 ≥8 个 b 开头的词（手输码 boundary=0，必然被判据拒收），它们把名额
-/// 占满，临时词「拜城县」进不了图。
+/// 场景一：用户手动加过 ≥8 个 b 开头的词（boundary=0，必被判据拒收），不能因此把临时词
+/// 「拜城县」挤出图。
 #[test]
 fn no_boundary_words_do_not_crowd_out_the_abbrev_hit() {
     let s = store("crowd_nobound");
@@ -138,8 +136,8 @@ fn no_boundary_words_do_not_crowd_out_the_abbrev_hit() {
     assert_eq!(on.as_deref(), Some("拜城县人民政府"));
 }
 
-/// 场景二：同一声母组词多，目标词的码按字典序靠后（`bachaxi` < `baichengxian`），
-/// 按键序截 8 条就把权重最高的它截掉了。应按权重取。
+/// 场景二：同一声母组词多，目标词的码字典序靠后（`bachaxi` < `baichengxian`），
+/// 应按权重取，不能按键序截掉权重最高的它。
 #[test]
 fn abbrev_hits_are_ranked_by_weight_not_key_order() {
     let s = store("crowd_group");
@@ -148,7 +146,7 @@ fn abbrev_hits_are_ranked_by_weight_not_key_order() {
         s.add_user_word("pinyin", "bachaxi", &format!("巴{i}"), 10, 0b100101)
             .unwrap();
     }
-    // 与竞争词**同在用户层**：各层分别截断后才合并，放在临时层它自己那层没有对手。
+    // 与竞争词同在用户层：各层分别截断后才合并，放在临时层它那层没有对手。
     s.add_user_word("pinyin", "baichengxian", "拜城县", 1200, BCX_BOUNDARY)
         .unwrap();
     let on = sentence(&engine("crowd_group_on", s, true), "bcxrmzf");
@@ -177,8 +175,8 @@ fn sentence_learn_code(e: &PinyinEngine, input: &str) -> (String, Option<(String
     (c.text, c.meta.learn_code)
 }
 
-/// 简拼整句（②b）的造词码是**完整全拼**：简拼节点带回查出的规范码与规范边界（`canon`），
-/// 不再把击键字母 `bcx` / `rmzf` 写进造词码——那种码几乎打不出来，只会在临时层堆积。
+/// 简拼整句（②b）的造词码是完整全拼：简拼节点带回规范码与规范边界（`canon`），
+/// 不把击键字母 `bcx` / `rmzf` 写进造词码，那种码几乎打不出来，只会在临时层堆积。
 ///
 /// 系统简拼节点（「不出现」「人民政府」）与用户简拼节点（「拜城县」）两种都验。
 #[test]

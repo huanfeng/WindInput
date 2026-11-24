@@ -1,28 +1,11 @@
-//! 全拼降级支路（step 6.7）必须与主路径**同口径**地受词组补全配置约束。
+//! 全拼降级支路（step 6.7）必须与主路径同口径地受词组补全配置约束。
 //!
-//! ## 背景
+//! 双拼开「允许全拼输入」后，`recall_full_pinyin` 把击键串再当全拼读一遍，自带召回与排序，
+//! 是第二条产出通道：主路径上每道补全判据（召回 cap、`completion_extra_syllables` 档位）
+//! 这里都得同步，否则同一开关在两条流下表现不一致。
 //!
-//! 双拼方案开启「允许全拼输入」后，引擎会把击键串再当全拼读一遍（`recall_full_pinyin`）。
-//! 该支路自带召回与排序，是主路径之外的**第二条产出通道** —— 于是主路径上每加一道
-//! 与补全有关的判据，这里都得同步，否则同一个开关在两条流下表现不一致。
-//!
-//! 本文件锁住两项曾经漏掉的：
-//!
-//! | | 主路径 | 降级支路（修复前） |
-//! |---|---|---|
-//! | 召回门槛 | `search_prefix_with_boundary_syllable_capped(.., cap)` | `search_prefix_with_boundary(..)` **无 cap** |
-//! | 音节数档位 | step 4 后回填 `completion_extra_syllables` | `..Default::default()` ⇒ **恒 0** |
-//!
-//! 实测后果：出厂 `min_syllables = 4` 下打 `beijingd`（started 3，上限应收紧到 3），
-//! 主路径一条超音节候选都不给，降级支路却照样召回「北京大学」「北京地区」乃至
-//! **7 音节的「北京大学出版社」**，且它们的 `extra` 全是 0 —— 与 3 音节的「北京的」
-//! 同档竞争，协调器的 `cmp_completion_extra` 形同虚设。
-//!
-//! ## ⚠️ 音节数只能按全拼域算
-//!
-//! 本支路里全拼域与击键域**是同一个域**（支路的定义就是把击键当全拼读），故 `started`
-//! 可以直接从 `syllables.len()` 与字节长度推出。主路径两域不同，`started_syllables` 必须
-//! 走双拼域 —— 两处的算法看着像，混用会静默错配。
+//! 音节数只能按全拼域算：本支路全拼域就是击键域，`started` 可由 `syllables.len()` 与字节长度
+//! 直接推出；主路径两域不同，`started_syllables` 必须走双拼域，两处算法混用会静默错配。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -48,7 +31,7 @@ fn manager(dir: &std::path::Path, min_syl: u32, max_extra: u32) -> EngineManager
     EngineManager::new(&cfg, Some(dir))
 }
 
-/// 同 [`manager`]，但带一条 11 音节的用户词（报障用户的真实词条）。
+/// 同 [`manager`]，但带一条 11 音节的用户词。
 fn manager_with_user_word(dir: &std::path::Path, tag: &str, max_extra: u32) -> EngineManager {
     const SYLS: &[&str] = &[
         "qing", "feng", "shu", "ru", "fa", "nei", "ce", "wen", "ti", "fan", "kui",
@@ -82,20 +65,12 @@ const USER_WORD: &str = "清风输入法内测问题反馈";
 /// 回归必须按这个值断言 —— 超出它的候选会被 `truncate` 丢弃，用户永远看不到。
 const COORD_LIMIT: usize = 300;
 
-/// 双拼下用**全拼**打用户词库长词，必须打得出来。
+/// 双拼下用全拼打用户词库长词，必须打得出来。
 ///
-/// ## 这条路径为什么是唯一通道
-///
-/// 双拼主路径把 `qingfengshurufa` 当**双拼码**解释（每 2 键一音节，切出来是另一串音节），
-/// 根本命中不到这条用户词 —— 降级支路是它唯一的产出通道，主路径 step 6 的
-/// `should_promote_user_completion` 在此场景下从未被执行到。
-///
-/// ## 两处修复缺一不可
-///
-/// 1. 降级支路 ④ 的用户词补上上浮判据（`is_promoted_completion`）；
-/// 2. `cmp_match_layers` 的 `fp_demoted` 改用 `eff_prefix` 口径 —— 只做 1. 时该词位次
-///    从 603 只挪到 595，仍在 300 之外：`fp_demoted` 是**首键**且当时只看 `is_prefix`
-///    结构真值，提升过的候选照样被首位沉底，出不了沉底组。
+/// 主路径把 `qingfengshurufa` 当双拼码切成另一串音节，命中不到这条词，降级支路是唯一通道。
+/// 需要两处配合：支路的用户词带上浮判据（`is_promoted_completion`），且 `cmp_match_layers`
+/// 的 `fp_demoted` 按 `eff_prefix` 口径判；后者是首键，只看 `is_prefix` 会把提升过的候选
+/// 照样沉底到 300 名之外。
 #[test]
 fn user_long_word_reachable_via_full_pinyin_fallback() {
     let Some(dir) = data_dir() else {
@@ -115,10 +90,8 @@ fn user_long_word_reachable_via_full_pinyin_fallback() {
     );
 }
 
-/// 反向对照：`max_extra` 收紧到装不下时，该词**允许**沉回去。
-///
-/// 缺了这条，「把 fp_demoted 整个删掉」这种过度修复也能让上面那条通过 —— 而那会把
-/// 降级支路的低置信补全全部放出来挤占版面，正是 `fp_demoted` 当初要挡的。
+/// 反向对照：`max_extra` 收紧到装不下时，该词允许沉回去。
+/// 防止「整个删掉 fp_demoted」这种过度修复也让上一条通过，那会放出支路的低置信补全挤占版面。
 #[test]
 fn user_long_word_still_sinks_when_max_extra_too_small() {
     let Some(dir) = data_dir() else {
@@ -161,10 +134,8 @@ fn fallback_respects_min_syllables_gate() {
     );
 }
 
-/// 门槛放宽后超音节补全回来，且**带上正确的音节数档位**。
-///
-/// 档位错了不会让候选消失，只会让它与对齐候选同档 —— 是静默的排序退化，故必须直接
-/// 断言字段值，不能只看候选在不在。
+/// 门槛放宽后超音节补全回来，且带上正确的音节数档位。
+/// 档位错了候选不会消失，只会与对齐候选同档，是静默的排序退化，故直接断言字段值。
 #[test]
 fn fallback_tags_completion_extra_syllables() {
     let Some(dir) = data_dir() else {
@@ -217,9 +188,7 @@ fn fallback_extra_without_trailing_partial() {
 
 /// 任意 `(音节序列, 词)` 的用户词夹具（`manager_with_user_word` 的通用版）。
 ///
-/// ⚠️ 目录名带 **pid**：本仓常态是多 worktree / 多会话并行跑测试，只按 `tag` 区分的话，
-/// 同一个用例在两个进程里会共用一份 store 并互相 `remove_dir_all`。上面那个夹具是先前
-/// 写的、没带 pid（`real_dict.rs` 早就踩过这个坑并加了 pid），新写的不该再沿用。
+/// 目录名带 pid：并行跑测试时只按 `tag` 区分，同一用例的两个进程会共用 store 并互删目录。
 fn manager_with_word(dir: &std::path::Path, tag: &str, syls: &[&str], word: &str) -> EngineManager {
     let root = std::env::temp_dir().join(format!("wind_fpfb_w_{tag}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
@@ -242,15 +211,11 @@ fn manager_with_word(dir: &std::path::Path, tag: &str, syls: &[&str], word: &str
     EngineManager::with_store_override(&cfg, Some(dir), Some(store), Some(root.join("ov")))
 }
 
-/// ★ 降级支路的用户词也必须守音节边界对齐 —— 这条路**走不到** step 6.3 那道 retain。
+/// 降级支路的用户词也必须守音节边界对齐：这条路走不到 step 6.3 那道 retain。
 ///
-/// `recall_full_pinyin` 被刻意放在 6.3 之后（6.3 的尺子由双拼域音节数算出，裁全拼候选
-/// 属判据跨域复用），所以支路产出的候选一条都过不了那道闸门。修复音节对齐时若只改了
-/// 词库层与主路径，这里的用户词会照旧跨音节：`shaixu` 切分为 `shai|xu`，`xu` 已是完整
-/// 音节，不该被拉长成 `xuan`。
-///
-/// 缺了这条测试，同一输入下会出现「系统词已挡住、用户词还漏着」的不一致，而且只在
-/// 双拼 + 允许全拼输入这个组合下才复现 —— 主路径的用例一个都抓不到。
+/// `recall_full_pinyin` 刻意放在 6.3 之后（6.3 的尺子按双拼域算，不能拿去裁全拼候选），
+/// 所以只改词库层与主路径时这里会照旧跨音节：`shaixu` 切为 `shai|xu`，`xu` 不该被拉长成
+/// `xuan`。只在双拼 + 允许全拼输入下复现，主路径用例抓不到。
 #[test]
 fn fallback_user_word_respects_syllable_alignment() {
     let Some(dir) = data_dir() else {

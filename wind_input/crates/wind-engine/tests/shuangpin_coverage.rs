@@ -1,26 +1,17 @@
-//! 双拼方案覆盖率：**每个内置方案能否打出全部 414 个标准音节**。
+//! 双拼方案覆盖率：每个内置方案能否打出全部 414 个标准音节。
 //!
-//! 现有双拼测试（`shuangpin.rs` 34 条）是逐例断言——小鹤 9 条、手道 7 条，
-//! 自然码/搜狗/紫光/微软各 1 条，**abc 一条没有**。逐例测试只能覆盖写测试的人想到的
-//! 那几个音节，方案数据表里缺一行（某个韵母没编码、某个零声母漏了）不会被任何断言碰到，
-//! 而用户会直接撞上「这个音节打不出来」。
+//! 逐例测试只覆盖写测试的人想到的音节，方案数据表缺一行（某韵母没编码、某零声母漏了）碰不到。
+//! 本文件反向枚举：把全部键对过一遍 `convert`，得到方案实际能产出的音节集合，与
+//! `STANDARD_SYLLABLES` 对账；方案清单扫目录得来，新增方案自动纳入。
 //!
-//! 本文件换一种覆盖方式：**反向枚举**。把全部键对（a-z 及符号键的两两组合）过一遍
-//! `convert`，得到该方案实际能产出的音节集合，再与 `STANDARD_SYLLABLES` 对账。
-//! 一次断言覆盖「目录里的全部方案 × 414 音节」，新增方案自动纳入（方案清单扫目录得来）。
-//!
-//! ⚠️ 覆盖率只回答「打不打得出」，不回答「**官方**击键打不打得出」。方案之间零声母
-//! 规则不同（O 引导 vs 首字母引导），抄串了照样全绿 —— 那一层由本文件末尾的
-//! `official_zero_initial_strokes_work` 正向击键表把守。
+//! 覆盖率只回答「打不打得出」，不回答「官方击键打不打得出」：零声母规则（O 引导 vs 首字母引导）
+//! 抄串了照样全绿，那一层由末尾的 `official_zero_initial_strokes_work` 正向击键表把守。
 
 use std::collections::{HashMap, HashSet};
 use wind_engine::pinyin::shuangpin::{Layout, ShuangpinConverter};
 use wind_engine::pinyin::syllable::STANDARD_SYLLABLES;
 
-/// 内置方案清单：**扫描目录**得来，不是硬编码列表。
-///
-/// ⚠️ 原先这里写死七个 id，本文件却宣称「新增方案自动纳入」—— 后来加的 `jiajia.toml`
-/// 因此从未进过任何门禁。扫目录才让那句话成立：漏登记的方案不会静默豁免覆盖率检查。
+/// 内置方案清单：扫描目录得来，不是硬编码列表，漏登记的方案不会静默豁免覆盖率检查。
 fn layouts() -> Vec<String> {
     let mut ids: Vec<String> = Vec::new();
     for entry in std::fs::read_dir(schema_dir()).expect("读取 data/schemas/shuangpin 失败") {
@@ -48,11 +39,10 @@ fn keys() -> Vec<u8> {
     (b'a'..=b'z').chain(*b";").collect()
 }
 
-/// 一组击键产出的**完整音节**；无匹配（原样回写）返回 `None`。
+/// 一组击键产出的完整音节；无匹配（原样回写）返回 `None`。
 ///
-/// ⚠️ **不能用 `full_pinyin()` 判**：无匹配时它把击键原样回写，于是 `ai`/`an`/`er`/`ao`
-/// 这些「击键字面恰好等于音节」的用例会假绿 —— 明明这个方案打不出，断言却过。
-/// 判据必须是「转换器认下了一个音节」，即 `syllables` 恰好一条且吃满全部按键。
+/// 不能用 `full_pinyin()` 判：无匹配时它把击键原样回写，`ai`/`an`/`er`/`ao` 这类击键字面
+/// 恰好等于音节的会假绿。判据是 `syllables` 恰好一条且吃满全部按键。
 fn syllable_of(conv: &ShuangpinConverter, stroke: &str) -> Option<String> {
     let r = conv.convert(stroke);
     if r.has_partial || r.syllables.len() != 1 || r.syllables[0].raw_end != stroke.len() {
@@ -69,8 +59,8 @@ fn load(id: impl AsRef<str>) -> ShuangpinConverter {
 
 /// 该方案实际能打出的音节 → 击键对。
 ///
-/// 走的是**公开的 `convert`**，不是内部映射表——测的因此是「用户敲这两个键会得到什么」，
-/// 而不是「表里写了什么」。两者不等价：零声母有三条查找路径、模糊声母还会追加变体。
+/// 走公开的 `convert` 而不是内部映射表，测的是「用户敲这两个键会得到什么」；两者不等价：
+/// 零声母有三条查找路径，模糊声母还会追加变体。
 fn reachable(conv: &ShuangpinConverter) -> HashMap<String, String> {
     let mut m = HashMap::new();
     for k1 in keys() {
@@ -91,32 +81,26 @@ fn reachable(conv: &ShuangpinConverter) -> HashMap<String, String> {
     m
 }
 
-/// 已知打不出的音节，逐条都要有性质说明 —— 白名单是**记录取舍**，不是掩盖缺口。
+/// 已知打不出的音节，逐条都要有性质说明：白名单是记录取舍，不是掩盖缺口。
 ///
-/// `lo`（全方案）：所有方案的 `o` 键都是 `["uo", "o"]` 一键双韵母，转换只取第一个，
-/// 于是 `lo` 恒被 `luo` 遮蔽。`lo` 只用于「咯」的一个读音，而 `luo`（罗/落/络…）
-/// 是高频音节 —— 这是双拼编码本身的容量限制，不是数据缺失，各家商业方案同样如此。
+/// `lo`（全方案）：所有方案的 `o` 键都是 `["uo", "o"]` 一键双韵母，转换只取第一个，`lo` 恒被
+/// 高频的 `luo` 遮蔽。这是双拼编码本身的容量限制，各家商业方案同样如此。
 const KNOWN_UNREACHABLE: &[&str] = &["lo"];
 
 /// 只在个别方案里打不出的音节（`(方案 id, 音节)`），性质同上：一键双韵母、转换只取第一个合法者。
 ///
-/// `shoudao` 的 `dia`：`k` 键配 `["en", "ia"]`，`d`+`k` 的两个解 `den`(扽) / `dia`(嗲) 都是
-/// 合法音节，`den` 在前。`dia` 是后补进标准音节表的（此前任何方案都打不出它），故这不是退化；
-/// 调换韵母顺序只会换成 `den` 打不出。其余方案 `dia` 均可达。
+/// `shoudao` 的 `dia`：`k` 键配 `["en", "ia"]`，`d`+`k` 的 `den`(扽) / `dia`(嗲) 都合法，
+/// `den` 在前；调换韵母顺序只会换成 `den` 打不出。其余方案 `dia` 均可达。
 const KNOWN_UNREACHABLE_IN_LAYOUT: &[(&str, &str)] = &[("shoudao", "dia")];
 
 fn allowed_in(id: &str) -> impl Fn(&str) -> bool + '_ {
     move |s| KNOWN_UNREACHABLE.contains(&s) || KNOWN_UNREACHABLE_IN_LAYOUT.contains(&(id, s))
 }
 
-/// **门禁**：每个内置方案都必须能打出全部标准音节（白名单除外）。
+/// 门禁：每个内置方案都必须能打出全部标准音节（白名单除外）。
 ///
-/// 这条断言是本文件存在的理由。它替代不了逐例测试的精确性，但覆盖的是逐例测试
-/// 结构上够不到的地方 —— 「没人想到要测的那个音节」。历史上一跑就抓到两处：
-/// - `abc` 的 `zero_initials` 只填了 12 个零声母里的 2 个 ⇒ 爱/安/恩/儿全打不出；
-/// - `ziguang` 的 finals 缺 `v = ["v"]` ⇒ 绿/女打不出（而略/虐正常）。
-///
-/// 两处都是「结构就位、数据没填满」，加载测试、逐例测试、真机常用字全都碰不到。
+/// 覆盖逐例测试结构上够不到的「没人想到要测的音节」，典型是「结构就位、数据没填满」：
+/// 如 `zero_initials` 只填了部分零声母、finals 缺 `v = ["v"]`。
 #[test]
 fn every_layout_covers_all_standard_syllables() {
     let mut failures = Vec::new();
@@ -142,8 +126,7 @@ fn every_layout_covers_all_standard_syllables() {
     );
 }
 
-/// 白名单自身必须**当前真的打不出**，否则它就在掩盖一条已经恢复的能力。
-/// 缺了这条自检，白名单会随着方案数据修好而悄悄变成一张废纸，还继续豁免着别的东西。
+/// 白名单自身必须当前真的打不出，否则它会在方案数据修好后悄悄继续豁免。
 #[test]
 fn whitelist_entries_are_still_actually_unreachable() {
     let ids = layouts();
@@ -194,17 +177,13 @@ fn every_layout_covers_zero_initial_syllables() {
     }
 }
 
-/// 各方案**官方**零声母击键表 —— 每条都是「这个方案的用户实际会敲什么」。
+/// 各方案官方零声母击键表：每条都是「这个方案的用户实际会敲什么」。
 ///
-/// ★ 为什么单有上面两条覆盖断言还不够：它们问的是「**存不存在某组**击键能打出这个音节」，
-/// 不问「**官方那组**击键能不能打出」。微软双拼的 `[zero_initials]` 曾整段抄自首字母引导
-/// 的模板，12 个零声母里 10 个官方击键（oa/ol/oj/oh/ok/oe/oz/of/og/or）全部打不出，
-/// 用户被迫改用小鹤/自然码打法 —— 而两条覆盖断言全绿，因为音节确实「打得出」。
-/// 这类「方案串味」缺陷只有正向击键表抓得到。
+/// 上面两条覆盖断言只问「存不存在某组击键能打出」，零声母整段抄自别家模板时照样全绿，
+/// 用户却被迫改用别家打法；这类方案串味只有正向击键表抓得到。
 ///
-/// 规则依据（2026-08-12 核对）：**微软/搜狗/智能ABC/紫光**用 `O` 键引导零声母；
-/// **自然码/小鹤**用首字母引导（单韵母重复 `aa`/`oo`/`ee`，双字母韵母打字面 `ai`/`an`，
-/// 三字母韵母打首字母+韵母键 `ah`/`eg`）。两类规则不可互抄 —— 本次缺陷正是抄串了。
+/// 规则：微软/搜狗/智能ABC/紫光用 `O` 键引导零声母；自然码/小鹤用首字母引导（单韵母重复
+/// `aa`/`oo`/`ee`，双字母韵母打字面 `ai`/`an`，三字母韵母打首字母+韵母键 `ah`/`eg`）。
 const OFFICIAL_ZERO_STROKES: &[(&str, [(&str, &str); 12])] = &[
     (
         "mspy",
@@ -260,7 +239,7 @@ const OFFICIAL_ZERO_STROKES: &[(&str, [(&str, &str); 12])] = &[
         ],
     ),
     (
-        // 自然码：首字母引导，**没有** O 引导规则。
+        // 自然码：首字母引导，没有 O 引导规则。
         "ziranma",
         [
             ("aa", "a"),
@@ -303,7 +282,7 @@ const OFFICIAL_ZERO_STROKES: &[(&str, [(&str, &str); 12])] = &[
 //              列入「用 O 键作零声母」的方案。官方规则未核实，先不写进门禁以免锁错。
 //   jiajia  —— 拼音加加的官方零声母规则未核实（RIME 的 pyjj 方案同时接受两套写法）。
 
-/// **门禁**：官方击键必须打出对应零声母音节。
+/// 门禁：官方击键必须打出对应零声母音节。
 #[test]
 fn official_zero_initial_strokes_work() {
     let mut failures = Vec::new();
@@ -329,10 +308,10 @@ fn official_zero_initial_strokes_work() {
     );
 }
 
-/// **门禁**：O 引导方案里，首字母引导的打法必须**不**产出零声母。
+/// 门禁：O 引导方案里，首字母引导的打法必须不产出零声母。
 ///
-/// 这条是上一条的反面。缺了它，`[zero_initials]` 里多留一行 `a = [...]` 不会被任何断言
-/// 碰到 —— 官方击键照样绿，方案却悄悄同时接受了别家的打法，正是本次缺陷的形态。
+/// 上一条的反面：缺了它，`[zero_initials]` 多留一行 `a = [...]` 不会被碰到，方案悄悄同时接受
+/// 别家打法。
 #[test]
 fn o_guided_layouts_reject_initial_letter_strokes() {
     // 这些击键在首字母引导方案里是零声母，在 O 引导方案里必须打不出零声母。
@@ -355,7 +334,7 @@ fn o_guided_layouts_reject_initial_letter_strokes() {
     }
 }
 
-/// 探测报告：列出每个方案打不出的音节。**非断言**，供调整白名单时看现状。
+/// 探测报告：列出每个方案打不出的音节。非断言，供调整白名单时看现状。
 #[test]
 #[ignore = "报告用，不作为门禁；cargo test --test shuangpin_coverage -- --ignored --nocapture"]
 fn coverage_report() {

@@ -1,22 +1,11 @@
-//! `.wscc` 单字全码表缓存的**接线层**验证：落盘 → 复用。
+//! `.wscc` 单字全码表缓存的接线层验证：落盘 → 复用。
 //!
-//! # 为什么单元测试不够
+//! `charcodes` 与 `manager` 的单元测试证明了格式与「cap 进指纹」判据，但复用分支走没走到，
+//! 只有让真的 `EngineManager` 跑一遍才知道。可观测量取 [`EngineManager::encode_word`]：它是
+//! 这张表唯一的生产消费点（自动造词按 `[[encoder.rules]]` 组码时逐字取全码）。
 //!
-//! `charcodes` 的单元测试证明了格式本身（往返、截断、异体版本），`manager` 的两条单测
-//! 证明了路径形态与「cap 进指纹」这个判据。三者都对，接线仍可能是错的——而接线恰恰是
-//! 最容易出问题的一段：复用分支到底走没走到，只有让**真的 `EngineManager` 跑一遍**才知道。
-//! 本仓踩过的正是这一类：护栏全钉在纯函数上，绕开了消费点。
-//!
-//! 可观测量取 [`EngineManager::encode_word`] 而不是那张表本身：它是这张表**唯一的**生产
-//! 消费点（自动造词按 `[[encoder.rules]]` 组码时逐字取全码），拿它当判据，
-//! 测的就是用户实际会碰到的那条路。
-//!
-//! # 与 `reverse_index_cache.rs` 的关系
-//!
-//! 两者是同一个方案目录下的**两份不同产物**（`.wridx` / `.wscc`），谁也不重写谁的文件。
-//! 「词库集合变了要失效」那条不在这里重复验证：两张表共用
-//! `reverse_index_source_digests` 取摘要，那条已由那边的 invalidation 测试覆盖，
-//! 这里只验本产物独有的接线。
+//! 与 `reverse_index_cache.rs` 是同一方案目录下的两份产物（`.wridx` / `.wscc`），互不重写。
+//! 「词库集合变了要失效」不在这里重复：两表共用 `reverse_index_source_digests`，由那边覆盖。
 
 use std::path::{Path, PathBuf};
 
@@ -47,8 +36,7 @@ fn mgr(dir: &Path) -> EngineManager {
     EngineManager::new(&cfg, Some(dir))
 }
 
-/// 在缓存根里找本方案的 `.wscc`。刻意**不复制一遍路径推导逻辑**——照抄一份就等于
-/// 「两处各写一份、其中一处悄悄过时」，那正是本测试要防的事。
+/// 在缓存根里找本方案的 `.wscc`。刻意不复制路径推导逻辑，照抄一份会悄悄过时。
 fn find_wscc() -> Option<PathBuf> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         let Ok(rd) = std::fs::read_dir(dir) else {
@@ -79,9 +67,8 @@ fn fp_of(wscc: &Path) -> PathBuf {
 
 /// 一次构建的可观测快照：几个真实单字各自取到的全码。
 ///
-/// 单字取码直接查这张表（`encode_word` 的 `codes.get(&c)` 分支），多字词则要先逐字取码
-/// 再按 `[[encoder.rules]]` 组码——两条都带上，复用回来的表若少了条目，前者变 `Err`、
-/// 后者也跟着整词失败。
+/// 单字取码直接查这张表（`encode_word` 的 `codes.get(&c)` 分支），多字词先逐字取码再按
+/// `[[encoder.rules]]` 组码；两条都带上，复用回来的表少了条目时前者变 `Err`、后者整词失败。
 fn snapshot(m: &EngineManager) -> Vec<Result<String, String>> {
     ["中", "工", "好", "你好", "中国人"]
         .iter()
@@ -89,12 +76,11 @@ fn snapshot(m: &EngineManager) -> Vec<Result<String, String>> {
         .collect()
 }
 
-/// ★ 落盘 → 复用：第二次构建**不该重写文件**，且取码结果必须完全一致。
+/// 落盘 → 复用：第二次构建不该重写文件，且取码结果必须完全一致。
 ///
-/// 「文件字节与 mtime 都没变」是复用分支唯一可靠的外部证据——重建分支恒会 rename 覆盖。
-/// 只断言「结果一样」是不够的：重建一遍结果当然也一样，那样测试对「复用根本没生效」
-/// 这个真正的故障完全不敏感，而它的后果正是本次改动要消灭的东西——每次启动都要重新
-/// 加载整组词库再全量扫一遍，自动造词的就绪闸因此在开机后头几秒一直关着。
+/// 文件字节与 mtime 不变是复用分支唯一可靠的外部证据（重建分支恒会 rename 覆盖）；只断言
+/// 结果一样对「复用没生效」不敏感，而那会让每次启动都全量扫词库，自动造词的就绪闸开机后
+/// 头几秒一直关着。
 #[test]
 fn single_char_codes_are_persisted_then_reused_without_rewriting() {
     let _guard = serialized();
@@ -111,8 +97,7 @@ fn single_char_codes_are_persisted_then_reused_without_rewriting() {
         let _ = std::fs::remove_file(fp_of(&p));
     }
     let m1 = mgr(&dir);
-    // 注意：返回值只说明「本次预热做了事」，**区分不了重建与复用**——
-    // 真正的判据是下面的 mtime 比对，别把这条当成「确实重建了」的证据。
+    // 返回值只说明本次预热做了事，区分不了重建与复用；判据是下面的 mtime 比对。
     assert!(
         m1.prewarm_single_char_codes(SCHEMA),
         "新 manager 上预热应执行"
@@ -151,23 +136,8 @@ fn single_char_codes_are_persisted_then_reused_without_rewriting() {
     );
 }
 
-/// 重建 vs 复用的实测基准（`--ignored --nocapture` 手动跑，不进 CI）。
-///
-/// # 2026-09-21 wubi86 实测（Linux、文件缓存热、test profile）
-///
-/// `build=18.8ms  reuse=2.9ms  wscc=185 KB`
-///
-/// 拆开看：复用那 2.9 ms 里绝大部分是 `load_dicts_individually`——**命中缓存也照样要
-/// 先加载整组词库**，因为缓存判据（各 `.wdat` 的摘要）本身就要从已加载的词库取。
-/// 省掉的是那 ~16 ms 的全表 `for_each_entry` 扫描。
-///
-/// ⇒ **收益随词条数线性放大**：扫描是 O(词条数) 而加载不是。wubi86 这种十万词级的方案
-/// 只省十几毫秒，feihuzj2 那种 251 万词的（反查索引 95.4 MB、构建秒级）才是这项改动
-/// 真正的受益者。**那个量级本测试没有实测**，手上没有该词库。
-///
-/// ★ 顺带记一个本次未动的浪费：`.wridx` 与 `.wscc` 两条构建路径**各自**调一次
-/// `load_dicts_individually`，即便双双命中缓存，同一组词库仍会被加载两遍。
-/// 合并它要动反查索引那条路径，不在本次改动范围内。
+/// 重建 vs 复用的基准（`--ignored --nocapture` 手动跑，不进 CI）。收益的构成见
+/// docs/design/codetable-auto-phrase.md 单字全码表一节。
 #[test]
 #[ignore]
 fn measure_build_vs_reuse() {
