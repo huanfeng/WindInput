@@ -222,7 +222,7 @@ fn local_info(settings: &SyncSettings, now: u64) -> DeviceInfo {
             name.to_string()
         },
         platform: platform().into(),
-        app_version: env!("CARGO_PKG_VERSION").into(),
+        app_version: env!("WIND_APP_VERSION").into(),
         caps: vec!["files".into()],
         last_seen: now,
     }
@@ -835,6 +835,14 @@ impl Runner {
         if key.trim().is_empty() {
             return Err("密钥不能为空".into());
         }
+        // 先在本地校验格式，免得被说成「远端格式不认识」
+        wind_sync::crypto::Dek::from_base64(key).map_err(|e| {
+            let d = match e {
+                wind_sync::crypto::CryptoError::Format(d) => d,
+                e => e.to_string(),
+            };
+            format!("密钥格式不对（{d}），请粘贴完整的导出密钥")
+        })?;
         let b = self.fresh_backend(None)?;
         let dek = remote::join_with_key(&*b, key).map_err(|e| sync_error(&e))?;
         self.adopt_dek(&dek)?;

@@ -318,7 +318,7 @@ fn two_devices_converge_with_core_requests() {
     let mut c = Node::new(&remote, false);
     c.cmd(Op::SetSecret, json!({"password": "pw"})).unwrap();
     let e = c.cmd(Op::ImportKey, json!({"key": "AAAA"})).unwrap_err();
-    assert!(!e.is_empty());
+    assert!(e.starts_with("密钥格式不对"), "{e}");
     c.cmd(Op::ImportKey, json!({"key": key})).unwrap();
     assert_eq!(c.sync().phase, "idle");
     assert_eq!(c.read("config.toml").as_deref(), Some("a = 2\n"));
@@ -794,7 +794,12 @@ fn device_roster_lists_both_devices_with_self_marker() {
     assert_eq!(me["readable"], true);
     assert_eq!(me["caps"], json!(["files"]));
     assert!(["windows", "macos", "linux", "android"].contains(&me["platform"].as_str().unwrap()));
-    assert!(!me["app_version"].as_str().unwrap().is_empty());
+    // 产品版本（docs/VERSION），不是同步组件 crate 的版本
+    let product = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../docs/VERSION"),
+    )
+    .unwrap();
+    assert_eq!(me["app_version"], product.trim());
     assert!(me["last_seen"].as_u64().unwrap() > 1_700_000_000);
     assert!(me["id"].as_str().unwrap().len() > 3);
 

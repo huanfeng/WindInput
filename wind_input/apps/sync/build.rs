@@ -1,6 +1,6 @@
 // 为 wind_input_sync.exe 嵌入 Windows 资源：图标 / 版本信息 / manifest，任务管理器里显示
 // 「清风输入法同步服务」而不是光秃的文件名。版本号与核心同取 docs/VERSION（见 service/build.rs）。
-// 仅 Windows 目标生效，其它目标为空操作。
+// 资源仅 Windows 目标嵌入；产品版本号各平台都注入为 WIND_APP_VERSION。
 
 use std::path::PathBuf;
 
@@ -15,13 +15,16 @@ fn main() {
     println!("cargo:rerun-if-changed={}", version_file.display());
     println!("cargo:rerun-if-changed={}", icon.display());
 
+    let ver_str = std::fs::read_to_string(&version_file)
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| "0.0.0".to_string());
+    // 设备名册上报的版本（各平台都要）
+    println!("cargo:rustc-env=WIND_APP_VERSION={ver_str}");
+
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
 
-    let ver_str = std::fs::read_to_string(&version_file)
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|_| "0.0.0".to_string());
     let core = ver_str.split('-').next().unwrap_or("0.0.0");
     let mut it = core.split('.').map(|s| s.parse::<u16>().unwrap_or(0));
     let (maj, min, pat) = (
