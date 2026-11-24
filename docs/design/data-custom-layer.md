@@ -128,6 +128,17 @@ try_into(merged) 失败
 **凡是「拿 `Config::load()` 的结果当种子、再整表写回用户层或导出给用户」的路径，
 降级时都会把用户数据抹掉**。新增此类路径必须过闸，并有守门测试。
 
+第四条是 `config.setItems`（wind-rpc `dispatch.rs`）：设置端对 Map 与数组型键发送
+「base ⊕ 本次编辑」的整份值，base 取自 `config.get`，降级时就是出厂值。闸门判据收在
+`FieldType::is_whole_value_leaf`（Map 与 `ui.toolbar.items` 等数组型键都算），加新类型时
+在那里回答一次；标量键不拦（落盘值是显式单值，与 base 无关，拦了会让降级期间整页无法保存）。
+
+降级的「UI 可见」由 RPC `config.degradation` 提供：语义是「此刻盘上的配置试加载一遍会不会
+降级」（每次现读四层），不是服务运行中那份配置的快照，故用户改好之后横幅能自行消失。
+独立成方法而不并进 `system.info`（不碰磁盘）或 `config.get`（`degradation` 是
+`#[serde(skip)]` 的运行期元信息，混进配置命名空间会被当成键写回）；返回形态恒为固定字段的
+对象，「字段缺失」在跨仓契约里与「旧版 core」无从区分。
+
 未加闸但已确认安全的：`prune_user_config` / `set_user_value`（`system_preset_value`
 走生 `toml::Value`，根本不反序列化，不变量 1 不破）；`keys_overview`
 （wind-webdata）只影响显示、不写盘，留待 P3 一并处理。

@@ -29,17 +29,14 @@ use crate::view::{Edges, Layout, View};
 
 /// 内置默认字族：`ui.font.family` 为空时用它。
 ///
-/// 它同时是 `TextRenderer::new` 的初始字族与回退链的链首，**必须只有一个来源**——
-/// 两处写死同一个字符串，改一处漏一处时的表现是「链首与实际 base family 对不上」，
-/// 而那只会让回退链静默不生效，不报任何错。
+/// 它同时是 `TextRenderer::new` 的初始字族与回退链的链首，必须只有一个来源，否则链首与
+/// 实际 base family 对不上，回退链静默不生效。
 pub const DEFAULT_FONT_FAMILY: &str = "Microsoft YaHei UI";
 
 /// 空字族回落内置默认。
 ///
-/// ★ 抽成函数是因为 [`build_font_plan`] 必须用同一个答案：两处各写一次
-/// `if empty { … }` 的话，回退链的链首会变成空串，而 `AddMapping` 的 `baseFamilyName`
-/// 是空串就永远匹配不上任何段——表现是「配了 fallback，但只在显式写了 family 时才生效」，
-/// 且没有任何报错。
+/// [`build_font_plan`] 必须用同一个答案：链首是空串时 `AddMapping` 的 `baseFamilyName` 永远
+/// 匹配不上，fallback 只在显式写了 family 时才生效。
 fn resolve_font_family(family: &str) -> &str {
     let f = family.trim();
     if f.is_empty() { DEFAULT_FONT_FAMILY } else { f }
@@ -47,11 +44,8 @@ fn resolve_font_family(family: &str) -> &str {
 
 /// 把 `[ui.font]` 的三个键折成渲染层的 [`FontPlan`]。
 ///
-/// 纯函数：它承载了本功能全部的「配置怎么变成方案」的判定（链首归一、未知类名处置），
-/// 而这些判定与窗口/COM 都无关，抽出来才测得到（构造 `CandidateWindow` 要真窗口）。
-///
-/// 未知的脚本类名记一条 warn 后**忽略**：配置文件是用户手写的，拼错一个键不该让整份
-/// 字体配置失效，更不该 panic。
+/// 纯函数，承载「配置怎么变成方案」的全部判定（链首归一、未知类名处置），与窗口/COM 无关，
+/// 故可单测。未知的脚本类名记 warn 后忽略：拼错一个键不该让整份字体配置失效。
 pub(crate) fn build_font_plan(
     family: &str,
     fallback: &[String],
@@ -69,19 +63,13 @@ pub(crate) fn build_font_plan(
     }
     // emoji 类的出厂指派（仅 Windows；macOS 的脚本指派尚未实现，见 `coretext.rs`）。
     //
-    // 不靠 data/config.toml 的默认值而在这里注入，是因为配置层写回不剔除「等于默认」的键：
-    // 老用户的 config.toml 里已经躺着一句 `scripts = {}`，改出厂值对他们永远不生效。
-    // 用户显式写了 `emoji = [...]`（含空表）即按用户的来，空表就是「关掉这条指派」。
+    // 在这里注入而不靠 data/config.toml 的默认值：老用户的 config.toml 里已有 `scripts = {}`，
+    // 改出厂值对他们不生效。用户显式写了 `emoji = [...]`（含空表 = 关掉）即按用户的来。
     //
-    // 为什么必须指派而不是只靠系统回退（`DEFAULT_EMOJI_FAMILY` 的文档有全文）：
-    // - 新码位（Emoji 16.0 的 🫜 一类）本机 Segoe UI Emoji 明明有字形，DirectWrite 内置的
-    //   回退区间表却没把它映射过去，量出来是缺字宽度；
-    // - 键帽序列（1️⃣）的基字「1」基准字体自己就有，回退根本不会触发，只有把整串切进
-    //   emoji 段才能连字（见 `script::font_runs` 的回溯改写）。
-    //
-    // 已知代价：`U+2600..27BF` 里 ★ ☆ ✓ 这些中性符号会跟着搬到 Segoe UI Emoji（分类表
-    // `script.rs` 对这段的取舍写明了「声明后一并跟着走」）；`declared()` 非空后 `font_runs`
-    // 在每次绘制每个文本叶子上都会跑一遍，实测每叶子几个字、微秒级。
+    // 只靠系统回退不够：DirectWrite 的回退区间表漏映射新 emoji 码位；键帽序列的基字基准字体
+    // 自己就有，回退不触发（见 `script::font_runs` 的回溯改写）。背景见
+    // `docs/design/emoji-suggestion.md`。代价：`U+2600..27BF` 的中性符号（☆ ✓）也跟着走，
+    // 且 `font_runs` 在每个文本叶子上都要跑一遍（微秒级）。
     if cfg!(windows) && !assigned.iter().any(|(c, _)| *c == ScriptClass::Emoji) {
         assigned.push((ScriptClass::Emoji, vec![DEFAULT_EMOJI_FAMILY.to_string()]));
     }
@@ -388,7 +376,7 @@ pub struct CandidateWindow {
     tip_for: Rc<Cell<i32>>,
     /// 「屏幕点处最上层是不是这个窗口」，默认 [`crate::window::window_at`]；测试换桩。
     window_at: fn(HWND, i32, i32) -> bool,
-    /// **生效**主题：[`Self::theme_source`] 叠上外观覆盖（字体 / 字号）之后的那份。
+    /// 生效主题：[`Self::theme_source`] 叠上外观覆盖（字体 / 字号）之后的那份。
     /// 渲染与测量一律只读它，由 [`Self::refresh_effective_theme`] 单点产出。
     theme: wind_theme::Resolved,
     /// 协调器下发的原始主题（未叠外观覆盖）。只供 [`Self::refresh_effective_theme`] 读。
@@ -457,25 +445,22 @@ pub struct CandidateWindow {
     scale: f32,
     /// 竖排布局（候选纵向堆叠）；默认横排。来自 ui.candidate.layout。
     vertical: bool,
-    /// 候选**文字节点**的字族覆盖（方案级 `[candidate] font_family`）；空 = 不覆盖。
+    /// 候选文字节点的字族覆盖（方案级 `[candidate] font_family`）；空 = 不覆盖。
     ///
     /// 优先级：方案 > 用户 `ui.font.family`（非空）> 主题节点 `views.text.font_family` >
     /// 内置默认（合并见 [`scene::effective_theme`]）。
-    /// ⚠️ 只作用于候选文字：序号/编码栏/注释/翻页栏是拉丁与数字，跟着换蒙文字体反而更差；
-    /// 要按脚本换字体用全局 `ui.font.scripts`（按字符分，比按节点分更贴合真实问题）。
+    /// 只作用于候选文字：序号/编码栏/注释/翻页栏多为拉丁与数字，跟着换反而更差；按脚本换字体
+    /// 用全局 `ui.font.scripts`。
     text_family_override: String,
     /// 候选列表顺时针旋转 90° 呈现（蒙古文等纵向书写脚本）。来自 ui.candidate.layout。
     ///
-    /// ★ 旋转态下 [`Self::vertical`] 是 **false**——屏幕上候选确是并列的，于是所有按方向
-    /// 分叉的既有判据（窗口尺寸下限、注释模板、`flip_when_above`）自动走横排那一支。
-    /// 唯一额外判 `rotated` 的地方是**列表怎么构造**：局部空间里它按竖排堆叠，
-    /// 转完才成为并列的列（见 `build_tree` 的 `list_vertical`）。
+    /// 旋转态下 [`Self::vertical`] 是 false（屏幕上候选是并列的），按方向分叉的既有判据自动走
+    /// 横排那一支。唯一额外判 `rotated` 的是列表怎么构造（见 `build_tree` 的 `list_vertical`）。
     rotated: bool,
     /// 旋转态下把每个字逆时针扶正、逐字下行（对联式竖排）。来自 ui.candidate.layout。
     ///
-    /// ★ 蕴含 [`Self::rotated`]：它与旋转态是**同一种排列**，只有叶子怎么搭不同。
-    /// 于是列表构造、逆序、阴影轴、尺寸下限、分隔方向、翻页栏位置全部原样复用，
-    /// 本位只在 `build_tree` 拼文字/序号叶子时读一次。
+    /// 蕴含 [`Self::rotated`]：同一种排列，只有叶子怎么搭不同，本位只在 `build_tree` 拼文字/
+    /// 序号叶子时读。
     upright: bool,
     /// 预编辑嵌入模式（编码嵌入候选行首，不显示独立 preedit 条）。
     /// 来自 ui.candidate.preedit_display == "candidate_inline"。
@@ -493,7 +478,7 @@ pub struct CandidateWindow {
     user_offset: (i32, i32),
     /// 是否采用主题阴影（false = 用户覆盖为无阴影）。来自 ui.candidate.shadow。
     theme_shadow: bool,
-    /// 固定位置模式的**内容左上**屏幕坐标；`None`=跟随光标（默认）。
+    /// 固定位置模式的内容左上屏幕坐标；`None`=跟随光标（默认）。
     /// 来自 ui.candidate.position_mode + custom_x/custom_y，每次 UpdateCandidates 同步。
     /// `Some((0, 0))` 是"已开启固定但尚未设定位置"，定位时落到屏幕默认锚点。
     fixed_pos: Option<(i32, i32)>,
@@ -628,12 +613,8 @@ impl CandidateWindow {
     /// 设置候选文字的字族覆盖（方案级 `[candidate] font_family`）；空串 = 取消覆盖。
     /// 语义与优先级见 [`Self::text_family_override`]。
     ///
-    /// # ⚠️ 它是「替换」不是「补充」
-    ///
-    /// 声明了它，候选文字就**不再用** `ui.font.family`——升级前候选文字一律走全局主字体，
-    /// 升级后凡声明本键的方案都改用它。两个字体在同一 `font_size` 下视觉大小本就不同
-    /// （字形在 em 框内的占比各家不一），故「换了个字体」在用户眼里等同于「字被缩放了」。
-    /// 这一行日志是那件事的唯一线索：换字族不经任何会失败的调用，画面之外无迹可寻。
+    /// 它是「替换」不是「补充」：声明了就不再用 `ui.font.family`。不同字体同字号下视觉大小
+    /// 不同，用户会以为字被缩放了，这一行日志是唯一线索。
     pub fn set_text_family_override(&mut self, family: &str) {
         let want = family.trim().to_string();
         if want != self.text_family_override {
@@ -651,7 +632,7 @@ impl CandidateWindow {
     /// 设置候选布局方向。三位的语义见 [`Self::rotated`] / [`Self::upright`] 与
     /// `UiCommand::SetCandidateLayout`。
     ///
-    /// ⚠️ 三位并非正交，合法值只有四个；协调器只会发出其中之一，这里 debug 下断言两条
+    /// 三位并非正交，合法值只有四个；协调器只会发出其中之一，这里 debug 下断言两条
     /// 非法组合，把「谁手写了字段」挡在开发期。
     pub fn set_orientation(&mut self, vertical: bool, rotated: bool, upright: bool) {
         debug_assert!(!(vertical && rotated), "vertical 与 rotated 不能同时为真");
@@ -660,7 +641,7 @@ impl CandidateWindow {
         // Homebrew 工具链就停在 1.96。两种写法等价，取两个版本都干净的那个。
         debug_assert!(!upright || rotated, "upright 蕴含 rotated");
         if (vertical, rotated, upright) != (self.vertical, self.rotated, self.upright) {
-            // ⚠️ upright 会把整串按格切开逐格排版，这会**切断连写脚本**（蒙古文、阿拉伯文）
+            // upright 会把整串按格切开逐格排版，这会切断连写脚本（蒙古文、阿拉伯文）
             // 的字形连接，每格退回孤立形——孤立形比连写形窄小，画面上就是「字变小变散」。
             // 那类脚本要的是 rotated。日志里带上这一位，才分得开「字体不对」与「排列不对」。
             tracing::info!("候选排列：vertical={vertical} rotated={rotated} upright={upright}");
@@ -719,8 +700,7 @@ impl CandidateWindow {
     /// 场景退化为保守的兜底常量（见 [`CandidateSceneInput::screen_safety_max_width_px`]）。
     ///
     /// 每帧只在渲染入口开头查一次，存进 [`Self::screen_extent`]（见 [`Self::layout_frame`]），
-    /// 场景输入一律读存下的值：一帧里要借好几次输入，每次都查显示器（失败时每次还刷一条 warn）
-    /// 没有必要，同一帧内光标点与固定点也不会变。
+    /// 场景输入一律读存下的值。
     fn query_screen_extent(&self) -> Option<(u32, u32)> {
         #[cfg(windows)]
         {
@@ -839,10 +819,9 @@ impl CandidateWindow {
 
     /// 把配置里的字体名解析成渲染端认得的 family（+ 名字里带的字重），按名字缓存。
     ///
-    /// **所有**字体名入口（`ui.font.family` / `fallback` / `scripts`、方案级
-    /// `[candidate] font_family`、主题节点 `font_family`）都走这一个函数，判定顺序见
-    /// [`resolve_font_name`]：原串是 family 就原样用；否则剥掉结尾字重词、再否则按 face 全名
-    /// 查——存量配置里的旧 GDI face name（「思源宋体 SemiBold」）靠这两步自愈（看板 A2-1）。
+    /// 所有字体名入口（`ui.font.family` / `fallback` / `scripts`、方案级 `[candidate] font_family`、
+    /// 主题节点 `font_family`）都走这一个函数，判定顺序见 [`resolve_font_name`]：存量配置里的
+    /// 旧 GDI face name（「思源宋体 SemiBold」）靠剥字重词、按 face 全名查自愈。
     fn resolve_font(&self, name: &str) -> ResolvedFont {
         let name = name.trim();
         if let Some(r) = self.font_names.borrow().get(name) {
@@ -861,13 +840,8 @@ impl CandidateWindow {
 
     /// [`Self::resolve_font`] + 按结果记日志。空名字返回 `None`。
     ///
-    /// # ★ 缺失的判据是「解析后仍 `Missing`」，不是 `family_exists != Some(true)`
-    ///
-    /// `Unknown` 表示**查不了**（mock 后端、或拿不到系统字体集）。把它也当成缺失会让
-    /// 非 Windows 平台每次设字体都刷一条假 warn——「查不到」与「确实没有」是两件事。
-    ///
-    /// `source` 写配置键的**全名**：用户看到日志后要能直接去改那一项，
-    /// 而几个来源（全局主字体 / 回退链 / 方案级 / 主题节点）改的是不同的地方。
+    /// 缺失的判据是「解析后仍 `Missing`」：`Unknown` 表示查不了（mock 后端等），当成缺失会刷
+    /// 假 warn。`source` 写配置键的全名，用户看到日志能直接去改那一项。
     fn resolve_and_report(&self, family: &str, source: &str) -> Option<ResolvedFont> {
         let name = family.trim();
         if name.is_empty() {
@@ -939,8 +913,7 @@ impl CandidateWindow {
     /// `family` 必须与最近一次 [`Self::set_font_family`] 同源——它是默认链的链首。
     /// 二者由同一条 `UiCommand::SetCandidateFont` 携带，故不存在到达顺序问题。
     ///
-    /// ⚠️ 链首不在这里查存在性：它就是 `family`，已由 [`Self::set_font_family`] 查过，
-    /// 同一条命令里查两遍就是同一条 warn 刷两次。
+    /// 链首不在这里查存在性：已由 [`Self::set_font_family`] 查过。
     pub fn set_font_plan(
         &mut self,
         family: &str,
@@ -1010,14 +983,12 @@ impl CandidateWindow {
 
     /// 把「候选项当前是否被反转」上报给协调器（仅在取值变化时发事件）。
     ///
-    /// ★ **判据的真相源只能在这一侧**：`placed_above` 要窗口尺寸 + 屏幕工作区才算得出，
-    /// `vertical` 还会被模式级强制横/竖排改写 —— 协调器读配置推不出来。故复用
-    /// [`CandidateScene::above_layout`] 这个既有的单一真相源，把它第一个返回值送过去，
-    /// 由协调器把 `highlight_up` / `highlight_down` 的走向翻转（视觉方向优先于候选序）。
+    /// 判据的真相源只能在这一侧（`placed_above` 要窗口尺寸 + 屏幕工作区，协调器推不出来）：
+    /// 送 [`CandidateScene::above_layout`] 的第一个返回值过去，由协调器翻转
+    /// `highlight_up` / `highlight_down` 的走向。
     ///
-    /// 调用点＝每处「`placed_above` 刚刚定完」之后，以及 [`CandidateWindow::hide`]
-    /// 清除上翻粘滞时 —— 后者关掉的是「组合结束后状态残留为 true，下一轮首帧渲染前
-    /// 用户就按了方向键」的窗口期。
+    /// 调用点＝每处 `placed_above` 刚定完之后，以及 [`CandidateWindow::hide`] 清除上翻粘滞时
+    /// （防下一轮首帧前按方向键读到残留的 true）。
     fn report_flip_state(&mut self) {
         let (flip, _) = CandidateScene::above_layout(
             self.placed_above,
@@ -1031,20 +1002,11 @@ impl CandidateWindow {
         }
     }
 
-    /// 标记窗口进入可见态；**不可见 → 可见**的转换处重采鼠标防抖基线。
+    /// 标记窗口进入可见态；不可见 → 可见的转换处重采鼠标防抖基线。
     ///
-    /// # ★★★ 基线必须在「窗口即将出现」时采样，不能沿用 `hide()` 那次
-    ///
-    /// 防抖的门控是「物理光标坐标与基线相同 ⇒ 是内容刷新引起的伪移动 ⇒ 忽略」。基线一旦
-    /// 陈旧，判据就整个反转：窗口出现在**新**光标位下方时，Windows 投来的进入消息坐标与
-    /// 陈旧基线不同 → 被判成「用户真实移动了鼠标」→ 闸门放行 → 60ms 后自动高亮并弹 tooltip，
-    /// 而用户根本没动过鼠标。这正是本防抖要挡的那件事。
-    ///
-    /// 此前基线只在 [`CandidateWindow::hide`] 里采，于是两种情况必然失效：
-    /// - **进程内第一次显示**：此前没有任何 `hide()`，基线是构造初值 `i32::MIN`，必不相等；
-    /// - **两次显示之间用户移动过鼠标**：`hide()` 采的是上一次组合结束时的光标位，已经过时。
-    ///
-    /// 采样点挪到显示转换处后，两者一并消失——「窗口出现瞬间鼠标在哪」才是这个判据要的基准。
+    /// 基线必须在窗口即将出现时采样，不能沿用 `hide()` 那次：防抖判据是「物理光标与基线相同
+    /// ⇒ 伪移动 ⇒ 忽略」，基线陈旧（进程内首次显示、或两次显示间鼠标动过）会把窗口出现时的
+    /// 进入消息误判成真实移动，自动高亮并弹 tooltip。
     fn mark_visible(&mut self) {
         if !self.visible {
             self.mouse.borrow_mut().reset_hover();
@@ -1073,17 +1035,11 @@ impl CandidateWindow {
         self.mouse.borrow_mut().engage_delay_ms = delay_ms.max(0) as u64;
     }
 
-    /// 设置拆字字根字体（TTF 路径 + DWrite 家族名）。**两个渲染器都要收到**。
+    /// 设置拆字字根字体（TTF 路径 + DWrite 家族名）。两个渲染器都要收到。
     ///
-    /// 字根字符落在私用区（PUA），系统字体里没有对应字形，须靠渲染器把 PUA 连续段切到字根
-    /// 字体集（`text::dwrite` 的 `pua_runs` + `SetFontCollection`，测量与绘制共用同一函数）。
-    /// 那套机制本身与控件无关，但**它只对调用过本方法的那个 `TextRenderer` 实例生效**。
-    ///
-    /// 本方法此前名为 `set_tooltip_chaizi_font`，只转发给 `self.tooltip` —— 于是候选窗自己的
-    /// `self.text_renderer` 从未拿到过字根字体。悬停提示里的字根正常、候选行里的字根显示成
-    /// 豆腐块或空白，而配置/文件/家族名/日志四项全对，查不出所以然
-    /// （同 `project_chaizi_font_pua_plane_gap` 的形态：**四项全对就该查消费端，不是资源本身**）。
-    /// 此前无人发现是因为候选行从来没有渲染过字根——注释段接入拆字来源后才第一次有。
+    /// 字根字符落在私用区（PUA），靠渲染器把 PUA 连续段切到字根字体集（`text::dwrite` 的
+    /// `pua_runs` + `SetFontCollection`）。这套机制只对调用过本方法的那个 `TextRenderer` 实例
+    /// 生效，漏转发给候选窗自己的渲染器，候选行里的字根就显示成豆腐块。
     pub fn set_chaizi_font(&mut self, path: &str, family: &str) {
         if let Err(e) = self.text_renderer.set_chaizi_font(path, family) {
             tracing::warn!("候选窗字根字体加载失败: {e}");
@@ -1173,7 +1129,7 @@ impl CandidateWindow {
         }
     }
 
-    /// 由原始主题 + 外观覆盖算出生效主题（[`Self::theme`]）与生效字号——**唯一**的合并点。
+    /// 由原始主题 + 外观覆盖算出生效主题（[`Self::theme`]）与生效字号——唯一的合并点。
     ///
     /// 在四个低频入口（换主题 / 用户字体 / 方案级字体 / 用户字号）调用，不在渲染热路径。
     /// 渲染与测量（`build_tree` 里的 `measure_style` 与各叶子）都只读结果，
@@ -1192,7 +1148,7 @@ impl CandidateWindow {
             let r = self.resolve_font(f);
             (r.family, r.weight)
         });
-        // 存在性告警按**生效**字族查（叠上用户字体之后、方案级字体之前，见
+        // 存在性告警按生效字族查（叠上用户字体之后、方案级字体之前，见
         // [`scene::EffectiveTheme::declared_families`]）。未变就不再问。
         if eff.declared_families != self.checked_theme_families {
             self.warn_missing_theme_families(&eff.declared_families);
@@ -1212,15 +1168,8 @@ impl CandidateWindow {
 
     /// 主题各节点声明的字族逐个查一次存在性，缺的记 warn。见 [`Self::resolve_and_report`]。
     ///
-    /// 全局 `ui.font.family` 与方案级 `[candidate] font_family` 早有这道查，主题节点一直漏着
-    /// ——而主题是最容易写错的那处：作者自己机器上装着那款字体，换台机器就静默回落，
-    /// 画面只表现为「字体不对」，日志里一片安静。
-    ///
-    /// 只在换主题时走（`push_theme` 的那几个低频事件：启动 / 切主题 / 深浅色 / 配置 reload），
-    /// 不在渲染热路径——每个字族一次 `FindFamilyName` 是按 COM 调用计费的。
-    ///
-    /// **按字族去重**：一份主题里十来个节点常配同一个名字，缺失时刷十条一模一样的 warn
-    /// 只会把日志淹掉。留第一个声明它的节点路径，用户照着去主题文件里搜那个名字就够了。
+    /// 主题作者机器上装着的字体换台机器就静默回落，这里给出日志线索。只在换主题时走
+    /// （`push_theme` 的低频事件），不在渲染热路径。按字族去重，留第一个声明它的节点路径。
     fn warn_missing_theme_families(&self, declared: &[(String, String)]) {
         let mut seen = std::collections::HashSet::new();
         for (path, family) in declared {
@@ -1269,7 +1218,7 @@ impl CandidateWindow {
     /// 内容区在窗口里的左上（软阴影扩边）。
     fn note_grid_box(&self, (left, top): (f32, f32), w: f32) {
         if self.grid.is_some() {
-            // 气泡贴的是**窗口实际的**右缘：渲染入口随后会按屏幕安全宽度收窄窗口，超宽的网格
+            // 气泡贴的是窗口实际的右缘：渲染入口随后会按屏幕安全宽度收窄窗口，超宽的网格
             // 按测得宽度记会让气泡离窗口右缘空出一截。与入口那道钳制同一个上限。
             let shown = w.min(self.screen_safety_max_width_px() as f32);
             self.grid_box.set((left, left + shown, top));
@@ -1286,15 +1235,13 @@ impl CandidateWindow {
 
     /// 悬停气泡的锚点：`(放侧边?, 左缘, 右缘, 顶, 底)`，窗口内坐标。
     ///
-    /// - 展开态：**停靠**在整个窗口外侧的顶端（右侧优先、放不下改左），不随悬停行上下移动，
-    ///   只换内容。按单格放的话，横排的「下方」与竖排的「侧边」都会盖住相邻的格子；跟着行
-    ///   上下走则是「半跟随」——位置在变却够不着，鼠标斜着过去一路擦过别的格子。
+    /// - 展开态：停靠在整个窗口外侧的顶端（右侧优先、放不下改左），不随悬停行移动，只换内容
+    ///   （按单格放会盖住相邻的格子）。
     /// - 竖排 / 旋转态：候选项侧边（旋转态的候选项是又高又窄的一列，放上下会离得很远）。
     /// - 横排：候选项下方（不足时上翻）。
     ///
-    /// ★ 三处定位（本地显示 `update_tooltip`、host-render `render_tooltip_frame`、外部宿主
-    /// `render_tooltip_overlay`）都从这里取，一处放侧边、一处放上下的话，同一个悬停在
-    /// 「实时显示」与「重推帧」之间会跳位置。
+    /// 三处定位（`update_tooltip`、`render_tooltip_frame`、`render_tooltip_overlay`）都从这里取，
+    /// 否则同一个悬停在实时显示与重推帧之间会跳位置。
     fn tip_anchor(&self, r: &Rect) -> (bool, f32, f32, f32, f32) {
         if self.grid_shown() {
             let (l, rr, top) = self.grid_box.get();
@@ -1321,7 +1268,7 @@ impl CandidateWindow {
         self.fixed_pos = pos;
     }
 
-    /// 当前候选窗**内容左上**屏幕坐标（窗口左上 + 阴影扩边）。
+    /// 当前候选窗内容左上屏幕坐标（窗口左上 + 阴影扩边）。
     /// 供「定位方式」切到 fixed 时把当前实际位置落盘成 custom_x/custom_y。
     pub fn content_origin(&self) -> (i32, i32) {
         let m = self.mouse.borrow();
@@ -1401,7 +1348,7 @@ impl CandidateWindow {
     #[cfg(not(windows))]
     pub fn show(&mut self) {
         // DPI 动态化：按光标所在显示器实时取缩放，换显示器后自动按新 DPI 渲染。
-        // ⚠️ 本路径一直按光标点取，不像另两个渲染入口那样在固定位置模式下改按固定点取；
+        // 本路径一直按光标点取，不像另两个渲染入口那样在固定位置模式下改按固定点取；
         // 三份管线合并时保持原样，没有顺手统一。
         let new_scale = crate::dpi::scale_for_point(self.x, self.y);
         self.show_at(new_scale, Instant::now());
@@ -1433,11 +1380,9 @@ impl CandidateWindow {
         let (width, height) = frame.size();
         let t_layout = t_start.elapsed();
 
-        // 定位提前到 paint 前（供 flip_when_above 判定）。对齐 Go：每帧据当前光标 + 内容尺寸重算
-        // 位置（place_window 负责工作区钳制、上方底边参考、上翻粘滞），再用 4px 阈值抑制微移——
-        // 从而 (1) 输入缓冲变化致尺寸变化时按需重定位、不溢出屏幕；(2) 上方显示以底边贴光标为参考；
-        // (3) 已显示后宿主 caret 微抖动(<4px)不跳，位置保护；显著变化(换行/reflow 修正)才跟随；
-        // (4) 一旦上翻则粘滞上方。新组合首显已由协调器延迟到 reflow 后的权威坐标，故首帧即落在正确处。
+        // 定位提前到 paint 前（供 flip_when_above 判定）：每帧据当前光标 + 内容尺寸重算位置
+        // （place_window 负责工作区钳制、上方底边参考、上翻粘滞），再用 4px 阈值抑制宿主 caret
+        // 微抖动。新组合首显已由协调器延迟到 reflow 后的权威坐标。
         let offset = self.position_offset_px();
         let (px0, py0, above) = Self::place_window(
             self.x,
@@ -1503,7 +1448,7 @@ impl CandidateWindow {
 
         // 位置 (px, py) 已在 paint 前计算并锚定（组合期锁定后复用，避免漂移）。
         // 窗口实际左上 = 内容锚点 − 左/上 margin，使内容仍落在锚点处，阴影向四周溢出。
-        // 基线采样刻意排在 `show` **之前**：窗口出现不会移动鼠标，两处取值物理上相同，
+        // 基线采样刻意排在 `show` 之前：窗口出现不会移动鼠标，两处取值物理上相同，
         // 但排在前面就完全不依赖「`show` 内部不会泵到 WM_MOUSEMOVE」这个前提。
         self.mark_visible();
         self.window.show(px - ml as i32, py - mt as i32);
@@ -1529,7 +1474,7 @@ impl CandidateWindow {
         }
 
         // DPI：按光标所在屏取缩放（Retina=2），几何/字号由 self.scale 派生。
-        // 固定位置模式按**固定点**取——固定位置可能落在与光标不同缩放的另一块屏上，
+        // 固定位置模式按固定点取——固定位置可能落在与光标不同缩放的另一块屏上，
         // 按光标算会让窗口用错误的 DPI 渲染（字号忽大忽小）。与 Windows 分支同一判据。
         let (dpi_x, dpi_y) = match self.fixed_pos {
             Some(f) if f != (0, 0) => f,
@@ -1562,7 +1507,7 @@ impl CandidateWindow {
                 self.placed_above = false;
                 self.last_content_pos = None;
                 // 本路径坐标是逻辑点，尺寸与扩边是设备像素：先换成逻辑点再交给 place_fixed。
-                // 扩边来自皮肤装饰（macOS 不画软阴影）；place_fixed 返回**窗口**左上，加回扩边
+                // 扩边来自皮肤装饰（macOS 不画软阴影）；place_fixed 返回窗口左上，加回扩边
                 // 才是内容左上，与下面跟随光标分支的 (px, py) 同义（出口处再统一减扩边）。
                 let s = self.scale.max(1.0);
                 let lg = |v: u32| (v as f32 / s).round() as i32;
@@ -1638,16 +1583,13 @@ impl CandidateWindow {
         let shadow = frame.shadow;
 
         self.mark_visible();
-        // 关键单位换算：ml/mt/blur 都是 device px（含 scale），而 screen_x/y 是 .app 使用的【逻辑点】
-        // （图像按 scale 显示）。故补偿前必须 /scale 换回逻辑点，否则 Retina(×2) 下会多减一截 →
-        // 候选窗偏左、偏上盖住 caret（正是截图现象）。no-shadow(margin=0)→0，无变化。
+        // 单位换算：ml/mt/blur 是设备像素，screen_x/y 是 .app 的逻辑点，补偿前必须 /scale，
+        // 否则 Retina 下候选窗偏左上盖住 caret。
         let scale = self.scale.max(1.0);
         let ml_l = (ml as f32 / scale).round() as i32;
         let mt_l = (mt as f32 / scale).round() as i32;
-        // 软阴影上边距是完整 3σ 高斯尾(多为透明)；内容紧贴 caret 时上方约一个 blur 高的【可见浓阴影】
-        // 会盖住 caret。故内容较锚点再下移「可见浓阴影」高度(≈blur，换算逻辑点)，使浓阴影恰落 caret
-        // 下方、透明尾不碍观感。above(上翻)不额外下移；固定位置分支 placed_above 恒为 false，
-        // 但那条路上窗口本就不贴 caret，阴影补偿有没有都不影响观感。
+        // 软阴影上边距是完整 3σ 高斯尾，内容紧贴 caret 时上方约一个 blur 高的浓阴影会盖住 caret，
+        // 故内容再下移约 blur 高度。上翻不下移（固定位置分支本就不贴 caret）。
         let clear_l = if self.placed_above {
             0
         } else {
@@ -1768,7 +1710,7 @@ impl CandidateWindow {
             return None;
         }
 
-        // DPI 探测点：固定位置模式按**固定点**取缩放，而不是光标点——固定位置可能落在
+        // DPI 探测点：固定位置模式按固定点取缩放，而不是光标点——固定位置可能落在
         // 与光标不同缩放的另一块屏上，按光标算会让窗口用错误的 DPI 渲染（字号忽大忽小）。
         let (dpi_x, dpi_y) = match self.fixed_pos {
             Some(f) if f != (0, 0) => f,
@@ -1786,9 +1728,9 @@ impl CandidateWindow {
         let (content_w, content_h) = (frame.content_w, frame.content_h);
         let (width, height) = frame.size();
         // 正常情况下 `build_tree` 已按同一套预算把文字裁到位，屏幕安全上限的钳制是恒不生效的
-        // 兜底。**只在它真的生效时才记日志**——那意味着预算算漏了行内某个成员（这正是横排内联
+        // 兜底。只在它真的生效时才记日志——那意味着预算算漏了行内某个成员（这正是横排内联
         // 编码/徽标/翻页栏曾被漏算的形态），是需要看见的异常，不是每帧噪音。
-        // ⚠️ 只有本路径记这条（三份管线合并前就如此，非 Windows 两条路径从来不记），保持原样。
+        // 只有本路径记这条（三份管线合并前就如此，非 Windows 两条路径从来不记），保持原样。
         if let Some((natural, safety_max_w)) = frame.safety_clamped {
             tracing::debug!(
                 "candidate width safety-clamp 生效（预算漏算？）: natural={} safety_max_content={} clamped={} margin_lr={} scale={:.2} vertical={}",
@@ -1887,7 +1829,7 @@ impl CandidateWindow {
         debug_assert!(screen_xy.is_some(), "定位三分支必有其一赋值 screen_xy");
         let (screen_x, screen_y) = screen_xy.unwrap_or((self.x, self.y));
         // 鼠标层记录阴影扩边，两处要用：
-        // 1. 拖动落定时把窗口左上换算回**内容左上**再上报落盘，否则每次「拖动→保存→
+        // 1. 拖动落定时把窗口左上换算回内容左上再上报落盘，否则每次「拖动→保存→
         //    重显」都会多减一次阴影，窗口逐次漂移；
         // 2. 拖动中按内容矩形钳制，让可见内容能真正贴到屏幕边缘（含任务栏）。
         self.mouse.borrow_mut().margin = (ml as i32, mt as i32, mr as i32, mb as i32);
@@ -2067,7 +2009,7 @@ impl CandidateWindow {
         }
     }
 
-    /// Linux 外部宿主：渲染当前悬停 tooltip（位图 + 落位规则）。`(wx, wy)` 为候选窗**建议**
+    /// Linux 外部宿主：渲染当前悬停 tooltip（位图 + 落位规则）。`(wx, wy)` 为候选窗建议
     /// 落点（`render_frame` 的 screen_x/y），addon 再平移到候选窗实际位置。侧边 / 上下的判据
     /// 同 [`Self::render_tooltip_frame`]。
     #[cfg(ext_presenter)]
@@ -2097,39 +2039,32 @@ impl CandidateWindow {
         Some(self.tooltip.as_ref()?.menu_request_at(cx, cy))
     }
 
-    /// **内容**左上 → **窗口**左上（减去软阴影扩边）。
+    /// 内容左上 → 窗口左上（减去软阴影扩边）。
     ///
-    /// 落盘的 custom_x/y 记的是内容左上（用户视觉上看到的窗口边缘），而 Win32 定位用的是
-    /// 窗口左上。本函数与 `window_to_content` 必须严格互逆，否则每轮
-    /// 「拖动 → 落盘 → 重新显示」都会多减一次阴影，候选窗逐次向左上漂移。
+    /// 落盘的 custom_x/y 记的是内容左上，Win32 定位用窗口左上。本函数与 `window_to_content`
+    /// 必须严格互逆，否则每轮「拖动 → 落盘 → 重新显示」候选窗逐次向左上漂移。
     ///
-    /// 纯算术、无平台依赖，故【不加 cfg 门控】：调用方 `content_origin` 是未门控的 pub fn，
-    /// 若把本对函数限定为 windows-only，非 Windows 目标就会 E0599 找不到函数——这类不对称
-    /// 在 Windows 本地开发时永远显现不出来，只有 CI 的 macOS 目标才炸。
-    /// Linux（既非 windows 也非 macos，仅供跑测试）下 `place_fixed` 无调用者，故显式
-    /// allow(dead_code)：它与 `window_to_content` 共用互逆契约和 round-trip 测试，必须成对存在。
+    /// 纯算术，不加 cfg 门控（未门控的 `content_origin` 要调它）；Linux 下无调用者故
+    /// allow(dead_code)，与 `window_to_content` 成对存在。
     #[cfg_attr(not(any(windows, ext_presenter)), allow(dead_code))]
     fn content_to_window(content: (i32, i32), ml: u32, mt: u32) -> (i32, i32) {
         (content.0 - ml as i32, content.1 - mt as i32)
     }
 
-    /// **窗口**左上 → **内容**左上（加回软阴影扩边）。`content_to_window` 的逆。
+    /// 窗口左上 → 内容左上（加回软阴影扩边）。`content_to_window` 的逆。
     fn window_to_content(window: (i32, i32), ml: i32, mt: i32) -> (i32, i32) {
         (window.0 + ml, window.1 + mt)
     }
 
     /// 固定位置模式的窗口落点（返回窗口左上屏幕坐标，含阴影扩边）。
     ///
-    /// - `fixed` 是**内容**左上坐标，减去阴影扩边 `(ml, mt)` 才是窗口左上。
-    /// - `(0, 0)` 视作"已开启固定但尚未设定位置"（用户还没拖过），落到默认锚点。
-    /// - 钳制按**内容**矩形、且钳到整块屏幕（含任务栏）：`custom_x/y` 是绝对屏幕坐标，
-    ///   用户换分辨率或拔掉副屏后会指向不可见区域，候选窗就此"消失"且无法用鼠标拖回来；
-    ///   但按含阴影的窗口矩形去钳会让内容离屏幕边还有一整个阴影宽就被拦下，见
-    ///   [`clamp_content_to_monitor`]。
+    /// - `fixed` 是内容左上坐标，减去阴影扩边 `(ml, mt)` 才是窗口左上。
+    /// - `(0, 0)` 视作「已开启固定但尚未设定位置」，落到默认锚点。
+    /// - 钳制按内容矩形、钳到整块屏幕（含任务栏）：换分辨率或拔掉副屏后 `custom_x/y` 可能指向
+    ///   不可见区域；按含阴影的窗口矩形去钳会差一个阴影宽，见 [`clamp_content_to_monitor`]。
     ///
-    /// macOS 同样走这里（`.app` 的 NSPanel 只是照搬算好的坐标）：那边不画软阴影，扩边恒 0，
-    /// 且 `clamp_content_to_monitor` 在非 Windows 是恒等函数——真正的屏幕钳制由 `.app` 用
-    /// `NSScreen.visibleFrame` 做，服务进程这边查不到 macOS 的显示器几何。
+    /// macOS 同样走这里：不画软阴影、扩边恒 0，`clamp_content_to_monitor` 在非 Windows 是恒等
+    /// 函数，真正的屏幕钳制由 `.app` 用 `NSScreen.visibleFrame` 做。
     #[cfg_attr(not(any(windows, ext_presenter)), allow(dead_code))]
     fn place_fixed(
         fixed: (i32, i32),
@@ -2150,18 +2085,12 @@ impl CandidateWindow {
         clamp_content_to_monitor(wx, wy, width, height, margin)
     }
 
-    /// 固定模式尚未设定位置时的默认锚点（**内容**左上屏幕坐标）。
+    /// 固定模式尚未设定位置时的默认锚点（内容左上屏幕坐标）。
     ///
-    /// 取**光标所在**显示器的工作区（用户在哪块屏打字就在哪块屏出现），水平居中、
-    /// 垂直落在约 3/4 高度处：贴底会和任务栏/其他浮动 UI 挤在一起，居中则挡住正文。
-    /// 内容高度不参与——顶端定在 3/4 处即可，超出底部由调用方的钳制拉回。
+    /// 取光标所在显示器的工作区（`rcWork`，自动落位避开任务栏），水平居中、顶端落在约 3/4
+    /// 高度处（贴底会与任务栏挤、居中会挡正文），超出底部由调用方的钳制拉回。
     ///
-    /// 这里用 `rcWork` 而非 `rcMonitor`：自动落位应避开任务栏，只有用户**手动拖动**
-    /// 才允许压到任务栏上。
-    ///
-    /// 非 Windows 退化为「就落在光标处」：服务进程查不到 macOS 的显示器几何（`.app` 才有
-    /// `NSScreen`），而这只影响「刚打开固定位置、还没拖过」这一瞬——窗口出现在光标旁，
-    /// 用户拖一次就定下来了。与其为此加一轮 IPC 往返，不如让首帧落在最不意外的地方。
+    /// 非 Windows 退化为落在光标处：服务进程查不到 macOS 的显示器几何，只影响还没拖过的那一瞬。
     #[cfg_attr(not(windows), allow(unused_variables))]
     fn default_fixed_anchor(caret_x: i32, caret_y: i32, width: u32) -> (i32, i32) {
         #[cfg(windows)]
@@ -2191,26 +2120,12 @@ impl CandidateWindow {
         (caret_x, caret_y)
     }
 
-    /// 据冻结光标锚点与当前内容尺寸计算候选窗位置，钳制在光标所在显示器工作区内。
-    /// 规则：
-    /// - 默认显示在光标下方（+gap）；下方空间不足则上翻到光标上方。
-    /// - 上方显示以"窗口底边贴近光标顶端"为参考：`above_y = caret_top - h - gap`，
-    ///   底边 = caret_top - gap 与高度无关 → 候选变少（h 减小）时顶边下移、底边不动，不会离光标变远。
-    /// - `sticky_above`=true（当前已在上方）时优先保持上方，仅当上方也放不下才回落下方，
-    ///   避免候选数量变化时上下抖动（需求 4）。
-    /// - 左右溢出则贴边（横向右方空间不足时允许左移，属位置保护的例外）。
-    ///
-    /// 返回 (x, y, above)：above=true 表示窗口被上翻到光标上方（供 flip_when_above 判定）。
-    ///
-    /// 仅「跟随光标」定位方式走这里；固定位置见 [`Self::place_fixed`]。
-    // 非 Windows 下窗口钳制为空实现，caret_h/w/h 及 x/y 的可变性仅 Windows 分支需要。
     #[cfg_attr(not(windows), allow(unused_variables, unused_mut))]
-    /// 候选窗相对光标的**锚点**计算（纯函数，不含屏幕钳制）：返回 `(x, below_y, above_y)`。
+    /// 候选窗相对光标的锚点计算（纯函数，不含屏幕钳制）：返回 `(x, below_y, above_y)`。
     ///
-    /// `caret_y` 为光标**底端**。下方锚点 = 底端 + gap；上方锚点以窗口底边贴光标顶端为参考。
-    /// 主题偏移 `off_y` 语义恒为「远离光标」：下方 **+**、上方 **−**。写成同号会让上翻时
-    /// 偏移把窗口压向光标，与配置意图相反——这是本函数存在的唯一理由（抽出来才测得到，
-    /// `place_window` 余下部分是 `#[cfg(windows)]` 的屏幕钳制，依赖真实显示器）。
+    /// `caret_y` 为光标底端。下方锚点 = 底端 + gap；上方锚点以窗口底边贴光标顶端为参考。
+    /// 主题偏移 `off_y` 语义恒为「远离光标」：下方 +、上方 −。抽成纯函数为了可测
+    /// （`place_window` 其余部分依赖真实显示器）。
     fn caret_anchors(
         caret_x: i32,
         caret_y: i32,
@@ -2224,26 +2139,14 @@ impl CandidateWindow {
         (caret_x + off_x, below_y, above_y)
     }
 
-    /// 按最终方位施加主题 Y 偏移：`off_y` 正值**恒为远离光标**——在下方就向下、
-    /// 在上方就向上。
+    /// 按最终方位施加主题 Y 偏移：`off_y` 正值恒为远离光标（在下方向下、在上方向上）。
     ///
-    /// ⚠️ 必须在**方位已定之后**调用，不能把偏移预先加进锚点：
-    /// `below_ok`/`above_ok` 是拿锚点跟工作区边界比出来的，锚点含偏移会让 off_y 越大
-    /// 两个条件越难成立 —— 本该上翻的场景被判成「上方也放不下」，落回下方分支再被钳到
-    /// `wa.bottom - hi`（贴屏幕底），窗口就压在光标上了。偏移只该改变距离，不该改变
-    /// 「往上还是往下」这个决策。
+    /// 必须在方位已定之后调用，不能预先加进锚点：锚点含偏移会让 `below_ok`/`above_ok` 越难
+    /// 成立，本该上翻的窗口落回下方被钳到屏幕底、压在光标上。偏移只改距离，不改方位决策。
     fn apply_offset_y(y: i32, above: bool, off_y: i32) -> i32 {
         if above { y - off_y } else { y + off_y }
     }
 
-    /// 跟随光标定位。`offset` 为主题 `window.position_offset`（设备像素，已 ×scale）。
-    ///
-    /// ⚠️ 偏移**必须在此函数内、锚点计算处注入**，不能在调用方给返回值加：
-    /// 下方那段 `rcWork` 越界兜底要在偏移之后跑，否则偏移能把窗口推出屏幕且再也钳不回来。
-    /// 上方锚点用**减号**——`off_y` 正值语义恒为「远离光标」，上翻时是向上推。
-    ///
-    /// 翻转/钳制整段在 `cfg(windows)` 内（靠 `GetMonitorInfoW` 取显示器边界），非 Windows
-    /// 直接返回下方锚点，于是那几个只服务于翻转的局部量在此平台无人读写。
     /// 皮肤避让：上下方位与偏移都定了之后，若窗体或装饰的不透明像素落进光标行保护带
     /// （`caret_y - caret_h .. caret_y`，上下各留 gap；横向范围已在 `mask` 里取好），把窗口沿
     /// 远离光标的方向逐像素推开到保护带清空为止。透明区越过光标行不算遮挡。
@@ -2289,6 +2192,18 @@ impl CandidateWindow {
         (ax - anchor.above.0, y)
     }
 
+    /// 跟随光标定位：据冻结光标锚点与当前内容尺寸计算候选窗位置，钳制在光标所在显示器工作区内。
+    /// `offset` 为主题 `window.position_offset`（设备像素，已 ×scale）。
+    /// - 默认显示在光标下方（+gap）；下方空间不足则上翻到光标上方。
+    /// - 上方以「窗口底边贴近光标顶端」为参考，底边与高度无关，候选变少时不会离光标变远。
+    /// - `sticky_above`=true 时优先保持上方，仅当上方也放不下才回落下方，避免上下抖动。
+    /// - 左右溢出则贴边。
+    ///
+    /// 返回 (x, y, above)：above=true 表示窗口被上翻到光标上方（供 flip_when_above 判定）。
+    /// 固定位置见 [`Self::place_fixed`]。
+    ///
+    /// 偏移必须在此函数内注入，不能在调用方给返回值加：`rcWork` 越界兜底要在偏移之后跑。
+    /// 翻转/钳制整段在 `cfg(windows)` 内，非 Windows 直接返回下方锚点（故有下面的 allow）。
     #[cfg_attr(not(windows), allow(unused_variables, unused_mut))]
     #[allow(clippy::too_many_arguments)]
     fn place_window(
@@ -2329,22 +2244,18 @@ impl CandidateWindow {
                     ..Default::default()
                 };
                 if GetMonitorInfoW(mon, &mut mi).as_bool() {
-                    // 垂直可用区：前台铺满**caret 所在这块屏**时任务栏不可见，按整屏算；
-                    // 否则照旧避开任务栏。全屏游戏下仍按 rcWork 算就白白少掉一条任务栏的高度
-                    // （实测 48px）：洛克王国 caret 底端 y=2024 时，rcMonitor 下方尚有 134px、
-                    // rcWork 只剩 86px，高度落在其间的候选窗被误判"放不下"而上翻，反过来遮住
-                    // 正在输入的那一行。
+                    // 垂直可用区：前台铺满 caret 所在这块屏时任务栏不可见，按整屏算，否则全屏
+                    // 游戏下会白少一条任务栏高度、误判放不下而上翻遮住输入行。
                     //
-                    // ⚠ 判据（含 DWM cloaked / shell 进程两道守卫）收口在 wind-keys，别在此重写：
-                    // 几何比较只是它的一半，那两道守卫才是它能用的原因。也**不能**改用
-                    // `foreground_fullscreen_kind() == Covering`——那个问的是"前台窗口自己那块屏"，
-                    // 而这里必须问 caret 所在那块屏：多屏下 A 屏的全屏游戏不会隐藏 B 屏的任务栏。
+                    // 判据（含 DWM cloaked / shell 进程两道守卫）收口在 wind-keys，别在此重写；
+                    // 也不能改用 `foreground_fullscreen_kind()`：那个问的是前台窗口自己那块屏，
+                    // 这里必须问 caret 所在那块屏。
                     let wa = if wind_keys::foreground::foreground_covers_monitor(&mi.rcMonitor) {
                         mi.rcMonitor
                     } else {
                         mi.rcWork
                     };
-                    // 可行性判定用**净锚点**（不含主题偏移）：偏移只该改变距离，
+                    // 可行性判定用净锚点（不含主题偏移）：偏移只该改变距离，
                     // 不该左右「往上还是往下」——含偏移会让 off_y 越大越容易判成两边都
                     // 放不下，落回下方再被钳到屏幕底、压住光标。
                     let below_ok = below_y + hi + cb <= wa.bottom;
@@ -2402,7 +2313,7 @@ impl CandidateWindow {
 
     /// 主题 `window.position_offset` + 用户偏移 → 设备像素 (x, y)。都未配=(0,0)，与旧行为一致。
     ///
-    /// 供边缘带装饰的主题拉开候选窗与光标的观感距离。**只喂给 place_window**——
+    /// 供边缘带装饰的主题拉开候选窗与光标的观感距离。只喂给 place_window——
     /// 固定位置与用户拖动是显式意图，再叠加会让窗口莫名偏离用户放的地方，
     /// 且会破坏拖动落盘的 window↔content 换算互逆性（见 place_fixed 一侧的坐标约定）。
     fn position_offset_px(&self) -> (i32, i32) {
@@ -2420,7 +2331,7 @@ impl CandidateWindow {
 
     /// 把插入符位置夹到合法字符边界。协调器发来的偏移与它自己的 preedit 同源、本应恒合法，
     /// 但 UI 与协调器是跨线程的两份状态（命令队列还会合并/丢弃），一旦错位 `split_at` 会
-    /// **panic 掉整个 UI 线程**。故在此收口：越界截到末尾，落在字符中间则退到前一个边界。
+    /// panic 掉整个 UI 线程。故在此收口：越界截到末尾，落在字符中间则退到前一个边界。
     fn clamp_caret(text: &str, caret: usize) -> usize {
         let mut c = caret.min(text.len());
         while c > 0 && !text.is_char_boundary(c) {
@@ -2641,10 +2552,8 @@ impl CandidateWindow {
 
     /// 下一次需要 [`Self::tick`] 的时刻；`None` = 无待到期者。
     ///
-    /// 消息循环据此安排唤醒。两个到期源：悬停激活闸门（`engage_at`，用户首次真实移动鼠标到
-    /// 候选窗上时武装，到期后悬停才开始响应；激活之后悬停走 `on_message` 即时发出，不再需要
-    /// 唤醒），以及右键压制「等菜单」阶段的兜底超时（见 [`TipHold::AwaitMenu`]）；另有隐藏后释放
-    /// 像素缓冲与皮肤装饰换帧。
+    /// 消息循环据此安排唤醒。到期源：悬停激活闸门（`engage_at`）、右键压制「等菜单」阶段的
+    /// 兜底超时（[`TipHold::AwaitMenu`]）、隐藏后释放像素缓冲、皮肤装饰换帧。
     pub fn next_deadline(&self) -> Option<std::time::Instant> {
         let m = self.mouse.borrow();
         let hold = match m.tip_hold {
@@ -2749,7 +2658,7 @@ pub struct CandidateMouse {
     /// 换算到当前扩边下，窗体才不随内容变化跳动。
     drag_pin_margin: (i32, i32),
     /// 当前阴影扩边 (left, top, right, bottom)，每帧渲染后由 `render_frame` 同步。
-    /// 窗口左上 + (left, top) = **内容**左上，即落盘用的坐标系；四个分量一起用于
+    /// 窗口左上 + (left, top) = 内容左上，即落盘用的坐标系；四个分量一起用于
     /// 按内容矩形做拖动钳制。
     margin: (i32, i32, i32, i32),
     /// 空白处双击判定（截图用，见 `UiEvent::CandidateDoubleClick`）。
@@ -2779,7 +2688,7 @@ pub struct CandidateMouse {
 /// [`crate::tooltip::LEAVE_GRACE_MS`] 同值——从候选行穿过空隙进入气泡要这么久。
 const TIP_GRACE: Duration = Duration::from_millis(crate::tooltip::LEAVE_GRACE_MS as u64);
 
-/// 气泡显示中、光标移到**另一个**候选的切换延迟。气泡在旁侧时，从候选 A 斜着去 A 的气泡
+/// 气泡显示中、光标移到另一个候选的切换延迟。气泡在旁侧时，从候选 A 斜着去 A 的气泡
 /// 会擦过相邻行 B；立刻切到 B，A 的气泡就被换掉、永远够不着。150ms 够手速正常地穿过一行
 /// （三四十像素），而在候选间正常移动时高亮只慢这么一点，不显得迟钝。比宽限短：去往另一个
 /// 候选多半是真想看它。
@@ -2875,15 +2784,10 @@ const HOLD_MENU_TIMEOUT: Duration = crate::popup_menu::MENU_REPLY_TIMEOUT;
 
 /// 候选窗右键对悬停气泡的压制（设计 §7.6 A）。
 ///
-/// 不压的话气泡会盖在菜单上：① 右键时气泡已显示，它不会自己消失；② 右键时激活延迟还没
-/// 到期，到期后照发 `Hover`，气泡在菜单弹出**之后**冒出来、叠在菜单上面（z 序后来者居上）。
+/// 不压的话气泡会盖在菜单上（已显示的不会自己消失；激活延迟到期后在菜单之后冒出来）。
 ///
-/// 做成阶段而不是一个布尔：右键到菜单可见之间，「菜单开着」还是 false，只靠它挡闸门的话，
-/// 这段来回里鼠标动 1px 就会重新武装闸门，到期时菜单已弹出，气泡照样叠上去；
-/// `ui.tooltip.delay=0` 时气泡甚至抢在菜单之前出来。
-///
-/// 只压气泡、不清悬停：悬停高亮还指着右键的那个候选，是「菜单作用于谁」的唯一提示。
-/// 清了（发 `Hover(-1)`）高亮会跳回键盘选中项，看上去像是菜单对着别的候选。
+/// 做成阶段而不是一个布尔：右键到菜单可见之间「菜单开着」还是 false，鼠标一动就会重新武装
+/// 闸门。只压气泡、不清悬停：悬停高亮是「菜单作用于谁」的唯一提示。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TipHold {
     /// 不压。
@@ -2935,9 +2839,8 @@ impl CandidateMouse {
     /// UI 循环每轮调用：推进右键压制阶段；悬停激活闸门到期则激活并补发当前悬停。
     ///
     /// `drawn_hover` 是 UI 此刻画着的悬停（`CandidateWindow::hover`，协调器最近一次下发的值）。
-    /// 解除压制时拿它而不是 `last_hover` 比：压制期间候选若重绘过（协调器重置悬停），
-    /// `last_hover` 还是旧值，与光标下的目标相等就不发 `Hover`，而 UI 画的已经是 -1，
-    /// 气泡便再也不回来。
+    /// 解除压制时拿它而不是 `last_hover` 比：压制期间候选若重绘过，`last_hover` 是旧值，
+    /// 会漏发 `Hover`，气泡便再也不回来。
     fn flush(&mut self, now: Instant, drawn_hover: i32) {
         self.tip_hold = self
             .tip_hold
@@ -3020,13 +2923,10 @@ impl CandidateMouse {
         }
     }
 
-    /// 重置悬停状态：清空闸门与去重值，并**以当前物理光标位重建基线**。
+    /// 重置悬停状态：清空闸门与去重值，并以当前物理光标位重建基线。
     ///
-    /// 两个调用点，职责不同，缺一不可：
-    /// - [`CandidateWindow::mark_visible`]（不可见 → 可见）：**基线在这里才有意义**。判据问的是
-    ///   「窗口出现之后鼠标动没动」，基准就必须取自窗口出现那一刻，见该函数的说明。
-    /// - [`CandidateWindow::hide`]：清掉闸门与残留悬停，使下一轮从未激活态起步。它顺带采的
-    ///   那次基线到下次显示时多半已经过时（用户在这期间移动了鼠标），**不能当作基线的来源**。
+    /// 两个调用点：[`CandidateWindow::mark_visible`]（基线在这里才有意义，见该函数）；
+    /// [`CandidateWindow::hide`]（清掉闸门与残留悬停，它顺带采的基线不能当作来源）。
     fn reset_hover(&mut self) {
         self.deferred = None;
         self.last_pos = None;
@@ -3223,7 +3123,7 @@ impl WindowMouse for CandidateMouse {
                     if let Some(pos) = self.window_origin() {
                         self.drag_pin = Some(pos);
                         self.drag_pin_margin = (self.margin.0, self.margin.1);
-                        // 上报**内容左上**（窗口左上 + 阴影扩边）：固定位置模式下协调器把它
+                        // 上报内容左上（窗口左上 + 阴影扩边）：固定位置模式下协调器把它
                         // 落盘成 custom_x/custom_y；跟随模式下协调器直接忽略——那里的拖动
                         // 只是"临时挪开"，下次组合仍回到光标旁。
                         let (cx, cy) =
@@ -3262,7 +3162,7 @@ impl WindowMouse for CandidateMouse {
                 let nx = self.drag_origin.0 + (p.x - self.drag_anchor.0);
                 let ny = self.drag_origin.1 + (p.y - self.drag_anchor.1);
                 let (w, h) = self.window_size();
-                // 按**内容**矩形钳制、且钳到整块屏幕：软阴影可溢出屏幕，候选窗也允许
+                // 按内容矩形钳制、且钳到整块屏幕：软阴影可溢出屏幕，候选窗也允许
                 // 摆到任务栏上方。用 clamp_to_work_area 会让内容离屏幕边还差一个阴影
                 // 宽（blur=8 的主题约 29px）就拖不动了。
                 let (cx, cy) = clamp_content_to_monitor(nx, ny, w, h, self.margin);
@@ -3689,7 +3589,7 @@ mod grid_tests {
         assert_eq!(hits.iter().filter(|(t, _)| *t >= 0 && *t < 100).count(), 6);
     }
 
-    /// 展开态宽度跟着当前可见内容走：滚到窄的一屏，窗口缩回（GH#256）。
+    /// 展开态宽度跟着当前可见内容走：滚到窄的一屏，窗口缩回。
     #[test]
     fn width_follows_visible_content_while_expanded() {
         let mut w = grid_win(3, 2, 0, &["一二三四五", "一", "一", "一", "一", "一"]);
@@ -3748,11 +3648,8 @@ mod min_size_tests {
 
     /// 造一个候选窗：`rows` 是行数下限，`w_dp`/`h_dp` 是窗口宽/高下限（dp）。
     ///
-    /// 宽高下限只灌进与 `vertical` 相符的那一项（另一方向留 0），顺带白嫖一份「读错方向」的
-    /// 回归覆盖：本模块几乎每条测试都会在 `min_window_w_px`/`min_window_h_px` 误读另一方向
-    /// 的字段（恒为 0）时失效下限而变红。
-    ///
-    /// `scale` 钉成 1.0 使 dp == 设备像素——断言里的数值才有确定含义（本机 DPI 会漂）。
+    /// 宽高下限只灌进与 `vertical` 相符的那一项（另一方向留 0），顺带覆盖「读错方向」的回归。
+    /// `scale` 钉成 1.0 使 dp == 设备像素。
     fn mk(vertical: bool, rows: u32, w_dp: u32, h_dp: u32, texts: &[&str]) -> CandidateWindow {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut w = CandidateWindow::new(CandidateWindowConfig::default(), tx).unwrap();
@@ -3807,7 +3704,7 @@ mod min_size_tests {
     const FIVE: &[&str] = &["一", "二", "三", "四", "五"];
     const THREE: &[&str] = &["一", "二", "三"];
 
-    // ────────────────── 只有模式徽标时的提示窗宽度（GH#127） ──────────────────
+    // ────────────────── 只有模式徽标时的提示窗宽度 ──────────────────
 
     /// 造一个「只有模式徽标、没有候选」的提示窗（刚进临时英文/临时拼音的那一帧）。
     fn hint(label: &str, min_w_dp: u32) -> CandidateWindow {
@@ -3825,14 +3722,8 @@ mod min_size_tests {
         s.chars().count() as f32 * w.theme.behavior.font_size as f32 * 0.6
     }
 
-    /// ★ GH#127 的**另一半**：那 12px 右留白在**宽度预算**段也得跟着条件化。
-    ///
-    /// 装配段（`trailing`）无候选时给 0，预算段却一直无条件加 `12 * s`——两边分叉的后果
-    /// 不是多出空白（方向反了，是少算可用宽），而是**超长编码提前一截被截断**：实测同一帧
-    /// 下窗宽 2988.4 而上限 3000，白白空掉 10.8px。只修装配段就只修好一半。
-    ///
-    /// 判据取「剩余空隙小于一个字符宽」而不是「宽度 == 上限」：截断按整字符走，量出来
-    /// 总比预算少小半个字。带 bug 时空隙 11.6px > 一个字宽（14×0.6=8.4），故这条会红。
+    /// 徽标的 12px 右留白在宽度预算段也须与装配段同条件（无候选时为 0），否则超长编码会提前
+    /// 一截被截断。判据取「剩余空隙小于一个字符宽」：截断按整字符走。
     #[test]
     fn hint_window_spends_its_whole_width_budget_on_a_long_preedit() {
         let long = "a'".repeat(200);
@@ -3850,7 +3741,7 @@ mod min_size_tests {
         let win_w = width_of(&w);
         let cap = w.screen_safety_max_width_px() as f32;
 
-        // 前置①：这一帧必须**已经被上限夹住**（再加长一倍宽度不变），否则下面的判据恒真。
+        // 前置①：这一帧必须已经被上限夹住（再加长一倍宽度不变），否则下面的判据恒真。
         let mut w2 = CandidateWindow::new(CandidateWindowConfig::default(), {
             let (tx2, _rx2) = std::sync::mpsc::channel();
             tx2
@@ -3878,14 +3769,8 @@ mod min_size_tests {
         );
     }
 
-    /// ★ GH#127：提示窗该紧贴文字，除了窗口自己的内边距不该再多出任何固定量。
-    ///
-    /// 修复前恒多 40.8px：无候选占位行把 `item_pad` 左右（10+8）连同那个撑高用的空格
-    /// （约 0.6 字宽）算进了行宽，模式徽标又带着「与后面候选拉开距离」的 12px 右留白 ——
-    /// 而这一帧后面根本没有候选。用户原话是「提示框右侧还有好多空白」。
-    ///
-    /// 判据写成等式而不是「差值一致」：多出来的是**固定量**，比较两个不同长度的徽标
-    /// 得到的差值在修复前后完全一样，那样的测试一个字都测不到。
+    /// 提示窗该紧贴文字，除了窗口内边距不该再多出固定量（占位行不计宽、无候选时徽标无右留白）。
+    /// 判据写成等式而不是「差值一致」：多出来的是固定量，差值比较测不到。
     #[test]
     fn mode_label_hint_window_hugs_its_text() {
         // 16 = 主题默认窗口内边距左右各 8（`window.padding` 的兜底值，scale=1）
@@ -3901,7 +3786,7 @@ mod min_size_tests {
         }
     }
 
-    /// 占位行的本职不能丢：提示窗的**高度**仍须与「有一条候选」时一致。
+    /// 占位行的本职不能丢：提示窗的高度仍须与「有一条候选」时一致。
     ///
     /// 它存在的唯一理由就是这个（刚进临英时窗口不要比随后出候选时矮一截）。
     /// 只盯着宽度改，很容易顺手把整行删掉 —— 那样宽度是对了，窗口却开始忽高忽低。
@@ -3919,7 +3804,7 @@ mod min_size_tests {
         );
     }
 
-    /// 用户显式配了候选窗最小宽度时，仍以配置为准（紧贴文字只是**没配**时的默认）。
+    /// 用户显式配了候选窗最小宽度时，仍以配置为准（紧贴文字只是没配时的默认）。
     #[test]
     fn configured_min_width_still_wins_on_hint_window() {
         let w = hint("英", 300);
@@ -3950,11 +3835,8 @@ mod min_size_tests {
 
     // ─────────────────────────── 行数下限（min_rows） ───────────────────────────
 
-    /// ★ 核心判据：补出的占位行必须与真实候选行**完全等高**。
-    ///
-    /// 「补了行、窗口变高了」是自动成立的废话；只有「3 条候选 + 2 空行 ≡ 5 条真实候选」
-    /// 才锁得住占位行装配不全（漏序号节点、漏 item.margin）导致的「矮一截」——那种缺陷
-    /// 的表现是窗口仍在抖、只是抖得小一点，肉眼很难认定为 bug。
+    /// 补出的占位行必须与真实候选行完全等高：「3 条候选 + 2 空行 ≡ 5 条真实候选」才锁得住
+    /// 占位行装配不全（漏序号节点、漏 item.margin）。
     #[test]
     fn padded_rows_equal_real_rows_in_height() {
         let full = measured(&win(true, 5, FIVE)).1;
@@ -3964,10 +3846,8 @@ mod min_size_tests {
 
     /// 占位行的文本属性必须逐项镜像真实候选行。
     ///
-    /// ★ 这条测的是等高性测试**测不到**的那一半：mock 文本后端只按字号估算、不区分字族与
-    /// 字重，占位行漏掉 `font_family` 时 `padded_rows_equal_real_rows_in_height` 照样全绿；
-    /// 而真实 DirectWrite 的行高取自该字族的 line metrics（宋体约 1.17em、雅黑约 1.33em），
-    /// 漏配就会让占位行矮一截。测量断言在此无能为力，只能从结构上比对。
+    /// 补等高性测试测不到的那一半：mock 后端不区分字族与字重，而真实后端行高取自字族
+    /// line metrics，只能从结构上比对。
     #[test]
     fn placeholder_row_mirrors_real_row_text_attrs() {
         let mut w = win(true, 5, THREE);
@@ -4102,11 +3982,8 @@ mod min_size_tests {
         assert_eq!(wide, plain);
     }
 
-    /// ★★ 本次重构的核心判据：下限量的是**窗口**，候选自身的宽度与位置一概不动。
-    ///
-    /// 旧实现（`min_width_chars_*`）把下限打在每个候选行容器的 `min_w` 上，横排时每格都被
-    /// 撑宽、格间距成倍放大——用户要的是「窗口大小不变」，不是「每个候选都变宽」。故这里
-    /// 逐条比对候选的命中矩形：配下限前后 x/w 必须逐位相等，多出来的宽度只能留在右侧空着。
+    /// 下限量的是窗口，候选自身的宽度与位置一概不动：配下限前后候选命中矩形的 x/w 逐位相等，
+    /// 多出来的宽度只能留在右侧空着。
     #[test]
     fn min_window_width_keeps_candidates_in_place() {
         let plain = laid(&mk(false, 0, 0, 0, &["字", "词"]), false);
@@ -4123,10 +4000,10 @@ mod min_size_tests {
         }
     }
 
-    /// ★ 竖排例外：候选行本就 `fill_cross`（高亮宽度统一），窗口被撑宽后高亮须跟着铺满，
+    /// 竖排例外：候选行本就 `fill_cross`（高亮宽度统一），窗口被撑宽后高亮须跟着铺满，
     /// 否则高亮只占左边一截、右侧空一块，观感比抖动更糟。
     ///
-    /// 与上一条不矛盾：铺满的是**行背景**，行内的序号/文字/注释仍按内容左对齐。
+    /// 与上一条不矛盾：铺满的是行背景，行内的序号/文字/注释仍按内容左对齐。
     #[test]
     fn vertical_highlight_fills_widened_window() {
         let root = laid(&mk(true, 0, 400, 0, &["字"]), false);
@@ -4147,7 +4024,7 @@ mod min_size_tests {
 
     /// 下限量的是整行内容（序号 + 文字 + 注释），注释在下限内时不得改变窗口宽度。
     ///
-    /// 真机实测出来的缺口：注释模板含拆字/编码/注音，宽度变化比候选文字本身还大。
+    /// 注释模板含拆字/编码/注音时，宽度变化比候选文字本身还大。
     #[test]
     fn min_window_width_covers_comment_segment() {
         let plain = measured(&win_c(true, 300, &[("字", "")])).0;
@@ -4174,11 +4051,8 @@ mod min_size_tests {
         assert_eq!(one, three);
     }
 
-    /// ★ 横排下限与竖排下限互不影响——两种排布的可用横向空间差一个数量级，共用一个值时
-    /// 调宽了竖排就顶得横排太松，调紧了横排就不够竖排用。
-    ///
-    /// 只灌一侧字段（另一侧留 0）后按**另一个**方向渲染：若 `min_window_w_px()` 读错了方向
-    /// （例如恒读 horizontal），这里会把本该跟随内容的渲染错锁成定宽。
+    /// 横排下限与竖排下限互不影响。只灌一侧字段后按另一个方向渲染：`min_window_w_px()` 读错
+    /// 方向时会把本该跟随内容的渲染错锁成定宽。
     #[test]
     fn horizontal_and_vertical_min_width_are_independent() {
         // 只配横排下限，竖排渲染时该下限不得生效。
@@ -4231,8 +4105,8 @@ mod min_size_tests {
         assert_eq!(clamped, plain);
     }
 
-    /// ★★ 高度下限存在的理由：`min_rows` 只数候选行，**翻页栏**的出现/消失它管不着
-    /// （用户真机反馈的正是这一处），窗口总高照样跳。窗口级下限把它一并罩住。
+    /// 高度下限存在的理由：`min_rows` 只数候选行，翻页栏的出现/消失它管不着，窗口总高照样跳。
+    /// 窗口级下限把它一并罩住。
     ///
     /// 前置断言不可省：若默认主题下翻页栏根本不显示，后半段就成了恒等式（假绿）。
     #[test]
@@ -4256,7 +4130,7 @@ mod min_size_tests {
         );
     }
 
-    /// ★★ 窗口翻到光标上方时，高度富余必须补在**顶部**。
+    /// 窗口翻到光标上方时，高度富余必须补在顶部。
     ///
     /// 上方显示时底边贴光标，空白压在下面会把候选整体顶离光标，位置反而随内容抖动——
     /// 正是本功能要消除的东西。与 min_rows 的占位行「反转时补顶部」同一判据。
@@ -4367,7 +4241,7 @@ mod min_size_tests {
 
 /// 翻页栏并入「编码所在行」（`ui.candidate.pager_in_preedit`）。
 ///
-/// 这个开关的诉求只有一句：**竖排时别让翻页栏白占一行**。但编码有两种形态，落点因此有两处：
+/// 这个开关的诉求只有一句：竖排时别让翻页栏白占一行。但编码有两种形态，落点因此有两处：
 /// 独立编码栏（`candidate_top`）并进栏行右端，内联编码（`candidate_inline`）并进编码自己那一行。
 /// 本组钉的是「两种形态表现一致」，以及三条不该被波及的旁路（横排 / 旋转态 / 开关关闭）。
 ///
@@ -4377,17 +4251,15 @@ mod min_size_tests {
 #[path = "candidate_window_pager_inline_tests.rs"]
 mod pager_inline_tests;
 
-/// 宽度上限：**整棵树**都不得超过屏幕安全上限。
+/// 宽度上限：整棵树都不得超过屏幕安全上限。
 ///
-/// ★ 与 [`min_size_tests`] 不同，本组**不 gate 平台**——断言的是不等式（行宽 ≤ 上限）而非
-/// 具体像素值，与文本后端量出多宽无关，故真实 DirectWrite 与 mock 下同样成立。上限也不写死
-/// 常量，直接取 `screen_safety_max_width_px()`。本组不走渲染入口，`screen_extent` 恒为 None，
-/// 各平台都按兜底常量（3000dp）断言，不涉真实屏幕宽。
+/// 不 gate 平台：断言的是不等式而非具体像素值。上限取 `screen_safety_max_width_px()`；本组
+/// 不走渲染入口，`screen_extent` 恒为 None，按兜底常量断言。
 #[cfg(test)]
 #[path = "candidate_window_width_budget_tests.rs"]
 mod width_budget_tests;
 
-/// 竖排「主词条优先」宽度分配（论坛 t271）：注释过长时让步的是注释，不是候选文字。
+/// 竖排「主词条优先」宽度分配：注释过长时让步的是注释，不是候选文字。
 /// 分配规则见 `build_tree` 里竖排那一支的注释。mock 后端等宽（0.6em），只用几何断言。
 #[cfg(test)]
 #[path = "candidate_window_vertical_comment_budget_tests.rs"]
@@ -4395,12 +4267,8 @@ mod vertical_comment_budget_tests;
 
 /// 方案级候选字体（`[candidate] font_family`）的接线。
 ///
-/// ⚠️ **必须 gate 到 Windows**：断言的是「换了字族宽度就变」，而非 Windows 的 mock
-/// 后端明写「字重/字体族不影响等宽近似测量，只取字号」（`text/dwrite.rs` 的 mock `measure`）
-/// ⇒ Linux CI 上 `assert_ne!` 两边相等直接红，而本机 Windows 全绿看不见。
-/// 同组的 `assert_eq!` 那条在 Linux 上更糟——它**恒真**、是条假绿。
-/// 这正是本仓「test 跑 Linux、clippy 交叉编 Win」那条分工的典型踩法，
-/// 先例见 `text/dwrite.rs` 的 `font_plan_tests`。
+/// 必须 gate 到 Windows：断言的是「换了字族宽度就变」，而 mock 后端测量不看字族（`assert_ne!`
+/// 会红、`assert_eq!` 恒真）。先例见 `text/dwrite.rs` 的 `font_plan_tests`。
 ///
 /// 旋转那三条留在 `width_budget_tests` 里不动：它们只用几何、mock 下同样成立。
 #[cfg(all(test, windows))]
@@ -4433,7 +4301,7 @@ mod schema_font_tests {
         root.measured_size().0
     }
 
-    /// ★ 覆盖真的作用到排版上；空串 = 不覆盖。
+    /// 覆盖真的作用到排版上；空串 = 不覆盖。
     ///
     /// 反向对照不可少：只断言「变了」的话，一个「无条件套用覆盖」的实现在空串下也会改字体。
     #[test]
@@ -4444,7 +4312,7 @@ mod schema_font_tests {
         assert_ne!(base, overridden, "方案级字族没作用到排版上");
     }
 
-    /// ★★ 覆盖只作用于**候选文字**：编码栏由 preedit 决定，宽度不得受影响。
+    /// 覆盖只作用于候选文字：编码栏由 preedit 决定，宽度不得受影响。
     #[test]
     fn override_does_not_touch_the_preedit_bar() {
         // 长编码 + 短候选：窗口宽度由编码栏决定。
@@ -4509,10 +4377,9 @@ mod truncate_text_tests {
         );
     }
 
-    /// ★ 预算被行内其它成员吃光（≤0）时语义是**截到最短**，不是「不截断」。
+    /// 预算被行内其它成员吃光（≤0）时语义是截到最短，不是「不截断」。
     ///
-    /// 反向写法（早退返回原文）会让「预算耗尽」变成「完全放开」，把溢出放大而不是收敛——
-    /// 正是它此前被 `.max(20*s)` 地板掩盖着没暴露。
+    /// 反向写法（早退返回原文）会让「预算耗尽」变成「完全放开」，把溢出放大而不是收敛。
     #[test]
     fn non_positive_budget_truncates_to_minimum() {
         let w = win();
@@ -4567,7 +4434,7 @@ mod truncate_text_tests {
         );
     }
 
-    /// ★ 测量样式必须与渲染叶子同构：字重/字族归一化规则照抄 `View::font_weight`（>0 才生效）
+    /// 测量样式必须与渲染叶子同构：字重/字族归一化规则照抄 `View::font_weight`（>0 才生效）
     /// 与 `View::font_family`（非空才生效）。少一条就是两套样式，预算按一种字体算、排版按另一
     /// 种走，差值累积成窗口右侧留白或右缘溢出。
     #[test]
@@ -4604,7 +4471,7 @@ mod water_fill_tests {
         assert_eq!(got, vec![100.0, 200.0, 50.0]);
     }
 
-    /// ★ 核心性质：短需求原样保留，**把没用完的份额让给长需求**，而不是一刀切均分。
+    /// 核心性质：短需求原样保留，把没用完的份额让给长需求，而不是一刀切均分。
     ///
     /// 均分会给长的 600/3=200，water-filling 给到 400——这正是「1 条长整句 + 8 个短词」
     /// 这个最常见场景里两者的观感差别。
@@ -4622,7 +4489,7 @@ mod water_fill_tests {
         assert_eq!(a, vec![400.0, 100.0, 100.0]);
     }
 
-    /// ★ 不溢出保证：只要 total ≥ 0 且不触发 floor，`Σ result ≤ total` **与项数无关**。
+    /// 不溢出保证：只要 total ≥ 0 且不触发 floor，`Σ result ≤ total` 与项数无关。
     /// 这正是贪心（先到先得 + 下限）给不了的性质——那种做法下第一项吃光预算，
     /// 后面每项仍各自加上「固定开销 + 文字下限」，累加必然突破上限。
     #[test]
@@ -4672,10 +4539,8 @@ mod tests;
 
 /// 主题节点字族的存在性检查接线。
 ///
-/// ⚠️ **只在 mock 后端下编译**：`family_exists` 在 Windows 上要问系统字体集、在 CoreText 上
-/// 尚未实现，两边都没有 `asked_families()` 这个读回口。而「有没有真的去问」正是这条链唯一
-/// 钉得住的一半——它此前整个不存在，主题里把字族名写错只表现为「字体不对」，日志里一个字
-/// 都没有。
+/// 只在 mock 后端下编译：只有 mock 有 `asked_families()` 读回口，而「有没有真的去问」正是这条
+/// 链钉得住的一半。
 #[cfg(all(test, mock_text))]
 mod theme_font_check_tests {
     use super::*;
@@ -4724,7 +4589,7 @@ mod theme_font_check_tests {
     }
 }
 
-/// 字体名解析的接线（看板 A2-1）：旧 GDI face name 在**每个**字体入口都换成 family + 字重。
+/// 字体名解析的接线：旧 GDI face name 在每个字体入口都换成 family + 字重。
 ///
 /// 只在 mock 后端下编译，理由同上：它靠 `set_mock_families` 注入「系统字体集」。
 #[cfg(all(test, mock_text))]
@@ -4806,9 +4671,8 @@ mod font_name_resolve_tests {
         assert_eq!(v.text.font_weight, 600);
     }
 
-    /// 靶机复现（维护者实测「字重无效」）：主题「Switch风格」给 `[text]` 写了 500、
-    /// `[text.selected]` 写了 700，用户 `ui.font.weight = 900` 对候选文字一个字都不生效。
-    /// 用户字重直接覆盖主题里所有节点（含选中等状态）写了的字重。
+    /// 用户字重直接覆盖主题里所有节点（含选中等状态）写了的字重：主题给 `[text]` 写 500、
+    /// `[text.selected]` 写 700 时，用户 `ui.font.weight = 900` 也必须生效。
     #[test]
     fn user_weight_overrides_every_theme_weight() {
         let mut w = win();
@@ -4966,7 +4830,7 @@ mod font_precedence_tests {
         );
     }
 
-    /// ★ 用户字体非空：全部节点（不只候选文字）的主题字族都让位，叶子回落全局字族（=用户字体）。
+    /// 用户字体非空：全部节点（不只候选文字）的主题字族都让位，叶子回落全局字族（=用户字体）。
     #[test]
     fn user_tier_beats_theme_on_every_node() {
         let mut w = win(themed());
@@ -5154,9 +5018,8 @@ mod comment_color_tests;
 
 // 上方注释条（`CandidateItem.comment_above`，设计 candidate-comment-above-line.md §3.3）。
 //
-// ⚠️ host 上文本测量是 mock 近似（字宽 0.6em、行高只看字号），下面凡涉及尺寸的断言都写成
-// 相对关系（等高、同一 x、差值 == 某叶子外框），不钉像素——它们测的是**盒模型结构**，
-// 真实后端下结构不变、关系照样成立。唯一只在 mock 下成立的前提见各测试注释。
+// host 上文本测量是 mock 近似，下面凡涉及尺寸的断言都写成相对关系（等高、同一 x、差值 ==
+// 某叶子外框），测的是盒模型结构。唯一只在 mock 下成立的前提见各测试注释。
 #[cfg(test)]
 #[path = "candidate_window_comment_above_tests.rs"]
 mod comment_above_tests;

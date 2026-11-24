@@ -7,7 +7,7 @@
 //! my/main.dict.yaml   引用资源
 //! ```
 //! 三分类:用户目录命中→打包;系统目录命中→记 system 引用;均无→记 missing。
-//! 「系统目录」是**一组**(`system_dirs`),按层序 `data_custom > data`——定制版自带的方案
+//! 「系统目录」是一组(`system_dirs`),按层序 `data_custom > data`——定制版自带的方案
 //! 与出厂方案同类:导出时一并打包(自包含),删除时永不触碰。
 //! 不再使用 bundle 层 manifest(方案文件自身已含 id/版本等大部分信息)。
 use std::collections::HashSet;
@@ -22,29 +22,22 @@ pub const PACKAGE_META_NAME: &str = "package.toml";
 /// 当前实现支持的分发包格式版本(写进导出的 package.toml,导入按此门禁)。
 pub const PACKAGE_FORMAT_VERSION: u32 = 2;
 
-/// 包内配置片段条目名(根条目)。**按名识别、不落盘**:它不是方案资源,写进 schemas
+/// 包内配置片段条目名(根条目)。按名识别、不落盘:它不是方案资源,写进 schemas
 /// 目录只会多一个死文件。文本随 [`SchemeImportPreview::config_patch`] 上浮,应用编排
 /// 在设置端(导入方案文件 → `config.applyPatch`),文件层不复刻片段管线的热重载与镜像回灌。
 pub const CONFIG_PATCH_NAME: &str = "config_patch.toml";
 
 /// 包内条目数上限。
 ///
-/// 真实方案包是「一个方案文件 + 几个词库/字体」，几十个条目顶天；两千是给
-/// 「一个包带多套混输子方案」留的余量，同时挡掉「中央目录里几十万个空条目」
-/// 那种只为把导入端拖死的构造。
+/// 真实方案包几十个条目顶天；两千给多套混输子方案留余量，同时挡掉只为拖死导入端的构造。
 pub const MAX_PACKAGE_ENTRIES: usize = 2000;
 
-/// 包内解压后**总**字节上限。
-///
-/// 与文本信封的 2 MB 不是一个量级、也不该是：信封的定位就是「小方案」，而大词库
-/// 走的正是 .wpkg（极点五笔全量词库就是几十 MB）。256 MiB 对任何真实方案包都绰绰
-/// 有余，同时把 zip 炸弹挡在把服务进程撑爆之前。
+/// 包内解压后总字节上限。大词库走的正是 .wpkg（可达几十 MB），故远大于文本信封的 2 MB；
+/// 256 MiB 对真实方案包绰绰有余，同时挡住 zip 炸弹。
 pub const MAX_PACKAGE_UNCOMPRESSED_BYTES: u64 = 256 * 1024 * 1024;
 
-/// `package.toml` / `config_patch.toml` 这类**文本**条目的单条上限。
-///
-/// 它们是手写 TOML，KB 量级；单独给一个小上限，免得走总额那条时要先把几百 MB
-/// 读进来才发现不对。取值与文本信封的 `MAX_TEXT_BYTES` 对齐。
+/// `package.toml` / `config_patch.toml` 这类手写文本条目的单条上限，与文本信封的
+/// `MAX_TEXT_BYTES` 对齐。
 const MAX_TEXT_ENTRY_BYTES: u64 = 2 * 1024 * 1024;
 
 /// 缺 format_version 字段的包一律视为 legacy v1(该字段出现之前的产物)。
@@ -77,10 +70,8 @@ pub struct PackageInfo {
     pub created_at: String,
     /// 包级说明标题(单行)。缺省即空串,导入端显示"未知"。
     ///
-    /// ⚠️ 这与包内 `config_patch.toml` 自带的 `[package]` 说明**不合并**:包级说的是
-    /// "这个分发包是什么",片段级说的是"这段配置改了什么",两级不是同一件事。
-    /// 导入确认对话框各显各的(包级在顶部,片段级在"将修改的配置"区块),
-    /// 不做合并也不做优先级判定。
+    /// 与包内 `config_patch.toml` 自带的 `[package]` 说明不合并:包级说「这个分发包是什么」,
+    /// 片段级说「这段配置改了什么」,导入确认对话框各显各的。
     #[serde(default)]
     pub title: String,
     /// 包级说明正文(可多行)。与 [`Self::title`] 同源同校验,同样不与片段级说明合并。
@@ -103,9 +94,8 @@ impl Default for PackageInfo {
 
 /// 校验并归一 `[package]` 的说明元信息(title/description)。
 ///
-/// **复用 wind-config 的同一份实现**——三种载体(片段 / 分发包 `package.toml` /
-/// 文本信封)同名同义,各写一份净化迟早分叉。失败是与 `format_version` 门禁同层的
-/// 硬错误:说明会直接渲染进 UI,写坏了该在分发前暴露,不静默截断也不静默丢弃。
+/// 复用 wind-config 的同一份实现(片段 / `package.toml` / 文本信封三种载体同名同义)。
+/// 失败是与 `format_version` 门禁同层的硬错误:说明直接渲染进 UI,不静默截断或丢弃。
 pub(crate) fn sanitize_package_info(info: &mut PackageInfo) -> anyhow::Result<()> {
     info.title =
         wind_config::patch::sanitize_title(&info.title).map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -153,46 +143,28 @@ enum Located {
     Missing,
 }
 
-/// 方案文件里写下的相对路径**安全可用**吗（不逃出 schemas 根）。
+/// 方案文件里写下的相对路径安全可用吗（不逃出 schemas 根）。
 ///
-/// # 这道守卫为什么必须在这里
+/// [`crate::bundle::validate_entry_rel`] 只校验归档条目名，而方案文件内容（`dictionaries[].path`、
+/// `engine.chaizi.db_path` / `font_path`、`shuangpin.layout`、`engine.mixed.*_schema`）同样是
+/// 包带进来的外来数据，会被 `user_dir.join()` 当路径用。没有这道守卫，写 `../victim.txt` 的
+/// 方案会在删除时删掉 user_dir 之外的文件、导出时把它打进包。
 ///
-/// [`crate::bundle::validate_entry_rel`] 此前是全 crate 唯一的穿越守卫，而它只校验
-/// **归档条目名**（zip 的 file name / 信封的 `files[].path`）。方案文件一旦落盘就被当成
-/// 「本机配置」，可它其实是同一个包带进来的**同一份外来数据**——`dictionaries[].path`、
-/// `engine.chaizi.db_path` / `font_path`、`shuangpin.layout`、`engine.mixed.*_schema`
-/// 全是包作者写的字符串，全都会被 `user_dir.join()` 当路径用。
-///
-/// 少了这道守卫的实测后果（2026-08-22，三条腿都跑过真实代码）：一个条目名完全干净、
-/// 只含 `evil.schema.toml` 的包，内容写 `[[dictionaries]] path = "../victim.txt"`，
-/// 装上之后
-/// - **删除该方案** → `../victim.txt` 被 `remove_file` 掉（user_dir 之外的任意文件）；
-/// - **导出该方案** → 该文件内容被打进 .wpkg（而导出的包正是要发给别人的）。
-///
-/// 判据直接复用 `validate_entry_rel`（所有组件必须是 `Component::Normal` 且不含 `:`，
-/// 顺带覆盖 `..`、绝对路径、`C:name` 这类驱动器相对路径）——**不另写一份**：两份谓词
-/// 迟早漂移，而漂移的那一半就是洞。只取它的 Ok/Err，归一化后的返回值刻意丢弃：
-/// 那会改写 `plan.pack` 里的 rel 字符串（`\` → `/`），是与本次修复无关的行为变化。
+/// 判据直接复用 `validate_entry_rel`，不另写一份（两份谓词迟早漂移）。只取 Ok/Err，归一化后的
+/// 返回值刻意丢弃，以免改写 `plan.pack` 里的 rel 字符串。
 fn is_safe_rel(rel: &str) -> bool {
     crate::bundle::validate_entry_rel(rel, "").is_ok()
 }
 
-/// 定位一个方案资源。**不安全的 rel 一律当 Missing**——调用方据此记进 `plan.missing`
-/// 并告警，既不打包也不删除。
+/// 定位一个方案资源。不安全的 rel 一律当 Missing（调用方记进 `plan.missing`，既不打包也不删除）。
 ///
-/// `system_dirs` 是**按层序排列的一组**系统 schemas 目录（`data_custom` 在前、`data` 在后）。
-/// 只传 data 层的话，定制版里只存在于 `data_custom` 的方案会被判成 `Missing`——导出得到一个
-/// 装不回去的空包，删除则连引用都记不上。定制层归 `System` 而不是 `User` 是刚性的：同一个
-/// `locate` 也服务删除路径，判成 `User` 就等于允许程序删 `data_custom` 里的文件（破不变量
-/// 「程序永不写 data_custom」）。
+/// `system_dirs` 是按层序排列的一组系统 schemas 目录（`data_custom` 在前、`data` 在后），漏传
+/// 定制层会把定制版方案判成 `Missing`。定制层归 `System` 而不是 `User` 是刚性的：同一个
+/// `locate` 也服务删除路径，判成 `User` 就等于允许程序删 `data_custom` 里的文件。
 fn locate(rel: &str, user_dir: &Path, system_dirs: &[PathBuf]) -> Located {
     if !is_safe_rel(rel) {
-        // 归到 Missing 而不是静默丢弃：调用方会把它记进 `plan.missing`，那条通道本来
-        // 就是「这个引用没解析到」的出口，且一路上送到设置页的缺失清单——用户看到的是
-        // `../victim.txt` 这么一行，本身已经足够指认问题。
-        //
-        // 刻意**不**在这里打日志：本 crate 至今零日志依赖，为一行 warn 引入 tracing
-        // 不划算，而 `missing` 已经承担了同样的可见性。
+        // 归到 Missing 而不是静默丢弃：`plan.missing` 会一路上送到设置页的缺失清单，已足够
+        // 指认问题。不在这里打日志：本 crate 零日志依赖。
         return Located::Missing;
     }
     let u = user_dir.join(rel);
@@ -210,10 +182,8 @@ fn locate(rel: &str, user_dir: &Path, system_dirs: &[PathBuf]) -> Located {
 
 /// `wubi86/x.dict.yaml` → `wubi86/x.wdat`（包内相对路径版）。
 ///
-/// 与 `wind_dict::cached::wdat_sibling` 是同一套命名约定（剥掉整个 `.dict.yaml`），但
-/// **刻意不复用它**：那个函数走 `Path`，Windows 上会把分隔符规范化成 `\`；而包内相对
-/// 路径必须保持 `/`——zip 规范如此，跨平台导入也依赖它。故这里做纯字符串处理，原样
-/// 保留分隔符。两处若要改约定需同步。
+/// 与 `wind_dict::cached::wdat_sibling` 同一套命名约定，但不复用它：那个走 `Path`，Windows
+/// 上会把分隔符规范化成 `\`，而包内相对路径必须保持 `/`。两处若要改约定需同步。
 fn wdat_rel(rel: &str) -> Option<String> {
     let stem = rel
         .strip_suffix(".dict.yaml")
@@ -223,9 +193,8 @@ fn wdat_rel(rel: &str) -> Option<String> {
 
 /// 资源定位：先按 `rel` 本身找，未命中再按 wdat-only 约定找同名 `.wdat`。
 ///
-/// 返回**实际命中的相对路径**——wdat-only 时它被改写成 `.wdat`。这一步不能省：包内按
-/// 相对路径直存，若仍记 `.dict.yaml`，导入端就会还原出一个名为 yaml、内容却是二进制的
-/// 文件，两头都读不了。
+/// 返回实际命中的相对路径（wdat-only 时改写成 `.wdat`），否则导入端会还原出名为 yaml、
+/// 内容却是二进制的文件。
 ///
 /// 非词库资源（字根字体、shuangpin toml 等）不受影响——`wdat_sibling` 对非 yaml 后缀
 /// 返回 `None`，直接落回原结果。
@@ -282,9 +251,7 @@ fn read_override_value(
     };
     // id 同样来自方案文件内容（`engine.mixed.*_schema`），照样要过守卫。
     //
-    // 当前调用序上这里已经安全了——`collect_into` 先 `locate(&schema_rel)` 且 Missing 即
-    // 早退，而那道守卫已经把 id 校验过一遍。但那是**调用顺序**给的保证，不是本函数的
-    // 契约；顺序一旦被人调整，这里就成了第二个出口。两行的代价换掉这份耦合。
+    // 当前调用序上 `collect_into` 已先校验过，但那是调用顺序给的保证，不是本函数的契约。
     if !is_safe_rel(&format!("{id}.toml")) {
         anyhow::bail!("非法方案 id（越界路径）: {id}");
     }
@@ -512,26 +479,20 @@ pub fn export_package(
     })
 }
 
-/// 枚举包内载荷条目(排除 package.toml、目录项),逐条过穿越守卫。
-/// 校验根下至少一个 `*.schema.toml`;对备份包/旧格式给出针对性错误。
-///
-/// 版本门禁在它调用的 [`read_package_meta`] 里,恒先于本函数的布局校验——更高版本的包
-/// 布局可能已变,先报"版本过高"比报"不是有效的方案包"对得上真实原因。同理它也先于
-/// 说明校验(说明字段的规则同样可能已变)。
 /// 包内一个载荷条目。
 ///
 /// `name` = zip 条目原名(取字节只能用它);`rel` = 归一化后的 schemas 相对路径
-/// (落盘、判根、取 id 只能用它)。两者仅在条目名含 `\` 的非规范包里不同——zip 规范
-/// 要求分隔符是 `/`,但确有打包器写反斜杠。混用其一即错:拿原名落盘会在类 Unix 平台
-/// 造出名字带字面 `\` 的文件,拿归一化名回查 zip 则找不到条目。
+/// (落盘、判根、取 id 只能用它)。两者仅在条目名含 `\` 的非规范包里不同,混用其一即错。
 pub(crate) struct PayloadEntry {
     pub name: String,
     pub rel: String,
 }
 
-/// 枚举包内条目,返回(落盘载荷条目, 根 `config_patch.toml` 的 zip 原名)。
+/// 枚举包内条目(排除 package.toml、目录项),逐条过穿越守卫,返回(落盘载荷条目, 根
+/// `config_patch.toml` 的 zip 原名)。校验根下至少一个 `*.schema.toml`;对备份包/旧格式给出
+/// 针对性错误。版本门禁在 [`read_package_meta`] 里,恒先于布局校验与说明校验。
 ///
-/// config_patch 按名识别后**从载荷里摘出去**:它既不进 will_add/conflicts,也不参与
+/// config_patch 按名识别后从载荷里摘出去:它既不进 will_add/conflicts,也不参与
 /// 「根下有没有 *.schema.toml」的判定(纯配置包由设置端的侦测规则 3 分派,不走这里),
 /// 更不会被 `import_package` 写进 schemas 目录。
 ///
@@ -550,11 +511,8 @@ fn scan_package_with_limit(
     let meta = read_package_meta(package)?;
     let file = std::fs::File::open(package)?;
     let mut archive = zip::ZipArchive::new(file)?;
-    // 规模门禁：条目数与声明总大小都只读**中央目录**，不解压任何内容，故排在逐条
-    // 校验之前——限额要挡的正是「先把整个包处理一遍再说它太大」那份开销。
-    //
-    // ⚠️ 这里读的「解压后大小」是归档**自己声明的**，撒谎的包骗得过它。真正的界画在
-    // `import_package` 的逐条有界读取上（`extract_entry_limited`），本段只是廉价前筛。
+    // 规模门禁：只读中央目录、不解压，故排在逐条校验之前。这里的大小是归档自己声明的，
+    // 骗得过；真正的界在 `import_package` 的逐条有界读取（`extract_entry_limited`）。
     if archive.len() > MAX_PACKAGE_ENTRIES {
         anyhow::bail!(
             "方案包条目过多({} 个,上限 {MAX_PACKAGE_ENTRIES})",
@@ -608,7 +566,7 @@ fn scan_package_with_limit(
     Ok((entries, config_patch_name))
 }
 
-/// 读取包内可选元信息,并按序做**版本门禁 → 说明校验**两道检查。
+/// 读取包内可选元信息,并按序做版本门禁 → 说明校验两道检查。
 ///
 /// 解析的宽容度(宽容只给过去,不给未来):
 /// - `package.toml` 不存在 → 回落默认值(导入不强制元信息,兼容手工打包);
@@ -616,10 +574,8 @@ fn scan_package_with_limit(
 ///   静默回落会把 format_version 当 legacy 处理,等于绕过版本门禁;
 /// - 解析失败且无该字段(或根本不是 TOML)→ 回落默认值(legacy 宽容,现状不变)。
 ///
-/// **两道检查的先后不可换**:更高版本的包,说明字段的规则也可能已放宽,拿当前规则去判
-/// 它本身就是错的;且「版本过高,请升级」对得上真实原因,「title 过长」只会把人带偏。
-/// 这与 [`scan_package`] 文档里「门禁先于布局校验」是同一条原则,信封路径
-/// (`envelope::parse`)也是同一顺序——两条路必须同判据。
+/// 两道检查的先后不可换:更高版本的包说明规则可能已变,「版本过高,请升级」才对得上真实原因。
+/// 信封路径(`envelope::parse`)必须同一顺序。
 pub fn read_package_meta(package: &Path) -> anyhow::Result<PackageMeta> {
     // 有界读取：package.toml 是手写 TOML，KB 量级。读不出来（不存在 / 超上限）一律
     // 回落默认值——超大的 package.toml 只可能是构造出来的，而 legacy 宽容语义本就是
@@ -687,7 +643,7 @@ pub fn preview_import(package: &Path, user_dir: &Path) -> anyhow::Result<SchemeI
     Ok(build_preview(meta, &rels, user_dir, config_patch))
 }
 
-/// 取包内配置片段原文。按 **zip 原名**读——归一化后的名字回查 zip 会找不到条目。
+/// 取包内配置片段原文。按 zip 原名读——归一化后的名字回查 zip 会找不到条目。
 fn read_config_patch(package: &Path, name: Option<&str>) -> anyhow::Result<Option<String>> {
     let Some(name) = name else {
         return Ok(None);
@@ -759,7 +715,7 @@ pub fn import_package_with_limit(
     // 读取阶段:全部载荷入内存,任何缺条目/坏条目在写盘前失败。
     // 取字节按 zip 原名,落盘按归一化 rel——见 [`PayloadEntry`]。
     let mut staged: Vec<(String, Vec<u8>)> = Vec::new();
-    // 逐条**有界**读取，且预算是整包共享的余额——这才是真正的界：`scan_package` 那道
+    // 逐条有界读取，且预算是整包共享的余额——这才是真正的界：`scan_package` 那道
     // 前筛读的是归档自己声明的大小，撒谎的包骗得过它（声明 1 KB、解压 10 GB）。
     let mut remaining = max_uncompressed;
     for e in &entries {
@@ -800,8 +756,8 @@ pub(crate) fn write_staged(
         }
         let tmp = target.with_extension("windinput.tmp");
         std::fs::write(&tmp, bytes)?;
-        // 包里可以只带 sidecar `.wdat`(见 `wdat_rel`),而那种词库是**直接走
-        // `wind_dict::reader_pool` 打开**的——正在运行的引擎手里可能还攥着指向旧内容的
+        // 包里可以只带 sidecar `.wdat`(见 `wdat_rel`),而那种词库是直接走
+        // `wind_dict::reader_pool` 打开的——正在运行的引擎手里可能还攥着指向旧内容的
         // mmap。池的 `(大小, mtime)` 判据在「大小不变 + 同一 mtime 刻度」时认不出替换,
         // 故这里也要走替换协议。守卫圈住「先删后 rename」整段。
         let replacing = wind_dict::reader_pool::is_pooled(&target)
@@ -856,15 +812,9 @@ pub fn delete_package(
     let mut deleted = Vec::new();
     let mut kept_shared = Vec::new();
     let mut deleted_rels: HashSet<String> = HashSet::new();
-    // ★★ 「在 user_dir 之下吗」必须**规范化之后**再比。
-    //
-    // `Path::starts_with` 是**组件前缀**比较且不做任何规范化：`user_dir/../../x` 的组件
-    // 序列以 user_dir 打头，它恒返回 true，随后 `remove_file` 把 `..` 交给操作系统解析——
-    // 守卫等于不存在。实测（2026-08-22）：方案里写 `path = "../victim.txt"`，删方案时
-    // user_dir 之外的那个文件确实被删掉了。
-    //
-    // 上游 `is_safe_rel` 已经把越界 rel 挡在 plan 之外，这里是**纵深第二道**：删除不可逆，
-    // 值得两道。canonicalize 失败即 bail 而不是继续——拿不准就别删。
+    // 「在 user_dir 之下吗」必须规范化之后再比：`Path::starts_with` 是组件前缀比较，
+    // `user_dir/../../x` 恒返回 true。上游 `is_safe_rel` 已挡掉越界 rel，这里是纵深第二道
+    // （删除不可逆）。canonicalize 失败即 bail，拿不准就别删。
     let user_root = user_dir
         .canonicalize()
         .map_err(|e| anyhow::anyhow!("无法规范化用户方案目录 {}: {e}", user_dir.display()))?;

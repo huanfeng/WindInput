@@ -51,7 +51,7 @@ fn text_state(sel: bool, hov: bool) -> wind_theme::TextState {
 
 /// 右侧注释实际显示的内容。`merge_above`（旋转 / 直立态）不支持上方注释条（设计
 /// candidate-comment-above-line.md §3.3），上段以 `\n` 接回下段之前，内容不丢；否则原样借用
-/// `comment`——上方条关闭或该候选无上段时一律走借用，与改动前逐字节一致。
+/// `comment`。
 fn right_comment(c: &CandidateItem, merge_above: bool) -> Cow<'_, StyledText> {
     if !merge_above || c.comment_above.is_empty() {
         Cow::Borrowed(&c.comment)
@@ -65,25 +65,17 @@ fn right_comment(c: &CandidateItem, merge_above: bool) -> Cow<'_, StyledText> {
     }
 }
 
-/// 换行可见符 U+21B5（`↵`）。取编辑器通用约定（VS Code 等显示换行即此符），
-/// 而非 Control Pictures 区的 `␊`/`␤`——后者字形是小方框里塞 `LF` 字母，
-/// 候选窗字号下几乎认不出，且部分中文字体不覆盖该区段。
+/// 换行可见符 U+21B5（`↵`），编辑器通用约定。不用 Control Pictures 区的 `␊`/`␤`：
+/// 候选窗字号下认不出，且部分中文字体不覆盖。
 const NEWLINE_GLYPH: char = '\u{21B5}';
 
-/// 制表可见符 U+21E5（`⇥`）。与换行分用不同符号：两者在文本里的语义不同，
-/// 混用一个符号等于告诉用户「这儿有个空白」却不说是哪种。
+/// 制表可见符 U+21E5（`⇥`），与换行区分。
 const TAB_GLYPH: char = '\u{21E5}';
 
-/// 把候选文本里的换行/制表符替换为可见符号，**仅供显示**。
+/// 把候选文本里的换行/制表符替换为可见符号，仅供显示；上屏仍走含真换行的原文。
 ///
-/// `Candidate::text` 本身不动——上屏走的仍是含真换行的原文。两者必须分开：
-/// 显示要的是「看得见有个换行」，上屏要的是「真的换行」。
-///
-/// 不这么做的后果不是「看不见」而是「排版坏掉」：DirectWrite 的 `CreateTextLayout`
-/// 把 `\n` 当硬换行，`TextRenderer::measure` 于是返回 N 倍行高，而 `view.rs` 的盒模型
-/// 按内容高布局 → 该候选被撑成多行、整个候选窗变高且行高参差。
-///
-/// CRLF 只出一个符号（不是两个）——它在用户眼里就是一个换行。
+/// 不替换会排版坏掉：文字后端把 `\n` 当硬换行，测出 N 倍行高，候选被撑成多行。
+/// CRLF 只出一个符号。
 fn visible_whitespace(s: &str) -> Cow<'_, str> {
     if !s.contains(['\n', '\r', '\t']) {
         return Cow::Borrowed(s); // 快路径：绝大多数候选无空白控制符，零分配
@@ -150,9 +142,7 @@ fn without_pinyin_hint(src: &StyledText) -> StyledText {
 
 /// 主题翻页字符 → 实际绘制的文本：未配（空串）时用内置箭头。
 ///
-/// 仅空串算「未配」，空白字符不算——主题作者用 `prev_char = " "` 表达的是「这里留白」，
-/// 不能被当成未配置而悄悄换回 ‹ ›。（编辑器那条路进不来这种值：它 trim 后空串即存 undefined，
-/// 手写 toml 才配得出来。）
+/// 仅空串算「未配」，空白字符不算：`prev_char = " "` 表达的是「这里留白」。
 ///
 /// 只管「字符档画什么」，不管要不要走字符档——箭头图优先，见调用点。
 fn arrow_char<'a>(configured: &'a str, builtin: &'a str) -> &'a str {
@@ -229,9 +219,8 @@ pub struct CandidateSceneOptions {
     pub pager_in_preedit: bool,
     /// 翻页栏显示覆盖（""跟随主题/"hide"/"auto"/"always"）。来自 ui.candidate.pager_bar_display。
     ///
-    /// **横竖各一份**（`.0`＝横排、`.1`＝竖排）：协调器按 `ByLayout` 下发两档，这边按
-    /// `vertical` 取。⚠️ 旋转态的 `vertical` 是 false ⇒ 落横排那份，与候选注释
-    /// 模板的分档口径一致（见 `wind-config` 的 `comment_max_chars`）。
+    /// 横竖各一份（`.0`＝横排、`.1`＝竖排），按 `vertical` 取。旋转态的 `vertical` 是 false，
+    /// 落横排那份，与候选注释模板的分档口径一致（见 `wind-config` 的 `comment_max_chars`）。
     pub pager_display: (String, String),
     /// 页码文字显示覆盖（""跟随主题/"show"/"hide"）。来自 ui.candidate.page_number_display。
     /// 横竖各一份，口径同 [`Self::pager_display`]。
@@ -327,12 +316,10 @@ impl SceneFrame {
 impl CandidateSceneInput<'_> {
     /// 当前排版方向（`self.vertical`）下生效的窗口最小宽度（设备像素；0=不限）。
     ///
-    /// ★ 按 `self.vertical`（用户配置的排布）取，不按 `list_vertical`（候选列表**物理**是否
-    /// 竖排列——无候选时强制横排提示行）：提示态也要延续用户配置的排布方向，否则从
-    /// 「只有模式徽标」到「出候选」的那一刻窗口仍会按另一套下限跳一下。
+    /// 按用户配置的 `self.vertical` 取，不按 `list_vertical`（无候选时强制横排）：否则从
+    /// 「只有模式徽标」到「出候选」窗口会按另一套下限跳一下。
     ///
-    /// 两个消费者共用本函数（`build_tree` 施加到根容器、[`CandidateScene::layout`] 对抗主题
-    /// `behavior.vertical_max_width` 上限），避免两处各算一套而分叉。
+    /// `build_tree`（施加到根容器）与 [`CandidateScene::layout`]（对抗竖排宽度上限）共用本函数。
     pub fn min_window_w_px(&self) -> u32 {
         let dp = if self.vertical {
             self.opts.min_window_width_vertical
@@ -352,20 +339,11 @@ impl CandidateSceneInput<'_> {
         CandidateScene::dp_to_px(dp, self.scale)
     }
 
-    /// 内容宽度的**屏幕安全上限**（设备 px，恒生效，不受排布方向/主题配置影响）。
+    /// 内容宽度的屏幕安全上限（设备 px，恒生效）。
     ///
-    /// 与 `behavior.vertical_max_width`（主题的美观类上限，默认 0=不限、仅竖排生效）是两回事：
-    /// 那个可以关，这个不能关——它是最后一道防线，防止异常长候选（比如超长拼音产生的候选）把
-    /// 窗口撑出显示器边界，届时 `place_window`/`clamp_content_to_monitor` 就算把位置钳回屏内，
-    /// 窗口本身也已经宽到放不下、必然探出另一侧。
-    ///
-    /// 有 [`Self::screen_extent_px`]（Windows：窗口侧查当前候选窗所在显示器的工作区，精确、
-    /// 随屏幕/DPI 动态变化）就取它的宽。
-    ///
-    /// 没有（非 Windows：本地服务进程查不到系统显示器几何（真正的屏幕钳制在 `.app` 侧用
-    /// `NSScreen.visibleFrame` 做，但那只管窗口**位置**、不管内容**宽度**——见
-    /// [`crate::sys::clamp_content_to_monitor`] 文档））就退化为一个保守的固定安全值兜底：
-    /// 不追求精确，只保证不会出现「宽到完全没法用」的窗口。
+    /// 与主题的 `behavior.vertical_max_width`（美观类、可关）不同，这是最后一道防线：窗口宽过
+    /// 屏幕后，定位再怎么钳也必然探出一侧。有 [`Self::screen_extent_px`] 就取工作区宽；没有
+    /// （非 Windows 查不到显示器几何）退化为保守的固定值。
     /// TODO: 后续应通过 IPC 把 `.app` 侧的真实屏幕宽度传回来，替换这个兜底常量。
     pub fn screen_safety_max_width_px(&self) -> u32 {
         const FALLBACK_SAFETY_DP: u32 = 3000;
@@ -375,14 +353,11 @@ impl CandidateSceneInput<'_> {
         }
     }
 
-    /// **局部排版横轴**在屏幕上对应那条边的可用长度（设备像素）。
+    /// 局部排版横轴在屏幕上对应那条边的可用长度（设备像素）。旋转态下是屏幕高度：文字沿
+    /// 屏幕纵向延伸。
     ///
-    /// ★★ 旋转态下局部宽度 = 屏幕**高度**：候选文字沿屏幕纵向延伸，拿屏幕宽度当上限，
-    /// 长候选会长到屏幕外——而这道钳制恒生效，正是为了防这件事。
-    ///
-    /// 与 [`Self::screen_safety_max_width_px`] 分成两个函数而不是加个参数：那三个调用点钳的是
-    /// **窗口在屏幕上的宽度**（旋转态下同样是宽度，不该跟着翻），本函数给的是**文字预算的轴**。
-    /// 同名同参只会让下一个人在两种语义间随手挑一个。
+    /// 与 [`Self::screen_safety_max_width_px`] 分开：那个钳窗口在屏幕上的宽度（旋转态不翻），
+    /// 本函数给的是文字预算的轴。
     pub fn local_text_extent_px(&self) -> u32 {
         if !self.rotated {
             return self.screen_safety_max_width_px();
@@ -394,27 +369,11 @@ impl CandidateSceneInput<'_> {
         }
     }
 
-    /// 按目标像素宽度截断文本：超出则截到刚好放得下「前缀+…」的最长前缀，未超出原样返回。
+    /// 候选文字的截断。直立态与其余形态量的不是同一根轴，故单开一层分派。
     ///
-    /// 只用于**显示层**（候选文字/编码栏）——截的是渲染用的显示副本，不改 `self.candidates`/
-    /// `self.preedit` 本身，选中上屏、退格删字等仍走未截断的原文，不受影响。
-    ///
-    /// 按像素二分而非按字符数：汉字宽、字母窄，字符数相同不代表像素宽度相同（`max_chars` 那条
-    /// 按字符数截断的路径是另一回事，见 `wind-config` 的 `truncate_display`）。
-    ///
-    /// `style` 必须由 [`CandidateScene::measure_style`] 按目标叶子的字族/字重构造，理由见该函数。
-    ///
-    /// ⚠️ `max_w <= 0`（预算被行内其它成员吃光）语义是**截到最短**（1 字 + …），不是「不截断」：
-    /// 后者与预算耗尽的含义正好相反，会把溢出放大而非收敛。
-    /// 候选文字的截断。直立态与其余形态**量的不是同一根轴**，故单开一层分派。
-    ///
-    /// ★ 直立态每个字是一格逆时针扶正的单元，它沿排布方向占的是**字的高度**（行高），
-    /// 不是字的前进宽度。直接复用 [`Self::truncate_text_for_width`] 会按横向宽度估容量：
-    /// 汉字两者接近（差 ~20%），拉丁差 2 倍以上（前进宽 ~0.5em、行高 ~1.2em）——
-    /// 表现是「英文候选在对联模式下戳出屏幕外」，而中文候选看着完全正常。
-    ///
-    /// ⚠️ 不能把判据塞进 [`Self::truncate_text_for_width`] 本身：编码栏与模式徽标也调它，
-    /// 而它们**没有**被切成格，量的仍是横向宽度。
+    /// 直立态每格沿排布方向占的是字的高度（行高），不是前进宽度；按宽度估容量时拉丁会差
+    /// 2 倍以上而戳出屏幕。判据不能塞进 [`Self::truncate_text_for_width`]：编码栏与模式徽标
+    /// 也调它，它们没被切成格。
     pub fn truncate_candidate_text(&self, text: &str, style: &TextStyle, max_w: f32) -> String {
         if !self.upright {
             return self.truncate_text_for_width(text, style, max_w);
@@ -423,8 +382,7 @@ impl CandidateSceneInput<'_> {
         if cells.is_empty() {
             return String::new();
         }
-        // 逐格量高度而不是「格数 × 行高」：回退字体的 line metrics 不同，行高会随内容变，
-        // 而这里必须与 View 实际排出来的一致（预算按一种算、排版按另一种走 = 溢出）。
+        // 逐格量高度而不是「格数 × 行高」：回退字体的行高不同，必须与 View 实际排版一致。
         let extent = |cs: &[&str]| -> f32 {
             cs.iter()
                 .map(|c| self.text_renderer.measure(c, style).height)
@@ -445,7 +403,7 @@ impl CandidateSceneInput<'_> {
         out
     }
 
-    /// 候选正文（带分段）的截断：放得下原样返回；放不下时若带模糊音提示，**整段去掉全部提示**
+    /// 候选正文（带分段）的截断：放得下原样返回；放不下时若带模糊音提示，整段去掉全部提示
     /// 再按原逻辑截正文——提示要么完整、要么不在，不会截出 `(pi…`。截断走
     /// [`Self::truncate_candidate_text`]（结果恒为「前缀 + …」），区间随 `cut_with_mark` 一起裁。
     pub fn truncate_candidate_styled(
@@ -468,7 +426,7 @@ impl CandidateSceneInput<'_> {
         src.cut_with_mark(shown.len() - '…'.len_utf8(), "…")
     }
 
-    /// 带样式文本**逐行**按宽截断（`\n` 分行，每行各自 [`Self::truncate_text_for_width`]），
+    /// 带样式文本逐行按宽截断（`\n` 分行，每行各自 [`Self::truncate_text_for_width`]），
     /// 颜色区间随 `cut_with_mark` 一起裁。全部放得下返回 `None`（调用方沿用原文、不分配）。
     ///
     /// 逐行而非整段：竖排注释模板可以写 `\n` 排成多行，整段二分会在首行超长时把后面几行
@@ -498,12 +456,18 @@ impl CandidateSceneInput<'_> {
         changed.then(|| StyledText::join(&parts, "\n"))
     }
 
+    /// 按目标像素宽度截断文本：超出则截到刚好放得下「前缀+…」的最长前缀，未超出原样返回。
+    ///
+    /// 只用于显示层，截的是显示副本；上屏、退格仍走原文。按像素二分而非字符数（按字符数截断
+    /// 是 `wind-config` 的 `truncate_display`）。`style` 必须由 [`CandidateScene::measure_style`]
+    /// 按目标叶子构造。
+    ///
+    /// `max_w <= 0`（预算被行内其它成员吃光）语义是截到最短（1 字 + …），不是「不截断」。
     pub fn truncate_text_for_width(&self, text: &str, style: &TextStyle, max_w: f32) -> String {
         if text.is_empty() {
             return String::new();
         }
-        // 半像素容差：不同后端的浮点连乘可能让「恰好等宽」冒出几个 ulp 的误差，
-        // 卡在预算边界上的文字不该只因这点误差被多裁一个字——差半像素肉眼分不出来。
+        // 半像素容差：浮点误差不该让恰好等宽的文字被多裁一个字。
         const WIDTH_EPS: f32 = 0.5;
         if max_w > 0.0 && self.text_renderer.measure(text, style).width <= max_w + WIDTH_EPS {
             return text.to_string();
@@ -610,16 +574,11 @@ impl CandidateSceneInput<'_> {
 
     /// 单个翻页箭头占的宽度：基线（字号 + 左右 padding）与实测文本宽取大。
     ///
-    /// **两个消费点必须共用这一份**：pager 装配处给按钮定宽，`pager_node_w()` 给同一行的
-    /// 编码/候选扣预留宽度。此前装配处 `fixed_w(arrow_w)`、预算处手写同一个公式，两份各自
-    /// 正确；一旦按文本撑开（主题可以把 prev_char 写成多字，schema 不限长）还各写各的，
-    /// 多字箭头下预算就比真实翻页栏窄，`pager_row_w` 的两个消费点都会算漏 —— 竖排内联
-    /// 编码那条的注释早写明「否则超长编码会把翻页栏顶出窗口右缘」，横排 water-filling 则
-    /// 是候选多分了宽度。
+    /// 两个消费点必须共用这一份：pager 装配处给按钮定宽，`pager_node_w()` 给同一行的编码/
+    /// 候选扣预留宽度。各算一套时多字箭头（`prev_char` 不限长）会让预算比真实翻页栏窄。
     ///
-    /// 走图标档时实际宽恒为基线，这里仍按文本算 → 预算只会偏大几像素，不会算漏；为省这点
-    /// 去重算一遍 `arrow_icon` 的资产解析不划算。
-    /// `fs` 由调用处给出（字号是 `build_tree` 内按 base_fs + scale 算的，此处拿不到）。
+    /// 走图标档时实际宽恒为基线，这里仍按文本算，预算只会偏大几像素。
+    /// `fs` 由调用处给出（字号在 `build_tree` 内算）。
     pub fn arrow_slot_w(
         &self,
         txt: &str,
@@ -645,34 +604,14 @@ impl CandidateSceneInput<'_> {
         crate::theme_assets::rv_gradient(g)
     }
 
-    /// 编码栏文本节点（含插入符）。
+    /// 直立态：把一段文本拆成逐格扶正的单元；其余形态原样返回一个叶子。
     ///
-    /// 插入符走 `View::caret_at` 的覆盖层语义：文本作为**整串**一次整形，宽度与光标位置无关，
-    /// 故移动光标不会让编码位移。曾把文本拆成「前半 + 竖线 + 后半」三节点，因
-    /// `measure(a+b) != measure(a)+measure(b)`（字距在拆分边界丢失 + 每段各自舍入）、
-    /// 且拆分点随光标而变，导致整串宽度抖动、字符跟着晃。
-    /// `max_w`：显示层截断预算（设备 px）——超长编码（如超长拼音打字缓冲）按此宽度截断加省略
-    /// 号，不影响 `self.preedit`/`self.preedit_caret` 本身。`caret_at` 自身会把插入符位置钳到
-    /// 截断后字符串的合法边界内（见 `View::caret_at`），故截断字符串后原样传入光标位置即可，
-    /// 不需要额外调整。
-    /// 直立态：把一段文本拆成**逐格扶正**的单元；其余形态原样返回一个叶子。
+    /// 凡是落在旋转包裹层内部的文本节点（候选、注释、模式徽标、内联编码）一律逐格扶正，
+    /// 拉丁也不例外，否则同一列里出现两种阅读方向。例外是序号，整块扶正（纵中横）。
+    /// 独立编码栏在包裹层外面，不走它。
     ///
-    /// # 为什么注释、模式徽标、内联编码也要走它
-    ///
-    /// 旋转态是「**一切**都转」，自洽；直立态里若只有候选文字扶正、注释仍躺着，
-    /// 同一列里就出现了两种阅读方向——真机反馈的原话是「看不懂」。
-    /// ⇒ **凡是落在旋转包裹层内部的文本节点，一律逐格扶正**，拉丁也不例外。
-    ///
-    /// 唯一例外是序号：它整块扶正（「10」横着读，日文排版称 tate-chu-yoko）。
-    /// 单位数下两种做法完全相同，多位数下横读才是纵排里数字的常规排法。
-    ///
-    /// ⚠️ 独立编码栏（非内联）**不**走它：那一栏在旋转包裹层**外面**，本就没转过。
-    ///
-    /// `leaf(片段, 该片段内的 caret 字节位, 该片段在整串里的字节偏移)` 由调用方构造——各处的
-    /// 字号/字重/字族/颜色都不同，把它们全收成参数会得到一个七参数函数。不切格时偏移为 0。
-    ///
-    /// 偏移是给分段颜色用的：着色区间按整串的字节偏移给出，逐格切开后每格要取落在自己范围内的
-    /// 那几段、平移到格内偏移（[`crate::text::ColorRun::slice`]）。
+    /// `leaf(片段, 片段内 caret 字节位, 片段在整串里的字节偏移)` 由调用方构造；偏移供分段
+    /// 着色平移区间（[`crate::text::ColorRun::slice`]），不切格时为 0。
     pub fn upright_text(
         &self,
         text: &str,
@@ -704,6 +643,12 @@ impl CandidateSceneInput<'_> {
         row
     }
 
+    /// 编码栏文本节点（含插入符）。
+    ///
+    /// 插入符走 `View::caret_at` 的覆盖层语义：文本整串一次整形，移动光标不会让编码位移
+    /// （拆成「前半 + 竖线 + 后半」三节点会因字距与舍入让整串宽度抖动）。
+    /// `max_w` 是显示层截断预算（设备 px）；`caret_at` 会把插入符钳到截断后的合法边界内。
+    ///
     /// `upright` = 本节点落在旋转包裹层内部（内联编码），需要逐格扶正。
     /// 独立编码栏传 `false`：它在包裹层外面，本就没转过。
     pub fn preedit_view(&self, fs: f32, max_w: f32, upright: bool) -> View {
@@ -721,8 +666,7 @@ impl CandidateSceneInput<'_> {
         let weight = v.preedit_bar.font_weight;
         let family = v.preedit_bar.font_family.clone();
         let caret_w = self.scale.max(1.0);
-        // 直立态逐格切时 caret 由 `upright_text` 分派到它落进的那一格；转完是格间的一条
-        // **横**线，正是纵排里插入符该有的样子。整块不切时行为与此前逐字节一致。
+        // 直立态逐格切时 caret 由 `upright_text` 分派到它落进的那一格，转完是格间的一条横线。
         let build = |seg: &str, caret: Option<usize>, _off: usize| {
             let mut leaf = View::leaf(seg.to_string(), color)
                 .font_size(fs)
@@ -751,16 +695,11 @@ impl CandidateScene {
         (dp as f32 * scale).ceil().max(1.0) as u32
     }
 
-    /// 构造与 [`crate::view::View`] 叶子**完全同构**的测量样式。
+    /// 构造与 [`crate::view::View`] 叶子完全同构的测量样式。
     ///
-    /// ★ 测量与渲染必须用同一套样式，否则宽度不是一个数：`View::text_style()` 取的是叶子上
-    /// 挂的 `font_family`/`font_weight`，主题配了 `[text] font_family`、或候选选中加粗
-    /// （`[item.selected].font_weight`）时，用 `TextStyle::new(size)`（默认字族 + 细体）
-    /// 算出来的预算会系统性偏离实际排版宽度——预算按细体算、排版按粗体走，差值累积成窗口
-    /// 右侧留白或右缘溢出。
-    ///
-    /// 归一化规则照抄 `View::font_weight`（`>0` 才生效）与 `View::font_family`（非空才生效），
-    /// 少一条就还是两套样式。
+    /// 测量与渲染必须用同一套样式（含字族、字重），否则预算系统性偏离实际排版宽度，累积成
+    /// 右侧留白或溢出。归一化规则照抄 `View::font_weight`（`>0` 才生效）与 `View::font_family`
+    /// （非空才生效）。
     pub fn measure_style(fs: f32, weight: i32, family: Option<&str>) -> TextStyle<'_> {
         TextStyle {
             family: family.filter(|s| !s.trim().is_empty()),
@@ -769,19 +708,12 @@ impl CandidateScene {
         }
     }
 
-    /// 最大最小公平分配（water-filling）：把总额 `total` 分给 `demands`，需求低于均分份额的
-    /// **原样满足**、把没用完的份额让给需求大的，需求大的平分剩余。返回与 `demands` 等长同序
-    /// 的分配结果，`floor` 是每项最低保障。
+    /// 最大最小公平分配（water-filling）：需求低于均分份额的原样满足，余量让给需求大的，
+    /// 需求大的平分剩余。返回与 `demands` 等长同序的分配，`floor` 是每项最低保障。
     ///
-    /// ★ 为什么横排必须用它而不是「先到先得」的贪心：每个候选除文字外还有一份**无条件计入**的
-    /// 固定开销（item 内边距 / 序号 / 注释 / 候选间隙），贪心下第一个候选吃光预算后，后面每个
-    /// 候选仍各自加上「固定开销 + 文字下限」，累加必然突破任何上限——真机实测 9 个候选溢出约
-    /// 1100px。本函数保证：只要 `total >= 0` 且不触发 `floor`，`Σ result ≤ total` 恒成立，
-    /// **与项数无关**，这正是贪心给不了的性质。
-    ///
-    /// `floor` 触发时（固定开销本身已超预算）总和可能超出 `total`——那是无解情形下的取舍：
-    /// 宁可溢出被裁掉，也不能少显示候选（选中键位与协调器下发的候选列表绑定，少一个会让用户
-    /// 按 8 选到错的词）。
+    /// 横排不能用先到先得的贪心：每个候选还有无条件计入的固定开销，贪心下累加必然突破上限。
+    /// 本函数保证不触发 `floor` 时 `Σ result ≤ total`，与项数无关。`floor` 触发时总和可能超出
+    /// ——宁可溢出被裁，也不能少显示候选（选择键与候选列表绑定）。
     pub fn water_fill(demands: &[f32], total: f32, floor: f32) -> Vec<f32> {
         let n = demands.len();
         if n == 0 {
@@ -796,8 +728,7 @@ impl CandidateScene {
             let share = remaining / (n - k) as f32;
             let give = demands[i].min(share).max(floor);
             out[i] = give;
-            // 扣**实际给出**的量（而非未经 floor 的理论份额）：floor 生效时余额要跟着少，
-            // 否则后面各项会按虚高的余额再算份额，超额层层放大。
+            // 扣实际给出的量（含 floor），否则后面各项按虚高的余额算份额，超额层层放大。
             remaining = (remaining - give).max(0.0);
         }
         out
@@ -805,13 +736,10 @@ impl CandidateScene {
 
     /// 两个「上方专属」开关的最终生效判定（纯函数）：返回 `(反转候选, 交换编码/候选带)`。
     ///
-    /// `flip_when_above` **只对竖排成立**：竖排下候选沿光标方向纵向排开，"反转"= 让候选 1
-    /// 落到离光标最近的一侧，语义明确；横排下候选是左右并列，反转只是把 1..n 变成 n..1，
-    /// 读序被打乱且与窗口在上在下毫无关系（同 `inline_preedit_bottom` 对横排的处置）。
-    /// `swap_preedit_when_above` 交换的是编码带与候选带的**上下**位置，横竖排都成立，不受此限。
+    /// `flip_when_above` 只对竖排成立（让候选 1 落到离光标最近的一侧；横排反转只会打乱读序）。
+    /// `swap_preedit_when_above` 交换编码带与候选带的上下位置，横竖排都成立。
     ///
-    /// 抽成纯函数是为了让「重建视图树的触发条件」与「build_tree 内的实际派生」共用同一份
-    /// 判据：否则横排开了 flip 时外层仍会每帧重建一棵与原树完全相同的树，白付 build+layout。
+    /// 抽成纯函数让「重建视图树的触发条件」与 build_tree 内的派生共用同一份判据。
     pub fn above_layout(above: bool, vertical: bool, flip: bool, swap: bool) -> (bool, bool) {
         (above && vertical && flip, above && swap)
     }
@@ -890,25 +818,19 @@ impl CandidateScene {
         let (ml, _, mr, _) = margins;
         let (w_f, h_f) = root.measured_size();
         let mut content_w = (w_f.ceil() as u32).max(40);
-        // 竖排最大宽度（behavior.vertical_max_width，单位 dp，默认 0=不限）：仅在用户/主题
-        // 显式配置正值时生效。本 View 引擎不支持文本折行，超宽候选在窗口右缘裁切（draw_text
-        // 按缓冲宽度裁剪，无省略号）——下面的屏幕安全上限是恒生效的另一道独立防线，两者不是
-        // 同一回事。
+        // 竖排最大宽度（behavior.vertical_max_width，dp，0=不限）：仅显式配置正值时生效，
+        // 不折行、超宽在右缘裁切。与下面恒生效的屏幕安全上限是两道独立防线。
         if inp.vertical && !inp.candidates.is_empty() {
             let vmax = inp.theme.behavior.vertical_max_width;
             if vmax > 0 {
                 // 单位 dp，换算复用 dp_to_px（与 min_window_width_* 等字段同一套算法）。
                 let vmax_px = Self::dp_to_px(vmax as u32, inp.scale).max(40);
-                // 下限优先于上限：用户显式配的抗抖动宽度不该被主题的裁切上限压回去。
-                // 见 [`CandidateSceneInput::min_window_w_px`]（未配 min 时该值为 0，行为不变）。
+                // 下限优先于上限：用户配的最小宽度不该被主题的裁切上限压回去。
                 content_w = content_w.min(vmax_px.max(inp.min_window_w_px()));
             }
         }
-        // 屏幕安全上限：横竖排都生效，防止异常长候选（如超长拼音产生的候选）把窗口撑出
-        // 显示器边界。与上面的主题上限是两条独立防线，见 screen_safety_max_width_px 文档。
-        // 钳的对象须是「屏幕能放下的内容宽度」= 屏幕宽度 − 阴影扩边（窗口宽还要再加回
-        // ml+mr）——直接拿 content_w 跟屏幕整宽比，加回扩边后窗口仍会探出屏幕（已实测命中：
-        // natural=5195 safety_max=3840 clamped=3840，但 width=clamped+ml+mr 已经超了 3840）。
+        // 屏幕安全上限（横竖排都生效，见 screen_safety_max_width_px）。钳的是屏幕宽度减去
+        // 阴影扩边：窗口宽还要加回 ml+mr，拿屏幕整宽比会让窗口探出屏幕。
         let safety_max_w = inp.screen_safety_max_width_px().saturating_sub(ml + mr);
         let before_safety = content_w;
         content_w = content_w.min(safety_max_w.max(inp.min_window_w_px()));
@@ -1034,12 +956,11 @@ impl CandidateScene {
         }
     }
 
-    /// 按当前状态构建候选视图树（横向布局）。
-    /// T3：从 RVNode 树（`Resolved.views`）取色/几何，颜色 None→兜底（与旧 ResolvedTheme 默认等值，零回归）。
-    /// 构建候选 View 树。`above=true`（窗口上翻到光标上方）时按三个正交开关调整布局：
-    /// 反转候选（flip_when_above，仅竖排）、交换编码/候选区（swap_preedit_when_above）、翻页栏并入编码栏
-    /// （pager_in_preedit，与 above 无关的常驻行为）。任何情形下每项 tag/序号标签/选中判定仍用
-    /// 原始索引 i，确保命中/选中映射不受排列变化影响。
+    /// 按当前状态构建候选 View 树，色/几何取自 `Resolved.views`（None → 兜底色）。
+    ///
+    /// `above=true`（窗口上翻到光标上方）时按开关调整布局：反转候选（flip_when_above，仅竖排）、
+    /// 交换编码/候选区（swap_preedit_when_above）；翻页栏并入编码栏（pager_in_preedit）与 above
+    /// 无关。任何情形下每项 tag/序号/选中判定仍用原始索引 i，命中映射不受排列影响。
     pub fn build_tree(&self, inp: &CandidateSceneInput) -> View {
         use wind_theme::rvnode::{RvEdges, RvNode};
         use wind_theme::schema::Dim;
@@ -1049,27 +970,20 @@ impl CandidateScene {
         // 候选文字的字族：优先级（方案 > 用户 > 主题 > 默认）已在
         // `refresh_effective_theme` 折进生效主题，这里只取结果。
         //
-        // ★ 只取一次、四个消费点（两处测量 + 候选叶子 + 占位行叶子）共用同一个值。
-        // 各自去取的话必然漂移，而漂移的两种表现都不报错：测量与渲染不同源 ⇒ 预算按一种
-        // 字体算、排版按另一种走，窗口右侧留白或右缘溢出；占位行漏掉 ⇒ 它与真实行行高不等
-        // （本文件下方 `padded_rows_equal_real_rows_in_height` 已为同一件事钉过一次）。
+        // 只取一次，四个消费点（两处测量 + 候选叶子 + 占位行叶子）共用：各取各的会让测量与
+        // 渲染不同源，或占位行与真实行行高不等（见 `padded_rows_equal_real_rows_in_height`）。
         let text_family: Option<String> = v.text.font_family.clone();
-        // above=true（窗口被上翻到光标上方）时，据两个正交开关派生上方专属行为：
-        //   flip_cands = 反转候选项排列顺序（ui.candidate.flip_when_above，仅竖排有意义）
-        //   swap_bands = 交换编码区↔候选区上下位置（ui.candidate.swap_preedit_when_above，编码沉底贴光标）
-        // 二者可单独或叠加：叠加时候选块内部反转 + 编码沉底 = 候选1 紧挨编码栏。
-        // 生效判据见 above_layout（与外层「要不要重建」共用同一份，避免两处各判一套）。
+        // 上方专属行为（判据见 above_layout）：flip_cands 反转候选顺序，swap_bands 交换编码区与
+        // 候选区（编码沉底贴光标）。叠加时候选 1 紧挨编码栏。
         let (flip_cands, swap_bands) = Self::above_layout(
             above,
             inp.vertical,
             inp.opts.flip_when_above,
             inp.opts.swap_preedit_when_above,
         );
-        // 翻页栏并入**独立**编码栏行（右对齐）：需开关开启 + 有独立编码栏（非嵌入）+ 翻页栏本身可见。
-        // 满足时翻页栏随编码区一同装配（swap 时自动跟随沉底）。
-        // ⚠️ 这只是「并入编码所在行」的**两条落点之一**。内联编码（`candidate_inline`）那条是
-        //    下方的 `pager_in_inline_row`（判据含 `list_vertical`，故没法与本条合并在此处算）。
-        //    两条都不满足才回退候选行尾 / 竖排底部独立行。
+        // 翻页栏并入独立编码栏行（右对齐，swap 时随编码区沉底）：需开关开启 + 有独立编码栏 +
+        // 翻页栏可见。这是两条落点之一，内联编码那条是下方的 `pager_in_inline_row`（判据含
+        // `list_vertical`，没法在此合并）；都不满足才回退候选行尾 / 竖排底部独立行。
         let pager_will_inline = inp.opts.pager_in_preedit
             && !inp.preedit.is_empty()
             && !inp.preedit_embedded
@@ -1084,7 +998,7 @@ impl CandidateScene {
         let text_fs = node_fs(&v.text);
         let preedit_fs = node_fs(&v.preedit_bar);
         // 尺寸下限（ui.candidate.min_window_width_* / min_window_height_*，dp×scale）：
-        // 施加在**根容器**上，见末尾装配段。此处只取值——`build_tree` 里还有 `min_rows`
+        // 施加在根容器上，见末尾装配段。此处只取值——`build_tree` 里还有 `min_rows`
         // 那条走内容层（补占位行）的下限，两者并存、互不换算。
         let min_win_w = inp.min_window_w_px() as f32;
         let min_win_h = inp.min_window_h_px() as f32;
@@ -1106,19 +1020,15 @@ impl CandidateScene {
             Some(g) => g.insets,
             None => edges_or(&v.window.padding, [6.0, 8.0, 6.0, 8.0]),
         };
-        // 内容宽度预算（设备 px）：与渲染入口钳 `content_w` 用的是**同一套算法**（主题
-        // vertical_max_width ⊕ 恒生效的屏幕安全网），提前在这里算出来是为了在下面构建候选/
-        // 编码栏文字节点时就按预算裁字（带省略号）——而不是等测完整棵树的自然宽度再回头夹
-        // 窗口整体尺寸：那样只夹得住窗口 buffer，夹不到文字本身，超宽文字仍会被
-        // `draw_text` 的直角缓冲区裁剪一路画到窗口右缘，把圆角盖掉（见
-        // project_candidate_screen_safety_width 记忆里的真机实测记录）。
+        // 内容宽度预算（设备 px）：与 `layout` 钳 `content_w` 同一套算法，提前算出来是为了
+        // 构建文字节点时就按预算裁字（带省略号）。只在事后钳窗口尺寸夹不到文字本身，超宽文字会
+        // 被直角裁剪一路画到右缘、盖掉圆角。
         let content_budget_px: f32 = {
             let (ml, mt, mr, mb) = match self.shadow_params(inp) {
                 Some(sh) => sh.margins(),
                 None => (0, 0, 0, 0),
             };
-            // ⚠️ 这里要的是**局部排版横轴**的上限，旋转态下它是屏幕高度（见函数文档），
-            // 于是要扣的阴影扩边也跟着换成上下两边——扣 ml+mr 是拿另一条轴的量在减。
+            // 要的是局部排版横轴的上限，旋转态下是屏幕高度，扣的阴影扩边也换成上下两边。
             let shadow_along_axis = if inp.rotated { mt + mb } else { ml + mr };
             let mut bound = inp.local_text_extent_px().saturating_sub(shadow_along_axis);
             if inp.vertical && !inp.candidates.is_empty() {
@@ -1127,8 +1037,7 @@ impl CandidateScene {
                     bound = bound.min(Self::dp_to_px(vmax as u32, s).max(40));
                 }
             }
-            // 下限也要同轴：旋转态的局部横轴在屏幕上是高度，取宽度下限等于拿另一条轴的
-            // 数当地板——竖屏（工作区高 > 宽）上会把预算抬到超过实际可用长度。
+            // 下限也要同轴：旋转态取高度下限，否则竖屏上预算会超过实际可用长度。
             let floor = if inp.rotated {
                 inp.min_window_h_px()
             } else {
@@ -1206,9 +1115,8 @@ impl CandidateScene {
         };
 
         // 通用盒装饰：底色 / 背景图 / 渐变 / z 层覆盖图 / 边框 + 圆角。
-        // 每项都是 Option —— 主题未配则原样返回，几何与观感零变化。供此前只有文字色、
-        // 连背景边框都没接线的容器节点（candidate_list / footer_bar）复用。
-        // 圆角只在显式配了 border_radius 时设置：View 默认 0，不设即方角，与原行为一致。
+        // 每项都是 Option，主题未配则原样返回。供容器节点（candidate_list / footer_bar）复用。
+        // 圆角只在显式配了 border_radius 时设置（View 默认 0 即方角）。
         let decorate_box = |view: View, node: &RvNode| -> View {
             let mut view = view;
             if let Some(c) = node.bg_color {
@@ -1233,13 +1141,10 @@ impl CandidateScene {
             view
         };
 
-        // 模式徽标的盒装饰（底色 / 边框 / 圆角 / 内边距）。
-        // **横排内嵌与竖排独立 chip 是两条通路**，抽成闭包共用——本仓「同一功能两处装配、
-        // 只改一处」是高发 bug 形态。
-        // 门控：有底色**或**有边框才渲染成徽标盒（原先只看底色，那样「只要边框的空心徽标」
-        // 表达不出来）；两者皆无时保持纯文字，零回归。
-        // 圆角一律取 mode_label.border_radius ?? item.border_radius —— **不能用 eff_border
-        // 返回的第三个值**，它在未配 border.radius 时兜底 0.0，会把徽标圆角抹平（同 :1824 的坑）。
+        // 模式徽标的盒装饰（底色 / 边框 / 圆角 / 内边距），横排内嵌与竖排独立 chip 共用。
+        // 有底色或有边框才包成徽标盒，两者皆无时保持纯文字。
+        // 圆角取 mode_label.border_radius ?? item.border_radius，不能用 eff_border 返回的第三个
+        // 值：它未配时兜底 0.0，会把徽标圆角抹平。
         let decorate_mode_chip = |chip: View| -> View {
             let border = eff_border(&v.mode_label, false, false);
             if v.mode_label.bg_color.is_none() && border.is_none() {
@@ -1260,16 +1165,11 @@ impl CandidateScene {
             chip
         };
 
-        // ── 「与编码同处一行」的两个不截断成员，各自的**节点自身宽度** ──
+        // ── 「与编码同处一行」的两个不截断成员，各自的节点自身宽度 ──
         //
-        // 抽成闭包是因为它们有**三个**消费点，而此前每处各写了一份算术：独立编码栏的文字
-        // 预算（正下方）、候选行的 `mode_label_row_w`、翻页栏的 `pager_row_w`。分开写的代价
-        // 已经兑现过两次 —— 55032bc0 补了内联编码那条落点却漏了独立栏这条（F-17），
-        // 2bee2a9f 改了装配段的右留白却漏了预算段。
-        //
-        // 只共用**节点这一半**，外边距/间隙留给各调用点：栏行给徽标的是左 12px，候选行给的
-        // 是右 `trailing`（且仅在后面真有候选时），而翻页栏在候选行还要额外吃一个 `box_gap`
-        // （Row 的 gap），在栏行则没有。方向与条件都不同，硬并进来只会再造一个分叉。
+        // 三个消费点共用（独立编码栏预算、候选行的 `mode_label_row_w`、翻页栏的
+        // `pager_row_w`），别各写一份算术。只共用节点这一半，外边距/间隙方向与条件各不相同，
+        // 留给调用点。
         let mode_chip_node_w = || -> f32 {
             if inp.mode_label.is_empty() {
                 return 0.0;
@@ -1313,8 +1213,7 @@ impl CandidateScene {
             } else {
                 0.0
             };
-            // 两个箭头各占 arrow_slot_w（基线 = 字号 + 左右 padding，多字按文本撑开）——
-            // 与下方 pager 装配处共用同一份，不再手写第二遍公式。
+            // 两个箭头各占 arrow_slot_w，与下方 pager 装配处共用。
             let base = footer_fs + fpad.l + fpad.r;
             let fb = &v.footer_bar;
             inp.arrow_slot_w(arrow_char(&fb.prev_char, "‹"), base, footer_fs, fb)
@@ -1324,25 +1223,14 @@ impl CandidateScene {
                 + fmargin.r
         };
 
-        // **独立**编码栏（`!preedit_embedded`）的文字预算：它是 root 这个 Column 的直接子节点、
-        // 自成一行，不与候选抢宽度，故只需扣窗口内边距与自身内边距——**以及同一行右端那两个
-        // 不截断的成员**。
-        // 内联编码（`preedit_embedded`）走的是另一条路——它在候选行里，预算由下方的统一分配
-        // （横排 water-filling）给出。
+        // 独立编码栏（`!preedit_embedded`）的文字预算：自成一行，扣窗口与自身内边距，以及同一行
+        // 右端不截断的徽标与翻页栏（band 是 `[编码][spacer][徽标][翻页栏]`；不扣的话窗口宽钳制
+        // 是裁切语义，它们会在右缘被切掉）。内联编码的预算由候选行的统一分配给出。
         //
-        // ★ 右端预留（F-17）：band 排的是 `[编码][spacer][徽标][翻页栏]`，后两者是纯加在编码
-        // 后面的，此前一个都没进预算。超长编码下 `root` 就按超宽排完了版，而窗口宽那道钳制
-        // （见渲染入口 `content_w.min(safety_max_w)`）是**裁切**语义、不回头改 `root`，于是
-        // 溢出的部分在右缘直接被切掉且没有省略号 —— 翻页栏和徽标看不见，或只剩半截箭头。
-        // 实测（scale=1，200 组 `a'`，上限 3000）：光翻页栏就撑到 3091.6，加上徽标 3146.8。
-        //
-        // ⚠️ 旋转态下 `content_budget_px` 量的是**局部横轴**（屏幕高度），而独立编码栏在旋转
-        // 包裹**之外**、量的是屏幕宽度——这里是两条轴混用。竖屏上长 preedit 会拿到超过屏幕
-        // 宽度的预算而不被截断（窗口本身仍被渲染期的宽度钳制夹住，夹不到文字）。
-        // 已知边界，蒙文用户是横屏，暂不为它再分一条轴。
+        // 已知边界：旋转态下 `content_budget_px` 量的是屏幕高度，而独立编码栏在旋转包裹之外、
+        // 量的是屏幕宽度。竖屏上长编码可能不被截断；旋转态用户是横屏，暂不再分一条轴。
         let preedit_bar_right_reserve_px = {
-            // 徽标的 12px 是它在 band 里的**左**外边距（把它与编码拉开），与候选行那个右留白
-            // 不是同一笔账——那边由 `mode_label_row_w` 按「后面有没有候选」决定。
+            // 12px 是徽标在 band 里的左外边距，与候选行的右留白（`mode_label_row_w`）不是一笔账。
             let chip = if inp.mode_label.is_empty() {
                 0.0
             } else {
@@ -1383,18 +1271,14 @@ impl CandidateScene {
         // band 间距（预编辑条↔候选列表↔翻页）= 主题 candidate_list.band_gap，未配→0（与 Go 一致）。
         .gap(dim(v.window_gap, 0.0))
         // ── 窗口尺寸下限（ui.candidate.min_window_width_* / min_window_height_*）──
-        // 下限量的是整个窗口，故落在根容器上：候选、编码栏、翻页栏都在里面，凑不满的
-        // 部分留空，候选自身照常按内容排布（不拉伸、不改间距）。
+        // 下限落在根容器上，凑不满的部分留空，候选照常按内容排布。
         //
-        // ⛔ 不要改成在渲染入口钳 `content_w`/`content_h`：那是 `root.measured_size()`
-        // 之后的产物，调大它不会回头改 root 的 mw/mh ⇒ 窗口缓冲变大而 root 背景/边框仍按
-        // 旧尺寸画，边上露一条透明带，竖排 `fill_cross` 的高亮也不跟着撑。上限（主题
-        // `vertical_max_width`）能那么写是因为它是裁切语义，下限不是。
+        // 不要改成在 `layout` 里钳 `content_w`/`content_h`：调大它不会回头改 root 的尺寸，
+        // 背景/边框仍按旧尺寸画，边上露一条透明带。上限能那么写是因为它是裁切语义。
         .min_w(min_win_w.max(skin_min_w))
         .min_h(min_win_h.max(skin_min_h))
-        // 高度富余落在**顶部**（仅上翻时）：窗口在光标上方时底边贴光标，空白压在下面
-        // 会把候选整体顶离光标，位置反而随内容抖动——正是本功能要消除的东西。
-        // 与 min_rows 的占位行「反转时补顶部」同一判据。
+        // 上翻时高度富余落在顶部：底边贴光标，空白压在下面会把候选顶离光标。与 min_rows
+        // 占位行「反转时补顶部」同一判据。
         .main(if above { Align::End } else { Align::Start })
         .node(NodeKey::Window as u8);
         // 窗口背景图 / 渐变 / z 层：皮肤生效时由皮肤接管，不再叠。
@@ -1414,8 +1298,7 @@ impl CandidateScene {
             }
         }
 
-        // 预编辑行（主题背景带 + 文本色）。完整渲染 preedit_bar 自身背景：底色 + 位图背景 +
-        // z 层 + 边框（此前只画底色，位图主题的 preedit 背景/边框丢失）。
+        // 预编辑行（主题背景带 + 文本色）：底色 + 位图背景 + z 层 + 边框。
         // 嵌入模式（preedit_embedded）下不画独立条——编码作为候选行首单元内联（见下方 list 构建）。
         // 【延迟装配】编码栏与分隔线不在此直接 push root，先存入变量；末尾装配段据 swap_bands 决定
         // 放窗口顶部（正常）或底部（编码沉底贴光标），并据 pager_will_inline 追加翻页栏到栏行右端。
@@ -1426,16 +1309,14 @@ impl CandidateScene {
                 .node(NodeKey::PreeditBar as u8)
                 .cross(Align::Center)
                 .bg(col(v.preedit_bar.bg_color, [240, 240, 240, 255]))
-                // 圆角：preedit_bar 自己的优先，未配才跟随 item（历史行为——此前只读
-                // item.border_radius，调候选项圆角会连带改预编辑栏）。`.or()` 保回退链，
-                // 老主题零变化。
+                // 圆角：preedit_bar 自己的优先，未配才跟随 item（老主题依赖这条回退链）。
                 .radius(dim(
                     v.preedit_bar.border_radius.or(v.item.border_radius),
                     4.0,
                 ))
                 .pad(preedit_pad)
                 .margin(edges_or(&v.preedit_bar.margin, [0.0; 4]))
-                // 独立编码栏在旋转包裹层**外面**，永远不扶正。
+                // 独立编码栏在旋转包裹层外面，永远不扶正。
                 .child(inp.preedit_view(preedit_fs, preedit_bar_text_budget_px, false));
             if let Some(vi) = inp.rv_image(v.preedit_bar.bg_image.as_ref()) {
                 band = band.bg_image(vi);
@@ -1453,9 +1334,8 @@ impl CandidateScene {
             // 右对齐区（mode_label / 并入的翻页栏）：band 跨轴撑满窗口内容宽 + spacer 吸收中间空白，
             // 才能把右侧内容顶到栏行末尾。二者任一存在即启用（排布：[编码] spacer [mode_label] [翻页栏]）。
             let need_right_align = !inp.mode_label.is_empty() || pager_will_inline;
-            // 编码栏恒撑满窗口内容宽（与主题编辑器预览 `stretch: true` 一致）。曾经只在
-            // 清风设计主题 / 右对齐区存在时才撑满，第三方主题的编码栏就只有编码那么宽，
-            // 配了背景色后后半截露出窗口底（窗口透明时就是透明的一段）。
+            // 编码栏恒撑满窗口内容宽（与主题编辑器预览 `stretch: true` 一致），否则配了背景色的
+            // 编码栏后半截会露出窗口底。
             band = band.fill_cross();
             if need_right_align {
                 band = band.child(View::spacer());
@@ -1521,16 +1401,13 @@ impl CandidateScene {
         let index_circle_bg = col(v.index.bg_color, [66, 133, 244, 255]);
         let item_pad = edges_or(&v.item.padding, [7.0, 10.0, 7.0, 8.0]);
         let item_radius = dim(v.item.border_radius, 4.0);
-        // 候选间距全由主题决定（与 Go 对齐，以主题配置为准）：
-        // 横排候选框间隙 = max(item_spacing − item 左右内边距, 0)——内边距本身已提供视觉间隔，
-        // 扣除避免"间距 + 内边距"叠加（旧逻辑用 config×2 凭空多加一段，致 msime 元素间隔不一致）。
-        // 竖排行距 = candidate_list.row_gap。主题未配 → 0（候选框相邻，靠 padding 分隔）。
+        // 候选间距全由主题决定：横排候选框间隙 = max(item_spacing − item 左右内边距, 0)（内边距
+        // 本身已提供视觉间隔，不叠加）；竖排行距 = candidate_list.row_gap。未配 → 0。
         let item_spacing = v.item_spacing.map(|d| d.resolve(s, 0.0)).unwrap_or(0.0);
         let box_gap = (item_spacing - item_pad.l - item_pad.r).max(0.0);
         let row_gap_v = dim(v.row_gap, 0.0);
         // 选中候选左侧强调条（仅主题启用时，如 msime/jidian）。
-        // height_ratio 判零回退：RvViews 若未经 resolve 填充（Default 构造）该字段是 0.0，
-        // 直接乘会把条高算成 0 → 钳到 2px 细线，观感是强调条消失。
+        // height_ratio 判零回退：未经 resolve 的 RvViews（Default 构造）该字段是 0.0，条会消失。
         let accent_bar = v.accent_bar_enabled.then(|| LeftBar {
             color: col(v.accent_bar.bg_color, [66, 133, 244, 255]),
             width: dim(v.accent_bar_width, 3.0),
@@ -1542,23 +1419,18 @@ impl CandidateScene {
             offset: dim(v.accent_bar_offset, 0.0),
         });
 
-        // 候选列表：横排=Row（cell 并列）；竖排=Column（候选纵向堆叠）。
-        // 无候选时（仅提示徽标/preedit，无候选可纵向堆叠）强制用 Row：徽标 + 等高占位
-        // 并排成单行，高度 = 一个候选行，与横排一致；否则竖排下徽标行与占位行会纵向
-        // 堆叠致提示窗口过高（网址/临拼/临英刚进入时尤甚）。preedit/徽标分隔方向亦随之。
-        // ★ 旋转态也走竖排这一支：它在**局部未旋转空间**里就是候选纵向堆叠，转 90° 后
-        // 才成为并列的列。于是行距、宽度预算、文字截断、分隔方向全部沿用竖排的既有实现，
-        // 一行都不用改——这正是把旋转做成「两位」而不是「第四种排列」的收益所在。
+        // 候选列表：横排=Row；竖排=Column。无候选时（仅提示徽标/preedit）强制用 Row，否则徽标行
+        // 与占位行纵向堆叠会让提示窗口过高。旋转态也走竖排这一支：局部空间里就是纵向堆叠，
+        // 转 90° 后才成为并列的列，行距、预算、截断全部沿用竖排实现。
         let list_vertical = (inp.vertical || inp.rotated) && !inp.candidates.is_empty();
-        // 展开态（多行网格）：只在横排出现（协调器那边已按方向把关，这里再判一次是因为
-        // 方向与网格是两条命令下发的，中间可能隔着一帧）。`cols == 0` 是无意义的版式，按收起处理。
+        // 展开态（多行网格）只在横排出现：方向与网格是两条命令下发的，中间可能隔一帧，故再判
+        // 一次。`cols == 0` 按收起处理。
         let grid = inp
             .grid
             .filter(|g| g.cols > 0 && !list_vertical && !inp.rotated && !inp.candidates.is_empty());
         let grid_cols = grid.map_or(1, |g| g.cols as usize);
         let list_pad = edges_or(&v.candidate_list.padding, [0.0; 4]);
-        // candidate_list 此前只贡献 gap/row_gap/band_gap 三个间距，背景与边框从不接线，
-        // 「候选区与编码栏用不同底色分区」这类设计表达不出来。装饰全 Option，未配零回归。
+        // candidate_list 的背景与边框装饰，全 Option，未配则不画。
         let mut list = decorate_box(
             if list_vertical {
                 // fill_cross 让候选列撑满 root 宽度（= max(最宽候选, 翻页栏)），
@@ -1582,17 +1454,13 @@ impl CandidateScene {
         // ══ 文字宽度预算分配 ══
         // 竖排：每候选独占一行、互不竞争，各自可用满整行预算。
         // 横排：内联编码 + 候选们 + 模式徽标 + 翻页栏全挤在同一个 Row 里共享一行宽度，
-        //   必须按最大最小公平（water-filling）分配，理由与「为什么不能贪心」见
-        //   [`Self::water_fill`]。徽标与翻页栏不截断（本就短、且截了没意义），按实际宽度
-        //   从预算里**预留**掉。
+        //   按最大最小公平分配（见 [`Self::water_fill`]）。徽标与翻页栏不截断，按实际宽度预留。
         let text_pad = edges_or(&v.text.padding, [0.0; 4]);
         // 逆序仅改排列顺序；i 仍是原始索引（tag/标签/选中据此）。提前到此是因为下面的预扫
         // 要按最终顺序算每个候选的固定开销。
         //
-        // ★ 旋转态**恒逆序**：局部列首经顺时针 90° 会落到屏幕最右，而蒙古文的列是从左向右
-        // 推进的（候选 1 要在最左）。逆序后局部列尾 = 屏幕最左，正是候选 1。
-        // 与 `flip_cands` 合成一个布尔，是为了让下面「占位行补在哪一端」自动跟着走——
-        // 两处各判一次的话，旋转态的占位列会补在候选 1 那一侧，把候选 1 推离窗口边缘。
+        // 旋转态恒逆序：局部列首经顺时针 90° 落到屏幕最右，而蒙古文的列从左向右推进。
+        // 与 `flip_cands` 合成一个布尔，让下面「占位行补在哪一端」自动跟着走。
         let reversed = flip_cands || inp.rotated;
         let mut order: Vec<(usize, &CandidateItem)> = inp.candidates.iter().enumerate().collect();
         if reversed {
@@ -1708,31 +1576,25 @@ impl CandidateScene {
                 )
                 .width
         };
-        // 横排行内两个**不截断**的成员，按实际宽度预留：
+        // 横排行内两个不截断的成员，按实际宽度预留：
         //  - 模式徽标：短（拼/双/英…），截了反而认不出
         //  - 翻页栏：定宽（两个箭头 + 页码），截了就没法点
         let preedit_bar_shown_pre = !inp.preedit.is_empty() && !inp.preedit_embedded;
         let mode_label_row_w =
             if !list_vertical && !inp.mode_label.is_empty() && !preedit_bar_shown_pre {
                 mode_chip_node_w()
-                // 与装配段的 `trailing` **同源同条件**：无候选时那边给 0，这边再无条件加
-                // 12 就会把可用宽算少，超长编码提前一截。两处分开写过一次，正是 GH#127
-                // 只修好一半的原因。
+                // 与装配段的 `trailing` 同源同条件：无候选时为 0。
                 + if inp.candidates.is_empty() { 0.0 } else { 12.0 * s }
-                // ⚠️ `box_gap` 这一项照加：无候选时 `list` 里仍是 [徽标, 占位行] 两个子节点，
-                // Row 的 gap 照样落在它们之间。内置主题一律未配 `item_spacing`（box_gap=0），
-                // 故观感上看不出来；自定义主题把它配到大于 item 左右内边距之和时，提示窗
-                // 右边会按差值多出一小块 —— 是 GH#127 的同类残余，但去掉 gap 会连带动到
-                // 内联编码与徽标之间的间隔，故留着不动。
+                // `box_gap` 照加：无候选时 `list` 里仍是 [徽标, 占位行]，Row 的 gap 落在其间。
+                // 自定义主题 `item_spacing` 很大时提示窗右边会多出一小块，已知取舍：去掉 gap
+                // 会连带动到内联编码与徽标之间的间隔。
                 + box_gap
             } else {
                 0.0
             };
-        // 翻页栏并入**内联**编码那一行（右对齐）——与 `pager_will_inline` 同一个开关、同一个
-        // 诉求（竖排省一行），只是编码不在独立栏里，落点改为编码自己那一行的右端。
-        // · 仅竖排：横排下内联编码与候选同属一行，翻页栏本就落在该行末尾，开关无从谈起。
-        // · ⚠️ 排除旋转态（蒙文）：内联编码是 `list` 的子节点、在旋转包裹层**内部**，翻页栏跟
-        //   进去会连箭头和页码一起转 90°。那一档维持底部独立行（它加在 `root` 上，屏幕上仍是横的）。
+        // 翻页栏并入内联编码那一行（右对齐），与 `pager_will_inline` 同一个开关。仅竖排（横排
+        // 翻页栏本就在该行末尾）；排除旋转态：内联编码在旋转包裹层内部，翻页栏跟进去会一起
+        // 转 90°，那一档维持底部独立行。
         let pager_in_inline_row = inp.opts.pager_in_preedit
             && !inp.preedit.is_empty()
             && inp.preedit_embedded
@@ -1740,13 +1602,12 @@ impl CandidateScene {
             && !inp.rotated
             && inp.pager_visible();
         // 同一行里要为翻页栏预留的宽度（0 = 这一行没有翻页栏）：
-        //   · 横排未并入编码栏 → 翻页栏落在候选行尾，与候选抢宽度（原行为）
+        //   · 横排未并入编码栏 → 翻页栏落在候选行尾，与候选抢宽度
         //   · 竖排内联编码并入 → 翻页栏在编码那一行右端，与编码抢宽度
         let pager_row_w = if inp.pager_visible()
             && ((!list_vertical && grid.is_none() && !pager_will_inline) || pager_in_inline_row)
         {
-            // `box_gap` 是**候选行这个 Row 的 gap**，只有这条落点吃得到；独立编码栏那条
-            // 挂在 spacer 右侧、没有容器间隙，故它只取节点自身宽（见 `pager_node_w` 上方）。
+            // `box_gap` 是候选行这个 Row 的 gap，只有这条落点吃得到。
             pager_node_w() + box_gap
         } else {
             0.0
@@ -1788,22 +1649,14 @@ impl CandidateScene {
         // 竖排的注释文字预算（与 `order` 同序；`None` = 不截，横排与直立态恒为 `None`）。
         let mut cand_comment_budgets: Vec<Option<f32>> = vec![None; cand_metrics.len()];
         let (inline_preedit_budget_px, cand_text_budgets) = if list_vertical {
-            // 竖排：内联编码与每个候选各占一行、互不竞争，都用满整行预算（保持既有行为）。
-            // 唯一例外是翻页栏并进编码行时（`pager_in_inline_row`，此时 `pager_row_w` 非 0）：
-            // 那一行被它占掉一截，编码预算须同步扣除，否则超长编码会把翻页栏顶出窗口右缘。
+            // 竖排：内联编码与每个候选各占一行、互不竞争，都用满整行预算。例外是翻页栏并进
+            // 编码行时（`pager_row_w` 非 0），编码预算须同步扣除。
             //
-            // ★ 行内「主词条优先、注释让步」（论坛 t271）。行宽上限 R = `row_budget`，来自
-            //   `content_budget_px` = min(屏幕工作区宽, 主题 `behavior.vertical_max_width`)
-            //   ⊕ 竖排最小宽度兜底，再扣窗口/候选区内边距。记
-            //     F = 除注释外的固定开销（item 内边距 + 序号 + 文字内外边距），
-            //     T = 文字自然宽，C = 注释总宽（含注释内外边距 B），
-            //     Cmin = min(C, B + min_text_w) —— 注释的保底（至少露出一截加 `…`）。
-            //   文字预算 = max(R − F − Cmin, min_text_w)：文字先拿，只给注释留保底；
-            //   注释文字预算 = max(R − F − min(T, 文字预算) − B, min_text_w)：用文字排完剩下的。
-            //   两者都放得下时（T + C ≤ R − F）文字与注释都不截，与改动前逐字节一致。
-            //   此前是「文字预算 = R − F − C」，注释从不让步，超长注释把主词条挤成「你…」。
-            // ⚠️ 直立态（逐格扶正）不走本规则、保持旧行为：那里注释沿堆叠轴量的是高度，而
-            //   `cand_comment_w` 是按横向宽度量的，两套尺子混算会误截。
+            // 行内主词条优先、注释让步。记行宽上限 R = `row_budget`，F = 除注释外的固定开销，
+            // T = 文字自然宽，C = 注释总宽（含注释内外边距 B），Cmin = min(C, B + min_text_w)：
+            //   文字预算 = max(R − F − Cmin, min_text_w)（文字先拿，只给注释留保底）；
+            //   注释文字预算 = max(R − F − min(T, 文字预算) − B, min_text_w)。
+            // 直立态不走本规则：那里注释沿堆叠轴量的是高度，`cand_comment_w` 是横向宽度。
             let text_budgets = cand_metrics
                 .iter()
                 .zip(&cand_comment_w)
@@ -1854,7 +1707,7 @@ impl CandidateScene {
         // ══ 上方注释条（设计 candidate-comment-above-line.md §3.3）══
         // 页级判定：本页任一候选带上段，整页 item 都改成 Column[上方条, 主行]，没有上段的候选
         // 放透明占位叶子——整页等高，竖排不出现行高锯齿。旋转 / 直立态不支持，上段已由
-        // `right_comment` 合回右侧注释。`has_above` 为假时以下各处一行都不走，树与改动前逐字节一致。
+        // `right_comment` 合回右侧注释。`has_above` 为假时以下各处一行都不走。
         let has_above = !inp.rotated && inp.candidates.iter().any(|c| !c.comment_above.is_empty());
         let above_fs = node_fs(&v.comment_above);
         let above_family = v.comment_above.font_family.clone();
@@ -1862,9 +1715,8 @@ impl CandidateScene {
         let above_margin = edges_or(&v.comment_above.margin, [0.0; 4]);
         // 每候选（与 `order` 同序）：(左缩进, 上段文字宽度上限)。
         // · 左缩进 = item 内容区起点到候选文字字形起点：序号外框 + 文字左外边距 + 文字左内边距。
-        // · 上段只做 UI 兜底截断，**不参与**候选文字的 water_fill（文字预算与无上方条时相同）：
-        //   竖排每行独占 row_budget；横排只能用主行排完后整行剩下的余量（多条超长上段之间再按
-        //   water_fill 公平分），故上段再长也不会把窗口顶出 row_budget。
+        // · 上段只做兜底截断，不参与候选文字的 water_fill：竖排每行独占 row_budget；横排只用
+        //   主行排完后的余量（多条上段之间再按 water_fill 分），故不会把窗口顶出 row_budget。
         let above_cols: Vec<(f32, f32)> = if has_above {
             let per: Vec<(f32, f32, f32, f32)> = order
                 .iter()
@@ -2012,15 +1864,10 @@ impl CandidateScene {
             item.child(above).child(main)
         };
 
-        // 【构建位置】翻页器在此提前构建（原先在候选项装配之后）：竖排内联编码要把它作为
-        // **子节点**并入编码那一行，而那一行在候选项之前就装配完毕 —— 消费点在前，构建必须更前。
-        // 其余落点（编码栏 band / 候选行尾 / 竖排底部独立行）都在末尾装配段用 take() 转移，
-        // 与构建位置无关。
-        // 翻页器（多页时）：‹ p/t › —— 箭头可点击翻页，带悬停高亮 + 禁用态
-        // mut：末尾装配段据归属（并入编码栏 / 候选行尾 / 竖排底部）用 take() 转移所有权。
+        // 翻页器（多页时）：‹ p/t ›，箭头可点击翻页，带悬停高亮 + 禁用态。须在候选项之前构建：
+        // 竖排内联编码要把它并入编码那一行，而那一行先装配。其余落点在末尾装配段用 take() 转移。
         let mut pager = if inp.pager_visible() {
-            // 禁用态箭头色：优先主题给 footer_bar 配的禁用态文字色（编辑器「禁用态」面板
-            // 就是配它），未配才回退全局 text_hint —— 回退保持旧观感，内置主题都没配。
+            // 禁用态箭头色：优先 footer_bar 的禁用态文字色，未配回退全局 text_hint。
             let disabled = v
                 .footer_bar
                 .disabled
@@ -2044,10 +1891,8 @@ impl CandidateScene {
             let row_h = if pager_will_inline || pager_in_inline_row {
                 preedit_fs.max(footer_fs)
             } else {
-                // 横排时翻页按钮与候选同在一行，行高 = 文字行高 + 内边距，而行高 > 字号（字体
-                // 上下留白）。按字号算会让按钮比行矮几个像素，居中取整后上下不对称，窗口内边距
-                // 为 0 的主题（胶囊）悬停块贴着窗口边缘时一眼可见。行高取与候选文字同款样式量。
-                // 竖排与网格展开态的翻页栏是独立一行，沿用字号算法，免得改动窗口高度。
+                // 横排时翻页按钮与候选同在一行，高度取候选的实测行高（行高 > 字号，按字号算会
+                // 上下不对称）。竖排与网格展开态的翻页栏是独立一行，沿用字号算法。
                 let line_h = if list_vertical || grid.is_some() {
                     text_fs
                 } else {
@@ -2070,12 +1915,10 @@ impl CandidateScene {
                 };
                 line_h + item_pad.t + item_pad.b
             };
-            // 翻页箭头三档（顺序即主题编辑器「翻页符号」面板上公开写明的契约）：
-            // prev/next_image（如 _base 的 chevron SVG + tint）> prev/next_char > 内置文字 ‹ ›。
-            // 图配了 `ref = ""`（_qingfeng / msime 就这么清掉继承来的 chevron）时 arrow_icon
-            // 返回 None，于是落到字符档。
-            // 这里看到的图必定是主题**自己写的**：只从 base 继承来的那张已在合并层让位给本层
-            // 写的字符（wind-theme `drop_inherited_arrow_images`），故此处无须再分辨来源。
+            // 翻页箭头三档（主题编辑器「翻页符号」面板公开的契约）：prev/next_image >
+            // prev/next_char > 内置 ‹ ›。图配了 `ref = ""` 时 arrow_icon 返回 None，落到字符档。
+            // 从 base 继承的图已在合并层让位给本层写的字符（wind-theme
+            // `drop_inherited_arrow_images`），此处无须分辨来源。
             let prev_txt = arrow_char(&v.footer_bar.prev_char, "‹");
             let next_txt = arrow_char(&v.footer_bar.next_char, "›");
             let prev_icon = inp.arrow_icon(v.footer_bar.prev_image.as_ref(), prev_on);
@@ -2095,15 +1938,10 @@ impl CandidateScene {
                                     .fixed_h(footer_fs)
                                     .bg_image(vi),
                             ),
-                        // 文字箭头启用色：优先 footer_bar.text_color（清风主题设为 text_hint → 细小淡 ‹›），
-                        // 未配置则回退 accent（旧主题保持原样）。
+                        // 文字箭头启用色：优先 footer_bar.text_color，未配回退 accent。
                         //
-                        // 宽度走 arrow_slot_w：arrow_w 这个基线是按**一个字**算的，而主题可以
-                        // 把 prev_char 写成多字（schema 不限长），定死基线的话文本会盖到页码上
-                        // 或被裁掉、命中区也仍是单字宽。取实测文本宽与基线的大者，单字符一侧
-                        // 毫无变化（内置 ‹ › 及寻常符号都比基线窄）。
-                        // 仍用 fixed_w 而非 min_w：宽度就此确定，与 pager_node_w() 的预算逐像素
-                        // 对齐 —— 两处同源正是这个函数存在的理由。
+                        // 宽度走 arrow_slot_w（多字箭头按文本撑开）；仍用 fixed_w 而非 min_w，
+                        // 与 pager_node_w() 的预算逐像素对齐。
                         None => View::leaf(txt, if enabled { arrow_on } else { disabled })
                             .font_size(footer_fs)
                             .fixed_w(inp.arrow_slot_w(txt, arrow_w, footer_fs, &v.footer_bar))
@@ -2160,12 +1998,9 @@ impl CandidateScene {
             None
         };
 
-        // 内联编码的"沉底"（swap_preedit_when_above 在首单元内联下的落点）：
-        // 内联模式没有独立编码栏可参与末尾那段 band/list 交换装配，编码是 list 的首个子节点。
-        // 横排下首单元 = 行首（最左），与上下无关，开关本就无意义 → 不参与；
-        // 竖排下首单元 = 列首（最上），语义上等同于"编码栏在上"，此时开关必须生效 →
-        // 把内联编码（及紧随其后的模式标记，二者共同构成独立栏模式下的"编码栏"内容）
-        // 延迟到候选项之后再挂，得到与独立栏模式一致的"编码沉底贴光标"表现。
+        // 内联编码的「沉底」（swap_preedit_when_above 在内联模式下的落点）：仅竖排生效（横排的
+        // 首单元是行首，与上下无关）。把内联编码及紧随的模式标记延迟到候选项之后再挂，与独立栏
+        // 模式的「编码沉底贴光标」一致。
         let inline_preedit_bottom =
             swap_bands && list_vertical && inp.preedit_embedded && !inp.preedit.is_empty();
         // 沉底时延迟装配的内联节点，按原相对顺序在候选项之后追加。
@@ -2196,9 +2031,8 @@ impl CandidateScene {
                 .preedit_view(preedit_fs, inline_preedit_budget_px, inp.upright);
             // 翻页栏并入这一行（`pager_in_inline_row`）：包一层撑满内容宽的 Row，spacer 把翻页栏
             // 顶到行末——与独立编码栏那条落点（band 内 spacer 右对齐）同构。
-            // ⚠️ 先判开关再 `take()`：反过来写（`take().filter(…)`）会在开关关闭时把翻页栏取出来
-            //    直接丢掉，末尾装配段再也拿不到它 —— 表现是翻页栏凭空消失，且只在关着开关时才犯。
-            // 左缩进与行间距（sep）挂在**外层**：内外都挂会叠成两倍缩进，且行间距落在编码而非整行上。
+            // 先判开关再 `take()`：写成 `take().filter(…)` 会在开关关闭时把翻页栏取出来丢掉。
+            // 左缩进与行间距（sep）挂在外层：内外都挂会叠成两倍缩进。
             let node = if pager_in_inline_row && let Some(p) = pager.take() {
                 View::container(Layout::Row)
                     .cross(Align::Center)
@@ -2223,18 +2057,15 @@ impl CandidateScene {
         let preedit_bar_shown = !inp.preedit.is_empty() && !inp.preedit_embedded;
         if !inp.mode_label.is_empty() && !preedit_bar_shown {
             let ml_fs = node_fs(&v.mode_label);
-            // 这个留白是**与后面的候选**拉开距离用的；一个候选都没有时（刚进临英/临拼、
-            // 窗口里只有这个徽标）它就成了凭空多出来的边距，是 GH#127 那片空白的另一半。
+            // 这个留白是与后面的候选拉开距离用的，一个候选都没有时归零。
             let trailing = if inp.candidates.is_empty() {
                 0.0
             } else {
                 12.0 * s
             };
             let sep = if list_vertical {
-                // ⚠️ 这一支**不可能在无候选时走到**：`list_vertical` 自带 `&& !candidates
-                // .is_empty()`（见其定义处的注释——无候选时强制 Row，免得徽标与占位行纵向
-                // 堆叠把提示窗撑高）。所以竖排配置下的「只有徽标」那一帧走的是下面的 else，
-                // 由 `trailing` 归零处理。别在这里再写一遍无候选分支，那是死代码。
+                // 这一支不会在无候选时走到（`list_vertical` 自带 `!candidates.is_empty()`），
+                // 别在这里再写无候选分支。
                 let gap = 6.0 * s;
                 Edges {
                     t: if inline_preedit_bottom { gap } else { 0.0 },
@@ -2248,9 +2079,8 @@ impl CandidateScene {
                     ..Edges::default()
                 }
             };
-            // 主题为 mode_label 配了底色或边框 → 渲染为小徽标（圆角 + 内边距）以更醒目。
-            // 与横排内嵌通路共用 decorate_mode_chip，两处装配保持一致。
-            // 徽标同样逐格扶正（多为单字，与整块无差；「全称」档下才看得出来）。
+            // 配了底色或边框时渲染为小徽标（decorate_mode_chip，与横排内嵌通路共用）。
+            // 直立态同样逐格扶正。
             let ml_color = col(v.mode_label.text_color, [120, 120, 128, 255]);
             let ml_weight = v.mode_label.font_weight;
             let ml_family = v.mode_label.font_family.clone();
@@ -2269,15 +2099,9 @@ impl CandidateScene {
                 list = list.child(chip);
             }
         }
-        // 无候选但有提示（模式徽标 / preedit）时：补一个与正常候选行等高的透明占位行，
-        // 使提示窗口（如网址模式、临拼/临英刚进入）高度与有候选时及普通候选窗一致，
-        // 避免窗口忽高忽低。占位行内边距/字号与候选行一致 → 测得同高，内容透明不可见。
-        //
-        // ★ `fixed_w(0.0)`：它的职责**只有撑高**，宽度一律不算。少了这一句，它会把
-        // `item_pad` 左右（10+8）连同那个空格字符（约 0.6 字宽）一并计进行宽 —— 而这一行
-        // 在横排里与模式徽标同处一行，于是「临时英文」四个字的提示框右边凭空多出近 30px
-        // 空白（GH#127，用户原话「提示框右侧还有好多空白」）。`fixed_w` 覆盖的是含 padding
-        // 的整宽、且不参与高度，正好只关掉宽度这一半（见 `View::measure`）。
+        // 无候选但有提示（模式徽标 / preedit）时：补一个与候选行等高的透明占位行，让提示窗口
+        // 与有候选时同高。`fixed_w(0.0)`：它只负责撑高，宽度不算，否则提示框右边会多出一截空白
+        // （`fixed_w` 覆盖含 padding 的整宽且不参与高度，见 `View::measure`）。
         if inp.candidates.is_empty() {
             list = list.child(
                 View::container(Layout::Row)
@@ -2290,11 +2114,8 @@ impl CandidateScene {
             );
         }
         // ── 竖排最小行数（ui.candidate.min_rows）──
-        // 候选不足时补足**与真实候选行同构**的透明占位行，使窗口高度不随候选数变化。
-        //
-        // 同构是硬要求，不能图省事复用上面那个「无候选提示行」（只有一个空格叶子）：真实行
-        // 还带 item.margin 与序号节点（index_circle 时高 = index_fs × 1.5），缺了它们补出的
-        // 行比真实行矮，窗口照样抖、只是抖得小一点——这种「修了但没修干净」最难被发现。
+        // 候选不足时补足与真实候选行同构的透明占位行，使窗口高度不随候选数变化。不能复用
+        // 上面的「无候选提示行」：真实行还带 item.margin 与序号节点，缺了会矮一截。
         let pad_rows = if list_vertical && inp.opts.min_rows > 0 {
             (inp.opts.min_rows as usize).saturating_sub(inp.candidates.len())
         } else {
@@ -2306,12 +2127,9 @@ impl CandidateScene {
                 .pad(item_pad)
                 .margin(edges_or(&v.item.margin, [0.0; 4]))
                 .fill_cross();
-            // ⚠️ font_family / font_weight 必须照搬：真实后端的行高来自**该字族**的 line
-            // metrics（DirectWrite 按 SetFontFamilyName 排版），不是字号的固定倍数。宋体约
-            // 1.17 em、Microsoft YaHei UI 约 1.33 em，配了 [text] font_family 的主题下漏掉
-            // 它就会让占位行矮一截，窗口照旧随候选数抖动。
-            // mock 文本后端只按字号估算、不区分字族 ⇒ 等高性测试**测不出**这一项，靠
-            // `placeholder_row_mirrors_real_row_text_attrs` 从结构上比对兜底。
+            // font_family / font_weight 必须照搬：真实后端的行高取自字族 line metrics，不是字号
+            // 的固定倍数。mock 后端测不出这一项，靠 `placeholder_row_mirrors_real_row_text_attrs`
+            // 从结构上比对。
             let mut idx = View::leaf(" ".to_string(), [0, 0, 0, 0])
                 .font_size(index_fs)
                 .font_weight(eff_weight(&v.index, &v.item, false, false))
@@ -2339,8 +2157,7 @@ impl CandidateScene {
                 ph
             }
         };
-        // 反转排列时占位行补在**顶部**：窗口上翻后底边贴光标、候选 1 在最下，空行若压在
-        // 候选 1 下面会把它顶离光标，候选 1 的位置反而随候选数抖动——正是本功能要消除的。
+        // 反转排列时占位行补在顶部：上翻后候选 1 在最下贴光标，空行压在下面会把它顶离光标。
         if reversed {
             for _ in 0..pad_rows {
                 list = list.child(placeholder_row());
@@ -2389,9 +2206,8 @@ impl CandidateScene {
                 };
                 let idx_pad = edges_or(&v.index.padding, [0.0; 4]);
                 let idx_margin = edges_or(&v.index.margin, [0.0; 4]);
-                // 展开态只有数字键选得到的那几格显示序号（从高亮行起往下顺延，范围由协调器
-                // 给出）。其余格子照样摆一个**透明**序号占住同样的宽度——直接不画的话，各行
-                // 文字的起点就对不齐了。
+                // 展开态只有数字键选得到的那几格显示序号（范围由协调器给出），其余格子摆透明
+                // 序号占位，否则各行文字起点对不齐。
                 let idx_ghost = grid.is_some_and(|g| {
                     let s = g.index_start as usize;
                     !(s..s + g.index_count as usize).contains(&i)
@@ -2426,9 +2242,7 @@ impl CandidateScene {
                 {
                     idx_leaf = idx_leaf.border(bc, bw).radius(br);
                 }
-                // 直立态：序号**整块**扶正，不逐字切——「10」于是横着读、位于列首，
-                // 正是纵排里数字的常规排法（日文排版称 tate-chu-yoko）。
-                // 逐字切会把它排成竖着的 1、0，看着像两个候选。
+                // 直立态：序号整块扶正、不逐字切（纵中横），逐字切的「1、0」看着像两个候选。
                 item = item.child(if inp.upright {
                     View::rotated_ccw(idx_leaf)
                 } else {
@@ -2452,10 +2266,8 @@ impl CandidateScene {
                 cand_text_budgets.get(k).copied().unwrap_or(min_text_w),
             );
             let text_weight = eff_weight(&v.text, &v.item, is_sel, is_hover);
-            // 候选文字从「引擎给的原文」到「真正画上去的串」之间要过两道加工——按预算截断、
-            // 选字族——**两道都不会失败，也都不留痕迹**。PUA 词库（蒙古文 Menksoft 等）出问题时，
-            // 「少了几个字」与「用错了字体」在画面上长得一模一样，只有把两端的码位并排打出来
-            // 才分得开。⚠️ 打码位而不是打字符：PUA 字符在日志文件里同样是不可见的空白。
+            // 原文到实际绘制串之间有截断、选字族两道静默加工；PUA 词库（如蒙古文）出问题时
+            // 「少字」与「错字体」画面上分不开，故把两端码位并排打出来（打码位：PUA 在日志里不可见）。
             if tracing::enabled!(tracing::Level::DEBUG) {
                 let cps = |s: &str| {
                     s.chars()
@@ -2474,10 +2286,8 @@ impl CandidateScene {
                     text_weight,
                 );
             }
-            // 直立态逐格扶正（见 `upright_text`）。装饰（底色/边框/内外边距）留在**外层
-            // 容器**上，整段文字仍是一个整体，不会每个字各画一个药丸。
-            // 模糊音提示段的颜色区间（无提示 = 空，叶子与改动前逐字段相同）；直立态逐格切时
-            // 每格只拿自己那几段，同注释。
+            // 直立态逐格扶正（见 `upright_text`），装饰留在外层容器上，不会每个字各画一个药丸。
+            // 模糊音提示段的颜色区间（无提示 = 空）；逐格切时每格只拿自己那几段，同注释。
             let txt_state = text_state(is_sel, is_hover);
             let text_runs = crate::span_runs::pinyin_hint_runs(
                 &v.text,
@@ -2498,8 +2308,7 @@ impl CandidateScene {
                 })
                 .pad(text_pad)
                 .margin(text_margin);
-            // 文字叶子的背景（底色/图/渐变）：此前只画边框，配了背景一律不生效，
-            // 「文字药丸」这类样式做不出来。
+            // 文字叶子的背景（底色/图/渐变），供「文字药丸」类样式。
             if let Some(c) = eff_bg(&v.text, is_sel, is_hover) {
                 tleaf = tleaf.bg(c);
             }
@@ -2542,9 +2351,7 @@ impl CandidateScene {
                 }
             }
             if !comment.is_empty() {
-                // 直立态同样逐格扶正：只让候选文字立起来、注释仍躺着的话，同一列里会有
-                // 两种阅读方向。⚠️ 拉丁编码也照切——「英文横着读反而对」那条取舍已被真机
-                // 推翻（旋转态是一切都转、自洽；直立态混排看不懂）。
+                // 直立态同样逐格扶正，拉丁编码也照切（见 `upright_text`）。
                 let cmt_weight = eff_weight(&v.comment, &v.item, is_sel, is_hover);
                 let cmt_family = v.comment.font_family.clone();
                 // 分段颜色：按当前主题与本候选的状态现求（悬停只有 UI 知道），等于正文色的丢弃。
@@ -2645,8 +2452,7 @@ impl CandidateScene {
                 };
                 item = stack_above(item, above);
             }
-            // 候选项基态底色：此前只在选中/悬停时调 .bg()，`[item] background = "…"` 从不生效，
-            // 而同级的背景图/渐变基态是读的（见下），三者本该同级。选中/悬停底色随后覆盖。
+            // 候选项基态底色（与背景图/渐变同级），选中/悬停底色随后覆盖。
             if let Some(c) = v.item.bg_color {
                 item = item.bg(c);
             }
@@ -2684,11 +2490,8 @@ impl CandidateScene {
             if let Some(g) = item_grad {
                 item = item.bg_gradient(g);
             }
-            // 候选项边框（含 selected/hover 换色换宽）。eff_border 此前只用在
-            // index/text/comment 三个叶子上，item 容器自己从没画过边框——
-            // 主题里写的 [item] border / [item.selected] border 一律不生效。
-            // 只取色与宽：圆角沿用上面按 item_radius 设好的值，避免 eff_border 的
-            // 0.0 兜底把未配 border.radius 的候选项圆角抹平。
+            // 候选项边框（含 selected/hover 换色换宽）。只取色与宽：圆角沿用 item_radius，
+            // 避免 eff_border 的 0.0 兜底把未配 border.radius 的候选项圆角抹平。
             if let Some((bc, bw, _)) = eff_border(&v.item, is_sel, is_hover) {
                 item = item.border(bc, bw);
             }
@@ -2698,15 +2501,12 @@ impl CandidateScene {
                 list = list.child(item);
             }
         }
-        // 网格装配：每 `cols` 格成一行。末屏行数不足时补与真实行同构的占位行（同竖排
-        // `min_rows` 那套），滚到末尾窗口也不变矮——窗口高度一变，上翻定位时整个窗口就跳。
-        // 展开态的分类标签栏，挂到表格**下方**与翻页栏同一行（见装配段）。放在上方会把首行
-        // 往下推，展开就不像「原地往下长出来」了。
+        // 网格装配：每 `cols` 格成一行。末屏行数不足时补同构占位行（同 `min_rows`），窗口高度
+        // 不变，上翻定位才不跳。分类标签栏挂到表格下方与翻页栏同一行，放上方会把首行往下推。
         let mut grid_tab_bar: Option<View> = None;
         if let Some(g) = grid {
-            // 分类标签栏（P3）：当前分类画选中底色。命中 tag 落在 `GRID_TAB_TAG_BASE` 段，
-            // 点击经候选点选那条路回到协调器（宿主原样回传正数下标）。展开期间它恒在，
-            // 窗口高度不因切分类而变。
+            // 分类标签栏：当前分类画选中底色。命中 tag 落在 `GRID_TAB_TAG_BASE` 段，点击经候选
+            // 点选那条路回到协调器。展开期间恒在，窗口高度不因切分类而变。
             if g.tabs != 0 {
                 let dim_c = t.color("text_dim", [140, 140, 145, 255]);
                 let mut bar = View::container(Layout::Row)
@@ -2736,9 +2536,8 @@ impl CandidateScene {
                 grid_tab_bar = Some(bar);
             }
             // 行间分隔线（`views.grid_divider`）：只有显式配了 `background` 才画，不回退调色板
-            // `separator`（默认主题有它，回退会让所有现有主题的网格多出线、窗口变高）。
-            // 夹在相邻两行之间（含占位行：它们与真实行同高，分隔线也得同样占位，否则
-            // 末屏行数不足时窗口会变矮）。线粗取整，同编码栏分隔线。
+            // `separator`（否则现有主题的网格都会多出线）。占位行之间也夹，否则末屏窗口变矮。
+            // 线粗取整，同编码栏分隔线。
             let grid_sep_col = v.grid_divider.bg_color.unwrap_or([0, 0, 0, 0]);
             let grid_sep_on = grid_sep_col[3] > 0 && v.grid_divider_enabled != Some(false);
             let grid_sep_thick = v
@@ -2835,8 +2634,8 @@ impl CandidateScene {
         };
         // 翻页栏归属（按优先级三选一）：
         //   1) pager_will_inline → 追加到编码栏 band 右端（随编码区一同装配，swap 时自动沉底贴光标）
-        //   2) 横排 → 并入候选行尾（原行为）
-        //   3) 竖排 → 候选区底部独立行（原行为）
+        //   2) 横排 → 并入候选行尾
+        //   3) 竖排 → 候选区底部独立行
         if pager_will_inline {
             if let (Some(band), Some(p)) = (preedit_band.take(), pager.take()) {
                 preedit_band = Some(band.child(p));
@@ -2853,8 +2652,8 @@ impl CandidateScene {
         // 竖排未并入的翻页栏：候选区独立行（与 list 同属候选区，随 swap 一起移动）。
         // 独立行按主题 behavior.pager_align（left/center/right，默认 center）水平对齐：包一层
         // fill_cross 的 Row 用 spacer 顶位。inline 情形已在编码栏内右对齐，不经此。
-        // ⚠️ 判据是 `list_vertical` 不是 `inp.vertical`：旋转态的列表在局部空间里也是竖排，
-        // 翻页栏同样该独立成行（它加在 `root` 上、在旋转包裹之外，故屏幕上仍是横的一条）。
+        // 判据是 `list_vertical` 不是 `inp.vertical`：旋转态的翻页栏同样独立成行（在旋转包裹
+        // 之外，屏幕上仍是横的）。
         // 网格同样走这一支：翻页栏挂在表格下方独立成行，不去抢某一行的宽度。
         let vertical_bottom_pager = if grid.is_some() {
             // 展开态：分类标签与翻页箭头同一行、整体居中（`[标签栏]  ‹ ›`）。不跟主题的
@@ -2889,16 +2688,11 @@ impl CandidateScene {
             None
         };
 
-        // 旋转包裹**只套候选列表**：编码栏、模式标记、翻页栏都留在屏幕坐标系里横着排
-        // （参考图里 "eho" 那一行就是横的）。包裹层是裸的，装饰全在 `list` 上跟着一起转。
-        //
-        // ⚠️ 上一句只对**独立**编码栏成立。`preedit_display = "candidate_inline"` 时编码是
-        // `list` 的子节点（见上方 `inline_tail`），会跟着转成竖的。出厂是 `app_inline`
-        // （编码由宿主自绘），故不是默认路径；蒙文用户若开了内联编码需要另行处理。
-        // ⚠️ 判据必须与 `list_vertical` 同源，**不能只判 `inp.rotated`**：无候选时列表被
-        // 刻意退化成 Row（徽标 + 等高占位，见 `list_vertical` 上方注释），此时再套旋转
-        // 就会把「刚进临英/临拼、只有模式徽标」的那一帧转成又窄又高的一竖条、徽标横躺。
-        // 那一帧真会显示（`render_frame` 在 mode_label 非空时就显示窗口）。
+        // 旋转包裹只套候选列表：独立编码栏、模式标记、翻页栏留在屏幕坐标系里横着排。包裹层是
+        // 裸的，装饰全在 `list` 上一起转。`candidate_inline` 时编码是 `list` 的子节点，会跟着转
+        // （非出厂路径，出厂是 `app_inline`）。
+        // 判据须与 `list_vertical` 同源，不能只判 `inp.rotated`：无候选时列表退化成 Row，再套
+        // 旋转会把「只有模式徽标」的那一帧转成又窄又高的一竖条。
         let list = if list_vertical && inp.rotated {
             View::rotated_cw(list)
         } else {
@@ -2972,11 +2766,7 @@ mod tests {
     use super::*;
 
     /// 主题配的翻页字符必须原样落到渲染，只有「一个字符都没配」才回退内置箭头。
-    ///
-    /// 这条以前是断的：渲染侧把 ‹ › 写死，`footer_bar.prev_char` 解析到 RvNode 后无人消费，
-    /// 主题里写什么都被画回内置箭头（而主题编辑器的预览一直照配置画，两边从来没对齐过）。
-    /// 空白不算未配——`prev_char = " "` 是「这里留白」的显式意图，被当成未配置就又变回 ‹ ›，
-    /// 正是同一个 bug 的另一副面孔。
+    /// 空白不算未配：`prev_char = " "` 是「这里留白」的显式意图。
     #[test]
     fn arrow_char_falls_back_only_when_unset() {
         assert_eq!(arrow_char("", "‹"), "‹", "未配 → 内置箭头");
@@ -2988,11 +2778,7 @@ mod tests {
         assert_eq!(arrow_char(" ", "‹"), " ", "留白是显式意图，不回退");
     }
 
-    /// 候选文本的空白控制符须显示为可见符号，且**不得改动其他字符**。
-    ///
-    /// 这只是显示投影——`Candidate::text` 原文不动，上屏走的仍是真换行（见
-    /// [`visible_whitespace`] 的文档）。故本测试只锁「显示成什么样」，
-    /// 不能被误读成「上屏文本也变了」。
+    /// 候选文本的空白控制符须显示为可见符号，且不得改动其他字符。只锁显示投影，上屏原文不变。
     #[test]
     fn whitespace_becomes_visible_glyphs() {
         // 无控制符：原样借用，零分配
@@ -3000,7 +2786,7 @@ mod tests {
 
         assert_eq!(visible_whitespace("甲\n乙"), "甲↵乙");
         assert_eq!(visible_whitespace("丙\t丁"), "丙⇥丁");
-        // CRLF 是**一个**换行，只出一个符号
+        // CRLF 是一个换行，只出一个符号
         assert_eq!(visible_whitespace("戊\r\n己"), "戊↵己");
         // 孤立 CR 同样算换行
         assert_eq!(visible_whitespace("庚\r辛"), "庚↵辛");
