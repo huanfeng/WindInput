@@ -2,11 +2,7 @@
 //!
 //! 设计文档：`docs/design/pinyin-mixed-abbrev.md`。
 //!
-//! ## 为什么这里只产「模式」，不产「切分」
-//!
-//! 文档 §4 的三个方案里，A（给 `Dag` 加声母节点）要动逐键候选生成的热路径且路径数膨胀，
-//! B（把 `nhao` 展开成 `nihao`/`nuhao`/… 逐个查）是**猜**，C（索引另存前缀简拼）要 bump
-//! wdat 且只解决一半。本模块走第四条路：
+//! 只产「模式」不产「切分」（文档 §4.5 方案 D）：
 //!
 //! ```text
 //!   nhao ──切分──> [Initial('n'), Syllable("hao")]   ← 模式（本模块）
@@ -15,18 +11,15 @@
 //!        ──校验──> ni|hao 逐段比对：n? ✓ / ==hao ✓   ← 模式在这里第二次发挥作用
 //! ```
 //!
-//! 投影键退化成纯简拼，所以**索引一个字节都不用改**；混合信息全部留在模式里做后置校验，
-//! 所以不会像纯简拼那样把 `nh` 下的词一股脑捞出来。`nih`（全拼在前）与 `nhao`（声母在前）
-//! 是同一套模式的两个实例，文档 §2 说的「卡在不同环节」在这里合成了一处。
+//! 投影键退化成纯简拼，索引不用改；混合信息留在模式里做后置校验。
 //!
 //! ## 与纯简拼的分工
 //!
 //! 本模块认**既有声母段又有音节段**的解释，外加**含双字母声母**的那些：
 //! - 全是单字母声母段（`nh`）→ 纯简拼，由 `AbbrevMatcher` + step5 处理，这里返回空；
 //! - 全是音节段（`nihao`）→ 全拼，走主路径；
-//! - 含 `zh`/`ch`/`sh` 段（`zhy` = zh|y）→ **归本模块，即使全是声母段**。纯简拼路径
-//!   逐字母切，只能把 `zhy` 解释成 z|h|y、投影键 `zhy`，而「这样」挂在键 `zy` 下 ——
-//!   那条路径表达不了「zh 是一个声母」，所以这里必须接住。
+//! - 含 `zh`/`ch`/`sh` 段（`zhy` = zh|y）→ 归本模块，即使全是声母段：纯简拼逐字母切，
+//!   表达不了「zh 是一个声母」（「这样」挂在键 `zy` 下）。
 //!
 //! 调用方还应先确认整串**不能**被完整切成音节序列，否则常见全拼输入会白跑一趟（见
 //! `PinyinEngine::convert` step 5b 的短路）。
@@ -37,16 +30,11 @@ use super::syllable::SyllableTrie;
 /// 再长的词打混合简拼已无收益，而段数直接决定 DFS 深度。
 const MAX_SEGMENTS: usize = 6;
 
-/// 单串最多保留的模式数。达到上限即停止枚举（DFS 顺序固定，故截断是确定性的：
-/// **长音节优先于短音节、音节段优先于双字母声母、双字母声母优先于单字母声母**，
-/// 即更具体的解释先被保留）。
+/// 单串最多保留的模式数。达到上限即停止枚举（DFS 顺序固定，截断确定：长音节 > 短音节 >
+/// 双字母声母 > 单字母声母，更具体的解释先保留）。
 ///
-/// ★ **从 16 提到 24 是因为双字母声母加了一档**：`zh`/`ch`/`sh` 的位置上多出一条边，
-/// 深层位置的分支互相挤，`chengshizhong` 实测丢掉了 3 条**改动前就有**的解释
-/// （键 `chesz`/`cheszh`/`chegsz`）。新增一个维度却不给额度，等于拿新解释换旧解释。
-/// 24 的依据是实测：该串新旧解释合计 16 条，`shanghaishizh` 等其余样本更少，
-/// 留出余量后仍远低于「每条模式一次索引点查」的成本拐点（见
-/// `tests/pinyin_abbrev_recall_latency.rs` 的真机计时）。
+/// 取 24 给双字母声母那一档留出额度（`chengshizhong` 这类串解释最多约 16 条），仍远低于
+/// 成本拐点（`tests/pinyin_abbrev_recall_latency.rs`）。
 const MAX_PATTERNS: usize = 24;
 
 /// 超过此长度不做混合解释。长串的合法解释本就少，而枚举成本随长度增长。
@@ -60,9 +48,7 @@ pub enum AbbrevSeg {
     /// 双字母声母段（`zh`/`ch`/`sh`）：约束对应音节以这**两个**字母开头。
     /// 载荷是 z/c/s 那一位 —— 投影键取的正是它，故索引不受影响（`zh|ge` → 键 `zg`）。
     ///
-    /// 它不是 [`Initial`](Self::Initial) 的特例而是独立一段，因为二者**消耗的击键数不同**
-    /// （2 vs 1）：`walk` 原先靠「边长 == 1」判声母段，混进 2 字节的声母后那条判据必错
-    /// 且不会报错（见 [`Edge`]）。
+    /// 独立成段而非 [`Initial`](Self::Initial) 的特例：二者消耗的击键数不同（2 vs 1）。
     Retroflex(char),
     /// 音节段：约束对应音节**全等**。
     Syllable(String),
@@ -72,8 +58,7 @@ impl AbbrevSeg {
     /// 本段与词典音节的**精确**匹配判定 —— 段语义的唯一真相源。
     ///
     /// 模糊放宽由调用方在此基础上叠加（见 `PinyinEngine::seg_matches_fuzzy`）：先问这里，
-    /// 不中再试变体。把 `starts_with` / 全等这两条留在本模块，是为了让「声母段只约束
-    /// 首字母、音节段约束全等」这个定义只有一处。
+    /// 不中再试变体。
     pub fn matches_exact(&self, syl: &str) -> bool {
         match self {
             AbbrevSeg::Initial(c) => syl.starts_with(*c),
@@ -123,12 +108,10 @@ impl MixedPattern {
 
     /// 候选词的音节序列是否符合本模式。
     ///
-    /// **音节数相等是硬条件**，这继承自纯简拼那条「字母数 == `boundary.count_ones()`」的
-    /// 过滤（文档 §5 约束 3）：扁平码有损，`xian` 既是「西安」的 xi|an 也是「先」的 xian，
-    /// 不按音节数卡住就会捞出一串权重高得多的单字。混合形态下的口径即**段数**。
-    /// ⚠️ **生产代码已无调用点**，四处段校验全部走 [`Self::matches_with`]（要拿模糊处数
-    /// 施加折扣）。保留它是作为「精确比较」的语义锚点与本模块单测的入口；若哪天单测也不用了，
-    /// 直接删掉即可，不要为了「保持对称」再给它接回生产路径。
+    /// 音节数（段数）相等是硬条件（文档 §5 约束 3）：扁平码有损，不卡住会捞出高权重单字。
+    ///
+    /// 生产代码已无调用点（都走 [`Self::matches_with`] 拿模糊处数），只作单测入口；单测不用了
+    /// 就删，别接回生产路径。
     pub fn matches<S: AsRef<str>>(&self, syllables: &[S]) -> bool {
         self.matches_with(syllables, |seg, syl| seg.matches_exact(syl).then_some(0))
             .is_some()
@@ -136,22 +119,13 @@ impl MixedPattern {
 
     /// 同 [`Self::matches`]，但音节段的比较交给调用方 —— 供模糊音放宽。
     ///
-    /// 闭包对**每一段**（声母段与音节段都算）返回 `Some(edits)`（该段的模糊改动处数，
-    /// `0` = 精确匹配）或 `None`（不匹配）；
-    /// 整条模式的返回值是各段 `edits` 之和。**调用方必须据此施加
-    /// [`fuzzy_penalized`](crate::pinyin) 折扣并标 `is_fuzzy`** —— 模糊命中恒低精确命中一档
-    /// 是全仓不变量（见 `FUZZY_WEIGHT_SCALE` 那段论证），本路径不是例外。
-    /// 返回处数而非 `bool`，正是为了让这个不变量在类型上没法被忽略。
+    /// 闭包对每一段返回 `Some(edits)`（模糊改动处数，`0` = 精确）或 `None`（不匹配），整条
+    /// 模式返回各段之和。调用方必须据此施加 [`fuzzy_penalized`](crate::pinyin) 折扣并标
+    /// `is_fuzzy`（模糊命中恒低精确一档是全仓不变量）；返回处数而非 `bool` 就是为了不让它被忽略。
     ///
-    /// **只有 `Syllable` 段需要这个钩子**：`Initial` 段比的是首字母，而模糊音的声母组
-    /// （`sh↔s`、`zh↔z`、`ch↔c`）恰好共享首字母，`starts_with` 天然就是宽松的
-    /// —— 用户敲 `s`，词典里的 `sheng` 本来就匹配得上。
-    ///
-    /// 真机现场：`senrikl` 想要「生日快乐」。声母投影键两边都是 `srkl`，
-    /// `search_abbrev` 已经把 `shengrikuaile` 召回来了，却在这里被
-    /// `"sen" == "sheng"` 判否丢弃 —— 模糊音在召回侧生效、在校验侧不生效，
-    /// 于是整条路白走。判据的方向必须与 `PinyinEngine::fuzzy_codes` 一致：
-    /// 对**用户输入段**做扩展，去匹配**词典音节**。
+    /// 三种段都要过钩子：音节段（`senrikl` 的 `sen` 要配 `sheng`）、改首字母的声母组
+    /// （n↔l 等）、双字母声母段的卷舌放宽。方向同 `PinyinEngine::fuzzy_codes`：扩展用户输入段
+    /// 去匹配词典音节。
     pub fn matches_with<S: AsRef<str>>(
         &self,
         syllables: &[S],
@@ -204,9 +178,7 @@ pub fn mixed_patterns(input: &str, trie: &SyllableTrie) -> Vec<MixedPattern> {
 
 /// 一条出边：吃掉几个字节，以及吃成哪种段。
 ///
-/// **必须带类型而不能只给长度**：`zh` 与 `ba` 都是 2 字节，前者是声母段、后者是音节段，
-/// 靠长度区分不了。此前 `walk` 用 `len == 1` 判「是不是声母段」，双字母声母进来后
-/// 那条判据就失效了。
+/// 必须带类型而不能只给长度：`zh` 与 `ba` 都是 2 字节，一个是声母段、一个是音节段。
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Edge {
     Initial,
@@ -254,8 +226,7 @@ fn is_initial(byte: u8, trie: &SyllableTrie) -> bool {
 
 /// `pos` 处是不是 `zh`/`ch`/`sh`。
 ///
-/// 判据仍向 trie 求证（`trie.is_prefix("zh")`）而非硬编码三个字面量：音节表是这件事的
-/// 真相源，写死一份就多一处会漂移的副本。
+/// 向 trie 求证而非硬编码三个字面量：音节表是真相源。
 fn is_retroflex_at(input: &str, pos: usize, trie: &SyllableTrie) -> bool {
     let b = input.as_bytes();
     if pos + 1 >= b.len() || b[pos + 1] != b'h' {
@@ -278,21 +249,14 @@ fn walk(
     if pos == input.len() {
         // 两种退化形态不归本模块：全**单字母**声母 = 纯简拼（step5），全音节 = 全拼（主路径）。
         //
-        // ★ 含 `Retroflex` 段的模式**即使全是声母段也要收**：`zhy` = zh|y 是纯简拼路径
-        // 表达不了的形态（它逐字母切，只能给出 z|h|y、投影键 `zhy`），而「这样」挂在
-        // 键 `zy` 下。不为它放行，双字母声母就只在「混着全拼音节打」时有效，
-        // 恰恰漏掉了用户最常写的那种（`zhy`/`zhsh`）。
+        // 含 `Retroflex` 段的模式即使全是声母段也要收（`zhy`/`zhsh`），见模块文档。
         let has_retroflex = cur.iter().any(|s| matches!(s, AbbrevSeg::Retroflex(_)));
         let has_initial = cur
             .iter()
             .any(|s| matches!(s, AbbrevSeg::Initial(_) | AbbrevSeg::Retroflex(_)));
         let has_syllable = cur.iter().any(|s| matches!(s, AbbrevSeg::Syllable(_)));
-        // ⚠️ **投影键至少 2 位**（= 段数 ≥ 2）。`Retroflex` 吃 2 个击键却只投影 1 个字母，
-        // 单段模式（`zh` → 键 `z`）于是绕过了 `MIN_ABBREV_STROKE` 立的规矩：
-        // 「单字母不构成简拼，退到 1 只会拖出一堆高频单字」。实测 `zhq` 会在 step 6.2 的
-        // `zh` 切点上把键 `z` 下所有 zh 开头的**单音节**词（这/中/只）连同单字的巨大权重
-        // 灌进候选，而它们只解释了 3 键里的 2 键。本次要修的三条（zhy/zhge/baichx）
-        // 都是 ≥2 段，不受此闸影响。
+        // 投影键至少 2 位（段数 ≥ 2）：单段 `zh` 只投影键 `z`，会绕过 `MIN_ABBREV_STROKE`、
+        // 把 zh 开头的高频单字灌进候选（`zhq` 在 step 6.2 的 `zh` 切点上）。
         if cur.len() >= 2 && (has_retroflex || (has_initial && has_syllable)) {
             out.push(MixedPattern::new(cur.clone()));
         }
@@ -321,21 +285,16 @@ fn walk(
 
 /// 按 `boundary`（音节起始**字节**位 bitmask）把全拼码切回音节序列。
 ///
-/// 这是混合校验唯一的音节来源：模式比对的是「第 k 个音节长什么样」，没有真值切分就没有
-/// 判据。故 `boundary == 0`（旧数据 / 用户手输码 / 五笔码）一律返回 `None` **不参与**混合
-/// 简拼——注意这与全仓「任一侧为 0 即降级放行」的惯例方向相反，因为那条惯例讲的是
-/// 「校验放宽」，而这里 boundary 缺失等于判据本身不存在，放行就成了不校验。
+/// 混合校验唯一的音节来源，故 `boundary == 0` 一律返回 `None`、不参与混合简拼。与全仓
+/// 「任一侧为 0 即降级放行」相反：这里 boundary 缺失等于判据不存在，放行就成了不校验。
 ///
 /// ⚠️ 与 [`super::PinyinEngine::abbrev_of_code`] **必须对同一个 boundary 给出一致的解释**
 /// （那边取的正是这里每段的首字母）。改动其一时同步核对另一处。
 pub fn syllables_from_boundary(code: &str, boundary: u64) -> Option<Vec<&str>> {
     // bit0 未置位 = 第一个音节不从 0 开始 —— 坏数据，不猜。
     //
-    // `!code.is_ascii()`：下面按**字节**下标切片，`i` 落在多字节字符内部会 panic。
-    // 同文件的 `render_keystroke_preedit` 早就带着同款守卫，说明本模块不把 ASCII 当
-    // 可假设的前提。此前本函数的调用方都带 `is_abbrev` 一类的窄化守卫，`shuangpin_code_of`
-    // 把调用面扩到了**每条拼音候选**、且处在按键线程持 state 锁的位置 —— 那里 panic
-    // 就是整个输入法崩掉，而这行的成本是零。
+    // `!code.is_ascii()`：下面按字节切片，非 ASCII 会 panic；调用面含每条拼音候选
+    // （`shuangpin_code_of`，按键线程持锁），panic 即输入法崩溃。
     if boundary & 1 == 0 || code.is_empty() || !code.is_ascii() {
         return None;
     }
@@ -354,43 +313,15 @@ pub fn syllables_from_boundary(code: &str, boundary: u64) -> Option<Vec<&str>> {
 /// 按候选的真值音节序列，把**击键串**切成对应的段并以 `'` 连接
 /// （`nhao` + `ni|hao` → `n'hao`；`nh` + `ni|hao` → `n'h`）。
 ///
-/// ## 为什么不能直接渲染候选的 code
+/// 不能直接渲染候选的 code：preedit 必须与击键串同域，`nh` 显示成 `ni'hao` 会让退格与光标错位
+/// （文档 §4.6）。
 ///
-/// preedit 必须与击键串**同域**。简拼/混合简拼候选的 code 是词的全拼码（`nihao`），
-/// 拿它走 [`super::render_preedit`] 会显示成 `ni'hao` —— 用户只敲了 4 键却看到 5 个字母，
-/// 退格与光标编辑立刻错位。要显示的是「用户敲的这几个键怎么分段」，不是「这个词怎么拼」。
+/// 逐音节贪心：能整段对上该音节就是音节段，否则是声母段（1 字节，或 `zh`/`ch`/`sh` 2 字节）。
+/// 双字母声母要试两遍：`zhge`+zhe|ge 应切 `zh'ge`，`zh`+zhong|hua 应切 `z'h`，贪心无回溯，
+/// 故先双字母优先、不成再单字母。能整串对齐的切法唯一，两遍不会给出不同结果。
 ///
-/// ## 切法
-///
-/// 逐音节贪心：当前位置能整段对上该音节就是**音节段**（吃掉整个音节），对不上就只能是
-/// **声母段**（吃 1 字节，或 `zh`/`ch`/`sh` 那 2 字节，且该声母必须是这个音节的开头）。
-/// 音节段优先是对的 —— 声母段是「信息更少」的解释，只在整段对不上时才成立。
-///
-/// ## 为什么双字母声母要**两遍**
-///
-/// 贪心无回溯，而 `zh` 这一位有两种都合法的读法，且哪种对**取决于后面走不走得通**：
-///
-/// | 击键 | 候选音节 | 正确切法 |
-/// |---|---|---|
-/// | `zhge` | zhe\|ge | `zh'ge` —— zh 是一个声母段 |
-/// | `zh`   | zhong\|hua | `z'h` —— 老写法，z 和 h 各是一段 |
-///
-/// 只按「双字母优先」单遍扫，第二行会在第一步吃掉 2 字节、第二个音节没键可分，
-/// 整个函数返回 `None`，组合区退回无分隔符的 `zh`。那正是本模块要显示给用户的东西
-/// （`z'h'ge` 这个显示曾是双字母声母缺失的**唯一**可见线索），不能因为新增了一种解释
-/// 就把另一种的显示弄丢 —— 候选侧两种解释是并存的，显示侧也必须并存。
-///
-/// 故先按双字母优先试一遍，不成再按单字母试一遍。两遍都失败才返回 `None`。
-/// 不会出现「两遍都成功但结果不同」的歧义：能整串对齐的切法对给定音节序列是唯一的
-/// （每一步的候选段互不为前缀）。
-///
-/// 返回 `(渲染串, 已消费的 raw 字节数)`。**部分匹配**（step 6.2 前缀回退）时消费数会小于
-/// `raw.len()`，余下的字母由调用方自己切分后追加——尾巴往往还含完整音节
-/// （`bzdnihaob` 的 `haob` = `hao` + 残码 `b`），整段甩上去会显示成 `b'z'd'ni'haob`，
-/// 该切的地方没切。
-///
-/// 任何一步对不上一律返回 `None`（调用方保持原显示不变）。preedit 是显示层，宁可少一个
-/// 分隔符，不可给出与击键长度不符的串——**去掉 `'` 必须恰好还原击键串**是这里的不变量。
+/// 返回 `(渲染串, 已消费的 raw 字节数)`；部分匹配（step 6.2 前缀回退）时余下字母由调用方
+/// 自己再切（文档 §4.7.2）。对不上一律返回 `None`。不变量：去掉 `'` 必须恰好还原击键串。
 pub fn render_keystroke_preedit(raw: &str, syllables: &[&str]) -> Option<(String, usize)> {
     if raw.is_empty() || syllables.is_empty() || !raw.is_ascii() {
         return None;
@@ -411,10 +342,7 @@ fn render_pass(raw: &str, syllables: &[&str], allow_two: bool) -> Option<(String
         }
         // 贪心：整段音节 > 双字母声母 > 单字母声母。顺序与 `edges` 一致（更具体的先试）。
         //
-        // ⚠️ 这里刻意**不查 `SyllableTrie`**（与 `is_retroflex_at` 不同，那边查是为了不
-        // 硬编码三个字面量）：判据 `syl.starts_with(t)` 是向**候选自己的真值音节**求证，
-        // 比查音节表更直接，也免去把 trie 穿进显示层。第二位是 `h` 那一条只是先筛掉
-        // 绝大多数不可能的位置。
+        // 不查 `SyllableTrie`：`syl.starts_with(t)` 向候选自己的真值音节求证，更直接。
         let two = (allow_two && pos + 2 <= raw.len()).then(|| &raw[pos..pos + 2]);
         let seg = if raw[pos..].starts_with(syl) {
             *syl

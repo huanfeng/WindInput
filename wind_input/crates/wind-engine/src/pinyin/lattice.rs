@@ -1,7 +1,6 @@
 // Portions derived from librime / librime-octagram, Copyright (c) 2014 RIME Developers, BSD-3-Clause (see NOTICE.md).
 //! 格子构建（Lattice）+ 多切分评分
 //!
-//! 与 Go 版本 `wind_input/internal/engine/pinyin/lattice.go` 对齐。
 //! 构建词图并支持多路径评分，用于 Viterbi 解码。
 
 use crate::pinyin::dag::{MaskCheck, SegGraph};
@@ -13,30 +12,12 @@ use wind_dict::manager::DictManager;
 
 /// 虚词表：**字形 → 该字作虚词时的读音**（无调全拼）。
 ///
-/// ## ★★★ 判据必须同时问「哪个字」和「哪个读音」
+/// 判据必须同时问字和读音：虚词优待合计约 8.0 nat（≈2981 倍词频），只按字形发放时多音字
+/// 的冷僻读音会白拿优待、压掉该音位上的高频字（kuai 下「会」压「快」）。数据见
+/// candidate-sorting-rules.md「拼音常量的取值依据」。
 ///
-/// 虚词优待合计 **8.0** 的量级差（`FUNCTION_WORD_BONUS` +2.0、实词
-/// `SINGLE_CHAR_PENALTY` −3.0、再豁免 `WORD_PENALTY` 3.0），相当于 e^8 ≈ **2981 倍词频**。
-/// 只按字形发放时，多音字的**冷僻读音**会白拿这份优待，把该音位上真正的高频字整片压掉：
-///
-/// ```text
-/// kuai:  会(w=334)   +2.0 = −11.49   >   快(w=29689)  −6.0 = −15.01   ⇒ 「快吃饭」出成「会吃饭」
-/// zhao:  着(w=263)          −11.72   >   找(w=54117)        −14.40
-/// huan:  还(w=12366)         −7.88   >   换(w=18772)        −15.47
-/// liao:  了(w=51)           −13.37   >   聊(w=8535)         −16.26
-/// ```
-///
-/// 这与 `score_node_inner` 长注释里批评 `gen_unigram`「按词去重取 max、多音字冷僻读音被按
-/// 常见读音计价」是**同型缺陷**，只是发生在加成层而非基础分层，故那次修复没覆盖到。
-///
-/// ## 取值口径
-///
-/// 只登记该字**作虚词/代词/助动词时**的读音；同字的实词读音一律不登记（会 kuai 会计、
-/// 都 du 首都、还 huan 归还、着 zhao/zhuo、和 huo/hu、没 mo 沉没、了 liao 了解、
-/// 地 di 土地、说 shui 游说）。码是**无调全拼**，故同码不同调无法区分——`得` 的 `de`
-/// （结构助词）与 `dé`（得到）共码，只能一并放行，这是无调码的固有上界，不是疏漏。
-///
-/// 单读音的字（我/你/是/不…）登记其唯一读音即可，判据对它们等价于旧的「只问字形」。
+/// 只登记该字作虚词/代词/助动词时的读音，实词读音不登记（会 kuai、还 huan、了 liao…）。
+/// 码是无调全拼，同码不同调无法区分（`得` de），这是无调码的固有上界。
 fn function_word_readings(w: &str) -> Option<&'static [&'static str]> {
     Some(match w {
         // —— 助词 ——
@@ -126,12 +107,8 @@ pub(crate) const WORD_PENALTY: f64 = 3.0;
 /// 产品语义（§4.1 实测：Rime 中缩合音词在候选层仍是第 4/5 位），故取「恰好压过
 /// 歧义拆分的收益」的量级即可。
 ///
-/// **0.35 是一个刀刃值，改动前务必重跑 `pinyin_eval` 的定点**：≤0.30 时
-/// `lianzhengtixing` 退回「李安整体性」（本次改造的原始缺陷）；≥0.5 时
-/// `liandaoyan` 劣化为「连导演」。**聚合指标在 0.30~0.35 之间完全不变**，
-/// 这两个定点是仅有的差异——因为它们是同一个词、同一个 `li|an` 拆分、同一个
-/// 歧义接缝，切分层没有可区分二者的信息。真正的区分需要 bigram 上下文
-/// （需要 bigram 上下文；旧 lm.rs 里的简化插值实现已随 unigram 合并删除，缺磁盘语料）。
+/// 0.35 是刀刃值，改动前务必重跑 `pinyin_eval` 的定点（`lianzhengtixing` / `liandaoyan`），
+/// 依据见 `docs/design/pinyin-boundary-aware-lattice.md`。
 pub(crate) const AMBIGUOUS_PENALTY: f64 = 0.35;
 
 /// 词图节点的**每模糊音节**对数惩罚，`ln(2)` ⇒ 概率域每个模糊音节乘 0.5。
@@ -139,71 +116,33 @@ pub(crate) const AMBIGUOUS_PENALTY: f64 = 0.35;
 /// 与候选层的 [`super::FUZZY_WEIGHT_SCALE`]（=0.5，乘性）是**同一个量在两个域的表达**，
 /// 两者必须同步改：候选层管词典直查的模糊命中，本常数管词图节点、进而管整句路径。
 ///
-/// 取值对齐 librime `kFuzzySpellingPenalty`（`= log(0.5)`，加进 `credibility` 再进 weight）
-/// 与 libime `fuzzyCost`（`= log10(0.5)`，`extraCost = fuzzies × fuzzyCost`）—— 两者都是
-/// **每个模糊拼写 0.5、多个累乘**。
-///
-/// 此前这里写死 `-0.5`（≈ ×0.61）且不看音节数，`beijinsi`（2 个模糊音节）与单音节模糊
-/// 同等对待。
+/// 取值对齐 librime `kFuzzySpellingPenalty`（`log(0.5)`）与 libime `fuzzyCost`（`log10(0.5)`）：
+/// 每个模糊拼写 0.5、多个累乘。
 pub(crate) const FUZZY_SYLLABLE_LOG_PENALTY: f64 = std::f64::consts::LN_2;
 
 /// 简拼节点每个音节的惩罚（混合整句解码用，见 [`LatticeBuilder::add_abbrev_nodes`]）。
 ///
-/// **按音节数计而非固定值**：简拼段越长，「每个字母只给了一个声母」积累的不确定性越大
-/// ——`bzd` 要在 12 个同简拼词里选，`bzdh` 的候选面更宽。固定罚会让长简拼段不合理地便宜。
-///
-/// 量纲参照同文件的 `WORD_PENALTY`(3.0) 与模糊命中的 0.5：简拼的不确定性远大于模糊音
-/// （一个声母对应几十个音节 vs z↔zh 两个变体），但又不能大到让混合整句根本出不来。
-/// **本值由 `pinyin_eval` 的 D 类对账定出，改动前必须重跑**（见 `pinyin-mixed-abbrev.md` §4.8）。
+/// 按音节数计而非固定值：简拼段越长不确定性越大，固定罚会让长段不合理地便宜。
+/// 由 `pinyin_eval` 的 D 类对账定出，改动前必须重跑（见 `pinyin-mixed-abbrev.md` §4.8）。
 pub(crate) const ABBREV_NODE_PENALTY: f64 = 1.2;
 
 /// 混合整句里把 `zh` / `ch` / `sh` **拆成两个声母**（z|h）时，每处拆分的扣分（对数域）。
 ///
-/// 用户打 `zh` 绝大多数时候要的是翘舌声母（`zhge` = 这个），而简拼节点按「一个字母一个
-/// 声母」读，会把它读成 z|h：「之后」(zhi|hou) 的简拼恰好是 `zh`，于是 `zhge` 组出
-/// 「之后个」、`shzhe` 组出「生活这」、`zhrgan` 组出「之后如果按钮」。拆开读并非不合法
-/// （「最后」的简拼就是 `zh`），故是**罚**不是禁。
-///
-/// 取值由 `pinyin_eval` 界面序扫出（2026-09-24，seed 20260721；A/B/C 不受影响，只有 ②b 用）：
-///
-/// | 惩罚 | E 短简拼 top-1 | 其中 R 全声母 | D 混合长串 top-1 |
-/// |---|---|---|---|
-/// | 0 | 64.40% | 27.27% | 12.20% |
-/// | 2 | 68.20% | 52.27% | 12.20% |
-/// | 4 | 70.60% | 70.45% | 12.10% |
-/// | **8** | **74.40%** | **90.91%** | **12.00%** |
-/// | 50（≈禁止） | 75.50% | 90.91% | 11.40% |
-///
-/// 8 处：E 类新增 100 条、丢 0 条；D 类丢的 2 条正是用户真把 s|h、z|h 当两个声母打的
-/// （「可视化」`ksh`、「相互帮助」`xhbz` + 「黑武士」）。再往上 E 只多 11 条、D 却丢 8 条。
+/// 用户打 `zh` 多半要翘舌声母，读成 z|h 会让 `zhge` 组出「之后个」。拆开读并非不合法
+/// （「最后」的简拼就是 `zh`），故是罚不是禁。取值由 `pinyin_eval` 扫参定出，见
+/// candidate-sorting-rules.md「拼音常量的取值依据」。
 pub(crate) const RETROFLEX_SPLIT_PENALTY: f64 = 8.0;
 
 /// 混合整句里简拼段**抢走前一全拼音节的韵尾**时的扣分（对数域）。
 ///
-/// 用户打 `ningbr`（宁波人）时 `ning` 是一个完整音节，而简拼节点可以从它中间的 `n` 起头，把
-/// 串读成 ni + n|g + b|r，组出「你能够比如」；同类还有 `zhentp` →「这钕铁硼」、`banld` →
-/// 「把年龄段」。用户把一个音节打全了，就几乎不会是要把它的韵尾拆给下一个词当声母。
-/// 判据见 [`steals_coda`]；与 [`RETROFLEX_SPLIT_PENALTY`] 同理，是罚不是禁。
-///
-/// 取值由 `pinyin_eval` 界面序扫出（2026-09-24，seed 20260721，已含翘舌拆分惩罚）：
-///
-/// | 惩罚 | E 短简拼 top-1 | 其中 F 首音节+声母 | D 混合长串 top-1 |
-/// |---|---|---|---|
-/// | 0 | 74.40% | 72.24% | 12.00% |
-/// | 2 | 75.20% | 73.43% | 12.00% |
-/// | 4 | 75.70% | 74.41% | 12.00% |
-/// | **8** | **76.20%** | **75.20%** | **12.00%** |
-/// | 16 / 50 | 76.20% | 75.20% | 12.00% |
-///
-/// 8 处 E 类新增 18、丢 0，此后不再变化；A~D 全程逐位不变。E 类剩余的 F 形态失败以同音 /
-/// 同简拼竞争为主（就你能 / 就你那），另有零声母音节的切分歧义（`xianzw` → 西安作为），
-/// 那是全拼音节图本身的问题，不归本项管。
+/// `ningbr`（宁波人）被读成 ni + n|g + b|r 组出「你能够比如」：用户打全了一个音节，就几乎
+/// 不会是要把韵尾拆给下一个词当声母。判据见 [`steals_coda`]；同 [`RETROFLEX_SPLIT_PENALTY`]，
+/// 是罚不是禁。取值依据见 candidate-sorting-rules.md「拼音常量的取值依据」。
 pub(crate) const CODA_STEAL_PENALTY: f64 = 8.0;
 
 /// 单个简拼跨度最多取几个词进图。
 ///
-/// 简拼召回面宽（`bzd` 真实词库下 12 个词），全塞进去会让节点数与 Viterbi 的边数一起膨胀，
-/// 而排在后面的低频词几乎不可能赢下整句路径。按权重取前 N 即可。
+/// 全塞进去会让节点与边数膨胀，而排在后面的低频词几乎赢不下整句路径。
 const ABBREV_NODE_LIMIT: usize = 8;
 
 /// 单个跨度上最多取几条用户词入图（[`LatticeBuilder::add_store_nodes`]）。
@@ -214,13 +153,11 @@ pub(crate) const USER_NODE_LIMIT: usize = 8;
 
 /// 用户层简拼节点每个跨度**取数**的上限（过判据、按权重取前 [`USER_NODE_LIMIT`] 之前）。
 ///
-/// 取数用 `search_abbrev_exact`（只查本组，无边界词不在其中）。存储层按索引键字典序数够
-/// 上限就返回，**不按权重**——所以上限太小会在判据前切掉高权重词（曾是 8：同组 10 个词时
-/// 「拜城县」就被切掉），太大又让按键路径随用户库规模线性变慢。实测（每个被查的两/三字母组
-/// 塞 2000 个用户词、`bcxrmzf` 一次转换，关 → 开）：不设上限 +60~90ms，64 +1.7ms，32 +1.1ms。
+/// 存储层按索引键字典序数够上限就返回、不按权重：太小会在判据前切掉高权重词，太大让按键
+/// 路径随用户库规模变慢（延迟数据见 candidate-sorting-rules.md「拼音常量的取值依据」）。
 ///
-/// ⚠️ 已知限制：同一声母串的用户词超过本值时，超出部分按码的字典序被截，与权重无关。
-/// 要彻底解决需在索引里按权重排序，本项不做。值与引擎侧 `ABBREV_INDEX_LIMIT` 同为 64。
+/// 已知限制：同一声母串的用户词超过本值时，超出部分按码的字典序被截，与权重无关。
+/// 值与引擎侧 `ABBREV_INDEX_LIMIT` 同为 64。
 const USER_ABBREV_SCAN_LIMIT: usize = 64;
 
 /// 模糊入图（系统词与用户词共用）时，从一个起点出发、**同一音节数**上最多保留几条在途的
@@ -229,10 +166,8 @@ const USER_ABBREV_SCAN_LIMIT: usize = 64;
 /// 超出时按改动处数升序保留，截掉的只是模糊处数多的组合（及其后继——后继的处数只增不减）。
 /// 每条组合在它到达的终点上各是一次候选点查（按变体码归并后），故这也是成本闸门。
 ///
-/// 取 256 = 旧口径「一条切分 64 种组合 × 4 条切分」：
-/// 不再按切分截断之后，多切分的串（`fanganfangan…` 同音节数下有 8 条切分）要的是
-/// 「每条切分都至少保住少处模糊的那些组合」，按处数排序的同层预算正好表达这一点；
-/// 量级与旧上界持平，性能见 `pinyin_sentence_user_words_probe::fuzzy_store_node_cost_on_real_dict`。
+/// 取 256（「64 种组合 × 4 条切分」的量级），性能见
+/// `pinyin_sentence_user_words_probe::fuzzy_store_node_cost_on_real_dict`。
 pub(crate) const FUZZY_LAYER_BUDGET: usize = 256;
 
 /// 各音节边 `(起, 止)` 的变体表（首项恒为原音节、0 处改动）：同一条边会被许多起点、
@@ -244,44 +179,18 @@ pub(crate) type FuzzyShape = (u64, Vec<usize>, usize);
 
 /// 用户词入图时的**对数域加成**（[`LatticeBuilder::add_store_nodes`]）。
 ///
-/// ## 为什么需要它
+/// 用户词与词频同轴但语义不同（「我要这个词」）：出厂加词权重恰好翻不过同码中频词，整句
+/// 仍不认。不抬 `ADD_WORD_WEIGHT`，那会动候选层的标定。+2.0 ≈ ×7.4，翻得过多数同码竞争者，
+/// 仍输给真正的高频词（数据见 candidate-sorting-rules.md「拼音常量的取值依据」）。
 ///
-/// 用户词的 weight 与词频同轴，但两者**语义不同**：词频说「这个词有多常见」，用户词说
-/// 「我要这个词」。同轴比大小的后果实测如下 —— 「盖伦」在 cn_dicts 里本就有（w=237），
-/// 同码的「概论」w=1217，而手动加词的出厂权重 `ADD_WORD_WEIGHT = 1200`
-/// （`handle_addword.rs:38`）**恰好低 17 分**：用户按设计流程走完（造词 + 开开关），
-/// 整句**仍然不认**，要手工把权重调到 1300 才翻得过来。那等于这个功能对默认路径上的
-/// 用户不存在。
-///
-/// ## 为什么加在这里，而不是抬 `ADD_WORD_WEIGHT`
-///
-/// 抬那个常量会连带改变**候选层**排序（它在那边的语义是「略高于系统库归一化中位 1000」），
-/// 而候选层本来就工作正常 —— 为整句的需要去动候选层的标定，是拿一个正确的东西去补
-/// 另一个。整句与候选本就是两套打分（前者在对数域按路径求和、后者在线性域比 weight），
-/// 「用户明确造过的词在**组句时**该被优先考虑」是独立于词频的判断，就地表达即可。
-///
-/// ## 为什么是 +2.0，且为什么是加而不是乘
-///
-/// 量纲对照同文件的其余调整项（`FUNCTION_WORD_BONUS` +2.0、`SINGLE_CHAR_PENALTY` −3.0、
-/// `WORD_PENALTY` 3.0），+2.0 等价于 `weight × e² ≈ ×7.4`：出厂加词的 1200 等效到 ~8900，
-/// 从「压过 96.3% 的系统词」抬到 **99.5%** —— 翻得过绝大多数同码竞争者，又仍然输给真正的
-/// 高频词（「这个」w=555006 ⇒ −6.08，加成后的用户词是 −10.22）。用户词不该碾压高频词，
-/// 只该在势均力敌时胜出。
-///
-/// **加在 `score_node` 之后而不是乘在 weight 上**：`score_node_inner` 里多字词的
-/// `BASE_CONTENT_WORD_BONUS` 用 `freq_factor`（由 log_prob 推出）做缩放，放大 weight 会
-/// 连带把那份加成也放大一次，等于同一个意图被计了两遍、且幅度不可控。
+/// 加在 `score_node` 之后而不乘在 weight 上：`BASE_CONTENT_WORD_BONUS` 由 log_prob 缩放，
+/// 放大 weight 会把那份加成也放大一次。
 pub(crate) const USER_NODE_BONUS: f64 = 2.0;
 
 /// 用户词入图时的 weight 上限（[`LatticeBuilder::add_store_nodes`]）。
 ///
-/// 用户词与词典 weight 同轴，默认档位本就落在合理位置（手动加词 1200 压过 96.3% 的系统词、
-/// 造词晋升 800 压过 94.7%），故不做分布重映射，**只防极端值**：导入的 wdict 可以带任意
-/// 权重，`w = 2e9` 时 `ln(w/DICT_TOTAL) = +2.11`，而系统最大词（15,378,475）才 −2.76
-/// —— 差近 5 个自然对数单位（≈148 倍），足以让整句变成用户词拼接秀。
-///
-/// 取 1e6（`ln = −5.49`，约 p99.99+）：够强 —— 几乎压过所有系统词，又仍在词频轴内侧，
-/// 不会跨到对数正值那一段去碾压一切。
+/// 默认档位本就合理，不做分布重映射，只防导入 wdict 带来的极端值（`w = 2e9` 会让整句变成
+/// 用户词拼接秀）。1e6 约 p99.99+，几乎压过所有系统词又仍在词频轴内侧。
 pub(crate) const USER_NODE_WEIGHT_CAP: i32 = 1_000_000;
 
 /// 用户层里**哪些词进整句词图**：用户词与临时词（都是用户上屏过的），不收草稿。
@@ -296,32 +205,22 @@ const MAX_ABBREV_SPAN: usize = 6;
 
 /// 尾部残码补全节点（[`LatticeBuilder::add_partial_final_nodes`]）的对数概率罚。
 ///
-/// 对齐 librime 的 `kCompletionPenalty = log(0.5)`（`script_translator.cc`）：残码是
-/// 「用户还没打完的音节」，把它当成某个具体音节是一次**预测**，须付出确定性代价。
-/// 我们的 `log_prob` 同为自然对数（`ln(weight / DICT_TOTAL)`），故数值直接取 `ln 2`。
+/// 对齐 librime `kCompletionPenalty = log(0.5)`：把残码当成某个具体音节是一次预测。
 ///
-/// **为何不按残码长度递减**：直觉上 `zho` 比 `z` 确定（候选音节少），但候选面收窄这件事
-/// 已经由 `search_prefix_*` 的召回集合自然表达了——`z` 捞出的字横跨 za/zai/zan/…，
-/// 它们要各自与整句其余部分竞争；`zho` 只剩 zhong/zhou 两族。**再按长度加一道折扣等于
-/// 把同一个信息扣两次**。同类先例见 `ABBREV_NODE_PENALTY` 的反向情形：那里按音节数递增
-/// 是因为简拼段的召回集合**不随段长收窄**（每个字母恒是一个声母），信息未被表达。
+/// 不按残码长度递减：候选面收窄已由召回集合表达，再折扣等于扣两次。`ABBREV_NODE_PENALTY`
+/// 按音节数递增恰是反面：简拼段的召回集合不随段长收窄。
 pub(crate) const PARTIAL_FINAL_PENALTY: f64 = std::f64::consts::LN_2;
 
 /// 尾部残码跨度最多取几个单字进图。
 ///
-/// 残码召回面比简拼更宽（`k` 覆盖 ka/kai/kan/kang/ke/ken/keng/kong/kou/ku/kua/… 全部单字），
-/// 但真正可能赢下整句路径的只有高频字，故比 `ABBREV_NODE_LIMIT`(8) 略放宽即可。
+/// 残码召回面比简拼更宽，但能赢下整句路径的只有高频字，故比 `ABBREV_NODE_LIMIT` 略放宽。
 pub(crate) const PARTIAL_FINAL_NODE_LIMIT: usize = 12;
 
 /// 词频归一化基准 —— **标定系数，非精确的词库总权重**，理由见 [`score_node_inner`]。
 ///
-/// 取值 = 合并前 `unigram.txt` 的总频次（实测 242,154,693），使 99.95% 的词在这次合并前后
-/// `log_prob` **数值完全不变**。参照：`cn_dicts` 实测总权重 243,154,024，差 0.41%
-/// （差额全部来自 w=0 条目、纯 ASCII 词与多音合并，w=0 的权重和本就为 0）。
-///
-/// ⚠️ 它与 [`WORD_PENALTY`] 共同构成「每词固定罚」这一个旋钮（`Σ ln(f/T) = Σ ln(f) − n·ln T`），
-/// 换词库导致的漂移只等价于该罚值的微调（词库总权重 +50% 也只让每词罚变化 0.4，相对
-/// `WORD_PENALTY`=3.0 约 13%），故不必随词库精确浮动。
+/// 取值是旧 unigram 表的总频次，与 `cn_dicts` 总权重差 0.41%。它与 [`WORD_PENALTY`] 共同构成
+/// 「每词固定罚」一个旋钮（`Σ ln(f/T) = Σ ln(f) − n·ln T`），换词库的漂移只等价于该罚值微调，
+/// 故不必随词库精确浮动。见 `docs/design/sentence-weight-same-axis.md` §4.1。
 pub(crate) const DICT_TOTAL: f64 = 242_154_693.0;
 
 /// 节点对数概率打分（对齐 Go lattice calcLogProb + 惩罚/加成）。
@@ -330,29 +229,16 @@ pub(crate) const DICT_TOTAL: f64 = 242_154_693.0;
 /// unigram）。`code` 是**取到这条词条所用的词典码**，供单字虚词判据核对读音——不是用户
 /// 原始击键，两者在模糊/简拼路径上并不相同，见 [`is_function_word`]。
 ///
-/// ⚠️ 因此本函数要求 `code` 落在**无调全拼**域。当前三个 `LatticeBuilder::build` 调用点
-/// 传的都是全拼（双拼在进 lattice 前已转换），`add_abbrev_nodes` 传的是回查出的全码。
-/// 哪天放开闸门让**双拼击键**直接进词图，`code` 会变成 `ui` 这类击键串，全表虚词一次性
-/// 掉权 8.0 nat —— 那是静默的整体劣化，不会有任何编译错误。
+/// 因此 `code` 必须落在无调全拼域。若让双拼击键直接进词图，全表虚词会静默掉权 8.0 nat。
 pub(crate) fn score_node(word: &str, code: &str, weight: i32) -> f64 {
     score_node_inner(word, code, weight, true)
 }
 
 /// **尾部残码待定音节**专用打分：与 [`score_node`] 相同，但**不给单字虚词优待**。
 ///
-/// ## 为什么必须去掉
-///
-/// 虚词优待合计 **8.0** 的量级差（`FUNCTION_WORD_BONUS` +2.0、实词 `SINGLE_CHAR_PENALTY`
-/// −3.0、再豁免 `WORD_PENALTY` 3.0），足以碾压任何 unigram 差距。落在残码位上的后果：
-/// `zhonghuar` 补出「中华**让**」而非「中华人」、`nihaom` 补出「你好**们**」而非「你好吗」
-/// ——「让」「们」都在虚词表里，「人」「吗」不在。
-///
-/// ## 为什么这不是给残码开特例
-///
-/// 虚词优待的**前提**是「虚词随内容词出现是语法黏着，不该付投机拆分的代价」（见
-/// [`score_node`] 内 `WORD_PENALTY` 处的长注释）。那个前提描述的是**整句内部**已经成形的
-/// 搭配。残码位是「用户打到一半的那个音节」——它是虚词的先验并不比实词高，语法黏着
-/// 无从谈起。**同一条加成，在两个位置的前提不同**，故按位置区分而非按词性区分。
+/// 虚词优待（约 8.0 nat）的前提是整句内部已成形的语法黏着；残码位是用户打到一半的音节，
+/// 前提不成立，否则 `nihaom` 补出「你好们」。按位置区分而非按词性区分，见
+/// candidate-sorting-rules.md §4.2。
 pub(crate) fn score_node_partial_final(word: &str, weight: i32) -> f64 {
     // 不给虚词优待 ⇒ 读音无从参与判据，码传空串即可（`is_function_word` 恒 false）。
     score_node_inner(word, "", weight, false)
@@ -370,42 +256,18 @@ fn score_node_inner(word: &str, code: &str, weight: i32, function_word_credit: b
     let chars: Vec<char> = word.chars().collect();
     let char_count = chars.len();
 
-    // 基础 logProb 直接由**该词条自己的**词典权重算出，不再查 unigram 表。
-    //
-    // ## 为什么不查 unigram（2026-08-08 合并）
-    //
-    // unigram.txt 由 `gen_unigram` 从**同一批 cn_dicts** 生成，实测 608,446/608,754
-    // (99.95%) 的取值与 dict weight 完全相等、缺失 0 条 —— 它是一份副本，不是独立数据。
-    // 而剩下的 0.05%（308 条）是**副本引入的缺陷**：`gen_unigram` 按词去重时取 `max`，
-    // 于是多音字的冷僻读音被按常见读音计价：
-    //
-    //   说(shui) 真实 w=4  → 按 267,892 计价（虚高 66,973 倍）
-    //   了(liao) 真实 w=51 → 按 1,758,342 计价（虚高 34,477 倍）
-    //
-    // 而调用方（`LatticeBuilder::build`）手上的 `hit.weight` 正是**该读音**的真实权重。
-    // 对齐 librime：`dict_compiler.cc:257` 编译期 `log(w > 0 ? w : DBL_EPSILON)`，词图打分
-    // 直接用词条自带 weight，**没有独立的 unigram 表**。（fcitx5 确有第二个数据源，但那是
-    // 独立语料训练的 KenLM —— 提供词典没有的信息，与本副本性质不同。）
-    //
-    // ⚠️ [`DICT_TOTAL`] 不是精确的词库总权重，而是**标定系数**：整句分
-    // `Σ ln(freq_i/TOTAL) = Σ ln(freq_i) − n·ln(TOTAL)`，其中 `−n·ln(TOTAL)` 与
-    // `WORD_PENALTY` 的 `−n×3.0` 是同一种「每词固定罚」。二者共同构成一个已被实测标定的
-    // 旋钮，故 TOTAL 无需随词库精确浮动；取当前值是为了让 99.95% 的词 log_prob **数值不变**，
-    // 把改动的扰动面压到最小。
+    // 基础 logProb 直接由该词条（该读音）自己的词典权重算出，不查独立的 unigram 表：
+    // 那是同一批词库的副本，按词取 max 会让多音字冷僻读音按常见读音计价。对齐 librime
+    // （词图打分直接用词条 weight）。见 `docs/design/sentence-weight-same-axis.md`。
     let mut log_prob = if weight > 0 {
         (weight as f64 / DICT_TOTAL).ln()
     } else {
-        // w ≤ 0 = 词库对「存疑 / 非标准读音」的标记（如 那→ne 方言读法）。等价于「频次 0.5」，
-        // 与 librime 用 `DBL_EPSILON` 让这类条目排不上去同一思路。
-        //
-        // 旧实现是「各字平均(char_based_score) + CHAR_BASED_PENALTY，再减 10.0」，实测
-        // 「种花人」为 −20.29，本式为 −19.99，**数值连续**；且不再依赖各字频率，
-        // 由高频字组成的存疑词不会再借「各字平均」拿到虚高基础分。
+        // w ≤ 0 = 词库对存疑 / 非标准读音的标记，等价于「频次 0.5」（同 librime `DBL_EPSILON`）。
+        // 不按各字平均估分：由高频字组成的存疑词会借此拿到虚高基础分。
         (0.5 / DICT_TOTAL).ln()
     };
 
-    // 虚词优待是**一件事的两半**（加成 + 豁免每词罚），此前分两处各算一次判据，
-    // 改判据时漏改一处就会退化成「加了成还照罚」这类半开状态。绑一次，两处共用。
+    // 虚词优待是一件事的两半（加成 + 豁免每词罚），判据绑一次、两处共用，免得改一处漏一处。
     let function_word = function_word_credit && char_count == 1 && is_function_word(word, code);
 
     if char_count == 1 {
@@ -422,21 +284,16 @@ fn score_node_inner(word: &str, code: &str, weight: i32, function_word_credit: b
         {
             log_prob += VERB_PARTICLE_PENALTY;
         } else if weight > 0 {
-            // 原判据是 `ug.contains(word)`（词是否在 unigram 表内）。二者等价：
-            // `gen_unigram` 只过滤 `freq<=0` 与纯 ASCII 词 ⇒ 凡 weight>0 的中文词都在表内。
+            // 等价于旧判据「词在 unigram 表内」（见 sentence-weight-same-axis.md）。
             let freq_factor = ((log_prob - LOG_PROB_MIN) / LOG_PROB_RANGE).clamp(0.0, 1.0);
             log_prob += BASE_CONTENT_WORD_BONUS * (char_count as f64).sqrt() * freq_factor;
         }
     }
-    // Phase 4：每词固定罚。Viterbi 的路径分是各节点 log_prob 之和，故「每节点减 W」
-    // 等价于「按路径词数罚 k·W」——把低频词打碎成两个高频片段不再免费。
+    // 每词固定罚：路径分是节点之和，「每节点减 W」即「按词数罚」，把低频词打碎成高频片段
+    // 不再免费。
     //
-    // **虚词（是/的/了…）豁免每词罚**：WORD_PENALTY 意在阻止「把低频词打碎成高频
-    // 片段」的投机拆分，而单字虚词随内容词出现是语法黏着、不是碎片。unigram 的独立性
-    // 假设对 P(内容词)·P(虚词) 双重扣了 ln(total)（每词一份），一个低频 3 字整词
-    // （填鸭式 w=152）便能压过「天涯+是」这种 2 词正解——这正是 bigram P(是|天涯)
-    // 该解决而 unigram 解决不了的（缺磁盘语料，尚无 bigram）。豁免虚词
-    // 的每词罚是对该缺陷的近似补偿：不让「虚词自成一词」这件语法必然的事付投机拆分的代价。
+    // 单字虚词豁免：它随内容词出现是语法黏着而非碎片；unigram 独立性假设会让低频整词
+    // （填鸭式）压过「天涯+是」这类正解，豁免是缺 bigram 时的近似补偿。
     if !function_word {
         log_prob -= WORD_PENALTY;
     }
@@ -567,13 +424,8 @@ impl Default for LatticeBuilder {
 
 impl LatticeBuilder {
     pub fn new() -> Self {
-        // 10 而非 6：6 会把「中华人民共和国」(7 音节) 挡在词图外，却放行它的语义碎片
-        // 「中华人民共和」(freq=2，法律条文名切出来的残片)，于是 Viterbi 只能在
-        // 「中华人民共和」+「过」之类的错误切分里挑最优。上限须覆盖常见长专名。
-        //
-        // 超过上限的词典整词（「冠状动脉粥样硬化性心脏病」12 音节）仍进不了词图，但不需要
-        // 额外兜底：整句改用等效词频后，错误拼接整句的 W_eff 是一串低频字的乘积、趋近
-        // clamp 下限，词典整词的真实词频天然压过它。守门测试见 `tests/pinyin_long_word.rs`。
+        // 上限须覆盖常见长专名（「中华人民共和国」7 音节），否则只放行其碎片。更长的词典整词
+        // 进不了词图也无需兜底：错误拼接整句的等效词频趋近下限，压不过它（`tests/pinyin_long_word.rs`）。
         Self { max_word_len: 10 }
     }
 
@@ -584,28 +436,18 @@ impl LatticeBuilder {
 
     /// 构建格子（**多路径切分**）
     ///
-    /// 枚举的是**字节跨度** `(p, q)` 而非音节路径。这是本次改造的核心决策：
-    ///
-    /// 1. 音节恒为输入的连续子串，故查询码只由跨度决定 —— `input[p..q]`。
-    ///    跨度对至多 O(n²)，而完整切分路径条数可指数增长（实测见
-    ///    `tests/pinyin_path_scale.rs`）。
-    /// 2. 「这个词是不是按某条合法路径敲出来的」不靠枚举路径回答，而是把词条自带的
-    ///    `boundary` **当作一条待验证的路径**逐段查图（`SegGraph::mask_path`），
-    ///    代价 O(音节数)。**路径爆炸因此在结构上不可能发生，无需剪枝。**
-    ///
-    /// 于是「西安交通大学」以真值 `xi|an|jiao|tong|da|xue` 合法入图，
-    /// 而「李安」（真值 `li|an`）仍进不了单音节边 `lian` —— 前者是 Phase 1 里
-    /// 被边界校验误杀的 4362 个词，后者是原始缺陷。两者第一次可以同时成立。
+    /// 枚举字节跨度 `(p, q)` 而非音节路径：跨度对至多 O(n²)，而切分路径可指数增长
+    /// （`tests/pinyin_path_scale.rs`）。词是否按合法路径敲出，靠把词条 `boundary` 当一条待验证
+    /// 路径逐段查图（`SegGraph::mask_path`），路径爆炸在结构上不可能发生。于是「西安交通大学」
+    /// 按真值 `xi|an|…` 入图，而「李安」（`li|an`）进不了单音节边 `lian`。
     ///
     /// `graph` 的形状决定切分来源：全拼用 `SegGraph::from_dag`（多路径），
     /// 双拼/手动分隔符用 `SegGraph::from_syllables`（真值链，行为与改造前完全一致）。
     /// `require_reachable`：是否只在「音节图上从 0 可达」的位置建节点。
     ///
     /// 常规路径传 `true`——不可达的位置上建节点纯属浪费，Viterbi 的 dp 永远到不了那里。
-    /// **混合整句路径必须传 `false`**：简拼段会打断音节图的可达性（`bzdhaobuhao` 里
-    /// b/z/d 都不成音节，位置 3 从 0 不可达），而 `[3,6) hao`、`[6,8) bu` 这些边其实
-    /// 都在图里、只是被这道守卫挡住了；补上连接的是随后追加的简拼节点
-    /// （见 [`Self::add_abbrev_nodes`]），那是音节图看不见的。
+    /// 混合整句路径必须传 `false`：简拼段会打断音节图的可达性（`bzdhaobuhao` 位置 3 从 0
+    /// 不可达），连接由随后追加的简拼节点（[`Self::add_abbrev_nodes`]）补上。
     pub fn build(
         &self,
         input: &str,
@@ -664,15 +506,10 @@ impl LatticeBuilder {
 
             // 模糊拼音变体
             //
-            // **词条边界不能拿去比所打码的偏移**：词典返回的 boundary 是**变体码**空间的偏移
-            // （zhongguo 的 {0,5}），而本跨度在用户**原码**空间（zong|guo 的 {0,4}）。z→zh
-            // 这类变体改变码长，两者位偏移不同域，直接比对会把正确的模糊命中整片误杀
-            // （mod.rs 对模糊命中对外一律置 boundary=0 也是这个理由）。
-            //
-            // 它只和**同域的变体边界**比。变体按图上**每条**切分逐音节展开（[`Self::fuzzy_spans`]）：
-            // `pinan` 的平安只在 `pin|an` 上，只取一条切分会整片漏掉。词条有边界时必须等于某个
-            // 形态的变体边界（`xi|an → xi|ang` 拼出的 `xiang` 撞上单音节的「想」就该拒），并取那个
-            // 形态的所打码切分；无边界时放行、取改动最少的形态。
+            // 词条边界在变体码空间，不能拿去比所打码的偏移（z→zh 改变码长），只和同域的变体
+            // 边界比。变体按图上每条切分逐音节展开（[`Self::fuzzy_spans`]）。词条有边界时须等于
+            // 某个形态的变体边界（`xi|an → xiang` 撞上单音节「想」就该拒），无边界时放行、取改动
+            // 最少的形态。
             let Some(fuzzy) = fuzzy_config.filter(|f| f.any_enabled()) else {
                 continue;
             };
@@ -736,27 +573,13 @@ impl LatticeBuilder {
 
     /// 在已建好的词图上**追加简拼节点**，供混合整句解码（`bzd` + `haobuhao` → 不知道好不好）。
     ///
-    /// ## 为什么必须独立枚举跨度
+    /// 独立枚举跨度（任意 `(p, q)`，`q - p ∈ [2, MAX_ABBREV_SPAN]`）：简拼段在音节图上不可达、
+    /// 也没有终点。节点按字节跨度与全拼节点天然可串，Viterbi 无需改动。
     ///
-    /// [`Self::build`] 的跨度来自 `graph.ends_within(p, ..)` —— 音节图的合法终点，且开头
-    /// 有 `graph.is_reachable(p)` 守卫。简拼段两条都不满足：`bzdhaobuhao` 的 b/z/d 都不成
-    /// 音节，位置 0 在音节图上根本不可达，从它出发也没有任何终点。所以简拼节点走独立枚举：
-    /// 任意 `(p, q)` 且 `q - p ∈ [2, MAX_ABBREV_SPAN]`。
+    /// 音节标注在击键空间：每个字母一个音节位，整句回填出 `b'z'd'hao'bu'hao`（见 `mixed_abbrev`
+    /// 模块文档）。
     ///
-    /// ## 与全拼节点的兼容性
-    ///
-    /// [`LatticeNode`] 的 `start`/`end` 是**字节跨度**、Viterbi 的 dp 也按字节位置推进，
-    /// 故简拼节点与全拼节点在同一张图里天然可串：`[0,3)` 的「不知道」接上 `[3,6)` 的
-    /// 「好」，dp 一路推到串尾。**Viterbi 一行都不用改。**
-    ///
-    /// ## 音节标注
-    ///
-    /// 简拼段里**每个字母就是一个音节的位置**（击键空间），故 `syllables` 逐字母切、
-    /// `syl_mask` 每字母一位。整句 boundary 由此回填出 `b'z'd'hao'bu'hao` 这样的显示，
-    /// 与击键串同域——这正是简拼候选一贯的做法（见 `mixed_abbrev` 模块文档）。
-    ///
-    /// ⚠️ `input` 必须是**原始击键串**。双拼下 `input` 是转换后的全拼、与击键不同域，
-    /// 简拼判据会全部失配（文档 §5 约束 4），故调用方须在双拼下跳过本方法。
+    /// `input` 必须是原始击键串；双拼下须跳过本方法（`pinyin-mixed-abbrev.md` §5 约束 4）。
     pub fn add_abbrev_nodes(&self, input: &str, dict: &CachedDict, nodes: &mut [Vec<LatticeNode>]) {
         let input_len = input.len();
         let bytes = input.as_bytes();
@@ -776,11 +599,8 @@ impl LatticeBuilder {
                 let stroke = &input[p..q];
                 for abbr_code in dict.search_abbrev(stroke, ABBREV_NODE_LIMIT) {
                     for hit in dict.search_with_boundary(&abbr_code) {
-                        // **音节数必须等于简拼字母数**（同 mod.rs step5 的过滤）：扁平码有损，
-                        // `xa` 指向的 `xian` 回查主表会把 1 音节的「先」一并捞出来。
-                        // 切分走与用户侧（`add_store_abbrev_nodes`）同一个函数：boundary==0 与
-                        // bit0 未置位的畸形边界切不出来，直接跳过——混合整句的每个节点都要求真值
-                        // 切分。（越出码长的高位被该函数忽略、不计音节，与 `count_ones` 不同。）
+                        // 音节数必须等于简拼字母数：扁平码有损，`xa` → `xian` 会捞出 1 音节的「先」。
+                        // 与用户侧同一个切分函数，畸形边界切不出来即跳过（整句节点要真值切分）。
                         if crate::pinyin::mixed_abbrev::syllables_from_boundary(
                             &abbr_code,
                             hit.boundary,
@@ -803,9 +623,7 @@ impl LatticeBuilder {
                             syllables: stroke.chars().map(|c| c.to_string()).collect(),
                             syl_mask: (0..span).fold(0u64, |m, i| m | (1u64 << i)),
                             log_prob,
-                            // 回查出的词条码与它的真值边界：整句造词写完整全拼，而不是击键
-                            // 字母。见 `LatticeNode::canon`。边界必非 0——上面已经过
-                            // `syllables_from_boundary` 校验且音节数 = 字母数（≥ 2）。
+                            // 回查出的全拼与真值边界（必非 0，上面已校验），见 `LatticeNode::canon`。
                             canon: Some((abbr_code.clone(), hit.boundary)),
                         });
                     }
@@ -816,53 +634,20 @@ impl LatticeBuilder {
 
     /// 在已建好的词图上**追加用户词节点**（S2），让自造词参与整句解码。
     ///
-    /// ## 解决什么
+    /// 系统词库与用户层本不相交，不补这一步自造词就不参与整句分词。设计见
+    /// engine-candidate-pipeline.md「S2：用户词进整句词图」。三条约束：
     ///
-    /// 整句词图此前只从 [`CachedDict`]（系统词库）建，用户层挂在 `PinyinEngine` 的另一个
-    /// 字段上、两者从不相交 ⇒ 用户自造的词**根本没参与整句分词**：「盖伦」单独打得出，
-    /// 「有盖伦吗」却被打散（t134）；手动调过权重的词在整句里同样不认（GH#93）。
+    /// 1. 只收用户上屏过的词（用户词 + 临时词，[`is_sentence_store_word`]），草稿不收。临时层
+    ///    也含自动造词直接写入的分步上屏拼接，分错段的一次上屏会带 [`USER_NODE_BONUS`] 自我强化。
+    /// 2. `boundary == 0` 不进图（与 [`Self::build`] 的降级放行相反）：整句节点要真值切分，
+    ///    宁可不进，不可乱切。
+    /// 3. 同词同起点取 `log_prob` 较大者而非跳过，否则用户调高系统已有词的权重在整句里无效。
     ///
-    /// ## 三条约束（都不是「防御性编程」，各有具体代价）
+    /// 权重两头都管：[`USER_NODE_BONUS`] 补下限，[`USER_NODE_WEIGHT_CAP`] 截上限。
     ///
-    /// 1. **只收用户上屏过的词**（用户词 + 临时词，见 [`is_sentence_store_word`]）。草稿层
-    ///    不收 —— 滑窗草稿会造出大量杂词，它的「用过即转正」（草稿 → 临时）才是质量闸；
-    ///    杂词直接进整句词图，污染的是所有人的整句。
-    ///    ⚠️ 临时词**曾经**也被挡（误把质量闸放在了临时 → 用户那一跳）：系统库没有的词
-    ///    （「拜城县」）手打一次只会进临时库，要再用够 `promote_count` 次才晋升，而在那之前
-    ///    整句永远不认它——用户看到的就是「刚打过的词，连着打就没了」。
-    ///    ⚠️ 临时层并不只有草稿跃迁来的词：自动造词（`learn_phrase_on_commit`）会把**分步上屏
-    ///    的拼接**与**选中的合成整句**直接写进临时层，不经草稿。分错段的一次上屏因此也会以
-    ///    整节点进图、带着 [`USER_NODE_BONUS`] 自我强化——这是开关出厂关的理由之一。
-    /// 2. **`boundary == 0` 不进图**（与 [`Self::add_abbrev_nodes`] 同、与 [`Self::build`]
-    ///    的降级放行**相反**）。整句的每个节点都要求真值切分：手输码用户词没有可信边界，
-    ///    放进去等于让 Viterbi 按猜出来的切分组句。代价是隐性造词（无边界）不参与整句，
-    ///    这是有意的 —— 宁可不进，不可乱切。
-    /// 3. **同词同起点已在图中时取 `log_prob` 较大者**，而不是像简拼节点那样直接跳过。
-    ///    GH#93 要的正是这个：用户把一个**系统词库已有**的词加进用户库并调高权重，
-    ///    整句里也得认这个新权重。直接跳过的话，用户词对所有已在系统库里的词完全无效。
+    /// 模糊音另走 [`Self::add_store_fuzzy_nodes`]（记录存规范码，按所打码点查撞不上）。
     ///
-    /// ## 权重标定：两头都要管
-    ///
-    /// 用户词 weight 与词典 weight 同轴（`ln(w / DICT_TOTAL)`），但两者**语义不同**
-    /// （词频 vs「我要这个词」），故同轴比大小在两头都会出事，各有一个常量对应：
-    ///
-    /// - **下不去**：出厂加词 1200 翻不过同码的中频词（实测「概论」1217，差 17 分）⇒
-    ///   [`USER_NODE_BONUS`] 在对数域补 +2.0；
-    /// - **上不封顶**：导入 wdict 可带 `w=2e9`，`ln(w/T) = +2.11` 比系统最大词还高近 5 个
-    ///   自然对数单位（≈148 倍）⇒ [`USER_NODE_WEIGHT_CAP`] 截到 1e6。
-    ///
-    /// 中间不做分布重映射：默认档位本就落在合理位置（造词晋升 800 压过 94.7% 的系统词）。
-    ///
-    /// ## 模糊音（`fuzzy_config` 开了任一组时）
-    ///
-    /// 记录存的是**规范码** + 规范码坐标下的边界，按所打码点查，翘舌打法 `chaijiu` 永远撞不上
-    /// `caijiu`。每个起点另走 [`Self::add_store_fuzzy_nodes`]，打分与 [`Self::build`] 里的
-    /// 系统词模糊节点同口径（每改动一处扣 [`FUZZY_SYLLABLE_LOG_PENALTY`]），再叠用户词的截顶
-    /// 与加成。模糊全关时一次额外查询都没有。
-    ///
-    /// ⚠️ 本方法由 `Config::sentence_uses_user_words` 把关，**出厂开启**（2026-09-28 起）；
-    /// 曾经出厂关闭的三条理由（赢者通吃 / 影响全体老用户 / 标定只做了截断）见该字段文档，
-    /// 现仍是已知局限但不再是出厂关的理由。且它只在 `use_smart_compose` 开着时才会被调用。
+    /// 由 `Config::sentence_uses_user_words` 把关（出厂开），且只在 `use_smart_compose` 开着时调用。
     ///
     /// `require_reachable` 与同一张图的 [`Self::build`] 传同值：不可达起点上的节点 Viterbi
     /// 永远走不到（`build` 在那里一个节点都没建，本方法的节点又只沿图边延伸），跳过它们
@@ -954,17 +739,9 @@ impl LatticeBuilder {
     /// 系统词（[`Self::build`]）与用户词（[`Self::add_store_fuzzy_nodes`]）的模糊节点、词候选的
     /// 模糊变体码（`PinyinEngine::fuzzy_codes`）共用这一份。
     ///
-    /// ## 为什么逐边展开而不取一条切分
-    ///
-    /// 同一跨度常有多条切分：`pinan` 是 `pi|nan` 也是 `pin|an`，平安只在后一条上
-    /// （`pin→ping`）。只按一条切分展开，另一条上的变体永远查不到。做法：沿图的音节边从 `p`
-    /// 逐层延伸，每走一条边就地展开该音节的变体（[`FuzzyMatcher::fuzzy_variants_scored`]，
-    /// 与 step 6 同一份判据），组合携带（变体码、**变体码自己的**音节边界、所打码切分、改动处数）。
-    ///
-    /// **不先枚举路径再展开**：那样要给路径条数设上限，而截断是按图的遍历顺序截的、没有语义，
-    /// 唯一对得上的那条切分可能正好被截掉（`fanganfangan…` 同音节数下 8 条切分）。
-    /// 逐层延伸时各切分共享前缀，截断只发生在同层组合超出 [`FUZZY_LAYER_BUDGET`] 时，
-    /// 且按改动处数截——少处模糊的组合在任何切分上都先保住。
+    /// 逐边展开而不取一条切分：`pinan` 的平安只在 `pin|an` 上。沿音节边逐层延伸、就地展开
+    /// 变体（[`FuzzyMatcher::fuzzy_variants_scored`]），不先枚举路径再展开：按条数截断没有语义，
+    /// 会截掉唯一对得上的切分。同层超出 [`FUZZY_LAYER_BUDGET`] 时按改动处数截。
     ///
     /// 全原音节组合（= 所打码本身）不收：那是精确命中，由各自的精确分支处理。
     ///
@@ -1034,10 +811,8 @@ impl LatticeBuilder {
                 break;
             }
             if next.len() > FUZZY_LAYER_BUDGET {
-                // 稳定排序后截断：结果确定，但**不是**「每层全局改动最少」的精确保证——
-                // 同改动数内部按遍历生成顺序截（先到的边、先到的变体先留），且只在本层比较：
-                // 被截掉的父组合，其后代可能比下一层留下的组合改动更少。实际会触发：11 组全开、
-                // 6 音节 4 条切分时，≤2 处改动的组合约 292 条，会在同改动数内部被截。
+                // 稳定排序后截断：结果确定，但不是「每层全局改动最少」的精确保证——同改动数内
+                // 按生成顺序截，且只在本层比较。模糊组全开的长串上会实际触发。
                 next.sort_by_key(|c| c.4);
                 next.truncate(FUZZY_LAYER_BUDGET);
             }
@@ -1158,9 +933,8 @@ impl LatticeBuilder {
     /// - **音节数 = 简拼字母数**，且**逐段首字母 = 对应字母**：层接口明说返回超集，判据由
     ///   调用方做；`boundary == 0` 的词在 `syllables_from_boundary` 这一步被拒——与
     ///   [`Self::add_store_nodes`] 约束 2 同理；
-    /// - 取数用 `search_abbrev_exact`（只查本组，上限 [`USER_ABBREV_SCAN_LIMIT`]），**过完判据
-    ///   再按权重取前 [`USER_NODE_LIMIT`]**。曾用带上限的 `search_abbrev`：存储层按索引键字典序数够就返回、
-    ///   且连带扫无边界组，手动加过几个同首字母的词就把名额占满，「拜城县」进不了图；
+    /// - 取数用 `search_abbrev_exact`（只查本组，上限 [`USER_ABBREV_SCAN_LIMIT`]），过完判据
+    ///   再按权重取前 [`USER_NODE_LIMIT`]，免得名额被无边界词或字典序占满；
     /// - 打分 = 简拼节点的罚分（`ABBREV_NODE_PENALTY × 字母数`）+ 用户词的截顶与加成，
     ///   与同位置的系统简拼节点公平竞争；
     /// - 同词同起点取 `log_prob` 较大者，切分与 `canon` 随胜者换（同 [`Self::add_store_nodes`]
@@ -1218,10 +992,8 @@ impl LatticeBuilder {
                         + USER_NODE_BONUS;
                     // 同词同起点取较大者，赢了切分与 `canon` 随胜者一起换（同两个兄弟方法）。
                     //
-                    // 不会破坏既有节点的上屏 / consumed：节点的起止字节不变，而 consumed 与上屏
-                    // 由起止决定。换进来的是该简拼词自己的逐字母切分（击键域，每字母一位）——
-                    // 被替换的若是全拼节点，其切分未必与之同形（`any_path` 取最少音节时，两字的
-                    // 「西昂」可以配单音节 `xian`），但整句回填的边界本就该跟胜出的那条解释走。
+                    // 起止字节不变，consumed 与上屏不受影响；切分换成胜者的逐字母切分，整句回填的
+                    // 边界本就该跟胜出的那条解释走。
                     if let Some(existing) = nodes[q]
                         .iter_mut()
                         .find(|n| n.word == cand.text && n.start == p)
@@ -1253,27 +1025,11 @@ impl LatticeBuilder {
     /// 在已建好的词图上**追加尾部残码节点**，供残码补全整句解码
     /// （`buzhidaok` → 「不知道」+ 残码 `k` 补成「看」→ 整句「不知道看」）。
     ///
-    /// ## 这条通路解决什么
+    /// 残码作为一个待定音节进格子（对齐 librime `enable_completion`、fcitx5「不完整拼音」）。
+    /// 不能让 [`Self::add_abbrev_nodes`] 兼职：简拼节点会把已完成音节也重切（`buzhidaok` →
+    /// 「不直达欧卡」），残码补全只展开最后那一段，见 candidate-sorting-rules.md §4.2。
     ///
-    /// 尾部残码（未成音节的声母/半音节）原本被完全排除在整句解码之外——`convert` 只在
-    /// `completed`（完整音节前缀）上建图，`buzhidaok` 的整句止步于「不知道」，末尾的 `k`
-    /// 无人认领。主流输入法（librime `enable_completion`、fcitx5 的「不完整拼音」）都会把
-    /// 残码当作一个**待定音节**放进格子，由 LM 选出最优单字。本方法补上这条通路。
-    ///
-    /// ## 为什么不能让 [`Self::add_abbrev_nodes`] 兼职
-    ///
-    /// 二者都是「给词图补音节图给不出的节点」，长得几乎一样，但**约束强弱不同**：简拼节点
-    /// 会把整串重新按声母序列切分，已完成的音节也会被重切。实测放开简拼闸门让残码入图，
-    /// `buzhidaok` 产出的是「不直达欧卡」、`nihaom` 是「你黑暗欧美」——`bu zhi dao` 被拆回
-    /// b/u/zh/i/d/a/o 去凑简拼了。残码补全要的是**保留已完成音节、只展开最后那一段**，
-    /// 是简拼组句的严格子集约束，故必须独立成路。
-    ///
-    /// ## 召回与音节标注
-    ///
-    /// 候选 = 以残码为前缀、**音节数为 1** 的词条（`syllable_capped(.., 1)` 把过滤下推到
-    /// 词库层），再筛出单字。跨度恒为 `[completed_len, input_len)` 的一整段，`syl_mask` 记
-    /// 一个音节位——残码在击键空间就是「一个还没打完的音节」，与全拼节点在同一字节空间里
-    /// 天然可串（理由同 [`Self::add_abbrev_nodes`] 的「与全拼节点的兼容性」）。
+    /// 候选 = 以残码为前缀、音节数为 1 的单字；跨度恒为 `[completed_len, input_len)`，记一个音节位。
     ///
     /// ⚠️ 调用方须保证 `nodes.len() > input_len`，即词图建在**含残码的整串**上而非
     /// `completed` 上——否则残码末端没有槽位，Viterbi 永远到不了串尾。
@@ -1295,17 +1051,15 @@ impl LatticeBuilder {
         if !partial.bytes().all(|b| b.is_ascii_lowercase()) {
             return;
         }
-        // 对齐位传 0：`partial` 本身就是「还没打完的那个音节」，它相对自己没有任何已完成
-        // 音节，位 0 恒置位 ⇒ 边界判据整条让开，保持纯字符前缀匹配（`m` → 吗/么/没）。
-        // 这正是 `prefix_syllable_aligned` 为残码场景留的退化通道，不是遗漏。
+        // 对齐位传 0：残码相对自己没有已完成音节，边界判据整条让开、保持纯字符前缀匹配，
+        // 这是 `prefix_syllable_aligned` 为残码场景留的退化通道。
         for hit in dict.search_prefix_with_boundary_syllable_capped(
             partial,
             PARTIAL_FINAL_NODE_LIMIT,
             1,
             0,
         ) {
-            // 只收单字：残码补的是「正在打的那一个字」。单音节多字词（儿化/连绵词）落到
-            // 这里会让一个待定音节兑出两个字，与用户已敲的音节数对不上。
+            // 只收单字：单音节多字词（儿化）会让一个待定音节兑出两个字。
             if hit.text.chars().count() != 1 {
                 continue;
             }
@@ -1315,8 +1069,7 @@ impl LatticeBuilder {
             {
                 continue;
             }
-            // ⚠️ 用 `score_node_partial_final` 而非 `score_node`：残码位不给虚词优待，
-            // 否则「让」「们」这类虚词凭 8.0 的量级差碾压「人」「吗」。见该函数文档。
+            // 残码位不给虚词优待，见 `score_node_partial_final`。
             let log_prob = score_node_partial_final(&hit.text, hit.weight) - PARTIAL_FINAL_PENALTY;
             nodes[input_len].push(LatticeNode {
                 start: completed_len,

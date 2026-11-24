@@ -1,6 +1,5 @@
 //! 模糊音配置与匹配
 //!
-//! 与 Go 版本 `wind_input/internal/engine/pinyin/fuzzy.go` 对齐。
 //! 允许用户输入时忽略常见发音混淆（如 z/zh, c/ch, s/sh, n/l）。
 
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -53,12 +52,10 @@ pub struct FuzzyConfig {
     /// 双拼**同键韵母**推出的等价音节：音节 → 同一键对下其余的合法读音
     /// （自定义布局 `q = ["iu", "ui"]` 时 `diu` → `[dui]`、`dui` → `[diu]`）。
     ///
-    /// **不是用户配置**：由 `PinyinEngine::with_shuangpin` 从布局推出
-    /// （`ShuangpinConverter::shared_key_syllables`），全拼方案恒空。双拼转换器对一个键对
-    /// 只交出一条全拼，其余读音靠这里在拼音引擎里展开回来。
+    /// 不是用户配置：由 `PinyinEngine::with_shuangpin` 从布局推出，全拼方案恒空。双拼转换器
+    /// 对一个键对只交出一条全拼，其余读音靠这里展开回来。
     ///
-    /// 展开时**零罚分**（处数计 0）：用户自己把两个韵母配在同一个键上，两种读音按词频平等
-    /// 竞争，不是「打错了」。与用户开的模糊组叠加时，后者照旧计处数。
+    /// 展开时零罚分：同键两种读音按词频平等竞争，不是「打错了」。叠加的模糊组照旧计处数。
     pub shared_key: HashMap<String, Vec<String>>,
     /// 字母换位纠错规则（[`CorrectionRules`]）。错误拼写并入 [`fuzzy_spellings`]，
     /// [`FuzzyMatcher::fuzzy_variants_scored`] 对其追加正确音节、计 [`CORRECTION_EDITS`] 处。
@@ -81,11 +78,8 @@ impl FuzzyConfig {
     /// 是否有任一展开来源：用户开的模糊组，或双拼同键音节（[`Self::shared_key`]）。
     /// 供调用方在全关时跳过整段展开逻辑（含其前置的切分求解）。
     ///
-    /// 同键音节必须算在内：否则用户没开任何模糊音时，各调用点的早退会把它整条跳过。
-    /// 只改声母首字母的路径（简拼键）对它是恒等变换，多算进来只多一次空展开。
-    ///
-    /// 注意**不能**用「对整串求 `fuzzy_variants` 得空」来代替这个判断：那既漏掉非首音节的
-    /// 变体，又要求先拿到 code；本判断只看配置，可在任何前置计算之前短路。
+    /// 同键音节必须算在内，否则没开模糊音时各调用点的早退会把它整条跳过。本判断只看配置，
+    /// 可在任何前置计算之前短路。
     pub fn any_enabled(&self) -> bool {
         self.zh_z
             || self.ch_c
@@ -105,13 +99,8 @@ impl FuzzyConfig {
     }
 }
 
-/// 模糊音组（**无序对**：两个方向都成立，故只登记一次）。
-///
-/// 此前写成 `from`/`to` 的单向规则表、正反两条各列一行，两个方向都用子串试探
-/// （声母 `starts_with`、韵母 `find`）匹配 —— 于是同一个音节会被表里**多条**规则重复命中：
-/// `sheng` 既被 `sh→s` 命中得 `seng`、又被 `s→sh` 命中得 `shheng`；`en→eng` 还能在
-/// `sheng` 中间 `find` 到 `en` 得 `shengg`。这些非法码查不到词、只白白撑大多音节展开的
-/// 组合预算。改为「按组取对端」后天然只匹配一次。
+/// 模糊音组（无序对：两个方向都成立，故只登记一次）。按整体相等取对端，不做子串试探，
+/// 否则同一音节会被多条规则重复命中、产出撑大组合预算的非法码（`sheng` → `shheng`）。
 struct FuzzyGroup {
     a: &'static str,
     b: &'static str,
@@ -132,11 +121,11 @@ impl FuzzyGroup {
     }
 }
 
-/// 声母模糊组
-/// [`INITIAL_GROUPS`] 的条目数。**导出仅供测试**：那边按 `2^N` 枚举全部标志位组合，
-/// 组数一旦变化而测试没跟上，新组就是零覆盖且全绿。断言它，改了就红。
+/// [`INITIAL_GROUPS`] 的条目数。导出仅供测试：那边按 `2^N` 枚举全部标志位组合，
+/// 组数变了而测试没跟上，新组就是零覆盖且全绿。
 pub const INITIAL_GROUP_COUNT: usize = 6;
 
+/// 声母模糊组
 const INITIAL_GROUPS: &[FuzzyGroup] = &[
     FuzzyGroup {
         a: "zh",
@@ -172,16 +161,10 @@ const INITIAL_GROUPS: &[FuzzyGroup] = &[
 
 /// 声母**首字母**的模糊等价集（含 `c` 自身，只含开启的组）。
 ///
-/// ## 为什么单独有这个函数
+/// 简拼索引的键是各音节首字母，只有改首字母的组（`n↔l`、`f↔h`、`r↔l`）影响召回；
+/// `zh↔z` 等对本函数是恒等变换。[`FuzzyMatcher::fuzzy_variants_scored`] 要完整音节，代替不了它。
 ///
-/// 简拼索引的键是各音节**首字母**拼成的串，所以只有**改首字母**的声母组会影响召回：
-/// `n↔l`、`f↔h`、`r↔l`。而 `sh↔s` / `zh↔z` / `ch↔c` 模糊前后首字母相同（s/z/c），
-/// 对本函数是恒等变换 —— **它们之所以一直走得通，正是因为这一点**，不是因为简拼路径
-/// 支持模糊音。用 [`FuzzyMatcher::fuzzy_variants_scored`] 代替不了它：那个要完整音节，
-/// 而这里只有一个首字母，`split_initial_final("n")` 得到的是裸声母、韵母为空。
-///
-/// ⚠️ `l` **同时属于** `n↔l` 与 `r↔l` 两组，两组都开时等价集是 `{l, n, r}`（3 个）。
-/// 这是唯一一个等价集大于 2 的字母，键变体数的上界由它决定。
+/// `l` 同属 `n↔l` 与 `r↔l`，两组都开时等价集是 `{l, n, r}`，是唯一大于 2 的，决定键变体数上界。
 pub fn initial_alternatives(c: char, config: &FuzzyConfig) -> Vec<char> {
     let mut out = vec![c];
     for g in INITIAL_GROUPS {
@@ -211,10 +194,8 @@ pub fn initial_alternatives(c: char, config: &FuzzyConfig) -> Vec<char> {
 
 /// 两个**首字母**是否模糊等价（含相等）。[`initial_alternatives`] 的无分配版本。
 ///
-/// 段校验跑在 `keys × abbr_code × hit` 的三重循环里，每条候选的每个声母段都要问一次；
-/// 走 `initial_alternatives(..).contains(..)` 等于在最内层为最多 3 个 char 反复分配 Vec。
-/// 判据与它**逐位一致**，改一处必须改另一处 —— 两者的一致性由
-/// `initial_alternatives_matches_pairwise_equal` 守住。
+/// 段校验在三重循环最内层调用，不能每次分配 Vec。判据与 [`initial_alternatives`] 逐位一致，
+/// 改一处必须改另一处（`initial_alternatives_matches_pairwise_equal` 守住）。
 pub fn initials_fuzzy_equal(a: char, b: char, config: &FuzzyConfig) -> bool {
     if a == b {
         return true;
@@ -236,14 +217,8 @@ pub fn initials_fuzzy_equal(a: char, b: char, config: &FuzzyConfig) -> bool {
 /// 供混合简拼的 [`AbbrevSeg::Retroflex`](super::mixed_abbrev::AbbrevSeg) 段做模糊放宽：
 /// 该段的精确语义是「音节以 `zh` 开头」，放宽成「以 `z` 开头」**只有对应组开着时才成立**。
 ///
-/// ⚠️ 不能改用 [`initials_fuzzy_equal`]：那个比的是**首字母**，而 `zh` 与 `z` 的首字母
-/// 相同 ⇒ 它会走 `a == b` 的短路恒返回 true，于是 `zh_z` 关着也放行 `ze`，
-/// 双字母声母就白设了。`head` 传的是 z/c/s 那一位。
-///
-/// ⚠️ 判据**两端对称**，不依赖组表把长的那端写在 `a` 还是 `b`（本组是无序对，见
-/// [`FuzzyGroup`]）。只问 `b` 的写法能work是因为今天三组都写成 `a="zh", b="z"`；
-/// 哪天有人写反，该函数会静默返回 false、开关对本段悄悄失效，而
-/// [`initials_fuzzy_equal`] 与 [`initial_alternatives`] 都是对称写的、不会跟着红。
+/// 不能改用 [`initials_fuzzy_equal`]：`zh` 与 `z` 首字母相同，它恒返回 true，`zh_z` 关着
+/// 也会放行。`head` 传的是 z/c/s 那一位。判据两端对称，不依赖组表把长的那端写在哪边。
 pub fn retroflex_relaxed(head: char, config: &FuzzyConfig) -> bool {
     INITIAL_GROUPS.iter().any(|g| {
         (g.flag)(config)
@@ -256,30 +231,14 @@ pub fn retroflex_relaxed(head: char, config: &FuzzyConfig) -> bool {
 
 /// 简拼键的模糊变体，附带该变体改动了**几位**（**含原键自身，处数 0，且恒在首位**）。
 ///
-/// **处数随键一起返回**而不是让调用方事后逐位比较：它在笛卡尔积构造期是免费的
-/// （每选一个非原字母就 +1），五个召回点的罚分口径因此由构造侧统一保证、不会各自漂移。
-/// 与本模块 [`FuzzyMatcher::fuzzy_variants_scored`] 同族形态。
+/// 处数随键一起返回，由构造侧统一保证各召回点的罚分口径。口径逐位计，与校验侧
+/// `AbbrevSeg::Initial` 段计 1 处一致。变体 = 各位 [`initial_alternatives`] 的笛卡尔积。
 ///
-/// 处数口径 = **逐位计**，与校验侧 `AbbrevSeg::Initial` 段计 1 处一致：简拼键的每一位
-/// 就是一个 `Initial` 段。`l` 的等价集 `{l,n,r}` 那种多来源不影响计量 —— 逐位比较不问
-/// 「经由哪一组」，一位改了就是一处。
-///
-/// 键是各音节首字母的拼接，故变体 = 各位 [`initial_alternatives`] 的笛卡尔积。
-/// 变体数是各位等价集大小之积，最坏 `3^len`（全 `l` 且 n_l + r_l 都开）。
-///
-/// ⚠️ **超过 [`MAX_ABBREV_KEY_VARIANTS`] 时只返回原键**，不做部分展开 —— 截一半等于
-/// 按字母表顺序随机挑几个变体放行，用户看到的是「有时出得来有时出不来」，比一致地
-/// 出不来更难排查。
-///
-/// ⚠️ **规模检查必须边乘边判、用 `checked_mul`**，不能先 `product()` 再比：
-/// `product()` 在 debug 下会 panic（实测 41 个 `l` + n_l/r_l ⇒ `3^41` 溢出 usize），
-/// 而 **release 下更糟** —— 乘法 wrapping 后 `total` 可能绕回一个小值、通过上限检查，
-/// 于是真的去铺 `3^41` 个变体。溢出与超限在这里是同一种处置（只查原键），
-/// 所以一个 `match` 就够，不必分开。
+/// 超过 [`MAX_ABBREV_KEY_VARIANTS`] 时只返回原键，不做部分展开（截一半会让召回时有时无）。
+/// 规模检查必须边乘边判、用 `checked_mul`：先 `product()` 在 release 下会 wrapping 绕回小值、
+/// 通过上限检查后真去铺指数个变体。
 pub fn fuzzy_abbrev_keys(key: &str, config: &FuzzyConfig) -> Vec<(String, usize)> {
-    // `any_enabled()` 这道是**早退优化、不是语义保证**：全关时 `initial_alternatives`
-    // 每位也只返回原字母 ⇒ `total == 1` ⇒ 下面那条同样返回原键。删掉它行为不变，
-    // 省下的是 `per_pos` 的分配。改这里时别把它当成正确性依赖。
+    // `any_enabled()` 只是早退优化：全关时下面同样返回原键。
     if key.is_empty() || !config.any_enabled() {
         return vec![(key.to_string(), 0)];
     }
@@ -287,7 +246,7 @@ pub fn fuzzy_abbrev_keys(key: &str, config: &FuzzyConfig) -> Vec<(String, usize)
         .chars()
         .map(|c| initial_alternatives(c, config))
         .collect();
-    // 边乘边判：溢出与超限同样处置（见上方 ⚠️），且超限时不必把剩下的位乘完。
+    // 边乘边判：溢出与超限同样处置（只查原键）。
     let mut total: usize = 1;
     for opts in &per_pos {
         match total.checked_mul(opts.len()) {
@@ -317,30 +276,8 @@ pub fn fuzzy_abbrev_keys(key: &str, config: &FuzzyConfig) -> Vec<(String, usize)
 
 /// [`fuzzy_abbrev_keys`] 的变体数上限。
 ///
-/// 真机简拼键长度就是音节数，常见 2~4。**各位的等价集大小不一样**，所以位数不能直接
-/// 换算成变体数 —— `n`/`f`/`h`/`r` 是 2 选，只有 `l` 是 3 选（同属 `n↔l` 与 `r↔l`）：
-///
-/// | 键 | 开启的组 | 变体数 | 64 之内？ |
-/// |---|---|---|---|
-/// | `nqc`  | n_l | 2 | ✔ |
-/// | `nnnn` | n_l | `2^4` = 16 | ✔ |
-/// | `lllh` | n_l + r_l + f_h | `3³ × 2` = 54 | ✔ |
-/// | `llll` | n_l + r_l | `3^4` = 81 | ✘ 降级为只查原键 |
-///
-/// ⚠️ 本 doc 此前写的是「4 位全落在 n/l/f/h/r 上且都开组才 16 个变体，仍在限内」——
-/// 那个算例**只对 2 选位成立**，`llll` 实际是 81。按错的上界做判断会以为全 `l` 的键
-/// 也在覆盖内，而它恰恰是唯一落在覆盖外的形状。
-///
-/// ## 超限的处置：整体放弃，且这与同模块的音节变体**不一致**
-///
-/// 超限时只返回原键，不做部分展开 —— 截一半等于按字母表顺序随机挑几个变体放行，
-/// 用户看到的是「有时出得来有时出不来」，比一致地出不来更难排查。
-///
-/// 但多音节的全拼展开（`LatticeBuilder::fuzzy_spans`）面对同类问题用的是**按改动处数截断**
-/// （每层只留改动最少的那批）而非整体放弃。类似的办法这里也适用：按「改动了几位」
-/// 分层递增枚举，某层放不下就**整层丢弃并停止**，规则变成一句用户能理解的话
-/// 「改一个音能出、改两个音出不来」，而层内截断又会退回不可预期。
-/// 未做 —— 它是召回面的扩张，不该与罚分口径的修复混在一笔里。
+/// 4 位键里只有全 `l`（n_l + r_l 都开，`3^4` = 81）超限，降级为只查原键。算例与未做的
+/// 「按改动位数分层」改进见 candidate-sorting-rules.md「拼音常量的取值依据」。
 pub const MAX_ABBREV_KEY_VARIANTS: usize = 64;
 
 /// 韵母模糊组。**整体相等**比较，不是子串查找：`jiang` 的韵母是 `iang`，它不该因为
@@ -371,12 +308,9 @@ const FINAL_GROUPS: &[FuzzyGroup] = &[
         b: "uang",
         flag: |c| c.uan_uang,
     },
-    // `ong` 同属下面两组（与声母 `l` 同属 n↔l、r↔l 同形），两组都开时有两个对端。
-    // **不传递**：[`part_options`] 只取与原韵母直接成对的对端，`dun` 不会经 `ong` 走到
-    // `deng`。**按拼写字面配对**：`jun`/`qun`/`xun` 的韵母按字面切成 `un`，对端 `jong` 等非音节由
-    // `VALID_SYLLABLES` 过滤，不映射到 `jiong` 系（iong 韵）；`yun↔yong` 能配上只是 `y` 按声母
-    // 切后字面恰好对上——从发音看它与 jun↔jiong 同类，这个不对称是刻意接受的（与手机输入法
-    // 「un=ong」的字面语义一致）。反向注册的 `jong`/`qong`/`xong` 拼写因此落到军/群/寻。
+    // `ong` 同属下面两组，两组都开时有两个对端，但不传递（`dun` 不会经 `ong` 走到 `deng`）。
+    // 按拼写字面配对：`jun` 的对端 `jong` 是非音节、被过滤，不映射到 `jiong`；`yun↔yong`
+    // 能配上只因 `y` 按声母切后字面对上。这个不对称是刻意接受的（同手机输入法「un=ong」）。
     FuzzyGroup {
         a: "un",
         b: "ong",
@@ -432,42 +366,15 @@ fn part_options<'a>(part: &'a str, groups: &[FuzzyGroup], config: &FuzzyConfig) 
     opts
 }
 
-/// 枚举「用户会打、但本身不是合法音节」的模糊拼写全集，供切分层注册。
+/// 枚举「用户会打、但本身不是合法音节」的模糊拼写全集（`tin`→ting），注册进切分层
+/// （[`SyllableTrie::load_fuzzy_spellings`](super::syllable::SyllableTrie::load_fuzzy_spellings)）。
+/// 模糊音在切分之后才逐音节展开，切不出 `tin` 就等于整条模糊链路没执行。相当于 librime
+/// 拼写代数的最小等价物，见 engine-candidate-pipeline.md §4.1。
 ///
-/// ## 为什么需要它
+/// 边界：只收非法拼写（合法的本来就切得出）；不收零声母拼写（元音开头的边会改动合法输入的
+/// 切分，`xiongdi` 多出 `xi|ong`）；只进切分层、不进 `is_syllable`/`is_prefix` 这类真值判据。
 ///
-/// 模糊音是在**切分之后**逐音节展开的（`LatticeBuilder::fuzzy_spans` 沿音节图的边逐条
-/// 展开）。而切分器 [`SyllableTrie`](super::syllable::SyllableTrie) 只认
-/// 标准音节表，于是 `tin`（想打 `ting`）这类**本身不成音节**的串在图上根本没有边：
-/// `tinzhi` 的 DAG 最远只走到 `ti`，`nzhi` 全成残码，模糊展开一次都轮不到执行。
-/// 现象是「明明开了 in-ing，`tinzhi` 却打不出「停止」」——不是排序靠后，是候选里压根没有。
-///
-/// 只在**打的那端不成音节**时失效，故 `jinzhi`→`jingzhi`（`jin` 合法）一直正常，
-/// `an_ang` 组更是一条都不缺（an/ang 系列两侧齐全）——这正是它长期没被发现的原因。
-/// 真实高频误打里受影响的有 `zuang`→zhuang、`suang`→shuang、`cuang`→chuang、
-/// `fui`→hui、`fuan`→huan、`tin`→ting、`din`→ding 等。
-///
-/// ## 做法
-///
-/// 把这些拼写注册进切分层（[`SyllableTrie::load_fuzzy_spellings`](
-/// super::syllable::SyllableTrie::load_fuzzy_spellings)），让错音串成为一条**可切的边**。
-/// 这是 librime `speller/algebra` 拼写代数的最小等价物：rime 把 `tin` 直接注册成 `ting`
-/// 的一种合法拼写，切分器天然认识它。我们只补「可切」这一步，其余（变体展开、`0.5^k`
-/// 惩罚、排序）沿用既有链路 —— 切出 `tin` 后 [`FuzzyMatcher::fuzzy_variants_scored`]
-/// 因 `check_valid` 为假而宽松放行，照常产出 `ting` 并计 1 处改动，下游无需任何改动。
-///
-/// ## 三个刻意的边界
-///
-/// - **只收非法拼写**：产物本身已是合法音节的（`jin`→`jing`、`si`→`shi`）不注册，
-///   它们本来就切得出来，重复注册只会让 `is_end` 多一份无谓开销。
-/// - **不收零声母拼写**（`eng`→`ong`）：以元音开头的边能接在任何音节后面，会改动
-///   合法输入的切分（`xiongdi` 多出 `xi|ong|di`）。
-/// - **只进切分层，不进 `is_syllable`/`is_prefix`**：后两者是**真值判据**，被双拼真值
-///   校验（[`shuangpin`](super::shuangpin)）、造词边界推导（[`generate`](super::generate)）
-///   等复用，让 `tin` 变成「合法音节」会污染它们。
-///
-/// 集合**闭合可枚举**（标准音节表固定、模糊组固定），按开启的组过滤后至多数十条，
-/// 故在 `with_fuzzy` 时一次性构建即可，不进按键热路径。
+/// 集合闭合、至多数十条，在 `with_fuzzy` 时一次性构建，不进按键热路径。
 pub fn fuzzy_spellings(config: &FuzzyConfig) -> Vec<String> {
     if !config.any_enabled() {
         return Vec::new();
@@ -482,9 +389,7 @@ pub fn fuzzy_spellings(config: &FuzzyConfig) -> Vec<String> {
                 if i == 0 && j == 0 {
                     continue; // 音节自身
                 }
-                // 零声母的非法拼写不注册：它以元音开头，能接在任何以辅音收尾的前一音节
-                // 后面，`eng`→`ong` 会在 `xi|ong`、`ji|ong` 处凭空多出切分（而没有人用
-                // `ong` 去打「鞥」）。今天只有这一条落在这里。
+                // 零声母的非法拼写不注册（见函数文档）。
                 if init.is_empty() {
                     continue;
                 }
@@ -505,13 +410,8 @@ pub struct FuzzyMatcher;
 impl FuzzyMatcher {
     /// 生成**单个音节**的模糊变体，附带该变体改动了几处（声母 1 处 + 韵母 1 处 = 2）。
     ///
-    /// 声母取值集与韵母取值集做**笛卡尔积**，而非各改一处后并列列出 —— 后者是
-    /// 「`senxiao` 打不出生肖」的根因：`sen` 只产出 `shen`（改声母）与 `seng`（改韵母），
-    /// 独独缺同时改两处的 `sheng`。凡「声母组 + 韵母组同时开启」的交叉场景全部受影响：
-    /// `zen`→`zheng`、`cen`→`cheng`、`san`→`shang`…
-    ///
-    /// 返回值里的处数是**惩罚计量**：`sen`→`sheng` 两处都不同，置信度本就该低于只错一处的
-    /// `sen`→`shen`，对齐 librime `kFuzzySpellingPenalty` / libime `fuzzyCost` 的逐处累加。
+    /// 声母取值集与韵母取值集做笛卡尔积，否则缺同时改两处的变体（`sen` 出不来 `sheng`）。
+    /// 处数是惩罚计量，逐处累加（对齐 librime `kFuzzySpellingPenalty` / libime `fuzzyCost`）。
     ///
     /// 双拼同键音节（[`FuzzyConfig::shared_key`]）并在这里：对端计 **0 处**，对端再经用户
     /// 模糊组得到的变体照常计处数；同一变体多条来源取处数最小者。
@@ -549,8 +449,7 @@ impl FuzzyMatcher {
         let initials = part_options(initial, INITIAL_GROUPS, config);
         let finals = part_options(final_, FINAL_GROUPS, config);
 
-        // 只有输入本身是合法音节时才校验产物合法性。裸声母/半成品码（`s`、`sh`）进来时
-        // 无从谈论「合法音节」，此时保持宽松，否则 `s`→`sh` 这类既有召回会被误杀。
+        // 只有输入本身是合法音节时才校验产物合法性；裸声母/半成品码（`s`）保持宽松。
         let check_valid = VALID_SYLLABLES.contains(input);
 
         let mut variants = Vec::new();

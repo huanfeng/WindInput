@@ -54,9 +54,8 @@ impl Layout {
         Self::from_toml_str(&text)
     }
 
-    /// 解析双拼布局 TOML 文本。命名与 [`from_toml`](Self::from_toml) 对称（一个吃路径、
-    /// 一个吃文本），不叫 `from_str`——那个名字属于 `FromStr` trait，而本函数的错误类型是
-    /// `anyhow::Error`，实现 trait 反而会把调用点的错误语境挤掉。
+    /// 解析双拼布局 TOML 文本。不叫 `from_str`：那属于 `FromStr` trait，与本函数的
+    /// `anyhow::Error` 错误类型不搭。
     pub fn from_toml_str(toml_text: &str) -> anyhow::Result<Layout> {
         let raw: RawLayout = toml::from_str(toml_text)?;
         let mut initials: HashMap<u8, String> = HashMap::new();
@@ -128,14 +127,9 @@ impl Layout {
     /// 全是字母（小鹤/自然码/abc/首道）时返回 `None` —— 与内置默认 `a-z` 等价，
     /// 让协调器走「默认集」快捷路径，零回归。
     ///
-    /// ★ **首码集按「这个键出现在第几码」分**，不是「是不是字母」：
-    /// 声母 / 零声母引导键（`initials`、`zero_initials`、`zero_pairs` 的**首**字节）是第一码
-    /// → 进首码集；韵母键（`finals`、`zero_pairs` 的**次**字节）只能作第二码 → 不进。
-    /// 这正是 `;` 既能打 `ying` 又不夺走空缓冲下 `;` 的快捷输入引导键的原因
-    /// （见 `docs/design/codetable-input-chars.md`「首码集是仲裁者」）。
-    ///
-    /// 现有 7 个内置布局的第一码全是字母，故首码集实际恒为 `a-z`；按语义写而非硬编码，
-    /// 是为了让「哪天有布局把符号配成声母键」时不必再改这里。
+    /// 首码集按「这个键出现在第几码」分：声母 / 零声母引导键（首字节）进首码集，韵母键只能
+    /// 作第二码、不进。所以 `;` 能打 `ying` 又不夺走空缓冲下的快捷输入引导键（见
+    /// `docs/design/codetable-input-chars.md`「首码集是仲裁者」）。
     pub fn code_char_set(&self) -> Option<wind_config::CodeCharSet> {
         // 第一码键：声母 + 零声母引导（zero_pairs 的首字节）。
         let leading_extra: Vec<u8> = self
@@ -168,11 +162,8 @@ impl Layout {
 
 /// 把一组非字母键拼成 `CodeCharSet` 规格串（`a-z` + 这些字面字符）。
 ///
-/// ⚠️ **`-` 必须排在末位**：规格串里 `-` 只在首/末位才是字面，夹在中间会被当范围符
-/// （`"a-z-;"` → 解析 `z-;` → 端点逆序 → 整串解析失败 → 静默回落 `a-z`，
-/// 于是布局里的符号键一个都进不了缓冲，而错误只在日志里）。
-/// 非 ASCII / 不可打印键在此就地丢弃：它们过不了 `CodeCharSet::parse`，
-/// 留着会让**整串**失败，把同布局里合法的符号键一起拖下水。
+/// `-` 必须排在末位：夹在中间会被当范围符，整串解析失败后静默回落 `a-z`。
+/// 非 ASCII / 不可打印键就地丢弃，否则整串失败、拖累同布局的合法符号键。
 fn charset_spec(extra: &[u8]) -> String {
     let mut keys: Vec<u8> = extra
         .iter()
@@ -206,9 +197,7 @@ use std::collections::HashSet;
 
 /// 一个转换后的音节。
 ///
-/// 原为本模块私有的 `ConvertedSyllable`（字段名 `sp_*` = shuangpin），现已提升为通用的
-/// [`SylSpan`]——raw↔flat 的往返需求遍布全拼、分隔符、简拼各条路径，不是双拼专属。
-/// 见 `super::interp` 的模块文档。
+/// 即通用的 [`SylSpan`]（raw↔flat 往返不是双拼专属），见 `super::interp` 的模块文档。
 pub use super::interp::SylSpan;
 
 /// 手动音节分隔符。全拼与双拼共用同一个字符：协调器把用户配的那个键（`'` 或反引号，
@@ -272,9 +261,8 @@ impl SpConvertResult {
 
 /// 出厂布局**固有**的同键音节对（无序）：这些对不进 [`ShuangpinConverter::shared_key_syllables`]。
 ///
-/// 同键对只为用户自定义出来的同键服务；出厂布局里本就成立的那几对（各布局 `o = ["uo", "o"]`
-/// 的 luo/lo、首道 `k = ["en", "ia"]` 的 den/dia）维持改动前「只出首个读音」的行为——
-/// 出厂双拼用户不开模糊音时因此根本不走模糊展开路径。
+/// 同键对只为用户自定义出来的同键服务；出厂布局固有的几对（luo/lo、首道 den/dia）维持
+/// 「只出首个读音」，出厂双拼用户不开模糊音时因此不走模糊展开路径。
 ///
 /// 按**音节对**排除而不是按单个音节：自定义布局在 `w` 上加 `o` 得到的 lia/lo 不在表里，照常生效。
 /// 新增出厂布局引入新的固有对时，守护测试 `builtin_layouts_shared_key_pairs_are_all_excluded` 变红。
@@ -380,14 +368,9 @@ impl ShuangpinConverter {
 
     /// [`Self::convert_pair`] 的本体，多一个「要不要并入模糊对偶声母」的开关。
     ///
-    /// 参数化而不是让建表方自己抄一遍规则：模糊音只影响**一个分支的候选列表**
-    /// （下方第 2 步），其余零声母三路径、`zero_pairs`、单韵母重复键全都与它无关。
-    /// 反向表建表走 `use_fuzzy = false`，理由见 [`ShuangpinReverse`]。
-    ///
-    /// ★ 这是**预防**不是修复：当前唯一的生产建表方 `EngineManager::shuangpin_reverse`
-    /// 现建一个从未调用 `set_fuzzy` 的转换器，所以两条路径眼下同值。参数留着是因为
-    /// 「顺手复用引擎已有的 converter 来建表」是很现实的重构方向，那一天它就是错的了
-    /// （守卫测试 `reverse_ignores_fuzzy_initials` 手动开模糊音，钉的正是那一天）。
+    /// 参数化而非让建表方抄一遍规则：模糊音只影响下方第 2 步。反向表建表走
+    /// `use_fuzzy = false`（理由见 [`ShuangpinReverse`]）；当前建表方的转换器本就没开模糊音，
+    /// 这是为「复用引擎已有 converter 建表」的重构预防，见 `reverse_ignores_fuzzy_initials`。
     fn convert_pair_inner(&self, key1: u8, key2: u8, use_fuzzy: bool) -> Vec<String> {
         let mut results: Vec<String> = Vec::new();
 
@@ -467,11 +450,8 @@ impl ShuangpinConverter {
         if !self.layout.has_zero_pairs() {
             // 3. 零声母特殊处理：单韵母重复键（aa→a, oo→o, ee→e）。
             //
-            // ★ 只对**把该键配成零声母引导键、且允许该单韵母**的方案生效。这条规则属于
-            //   「首字母引导」流派（小鹤/自然码）；「O 引导」流派（微软/搜狗/智能ABC）里
-            //   `aa`/`ee` 不是零声母，`a` 只能打 `oa`。
-            //   原先无条件放行，于是方案规则一半写在 TOML、一半写在引擎里：微软双拼即便把
-            //   `[zero_initials]` 收敛成纯 `o` 引导，`aa`/`ee` 照样出「啊/额」，数据说了不算。
+            // 只对把该键配成零声母引导键、且允许该单韵母的方案生效（小鹤/自然码流派）；
+            // 「O 引导」流派（微软/搜狗/智能ABC）里 `aa` 不是零声母。规则由 TOML 说了算。
             if key1 == key2 {
                 let single = (key1 as char).to_string();
                 if self.is_valid(&single)
@@ -488,10 +468,8 @@ impl ShuangpinConverter {
 
     /// 同键韵母推出的等价音节（喂给 [`FuzzyConfig::shared_key`]，零罚分展开）。
     ///
-    /// `convert` 对一个键对只交出 `syllables[0]` 一条全拼：自定义布局把两个韵母放在同一个
-    /// 韵母键上（`q = ["iu", "ui"]`）时，`dq` 算得出 `diu`、`dui` 两个合法音节，后者却被
-    /// 丢掉。这里把「同一声母键 + 同一韵母键得到的全部合法音节」两两配对，交给拼音引擎
-    /// 按模糊音那套机制展开回来。
+    /// `convert` 对一个键对只交出一条全拼：自定义布局 `q = ["iu", "ui"]` 时 `dq` 的 `dui`
+    /// 会被丢掉。这里把同一键对得到的全部合法音节两两配对，交给拼音引擎按模糊机制展开回来。
     ///
     /// 只看常规「声母 + 韵母」那一路（[`Self::convert_pair_inner`] 第 2 步、不带模糊对偶
     /// 声母）：零声母路径与 `zero_pairs` 不造对。按**音节**而非韵母字面配对，ü 归一化
@@ -542,24 +520,12 @@ impl ShuangpinConverter {
     /// 将双拼键序列转换为全拼（对齐 Go Convert）。
     /// `keys` 为小写字母序列（如小鹤方案下的 "nihc"），可含手动音节分隔符 `'`。
     ///
-    /// ## 手动分隔符 `'` 是**配对的硬边界**
+    /// 手动分隔符 `'` 是配对的硬边界、重置配对起点：双拼每 2 键一音节，单键作简拼声母会让
+    /// 其后配对全部错位（`nhc` 被读成 `nh`→nang + `c`），这个歧义打分挽回不了。
+    /// `n'hc` → 段 `n` + 段 `hc`（→hao），full 得 `nhao`，正是混合简拼认得的形状。
     ///
-    /// 双拼每 2 键一音节，配对起点由「前面消耗了几个键」决定——一旦用户想让某个键单独
-    /// 作简拼声母，其后**所有**键的配对都会错位：`nhc`（你 简 + 好 全）被读成
-    /// `nh`→`nang` 加残码 `c`，全然不是用户敲的那两个字。这个歧义无法由打分挽回，
-    /// 因为两种读法都是合法击键序列（见 `pinyin-mixed-abbrev.md` 记下的「双拼下 `xan`
-    /// 是三声母还是 xa+残码，本身歧义，故意未处理」——本函数就是补上那个手段）。
-    ///
-    /// ⇒ `'` 处**重置配对起点**：`n'hc` → 段 `n`（落单，作声母）+ 段 `hc`（→`hao`），
-    /// full 得 `nhao`，正是混合简拼（声母段 + 完整音节）认得的形状。
-    ///
-    /// ★ **段尾落单键与末尾落单键不是一回事**：后者是「还没打完」（`partial`，可能续打
-    /// 下一键成对），前者是用户已用 `'` 明确宣告「它就到此为止」。故段尾落单键写进 full
-    /// 却**不置 `has_partial`**——置了会让下游把已定案的简拼段当成待续输入。
-    ///
-    /// ★ 段尾落单键刻意**不进 `syllables`**：它不是音节。这样 `sp_boundary_mask` 会把它
-    /// 当作「回写段」自动标出段起点（那里已有 `s.fp_start > cursor` 的空隙分支），
-    /// 手动边界因此无需在 mask 里另开一路。
+    /// 段尾落单键（用户已用 `'` 定案）写进 full 却不置 `has_partial`，也不进 `syllables`
+    /// （`sp_boundary_mask` 会把它当回写段自动标出段起点）；只有末尾落单键才是待续的 partial。
     ///
     /// `'` 自身不进 `full_pinyin`、不占 `position_map`；但 `raw_start`/`raw_end` 与
     /// `position_map` 的值取**含 `'` 的击键偏移**，故 `map_consumed_length` 回算出的
@@ -729,8 +695,7 @@ impl ShuangpinConverter {
 
     /// 建立音节 → 双拼键对的反向表（见 [`ShuangpinReverse`]）。
     ///
-    /// 建表成本是 O(首码键 × 韵母键) 次 `convert_pair`（现有布局约 676 次，每次含若干
-    /// trie 查询），**故必须缓存**，绝不在按键链路上现建。
+    /// 建表成本是 O(首码键 × 韵母键) 次 `convert_pair`，必须缓存，不在按键链路上现建。
     pub fn build_reverse(&self) -> ShuangpinReverse {
         // 首码键 = 声母键 ∪ 零声母引导键 ∪ `zero_pairs` 的首字节；
         // 次码键 = 韵母键 ∪ `zero_pairs` 的次字节。
@@ -757,9 +722,7 @@ impl ShuangpinConverter {
         trailing.sort_unstable();
         trailing.dedup();
 
-        // ★ 排序后枚举，表才是**确定**的。直接遍历 HashMap 的话「哪个键对抢到某音节」
-        // 会随哈希序漂移，而那恰是往返测试要钉住的东西——漂移后测试时绿时红，
-        // 且真机上同一个字今天显示 `vh` 明天显示别的。
+        // 排序后枚举，表才确定，否则「哪个键对抢到某音节」随哈希序漂移。
         let mut pairs: Vec<([u8; 2], Vec<String>)> =
             Vec::with_capacity(leading.len() * trailing.len());
         for &k1 in &leading {
@@ -795,27 +758,11 @@ impl ShuangpinConverter {
 /// 与 `${code_rev}`（拿候选文本去码表词库查反向索引）不是一回事：那边是**查表**，
 /// 这边是**算**——双拼编码不存在于任何词库里，双拼只是「全拼词库 + 一张键盘布局」。
 ///
-/// # 为什么是枚举反演而不是手写反向规则
+/// 枚举反演而非手写反向规则：取码规则全部集中在 [`ShuangpinConverter::convert_pair`]，
+/// 反向表是它的产物而不是副本，改布局或规则自动跟上。
 ///
-/// 双拼的取码规则——零声母三路径、`zero_pairs` 显式键对、单韵母重复键 `aa→a`、
-/// j/q/x/y 的 ü 归一化、以及「哪个流派允许 `aa` 当零声母」这类方案差异——全部集中在
-/// [`ShuangpinConverter::convert_pair`] 一个函数里。手写一份反向规则等于把同一套规则
-/// 誊抄第二遍，而 `convert_pair` 里单韵母重复键那段注释记的正是上一次「方案规则一半
-/// 写在 TOML、一半写在引擎里」留下的伤：微软双拼把 `[zero_initials]` 收敛成纯 `o` 引导，
-/// `aa`/`ee` 照样出「啊/额」，数据说了不算。
-///
-/// 枚举反演没有这个问题：规则只有一处，反向表是它的**产物**而不是副本。
-/// 新增布局、改 TOML、改取码规则，反向表自动跟上。
-///
-/// # 建表必须关掉模糊音
-///
-/// 开着模糊音时 `convert_pair` 会把对偶声母（z↔zh / c↔ch / s↔sh）的结果并进候选末尾。
-/// 小鹤下 `zh` 这个键对，`z`+`uang` 不是合法音节被 trie 拒掉，模糊对偶 `zh`+`uang`
-/// = `zhuang` 却合法，于是 `zhuang` 成了 `zh` 的 `results[0]`；而枚举序 `z` 在 `v`
-/// 之前，`zhuang → zh` 会抢在真值 `vh`（小鹤 `v` = `zh`）之前登记。
-///
-/// 后果不是「显示得不够好」而是**显示的编码是错的**：用户照着 `zh` 敲下去得到的是
-/// 「臓」而不是「装」。模糊音是输入时的宽容，不是这个字的打法。
+/// 建表必须关掉模糊音：否则模糊对偶声母的结果会抢先登记（小鹤 `zhuang` → `zh` 抢在真值
+/// `vh` 之前），显示的编码是错的——照着敲得到的是别的字。
 pub struct ShuangpinReverse {
     map: HashMap<String, [u8; 2]>,
 }
@@ -828,9 +775,7 @@ impl ShuangpinReverse {
 
     /// 整串音节 → 击键串（`["ni", "hao"]` → `"nihc"`）。
     ///
-    /// **任一音节查不到即整体返回 `None`**，不做「查得到的拼上、查不到的跳过」：
-    /// 半截击键串是**错**的答案而不是不完整的答案，用户照着敲会得到别的字。
-    /// 注释是装饰，这一次不显示即可。
+    /// 任一音节查不到即整体返回 `None`：半截击键串是错的答案，照着敲会得到别的字。
     pub fn encode_all(&self, syllables: &[&str]) -> Option<String> {
         if syllables.is_empty() {
             return None;

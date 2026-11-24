@@ -275,7 +275,7 @@ floor 到 0——即一年前用过一次、衰减到 0.01 的记录仍能把第
 ### 6.4 三层比较链
 
 ```text
-① 锚定       is_sentence 或精确码短语 → 恒占顶部，互相维持原序，不参与提升
+① 锚定       精确码短语 → 恒占顶部，互相维持原序，不参与提升（整句不锚定，见下）
 ② 匹配层级   cmp_match_layers（简拼/前缀补全/子短语）→ 词频不得跨层提拔
 ③ 目标位次   升序；同位次时被提升者在前；其余维持原序
 ```
@@ -283,6 +283,30 @@ floor 到 0——即一年前用过一次、衰减到 0.01 的记录仍能把第
 ⚠️ **契约：入参必须已按显示序排好**。`base_pos` 取的就是入参下标。协调器的顺序
 （`candidate_display_order` → `apply_filter` → **本函数** → `apply_shadow`）满足这一点，
 且本函数是最后一道整体排序，结果不会被后续按权重重排推翻。
+
+整句不锚定：其 weight 已与词库同量纲（`pinyin::sentence_weight`），靠显示序挣 `base_pos`
+后与其余候选一样接受词频挑战。锚定是硬闸门，留着它「整句同量纲」就只在无词频记录时成立，
+且模糊同码候选（不算竞争者）选再多次也翻不过整句（守门测试 `pinyin_fuzzy_peer_can_overtake_sentence`）。
+
+### 6.5 预测距离折抵有效次数（`completion_distance_discount`）
+
+`power = eff − completion_extra_syllables`，在 `MIN_PROMOTION_POWER` 判定之前施加：每多预测
+一个用户没输入的音节，就多要一次实证来兑现。
+
+否决过的做法是 `extra ≤ 1` 才豁免 `promote_prefix` 的硬阈值：它挡住了 `extra=4` 的
+`bingdongsanchif`，却放过 `bkdssjiifwyiriv`（双拼，9 音节「冰冻三尺非一日之寒」，`extra=1`）——
+选过一次就把 `base_pos=1` 减半到 0、抢走首位。而同为 `extra=1` 的 `jisuanjik`→「计算机科学」
+必须能靠 30 次词频反超残码整句（`pinyin_sentence_flag`）。两案的差异在次数而非 `extra`，
+布尔阈值切不开：
+
+| 场景 | extra | 次数 | `eff - extra` | 结果 |
+|---|---|---|---|---|
+| `bkdssjiifwyiriv` 长词 | 1 | 1 | 0 | 不提升 |
+| `jisuanjik` 计算机科学 | 1 | 30 | 29 | 仍提升 |
+| `bingdongsanchif` 长词 | 4 | 1 | −3 | 不提升 |
+
+体感：`extra=1` 的长词选 2 次到首位，`extra=4` 的要 5 次。与 librime/fcitx5 把
+`overLengthCost` 与用户历史放在同一根轴上相加同一思路。
 
 ---
 

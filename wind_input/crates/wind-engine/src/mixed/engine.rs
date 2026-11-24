@@ -1,13 +1,9 @@
-//! 混合引擎实现（码表主 + 拼音次，分层加权合并）
+//! 混合引擎实现（码表主 + 拼音次 + 可选英文）。
 //!
-//! 与 Go 版本 `wind_input/internal/engine/mixed/mixed.go` 对齐（核心分层）。
-//!
-//! 加权策略（双向夹击）：
-//! - 码表：精确匹配(code==input) +CodetableWeightBoost(默认 1e7)；短语 +1M；前缀补全 +500K
-//! - 拼音：weight ÷ PinyinTierScale(100) 归一化到低档（0~100K），与码表/短语严格隔离
-//! - 合并后按权重排序、按文本去重；输入短于 min_pinyin_length 时仅码表
-//!
-//! 后置：英文候选、简拼长度惩罚（HasFullSyllable）、convertMixedOverflow 精细档。
+//! 合并后按[截断优先级档](MixedEngine::truncation_tier)稳定排序、按文本去重、带保底配额截断；
+//! 不改 weight，最终显示序由协调器重排。输入短于 `min_pinyin_length` 时仅码表；超码长走
+//! `convert_overflow`。设计见 `docs/architecture/engine-candidate-pipeline.md` §7 与
+//! `docs/design/mixed-source-tier-quota.md`。
 
 use crate::engine::{ConvertOptions, ConvertResult, Engine, EngineType};
 use std::sync::Arc;
@@ -42,34 +38,14 @@ impl MixedEngine {
     /// | 2 | 码表前缀补全、英文精确 |
     /// | 3 | 拼音、英文前缀 |
     ///
-    /// ## 这套档位从前写在权重里
+    /// 档位不写进 weight（真实词频与类别偏置挤在同一个 `i32` 会吃掉量程、泄漏到显示序），
+    /// 见 `docs/design/mixed-source-tier-quota.md`。
     ///
-    /// 六个加成常数（`+1e7` / `+1M` / `+500K` ×2 / `÷100` / `+0`）一直在表达同一套档位，
-    /// 表达方式是**数值大小**：给候选权重加一个足够大的常数，再全局按 weight 排序，档位
-    /// 就"自然"浮现。那套写法有三个代价，正是拆掉它的理由：
+    /// 档 1 在本引擎恒不可达：短语由协调器在引擎返回之后合并，引擎内无生产代码置位
+    /// `is_phrase`。保留它零成本且语义正确。
     ///
-    /// 1. **真实词频与类别偏置挤在同一个 `i32` 里**，量程被吃掉（拼音 p50=34 被 `÷100`
-    ///    整除归零）；
-    /// 2. **档序依赖权重取值范围**——档 0 与档 1 之间隔着 9e6，一条权重超过 9e6 的短语就能
-    ///    反超码表精确全码。真实词频到不了那个量级，但那是**数据的性质，不是代码的保证**；
-    /// 3. 偏置随 `weight` 一路**泄漏到协调器**，把引擎的截断策略混进了显示序。
-    ///
-    /// ## ⚠️ 档 1（短语）在本引擎恒不可达
-    ///
-    /// `is_phrase` 在整个 `wind-engine` 里**没有任何生产代码置位**（`freq_rerank` 里的几处
-    /// 全是测试 fixture，且 `apply_freq_rerank` 定义并调用于**协调器**）。短语是协调器合并进
-    /// 候选列表的（`handle_candidate.rs`），发生在引擎返回**之后**，而本函数只看得见
-    /// `primary.convert()`（码表引擎从不置位）、拼音、英文三路。
-    ///
-    /// 保留本档是因为它零成本且语义正确：真有短语流到这里时它该排在码表前缀补全之前。
-    ///
-    /// ## ⚠️ 档 2 混着两个来源，是历史包袱
-    ///
-    /// 「英文精确」与「码表前缀补全」同档，源于旧加成里 `PARTIAL_MATCH_BOOST` 与
-    /// `ENGLISH_EXACT_BOOST` **数值恰好相等**（都是 500,000）——常数碰撞，不是设计。
-    /// 本步维持同档，但档内不再比权重（见 [`MixedEngine::sort_dedup_truncate`]），于是英文
-    /// 精确落在码表前缀补全**之后**（按合并顺序）。英文该不该有保底席位，见
-    /// `docs/design/mixed-source-tier-quota.md` §3.3。
+    /// 档 2 混着码表前缀补全与英文精确，是旧加成常数碰撞留下的；档内不比权重，英文精确按
+    /// 合并顺序落在码表之后，靠 [`MixedEngine::truncate_with_english_seats`] 保底。
     fn truncation_tier(c: &Candidate, ctx: TruncationCtx<'_>) -> u8 {
         match c.source {
             // 短语先判：短语也走码表来源，但优先于「码是否等于输入」。
@@ -110,13 +86,11 @@ impl Default for MixConfig {
     fn default() -> Self {
         Self {
             min_pinyin_length: 2,
-            // ⚠️ 同为「三处同源」项（见下方 auto_commit_block_on_pinyin 的说明）。
+            // 三处同源项（见下方 auto_commit_block_on_pinyin 的说明）。
             pinyin_partial_candidates: false,
             pinyin_partial_candidates_overflow: true,
-            // ⚠️ 三处同源：本处 / `MixGlobal::default()`（wind-config）/ `data/config.toml
-            // [schema.mix]` 必须一致，改默认须同步全部三处。出厂默认以 L1⊕L2⊕L2.5 为准（靠后层覆盖靠前层），
-            // 即 data/config.toml 里的值。本处曾长期为 false 而另两处为 true，导致引擎单测跑在一个
-            // 现实中不存在的配置下（测试全绿但保护实际是开着的）。
+            // 三处同源：本处 / `MixGlobal::default()`（wind-config）/ `data/config.toml
+            // [schema.mix]` 必须一致，否则引擎单测跑在现实中不存在的配置下。
             auto_commit_block_on_pinyin: true,
             pinyin_only_overflow: true,
             top_code_override_pinyin: false,
@@ -143,18 +117,13 @@ pub struct MixedEngine {
     min_pinyin_length: usize,
     /// **码长内**（输入 ≤ 主码表最大码长）是否保留「未消费整串」的拼音候选。
     ///
-    /// 默认 `false`：`gedw`（五笔精确码「青春」）下拼音把 `ge` 的 219 条同音单字全交出来，
-    /// 每条只解释 4 键中的 2 键 —— 主流混输实现均不出这类候选。关掉后 `gedw` 只剩「青春」，
-    /// 开着简拼时还能让混合简拼词「各单位」从第 221 位浮到第 2 位（同一根因的两面）。
-    ///
-    /// ⚠️ 代价是**失去码长内的分步上屏**（选一条部分候选先上屏、剩余码续输）。正在输入中的
-    /// 拼音不受影响 —— 那是前缀补全（`wanl` → 「完了」，code=`wanle`、消费整串），与残码
-    /// 候选方向相反，见 `Engine::convert_requiring_full_match` 的判据说明。
+    /// 默认 `false`：`gedw`（五笔「青春」）下拼音会交出 `ge` 的上百条同音单字，每条只解释
+    /// 一半击键，主流混输均不出这类候选。代价是失去码长内的分步上屏；前缀补全（`wanl` →
+    /// 「完了」，消费整串）不受影响，见 `Engine::convert_requiring_full_match`。
     pinyin_partial_candidates: bool,
     /// **超码长**（输入 > 主码表最大码长，已切入纯拼音语境）是否保留同类候选。
     ///
-    /// 默认 `true` = 保留：那里正是长拼音输入的地盘，`nihaom` 选「你好」再续打 `ma` 的分步
-    /// 上屏必须留着。与上一项分设两个开关是用户明确要求的取舍（2026-08-14）。
+    /// 默认 `true` = 保留：那里是长拼音输入的地盘，`nihaom` 选「你好」再续打的分步上屏要留着。
     pinyin_partial_candidates_overflow: bool,
     /// 全码自动上屏 / 顶码上屏 / **满码空码清空**时，若存在拼音候选则否决（保护拼音用户，
     /// 对齐 Go AutoCommitBlockOnPinyin）。**默认开**（三处同源：`MixConfig::default()` /
@@ -182,9 +151,8 @@ pub struct MixedEngine {
     /// 英文词库引擎（schema.mix.enable_english 开且 english 方案可加载时为 Some）。
     /// 混输各路径按精确/前缀加权混入英文候选；None = 关闭（零开销）。
     ///
-    /// ⚠️ `Arc` 而非 `Box`：这一份与 `engines["english"]`（英文方案自身、英文候选混入、
-    /// 临英、快捷输入英文都用它）是**同一个实例**。英文引擎带一张按用户词库规模增长的
-    /// 词组分词索引，靶机 18 万条时每份 12.7 MB，各建一份是纯浪费。
+    /// `Arc` 而非 `Box`：与 `engines["english"]` 是同一个实例，英文引擎带一张随用户词库
+    /// 规模增长的词组分词索引，各建一份是纯浪费。
     english: Option<Arc<dyn Engine>>,
     /// 英文取用策略（最小长度 / 补全门槛 / 条数上限 / 上屏否决），与码表方案的
     /// `english_merge` 折成同一形态，经 `english_merge::select` / `has_any` 共用一套口径。
@@ -291,15 +259,11 @@ impl MixedEngine {
     /// 这个判「拼音**还没打完**」（只查标准音节表，不查词典）。清空发生在无候选时，正需要后者。
     /// `secondary` 为 None（纯码表混输）时恒 false。
     ///
-    /// **已知取舍：不认简拼**（`schema.mix.enable_pinyin_abbrev` 开时）。本判据只认全拼音节前缀，
-    /// 故简拼中途态若暂无候选仍可能被清空。未做联动是有意的——若一并认 `is_abbreviation`，由于它
-    /// 只要求每字母是某音节首字母，几乎任何字母串都会被守护住，清空将形同虚设。现有多个上屏阻止
-    /// 选项已能覆盖大部分场景，待真机反馈再定；届时勿只改本函数，须连带重估清空功能的存在意义。
+    /// 已知取舍：不认简拼。若一并认 `is_abbreviation`，几乎任何字母串都会被守护住，清空形同
+    /// 虚设；要改须连带重估清空功能本身。
     ///
-    /// **前提：混输不接双拼**（码长太接近，产品上不支持）。`is_possible_pinyin_sequence` 与另三个
-    /// 音节判据一样，把入参当全拼直喂音节表、不走 `ShuangpinConverter`（不同于 `convert()`）。
-    /// 若将来给混输接入双拼，此处会**静默**误判：如小鹤 `nihc`(=ni+hao) 判为「无后续」→ 清空吞掉
-    /// 用户正在输入的串。届时须先给这四个判据加统一的双拼前置转换，勿只改本函数。
+    /// 前提：混输不接双拼。本判据与另三个音节判据都把入参当全拼直喂音节表；若将来接双拼，
+    /// 须先给这四个判据加统一的双拼前置转换，否则会静默误判并清掉正在输入的串。
     fn pinyin_may_continue(&self, input: &str) -> bool {
         self.secondary
             .as_ref()
@@ -312,11 +276,8 @@ impl MixedEngine {
     ///   `is_ambiguous_pinyin_word` 同口径）。简拼串走的正是这一支——`pinyin_may_continue`
     ///   只认全拼音节前缀，对简拼恒 false（见其文档）。
     ///
-    /// 反面即「拼音打岔了」：`yijga`（五笔全码 `yijg`=就是 再多打一个字母）拼音只切得出 `yi`、
-    /// 余下 `jga` 连音节前缀都不是，首选「以」只消费 2/5 —— 这种串不该由拼音独占。
-    ///
-    /// 与 `is_ambiguous_pinyin_word` 的分工：那个判「拼音**已经**成词」（看词典权重，用于否决
-    /// 上屏），本函数判「拼音**够不够格接管整串**」（看覆盖度，用于超码长归属）。
+    /// 反例：`yijga` 拼音只切得出 `yi`，首选「以」只消费 2/5，不该由拼音独占。
+    /// 与 `is_ambiguous_pinyin_word`（成词，用于否决上屏）不同，本函数看覆盖度，用于超码长归属。
     fn pinyin_claims_overflow(&self, input: &str) -> bool {
         if self.pinyin_may_continue(input) {
             return true;
@@ -332,13 +293,9 @@ impl MixedEngine {
         };
         let input_len = input.chars().count();
         let consumes_all = |c: &Candidate| c.consumed_length == 0 || c.consumed_length >= input_len;
-        // 首选吃满整串，**或**有整句吃满整串。后一条只对 ②b 混合整句起作用：非简拼层的整句
-        // 本就排在部分候选之前，首选那条已覆盖它们；②b 整句自 `3934d5cc` 起在简拼层，
-        // `wobzd` 的首选成了只吃 `wo` 的「我」，不补这一条就让码表认领了整串
-        // （`tests/mixed_overflow_abbrev_sentence.rs`）。
-        //
-        // ⚠️ 不放宽成「任一候选吃满整串」：整串简拼词（`yijga` 读成 yi+j+g+a 也许恰有一个）
-        // 此前从不参与认领，放宽会把本该让给码表的串也判给拼音。
+        // 首选吃满整串，或有整句吃满整串。后一条为 ②b 混合整句：它在简拼层、排在部分候选
+        // 之后（`wobzd` 首选是只吃 `wo` 的「我」），见 `tests/mixed_overflow_abbrev_sentence.rs`。
+        // 不放宽成「任一候选吃满」：整串简拼词会把本该让给码表的串也判给拼音。
         r.candidates.first().is_some_and(consumes_all)
             || r.candidates
                 .iter()
@@ -350,12 +307,10 @@ impl MixedEngine {
     /// 与 [`Self::pinyin_claims_overflow`] 对称 —— 超码长归属问的是「谁解释得了整串」。码表只
     /// 解释得了前 N 码（`gith`=不算），英文却吃得下整个 `github`，归属就不该判给码表。
     ///
-    /// ⚠️ 判据刻意用**精确整串**而非 [`Self::english_blocks_commit`] 的「有词条（含前缀）」：英文库 21918 条，
-    /// 前缀面极大，按前缀判会让一堆恰好撞上某英文词开头的五笔全码平白丢掉归属。也不走
-    /// 取候选再比对 —— 那会被取数上限截断，精确词未必在前几条。
+    /// 判据用精确整串而非前缀：英文库前缀面极大，按前缀判会让撞上英文词开头的五笔全码平白
+    /// 丢掉归属。也不取候选再比对，那会被取数上限截断。
     ///
-    /// ⚠️ **不读 `auto_commit_block_on_english`**：那是**上屏否决**开关（出厂 `false`），本判据决定的
-    /// 是**候选归属/排序**，两者正交。若受其支配，默认配置的用户照样会看到 `github` 首选是「不算」。
+    /// 不读 `auto_commit_block_on_english`：那是上屏否决开关，本判据管候选归属，两者正交。
     fn english_claims_overflow(&self, input: &str) -> bool {
         let Some(eng) = &self.english else {
             return false;
@@ -371,26 +326,15 @@ impl MixedEngine {
     ///   兜住：`nihx` 在五笔没有精确全码 → 仍归拼音，不会被五笔顶码截胡；
     /// - 拼音并不**主张**这一串（见 [`Self::pinyin_claims_overflow`]）；
     /// - 英文并不**主张**这一串（见 [`Self::english_claims_overflow`]）——开着英文词库时 `words`
-    ///   的前 4 码 `word` 若在码表成词，码表精确 `+1e7` 会把英文精确档 `+500K` 整层压掉；
+    ///   的前 4 码 `word` 若在码表成词，码表精确（档 0）会把英文精确（档 2）整层压掉；
     /// - 拼音至少**交得出候选**（见 [`Self::pinyin_has_any`]）——这条与上面第二条方向相反，
     ///   两头夹出「还在中文语境里、但拼音接管不了整串」这个窄带。
     ///
-    /// ⚠️ **前三条的判据是「谁解释得了整串」，第四条问的却是「这串还算不算中文」**，别把它们当成
-    /// 一类。真机回归 `github`（英文词库关着）四条里前三条全放行：`gith` 在五笔主库确是精确全码
-    /// 「不算」（1822）、`gi` 不成音节所以拼音主张不了、英文引擎压根不在场 —— 于是归属判给码表，
-    /// 首选变成「不算」，空格上屏还把整个缓冲吃掉。可这串连开头都解释不出一个字，判给码表毫无
-    /// 依据（对比 `yijga` 至少出得来「以」）。第四条即为此而设，落回 249f486 之前的行为：候选
-    /// 保持为空，用户空格/回车直接上屏原码。
+    /// 前三条问「谁解释得了整串」，第四条问「这串还算不算中文」（`github` 连开头都读不出一个字，
+    /// 判给码表毫无依据，候选留空让用户上屏原码）。第四条对顶码通路无影响。
     ///
-    /// ⚠️ 第四条对**顶码通路无影响**：⓪ 的判据是 `pinyin_only_overflow && has_pinyin && !ct_owns`，
-    /// `has_pinyin=false` 时整条本就不成立。顶码侧的英文场景另由 ③ `auto_commit_block_on_english`
-    /// 负责（出厂 `false`），两者是不同维度，勿混。
-    ///
-    /// ⚠️ 判据落在**前 N 码前缀**而非整串，这是本函数存在的全部理由：`convert_overflow` 原有的
-    /// 逃生口 `has_full_input_match(input) || has_longer_code(input)` 问的是**整串**，而定长码表
-    /// （五笔 4 码封顶）里根本不存在 5 码词条 —— 那个条件对五笔恒假，等于没有逃生口，于是
-    /// `yijg` + **任意**字母都被拼音「以」整串接管，且关掉全部上屏否决开关也无济于事
-    /// （①②③ 与 ⓪ 是独立通路）。真机实测即由此而来。
+    /// 判据落在前 N 码而非整串：定长码表（五笔 4 码封顶）里不存在更长的词条，问整串的长码特例
+    /// 对五笔恒假。详见 `docs/architecture/engine-candidate-pipeline.md` §7.4。
     fn codetable_owns_overflow(&self, input: &str) -> bool {
         if self.max_code_len == 0 {
             return false;
@@ -407,10 +351,8 @@ impl MixedEngine {
 
     /// 拼音对这串**交得出候选**（哪怕只解释开头一小截）——「这串还在中文语境里」的最低证据。
     ///
-    /// 与 [`Self::pinyin_claims_overflow`] 是**方向相反**的一对：那个问「拼音够不够格接管整串」
-    /// （够格就别让码表插手），这个问「拼音是不是连一个字都读不出来」（读不出来说明这串根本不是
-    /// 中文码，码表也别硬解释）。`yijga` 出得来「以」→ 归码表；`github` 什么都出不来 → 谁都不接，
-    /// 候选留空让用户上屏原码。
+    /// 与 [`Self::pinyin_claims_overflow`] 方向相反，两头夹出「还在中文语境、但拼音接管不了整串」
+    /// 的窄带：`yijga` 出得来「以」→ 归码表；`github` 什么都出不来 → 谁都不接。
     fn pinyin_has_any(&self, input: &str) -> bool {
         self.secondary.as_ref().is_some_and(|sec| {
             sec.convert(input, 1)
@@ -421,17 +363,15 @@ impl MixedEngine {
 
     /// 给拼音子引擎的取舍：**码长内**（输入 ≤ 主码表最大码长）。
     ///
-    /// `allow_partial_final: Some(false)` —— 这一段的击键串同时是码表码，让尾部残码参与整句
-    /// 解码会抢走码表首位（真机 `aaw`，本意五笔 `aawt`→「工作」，首选变成「啊啊我」）。
+    /// `allow_partial_final: Some(false)`：这一段的击键串同时是码表码，残码整句会抢走码表首位
+    /// （`aaw` 首选变成「啊啊我」）。
     fn in_code_len_opts(&self) -> ConvertOptions {
         ConvertOptions {
             require_full_match: !self.pinyin_partial_candidates,
             allow_partial_final: Some(false),
             // 混输不筛候选：它的两侧配额与截断另有一套（`merge_sort_dedup`）。
             admit: None,
-            // 保留子引擎的简拼配额：混输的候选最终交给协调器 `candidate_display_order`
-            // 重排，补在尾部是安全的。（本函数与 `overflow_opts` 刻意列全字段、不用
-            // `..Default::default()`，见下方那条「两套取值表摆在一起才看得出差异」。）
+            // 保留子引擎的简拼配额：协调器会重排，补在尾部是安全的。刻意列全字段，见 `overflow_opts`。
             no_abbrev_quota: false,
             sp_raw_lattice: false,
             aux_continuous: None,
@@ -442,11 +382,9 @@ impl MixedEngine {
 
     /// 给拼音子引擎的取舍：**超码长**（输入 > 主码表最大码长）。
     ///
-    /// `allow_partial_final: Some(true)` —— 定长码表之外的串不可能是码表码，这里已是纯拼音
-    /// 语境，就该按纯拼音的规矩组句（`zaiyebuj` → 「在也不就」，此前尾字母 `j` 被丢下）。
+    /// `allow_partial_final: Some(true)`：超码长已是纯拼音语境，按纯拼音规矩组句。
     ///
-    /// ⚠️ 两侧**各写一个方法而不是给同一个函数传 bool**：它们是两套取值表，摆在一起才看得出
-    /// 「同一维度在两侧取值相反」（对照表见 [`ConvertOptions`]）。
+    /// 两侧各写一个方法、列全字段而不传 bool：两套取值表摆在一起才看得出差异（见 [`ConvertOptions`]）。
     fn overflow_opts(&self) -> ConvertOptions {
         ConvertOptions {
             require_full_match: !self.pinyin_partial_candidates_overflow,
@@ -475,38 +413,20 @@ impl MixedEngine {
     /// 按**截断优先级档**稳定排序 → 按文本去重 → 带拼音保底配额截断
     /// （`convert` 主路径与 overflow 共用）。
     ///
-    /// ## 排序键只有「档」一个，这是刻意的
+    /// 排序键只有「档」：稳定排序 + 各段按子引擎排好的序拼接 ⇒ 组内保持子引擎原序。
+    /// 档内不可再按 weight 重排，否则拼音的层级键（布尔、等价于惩罚 ∞）被抹掉，高词频简拼
+    /// 会反超低词频精确候选（candidate-sorting-rules.md §4.3）。
     ///
-    /// `sort_by_key` 是**稳定排序**，同档候选保持原有相对次序。而候选是按
-    /// `码表 → 拼音 → 英文` 拼接的，**每一段内部已经是子引擎排好的序**
-    /// （码表 `cmp_exact_first().then(base_cmp)`，拼音
-    /// `cmp_match_layers().then(weight).then(natural_order)`）。
-    /// ⇒ 只按档位稳定排序 = 档位分组 + **组内保持子引擎原序**，无须额外记录任何索引。
-    ///
-    /// ## ⚠️ 档内绝不可再按 weight 重排
-    ///
-    /// 曾经的写法是全局按（带加成的）weight 排序，那会把子引擎的排序链整个抹掉。代价
-    /// 具体是：拼音的 `cmp_match_layers` 里，层级键（简拼 / 前缀补全 / 子短语 / 全拼降级）
-    /// 是**布尔的、等价于惩罚 ∞**，weight 表达不了——于是一条高词频简拼候选会在这里
-    /// 反超低词频的精确候选，而子引擎明明把精确排在了前面。
-    ///
-    /// 同一条教训另有两处记载：`candidate-sorting-rules.md` 红线，以及协调器
-    /// `candidate_display_order` 的「层级键必须原样复用 `cmp_match_layers`，不要另写一份」。
-    ///
-    /// ## 与协调器的分工
-    ///
-    /// 本函数只决定**谁活下来**。最终显示序由协调器 `candidate_display_order` 无条件重排
-    /// 全部候选决定（`candidate-sorting-rules.md` §6），故这里的组间次序不影响用户所见。
+    /// 本函数只决定谁活下来，显示序由协调器 `candidate_display_order` 重排。
     fn sort_dedup_truncate(
         cands: &mut Vec<Candidate>,
         max_candidates: usize,
         ctx: TruncationCtx<'_>,
     ) {
         cands.sort_by_key(|c| Self::truncation_tier(c, ctx));
-        // 按 text 去重，并把被丢弃那条所占的码位并进幸存者（`Candidate::merged_codes`）：
-        // 否则「检索范围」过滤按 (source, code) 分组时会丢掉「该码位下有常用字」这一事实，
-        // 同一个字打前缀出、打全码反而不出。跨来源（码表 vs 拼音）由 `absorb_codes_from`
-        // 自行挡掉——两套编码不同域，并入会造出假的同码关系。
+        // 按 text 去重，并把被丢弃那条的码位并进幸存者（`Candidate::merged_codes`），否则
+        // 「检索范围」过滤按 (source, code) 分组时会丢掉「该码位下有常用字」。跨来源由
+        // `absorb_codes_from` 自行挡掉（编码不同域）。
         let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         let mut deduped: Vec<Candidate> = Vec::with_capacity(cands.len());
         for c in std::mem::take(cands) {
@@ -523,13 +443,9 @@ impl MixedEngine {
 
     /// 截断时**英文全员保底**，其余候选走 [`Self::truncate_with_pinyin_quota`]。
     ///
-    /// 进到这里的英文已由 `english_merge::select` 限好条数（中文侧有候选时至多
-    /// `english_max_count` 条；中文侧为空时列表里本就只有英文），故「全员保底」即「保底不超过
-    /// `english_max_count`」。不保底的话，码表前缀补全洪水下英文精确会被整片挤掉——码表在
-    /// 档 0 / 档 2、英文精确同在档 2 且排在码表之后（`english_survives_codetable_flood`）。
-    ///
-    /// 手法同码表方案的 `english_merge::merge`：先给英文腾座，再追加在尾部。尾部追加不影响
-    /// 显示序——协调器 `candidate_display_order` 会无条件重排全部候选。
+    /// 英文已由 `english_merge::select` 限好条数，故全员保底即至多 `english_max_count`。
+    /// 不保底的话码表前缀补全洪水会把同在档 2、排在其后的英文精确整片挤掉
+    /// （`english_survives_codetable_flood`）。追加在尾部，显示序由协调器重排。
     fn truncate_with_english_seats(cands: &mut Vec<Candidate>, max_candidates: usize) {
         let is_en = |c: &Candidate| c.source == CandidateSource::English;
         if cands.len() <= max_candidates || !cands.iter().any(is_en) {
@@ -546,31 +462,18 @@ impl MixedEngine {
 
     /// 截断到 `max_candidates`，但**保证拼音候选至少留 `max/PINYIN_QUOTA_DIVISOR` 席**。
     ///
-    /// ⚠️ 与 `pinyin/mod.rs` 的 `truncate_with_quotas` **逐行同构**，只差谓词
-    /// （`source == Pinyin` vs `is_abbrev`）与分母。**刻意保持两份**：各自的 doc 记着
-    /// 不同的事故现场与分母依据，合并会把它们稀释成一段泛泛的说明。代价是改一处要看
-    /// 另一处 —— 改本函数的腾位/补位语义前，先确认那边是否要跟。
+    /// 与 `pinyin/mod.rs` 的 `truncate_with_quotas` 同构，只差谓词与分母；刻意保持两份，
+    /// 改腾位/补位语义前先确认那边是否要跟。
     ///
-    /// **为什么需要**：码表候选落在档 0/档 2、拼音在档 3，于是截断时码表恒排在前。
-    /// 而五笔 2 码前缀的候选量常常超过整个配额——实测 **52 个 2 码前缀条目数 > 300**
-    /// （最多 `kh` 663 条），其中 `pu`（495 条）正是「既是五笔 2 码、又是完整拼音音节」的交集。
-    /// 那种输入下拼音候选**一条都进不了列表**，下游协调器的拼音精确档
-    /// （`cmp_pinyin_exact_first`）就无从下手——提档提不了不在场的候选。
+    /// 为什么需要：码表恒在拼音之前的档，而五笔 2 码前缀的候选量常超过整个上限，那种输入下
+    /// 拼音一条都进不来，协调器的拼音精确档无从下手（依据见 candidate-sorting-rules.md §4.3）。
+    /// 只补不挤空：截掉的部分没有拼音时一条码表候选都不会被挤掉。
     ///
-    /// **只补不挤空**：尾部确实没有拼音候选时（纯五笔溢出串、`kh` 这类非音节码）`extra` 为空，
-    /// 一条码表候选都不会被挤掉，行为与改动前完全一致。
+    /// 已知缺口：取的是被截段里最前面的拼音，而简拼候选（含 ②b 混合整句）沉在拼音块末尾，
+    /// 码表候选超上限时会被再截一次。只在开了 `enable_pinyin_abbrev`（出厂关）时可见；
+    /// 彻底修法是 extra 选取也给 `is_abbrev` 留一席。
     ///
-    /// ⚠️ **已知缺口：本配额救不回拼音侧的简拼候选。** `take(quota - kept)` 取的是被截段里
-    /// **最前面**的拼音候选，而简拼候选在 `cmp_match_layers` 的第二键 `is_abbrev` 上恒沉在
-    /// 拼音块的最尾。于是码表候选一多（本 doc 上面记的「52 个 2 码前缀条目数 > 300、最多
-    /// `kh` 663 条」），拼音子引擎那边刚由 `truncate_with_quotas` 救回来的简拼候选，
-    /// 到这里会被**再截一次**。彻底的修法是让本函数的 extra 选取也给 `is_abbrev` 留一席。
-    /// 自 `3934d5cc` 起 ②b **混合整句**也带 `is_abbrev`（与整串简拼词同层按权重竞争），同样
-    /// 落在这个缺口里——只在开了 `enable_pinyin_abbrev`（出厂关）且码表候选超上限时可见。
-    ///
-    /// ⚠️ 补进来的拼音候选**追加在尾部、不保证有序**——这依赖协调器
-    /// `candidate_display_order` 会**无条件重排全部候选**（见 candidate-sorting-rules.md §6）。
-    /// 本函数的职责只是「让候选进得来」，不是「排好序」。
+    /// 补进来的拼音追加在尾部、不保证有序，依赖协调器无条件重排。
     fn truncate_with_pinyin_quota(cands: &mut Vec<Candidate>, max_candidates: usize) {
         if cands.len() <= max_candidates {
             return;
@@ -662,15 +565,10 @@ impl MixedEngine {
     /// 拼音拆分形态（`preedit_pinyin` → 协调器 `preedit_split_body`），供**高亮跟随**取用：
     /// 高亮拼音候选时显示它，高亮码表候选时显示原始码（`effective_preedit_body`）。
     ///
-    /// 判据是「**拆分串与原始输入不同**」，而非 `pinyin_preedit_of` 的「≥2 完成音节」。
-    /// 后者是「默认显示什么」的保守取舍，套到本字段上会漏掉**单音节 + 尾部残码**：
-    /// `nunl` = 完成音节 `nun`（稀有音节，见 `syllable.rs` 末尾）+ 残码 `l`，拼音候选「嫩」
-    /// 只消费 3 个字符，而编码栏却显示整串 `nunl` —— 候选按 `nun|l` 算、显示按整串算，
-    /// 用户看不出引擎已把 `l` 划到音节外，空格上屏残留一个 `l` 便显得无由来。
+    /// 判据是「拆分串与原始输入不同」，比 `pinyin_preedit_of` 宽：单音节 + 残码（`nunl` =
+    /// `nun` + `l`，「嫩」只消费 3 字符）也要给，否则编码栏显示整串，上屏残留的 `l` 显得无由来。
     ///
-    /// 拆分串 == 原始输入时返回 None（`nun`、纯五笔码 `aaaa` 的 `a'a'a'a` 除外——那确实不同，
-    /// 但它只在高亮到拼音候选时才显示，那时拆分正是该候选的真实解读）。空串同样返回 None：
-    /// 空 = 「无拆分形态」，协调器据此恒用原始码。
+    /// 拆分串等于原始输入或为空时返回 None，协调器据此用原始码。
     fn pinyin_split_of(py: &ConvertResult, input: &str) -> Option<String> {
         if py.preedit_display.is_empty() || py.preedit_display == input {
             return None;
@@ -695,9 +593,7 @@ impl MixedEngine {
     ///
     /// 取舍与码表方案的英文混入**同一个入口** [`crate::english_merge::select`]：中文侧有候选时
     /// 只收完整单词（够 `english_complete_min_length` 再补前缀词），合计不超
-    /// `english_max_count`；中文侧为空时给一页前缀补全。前缀扩展为什么不随便进列表、为什么要
-    /// 清 `is_exact_code`，见该模块的 `lookup` 文档（实测混输打 `github` 曾混进 8 条 GitHub
-    /// 开头的长词组，打 `hen` 带出 Henderson / Hendrix）。
+    /// `english_max_count`；中文侧为空时给一页前缀补全。取舍理由见该模块的 `lookup` 文档。
     fn english_for_display(&self, input: &str, base_empty: bool) -> Vec<Candidate> {
         match &self.english {
             Some(eng) => {
@@ -737,25 +633,22 @@ impl MixedEngine {
             self.primary.has_full_input_match(input) || self.primary.has_longer_code(input);
 
         if self.pinyin_only_overflow {
-            // 超码长走**另一个**开关（默认保留部分候选：这里已是纯拼音语境，长拼音的分步
-            // 上屏要留着）。上方三处判据函数（`is_ambiguous_pinyin_word` /
-            // `pinyin_claims_overflow` / `pinyin_has_any`）**刻意仍走 `convert`**：它们问的是
-            // 「拼音够不够格接管这一串 / 这串还算不算中文」，与「哪些候选该显示」正交。
+            // 超码长用 `overflow_opts`。三处判据函数（`is_ambiguous_pinyin_word` /
+            // `pinyin_claims_overflow` / `pinyin_has_any`）刻意仍走 `convert`：它们问归属，
+            // 与「哪些候选该显示」正交。
             let py = sec
                 .convert_with_opts(input, max_candidates, self.overflow_opts())
                 .unwrap_or_default();
             let pinyin_preedit = Self::pinyin_preedit_of(&py);
             let pinyin_split = Self::pinyin_split_of(&py, input);
             let pinyin = py.candidates;
-            // 码表回捞（两条互补的口子，任一成立即把码表候选并回来；档位隔离由
-            // `truncation_tier` 负责，不再靠给拼音 ÷100 来避免档位重叠）：
+            // 码表回捞（两条互补的口子，任一成立即把码表候选并回来）：
             // - 长码特例 `has_full_or_longer`：**整串**在码表有精确匹配/更长后继。只有码长可变
             //   的码表够得着——五笔这类定长码表恒假（4 码封顶，不存在 5 码词条）。
             // - `codetable_owns_overflow`：**前 N 码**是精确全码而拼音并不主张这一串
             //   （`yijg`+任意字母）。这条才是定长码表的逃生口，与顶码 ⓪ 共用判据。
             let ct_owns = self.codetable_owns_overflow(input);
-            // 截断档位的判据串必须与紧邻的 `boost_codetable` 逐字同源——两个分支的
-            // 「视作精确全码」口径不同（整串 vs 前 N 码前缀），取错会让档 0/档 2 整体错位。
+            // 截断档位的判据串随分支而异（整串 vs 前 N 码前缀），取错会让档 0/档 2 整体错位。
             let english_exact = input.to_lowercase();
             let mut merged = if has_full_or_longer || ct_owns {
                 // 与候选一同返回本分支的判据串，就地成对产出，不在别处重算一遍。
@@ -767,10 +660,8 @@ impl MixedEngine {
                         .candidates;
                     (full, input.to_string())
                 } else {
-                    // 前 N 码前缀候选：前缀视作精确全码加权（同混合 overflow 分支的口径），
-                    // 但 `is_exact_code` 归一到**完整输入** —— 前缀恒短于 input，故一律 false，
-                    // 免得下游（协调器 `candidate_display_order` / `freq_rerank`）把只匹配
-                    // 前缀的候选当成本次输入的精确匹配提拔进精确档。
+                    // 前 N 码前缀候选：截断档位上视作精确全码（同混合 overflow 分支的口径），
+                    // 但 `is_exact_code` 归一到完整输入（恒 false），免得下游提拔进精确档。
                     let prefix: String = input.chars().take(self.max_code_len).collect();
                     let mut pre = self
                         .primary
@@ -779,19 +670,9 @@ impl MixedEngine {
                         .candidates;
                     for c in &mut pre {
                         c.is_exact_code = false;
-                        // ★ 这条候选只解释得了**前 N 码**，必须如实标注消费长度。不标（码表候选
-                        // 恒 0）的话协调器 `commit_selected` 的
-                        // `partial = consumed > 0 && consumed < total` 恒为 false ⇒ 按「消费整串」
-                        // 处理，选中即把没解释的尾码一并吃掉（`yijga` 选「就是」→ 尾巴上的 `a`
-                        // 凭空消失；`github` 选「不算」→ `ub` 消失）。
-                        //
-                        // ⚠️ 这是**码表候选带 `consumed_length` 的唯一出口**。协调器侧有两处判据
-                        // 原本依赖「码表恒 0 ⇒ 永不部分匹配」这个不变量，已随本改动一并对齐：
-                        // `build_candidates` 的分段续转（改看最后一段来源）与
-                        // `learn_phrase_on_commit`（混输下跳过码表段）。
-                        //
-                        // 字节长度：协调器按字节切缓冲（`input_buffer[consumed..]` +
-                        // `is_char_boundary`），而输入缓冲在此恒为 ASCII 码字符，与字符数相等。
+                        // 只解释得了前 N 码，须如实标消费长度，否则协调器按消费整串上屏、吃掉尾码。
+                        // 这是码表候选带 `consumed_length` 的唯一出口（协调器侧对应见
+                        // engine-candidate-pipeline.md §7.4）。字节长度：缓冲恒为 ASCII。
                         c.consumed_length = prefix.len();
                     }
                     (pre, prefix)
@@ -844,17 +725,12 @@ impl MixedEngine {
                     .unwrap_or_default();
                 codetable.extend(full.candidates);
             }
-            // `is_exact_code` 归一到**完整输入**：上面两次 convert 分别以 prefix 和 input 为输入，
-            // 码表引擎按各自的输入串置位，于是同一个 Vec 里混着两种「精确」定义。而下游一律以
-            // 完整输入为准（协调器 `candidate_display_order`、`freq_rerank::freq_tier` 的
-            // `code == input`），不归一会让只匹配前缀的候选被提拔进精确档。
+            // `is_exact_code` 归一到完整输入：两次 convert 的输入不同，混着两种「精确」定义，
+            // 而下游一律以完整输入为准，不归一会让只匹配前缀的候选被提拔进精确档。
             for c in &mut codetable {
                 c.is_exact_code = c.code == input;
             }
-            // 超码长走**另一个**开关（默认保留部分候选：这里已是纯拼音语境，长拼音的分步
-            // 上屏要留着）。上方三处判据函数（`is_ambiguous_pinyin_word` /
-            // `pinyin_claims_overflow` / `pinyin_has_any`）**刻意仍走 `convert`**：它们问的是
-            // 「拼音够不够格接管这一串 / 这串还算不算中文」，与「哪些候选该显示」正交。
+            // 超码长用 `overflow_opts`（判据函数仍走 `convert`，理由同上一分支）。
             let py = sec
                 .convert_with_opts(input, max_candidates, self.overflow_opts())
                 .unwrap_or_default();
@@ -865,8 +741,7 @@ impl MixedEngine {
             let english =
                 self.english_for_display(input, codetable.is_empty() && pinyin.is_empty());
             codetable.extend(english);
-            // 本分支「视作精确全码」的是**前 N 码前缀**，不是 `input`（后者是 `is_exact_code`
-            // 的口径，两者刻意不同，见上面那处 `is_exact_code` 归一的说明）。
+            // 本分支截断档位「视作精确全码」的是前 N 码前缀，与 `is_exact_code` 的口径刻意不同。
             let ctx = TruncationCtx {
                 codetable_exact: &prefix,
                 english_exact: &input.to_lowercase(),
@@ -908,18 +783,11 @@ impl Engine for MixedEngine {
 
     /// 码元字符集取**主码表子引擎**的。
     ///
-    /// ⚠️ 必须显式代理，不能沿用 trait 默认的 `None`：默认值会让协调器回落历史行为，
-    /// 于是混输方案里配的 `input_chars` 完全不生效，且**毫无报错**——正是本仓
-    /// 「配置就位、消费点不可达」那一类静默失效。
+    /// 必须显式代理：沿用 trait 默认的 `None` 会让混输方案配的 `input_chars` 静默失效。
+    /// 只取 primary：它约束哪些键进码表缓冲，拼音有自己的音节判定。
     ///
-    /// 只取 primary 是刻意的：`input_chars` 约束的是「哪些键进码表缓冲」，拼音次引擎
-    /// 有自己的音节合法性判定，不受本集约束（对齐 `max_code_len` 同样只取 primary）。
-    ///
-    /// ⚠️ **已知边界**：拼音引擎现在也会产出码元集（双拼布局带非字母韵母键时，如微软
-    /// 双拼的 `;` = ing，见 `PinyinEngine::input_chars`），而次引擎的集在此被丢弃。
-    /// 内置混输方案的 `secondary_schema` 是全拼 `pinyin`，无影响；若有人把它指向双拼方案，
-    /// 那个 `;` 在混输下仍进不了缓冲。合并两侧的集须先想清「码表侧的非码元字符要不要因
-    /// 次引擎而放行」，不是加个并集就完事，故留待真有此需求时再定。
+    /// 已知边界：次引擎若是带非字母韵母键的双拼（微软双拼 `;`），它的码元集在此被丢弃；
+    /// 内置混输的次引擎是全拼，无影响。合并两侧的集须先想清码表侧要不要因此放行。
     fn input_chars(&self) -> Option<&wind_config::CodeCharSet> {
         self.primary.input_chars()
     }
@@ -988,9 +856,8 @@ impl Engine for MixedEngine {
         self.secondary.is_some()
     }
 
-    /// 热插拔扩展词库：转发到主/次/英文子引擎（码表子引擎承载 codetable-extra 层，
-    /// 英文子引擎承载 `en_ext` 一类扩展层）。三个都要转：漏掉哪个，那个方案的扩展库开关
-    /// 在混输下就只会翻到独立引擎那份、看着生效实际没有。
+    /// 热插拔扩展词库：转发到主/次/英文子引擎，三个都要转，漏掉哪个，那个扩展库开关在
+    /// 混输下就看着生效实际没有。
     fn set_dict_enabled(&self, dict_id: &str, enabled: bool) -> bool {
         let a = self.primary.set_dict_enabled(dict_id, enabled);
         let b = self
@@ -1019,17 +886,13 @@ impl Engine for MixedEngine {
         let mut timer = crate::pinyin::ConvertStageTimer::new();
         let input_len = input.chars().count();
 
-        // 超长分支（对齐 Go ConvertEx）：输入超过码表最大码长时，按 pinyin_only_overflow 分流，
-        // 不再走下方「码表+拼音等长合并」路径。
-        //
-        // 注：此分支**有意不产生 `should_clear`**（`convert_overflow` 恒返回 false）。超长即已切入
-        // 纯拼音语境，「码表满码却无候选」这个前提不再成立，此时清空会打断正常的长拼音输入。
-        // 故满码空码清空仅在 `input_len == max_code_len` 生效，勿按「缺口」补齐。
+        // 超长分支：按 pinyin_only_overflow 分流。有意不产生 `should_clear`：超长已是纯拼音
+        // 语境，清空会打断长拼音输入，故满码空码清空仅在 `input_len == max_code_len` 生效。
         if self.max_code_len > 0 && input_len > self.max_code_len {
             return Ok(self.convert_overflow(input, max_candidates));
         }
 
-        // 1. 码表候选 + 加权
+        // 1. 码表候选
         timer.mark("mx");
         let ct = self.primary.convert(input, max_candidates)?;
         timer.mark("mxct");
@@ -1037,13 +900,10 @@ impl Engine for MixedEngine {
         let ct_should_commit = ct.should_commit;
         let ct_commit_text = ct.commit_text.clone();
         let ct_should_clear = ct.should_clear;
-        // 主码表的精确空码补全备选原样上浮：混输合并后仍可能一条候选都没有（拼音也未命中），
-        // 那时才由协调器采纳。此处若就地并入 `codetable` 会重蹈引擎自行判空的覆辙——拼音候选
-        // 尚未合入，这一层的「空」同样不是最终的空。见 `ConvertResult::completion_hints`。
+        // 精确空码补全备选原样上浮，由协调器在最终为空时采纳；不能就地并入，拼音尚未合入，
+        // 这一层的「空」不是最终的空。见 `ConvertResult::completion_hints`。
         let ct_completion_hints = ct.completion_hints;
-        // ⚠️ 码表候选**不再改 weight**：精确/前缀补全的分野由 `truncation_tier` 表达。
-        // 从前这里给精确 +1e7、前缀补全 +500K，于是类别偏置与真实词频挤在同一个 i32 里，
-        // 还随候选一路泄漏到协调器，把引擎的截断策略混进了显示序。
+        // 不改 weight：精确/前缀补全的分野由 `truncation_tier` 表达。
         let codetable: Vec<Candidate> = ct.candidates;
 
         // 2. 拼音候选（输入达到最小长度）
@@ -1053,24 +913,21 @@ impl Engine for MixedEngine {
         let mut pinyin_preedit: Option<String> = None;
         // 高亮跟随用的拆分形态：判据比上面宽（见 `pinyin_split_of`），单音节 + 残码也提供。
         let mut pinyin_split: Option<String> = None;
-        // ⚠️ 走 `convert_with_opts` 而非 `convert`：两项覆写都必须在拼音引擎**内部**生效
-        // （半截过滤要在截断之前，残码整句是生成期的事），在这里拿结果再加工都来不及。
+        // 走 `convert_with_opts`：半截过滤要在截断之前、残码整句是生成期的事，拿结果再加工来不及。
         if input_len >= self.min_pinyin_length
             && let Some(sec) = &self.secondary
             && let Ok(py) = sec.convert_with_opts(input, max_candidates, self.in_code_len_opts())
         {
             pinyin_preedit = Self::pinyin_preedit_of(&py);
             pinyin_split = Self::pinyin_split_of(&py, input);
-            // ⚠️ 拼音候选**不再 ÷100**：与码表的隔离由 `truncation_tier` 表达。
-            // 那个除法是整数除法，拼音词频中位数 34 会被**整除归零**——量程被偏置
-            // 吃掉的最直接后果。
+            // 不改 weight：与码表的隔离由 `truncation_tier` 表达。
             pinyin = py.candidates;
         }
         timer.mark("mxpy");
 
         // 3. 合并 → 按截断档位稳定排序 → 按文本去重
         //
-        // ⚠️ 拼接顺序即**组内次序**：`sort_dedup_truncate` 只按档位稳定排序，同档保持原有
+        // 拼接顺序即组内次序：`sort_dedup_truncate` 只按档位稳定排序，同档保持原有
         // 相对位置，故各段内部子引擎排好的序原样保留。改动此处的顺序会改变同档内的去留。
         let has_pinyin = !pinyin.is_empty();
         // 上屏否决只数非低置信的拼音候选：满码唯一的五笔字不该被一条打错才凑出来的拼音候选拦下。
@@ -1080,7 +937,7 @@ impl Engine for MixedEngine {
         merged.extend(pinyin);
         merged.extend(english);
         // 排序 → 去重 → 带拼音保底配额截断（与 overflow 路径共用，见 `sort_dedup_truncate`）。
-        // 判据串与上面那段内联加成逐字同源：码表看 `code == input`，英文看 `code == 小写 input`。
+        // 码表看 `code == input`，英文看 `code == 小写 input`。
         let ctx = TruncationCtx {
             codetable_exact: input,
             english_exact: &input.to_lowercase(),
@@ -1111,30 +968,15 @@ impl Engine for MixedEngine {
 
         // 满码空码清空：主码表请求清空 + 拼音守护未拦截。
         //
-        // 两道守护，**同受 `auto_commit_block_on_pinyin` 支配**（这是第四条「拼音让路」通路，
-        // 与 `convert` 满码上屏 / `recheck_auto_commit` 显示态复评 / `handle_top_code` 顶码同源）：
-        // - `has_pinyin`：拼音此刻已出候选 → 留给拼音（粗粒度，且合并后非空，协调器亦会复核）；
-        // - `pinyin_may_continue`：拼音**还没打完** → 保护中途态。这一项才是无候选时的关键守护：
-        //   如 zhon（码表满码无候选无后继、拼音此刻也无候选）合并结果为空，协调器的
-        //   `state.candidates.is_empty()` 复核挡不住，若不看后续可能性就会把用户正在输入的
-        //   zhong 吞掉。经 `&&` 短路，仅在码表确有清空意向且守护开时才查音节表。
-        //
-        // ⚠️ 两道**必须一起**受开关支配，只放开 `has_pinyin` 等于没放开：`nunl` 这类
-        // 「完整音节 + 单个声母字母」串即便词库里一条候选都没有，`pinyin_may_continue` 仍判
-        // 「还没打完」（单字母恒是某音节前缀）而独立拦住清空。见
-        // `clear_still_vetoed_even_without_the_nun_entry`。
-        //
-        // 关闭该开关**不会**牺牲「拼音还没打完」的中途态——那由协调器的第三道门
-        // （`clear_blocked_by_candidates`）按候选实际形态兜住，比本处的音节表推测精确得多：
-        // 真实词库下 `wanl` 出的是前缀补全候选（code=`wanle`，消费整串）→ 拦住清空，
-        // 用户接着打 `wanle` 不会被吞；`zhon`(→zhong 系列) 同理。真正会被清空的只有
-        // 「候选全是部分匹配」的串（`nunl` 的「嫩」只解释了 `nun`），即确实打岔了的那些。
-        // 实测见 `input_flow.rs` 的 `..._clears_when_only_partial_pinyin` /
-        // `..._keeps_prefix_completion_candidates` 单一变量对照。
+        // 两道守护同受 `auto_commit_block_on_pinyin` 支配（第四条「拼音让路」通路）：
+        // - `has_pinyin`：拼音此刻已出候选；
+        // - `pinyin_may_continue`：拼音还没打完（`zhon` 合并结果为空，协调器复核挡不住）。
+        // 两道必须一起受开关支配，只放开前者等于没放开（`clear_still_vetoed_even_without_the_nun_entry`）。
+        // 关闭开关不牺牲中途态：协调器的 `clear_blocked_by_candidates` 按候选实际形态兜住，
+        // 见 engine-candidate-pipeline.md §7.3「空码清空」。
         let pinyin_guards_clear =
             self.auto_commit_block_on_pinyin && (has_pinyin || self.pinyin_may_continue(input));
-        // 英文守护同样拦清空（与码表方案的通路①同口径）：满码无码表匹配时清空会把用户正在
-        // 打的英文词一起抹掉。经 `&&` 短路，仅在码表确有清空意向时才查英文。
+        // 英文守护同样拦清空，否则会抹掉正在打的英文词。短路：仅在码表确有清空意向时才查。
         let should_clear =
             ct_should_clear && !pinyin_guards_clear && !self.english_blocks_commit(input, &merged);
 
@@ -1164,10 +1006,8 @@ impl Engine for MixedEngine {
 
     /// 如实转发主引擎的状态。
     ///
-    /// 构建方只在**没配拼音子引擎**（退化为纯码表、整句真能触发）时才给主引擎开整句
-    /// （见 `EngineManager` 构建混输处），故返回 true 即整句会生效。如实转发让协调器的
-    /// 分隔符键在退化配置下放行，短语满码上屏也据此让位；配着拼音子引擎时恒 false，
-    /// 两者都不受影响。
+    /// 构建方只在没配拼音子引擎时才给主引擎开整句（见 `EngineManager` 构建混输处），故返回
+    /// true 即整句会生效；配着拼音子引擎时恒 false。
     fn sentence_input_enabled(&self) -> bool {
         self.primary.sentence_input_enabled()
     }
@@ -1176,8 +1016,8 @@ impl Engine for MixedEngine {
         EngineType::Mixed
     }
 
-    /// 满码自动上屏「显示态」复评：先按**与 should_commit 同一套**拼音①②/英文守护否决
-    /// （避免复评绕过否决——修"满码全码唯一自动上屏时不否决"），再在**码表来源**候选中判唯一
+    /// 满码自动上屏「显示态」复评：先按与 should_commit 同一套拼音①②/英文守护否决
+    /// （复评不得绕过否决），再在**码表来源**候选中判唯一
     /// 精确全码（拼音/英文不参与满码上屏）委托主码表复评。智能过滤掉生僻同码字后剩唯一精确全码
     /// 时放行。`has_pinyin`/`has_english` 按显示候选来源判定（与所见一致）。
     fn recheck_auto_commit(&self, input: &str, candidates: &[Candidate]) -> Option<String> {
@@ -1209,15 +1049,11 @@ impl Engine for MixedEngine {
     /// - ② `block_commit_on_pinyin_word` 且整串是强拼音词（wangba→网吧）→ 抑制顶码；
     /// - ③ 英文守护（前缀级 `auto_commit_block_on_english` / 成词级 `block_commit_on_english_word`）
     ///   命中 → 抑制顶码（github→GitHub，见下）；
-    /// - `top_code_override_pinyin` 开启 = 顶码优先，**无视**上述全部否决强制倒向五笔。
-    ///   （该名字只提 pinyin 属历史局限，它实际是顶码总开关，⓪①②③ 一律受其压制。）
+    /// - `top_code_override_pinyin` 开启 = 顶码优先，无视上述全部否决（名字只提 pinyin 是历史
+    ///   局限，它实际是顶码总开关）。
     ///
-    /// ⓪ 与 [`Self::convert`] 的超长分流**共用同一个判据**（`input_len > max_code_len` +
-    /// `pinyin_only_overflow`）。此前本函数完全不读 `pinyin_only_overflow`，于是同一次按键里
-    /// `convert` 判「切入纯拼音语境」、`handle_top_code` 却委托纯码表顶掉前 N 码；而协调器
-    /// （`coordinator.rs` 字母键臂）让顶码**先于**候选刷新执行 → 顶码恒赢，`convert_overflow`
-    /// 的纯拼音分支只在拼音否决①②恰好命中时才够得着。混输下打 `youyoud`（悠悠的）在第 5 键
-    /// 被顶出「变凉」+ 余码 `oud` 即此漏的实例。
+    /// ⓪ 与 [`Self::convert`] 的超长分流共用同一判据：协调器让顶码先于候选刷新执行，两处不一致
+    /// 时顶码恒赢（`youyoud` 第 5 键被顶出「变凉」）。
     ///
     /// 与码表侧判据天然互补，不重复拦截：`CodeTableEngine::handle_top_code` 仅在整串**既无精确
     /// 匹配也无更长后继**时才返回 Some，而 `convert_overflow` 的「长码特例」（`has_full_or_longer`）
@@ -1229,16 +1065,9 @@ impl Engine for MixedEngine {
         }
         // 顶码优先开关关闭时，应用 ⓪③ 与满码同一套拼音①②否决。
         if !self.top_code_override_pinyin {
-            // ③ 英文守护：与满码上屏（`convert`）/ 显示态复评（`recheck_auto_commit`）**同一个
-            // 开关**，补齐第三条上屏通路。此前 `auto_commit_block_on_english` 全仓只有那两个
-            // 使用点，顶码一个都没有 —— 用户开了「有英文候选时否决上屏」，打 github 到第 5 键
-            // 仍被顶出五笔词「不算」（`gith` 在主码表有词），与 ⓪ 同构的漏。
-            //
-            // 自带防卡死，无需 ⓪ 那样的额外条件：判据要求「英文按前缀确有词条」，拦下顶码后
-            // 中文侧若为空，overflow 的前缀补全必然交得出那批候选；用户继续敲完也必然露面。
-            //
-            // ⚠️ 刻意放在下方 `Some(sec)` 块**之外**：英文守护与拼音子引擎无关，
-            // 纯码表 + 英文的混输（secondary=None）同样该生效。
+            // ③ 英文守护：与满码上屏 / 显示态复评同一个判据。自带防卡死：判据要求英文确有
+            // 前缀词条，拦下后 overflow 必然交得出候选。放在 `Some(sec)` 块之外：纯码表 + 英文
+            // 的混输同样该生效。
             if self.english_blocks_commit(input, &[]) {
                 return None;
             }
@@ -1248,41 +1077,15 @@ impl Engine for MixedEngine {
                     .convert(input, 1)
                     .map(|r| !r.candidates.is_empty())
                     .unwrap_or(false);
-                // ⓪ 超码长仅查拼音：本串已归拼音管，只要拼音真给得出候选，顶码就不该抢。
+                // ⓪ 超码长仅查拼音：拼音给得出候选时顶码不该抢。必须叠 `has_pinyin`：纯五笔
+                // 溢出串若也禁顶码，用户会卡在既不上屏、又没候选的长串上。
                 //
-                // **必须叠 `has_pinyin`，不可只看开关**：纯五笔溢出串（aaaab 之类，拼音一条
-                // 候选都没有）若也禁顶码，`convert_overflow` 的纯拼音分支同样交不出候选——
-                // 用户会卡在一个既不上屏、又没候选的长串上，没有出口。
+                // 例外口 `codetable_owns_overflow`（前 N 码是精确全码、拼音只解释开头一小截）
+                // 放行顶码，且 ⓪① 共用这个归属结论：① 是「让路给拼音」，前提是拼音接得住，
+                // 否则候选侧已回捞码表词、顶码侧却被 ① 拦下（`cety` + 第 5 键）。② 不豁免：
+                // 词强度与归属正交。见 engine-candidate-pipeline.md §7.3 / §7.4。
                 //
-                // **例外口 `codetable_owns_overflow`**：前 N 码是精确全码而拼音只解释得了开头
-                // 一小截（`yijg`=就是，再打任意字母 → 拼音只切出 `yi`，余下连音节前缀都不是）。
-                // 这种串归码表，放行顶码。没有这个例外时 ⓪ 是一票独占：用户把 ①②③ 全关也
-                // 改变不了结果——它们是彼此独立的通路，⓪ 只受 `top_code_override_pinyin` 压制。
-                // 不必担心卡死：例外成立⇒前缀确有精确全码，码表侧顶码必给得出结果；即便码表侧
-                // 因整串有更长后继而返回 None，`convert_overflow` 的长码特例也照样交得出候选。
-                //
-                // 与 ① 的分工：① 不限超码长（满码时同样生效）、由 `auto_commit_block_on_pinyin`
-                // 驱动；⓪ 只在本函数成立（此处已确认 `input_len > max_code_len`）、由
-                // `pinyin_only_overflow` 驱动。两者独立配置，任一命中即否决。
-                //
-                // ★ 归属结论由 ⓪① **共用**：`codetable_owns_overflow` 一旦成立，① 也不得再以
-                // 「有拼音候选」为由否决顶码。此前它只豁免 ⓪，于是同一次按键里候选侧已把码表词
-                // 回捞到首位、顶码侧却仍被 ① 拦下 —— 两处对同一个归属问题给出相反处置。真机
-                // `cety`（唯一全码「通往」）+ 第 5 键即此漏：`ce` 是合法音节但 `ty` 连音节前缀
-                // 都不是，拼音只解释 2/5 键，归属明明在码表。
-                //
-                // ⚠️ 这**反转**了「⓪ 的例外口不是上屏放行口」那条旧决定（原
-                // `default_guards_reclaim_candidates_but_still_block_commit` 及其注释）。旧决定把
-                // 「出厂 ① 开 ⇒ 回捞但不上屏」记为默认安全，而用户报的正是这一格：顶码在出厂
-                // 配置下等于失效。反转依据是语义 —— ① 是「让路给拼音」，让路的前提是拼音确实
-                // 接得住这一串，而 `codetable_owns_overflow` 已判定它接不住。
-                //
-                // ② `block_commit_on_pinyin_word` **不**豁免：它判的是「整串是强拼音词」（词强度），
-                // 与「归属」正交，且两者判据基本互斥（成词要求整串是完整音节序列，本例外口却要求
-                // 拼音主张不了整串）。故只削弱 `pinyin_vetoes_commit` 的 ① 那一半。
-                //
-                // `has_pinyin == false` 时本结论恒为 false（第四条判据 `pinyin_has_any` 与
-                // `has_pinyin` 同口径），故短路求值 —— 纯五笔溢出串上省掉一次码表 + 拼音查询。
+                // `has_pinyin == false` 时归属结论恒 false（与 `pinyin_has_any` 同口径），短路省查询。
                 let codetable_owns = has_pinyin && self.codetable_owns_overflow(input);
                 if self.pinyin_only_overflow && has_pinyin && !codetable_owns {
                     return None;
