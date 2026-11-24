@@ -3160,6 +3160,8 @@ name = "wind-mobile"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "serde_json",
+ "tempfile",
  "toml 0.8.23",
  "tracing",
  "wind-bridge",
@@ -3170,8 +3172,11 @@ dependencies = [
  "wind-keys",
  "wind-phrase",
  "wind-store",
+ "wind-sync",
+ "wind-sync-ipc",
  "wind-transfer",
  "wind-ui-types",
+ "wind_sync_host",
 ]
 
 [[package]]
@@ -3341,6 +3346,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "toml 0.8.23",
 ]
 
 [[package]]

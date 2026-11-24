@@ -23,6 +23,11 @@ wind-store = { path = "../wind-store" }
 wind-phrase = { path = "../wind-phrase" }
 # 方案包导入 / 预览 / 删除（设置页「导入方案」），与桌面共用一份实现
 wind-transfer = { path = "../wind-transfer" }
+# 数据同步（进程内运行，见 sync.rs）。网络与加密依赖由 wind_sync_host 带入，须能为 Android 目标编译。
+wind_sync_host = { path = "../../apps/sync" }
+wind-sync = { path = "../wind-sync" }
+wind-sync-ipc = { path = "../wind-sync-ipc" }
+serde_json = { workspace = true }
 chrono = "0.4"
 tracing = { workspace = true }
 # 配置快照的序列化与写入值的构造（见 config_api）。配置文件本身就是 TOML，
@@ -31,3 +36,6 @@ toml = { workspace = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tempfile = "3"

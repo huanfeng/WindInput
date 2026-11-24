@@ -23,6 +23,9 @@
 //! 所以本 crate 的依赖表里不该出现任何绑定框架——一旦沾上，「接口层」就退化成
 //! 「那个平台的实现层」，第二个平台再来只能复制粘贴。
 //!
+//! - 同样留在这里：数据同步门面 `sync.rs`（`MobileSync`，JSON 进出、进程内跑同步 Runner，
+//!   重载直接调核心）。绑定层只做字符串透传与线程调度，不碰同步逻辑。
+//!
 //! # 通道形状（对应 WindInputAndroid docs/architecture.md §3.1）
 //!
 //! - 正向：软键与物理键经 [`MobileCore::press`]（[`PressKey`] + [`KeySource`]）→ 翻译 VK、
@@ -54,6 +57,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 pub mod config_api;
 mod schema_settings;
+pub mod sync;
 mod touch;
 
 pub use schema_settings::{SchemaSetting, SchemaSettingGroup, SchemaSettingKind, SchemaSettings};
