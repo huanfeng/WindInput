@@ -691,7 +691,7 @@ fn raw_ctrl_c_seen_by_service_is_not_tap() {
     assert!(c.is_chinese_mode(), "Ctrl+C 之后的松开不切中英");
 }
 
-/// 原漏洞：Ctrl+数字走 `WM_HOTKEY`，TSF 的待判单击作废不了。服务端判定下它弄脏 track。
+/// Ctrl+数字走 `WM_HOTKEY`，TSF 的待判单击作废不了；服务端判定下它弄脏 track，不切中英。
 #[test]
 fn raw_ctrl_digit_via_hotkey_does_not_toggle() {
     if !has_schemas() {

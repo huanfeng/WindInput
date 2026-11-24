@@ -1,5 +1,5 @@
 //! 反查模式端到端（docs/design/codetable-reverse-mode.md §3）。真实数据：build_dev/data 的 wubi86 / wubi86_pinyin。
-//! ⚠️ 数据缺失时整族静默跳过而计数照绿，判据是耗时（≥1s）与输出里有没有「跳过」。
+//! 数据缺失时整族静默跳过而计数照绿，判据是耗时（≥1s）与输出里有没有「跳过」。
 
 use std::path::PathBuf;
 use wind_bridge::handler::{KeyEventData, MessageHandler};
@@ -136,9 +136,9 @@ fn page_until_relaxed(c: &Coordinator) -> bool {
     false
 }
 
-/// 翻到末页再按一次 ⇒ 被智能档滤掉的反查生僻字追加在末尾，原有顺序不动、模式不退；
-/// 放宽态在本次按键结束后仍在（`expire_scope_override` 看的是 `special_buffer`，不是恒空的
-/// `input_buffer`——看错了会在同一键里静默撤销）。末页放宽若漏了反查模式那一臂，红在「应放宽」。
+/// 翻到末页再按一次 ⇒ 被智能档滤掉的反查生僻字追加在末尾，原有顺序不动、模式不退。
+/// 放宽态在本次按键结束后仍在：`expire_scope_override` 看的是 `special_buffer` 而非恒空的
+/// `input_buffer`，看错了会在同一键里静默撤销。
 #[test]
 fn reverse_page_end_relax_appends_filtered() {
     if !dict_ready() {
@@ -243,7 +243,7 @@ fn reverse_symbol_trigger_enters_when_bound() {
     assert_eq!(c.debug_active_mode(), None, "没绑反查键：不进");
 }
 
-/// ★ Review Focus 3：字母触发键是本方案首码（活码前缀）⇒ 让位作正常码；符号键不让位；
+/// 字母触发键是本方案首码（活码前缀）⇒ 让位作正常码；符号键不让位；
 /// 冲突体检认得反查键。
 #[test]
 fn reverse_letter_trigger_yields_to_live_code_prefix() {
@@ -287,7 +287,7 @@ fn reverse_yields_in_pinyin_schema() {
     assert_eq!(c.debug_active_mode(), None);
 }
 
-/// GH#146 同构：`z_key_action = "reverse"` 在出厂 `zz*` 短语下经 z 夺取进入。
+/// `z_key_action = "reverse"` 在出厂 `zz*` 短语下经 z 夺取进入。
 #[test]
 fn z_key_action_reverse_enters_via_z_fallback() {
     if !dict_ready() {
@@ -309,9 +309,9 @@ fn z_key_action_reverse_enters_via_z_fallback() {
     );
 }
 
-/// 放宽后失焦：`reset_exclusive_modes` 必须一并复位 `scope_relaxed`。它的失效点
-/// `expire_scope_override` 只挂在按键出口上，失焦清缓冲不经过它；不复位的话回来后
-/// 打的第一个码（缓冲非空）就继承了上一个焦点里的放宽态。主路 / 临拼同受此缺口影响。
+/// 放宽后失焦：`reset_exclusive_modes` 必须一并复位 `scope_relaxed`。失效点
+/// `expire_scope_override` 只挂在按键出口上，失焦清缓冲不经过它；不复位的话回来后打的第一个码
+/// 就继承了上一个焦点里的放宽态。
 #[test]
 fn reverse_focus_lost_after_relax_leaves_no_residue() {
     if !dict_ready() {
@@ -374,9 +374,9 @@ fn reverse_wildcard_key_on_nav_key_is_reported() {
     assert_eq!(c.debug_preedit(), "\\a;", "`;` 作通配进了缓冲");
 }
 
-/// 修饰键绑反查、在拼音方案里按：门卫没过必须**不吞键**，落回全局链照常切中英
-/// （出厂 `toggle_mode_keys` 含 rshift）。反查让位判据若排在修饰键早退之前，keyup 通路会把
-/// Yield 当「显式 none」吞掉，RShift 在拼音方案里彻底没反应。
+/// 修饰键绑反查、在拼音方案里按：门卫没过必须不吞键，落回全局链照常切中英（出厂
+/// `toggle_mode_keys` 含 rshift）。反查让位判据若排在修饰键早退之前，keyup 通路会把 Yield 当
+/// 「显式 none」吞掉。
 #[test]
 fn reverse_modifier_binding_in_pinyin_still_toggles_mode() {
     if !dict_ready() {
@@ -497,7 +497,7 @@ fn reverse_mode_has_no_pinyin_in_mixed() {
     );
 }
 
-/// ★ Review Focus 5（真实数据）：翻过页、放宽过再 Esc，残留全清；随后主路径打字与新开的 coordinator 逐条相同。
+/// 真实数据：翻过页、放宽过再 Esc，残留全清；随后主路径打字与新开的 coordinator 逐条相同。
 #[test]
 fn reverse_esc_exits_without_residue() {
     if !dict_ready() {

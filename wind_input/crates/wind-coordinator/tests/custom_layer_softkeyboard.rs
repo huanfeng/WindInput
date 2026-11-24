@@ -1,31 +1,24 @@
 //! 软键盘映射表的三层按面合并：`data < data_custom < %APPDATA%`。
 //!
-//! 软键盘**刻意不走** `Config::resolve_data_file`（那是「靠前的层存在就整份取代出厂」），
-//! 而是按面合并——用户只想改一个键时不该失去其余的面。加了定制层之后，这个自成一套的
-//! 加载路径必须同样认 `data_custom/`，否则定制者放进去的那份被**静默忽略**：程序一切
-//! 正常、日志里连 WARN 都没有，正是本计划反复处理的那类故障。
+//! 软键盘刻意不走 `Config::resolve_data_file`（靠前的层存在就整份取代出厂），而是按面合并：用户只想
+//! 改一个键时不该失去其余的面。这条自成一套的加载路径必须同样认 `data_custom/`，否则定制者放进去的
+//! 那份会被静默忽略，日志里连 WARN 都没有。
 //!
-//! 本文件钉四条，都是「摘掉实现只表现为某个键出的字不对」、在候选面/菜单上不可观察的：
+//! 本文件钉四条，摘掉实现都只表现为某个键出的字不对：
 //!
 //! | # | 断言 | 摘掉什么会红 |
 //! |---|---|---|
 //! | 1 | 三层各定义一部分面 ⇒ 合并结果含全部面 | 定制层没接进来 |
-//! | 2 | 同名面同一个键：`data < custom < user` | **叠加顺序反了**（用户改的键被定制版盖回去） |
+//! | 2 | 同名面同一个键：`data < custom < user` | 叠加顺序反了（用户改的键被定制版盖回去） |
 //! | 3 | 无用户层时定制层的面生效 | 定制层只在有用户层时才被读 |
 //! | 4 | 定制层解析失败 ⇒ 跳过它，另两层照常 | 一层坏掉打回内置兜底表 |
 //!
-//! ⚠️ **第 2 条是层序方向的唯一守门**：夹具刻意让 `p_shared.q` 三层各写一个不同的值，
-//! 且面的**出现序**也一并断言（`p_custom` 必须排在 `p_user` 前）——把 `.rev()` 摘掉、
-//! 或把两层的叠加顺序对调，两处各红一次。只断言「custom 生效了」是不够的：顺序反了时
-//! 定制层同样生效，只是把用户的覆盖盖掉了。
+//! 第 2 条是层序方向的唯一守门：`p_shared.q` 三层各写不同的值，且面的出现序一并断言（`p_custom`
+//! 必须排在 `p_user` 前）；只断言「custom 生效了」不够，顺序反了时定制层同样生效。
 //!
-//! 为什么必须是集成测试（独立进程）：`Config::custom_manifest()` 用 OnceLock 缓存，
-//! 一个进程只能有一种层状态。本文件全程「清单在场」，三个子场景靠**换盘上的文件**切换
-//! （加载每次构造都重来一遍，缓存的只有目录）。「清单不在场」那一态在
-//! `custom_layer_softkeyboard_no_custom.rs`。
-//!
-//! ⚠️ 本用例**不依赖 `build_dev/data`**：软键盘完全脱离引擎（无方案、无码表），夹具
-//! 全部自造，故不会静默跳过。
+//! 必须是集成测试：`Config::custom_manifest()` 用 OnceLock 缓存，一个进程只能有一种层状态。本文件
+//! 全程「清单在场」，三个子场景靠换盘上的文件切换（缓存的只有目录）；「清单不在场」那一态在
+//! `custom_layer_softkeyboard_no_custom.rs`。不依赖 `build_dev/data`，夹具全部自造，不会静默跳过。
 
 use std::path::{Path, PathBuf};
 use wind_config::Config;
@@ -51,7 +44,7 @@ name = \"共享面\"
 keys = { q = \"D_Q\", w = \"D_W\", e = \"D_E\" }
 ";
 
-/// 定制层：只改共享面的两个键 + 加一个自己的面（**不整份复制**，正是要支持的用法）。
+/// 定制层：只改共享面的两个键 + 加一个自己的面（不整份复制，正是要支持的用法）。
 const CUSTOM_SK: &str = "\
 [[pages]]
 id = \"p_shared\"
@@ -97,7 +90,7 @@ fn shared_out(coord: &Coordinator, slot: &str) -> String {
 
 #[test]
 fn softkeyboard_merges_three_layers_lowest_to_highest() {
-    // ⚠️ 目录名带 pid：多 worktree / 多会话并行跑测试时固定名会互删夹具。
+    // 目录名带 pid：多 worktree / 多会话并行跑测试时固定名会互删夹具。
     let tmp = std::env::temp_dir().join(format!(
         "wind_coord_custom_softkeyboard-{}",
         std::process::id()
@@ -111,7 +104,7 @@ fn softkeyboard_merges_three_layers_lowest_to_highest() {
     std::fs::create_dir_all(&tmp).unwrap();
     std::fs::write(&conf, user.to_string_lossy().as_bytes()).unwrap();
 
-    // 清单必须在**任何** OnceLock 初始化之前就位。本用例只用它把定制层「打开」，
+    // 清单必须在任何 OnceLock 初始化之前就位。本用例只用它把定制层「打开」，
     // 不做减法。
     write_at(
         &custom,

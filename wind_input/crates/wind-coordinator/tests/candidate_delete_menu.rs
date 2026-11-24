@@ -4,7 +4,7 @@
 //!
 //! 菜单一律按全量下标取（`candidate_menu_items`），候选经 Coordinator 取（引擎位次 ≠ 界面位次）。
 //!
-//! ⚠️ 依赖 `build_dev/data` 真实词库；缺失时整族静默跳过（判据是耗时 0.0x s）。
+//! 依赖 `build_dev/data` 真实词库；缺失时整族静默跳过（判据是耗时 0.0x s）。
 
 use std::path::PathBuf;
 use std::sync::Arc;

@@ -1,18 +1,13 @@
 //! 码元字符集 `input_chars` / `leading_chars` 的端到端验证
 //! （设计见 docs/design/codetable-input-chars.md）。
 //!
-//! 五笔 86 的码元是 a-y，故用 `input_chars = "a-x"` 把 `y` 排除出去——`y` 在默认配置下
-//! 是**完全正常**的码元（`ay` 有候选），对照因此鲜明：同一个键、同一套操作，仅因字符集
-//! 不同而走向两条路。
+//! 五笔 86 的码元是 a-y，故用 `input_chars = "a-x"` 排除 `y`：`y` 在默认配置下是正常码元（`ay`
+//! 有候选），同一操作仅因字符集不同而走向两条路。
 //!
-//! ## ⚠️ 反向对照不可省
+//! 每条「非码元字符被拒」的用例都配一条「默认字符集下同一操作照常进缓冲」的反向对照，不可省：
+//! 只测正向的话，`input_chars` 没接线、或 `y` 因别的原因本就打不出，用例一样会绿。
 //!
-//! 每条「非码元字符被拒」的用例都配一条「默认字符集下同一操作照常进缓冲」的对照。
-//! 只测正向的话，哪怕 `input_chars` 整个没接线、或 `y` 因别的原因本就打不出，用例
-//! 一样会绿——对照用例把「是本特性起了作用」与「碰巧看起来对」区分开。
-//!
-//! 词典缺失时自动跳过 —— ⚠️ `build_dev/data` 不存在时**整族静默跳过而计数照绿**，
-//! 判据是耗时（正常 1s 量级 vs 跳过 0.0x s）。见 project_build_dev_data_missing。
+//! `build_dev/data` 不存在时整族静默跳过而计数照绿，判据是耗时（正常 1s 量级、跳过 0.0x s）。
 
 use std::path::PathBuf;
 use wind_bridge::handler::{KeyAction, KeyEventData, MessageHandler};
@@ -49,10 +44,9 @@ fn press(coord: &Coordinator, code: &str) {
 
 /// 按下字母或数字键。
 ///
-/// ⚠️ **只对字母与数字成立**：它们的 VK 恰好等于大写 ASCII（`'A'`=0x41=VK_A、
-/// `'1'`=0x31=VK_1）。符号键不是——`'/'` 是 0x2F 而 VK_OEM_2 是 0xBF，按字符传会
-/// 敲到一个根本不存在的键上，测试却照样「通过」（因为没人接管那个键码）。符号一律用
-/// [`press_vk`]。
+/// 只对字母与数字成立：它们的 VK 恰好等于大写 ASCII（`'A'`=0x41=VK_A）。符号键不是
+/// （`'/'` 是 0x2F 而 VK_OEM_2 是 0xBF），按字符传会敲到不存在的键上、测试照样通过；
+/// 符号一律用 [`press_vk`]。
 fn press_one(coord: &Coordinator, c: char) -> KeyAction {
     debug_assert!(
         c.is_ascii_alphanumeric(),
@@ -125,10 +119,8 @@ fn non_code_letter_terminates_composition() {
     );
 }
 
-/// ★ **反向对照**：默认字符集下同一操作，`y` 照常进缓冲、不上屏。
-///
-/// 这一条证明主用例的行为来自 `input_chars = "a-x"`，而不是 `y` 本来就打不出、
-/// 或整条判定压根没接线。
+/// 反向对照：默认字符集下同一操作，`y` 照常进缓冲、不上屏，证明主用例的行为来自
+/// `input_chars = "a-x"`，而非 `y` 本来就打不出或判定没接线。
 #[test]
 fn default_charset_buffers_the_same_letter() {
     let d = data_dir();
@@ -147,11 +139,10 @@ fn default_charset_buffers_the_same_letter() {
     );
 }
 
-/// ★ 空缓冲下的非码元字母**也必须出字，不能透传**。
+/// 空缓冲下的非码元字母也必须出字，不能透传。
 ///
-/// C++ 在中文模式下对字母键是无条件吃的（`chinese_letter` 分支），返回 PassThrough
-/// 就构成「吃了再吐」——不补发 WM_KEYDOWN 的宿主直接丢字符。铁律见
-/// project_fullwidth_eat_flip：C++ 吃键集 ⊆ Rust 出字集。
+/// C++ 在中文模式下无条件吃字母键（`chinese_letter` 分支），返回 PassThrough 就构成「吃了再吐」，
+/// 不补发 WM_KEYDOWN 的宿主直接丢字符。约束：C++ 吃键集 ⊆ Rust 出字集。
 #[test]
 fn non_code_letter_on_empty_buffer_still_outputs() {
     let d = data_dir();
@@ -194,9 +185,8 @@ fn digit_enters_buffer_when_composing() {
     );
 }
 
-/// ★ **反向对照**：默认字符集下，同一操作的 `1` 照常选走第 1 个候选。
-///
-/// 没有这一条，主用例无法区分「数字进了缓冲」与「数字选词整个没生效」。
+/// 反向对照：默认字符集下同一操作的 `1` 照常选走第 1 个候选；没有这一条，主用例无法区分
+/// 「数字进了缓冲」与「数字选词整个没生效」。
 #[test]
 fn default_charset_lets_digit_select_candidate() {
     let d = data_dir();
@@ -220,9 +210,7 @@ fn default_charset_lets_digit_select_candidate() {
     );
 }
 
-/// ★ 首码约束：数字是码元但**不是首码**，空缓冲下按 `1` 不得进缓冲。
-///
-/// 这是「数字可作码元但不作第一码」的核心保证——否则用户既选不了第 1 个候选，
+/// 首码约束：数字是码元但不是首码，空缓冲下按 `1` 不得进缓冲，否则用户既选不了第 1 个候选，
 /// 也拿不回原生数字输入。
 #[test]
 fn digit_is_not_allowed_as_leading_char() {
@@ -245,7 +233,7 @@ fn digit_is_not_allowed_as_leading_char() {
     );
 }
 
-/// 对照上一条：`leading_chars` 留空 = 首码集等于全集，此时数字**可以**起头。
+/// 对照上一条：`leading_chars` 留空 = 首码集等于全集，此时数字可以起头。
 /// 证明上一条的拦截来自 `leading_chars` 而非「数字根本进不了缓冲」。
 #[test]
 fn digit_may_lead_when_leading_chars_unset() {
@@ -283,7 +271,7 @@ fn symbol_enters_buffer_when_composing() {
     );
 }
 
-/// `;` 是出厂次选键，但**组码中码元优先**——闸门排在 `decideBufferedTrigger` 那条
+/// `;` 是出厂次选键，但组码中码元优先——闸门排在 `decideBufferedTrigger` 那条
 /// 次选/三选链之前。这条锁住「符号被别的功能占用时，组码中仍归码表」。
 #[test]
 fn semicolon_beats_select_key_when_composing() {
@@ -302,7 +290,7 @@ fn semicolon_beats_select_key_when_composing() {
     );
 }
 
-/// ★ **反向对照**：默认字符集下同一个 `/` 走标点流水线上屏，不进缓冲。
+/// 反向对照：默认字符集下同一个 `/` 走标点流水线上屏，不进缓冲。
 #[test]
 fn default_charset_sends_symbol_to_punctuation() {
     let d = data_dir();
@@ -335,9 +323,7 @@ fn wubi_config_with_semicolon_mix(input_chars: &str, leading_chars: &str) -> Con
     cfg
 }
 
-/// ★ 首码集**不含** `;` ⇒ 空缓冲归模式，快捷输入照常进得去。
-///
-/// 这是「两者共存」的配法：`;` 只在组码中作码元。
+/// 首码集不含 `;` ⇒ 空缓冲归模式，快捷输入照常进得去；`;` 只在组码中作码元，两者共存。
 #[test]
 fn mode_trigger_wins_when_symbol_is_not_leading() {
     let d = data_dir();
@@ -355,7 +341,7 @@ fn mode_trigger_wins_when_symbol_is_not_leading() {
     );
 }
 
-/// ★ 首码集**含** `;` ⇒ 空缓冲归码表，引导键让位。
+/// 首码集含 `;` ⇒ 空缓冲归码表，引导键让位。
 #[test]
 fn code_char_wins_when_symbol_is_leading() {
     let d = data_dir();
@@ -418,10 +404,9 @@ fn mix_trigger_conflict_is_reported_when_leading() {
     );
 }
 
-/// ★ **反向对照**：`;` 不作首码时，mix 引导键**不该**被报为冲突。
+/// 反向对照：`;` 不作首码时，mix 引导键不该被报为冲突。
 ///
-/// 此时模式只在空缓冲用、码元只在组码中用，井水不犯河水。报出来只会变成噪音，
-/// 把真冲突淹掉——这正是告警最容易退化的方式。
+/// 此时模式只在空缓冲用、码元只在组码中用，互不干扰；误报会把真冲突淹掉。
 #[test]
 fn mix_trigger_not_reported_when_symbol_is_not_leading() {
     let d = data_dir();

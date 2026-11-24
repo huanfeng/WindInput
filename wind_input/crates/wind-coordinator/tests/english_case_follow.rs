@@ -1,21 +1,16 @@
-//! 英文候选**跟随输入大小写**的端到端测试（`schema.english.case_follow_input` /
+//! 英文候选跟随输入大小写的端到端测试（`schema.english.case_follow_input` /
 //! `input.temp_english.case_follow_input` / `input.capslock.english_case_cycle`）。
 //!
-//! # 这组测试要钉住的四件事
+//! 钉住四件事：
 //!
-//! 1. **逐位投影且单向**：打 `Hi` 出 `Hill`、打 `WoW` 出 `WoWed`；打小写不动词库原文。
-//! 2. ★ **英文方案读的是影子串**：`state.input_buffer` 恒为全小写，用它取输入形态的话
-//!    整个功能在英文方案下**一条也不会投影，且毫无报错**。这是实现期最容易漏的一处，
-//!    `english_schema_projects_with_shift` 是它的守门断言。
-//! 3. ★ **英文方案下 Shift+字母不再进临英**：用户已经在英文方案里，Shift 的意思是
-//!    「打个大写字母」而不是「换一个模式」。
-//! 4. ★ **词频记的是词库原文**：投影后的文本若进了词频，写 `Hill`、读 `hill`（读端排在
-//!    投影之前），两端永不相交 —— 英文词频整体静默失效。
+//! 1. 逐位投影且单向：打 `Hi` 出 `Hill`、打 `WoW` 出 `WoWed`；打小写不动词库原文。
+//! 2. 英文方案读的是影子串：`state.input_buffer` 恒为全小写，用它取输入形态的话英文方案下一条也
+//!    不会投影且毫无报错（守门断言 `english_schema_projects_with_shift`）。
+//! 3. 英文方案下 Shift+字母不再进临英：Shift 的意思是「打个大写字母」而不是「换一个模式」。
+//! 4. 词频记的是词库原文：投影后的文本若进了词频，写 `Hill`、读 `hill`（读端排在投影之前），
+//!    英文词频整体静默失效。
 //!
-//! # ⚠️ 假绿源
-//!
-//! 词典缺失时整族**静默跳过**（判据是耗时而非通过条数），worktree 需自备 `build_dev`。
-//! 同 `english_head_candidates.rs`。
+//! 词典缺失时整族静默跳过（判据是耗时而非通过条数），worktree 需自备 `build_dev`。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -78,8 +73,8 @@ fn coord_with(cfg: Config, tag: &str) -> Arc<Coordinator> {
 /// 本文件多数用例打 `Hib` / `hib` 而不是 `Hi`：英文候选按词频排序后，`hi` 首页是
 /// hi / his / high…，用作观测对象的 hibernate / hibernation 落不到首页。
 ///
-/// 按 `word` 逐键输入，大写字母带 Shift。首字母大写时**不**特殊处理——英文方案下它就该
-/// 落进主路字母臂（本文件的 `shift_letter_stays_in_english_schema` 正是钉这一条）。
+/// 按 `word` 逐键输入，大写字母带 Shift。首字母大写时不特殊处理：英文方案下它就该落进主路字母臂
+/// （`shift_letter_stays_in_english_schema` 钉这一条）。
 fn type_word_cased(coord: &Coordinator, word: &str) {
     for c in word.chars() {
         let shift = if c.is_ascii_uppercase() { MOD_SHIFT } else { 0 };
@@ -89,10 +84,8 @@ fn type_word_cased(coord: &Coordinator, word: &str) {
 
 // ───────────────────── 英文方案 ─────────────────────
 
-/// ★ 英文方案下打 `Hi`：词库候选整体投影成首字母大写。
-///
-/// 这条同时是「输入形态取自影子串」的守门断言——取 `input_buffer`（恒全小写）的话，
-/// 页面里一条大写也不会有。
+/// 英文方案下打 `Hi`：词库候选整体投影成首字母大写。同时是「输入形态取自影子串」的守门断言，
+/// 取 `input_buffer`（恒全小写）的话页面里一条大写也不会有。
 #[test]
 fn english_schema_projects_with_shift() {
     if !has_english_schema() {
@@ -107,7 +100,7 @@ fn english_schema_projects_with_shift() {
         Some("Hib"),
         "首候选恒是所打原文（含大小写），实际: {page:?}"
     );
-    // 判据落在**具体词**上：按首字母扫全列表会被词库自带大写的条目（`Hi-Fi`）搅乱，
+    // 判据落在具体词上：按首字母扫全列表会被词库自带大写的条目（`Hi-Fi`）搅乱，
     // 而那类条目正是单向规则要保护的对象，不该出现在这条断言的判据里。
     assert!(
         page.iter().any(|t| t == "Hibernate"),
@@ -119,9 +112,7 @@ fn english_schema_projects_with_shift() {
     );
 }
 
-/// 反向对照：关掉开关后词库候选保持词库原文（小写）。
-///
-/// 没有这条，「恒投影」与「按开关投影」两种实现都能让上面的正向断言通过。
+/// 反向对照：关掉开关后词库候选保持词库原文（小写），区分「恒投影」与「按开关投影」。
 #[test]
 fn english_schema_case_follow_can_be_turned_off() {
     if !has_english_schema() {
@@ -158,7 +149,7 @@ fn lowercase_input_leaves_dict_case_alone() {
         page.iter().any(|t| t == "hibernate"),
         "词库原文原样出现，实际: {page:?}"
     );
-    // ★ 单向规则的正面证据：en_ext 的专名 `Hibernate` 自带大写，全小写输入**不得**把它压成
+    // 单向规则的正面证据：en_ext 的专名 `Hibernate` 自带大写，全小写输入不得把它压成
     // 小写。这正是 `China` / `iPhone` 那条取舍在真实词库里的样子。
     assert!(
         page.iter().any(|t| t == "Hibernate"),
@@ -166,7 +157,7 @@ fn lowercase_input_leaves_dict_case_alone() {
     );
 }
 
-/// ★ 英文方案下 Shift+字母**留在英文方案**，不再被换进临时英文。
+/// 英文方案下 Shift+字母留在英文方案，不再被换进临时英文。
 #[test]
 fn shift_letter_stays_in_english_schema() {
     if !has_english_schema() {
@@ -207,8 +198,6 @@ fn shift_letter_still_enters_temp_english_elsewhere() {
 // ───────────────────── 临时英文 ─────────────────────
 
 /// 临英由 Shift+字母进入 ⇒ 缓冲首字母恒大写 ⇒ 候选恒为首字母大写形态。
-///
-/// 这是 2026-09-09 重新裁定的行为（旧 `adapt_en_case` 曾因整串套形被删除）。
 #[test]
 fn temp_english_projects_from_entry_capital() {
     if !has_english_schema() {
@@ -260,10 +249,8 @@ fn projection_does_not_duplicate_candidates() {
 
 // ───────────────────── 投影 × 词频 ─────────────────────
 
-/// ★★ 选中被投影过的候选：词频记的是**词库原文**，不是屏幕上那个形态。
-///
-/// 存反了的后果是完全静默的——读端 `apply_freq_rerank_in` 排在投影之前、按原文查，
-/// 于是写 `Hello`、读 `hello`，两端永不相交，英文词频整体失效而没有任何报错。
+/// 选中被投影过的候选：词频记的是词库原文，不是屏幕上那个形态。存反了完全静默：读端
+/// `apply_freq_rerank_in` 排在投影之前、按原文查，写 `Hello`、读 `hello`，两端永不相交。
 #[test]
 fn freq_records_dict_original_not_projected_text() {
     if !has_english_schema() {
@@ -277,7 +264,7 @@ fn freq_records_dict_original_not_projected_text() {
         Coordinator::new_headless_with_store(cfg, Some(&data_dir()), std::sync::Arc::clone(&store));
 
     // 取 hibernation 而不是 hibernate：后者在 en_ext 里另有专名 `Hibernate`，投影后同名时
-    // 留下的是那条没被改写的专名（`dedup_by_text`，论坛 t281 审查），选中的就不是投影候选了。
+    // 留下的是那条没被改写的专名（`dedup_by_text`， 审查），选中的就不是投影候选了。
     type_word_cased(&coord, "Hib");
     let page = coord.debug_page_texts();
     let shown = page
@@ -305,7 +292,7 @@ fn freq_records_dict_original_not_projected_text() {
 }
 
 /// 词库同时有 `hibernate` 与专名 `Hibernate`（en_ext）：输入 `Hib` 时前者投影成 `Hibernate`，
-/// 与后者同名。留下的必须是没被改写的专名（论坛 t281 审查）——选中它，词频记在专名上。
+/// 与后者同名。留下的必须是没被改写的专名（ 审查）——选中它，词频记在专名上。
 #[test]
 fn projected_twin_yields_to_real_capitalized_word() {
     if !has_english_schema() {
@@ -341,9 +328,8 @@ fn projected_twin_yields_to_real_capitalized_word() {
     );
 }
 
-/// 反过来：库里已有词频记录时，投影**不妨碍**它把词顶到前面。
-///
-/// 重排排在投影之前，故它比对的是词库原文；这条钉住「顺序没被人调换」。
+/// 反过来：库里已有词频记录时，投影不妨碍它把词顶到前面。重排排在投影之前、比对词库原文；
+/// 这条钉住「顺序没被人调换」。
 #[test]
 fn projection_does_not_break_freq_rerank() {
     if !has_english_schema() {
@@ -439,7 +425,7 @@ fn capslock_not_hijacked_when_disabled() {
     );
 }
 
-/// ★ 非英文语境不夺取：中文方案下 CapsLock 仍归系统 / 用户绑定。
+/// 非英文语境不夺取：中文方案下 CapsLock 仍归系统 / 用户绑定。
 #[test]
 fn capslock_not_hijacked_outside_english() {
     if !has_english_schema() {
@@ -463,7 +449,7 @@ fn capslock_not_hijacked_outside_english() {
     );
 }
 
-/// ★ 空闲（无候选）时不夺取——否则用户按 CapsLock 连大写锁定都切不了。
+/// 空闲（无候选）时不夺取——否则用户按 CapsLock 连大写锁定都切不了。
 #[test]
 fn capslock_not_hijacked_without_candidates() {
     if !has_english_schema() {
@@ -498,7 +484,7 @@ fn capslock_cycle_works_in_temp_english() {
     );
 }
 
-/// ★ 档位属于**这一次**组合：上屏后复位，不串到下一个词。
+/// 档位属于这一次组合：上屏后复位，不串到下一个词。
 #[test]
 fn variant_resets_after_commit() {
     if !has_english_schema() {
@@ -521,11 +507,11 @@ fn variant_resets_after_commit() {
     );
 }
 
-/// ★ macOS 落点：CapsLock 在那边到不了输入法(只有锁定态经 toggles 传过来, 按键本身走
-/// flagsChanged 且 toWindowsVK 无映射), 故触发键可换成 Tab —— 它走正常 keydown 主链路。
+/// macOS 落点：CapsLock 在那边到不了输入法（只有锁定态经 toggles 传过来，按键本身走 flagsChanged
+/// 且 toWindowsVK 无映射），故触发键可换成 Tab，走正常 keydown 主链路。
 ///
-/// 这条同时钉住「两个消费点共用同一套判据」：Tab 不经全局钩子, 走的是
-/// `try_english_case_cycle_key`, 产出必须与 CapsLock 那条逐格相同。
+/// 同时钉住两个消费点共用同一套判据：Tab 走 `try_english_case_cycle_key`，产出必须与 CapsLock
+/// 那条逐格相同。
 #[test]
 fn tab_can_be_the_cycle_key() {
     if !has_english_schema() {
@@ -552,7 +538,7 @@ fn tab_can_be_the_cycle_key() {
     );
 }
 
-/// 配了 Tab 时 CapsLock **不**生效, 反之亦然——键即开关, 不是「开了就两个键都能用」。
+/// 配了 Tab 时 CapsLock 不生效, 反之亦然——键即开关, 不是「开了就两个键都能用」。
 #[test]
 fn only_the_configured_key_cycles() {
     if !has_english_schema() {

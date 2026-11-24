@@ -6,8 +6,7 @@
 //! 「开启」一律经 `Config` 走 `build_engine` 的折叠（不直接构造引擎）：`build_engine`
 //! 若仍传 `wildcard: None`，`active_wildcard_key()` 恒 `None`，下面的进缓冲用例全红。
 //!
-//! ⚠️ `build_dev/data` 不存在时整族静默跳过而计数照绿，判据是耗时（正常 ≥1s）
-//! 与输出里有没有「跳过」。
+//! `build_dev/data` 不存在时整族静默跳过而计数照绿，判据是耗时（正常 ≥1s）与输出里有没有「跳过」。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -146,7 +145,7 @@ fn symbol_wildcard_enters_buffer_instead_of_punct() {
     assert_ne!(coord.debug_input_buffer(), "a?", "对照：关闭时 ? 不进缓冲");
 }
 
-/// 空缓冲下符号通配键**作通配**（论坛 t302；此前一律让位出标点）：首位 `?` 进缓冲、不出「？」。
+/// 空缓冲下符号通配键作通配：首位 `?` 进缓冲、不出「？」。
 /// 对照：关闭通配时同一键照常出全角「？」。
 #[test]
 fn lead_symbol_wildcard_enters_buffer() {
@@ -205,7 +204,7 @@ fn mid_composition_conflict_yields_and_is_reported() {
     );
 }
 
-/// 通配键是**显式配置**的方案码元时，体检报「方案码元」。
+/// 通配键是显式配置的方案码元时，体检报「方案码元」。
 /// 对照：同一键不在显式码元集里（未配 `input_chars`）时不报。
 #[test]
 fn wildcard_that_is_a_configured_code_char_is_reported() {
@@ -274,7 +273,7 @@ fn leading_z_phrase_code_stays_literal() {
 }
 
 /// overlay（临时拼音）激活时通配不适用：`z` 在临拼里是拼音字母。
-/// 通配键取的是**活跃方案**（五笔）的，overlay 用的是别的方案，协调器必须自己挡住。
+/// 通配键取的是活跃方案（五笔）的，overlay 用的是别的方案，协调器必须自己挡住。
 #[test]
 fn overlay_mode_ignores_wildcard() {
     if !dict_ready() {
@@ -434,7 +433,7 @@ fn mixed_overlength_is_identical_to_off() {
     }
 }
 
-/// ★ Review Focus 5：`zhang` 首位字面，装不装 `zz*` 短语都与关闭时相同。
+/// `zhang` 首位字面，装不装 `zz*` 短语都与关闭时相同。
 #[test]
 fn mixed_lead_z_is_literal_with_and_without_zz_phrases() {
     if !mixed_ready() {
@@ -493,9 +492,8 @@ fn mixed_azi_wildcard_first_then_pinyin() {
     }
 }
 
-/// ★ Review Focus 4：拼音分段续转的剩余串按字面续转拼音，与关闭时逐条相同。
-/// `woaizi` 选「我」后剩 `aizi`（4 码、z 非首位）——这条才测得到续转规则；
-/// spec 给的 `woaizhongguo` 剩余串超码长，走的是超码长规则，一并保留。
+/// 拼音分段续转的剩余串按字面续转拼音，与关闭时逐条相同。`woaizi` 选「我」后剩 `aizi`
+/// （4 码、z 非首位），这条才测得到续转规则；`woaizhongguo` 剩余串超码长，走超码长规则。
 #[test]
 fn mixed_segment_continuation_stays_literal() {
     if !mixed_ready() {
@@ -617,7 +615,7 @@ fn leading_wildcard_when_unbound_scans_whole_table() {
     );
 }
 
-/// ★ Review Focus 1：首位 z 让位给 `zz*` 短语后，整轮都是字面——`zzbd` 仍出「、」。
+/// 首位 z 让位给 `zz*` 短语后，整轮都是字面——`zzbd` 仍出「、」。
 /// 对照：同配置下 `az` 仍是通配（证明通配确实开着）。
 #[test]
 fn zz_phrases_survive_when_wildcard_on() {
@@ -666,7 +664,7 @@ fn leading_z_yields_to_z_key_repeat() {
     );
 }
 
-/// ★ Review Focus 2：开着通配，`z_key_action = temp_pinyin` 的 z 夺取仍然成立
+/// 开着通配，`z_key_action = temp_pinyin` 的 z 夺取仍然成立
 /// （`has_code_prefix("zh")` 走字面 convert，不会被当成 `?h` 判活）。
 #[test]
 fn z_fallback_still_hijacks_when_wildcard_on() {
@@ -726,7 +724,7 @@ fn wildcard_full_length_does_not_auto_commit() {
     assert_eq!(coord.debug_input_buffer(), "aaaz", "也不清空");
 }
 
-/// ★ Review Focus 4：符号通配键同时在 `input.buffer_symbol_chars` 里，仍按通配查候选。
+/// 符号通配键同时在 `input.buffer_symbol_chars` 里，仍按通配查候选。
 #[test]
 fn symbol_wildcard_listed_in_buffer_symbol_chars_still_queries() {
     if !dict_ready() {
@@ -745,9 +743,8 @@ fn symbol_wildcard_listed_in_buffer_symbol_chars_still_queries() {
     );
 }
 
-/// spec §3.1：同字不同码在通配结果里各留一条（学码时要看到每个码位）。
-/// 「工」在五笔 86 里有 `aaa`（三简）与 `aaaa`（全码），`aaz` 的等长档与更长档各命中一条；
-/// 协调器显示层若仍按 text 去重，后一条会被并进前一条。
+/// 同字不同码在通配结果里各留一条（学码时要看到每个码位，spec §3.1）。「工」有 `aaa` 与
+/// `aaaa`，`aaz` 的等长档与更长档各命中一条；显示层若按 text 去重，后一条会被并进前一条。
 #[test]
 fn same_text_different_codes_both_listed() {
     if !dict_ready() {
@@ -768,9 +765,9 @@ fn same_text_different_codes_both_listed() {
     );
 }
 
-/// 出简让全在通配组码下不施加：通配结果是「查码」列表，不是某个码位的首选之争。
-/// 现场：档位 3 下沿途记下 `a`/`aaa` 的首选「工」，`aaaz` 的首条（「工」，全码 `aaaa`）
-/// 若照常让位就会被挪走。对照：档位 0 同一操作的首条。
+/// 出简让全在通配组码下不施加：通配结果是「查码」列表，不是某个码位的首选之争。档位 3 下
+/// 沿途记下 `a`/`aaa` 的首选「工」，`aaaz` 的首条（「工」，全码 `aaaa`）若照常让位就会被挪走。
+/// 对照：档位 0 同一操作的首条。
 #[test]
 fn short_code_yield_skipped_under_wildcard() {
     if !dict_ready() {
@@ -799,9 +796,8 @@ fn short_code_yield_skipped_under_wildcard() {
     assert_eq!(first_at(3), base, "通配组码不出简让全");
 }
 
-/// ★ Review Focus 3（端到端）：主输入路两个上屏出口（空格选词、标点顶屏）在通配组码下
-/// 以**候选全码**记词频，不记 `aaaz` 这种查询串（读端永远查不中的孤儿键）。
-/// 单测只钉 `main_freq_code` 本身；这里钉的是出口确实接上了它。
+/// 主输入路两个上屏出口（空格选词、标点顶屏）在通配组码下以候选全码记词频，不记 `aaaz` 这种
+/// 查询串（读端永远查不中的孤儿键）。单测只钉 `main_freq_code` 本身，这里钉出口确实接上了它。
 #[test]
 fn commit_under_wildcard_records_freq_by_full_code() {
     if !dict_ready() {
@@ -952,8 +948,8 @@ fn triples_with(cfg: Config, keys: &str) -> Vec<(String, String, String)> {
     coord.debug_candidate_triples()
 }
 
-/// spec §11 契约 1：智能档把通配结果当一组——有常用字就滤掉生僻字，与「常用字」档结果相同。
-/// 旧实现按 `(来源, 码)` 分组，`han?` / `a??` 下只含生僻字的码位当孤儿放行。
+/// spec §11 契约 1：智能档把通配结果当一组，有常用字就滤掉生僻字，与「常用字」档结果相同；
+/// 按 `(来源, 码)` 分组会让 `han?` / `a??` 下只含生僻字的码位当孤儿放行。
 /// 对照：「全部字符」档条数更多，证明这些输入下首批确有生僻字可滤。
 #[test]
 fn pure_wildcard_smart_filters_like_general() {
@@ -999,7 +995,7 @@ fn page_until_more_than(coord: &Coordinator, than: usize) -> usize {
     coord.debug_candidate_count()
 }
 
-/// ★ Review Focus 3：通配首批至多 100 条且 `has_more` 为真，翻到边界按 ×2 扩充。
+/// 通配首批至多 100 条且 `has_more` 为真，翻到边界按 ×2 扩充。
 /// 旧实现码长 ≥ 3 首批上限 1000、引擎却至多回 100 ⇒ `has_more` 恒假，永不扩充。
 #[test]
 fn pure_wildcard_first_batch_is_100_and_expands() {
@@ -1079,11 +1075,10 @@ fn mixed_wildcard_smart_filters_like_general() {
     }
 }
 
-/// ★ Review Focus 5：混输首批回满、翻页扩充后，等长通配仍全部排在最前，字面候选仍在。
-/// 控制者裁决：混输首批维持 300（非计划原文的 100），故上限断言按 300。
-/// 键用 `yiz` 而非计划的 `azz`：真实数据里 `azz` 无任何拼音候选（`zz` 不成音节）；`yiz` 首批
-/// 299 条、拼音 189 条、`has_more` 为真，拼音保底配额（300/5 = 60 席）确实在起作用。
-/// 缺 Task 2 时红在 `has_more` 或扩充不生效；配额 / 合并序被破坏时红在后几条。
+/// 混输首批回满、翻页扩充后，等长通配仍全部排在最前，字面候选仍在；混输首批上限 300。
+/// 键用 `yiz`：`azz` 在真实数据里无拼音候选（`zz` 不成音节），`yiz` 首批 299 条、拼音 189 条、
+/// `has_more` 为真，拼音保底配额（300/5 = 60 席）确实在起作用。
+/// 扩充不生效时红在 `has_more`；配额 / 合并序被破坏时红在后几条。
 #[test]
 fn mixed_expansion_keeps_equal_length_wildcard_first() {
     if !mixed_ready() {
@@ -1147,8 +1142,7 @@ fn general_mode_wildcard_pages_fill_up() {
 }
 
 /// 智能档被滤的通配生僻字经「翻到末页再按一次」追加在末尾，原有候选顺序不动。
-/// `hanz` 纯码表只有 9 条（`han?`，4 码满码无更长补全），一页即末页。缺 Task 1 时红
-/// （无被滤候选可追加）。
+/// `hanz` 纯码表只有 9 条（`han?`，4 码满码无更长补全），一页即末页。
 #[test]
 fn page_end_relax_appends_filtered_wildcard_results() {
     if !dict_ready() {
@@ -1208,7 +1202,7 @@ fn single_only_azz_smoke() {
     assert!(texts.iter().all(|t| is_single(t)), "{texts:?}");
 }
 
-/// ★ Review Focus 2（真实数据）：`azzz`（`a???`）按权重前 100 条只有 ~38 个单字；
+/// 真实数据：`azzz`（`a???`）按权重前 100 条只有 ~38 个单字；
 /// 先滤后截才能让首批凑满 100 个单字、`has_more` 为真、翻页可扩。缺 Task 2 时红在条数。
 #[test]
 fn single_only_azzz_first_batch_is_full_of_singles() {
@@ -1324,7 +1318,7 @@ fn lookup_disabled_dicts_inline_wildcard_excludes_xzqy() {
     );
 }
 
-/// ★ Review Focus 1（真实数据）：开关开着，普通打字的候选逐条不变（含前缀补全与活码字母）。
+/// 真实数据：开关开着，普通打字的候选逐条不变（含前缀补全与活码字母）。
 #[test]
 fn lookup_disabled_dicts_leaves_plain_typing_identical() {
     if !dict_ready() {

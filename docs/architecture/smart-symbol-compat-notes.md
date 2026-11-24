@@ -306,7 +306,7 @@ if (holdActiveBeforeResponse && !(*pfEaten)
 `english_passthrough_punct_chars`）由 DLL 直接透传。吃下再经 CUAS 吐回时，非 TSF-aware 宿主（如 Tkinter）
 会把送达的字符码当虚拟键码解释：`#`(0x23)→`VK_END`、`%`(0x25)→`VK_LEFT`、`&`(0x26)→`VK_UP`、
 `(`(0x28)→`VK_DOWN`，字不上屏反而移动光标；英文标点态更凶，`.`(0x2E)→`VK_DELETE` 吞掉光标后一字、
-`[`(0x5B)→`VK_LWIN` 弹开始菜单、`'`→`VK_RIGHT`、`;`→`VK_F1`。`@`、`*` 只是撞上的 VK 恰好没有默认绑定。
+`[`(0x5B)→`VK_LWIN` 弹开始菜单、`'`→`VK_RIGHT`、`;`→`VK_F1`；OEM 键同理，`-`(0x2D)→`VK_INSERT`（宿主切进改写模式）、`/`(0x2F)→`VK_HELP`、`|`(0x7C)→`VK_F13`。`@`、`*` 只是撞上的 VK 恰好没有默认绑定。
 微软拼音对这批符号不吃键，宿主拿到真实 VK，透传集就是对齐这一行为。
 
 判据的几条约束：

@@ -1,12 +1,11 @@
-//! 常用字表的**用户覆盖**（候选右键「设为生僻字 / 设为常用字」）端到端。
+//! 常用字表的用户覆盖（候选右键「设为生僻字 / 设为常用字」）端到端。
 //!
-//! 装置沿用 `codetable_filter_scope_consistency.rs` 的现场：五笔 `sivg` 码位上坐着
-//! 常用的「档」与生僻的「桜」，智能档只放行前者。把「档」标成生僻之后，这个码位就
-//! **没有常用字了**，于是「桜」按孤儿码规则被放出来——一条断言同时验到了
-//! 写库、镜像回灌、候选重建、过滤联动四步。
+//! 装置沿用 `codetable_filter_scope_consistency.rs` 的现场：五笔 `sivg` 码位上有常用的「档」与
+//! 生僻的「桜」，智能档只放行前者。把「档」标成生僻之后，这个码位没有常用字了，「桜」按孤儿码
+//! 规则被放出来——一条断言同时验到写库、镜像回灌、候选重建、过滤联动四步。
 //!
-//! ⚠️ `build_dev/data` 不存在时**整族静默跳过而计数照绿**（判据是耗时：正常秒级，
-//! 跳过是 0.0x s）。恢复命令 `.\scripts\dev.ps1 gd`。
+//! `build_dev/data` 不存在时整族静默跳过而计数照绿（判据是耗时：正常秒级，跳过 0.0x s）。
+//! 恢复命令 `.\scripts\dev.ps1 gd`。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -60,7 +59,7 @@ fn coord(tag: &str) -> Arc<Coordinator> {
     Coordinator::new_headless_with_store(cfg, Some(&data_dir()), store(tag))
 }
 
-/// 按键走**生产入口** `handle_key_event_policed`，不是内部的 `handle_key_event`——
+/// 按键走生产入口 `handle_key_event_policed`，不是内部的 `handle_key_event`——
 /// 后者绕过若干收口，等于验证一条真实不存在的路径。
 fn press(coord: &Coordinator, code: &str) {
     for c in code.chars() {
@@ -90,14 +89,11 @@ fn index_of(list: &[String], text: &str) -> Option<usize> {
     list.iter().position(|t| t == text)
 }
 
-/// ★ 核心链路：把一个字标成生僻，它**当场从候选里消失**，被它压着的生僻字露出来。
+/// 核心链路：把一个字标成生僻，它当场从候选里消失，被它压着的生僻字露出来。
 ///
-/// 走完整条路：写 redb → 回灌内存镜像 → 重建候选 → 智能过滤重算。任何一步断掉，
-/// 屏幕上就毫无变化——那正是用户报的「设了没反应」。
-///
-/// ⚠️ 这里钉的是**用户显式降级不吃「孤儿码位」保底**（`Candidate::user_rare`）。
-/// 不加那一位的话：「档」降级后 sivg 组变成「没有常用字」，保底把它原样放回、还在
-/// 第一位——智能档因此成了三档里唯一「设了看不出」的一档。
+/// 写 redb → 回灌内存镜像 → 重建候选 → 智能过滤重算，任何一步断掉屏幕上都毫无变化。
+/// 同时钉住用户显式降级不吃「孤儿码位」保底（`Candidate::user_rare`）：不加那一位，「档」降级后
+/// sivg 组变成「没有常用字」，保底会把它原样放回第一位。
 #[test]
 fn marking_a_char_rare_removes_it_from_candidates() {
     let d = data_dir();
@@ -137,10 +133,8 @@ fn marking_a_char_rare_removes_it_from_candidates() {
     );
 }
 
-/// 滤掉**不等于**打不出：末页再按一次翻页键，放宽就能把它调回来。
-///
-/// 这是「直接滤掉」这个设计成立的前提（2026-08-24 用户拍板时点明的那条出路）。
-/// 缺了它，把某码位唯一的字降级就等于把那个字永久锁死——而用户当时只是想让它别挡路。
+/// 滤掉不等于打不出：末页再按一次翻页键，放宽就能把它调回来。这是「直接滤掉」成立的前提，
+/// 缺了它，把某码位唯一的字降级就等于把它永久锁死。
 #[test]
 fn demoted_char_comes_back_via_scope_relax() {
     let d = data_dir();
@@ -169,9 +163,7 @@ fn demoted_char_comes_back_via_scope_relax() {
     );
 }
 
-/// 覆盖是**全局**的：换一个码位打同一个字，判定跟着走。
-///
-/// 这正是它与 shadow 的分界——shadow 键含输入码，只在那个码下生效。
+/// 覆盖是全局的：换一个码位打同一个字，判定跟着走。这是它与 shadow 的分界（shadow 键含输入码）。
 #[test]
 fn override_applies_across_codes() {
     let d = data_dir();
@@ -197,10 +189,8 @@ fn override_applies_across_codes() {
     assert!(cands(&c).contains(&"档".to_string()));
 }
 
-/// 点回出厂方向 = **删掉覆盖**，而不是写一条同向记录。
-///
-/// 库里因此永远只留「与出厂不同」的字：词库管理界面列出来的就是一份干净的
-/// 「我改过的」，出厂表升版时没被碰过的字自动跟随。
+/// 点回出厂方向 = 删掉覆盖，而不是写一条同向记录。库里因此只留「与出厂不同」的字，出厂表升版时
+/// 没被碰过的字自动跟随。
 #[test]
 fn toggling_back_removes_the_row_instead_of_writing_a_redundant_one() {
     let d = data_dir();
@@ -226,7 +216,7 @@ fn toggling_back_removes_the_row_instead_of_writing_a_redundant_one() {
         "第一次点击应写下一条与出厂相反的覆盖"
     );
 
-    // 再切回来。降级后它已从候选里消失，右键点不到——**得先放宽把它调出来**，
+    // 再切回来。降级后它已从候选里消失，右键点不到——得先放宽把它调出来，
     // 这正是「滤掉但留一条出路」那个设计在用户手上的实际走法。
     c.handle_key_event_policed(&key_event(VK_NEXT));
     let list2 = cands(&c);
@@ -250,7 +240,7 @@ fn toggling_back_removes_the_row_instead_of_writing_a_redundant_one() {
     );
 }
 
-/// 词组不给标记：「常用」是**字**级属性，给词组存覆盖，读端逐字判定时永远看不到它。
+/// 词组不给标记：「常用」是字级属性，给词组存覆盖，读端逐字判定时永远看不到它。
 #[test]
 fn phrases_are_not_markable() {
     let d = data_dir();
@@ -285,8 +275,8 @@ fn phrases_are_not_markable() {
 
 /// 词库管理列表：全表 + 搜索 + 「只看已修改」。
 ///
-/// 这三条必须在**有真实字表**的地方测。webdata 那侧的装置没有 data_dir，默认表为空 ⇒
-/// 「全表」与「只看已修改」两个口径恰好等价，`only_modified` 传不传都一样，测了等于没测。
+/// 这三条必须在有真实字表的地方测：webdata 那侧的装置没有 data_dir，默认表为空，「全表」与
+/// 「只看已修改」两个口径恰好等价。
 #[test]
 fn list_covers_whole_table_and_filters_modified_only() {
     let d = data_dir();
@@ -340,10 +330,8 @@ fn list_covers_whole_table_and_filters_modified_only() {
     assert!(c.common_char_rows("", false).len() > 8000);
 }
 
-/// 覆盖在**重启后**仍然生效——装载走 `build`，而不是只在 `new()` 里。
-///
-/// 这条钉的是回灌落点：若装载写在 `new()` 里，`new_headless_with_store` 这条路
-/// （直接走 build）就恒看不到已存在的覆盖，而那正是本测试模拟的「重启」。
+/// 覆盖在重启后仍然生效：装载走 `build` 而不只在 `new()` 里。若写在 `new()` 里，
+/// `new_headless_with_store`（直接走 build）就看不到已存在的覆盖，而那正是本测试模拟的「重启」。
 #[test]
 fn overrides_survive_restart() {
     let d = data_dir();

@@ -1,18 +1,16 @@
 //! 会话态动词 `commit_highlighted`（上屏当前高亮候选）的端到端测试。
 //!
-//! 它就是「空格上屏高亮候选」那个动作换一个键来按，所以断言的形状是**对拍**：同一段输入、
-//! 同一个高亮位置，一边按空格、一边按绑了本动词的 Tab，两边的按键结果（含补空格）、记账
-//! 事件（统计来源）、收尾模式与上屏历史必须逐字相同。只断言「上屏了高亮那条」是不够的——
-//! 这些副作用各模式出口各有一套，另写一份的实现也能让文本对上，却在副作用上悄悄分叉。
+//! 它就是「空格上屏高亮候选」换一个键来按，所以断言是对拍：同一段输入、同一个高亮位置，一边按
+//! 空格、一边按绑了本动词的 Tab，按键结果（含补空格）、记账事件、收尾模式与上屏历史必须逐字相同。
+//! 只断言「上屏了高亮那条」不够：副作用各模式出口各有一套，另写一份的实现能对上文本却在副作用上分叉。
 //!
-//! 词频**不在断言之列**：headless 构造不带用户库（`store = None`），选词记词频是空操作，
-//! 两边比出来恒等、证明不了什么。词频与其余副作用同在各模式的选中出口里，对拍住出口
-//! （按键结果 + 统计 + 历史）即覆盖到它所在的那个函数。
+//! 词频不在断言之列：headless 构造不带用户库（`store = None`），记词频是空操作；它与其余副作用同在
+//! 选中出口里，对拍住出口即覆盖到它。
 //!
-//! 每个模式都先断言**确实进了该模式**：触发键没生效时按键会落回主输入路径，而主路径同样会
-//! 上屏——不验进入就是假绿（见 docs/design/session-key-actions.md §10）。
+//! 每个模式都先断言确实进了该模式：触发键没生效时按键会落回同样会上屏的主输入路径，不验进入就是
+//! 假绿（见 docs/design/session-key-actions.md §10）。
 //!
-//! ⚠️ 依赖 `build_dev/data` 真实词库；缺失时**静默跳过**（判据是耗时 0.00s）。
+//! 依赖 `build_dev/data` 真实词库；缺失时静默跳过（判据是耗时 0.00s）。
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -91,7 +89,7 @@ fn type_str(coord: &Coordinator, s: &str) {
 
 /// 一次按键的可比对快照：按键结果、这次按键产生的记账事件、按完后的模式。
 ///
-/// `KeyAction` 没有 `PartialEq`，按 `Debug` 形态比——字段全在里面，比结构更严。
+/// `KeyAction` 没有 `PartialEq`，按 `Debug` 形态比，字段全在里面。
 fn press_and_observe(coord: &Coordinator, vk: u32) -> (String, String, Option<&'static str>) {
     coord.debug_capture_stat_events();
     let act = coord.handle_key_event(&key(vk, 0));
@@ -99,12 +97,10 @@ fn press_and_observe(coord: &Coordinator, vk: u32) -> (String, String, Option<&'
     (format!("{act:?}"), stats, coord.debug_active_mode())
 }
 
-/// ★ 对拍主体：两个实例走同一段 `setup`，一个按空格、一个按 Tab，结果必须逐字相同。
+/// 对拍主体：两个实例走同一段 `setup`，一个按空格、一个按 Tab，结果必须逐字相同。
 ///
-/// `move_highlight`：先按 ↓ 把高亮移到第 2 条再比。**高亮不在首位时才分得出**「上屏高亮」
-/// 与「上屏首选」——在首位上比，一个上屏首选的错误实现也会绿。
-///
-/// 两边都先摆好再按键：两个实例若共用任何学习态，先上屏的一方会改掉另一方的候选序。
+/// `move_highlight`：先按 ↓ 把高亮移到第 2 条再比，高亮不在首位时才分得出「上屏高亮」与
+/// 「上屏首选」。两边都先摆好再按键：共用学习态的话，先上屏的一方会改掉另一方的候选序。
 fn assert_same_as_space(
     mode: Option<&str>,
     edit: impl Fn(&mut Config),
@@ -194,9 +190,8 @@ fn main_route_commits_highlighted_like_space() {
     assert_same_as_space(None, |_| {}, |_| {}, |c| type_str(c, "a"), true);
 }
 
-/// ⚠️ 本条**不区分「绑上了」与「没绑上」**：临拼的兜底臂对任何未认领的键都「上屏高亮」
-/// （`handle_temp_pinyin_key` 的 `_` 臂），Tab 没绑上时照样得到同一结果。它守的是对拍——
-/// 出口日后若分叉，这里会红；「动词真的生效」由其余模式的用例证明。
+/// 本条不区分「绑上了」与「没绑上」：临拼的兜底臂（`handle_temp_pinyin_key` 的 `_` 臂）对任何
+/// 未认领的键都「上屏高亮」。它守的是出口不分叉；「动词真的生效」由其余模式的用例证明。
 #[test]
 fn temp_pinyin_commits_highlighted_like_space() {
     skip_without_data!();
@@ -229,9 +224,8 @@ fn temp_english_commits_highlighted_like_space() {
     );
 }
 
-/// ★ 临英 `space_as_input` 下空格是输入字符，**本动词不跟这个变体**：它恒为「上屏高亮」。
-///
-/// 对照组是**关着**该开关按空格——那才是「上屏高亮」这个动作本身。
+/// 临英 `space_as_input` 下空格是输入字符，本动词不跟这个变体，恒为「上屏高亮」。
+/// 对照组是关着该开关按空格。
 #[test]
 fn temp_english_space_as_input_does_not_bend_the_verb() {
     skip_without_data!();
@@ -313,11 +307,9 @@ fn special_mode_commits_highlighted_like_space() {
 /// 辅助码：拼音打 `shi`、`\` 进辅助码（全局开关须拨开）、筛一码 `h`（笔画「横」）后移高亮。
 /// 走的是 `aux_code_committed`——部分消费时要留在模式内，派发不能套主路的 `commit_selected`。
 ///
-/// ⚠️ 必须先 `prewarm_indexes`：全拼默认辅助码 2a9193ba 起从文件（`aux_code/stroke.txt`，
-/// 进程内同步读，无需反查索引）改成引用码表方案（`schema:stroke`），`enter_aux_code` 门卫
-/// 要求该方案反查索引已就绪、按键线程绝不现建（见 `coordinator.rs::prewarm_indexes` 的注释）。
-/// 真机由 `Coordinator::new` 起的后台线程预热，headless 不跑那个线程，不手动补这一句，
-/// 本用例会在索引未就绪的那次按键上静默不进模式（`enter_aux_code` 直接返回 `None`）。
+/// 必须先 `prewarm_indexes`：全拼默认辅助码引用码表方案（`schema:stroke`），`enter_aux_code`
+/// 门卫要求该方案反查索引已就绪、按键线程绝不现建。真机由 `Coordinator::new` 起的后台线程预热，
+/// headless 不跑那个线程，不补这一句本用例会静默不进模式（`enter_aux_code` 返回 `None`）。
 #[test]
 fn aux_code_commits_highlighted_like_space() {
     skip_without_data!();
@@ -362,12 +354,11 @@ fn quick_input_repeat_commits_like_space() {
     );
 }
 
-/// ★ 重复上屏态下候选**恒只有一条**——`commit_highlighted` 的 mix 臂不为重复态另开
-/// 分支（交给 `mix_select_at` 的 `mix_repeat` 判断）所依赖的前提。
+/// 重复上屏态下候选恒只有一条：`commit_highlighted` 的 mix 臂不为重复态另开分支（交给
+/// `mix_select_at` 的 `mix_repeat` 判断）所依赖的前提。
 ///
-/// 用最可能破坏它的情形压：简入繁出开着、上次上屏是个 1 对多的字（「出」→ 出 / 齣）。
-/// 普通候选区里这种字会被 `expand_s2t_variants` 就地展开成多条；若重复态也被展开，高亮就能
-/// 移到第 2 条，空格取首条还是取高亮就成了两个结果，那个被删掉的分支就不再冗余。
+/// 用最可能破坏它的情形压：简入繁出开着、上次上屏是 1 对多的字（「出」→ 出 / 齣）。若重复态也被
+/// `expand_s2t_variants` 展开，高亮能移到第 2 条，空格取首条与取高亮就成了两个结果。
 #[test]
 fn quick_input_repeat_holds_a_single_candidate_even_with_s2t_variants() {
     skip_without_data!();
@@ -460,11 +451,10 @@ fn assoc_space_commits_true_follows_space() {
     assert_eq!(by_tab.1, by_space.1, "记账事件应与空格逐字相同");
 }
 
-/// ★ `space_commits = false`：联想的高亮是输入法猜的，用户说了「别替我选」——绑定键
-/// 同样**不选**，也不吞键（返回原语义，与按一个没绑定的键同形）。
+/// `space_commits = false`：联想的高亮是输入法猜的，绑定键同样不选，也不吞键（返回原语义）。
 ///
-/// 对照组是同配置下**没绑** Tab 的实例：两边按 Tab 的结果必须相同。只断言「没上屏联想」
-/// 的话，一个把键吞掉什么都不做的实现也会绿。
+/// 对照组是同配置下没绑 Tab 的实例，两边按 Tab 结果必须相同；只断言「没上屏联想」的话，
+/// 把键吞掉什么都不做的实现也会绿。
 #[test]
 fn assoc_space_commits_false_is_not_committed_by_verb() {
     skip_without_data!();
@@ -507,7 +497,7 @@ fn idle_tab_is_not_taken() {
     );
 }
 
-/// ★ 有会话**无候选**：本动词无事可做，键回落原语义，不得清掉或上屏正在打的内容。
+/// 有会话无候选：本动词无事可做，键回落原语义，不得清掉或上屏正在打的内容。
 ///
 /// 网址模式是「有会话、从不产候选」的天然样本（出厂开关关闭，须显式拨开）。
 #[test]

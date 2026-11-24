@@ -1,36 +1,19 @@
 //! 定制版减法（`custom.toml` 的 `[themes] hide`）在主题两侧的端到端接线。
 //!
-//! 主题的 hide 有**两个**消费侧，只做一侧各有各的现象：
+//! 主题的 hide 有两个消费侧，只做一侧各有现象：只做列表侧时，存量用户 `ui.theme.name` 指着的
+//! 主题照常生效（设置页里找不到它、界面上就是它）；只做解析侧时，列表里还列着一个选了会变成
+//! 别的样子的主题。故两侧各测一条：
 //!
-//! | 只做列表侧 | 只做解析侧 |
-//! |---|---|
-//! | 存量用户 `ui.theme.name` 里指着的那个主题照常生效 ⇒「设置页里找不到它，界面上就是它」 | 列表里还列着一个选了会变成别的样子的主题 |
+//! 1. 列表侧 `list_themes_full`：右键菜单与设置页 `theme.list` 共用的唯一实现（`wind-webdata`
+//!    的 `web_theme_list` 复用它）；
+//! 2. 解析侧 `theme_palette`（`theme_query.rs`，移动端拉取式色表，刻意不走 `push_theme` 那条链，
+//!    与它共用 `Coordinator::theme_id_honoring_hide`）：断言拿到的是兜底主题的色表而不是被 hide
+//!    那个的，且两者事先确实不同（否则断言恒真）。
 //!
-//! 故本文件两侧各测一条：
+//! 另钉 hide 是绝对的：用户在 `%APPDATA%\WindInput\themes\` 放一份同名主题，它仍不出现在列表里。
 //!
-//! 1. **列表侧** `list_themes_full`（右键菜单与设置页 `theme.list` 的**唯一**实现，
-//!    见下方「与规格的出入」）；
-//! 2. **解析侧** `theme_palette`（移动端拉取面，与桌面 `push_theme` 共用
-//!    `Coordinator::theme_id_honoring_hide`）——断言拿到的是兜底主题的色表而**不是**
-//!    被 hide 那个的，且两者事先确实不同（否则断言恒真）。
-//!
-//! 另钉一条 **hide 是绝对的**：用户自己在 `%APPDATA%\WindInput\themes\` 放一份同名主题，
-//! 它仍然不出现在列表里。
-//!
-//! # 与规格的出入（实施时发现，据实记下）
-//!
-//! P2 的任务书写「themes 列表是**两份**独立实现，都要过滤」。**已不成立**：P1d 已把
-//! `wind-webdata` 的 `theme_dirs()` 改为直接复用 `theme_search_dirs()`，并让
-//! `web_theme_list` 复用 `list_themes_full`。现在列表只有一份实现（本文件测的这份），
-//! 设置页与右键菜单共用它。
-//!
-//! 反过来多出一处规格没点到的：`Coordinator::theme_palette`（`theme_query.rs`，移动端
-//! 拉取式色表）**刻意不走** `push_theme` 那条链，是搜索链的第三个消费者。它也已接上，
-//! 本文件测的正是它。
-//!
-//! 为什么必须是集成测试（独立进程）：`Config::custom_manifest()` 用 OnceLock 缓存。
-//! ⚠️ 全文件仅此一个 `#[test]`，理由同 `wind-engine/tests/custom_layer_hide.rs`。
-//! ⚠️ 本用例**不依赖 `build_dev/data`**：主题夹具全部自造，故不会静默跳过。
+//! 必须是集成测试：`Config::custom_manifest()` 用 OnceLock 缓存，全文件仅此一个 `#[test]`，理由同
+//! `wind-engine/tests/custom_layer_hide.rs`。不依赖 `build_dev/data`（主题夹具全部自造），不会静默跳过。
 
 use std::path::{Path, PathBuf};
 use wind_config::Config;
@@ -56,7 +39,7 @@ fn argb(rgb: u32) -> u32 {
 
 #[test]
 fn hidden_themes_vanish_from_list_and_from_resolution() {
-    // ⚠️ 目录名带 pid：多 worktree / 多会话并行跑测试时固定名会互删夹具。
+    // 目录名带 pid：多 worktree / 多会话并行跑测试时固定名会互删夹具。
     let tmp = std::env::temp_dir().join(format!(
         "wind_coord_custom_hide_theme_e2e-{}",
         std::process::id()
@@ -70,7 +53,7 @@ fn hidden_themes_vanish_from_list_and_from_resolution() {
     std::fs::create_dir_all(&tmp).unwrap();
     std::fs::write(&conf, user.to_string_lossy().as_bytes()).unwrap();
 
-    // 清单必须在**任何** OnceLock 初始化之前就位。定制者要删掉出厂的 msime 主题。
+    // 清单必须在任何 OnceLock 初始化之前就位。定制者要删掉出厂的 msime 主题。
     write_at(
         &custom,
         "custom.toml",
@@ -110,7 +93,7 @@ fn hidden_themes_vanish_from_list_and_from_resolution() {
         "themes/violet/theme.toml",
         &theme_toml("紫", "#0000CC"),
     );
-    // 用户层：用户拿被 hide 的 id 命名了自己的主题——**仍然不可见**（hide 是绝对的）。
+    // 用户层：用户拿被 hide 的 id 命名了自己的主题——仍然不可见（hide 是绝对的）。
     write_at(
         &user,
         "themes/user_named/theme.toml",
@@ -123,7 +106,7 @@ fn hidden_themes_vanish_from_list_and_from_resolution() {
         &theme_toml("我的2", "#654321"),
     );
 
-    // ★ 活跃主题就是被 hide 的那个（存量用户升级到定制版的必然状态）。
+    // 活跃主题就是被 hide 的那个（存量用户升级到定制版的必然状态）。
     let mut cfg = Config::default();
     cfg.ui.theme.name = "msime".to_string();
     let coord = Coordinator::new_headless(cfg, Some(&data));

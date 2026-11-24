@@ -1,12 +1,10 @@
 //! 出厂剪贴板反查短语（`cofc`）的守门。
 //!
-//! **系统短语的语法错误用户零感知**：写错一个函数名或括号，`evaluate_phrase` 返回 Err，
-//! 短语层只记一条 warn 就把整条丢掉——用户侧表现为「打了 cofc 什么都没有」，
-//! 与「剪贴板是空的」完全同形，靠人是分不出来的。
+//! 系统短语语法错时 `evaluate_phrase` 返回 Err、短语层只记 warn 丢弃整条，用户侧与「剪贴板为空」
+//! 同形，只能靠测试守。
 //!
-//! ⚠️ 读的是**仓库** `data/system.phrases.toml` 而不是 `build_dev/data/`：
-//! 那份是部署产物，且在 worktree 里是指向主仓的符号链接（改动不会体现），
-//! 拿它跑等于验主仓的旧文件。出厂词条的语法是源文件的属性，与部署无关。
+//! 读的是仓库 `data/system.phrases.toml` 而非 `build_dev/data/`：后者是部署产物，在 worktree 里
+//! 是指向主仓的符号链接，拿它跑等于验主仓的旧文件。
 
 use std::path::PathBuf;
 
@@ -20,22 +18,17 @@ fn layer() -> wind_phrase::PhraseLayer {
     wind_phrase::PhraseLayer::load(&p)
 }
 
-/// ★ `cofc` 必须能解析并求值出「剪贴板整串内容的反查」。
+/// `cofc` 必须能解析并求值出「剪贴板整串内容的反查」，display 原样等于宿主返回的反查结果。
 ///
-/// 本条只管**查得到**的主路径：display 原样等于宿主返回的反查结果。
-/// 「查不到时怎么办」由下一条负责。
-///
-/// ★ 词条写的是 `dict.rev(clip())` —— 省略 n 即**整串**反查，宿主拿到的必须是一整个
-/// 剪贴板文本（「好吧」），而不是它的第 1 个字。复制一个词就该查到这个词的码，这是
-/// 剪贴板反查的主行为；这条断言就是它的守门人。
+/// 词条写的是 `dict.rev(clip())`：省略 n 即整串反查，宿主拿到的必须是整个剪贴板文本（「好吧」）
+/// 而不是第 1 个字。查不到的情形由下一条负责。
 #[test]
 fn factory_cofc_parses_and_renders_clipboard_lookup() {
     let clip = |_n: i64| "好吧".to_string();
     let reverse = |text: &str, fmt: &str, _m: usize| {
         assert_eq!(text, "好吧", "出厂词条应查剪贴板整串（省略 n 即整串）");
-        // ★ 必须是 `code_rev_all`（全部码位）而不是 `code_rev`（仅最长的全码）——反查回答
-        // 的是「这个字怎么打」，简码才是最有用的答案。写死这个断言是为了让人改回只给全码
-        // 的那个变量时变红。（0.122 之前这两个变量叫 `code_all` / `code`，现为兼容别名。）
+        // 必须是 `code_rev_all`（全部码位）而非 `code_rev`（仅最长全码）：反查回答「这个字怎么打」，
+        // 简码才是最有用的答案。（`code_all` / `code` 是兼容别名。）
         assert!(
             fmt.contains("${code_rev_all}") && fmt.contains("${pinyin}"),
             "默认版式应含全部码位与拼音，实际收到 {fmt:?}"
@@ -62,11 +55,9 @@ fn factory_cofc_parses_and_renders_clipboard_lookup() {
 
 /// 打前缀 `co` 时，`cofc` 在导航列表里的标签。
 ///
-/// 前缀列举走廉价的 `NavCtx`（不读剪贴板、不查词库，否则要为每条候选摊一次开销到
-/// 按键线程），故 `dict.rev` 在那里恒为空 → `default` 回落到提示语。
-///
-/// 这**恰好**让提示语兼作命令名：`co` 列表里这一条读作「剪贴板反查（需先复制一个字或词）」，
-/// 自解释。改提示语时要顺带想一下它在这个位置读起来是否成立。
+/// 前缀列举走廉价的 `NavCtx`（不读剪贴板、不查词库，免得每条候选都给按键线程摊开销），
+/// `dict.rev` 在那里恒为空，`default` 回落到提示语，提示语因此兼作命令名。改提示语时要顺带
+/// 想想它在这个位置读起来是否成立。
 #[test]
 fn factory_cofc_shows_meaningful_label_in_prefix_nav() {
     let hits = layer().lookup_prefix("co", &[], 1, &wind_phrase::PhraseScope::ALL);
@@ -82,14 +73,11 @@ fn factory_cofc_shows_meaningful_label_in_prefix_nav() {
     );
 }
 
-/// ★ 剪贴板为空 / 查不到时，**出一条提示候选**而不是一片空白。
+/// 剪贴板为空 / 查不到时出一条提示候选而不是一片空白（否则与「功能坏了」同形）。
 ///
-/// 「什么都不出」与「功能坏了」在用户侧完全同形，这是真机反馈过的问题。
-///
-/// 同时锁住另一半：提示语**不能**被上屏。`$CC` 的 display 只管显示，上屏走
-/// `type(dict.rev(clip()))` —— 查不到时它求值为空串，选中即什么都不打。
-/// 若有人图省事把词条改回纯模板 `{default(dict.rev(clip()), "提示")}`，
-/// 提示语就会变成上屏文本被打进用户文档，这条会因 `command_src` 为 None 而变红。
+/// 同时钉住提示语不能上屏：display 只管显示，上屏走 `type(dict.rev(clip()))`，查不到时求值为
+/// 空串。若词条改回纯模板 `{default(dict.rev(clip()), "提示")}`，提示语会被打进用户文档，
+/// 这条会因 `command_src` 为 None 而变红。
 #[test]
 fn factory_cofc_hints_when_empty_and_never_commits_the_hint() {
     let reverse = |_t: &str, _f: &str, _m: usize| String::new();

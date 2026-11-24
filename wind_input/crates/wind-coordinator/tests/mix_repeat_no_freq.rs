@@ -1,21 +1,16 @@
-//! 「重复上屏」候选（`quick_input.repeat`）**选词臂**的记账口径。
+//! 「重复上屏」候选（`quick_input.repeat`）选词臂的记账口径。
 //!
-//! `inject_mix_repeat_candidate` 的文档写着：这条候选与输入缓冲没有对应关系（码为空），
-//! 「选词记录、造词、标点顶屏三条路径都必须绕开它」。空格臂与⑥标点臂都显式绕了，
-//! **选词臂漏了** —— `mix_select` 一路走到 `record_selection_cand_in`，往词频库写一条
-//! `code = ""` 的行，正是联想候选那条注释说的「读端按候选码永远查不中的孤儿键」。
+//! 这条候选与输入缓冲没有对应关系（码为空），选词记录、造词、标点顶屏都必须绕开它（见
+//! `inject_mix_repeat_candidate`）。选词臂若漏绕，`mix_select` 会一路走到 `record_selection_cand_in`，
+//! 往词频库写一条 `code = ""` 的孤儿行（读端按候选码永远查不中）。
 //!
-//! ⚠️ 两条容易写出「假绿」的地方，都在本文件里显式挡住：
-//! 1. **词频出厂是关的**，不打开就是在测一个关着的功能，怎么写都"通过"；
-//! 2. **必须用没有表达式类成员的 mix**，否则空缓冲按数字会走数字透镜的①作表达式输入，
-//!    根本到不了选词臂。
+//! 两处假绿在本文件里显式挡住：
+//! 1. 词频出厂是关的，不打开就是在测一个关着的功能；
+//! 2. 必须用没有表达式类成员的 mix，否则空缓冲按数字会走数字透镜作表达式输入，到不了选词臂。
 //!
-//! # 本文件**没有**覆盖的一半
-//!
-//! 记账还有一条「击键数按 1 封顶」（`record_commit_ks(text, 0, 1, 0, …)`，不封的话一键
-//! 几十字会把速度统计顶穿）。本文件只查词频库，量不到它 —— 把那个 `1` 改回 `0` 两条测试
-//! 都绿。之所以不补：两条臂现在共用 `commit_mix_repeat` 这**一个**方法，封顶写在里面，
-//! 已经不存在「一处改了另一处没改」的漂移面；真要测它得读统计库，机械量与收益不相称。
+//! 未覆盖：击键数按 1 封顶（`record_commit_ks(text, 0, 1, 0, …)`，不封则一键几十字会顶穿速度统计）。
+//! 本文件只查词频库量不到它；两条臂共用 `commit_mix_repeat` 一个方法，封顶写在里面，不存在漂移面，
+//! 测它要读统计库，收益不相称。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -54,7 +49,7 @@ fn store_at(tag: &str) -> Arc<Store> {
 }
 
 /// 只留真实方案 + `quick_input.repeat`：去掉计算/日期/数字三个表达式类来源，
-/// 使 `mix_has_quick_numeric` 为假 —— 空缓冲按数字键才会落到**文本透镜的选词臂**。
+/// 使 `mix_has_quick_numeric` 为假 —— 空缓冲按数字键才会落到文本透镜的选词臂。
 fn config() -> Config {
     let mut cfg = Config::default();
     cfg.schema.available = vec!["wubi86".into(), "pinyin".into()];
@@ -85,9 +80,8 @@ fn empty_code_rows(store: &Store) -> Vec<(String, String, String)> {
     out
 }
 
-/// ★ 用**选词键**取走重复上屏候选，不得往词频库写空码行。
-///
-/// 对照的是空格臂：它走 `record_commit_ks(text, 0, 1, 0, …)`，压根不碰词频。
+/// 用选词键取走重复上屏候选，不得往词频库写空码行。对照的是空格臂：它走
+/// `record_commit_ks(text, 0, 1, 0, …)`，压根不碰词频。
 #[test]
 fn repeat_candidate_picked_by_select_key_records_no_empty_code_freq() {
     if !has_schemas() {
@@ -117,7 +111,7 @@ fn repeat_candidate_picked_by_select_key_records_no_empty_code_freq() {
         "前提：空缓冲应只有一条重复候选，实际 {texts:?}"
     );
 
-    // 用**数字选词键**取它（而不是空格）—— 这一条通路此前没有绕开记账。
+    // 用数字选词键取它（而不是空格）—— 这一条通路此前没有绕开记账。
     coord.handle_key_event(&key(0x31)); // 1
 
     let stray = empty_code_rows(&store);
@@ -127,7 +121,7 @@ fn repeat_candidate_picked_by_select_key_records_no_empty_code_freq() {
     );
 }
 
-/// ★反向对照：同一条候选用**空格**取走，本就不记 —— 证明上面那条断言不是「这个配置下
+/// 反向对照：同一条候选用空格取走，本就不记 —— 证明上面那条断言不是「这个配置下
 /// 根本写不进词频」。没有它，把 `record_freq` 整个删掉两条都会绿。
 #[test]
 fn repeat_candidate_picked_by_space_records_nothing_either() {
@@ -141,7 +135,7 @@ fn repeat_candidate_picked_by_space_records_nothing_either() {
         coord.handle_key_event(&key(vk));
     }
     coord.handle_key_event(&key(0x20));
-    // 前提：这个配置下词频**确实写得进**（否则上面那条测试是空过的）。
+    // 前提：这个配置下词频确实写得进（否则上面那条测试是空过的）。
     let mut any = false;
     for schema in ["wubi86", "pinyin", "english", "wubi86_pinyin"] {
         if let Ok((rows, total)) = store.list_freq_paged(schema, "", 0, 0) {

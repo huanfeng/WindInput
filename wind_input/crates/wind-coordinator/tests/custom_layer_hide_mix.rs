@@ -1,32 +1,24 @@
-//! 定制版减法（`[schemas] hide`）与 **mix 成员**的相互作用：被 hide 的成员静默跳过，
-//! 其余成员照常。
+//! 定制版减法（`[schemas] hide`）与 mix 成员的相互作用：被 hide 的成员静默跳过，其余成员照常。
 //!
-//! 这条为什么值一个独立文件：被跳过的成员**在候选面上不可观察**——它本来就不产候选，
-//! 候选面少了几条与「那个方案没词」无从区分。一个把整个 mix 判空的实现同样会让
-//! 「候选里没有英文词」这类断言全绿。故直接问 `Coordinator::mix_members`
-//! （经 `debug_mix_members` 直通，不另算一遍）。
+//! 被跳过的成员在候选面上不可观察（少了几条与「那个方案没词」无从区分，把整个 mix 判空的实现
+//! 同样会让断言全绿），故直接问 `Coordinator::mix_members`（经 `debug_mix_members` 直通）。
 //!
-//! 跳过机制本身**不是**在 mix 这一层新写的过滤：`mix_members` 的门卫一直是
-//! `EngineManager::ensure_schema`，而定制版的减法拦在更下面的 `read_schema`
-//! （引擎构建不出来 ⇒ 门卫自然放不进来）。本用例钉的是「这条链确实通着」。
+//! 跳过不是 mix 层新写的过滤：`mix_members` 的门卫是 `EngineManager::ensure_schema`，定制版的减法
+//! 拦在更下面的 `read_schema`。本用例钉的是这条链确实通着。
 //!
-//! ⚠️ **依赖 `build_dev/data` 的真实词库**：正向对照要求没被 hide 的成员**真的**能构建
-//! 出引擎，而空词库的方案 `ensure_schema` 同样是 false，那样两侧就分不开了。
-//! 缺 `build_dev/data` 时本用例跳过、计数照绿。
+//! 依赖 `build_dev/data` 的真实词库：正向对照要求没被 hide 的成员真的能构建出引擎（空词库的方案
+//! `ensure_schema` 同样是 false）。缺失时跳过、计数照绿；这里的跳过判据不能用耗时（`.wdat` 缓存热时
+//! 整个用例也只跑 0.0x 秒），要看 `build_dev/data/schemas/wubi86.schema.toml` 在不在，或
+//! `--nocapture` 看有没有「跳过：」那行。
 //!
-//! ⚠️ **这里的跳过判据不能用耗时**（本仓词库测试族的惯用判据在这条上不成立）：`.wdat`
-//! 缓存热的时候整个用例连构造带断言只跑 0.0x 秒，与跳过分支的耗时无从区分。要确认它
-//! 真在跑，直接看 `build_dev/data/schemas/wubi86.schema.toml` 在不在，或
-//! `cargo test … -- --nocapture` 看有没有那行「跳过：」。
-//!
-//! ⚠️ 全文件仅此一个 `#[test]`：`Config::custom_manifest()` 是 OnceLock，理由同
+//! 全文件仅此一个 `#[test]`：`Config::custom_manifest()` 是 OnceLock，理由同
 //! `wind-engine/tests/custom_layer_hide.rs`。
 
 use std::path::{Path, PathBuf};
 use wind_config::Config;
 use wind_coordinator::Coordinator;
 
-/// 真实数据层：仓库根的 `build_dev/data`（**只读**——它是主仓 junction 共享的产物目录，
+/// 真实数据层：仓库根的 `build_dev/data`（只读——它是主仓 junction 共享的产物目录，
 /// 测试绝不写它。本用例的 custom / user 两层都在临时目录里）。
 fn build_dev_data() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data")
@@ -49,7 +41,7 @@ fn hidden_schema_is_skipped_as_mix_member_while_others_stay() {
         return;
     }
 
-    // ⚠️ 目录名带 pid：多 worktree / 多会话并行跑测试时固定名会互删夹具。
+    // 目录名带 pid：多 worktree / 多会话并行跑测试时固定名会互删夹具。
     let tmp = std::env::temp_dir().join(format!(
         "wind_coord_custom_hide_mix_e2e-{}",
         std::process::id()
@@ -62,7 +54,7 @@ fn hidden_schema_is_skipped_as_mix_member_while_others_stay() {
     std::fs::create_dir_all(&tmp).unwrap();
     std::fs::write(&conf, user.to_string_lossy().as_bytes()).unwrap();
 
-    // 清单必须在**任何** OnceLock 初始化之前就位。
+    // 清单必须在任何 OnceLock 初始化之前就位。
     // 定制者删掉英文方案（典型诉求：这个定制版不要英文候选那一路）。
     write_at(
         &custom,
@@ -72,8 +64,7 @@ fn hidden_schema_is_skipped_as_mix_member_while_others_stay() {
     );
 
     // SAFETY: 本文件仅此一个测试，env 在任何 OnceLock 初始化之前设置，无并发读者。
-    // data 层不经 install_root 而由构造参数给出（build_dev 只读），故这里只重定向
-    // user 与 custom 两层。
+    // data 层由构造参数给出（build_dev 只读），这里只重定向 user 与 custom 两层。
     unsafe {
         std::env::set_var("WIND_DATADIR_CONF", &conf);
         std::env::set_var("WIND_INSTALL_ROOT", &root);
@@ -92,7 +83,7 @@ fn hidden_schema_is_skipped_as_mix_member_while_others_stay() {
     let mut cfg = Config::default();
     cfg.schema.active = "wubi86".to_string();
     cfg.schema.available = vec!["wubi86".to_string(), "pinyin".to_string()];
-    // mix 实例 0 的成员改成三个**真方案**：其中 english 已被 hide。
+    // mix 实例 0 的成员改成三个真方案：其中 english 已被 hide。
     cfg.schema.mix_modes[0].members = vec![
         "wubi86".to_string(),
         "pinyin".to_string(),

@@ -1,20 +1,14 @@
-//! 「检索范围」智能档的**过滤一致性**与**临时放宽**（端到端，真实词库）。
+//! 「检索范围」智能档的过滤一致性与临时放宽（端到端，真实词库）。
 //!
-//! 两层语义：
+//! 1. 一致性：生僻字在前缀输入与全码输入下可见性相同。例：五笔「桜」(sivg) 与常用字「档」同码位，
+//!    「档」另有简码 `siv`；过滤器上游按 text 去重时若丢掉「档」在 `sivg` 的那条，`sivg` 组只剩
+//!    「桜」成孤儿码而放行，就会出现打 `siv` 能出、打全 `sivg` 却消失。
+//! 2. 临时放宽（`smart-filter-scope-relax.md`）：候选窗内翻到末页再按一次向后翻页键，把被滤候选
+//!    追加到末尾，本次组合结束后自动恢复。唯一入口，只由用户主动触发，不做自动补充
+//!    （见 `smart_list_unchanged_without_explicit_relax`）。
 //!
-//! 1. **一致性**（`fix(filter): 去重并入码位` 修的）：生僻字在前缀输入与全码输入下可见性相同。
-//!    现场＝五笔「桜」(sivg) 打 `siv` 能出、打全 `sivg` 却消失。根因在过滤器上游的按 text
-//!    去重：`sivg` 码位另有常用字「档」，而「档」还有简码 `siv`，打 `siv` 时「档」以
-//!    `code="siv"` 入列、它在 `sivg` 的那条被去重丢弃，`sivg` 组只剩「桜」成孤儿码而放行。
-//! 2. **临时放宽**（`smart-filter-scope-relax.md`）：候选窗内翻到末页再按一次向后翻页键，
-//!    把被滤候选**追加到末尾**；本次组合结束后自动恢复。**唯一入口，全靠用户主动触发**。
-//!
-//! ⚠️ 曾做过「候选不足一页就自动补充」，实测平白改变了智能档的既有观感，**已删除**。
-//! `smart_list_unchanged_without_explicit_relax` 就是钉住这一点的——不主动触发就什么都不变。
-//!
-//! ⚠️ `build_dev/data` 不存在时**整族静默跳过而计数照绿**（判据是耗时，正常秒级 vs 0.0x s）。
-//! 这不是假想风险：本文件开发期间该目录被清掉过一次，用例全部跳过却报「3 passed」，
-//! 是靠一个无守卫的临时探针打印出空候选才发现的。恢复命令 `.\scripts\dev.ps1 gd`。
+//! `build_dev/data` 不存在时整族静默跳过而计数照绿（判据是耗时：正常秒级、跳过 0.0x s），
+//! 恢复命令 `.\scripts\dev.ps1 gd`。
 
 use std::path::PathBuf;
 use wind_bridge::handler::{KeyEventData, MessageHandler};
@@ -53,9 +47,8 @@ fn wubi_config(filter_mode: &str) -> Config {
     cfg.schema.active = "wubi86".into();
     cfg.input.default.chinese_mode = true;
     cfg.input.filter_mode = filter_mode.into();
-    // 含生僻字的**词**怎么处置，显式钉住出厂档（见 `rare_phrase_scope.rs`）。本族素材全是
-    // 单字，两档结果相同 —— 正因如此，跟着 `Config::default()` 走的话，将来出厂档一变，
-    // 这一族的语义会**静默**换成另一档而断言照绿。
+    // 含生僻字的词怎么处置，显式钉住出厂档（见 `rare_phrase_scope.rs`）。本族素材全是单字，两档
+    // 结果相同，若跟着 `Config::default()` 走，出厂档一变语义会静默换档而断言照绿。
     cfg.input.rare_phrase = "keep".into();
     cfg
 }
@@ -64,7 +57,7 @@ fn coord_with(filter_mode: &str) -> std::sync::Arc<Coordinator> {
     Coordinator::new_headless(wubi_config(filter_mode), Some(&data_dir()))
 }
 
-/// 按键走**生产入口** `handle_key_event_policed`：临时放宽的失效收口挂在那里，
+/// 按键走生产入口 `handle_key_event_policed`：临时放宽的失效收口挂在那里，
 /// 直接调内部的 `handle_key_event` 会绕过它，等于验证一条真实不存在的路径。
 fn press(coord: &Coordinator, code: &str) {
     for c in code.chars() {
@@ -80,7 +73,7 @@ fn candidates_for(filter_mode: &str, code: &str) -> Vec<String> {
     coord.debug_all_candidate_texts()
 }
 
-/// 精确翻到**末页**（不多按）。多按会翻过头，视口相关断言就测不准了。
+/// 精确翻到末页（不多按）。多按会翻过头，视口相关断言就测不准了。
 fn page_to_last(coord: &Coordinator) {
     for _ in 0..50 {
         let (cur, _, total) = coord.debug_page_info();
@@ -92,7 +85,7 @@ fn page_to_last(coord: &Coordinator) {
     panic!("翻页未收敛：页数异常");
 }
 
-/// 翻到末页后**再按一次**——这一下才是触发放宽的那次。
+/// 翻到末页后再按一次——这一下才是触发放宽的那次。
 fn page_to_end_and_relax(coord: &Coordinator) {
     page_to_last(coord);
     coord.handle_key_event_policed(&key_event(VK_NEXT));
@@ -131,9 +124,7 @@ fn rare_char_hidden_consistently() {
     );
 }
 
-/// ★ 反向对照：放开检索范围后「桜」必须两次都出现。
-///
-/// 排除「桜 压根不在词库/检索不到」这种假绿——没有它，上面那条连词库为空都能通过。
+/// 反向对照：放开检索范围后「桜」必须两次都出现，排除「桜不在词库/检索不到」的假绿。
 #[test]
 fn gb18030_reveals_rare_char_in_both_inputs() {
     if !dict_ready(&data_dir()) {
@@ -149,10 +140,9 @@ fn gb18030_reveals_rare_char_in_both_inputs() {
     }
 }
 
-/// ★ 边界对照：无同码常用字的孤儿码生僻字，智能档下本就保留。
+/// 边界对照：无同码常用字的孤儿码生僻字，智能档下本就保留。
 ///
-/// 「樑」(sivs) 与「档」(siv/sivg) 不共码位。若实现退化成「有常用字就滤掉所有生僻字」，
-/// 这条会红。
+/// 「樑」(sivs) 与「档」(siv/sivg) 不共码位；实现退化成「有常用字就滤掉所有生僻字」时这条会红。
 #[test]
 fn orphan_rare_char_survives_smart_filter() {
     if !dict_ready(&data_dir()) {
@@ -168,10 +158,9 @@ fn orphan_rare_char_survives_smart_filter() {
 
 // ─────────────────────── 层 2：临时放宽 ───────────────────────
 
-/// ★★ **不主动触发就什么都不变**——智能档的既有表现不被任何自动行为改动。
+/// 不主动触发就什么都不变：智能档的既有表现不被任何自动行为改动。
 ///
-/// 这是本功能的默认行为契约。曾实现过「候选不足一页自动补充」，实测下来平白改变了智能档
-/// 的观感（用户没要求却凭空多出生僻字），已删除。若日后有人再加自动补充类逻辑，这条会红。
+/// 这是默认行为契约；自动补充类逻辑会平白多出用户没要求的生僻字，加了这条会红。
 #[test]
 fn smart_list_unchanged_without_explicit_relax() {
     if !dict_ready(&data_dir()) {
@@ -197,9 +186,7 @@ fn smart_list_unchanged_without_explicit_relax() {
     );
 }
 
-/// ★ 候选**不足一页**时，同样靠翻页键放宽——一条路径覆盖两种场景。
-///
-/// `sivg` 智能档下只剩「档」一条，连一页都不到；此时 `page_next` 一样翻不动
+/// 候选不足一页时同样靠翻页键放宽：`sivg` 智能档下只剩「档」一条，`page_next` 一样翻不动
 /// （`current_page + 1 < total_pages` 为假），照样落到放宽分支。
 #[test]
 fn short_list_relaxes_via_page_key_too() {
@@ -229,14 +216,10 @@ fn short_list_relaxes_via_page_key_too() {
     );
 }
 
-/// ★★ **常用字档不参与放宽**——放宽是智能档专属的补偿。
+/// 常用字档不参与放宽，放宽是智能档专属的补偿。
 ///
-/// 智能档按「同码位有常用字」滤掉生僻字，才需要一条把它们放回来的出路；常用字档要的
-/// 正是一个稳定只出常用字的列表，若它也能翻到底放宽，两档的差异就被抹平了，用户也就
-/// 没有理由再选常用字档。
-///
-/// 门禁曾写作「排除 Gb18030」，等价于常用字档照样放宽——与设计文档（全篇以
-/// `filter_mode = "smart"` 为前提）不符。这条钉住修正后的语义。
+/// 智能档按「同码位有常用字」滤掉生僻字，才需要出路把它们放回来；常用字档要的正是稳定只出
+/// 常用字的列表，若它也能放宽，两档差异就被抹平了。
 #[test]
 fn general_scope_does_not_relax_on_page_end() {
     if !dict_ready(&data_dir()) {
@@ -270,10 +253,10 @@ fn general_scope_does_not_relax_on_page_end() {
     );
 }
 
-/// 放宽把被滤候选**追加到末尾**，原有顺序纹丝不动。
+/// 放宽把被滤候选追加到末尾，原有顺序不动。
 ///
-/// **追加而非按真实顺序插入**是刻意的——翻页是线性前进的动作，翻到末尾再翻却让新字插到
-/// 第 1 页（`dwi` 放宽出的字权重 8999 占三简位，正好排在很前面），体验很突兀。
+/// 追加而非按真实顺序插入是刻意的：翻页是线性前进的动作，翻到末尾再翻却让新字插到第 1 页
+/// （`dwi` 放宽出的字权重 8999 占三简位）会很突兀。
 #[test]
 fn relax_appends_filtered_at_end() {
     if !dict_ready(&data_dir()) {
@@ -311,11 +294,10 @@ fn relax_appends_filtered_at_end() {
     assert_eq!(got, all, "放宽后的候选**集合**应与全部字符档一致");
 }
 
-/// ★ 放宽后**当前页必须能看到新增候选**，否则用户按了翻页却什么变化都没有。
+/// 放宽后当前页必须能看到新增候选，否则用户按了翻页却什么变化都没有。
 ///
-/// 「追加末尾 + 翻到下一页」这套组合的最终验收。历史上出过两种错法：按真实顺序插入导致
-/// 新字落在第 1 页（用户在末页看不到），以及视口定位跳回页首（翻着翻着回到开头）。
-/// 用 `dwi`：它放宽出的字权重 8999 占三简位，若改回「按真实顺序插入」这条立刻变红。
+/// 两种错法都会红：按真实顺序插入（`dwi` 放宽出的字权重 8999 占三简位，会落到第 1 页），
+/// 以及视口定位跳回页首。
 #[test]
 fn relax_keeps_new_candidate_visible_on_current_page() {
     if !dict_ready(&data_dir()) {
@@ -352,10 +334,9 @@ fn relax_keeps_new_candidate_visible_on_current_page() {
     assert_eq!(sel, 0, "翻页后高亮应照常归零（与普通翻页一致）");
 }
 
-/// 临时放宽在**本次组合结束后**失效，下次输入回到智能档。
+/// 临时放宽在本次组合结束后失效，下次输入回到智能档。
 ///
-/// 失效收口在 `handle_key_event_policed`（判据＝缓冲已空），覆盖上屏/取消/切焦点等全部
-/// 结束路径，无需逐路径接线。
+/// 失效收口在 `handle_key_event_policed`（判据＝缓冲已空），覆盖上屏/取消/切焦点等全部结束路径。
 #[test]
 fn relax_expires_after_composition_ends() {
     if !dict_ready(&data_dir()) {
@@ -382,7 +363,7 @@ fn relax_expires_after_composition_ends() {
     );
 }
 
-/// 放宽期间**改编码不丢状态**：找生僻字常要退格重打，此时若失效就得反复触发。
+/// 放宽期间改编码不丢状态：找生僻字常要退格重打，此时若失效就得反复触发。
 #[test]
 fn relax_survives_backspace_within_composition() {
     if !dict_ready(&data_dir()) {

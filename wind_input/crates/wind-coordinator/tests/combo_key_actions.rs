@@ -1,18 +1,13 @@
-//! 组合键的 `keys.key_actions`：值域与单键、修饰键**同一张表**（`BoundAction`）。
+//! 组合键的 `keys.key_actions`：值域与单键、修饰键同一张表（`BoundAction`）。组合键通路在按键链
+//! 上位次更早（英文模式分水岭之前）、不与输入争键，本该是限制最少的一条。
 //!
-//! 2026-09-18 之前组合键只认六个动词（`hotkey_action_entry` 那份逐条追加的白名单），
-//! 用户在设置端「自定义按键」里选「组合键」，能配的功能比选「单个按键」少一大截——
-//! 而组合键这条通路在按键链上位次**更早**（英文模式分水岭之前）、不与输入争键、可全局
-//! 拦截，本该是限制最少的一条。那份白名单不是设计论证的产物，是演进残留。
+//! 本文件守三件事：
 //!
-//! 本文件守的是合流后的三件事：
-//!
-//! 1. **能力** —— A/B/C 三类动词绑在组合键上都真的动作（编译期的对照见 wind-config 的
-//!    `combo_keys_accept_the_whole_bound_action_domain`，那条只验进没进表，到不了分派端）；
-//! 2. **热键上下文专有的三条** —— key_code=0 哨兵（不写引导符）、`chinese_mode` 守卫、
-//!    已在该模式时幂等；
-//! 3. **中英切换的回程** —— `toggle_mode` 绑组合键时**不得**带 `CHINESE_ONLY`，
-//!    否则切到英文态后 TSF 不再转发，再也切不回来（单程票）。
+//! 1. 能力：A/B/C 三类动词绑在组合键上都真的动作（wind-config 的
+//!    `combo_keys_accept_the_whole_bound_action_domain` 只验进没进表，到不了分派端）；
+//! 2. 热键上下文专有的三条：key_code=0 哨兵（不写引导符）、`chinese_mode` 守卫、已在该模式时幂等；
+//! 3. 中英切换的回程：`toggle_mode` 绑组合键时不得带 `CHINESE_ONLY`，否则切到英文态后 TSF 不再
+//!    转发，再也切不回来。
 
 use std::path::PathBuf;
 use wind_bridge::handler::{KeyAction, KeyEventData, MessageHandler};
@@ -24,9 +19,8 @@ fn data_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data")
 }
 
-/// ⚠️ 返回 `false` 时全部用例直接 `return` 并报 `ok`——**一条断言都没跑**。这是本仓
-/// `tests/` 下的既有约定（缺 `build_dev/data` 时不红），但它意味着「6/6 通过」本身
-/// 不构成断言已执行的证据。故跳过时留一行痕，让「全绿但什么都没测」看得出来。
+/// 返回 `false` 时全部用例直接 `return` 并报 `ok`，一条断言都没跑（`tests/` 下缺 `build_dev/data`
+/// 时不红的既有约定）。故跳过时留一行痕，让「全绿但什么都没测」看得出来。
 fn has_schemas() -> bool {
     let d = data_dir();
     let ok = d.join("schemas/wubi86.schema.toml").exists()
@@ -61,10 +55,9 @@ fn key(vk: u32, modifiers: u32) -> KeyEventData {
 const VK_J: u32 = 0x4A;
 const VK_W: u32 = 0x57;
 
-/// ⚠️ **三个修饰键不是随手写的**：出厂 `keys.toggle_s2t` 占着 `ctrl+shift+j`，而固定字段
-/// 那几段编译在 `key_actions` **之前**，`match_key_down` 又是 `.find()` 先注册者赢——
-/// 用两修饰键写这些用例，绑定会被出厂那条静默遮蔽，全部用例红在「功能没生效」上，
-/// 而实现其实是对的。选键前先查一遍出厂占用。
+/// 三个修饰键是刻意选的：出厂 `keys.toggle_s2t` 占着 `ctrl+shift+j`，固定字段编译在
+/// `key_actions` 之前，`match_key_down` 又是 `.find()` 先注册者赢。用两修饰键写这些用例，
+/// 绑定会被出厂那条静默遮蔽。选键前先查一遍出厂占用。
 const CTRL_ALT_SHIFT: u32 = MOD_CTRL | MOD_ALT | MOD_SHIFT;
 
 /// 装一条 `ctrl+alt+shift+j` → `verb` 的组合键绑定。
@@ -76,9 +69,7 @@ fn coord_with_combo(verb: &str) -> std::sync::Arc<Coordinator> {
     Coordinator::new_headless(c, Some(&data_dir()))
 }
 
-/// A 类：中英文切换绑组合键。**这是合流最实际的收获**——在此之前 `toggle_mode` 只能绑
-/// `lshift`/`rshift`/`lctrl`/`rctrl`/`capslock` 五个修饰键（`keys.toggle_mode_keys` 的全部
-/// 值域），想配成 Ctrl+Alt+Shift+J 这种组合键，全系统没有任何一条路。
+/// A 类：中英文切换绑组合键（`keys.toggle_mode_keys` 的值域只有五个修饰键，组合键只能走这里）。
 #[test]
 fn combo_key_toggles_chinese_mode() {
     if !has_schemas() {
@@ -91,11 +82,10 @@ fn combo_key_toggles_chinese_mode() {
     assert!(!coord.is_chinese_mode(), "组合键应切到英文");
 }
 
-/// ★ 回程：英文态下同一个组合键必须**还能按得动**。
+/// 回程：英文态下同一个组合键必须还能按得动。
 ///
-/// 单独一条而不是并进上面那个用例：只验「切过去」的话，给 `toggle_mode` 错配上
-/// `CHINESE_ONLY` 策略位的实现也会绿——那种实现切到英文态后 TSF 不再转发这个键，
-/// 用户再也回不到中文，而这恰恰是本仓在 `toggle_schema` 上踩过的那个坑。
+/// 单独一条：只验「切过去」的话，给 `toggle_mode` 错配 `CHINESE_ONLY` 的实现也会绿，而那种实现
+/// 切到英文态后 TSF 不再转发这个键，用户再也回不到中文。
 #[test]
 fn combo_key_toggles_back_from_english() {
     if !has_schemas() {
@@ -109,10 +99,8 @@ fn combo_key_toggles_back_from_english() {
     assert!(coord.is_chinese_mode(), "英文态下按同一个组合键应切回中文");
 }
 
-/// B 类：进 overlay 模式，且**组合区不写引导符**（key_code=0 哨兵）。
-///
-/// 哨兵那半是这条通路专有的：引导键进入要把引导符显示在组合区里，热键进入没有引导符
-/// 可写，写了就会在用户屏幕上凭空多一个字符。
+/// B 类：进 overlay 模式，且组合区不写引导符（key_code=0 哨兵）。热键进入没有引导符可写，
+/// 写了就会在用户屏幕上凭空多一个字符。
 #[test]
 fn combo_key_enters_overlay_without_guide_prefix() {
     if !has_schemas() {
@@ -140,8 +128,7 @@ fn combo_key_enters_overlay_without_guide_prefix() {
 
 /// 幂等：已在目标模式时再按，安静吃掉，不重开。
 ///
-/// 重开会把用户已经打进模式里的编码清掉，放行则让这个组合键泄漏给宿主——「再按一次」
-/// 两种结果都不该有。
+/// 重开会清掉用户已打进模式里的编码，放行则让这个组合键泄漏给宿主，两种都不该有。
 #[test]
 fn combo_key_is_idempotent_inside_its_own_mode() {
     if !has_schemas() {
@@ -165,9 +152,9 @@ fn combo_key_is_idempotent_inside_its_own_mode() {
 
 /// `chinese_mode` 守卫：英文态下 B 类动词不触发。
 ///
-/// 策略位已让 TSF 在英文态不转发这个键，这里仍要判——别的路径转发进来的同一个键，
-/// 会在英文态凭空建一个组合区。判据取 `BoundAction::only_in_chinese_mode`，
-/// 与编译期给不给 `CHINESE_ONLY` 位是同一个方法。
+/// 策略位已让 TSF 在英文态不转发这个键，这里仍要判：别的路径转发进来的同一个键会在英文态
+/// 凭空建一个组合区。判据取 `BoundAction::only_in_chinese_mode`，与编译期给不给
+/// `CHINESE_ONLY` 位是同一个方法。
 #[test]
 fn combo_key_overlay_verb_is_inert_in_english_mode() {
     if !has_schemas() {
@@ -188,19 +175,11 @@ fn combo_key_overlay_verb_is_inert_in_english_mode() {
     );
 }
 
-/// ★★ 门卫没过时**仍然吞键**，不把组合键泄漏给宿主。
+/// 门卫没过时仍然吞键，不把组合键泄漏给宿主。
 ///
-/// 现场用的是一种**正常配置**而非错误路径：活跃方案本身就是拼音方案时，
-/// `temp_pinyin_target()` 恒为 `None`（临拼是「码表方案里临时切拼音」，拼音方案下无意义），
-/// 于是 `commit_and_enter_bound_action` 的门卫返回 `None`。
-///
-/// 此时若按引导键通路的策略「不吞键、落回按键链」，`Ctrl+Alt+Shift+J` 就会原样交给宿主，
-/// 宿主按自己的加速键执行——用户配的是「进临时拼音」，得到的是别的功能。引导键通路能
-/// 那么做是因为它落下去只是打出一个字符。
-///
-/// ⚠️ 这条守的是 2026-09-18 合流时差点丢掉的语义：被删掉的旧手写链里写着「中文模式下
-/// 一律吞键（不放行，避免把该组合键泄漏给宿主）」，合流初版把它换成了引导键通路的
-/// 「门卫没过返回 None」，代码审查抓了出来。
+/// 现场是正常配置：活跃方案本身就是拼音方案时 `temp_pinyin_target()` 恒为 `None`，
+/// `commit_and_enter_bound_action` 的门卫返回 `None`。此时若照引导键通路「不吞键、落回按键链」，
+/// `Ctrl+Alt+Shift+J` 会交给宿主执行它自己的加速键；引导键通路能那么做是因为落下去只打出一个字符。
 #[test]
 fn combo_key_eats_the_key_even_when_the_guard_rejects() {
     if !has_schemas() {
@@ -226,14 +205,11 @@ fn combo_key_eats_the_key_even_when_the_guard_rejects() {
     );
 }
 
-/// ★ A 类的**出口形状**：切换前未上屏的编码要经本次按键应答交还宿主。
+/// A 类的出口形状：切换前未上屏的编码要经本次按键应答交还宿主。
 ///
-/// 单独一条的理由与 `combo_key_toggles_back_from_english` 同类——上面那条只断言
-/// `is_chinese_mode()`，把 `run_dispatch_action` 从 `dispatch_hotkey_keyed` 改成
-/// `dispatch_hotkey`（正是那种「顺手统一一下」的改动）它照样绿，而真机症状是
-/// 「切了中英文，编码还挂在应用的组合区里」——`dispatch_hotkey` 只能 push，
-/// 而 push 的空文本清不掉宿主的 composition。`schema_switch_commit.rs` 整个文件
-/// 就是为这一类缺陷建的。
+/// 上一条只断言 `is_chinese_mode()`，把 `run_dispatch_action` 从 `dispatch_hotkey_keyed` 改成
+/// `dispatch_hotkey` 它照样绿；而 `dispatch_hotkey` 只能 push，空文本清不掉宿主的 composition，
+/// 编码会挂在应用的组合区里（同类缺陷见 `schema_switch_commit.rs`）。
 #[test]
 fn combo_key_toggle_mode_returns_pending_code_through_the_key_reply() {
     if !has_schemas() {
@@ -260,10 +236,7 @@ fn combo_key_toggle_mode_returns_pending_code_through_the_key_reply() {
     }
 }
 
-/// C 类：方案切换绑组合键（合流前就支持，作为回归对照留着）。
-///
-/// 与上面几条同在一个文件里跑，是为了在「组合键分派整条链路」被改动时一起红——
-/// 它是这条链路上唯一一条合流前就绿的用例。
+/// C 类：方案切换绑组合键，作为组合键分派整条链路的回归对照。
 #[test]
 fn combo_key_switches_schema() {
     if !has_schemas() {

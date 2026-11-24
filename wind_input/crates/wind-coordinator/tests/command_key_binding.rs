@@ -6,13 +6,13 @@
 //!
 //! # 探针为什么是 `ime.toggle("candwin")`
 //!
-//! 它只翻一个内存位（候选窗隐藏开关）：不写盘、不切方案、**不碰组合区**。会话态那条要同时
-//! 断言「命令执行了」与「当前组合原样不动」，拿 `ime.schema` 当探针的话，切方案本身就会清掉
-//! 组合，两件事分不开。`ime.toggle("layout")` 则会写用户配置文件，测试里不该碰。
+//! 它只翻一个内存位（候选窗隐藏开关）：不写盘、不切方案、不碰组合区。会话态那条要同时断言
+//! 「命令执行了」与「当前组合原样不动」，`ime.schema` 切方案本身就会清掉组合；`ime.toggle("layout")`
+//! 会写用户配置文件。
 //!
 //! 命令经 `spawn_command` 起独立线程执行，结果不是同步可见的，故用轮询等待。
 //!
-//! ⚠️ 依赖 `build_dev/data` 真实词库；缺失时**静默跳过**（判据是耗时 0.00s）。
+//! 依赖 `build_dev/data` 真实词库；缺失时静默跳过（判据是耗时 0.00s）。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -143,10 +143,8 @@ fn combo_key_runs_command() {
     assert_probe_ran(&coord);
 }
 
-/// ★ 命令与中英态无关：英文态下同一个组合键照样按得动。
-///
-/// 守的是策略位——带上 `CHINESE_ONLY` 的话 TSF 在英文态不转发，分派端也会被
-/// `only_in_chinese_mode` 守卫挡掉。
+/// 命令与中英态无关：英文态下同一个组合键照样按得动。带上 `CHINESE_ONLY` 的话 TSF 在英文态不转发，
+/// 分派端也会被 `only_in_chinese_mode` 守卫挡掉。
 #[test]
 fn combo_key_runs_command_in_english_mode() {
     skip_without_data!();
@@ -160,7 +158,7 @@ fn combo_key_runs_command_in_english_mode() {
     assert_probe_ran(&coord);
 }
 
-/// ★ `shift+backspace` 绑命令（t372：一键撤销刚上屏的长词组，绑 `ime.undo_commit()`）：
+/// `shift+backspace` 绑命令（一键撤销刚上屏的长词组，绑 `ime.undo_commit()`）：
 /// 空闲态（刚上屏完、没有组合）与组合中途都命中即执行并吞键，不落到退格的原语义。
 #[test]
 fn shift_backspace_runs_command_when_idle() {
@@ -240,7 +238,7 @@ fn combo_key_accepts_cc_wrapped_expression() {
     assert_probe_ran(&coord);
 }
 
-/// 纯修饰键轻敲（keyup）：执行命令，且**不再**落到出厂的中英切换（rshift 出厂是 toggle_mode）。
+/// 纯修饰键轻敲（keyup）：执行命令，且不再落到出厂的中英切换（rshift 出厂是 toggle_mode）。
 #[test]
 fn modifier_tap_runs_command_instead_of_toggle_mode() {
     skip_without_data!();
@@ -265,11 +263,10 @@ fn leading_key_runs_command_when_idle() {
     assert_probe_ran(&coord);
 }
 
-/// ★ 单个有字符的键在**英文态**透传：那个字符照常出，命令不执行。
+/// 单个有字符的键在英文态透传：那个字符照常出，命令不执行。
 ///
-/// 引导键链在英文模式分水岭之后，英文态下有字符的键必须能出字——这是这条通路的物理
-/// 约束，不是命令动词的取舍（与 A 类动词同）。设置端文案据此区分「组合键 / 修饰键两种
-/// 态都能按」与「单键只在中文态」。
+/// 引导键链在英文模式分水岭之后，英文态下有字符的键必须能出字，这是通路的物理约束。设置端文案
+/// 据此区分「组合键 / 修饰键两种态都能按」与「单键只在中文态」。
 #[test]
 fn leading_key_passes_through_in_english_mode() {
     skip_without_data!();
@@ -299,7 +296,7 @@ fn leading_key_does_not_run_command_mid_composition() {
 
 // ───────────────────────── keys.session_actions ─────────────────────────
 
-/// ★ 会话态：执行命令，**当前组合原样不动**（不清空、不上屏），吞键。
+/// 会话态：执行命令，当前组合原样不动（不清空、不上屏），吞键。
 #[test]
 fn session_key_runs_command_and_keeps_composition() {
     skip_without_data!();
@@ -319,7 +316,7 @@ fn session_key_runs_command_and_keeps_composition() {
     assert_eq!(coord.debug_page_texts(), texts, "候选不应变");
 }
 
-/// ★ 功能键 F1 能绑会话态动作（候选中按 F1 触发命令），组合区原样不动。
+/// 功能键 F1 能绑会话态动作（候选中按 F1 触发命令），组合区原样不动。
 #[test]
 fn session_function_key_runs_command() {
     skip_without_data!();
@@ -335,7 +332,7 @@ fn session_function_key_runs_command() {
     assert_eq!(coord.debug_preedit(), preedit, "组合区不应变");
 }
 
-/// ★ `toggle_tip`：把悬停目标设到高亮项，再按一次收起；移动高亮同鼠标离开一样收起（t372）。
+/// `toggle_tip`：把悬停目标设到高亮项，再按一次收起；移动高亮同鼠标离开一样收起。
 #[test]
 fn session_toggle_tip_follows_highlight() {
     skip_without_data!();
@@ -355,7 +352,7 @@ fn session_toggle_tip_follows_highlight() {
     assert_eq!(coord.debug_hover_target(), -1, "再按一次收起");
 }
 
-/// 绑在 → 上：编码区光标不在末尾时照旧右移光标，到末尾才开关提示（t372）。
+/// 绑在 → 上：编码区光标不在末尾时照旧右移光标，到末尾才开关提示。
 #[test]
 fn toggle_tip_on_right_moves_caret_before_end() {
     skip_without_data!();
@@ -413,7 +410,7 @@ fn caret_right_next_moves_highlight_at_end() {
     assert_eq!(coord.debug_page_info().1, before + 1, "高亮应下移一位");
 }
 
-/// 会话态命令**不要候选**：打了码没候选时也能按（网址模式是「有会话、无候选」的天然样本）。
+/// 会话态命令不要候选：打了码没候选时也能按（网址模式是「有会话、无候选」的天然样本）。
 #[test]
 fn session_key_runs_command_without_candidates() {
     skip_without_data!();
@@ -457,7 +454,7 @@ fn empty_expression_is_not_a_binding() {
     assert_probe_not_ran(&coord);
 }
 
-/// GH#254：Ctrl+= 开了快捷加词预览后切到英文，加词会话必须随之结束——
+/// Ctrl+= 开了快捷加词预览后切到英文，加词会话必须随之结束——
 /// 否则 `hotkey_session` 留着，英文模式下 Ctrl+- 乃至单键 `-` 都被吞。
 #[test]
 fn mode_switch_ends_add_word_session() {
@@ -488,7 +485,7 @@ fn mode_switch_ends_add_word_session() {
     );
 }
 
-/// GH#267：`ui.candidate.syllable_separator` 只换显示——应用里的组合串不再带 `'`，引擎缓冲与切分不变。
+/// `ui.candidate.syllable_separator` 只换显示——应用里的组合串不再带 `'`，引擎缓冲与切分不变。
 #[test]
 fn syllable_separator_is_display_only() {
     skip_without_data!();

@@ -1,23 +1,17 @@
-//! Mix（快捷输入 / 融合方案）的用户数据归属 —— 词频与候选调整按**成员方案**落桶。
+//! Mix（快捷输入 / 融合方案）的用户数据归属：词频与候选调整按成员方案落桶。
 //!
-//! Mix 与临拼/临英不同：它是**融合**方案，一次列表里混着算式、日期、拼音、英文、生僻字，
-//! 成员甚至可以是第三方方案。由此有两条与别处不同的纪律：
+//! Mix 是融合方案，一次列表里混着算式、日期、拼音、英文、生僻字，成员可以是第三方方案。两条纪律：
 //!
-//! ★★ **用户数据按成员方案归属，不按 active**。各成员的词频/候选调整本就该记在各自桶里；
-//! 按 active 归属会把拼音成员学到的东西记进主方案（常是五笔）的桶。读端在
-//! `update_mix_candidates` 里逐成员段应用，写端按候选来源反查（`mix_candidate_owner`），
-//! 两端落同一个桶。
+//! - 用户数据按成员方案归属，不按 active：按 active 会把拼音成员学到的东西记进主方案（常是五笔）
+//!   的桶。读端在 `update_mix_candidates` 里逐成员段应用，写端按候选来源反查（`mix_candidate_owner`），
+//!   两端落同一个桶。
+//! - 应用粒度是「成员段内」而非整张列表：拼音里调到第 3 位说的是「拼音候选里的第 3」，mix 的第 3 位
+//!   可能是算式；段内应用不动成员之间的次序（成员顺序即候选优先级）。隐藏（`deleted`）不受此限。
 //!
-//! ★★ **应用粒度是「成员段内」，不是整张列表**。用户在拼音方案里把某词调到第 3 位，说的是
-//! 「拼音候选里的第 3」；mix 的第 3 位可能是算式或日期，跨类型套用那个位置没有意义。段内
-//! 应用既兑现调整，又不动成员之间的次序（「成员顺序即候选优先级」是 mix 的既有设计）。
-//! 隐藏（`deleted`）不受此限——「这条别出现」与谁排第几无关，任何粒度上都成立。
+//! 检索范围过滤（`mark_common`/`apply_filter`）刻意不接：mix 成员可以是第三方方案，还有自带准入的
+//! 生僻字成员，主路径的统一常用度判据与之冲突。故本文件不测过滤，那不是缺口。
 //!
-//! ⛔ **检索范围过滤（`mark_common`/`apply_filter`）刻意不接**（2026-09-08 用户拍板）：
-//! mix 成员可以是第三方方案，还有专门的生僻字成员自带准入。用主路径那套统一的常用度判据
-//! 去裁剪，与生僻字成员的存在意义直接冲突。故本文件**不测**过滤，那不是缺口。
-//!
-//! ⚠️ 词库缺失时整族静默跳过，判据是耗时（真跑约 1s 量级 vs 跳过 0.0x s）。
+//! 词库缺失时整族静默跳过，判据是耗时（真跑约 1s 量级、跳过 0.0x s）。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -52,8 +46,8 @@ fn key_event(key_code: u32) -> KeyEventData {
 
 /// 五笔主方案（active ≠ 拼音成员，否则「按 active 归属」的错误实现也能通过）。
 ///
-/// ⚠️ 拼音调频必须**显式打开**：`Config::default()` 不读 `data/config.toml`，
-/// 那里默认是 false ⇒ 不设的话测的是一个关着的功能（本仓既有的假绿源）。
+/// 拼音调频必须显式打开：`Config::default()` 不读 `data/config.toml`，那里默认是 false，
+/// 不设的话测的是一个关着的功能。
 fn mix_config() -> Config {
     let mut cfg = Config::default();
     cfg.schema.available = vec!["wubi86".into(), "pinyin".into()];
@@ -111,9 +105,7 @@ fn baseline(tag: &str, input: &str) -> Option<Vec<String>> {
     Some(v)
 }
 
-/// ★ 隐藏：拼音方案里隐藏掉的候选，快捷输入里也不该冒出来。
-///
-/// 这是**改动前实测会红**的那条：探针显示隐藏「你」后它在 mix 里照样排首位。
+/// 隐藏：拼音方案里隐藏掉的候选，快捷输入里也不该冒出来。
 #[test]
 fn hidden_in_pinyin_bucket_is_hidden_in_mix() {
     let Some(base) = baseline("hide", "ni") else {
@@ -136,7 +128,7 @@ fn hidden_in_pinyin_bucket_is_hidden_in_mix() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// ★ 置顶：作用在**成员段内**。拼音成员段的首条应变成被置顶的那个。
+/// 置顶：作用在成员段内。拼音成员段的首条应变成被置顶的那个。
 #[test]
 fn pin_in_pinyin_bucket_reorders_within_member_segment() {
     let Some(base) = baseline("pin", "ni") else {
@@ -160,9 +152,8 @@ fn pin_in_pinyin_bucket_reorders_within_member_segment() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// **反向对照**：带 store 但不写规则 ⇒ 顺序回到原序。
-///
-/// 缺了它，「凡是接上 store 就变序」之类的实现会让上面两条假绿。
+/// 反向对照：带 store 但不写规则 ⇒ 顺序回到原序。缺了它，「凡是接上 store 就变序」的实现会让
+/// 上面两条假绿。
 #[test]
 fn store_without_rule_keeps_mix_order() {
     let Some(base) = baseline("nopin", "ni") else {
@@ -175,9 +166,8 @@ fn store_without_rule_keeps_mix_order() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// **变异防线**：规则写进 active 方案（`wubi86`）桶 ⇒ mix 不得生效。
-///
-/// 归属若退回 active，本用例与上面两条会从相反方向同时变红。
+/// 变异防线：规则写进 active 方案（`wubi86`）桶 ⇒ mix 不得生效。归属若退回 active，本用例与上面
+/// 两条会从相反方向同时变红。
 #[test]
 fn rule_in_active_schema_bucket_does_not_leak_into_mix() {
     let Some(base) = baseline("leak", "ni") else {
@@ -200,9 +190,8 @@ fn rule_in_active_schema_bucket_does_not_leak_into_mix() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// ★ 写端：mix 里选走拼音候选，词频记进 `"pinyin"` 桶，不落主方案桶。
-///
-/// 读写两端必须同桶，否则「写进 A、读的是 B」——记账看着成功而顺序永不动。
+/// 写端：mix 里选走拼音候选，词频记进 `"pinyin"` 桶，不落主方案桶；读写不同桶时记账看着成功而
+/// 顺序永不动。
 #[test]
 fn mix_freq_lands_in_member_bucket_not_active_schema() {
     if !has_schemas() {
@@ -224,7 +213,7 @@ fn mix_freq_lands_in_member_bucket_not_active_schema() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// ★ 闭环：在拼音方案里学到的词频，快捷输入里照样生效（同一个桶的读端）。
+/// 闭环：在拼音方案里学到的词频，快捷输入里照样生效（同一个桶的读端）。
 #[test]
 fn freq_learned_in_pinyin_schema_reranks_mix() {
     let Some(base) = baseline("freq", "ni") else {
@@ -250,20 +239,14 @@ fn freq_learned_in_pinyin_schema_reranks_mix() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// ★★ **取数窗口 ≠ 每成员配额**（A2-3 / [t141](https://forum.windinput.com/topic/141)）。
+/// 取数窗口 ≠ 每成员配额。
 ///
-/// 词频重排与候选调整都只在**已取到的那批候选**里工作（`apply_freq_rerank_in` 不回查词库），
-/// 所以「问引擎要多少条」就是它们的可见窗口。此前 mix 对每个真实方案成员写死 50，而 50 同时
-/// 又是每成员配额 ⇒ 窗口恒等于配额，**排在配额之外的词永远等不到被提上来**。
+/// 词频重排与候选调整只在已取到的那批候选里工作（`apply_freq_rerank_in` 不回查词库），「问引擎要
+/// 多少条」就是它们的可见窗口。窗口若等于配额，排在配额之外的词永远等不到被提上来（临英里一码就
+/// 置顶的词，快捷输入要多打一码才生效）。
 ///
-/// 用户侧的观感是「临英里一码就置顶的词，快捷输入要多打一码才生效」——多打的那一码把候选面
-/// 缩到了配额以内，词这才进了窗口。
-///
-/// ⚠️ 判据是**重排前的原序位次**，不是重排后的名次：实测临英打 `hi` 拿 87 条、`history`
-/// 重排后在第 34，可它的原序位次在 50 开外——快捷输入的 50 条窗口压根取不到它，也就无从重排。
-///
-/// ⚠️ **判据必须落在配额之外的词上**。拿一个本来就在前 50 的词做断言，「先截后排」的旧实现
-/// 同样能通过——那正是本仓反复出现的假绿形态，故下面先把「原序在配额之外」断成前提。
+/// 判据是重排前的原序位次而非重排后名次，且必须落在配额之外的词上：拿本来就在前 50 的词断言，
+/// 「先截后排」的实现同样能通过，故下面先把「原序在配额之外」断成前提。
 #[test]
 fn freq_reaches_member_candidates_beyond_quota() {
     if !has_schemas() || !data_dir().join("schemas/english").is_dir() {
@@ -302,27 +285,23 @@ fn freq_reaches_member_candidates_beyond_quota() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// ★★ **配额一侧的对照**：取数放大不得吃掉靠后成员的位置。
+/// 配额一侧的对照：取数放大不得吃掉靠后成员的位置。
 ///
-/// 上一条用例锁的是「窗口必须大」，这条锁「配额必须小」——两者是同一个不变式的两半，缺了
-/// 这半边，`truncate(MIX_MEMBER_QUOTA)` 整行被删掉时无人报警。而删掉它正是本函数**修改前
-/// 的注释专门警告过**的那种回归：本函数无跨成员排序、`seen` 又是先到先得，每个成员留多少
-/// 直接等于它从靠后成员那里抢走多少位置，窗口放到 300 会把排在末位的 `english` 成员整段
-/// 推到翻页之外。
+/// 上一条锁「窗口必须大」，这条锁「配额必须小」，缺了它 `truncate(MIX_MEMBER_QUOTA)` 被删时无人报警。
+/// 本函数无跨成员排序、`seen` 先到先得，每个成员留多少就从靠后成员那里抢走多少位置，窗口放大会把
+/// 末位的 `english` 成员整段推到翻页之外。
 ///
-/// 判据取**末位成员首条候选的下标上界**而非「总条数 == 50」：后者会随词库版本漂移变脆，
-/// 而「英文成员还够得着」才是这条配额真正要保住的东西。
+/// 判据取末位成员首条候选的下标上界而非「总条数 == 50」：后者随词库版本漂移变脆。
 #[test]
 fn member_quota_caps_each_member_segment() {
     if !has_schemas() || !data_dir().join("schemas/english").is_dir() {
         eprintln!("跳过：词库不存在");
         return;
     }
-    // 出厂 quick_mix 的成员序：quick_input.* → $primary_pinyin → english，英文在**末位**。
+    // 出厂 quick_mix 的成员序：quick_input.* → $primary_pinyin → english，英文在末位。
     //
-    // ⚠️ 码必须让**靠前的拼音成员也吃满配额**，否则前面没东西去挤后面，这条用例恒绿：
-    // `hi` 就是这样的反例（不是合法拼音音节 ⇒ 拼音成员零候选 ⇒ 英文恒在最前，删掉配额
-    // 也测不出来）。`ni` 两边都有候选，才构成真正的竞争。
+    // 码必须让靠前的拼音成员也吃满配额，否则前面没东西去挤后面、这条恒绿：`hi` 不是合法拼音音节，
+    // 拼音成员零候选；`ni` 两边都有候选，才构成竞争。
     let (store, path) = fresh_store("wind_mix_quota_cap.redb");
     let cands = mix_candidates_with(mix_config(), Arc::clone(&store), "ni");
 

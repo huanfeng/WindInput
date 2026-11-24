@@ -1,18 +1,17 @@
 //! 码表逆切分的端到端验证：从按键入口走到候选窗显示与上屏。
 //!
-//! 引擎单测（`codetable/engine.rs` 的 `split_*`）证明的是组合候选的构造；本文件证明的是
-//! 两件只有走完协调器才看得见的事：
+//! 引擎单测（`codetable/engine.rs` 的 `split_*`）证明组合候选的构造；本文件证明只有走完协调器
+//! 才看得见的事：
 //!
-//! - **段候选吃候选调整**（论坛 t231）：`EngineManager` 真的把 store 注入了引擎。用户在
-//!   段码上删掉的词不得被拼进组合——引擎单测里是手工 `with_segment_shadow`，漏接线照样绿；
-//! - **次选只显示后段**（论坛 t231 / t11）：显示与上屏在协调器出口分叉，首条组合由
-//!   显示出口 `cand_display_text` 判定为整串；
-//! - **段内置顶**活过协调器的重排（引擎单测只看得到引擎序，审查实测曾被按权重排回）。
+//! - 段候选吃候选调整：`EngineManager` 真的把 store 注入了引擎，用户在段码上删掉的词不得被拼进
+//!   组合（引擎单测里是手工 `with_segment_shadow`，漏接线照样绿）；
+//! - 次选只显示后段：显示与上屏在协调器出口分叉，首条组合由 `cand_display_text` 判定为整串；
+//! - 段内置顶活过协调器的重排（引擎单测只看得到引擎序）。
 //!
 //! 现场 `aaab`：五笔 86 里是空码，`aa`（式/戒…）与 `ab`（节/蒸…）都有重码。
 //! 逆切分出厂关，经方案级 override 打开。
 //!
-//! ⚠️ 依赖 `build_dev/data` 真实词库；缺失时**静默跳过**（判据是耗时 0.00s）。
+//! 依赖 `build_dev/data` 真实词库；缺失时静默跳过（判据是耗时 0.00s）。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -110,7 +109,7 @@ fn alt_candidates_show_back_segment_but_commit_whole() {
         shown[1],
         texts[1]
     );
-    // 选 ② 上屏的是**整串**，不是显示的那半截。
+    // 选 ② 上屏的是整串，不是显示的那半截。
     match coord.handle_key_event(&key(u32::from(b'2'))) {
         KeyAction::InsertText { text, .. } => assert_eq!(text, texts[1]),
         other => panic!("选 ② 应上屏整串，实际 {other:?}"),
@@ -129,7 +128,7 @@ fn full_display_keeps_whole_text() {
     let texts = coord.debug_page_texts();
     assert!(texts.len() >= 2, "前提：应有 ≥2 条组合，实际 {texts:?}");
     assert_eq!(coord.debug_page_display_texts(), texts);
-    // ★ 前提对照：同一现场在默认档下**确实**分叉——否则 `aaab` 哪天不再走切分（词库加了
+    // 前提对照：同一现场在默认档下确实分叉——否则 `aaab` 哪天不再走切分（词库加了
     // 条目），本条会因为「根本没有组合候选」而假绿。
     let (back, _store2, _dir2) = coord_with("full_ctl", "");
     press(&back, INPUT);
@@ -139,7 +138,7 @@ fn full_display_keeps_whole_text() {
     );
 }
 
-/// 论坛 t231：段码上被删除的词不再参与组合。
+/// 段码上被删除的词不再参与组合。
 #[test]
 fn deleted_segment_word_is_not_composed() {
     if !has_data() {
@@ -193,7 +192,7 @@ fn pinned_segment_word_leads_composition() {
     assert_eq!(coord.debug_page_display_texts()[0], after[0]);
 }
 
-/// 以词定字按**所见**取字：高亮「② 蒸」时按 `,` 上屏「式蒸」的前段 + 「蒸」，而不是整串
+/// 以词定字按所见取字：高亮「② 蒸」时按 `,` 上屏「式蒸」的前段 + 「蒸」，而不是整串
 /// 第一个字「式」。
 #[test]
 fn select_char_on_alt_uses_shown_back_segment() {
@@ -218,9 +217,8 @@ fn select_char_on_alt_uses_shown_back_segment() {
     }
 }
 
-/// 前段多取时，前段**非首选**的行被顶到首位（这里用整串码上的置顶；词频重排同形）：
-/// 首条展示的是另一个前段，其余行若仍只显示后段，「① 戒节 ② 节」的 ② 读起来是「戒节」、
-/// 上屏却是「式节」⇒ 此时全部显示整串。
+/// 前段多取时，前段非首选的行被顶到首位（这里用整串码上的置顶；词频重排同形）：其余行若仍只
+/// 显示后段，「① 戒节 ② 节」的 ② 读起来是「戒节」、上屏却是「式节」，故此时全部显示整串。
 #[test]
 fn other_front_on_top_shows_every_row_whole() {
     if !has_data() {
@@ -300,11 +298,11 @@ fn coord_xy_with(
     (coord, TempRoot(root))
 }
 
-/// 论坛 t307：短语码在码表里空码时，引擎照样切分——直通命令 `ojs` 旁边多出「井三/井所有」，
-/// 组合区显示切分串 `oj's`。精确码短语就是这串码的精确解，切分候选须让位。
+/// 短语码在码表里空码时，精确码短语就是这串码的精确解，切分候选须让位；否则直通命令 `ojs` 旁边
+/// 会多出「井三/井所有」，组合区显示切分串 `oj's`。
 #[test]
 fn exact_code_phrase_suppresses_split() {
-    // ★ 前提对照：没有短语时这串码确实切分——否则下面是在一个不切的世界里断言「没切」。
+    // 前提对照：没有短语时这串码确实切分——否则下面是在一个不切的世界里断言「没切」。
     let (bare, _d0) = coord_xy("t307_bare");
     press(&bare, "ojs");
     assert_eq!(bare.debug_page_texts(), vec!["井三", "井所有"]);
@@ -346,9 +344,8 @@ fn exact_code_phrase_suppresses_split_at_full_length() {
     assert_eq!(coord.debug_page_texts(), vec!["短语甲"]);
 }
 
-/// 论坛 t302：精确匹配 + 空码补全 + 逆切分，满码长 `ojss` 空码、但码表收了超码长的 `ojssa`。
-/// 期望：不切分，空码补全给出后续编码那一条。修复前两处都错——切成「井三三…」，且补全的
-/// `< max_code_length` 闸门在满码长处不放行。
+/// 精确匹配 + 空码补全 + 逆切分：满码长 `ojss` 空码、但码表收了超码长的 `ojssa`。
+/// 期望不切分，空码补全给出后续编码那一条（补全的 `< max_code_length` 闸门须在满码长处放行）。
 #[test]
 fn full_length_empty_code_with_longer_entry_shows_completion_not_split() {
     let exact = |c: &mut Config| {
@@ -359,7 +356,7 @@ fn full_length_empty_code_with_longer_entry_shows_completion_not_split() {
     press(&coord, "ojss");
     assert_eq!(coord.debug_page_texts(), vec!["后续"]);
 
-    // ★ 反向对照：没有超码长词条时同一串照切——证明拦下切分的是后继。
+    // 反向对照：没有超码长词条时同一串照切——证明拦下切分的是后继。
     let (bare, _d0) = coord_xy_with("t302_bare", "", exact);
     press(&bare, "ojss");
     assert!(
@@ -369,9 +366,8 @@ fn full_length_empty_code_with_longer_entry_shows_completion_not_split() {
     );
 }
 
-/// 论坛 t302：超码长（第 5 码起）空码、仍有更长后续时照样提示后续编码，直到打全。
-/// 小鹤音形现场 `okou` → `okouu` → `okouuxb`（𢠙），曾只在满码长那一格提示、第 5 码断开。
-/// 竞争者 `ojssbc` 与目标在第 5 码分岔：证明补的是「本串的后续」而非同前缀随便一条。
+/// 超码长（第 5 码起）空码、仍有更长后续时照样提示后续编码，直到打全（小鹤音形 `okouuxb` 𢠙）。
+/// 竞争者 `ojssbc` 与目标在第 5 码分岔，证明补的是「本串的后续」而非同前缀随便一条。
 /// 顶码同开：有更长后继时顶码不得抢先上屏。
 #[test]
 fn completion_continues_past_full_length() {
@@ -408,9 +404,9 @@ fn completion_continues_past_full_length() {
     assert_eq!(ph.debug_page_texts(), vec!["短语后续"], "超码长短语后续");
 }
 
-/// 论坛 t302 连带：开 `clear_on_empty_max` 时，超码长的短语后续补全须拦住满码空码清空。
-/// 引擎只看码表（`ojsxy` 无后继 ⇒ 给出清空资格），协调器按最终列表裁决——补出的短语后续
-/// 在列表里就不清。反例：`ojssz` 码表与短语都无后继，照常清空。
+/// 开 `clear_on_empty_max` 时，超码长的短语后续补全须拦住满码空码清空。引擎只看码表（`ojsxy`
+/// 无后继 ⇒ 给出清空资格），协调器按最终列表裁决，补出的短语后续在列表里就不清。
+/// 反例：`ojssz` 码表与短语都无后继，照常清空。
 #[test]
 fn phrase_completion_past_full_length_blocks_clear_on_empty_max() {
     let exact_clear = |c: &mut Config| {

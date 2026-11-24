@@ -1,4 +1,4 @@
-//! 英文「屏蔽这个词」：英文方案 / 临时英文右键删 ≥2 字母的词，按**词库原文**屏蔽（`english` 桶里
+//! 英文「屏蔽这个词」：英文方案 / 临时英文右键删 ≥2 字母的词，按词库原文屏蔽（`english` 桶里
 //! `code = *` 的删除行），所有前缀、补全都不再出；输入原文那一条不受屏蔽、回车照常上屏。
 //! 大小写不归一（`ok` 与 `OK` 是两个词）。混在拼音 / 码表 / 混输里的英文不读这个屏蔽集。
 //! 另含英文删除 / 置顶在大小写跟随下的落键修正、混入英文的用户词删除。
@@ -6,7 +6,7 @@
 //!
 //! 每条用例先断言删除前候选确实在。词库候选与头部原文候选靠编码区分：头部候选无码。
 //!
-//! ⚠️ 依赖 `build_dev/data` 真实词库；缺失时整族静默跳过（判据是耗时 0.0x s）。
+//! 依赖 `build_dev/data` 真实词库；缺失时整族静默跳过（判据是耗时 0.0x s）。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -102,7 +102,7 @@ fn triples(cfg: &Config, store: &Arc<Store>, input: &str) -> Vec<(String, String
         .collect()
 }
 
-/// 有没有文本（忽略大小写）等于 `word` 的**词库**候选（有编码；头部原文候选无码）。
+/// 有没有文本（忽略大小写）等于 `word` 的词库候选（有编码；头部原文候选无码）。
 fn has_dict_word(cands: &[(String, String)], word: &str) -> bool {
     cands
         .iter()
@@ -141,7 +141,7 @@ fn delete_item(coord: &Coordinator, idx: usize) -> wind_ui_types::MenuItemSpec {
         .expect("菜单应有删除项")
 }
 
-/// ★ 临英 `Hel` 下删投影成 `Help` 的词库词 `help`：按词库原文屏蔽，`he` / `help` / `helper`
+/// 临英 `Hel` 下删投影成 `Help` 的词库词 `help`：按词库原文屏蔽，`he` / `help` / `helper`
 /// 下都不再出这个词库词，英文方案主路同样不出；`Help` 原文那条仍在、回车照常上屏。
 #[test]
 fn temp_english_delete_blocks_word_by_dict_text() {
@@ -301,7 +301,7 @@ fn single_letter_not_blocked() {
     );
 }
 
-/// ★ 英文方案主路 + 大小写跟随：`Hel` 下把投影成 `Held` 的词置顶，规则按词库原文落键、当场生效，
+/// 英文方案主路 + 大小写跟随：`Hel` 下把投影成 `Held` 的词置顶，规则按词库原文落键、当场生效，
 /// 菜单的「恢复默认」随之可用。修前写的是 `Held`、读端比的是 `held`，置顶无效。
 #[test]
 fn english_pin_under_case_follow_takes_effect() {

@@ -3,7 +3,7 @@
 //! 读端在 shadow 之后才插入简繁变体（`expand_s2t_variants`）、单字母重复上屏项与 emoji；
 //! 写端读的 `state.candidates` 已含这些项，算下标时要跳过。
 //!
-//! ⚠️ 依赖 `build_dev/data` 真实词库；缺失时整族静默跳过（判据是耗时 0.0x s）。
+//! 依赖 `build_dev/data` 真实词库；缺失时整族静默跳过（判据是耗时 0.0x s）。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -391,7 +391,7 @@ fn pin_clears_same_word_deleted() {
     assert_eq!(pos_of(&texts(&cfg, &store, "nihao"), "你好"), Some(2));
 }
 
-/// 临时拼音按**它自己的列表**应用 pinyin 桶里 N>0 的规则，不报错：先在临拼里看清目标词，
+/// 临时拼音按它自己的列表应用 pinyin 桶里 N>0 的规则，不报错：先在临拼里看清目标词，
 /// 写下第 3 位的规则，再进临拼，它就在临拼列表第 3 位。
 #[test]
 fn temp_pinyin_applies_pin_on_its_own_list() {
@@ -458,7 +458,7 @@ fn move_down_onto_pinned_neighbor_swaps_back() {
 
 /// 置顶 b 得 `[b,a,c]`，再后移 b 回到 `[a,b,c]`。
 ///
-/// 对照用例：a 没有规则，不触发交换，修复前也是绿的；钉住的是「置顶后再后移」这条路不回归。
+/// 对照用例：a 没有规则，不触发交换；钉住「置顶后再后移」这条路不回归。
 #[test]
 fn move_top_then_move_down_restores() {
     skip_without_data!();
@@ -472,7 +472,7 @@ fn move_top_then_move_down_restores() {
 
 /// 对照（前移）：置顶 c 得 `[c,a,b,d]`，前移 a 与 c 交换得 `[a,c,b,d]`。
 ///
-/// 对照用例：前移写的规则是最新的、同位时排在前面，本身就等于交换，修复前也是绿的。
+/// 对照用例：前移写的规则最新、同位时排在前面，本身就等于交换。
 #[test]
 fn move_up_onto_pinned_neighbor_swaps() {
     skip_without_data!();
@@ -598,8 +598,8 @@ fn pin_at_counts_ui_slots_with_s2t_variants() {
 
 /// 两条规则同在第 2 位（Y 新），界面 `[a,Y,X,…]`；前移 X 得 `[a,X,Y,…]`。
 ///
-/// 前移写下的规则最新、同位时排在前面，本身就是交换的效果，故这一条**不依赖**交换代码
-/// （去掉交换实测仍绿）；真正依赖交换的是后移，见 `move_down_onto_pinned_neighbor_swaps_back`。
+/// 前移写下的规则最新、同位时排在前面，本身就是交换的效果，故这一条不依赖交换代码；
+/// 真正依赖交换的是后移，见 `move_down_onto_pinned_neighbor_swaps_back`。
 #[test]
 fn move_up_past_same_position_pin() {
     skip_without_data!();
