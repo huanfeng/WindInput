@@ -1,7 +1,6 @@
 //! 生命周期：配置重载、服务重启、独占模式进入/复位。
 //!
-//! 从 coordinator.rs 拆出（同 crate 内 `impl Coordinator` 块，组织性重构，无逻辑变更）。
-//! 注：IME 激活/失活、焦点变更、composition 终止是 MessageHandler trait 方法，留在
+//! IME 激活/失活、焦点变更、composition 终止是 MessageHandler trait 方法，在
 //! coordinator.rs 的 `impl MessageHandler` 块。
 
 use crate::coordinator::{Coordinator, State, punct_char};
@@ -17,8 +16,8 @@ use wind_ui_types::UiCommand;
 pub(crate) enum BoundKeyDecision {
     /// 方案表未对该键表态 —— 照常走全局引导键链（未配置者行为不变）。
     NotBound,
-    /// 表了态但该键让位（显式 `none` / 活码前缀 / z 的 repeat 身份）——
-    /// 落普通输入，且**不再落全局引导键链**。
+    /// 表了态但该键让位（显式 `none` / 活码前缀 / z 的 repeat 身份）：落普通输入，
+    /// 且不再落全局引导键链。
     Yield,
     /// 执行这个动作。
     Act(BoundAction),
@@ -28,18 +27,11 @@ impl Coordinator {
     /// 重启服务进程：隐藏 UI 后向 main 发重启信号（main 释放单例并重拉自身）。
     pub(crate) fn restart_service(&self) {
         info!("Restart service requested from menu");
-        // 若有活跃 composition（拼音输入中/独占模式），先清空内部状态并通知 TSF 清除 composition，
-        // 避免服务退出后 TSF 持有孤儿 composition 导致残留。
+        // 有活跃 composition 时先清空内部状态并通知 TSF 清除，避免服务退出后留下孤儿组合。
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        // ⚠️ `candidates` 这一项不能少 —— **联想态**的四项全是空的：文本已上屏（`input_buffer`
-        // / `committed_text` 空）、`active` 恒为 `None`（联想不是 overlay 模式，`assoc_active()`
-        // 纯看首候选的 source），而它挂在宿主里的那个组合是 `assoc_composition` 占位。
-        // 少了这一项，联想态下重启服务不推 `ClearComposition`，那个占位空格就留在用户文档里
-        // 成了孤儿——而且这次连兜底都没有：服务进程重启了，`assoc_placeholder_orphaned` 标记
-        // 跟着没了，`adopt_orphaned_placeholder` 接不到。症状同 `fire_assoc_hide` 注释里记的
-        // 那个「被宿主 finalize 后在文档里留下占位空格」。
-        //
-        // 它只在**联想态**这一格改变行为：普通输入有候选时 `input_buffer` 必然非空，早就为真了。
+        // `candidates` 这一项不能少：联想态下其余四项全空，宿主里挂的是 `assoc_composition`
+        // 占位，漏了就不推 `ClearComposition`，占位空格留在文档里；服务重启后
+        // `assoc_placeholder_orphaned` 也没了，`adopt_orphaned_placeholder` 兜不住。
         let has_composition = !state.input_buffer.is_empty()
             || !state.preedit.is_empty()
             || !state.committed_text.is_empty()
@@ -67,26 +59,21 @@ impl Coordinator {
             .clone();
         let dark = self.resolve_theme_dark();
         self.push_theme(&name, dark);
-        // 语言栏图标的呈现参数也在配置里（[ui.langbar]）。少了这一步，改了角标形状/配色
-        // 要重启才生效——「改了没反应、重启就好」正是本仓反复出现的那类缺陷（运行时镜像态
-        // 没回灌）。内部自带"无变化则不重发"，故白调一次的成本是零。
+        // 语言栏图标的呈现参数（[ui.langbar]）也是运行时镜像，不回灌就要重启才生效。
+        // 内部自带「无变化则不重发」。
         #[cfg(all(feature = "desktop-ui", windows))]
         self.apply_langbar_config();
-        // 速度修正系数也是运行时镜像态：采集器在 flush 时用它算 `max_speed` 并落库，
-        // 不回灌就会出现「改了配置、当日速度变了而历史最快还按旧系数」的两套口径。
+        // 速度修正系数同理：不回灌会出现当日速度按新系数、历史最快按旧系数的两套口径。
         if let Some(c) = self.stat_collector.as_ref() {
             c.set_speed_factor(self.rt().config.stats.speed_factor);
         }
-        // 不再弹「已重载」气泡：热重载统一由 reload_user_config 的 toast 通知，避免重复。
+        // 不弹「已重载」气泡：热重载统一由 reload_user_config 的 toast 通知。
     }
 
-    /// 该键是否被**任一模式**配作进入键（临拼/临英的符号触发键、特殊模式引导键、mix 触发键、
-    /// 反查模式触发键）。
-    /// 仅用于「智能符号 press2 要不要抢在模式激活之前」的门控：只有被模式占用的符号键存在
-    /// 这个冲突，其余标点照常在标点分支判 press2。
+    /// 该键是否被任一模式配作进入键（临拼/临英的符号触发键、特殊模式引导键、mix 触发键、
+    /// 反查模式触发键）。仅用于「智能符号 press2 要不要抢在模式激活之前」的门控。
     ///
-    /// z 键功能（`z_key_action`）刻意不算：它要过三重身份裁决，且字母键根本不产出标点，
-    /// `punct_char` 那一关就已经把它挡在门外。
+    /// z 键功能（`z_key_action`）刻意不算：字母键不产出标点，`punct_char` 那一关就挡住了。
     pub(crate) fn is_any_mode_trigger(&self, key_code: u32) -> bool {
         self.is_temp_pinyin_trigger(key_code)
             || self.is_temp_english_trigger(key_code)
@@ -95,25 +82,19 @@ impl Coordinator {
             || self.is_reverse_trigger(key_code)
     }
 
-    /// 该键在空缓冲时是否已被方案声明为**首码** —— 是则符号类模式引导键让位给码表。
+    /// 该键在空缓冲时是否已被方案声明为首码，是则符号类模式引导键让位给码表。
     ///
-    /// 冲突现场：`;` 既是 `quick_mix` 的引导键，又被某方案写进了 `input_chars`。模式激活
-    /// 排在码元闸门之前且守卫同为「空缓冲」，于是引导键恒赢、方案里配的码元只在组码中生效
-    /// （`abc;` 可用而 `;abc` 不可用），且毫无提示。
+    /// 冲突场景：`;` 既是 `quick_mix` 引导键又在某方案的 `input_chars` 里，模式激活排在码元
+    /// 闸门之前，引导键恒赢、`;abc` 打不出。仲裁交给首码集（`leading_chars`，未配置时等于
+    /// `input_chars`）：想两者共存，把该符号排除出 `leading_chars` 即可。
     ///
-    /// 仲裁交给**首码集**：写进 `leading_chars`（未显式配置时等于 `input_chars`）即表示
-    /// 「这个字符可以起头」，那它在空缓冲时就该归码表。想两者共存，把该符号排除出
-    /// `leading_chars` 即可——它便只在组码中作码元，空缓冲仍进模式。
+    /// 只管非字母：字母默认全在首码集里，一并让位会废掉 Shift+字母进临英与 `z_key_action`
+    /// 的身份裁决（后者自带 `has_code_prefix("z")` 判据）。符号通配键的首位仲裁见
+    /// [`Self::wildcard_takes_lead_key`]。
     ///
-    /// ★ **只管非字母**。字母默认全在首码集里，一并让位会直接废掉两个既有功能：
-    /// Shift+字母进临时英文、以及 `z_key_action` 的三重身份裁决（后者本就自带
-    /// `has_code_prefix("z")` 判据处理码元冲突，不需要也不能被本函数接管）。
-    ///
-    /// 符号通配键的首位仲裁**不在这里**，见 [`Self::wildcard_takes_lead_key`]。
-    ///
-    /// ★★ 五c 之后**只对全局层绑定生效**（`bound_key_decision` 按来源分流）：这是
-    /// **跨层**仲裁——全局配置无从知道某个方案把这个符号当码元用了。方案级 `[key_actions]`
-    /// 与同方案的 `leading_chars` 是同层冲突，显式绑定优先，见 §4.3。
+    /// 只对全局层绑定生效（`bound_key_decision` 按来源分流）：这是跨层仲裁；方案级
+    /// `[key_actions]` 与同方案 `leading_chars` 是同层冲突，显式绑定优先，见
+    /// docs/design/schema-key-actions.md §4.3。
     pub(crate) fn code_char_takes_lead(&self, key_code: u32) -> bool {
         let Some(ch) = punct_char(key_code, false) else {
             return false;
@@ -125,13 +106,12 @@ impl Coordinator {
             .active_is_leading_char(ch.to_ascii_lowercase())
     }
 
-    /// 空缓冲下这个键是否归**符号通配键**（论坛 t302）：是则全局层绑定（出厂反引号 = 临拼
-    /// 触发）让位，键落普通输入、由 `try_code_char_gate` 收作通配。方案级显式绑定仍优先
+    /// 空缓冲下这个键是否归符号通配键：是则全局层绑定（出厂反引号 = 临拼触发）让位，
+    /// 键落普通输入、由 `try_code_char_gate` 收作通配。方案级显式绑定仍优先
     /// （判据内含，见 `wildcard_symbol_takes_lead`）。
     ///
-    /// ⚠️ **只能在空缓冲的调用点问**，不能并进 [`Self::code_char_takes_lead`]：后者也被组码中
-    /// 「顶字 + 进模式」那条路调用，而满码后通配键按字面（`wildcard_past_full`）不进缓冲——
-    /// 那里再让位，引导键与通配两头落空，键被白吞（审查实测 `aaaa` + 反引号）。
+    /// 只能在空缓冲的调用点问，不能并进 [`Self::code_char_takes_lead`]：后者也被组码中
+    /// 「顶字 + 进模式」调用，而满码后通配键按字面不进缓冲，那里再让位键就被白吞。
     pub(crate) fn wildcard_takes_lead_key(&self, key_code: u32) -> bool {
         punct_char(key_code, false).is_some_and(|ch| self.wildcard_symbol_takes_lead(ch))
     }
@@ -139,33 +119,20 @@ impl Coordinator {
     /// 空缓冲模式激活的单一入口。命中返回激活 KeyAction，都不命中返回 None（落普通输入）。
     /// URL 前缀夺取是「缓冲扩展夺取」语义，不在此链，单独处理。
     ///
-    /// # 五c 之后：硬编码优先级链已消失
+    /// 只有两段：临时英文 Shift+字母（不由 `key_actions` 表达，独立分支），以及
+    /// `bound_key_decision`（所有具名键的绑定，方案级 → 全局单键 → `z_key_action`，
+    /// 一个键只有一个动作，冲突在配置合并期就定了）。
     ///
-    /// 曾经这里按固定顺序依次问「是不是临英触发键 / 临拼触发键 / 特殊模式 / mix」，
-    /// 那套顺序**不是数据、无从配置**，且两个实例配同一个键时后者静默失效。
-    /// 现在只剩两段：
-    ///
-    /// 1. **临时英文 Shift+字母** —— 它不由 `key_actions` 表达（键是 Shift+任意字母，
-    ///    不是某个具体键），故仍是独立分支。
-    /// 2. **`bound_key_decision`** —— 所有具名键的绑定，方案级 → 全局单键 → `z_key_action`
-    ///    由具体到一般。一个键只有一个动作，冲突在配置合并期就定了。
-    ///
-    /// ⚠️ 行为统一：老实现里临英/special/mix 三段要求 `candidates.is_empty()`、临拼那段
-    /// 刻意不要求（其注释明说「不要求候选空」）。单点裁决无法按动作分条件而不增复杂度，
-    /// 统一取**不要求**——跟随临拼的既有行为。影响面是「空缓冲但有候选」（空码补全等）
-    /// 时按引导键：原先 special/mix 不进、现在进。这是本次收编唯一有意的行为变化。
+    /// 引导键统一不要求候选为空：「空缓冲但有候选」（空码补全等）时按引导键也会进模式。
     pub(crate) fn try_activate_mode(
         &self,
         state: &mut State,
         data: &KeyEventData,
     ) -> Option<KeyAction> {
-        // 智能符号 press2 **优先于模式激活**：模式内二次按进入键时已上屏中文标点并武装
-        // （见 `arm_smart_symbol_after_commit`），时限内再按同键必须替换成英文形，而不是又进
-        // 一次模式——否则被模式占用的符号键（`;` / `` ` `` / `\`）永远打不出英文形，武装白武装。
-        //
-        // 三重收窄，确保不惊扰既有路径：① 仅空闲态（无缓冲/无已转换前缀/无候选，缓冲非空时的
-        // 模式触发另有 `decideBufferedTrigger` 那条链，不归此处管）；② 仅被某模式占用的键
-        // （普通标点仍按原路径在标点分支判 press2，路径与风险都不扩散）；③ 仅判 press2，不武装。
+        // 智能符号 press2 优先于模式激活：模式内二次按进入键时已上屏中文标点并武装
+        // （`arm_smart_symbol_after_commit`），时限内再按同键必须替换成英文形而不是又进一次
+        // 模式，否则 `;` / `` ` `` / `\` 永远打不出英文形。收窄到：空闲态、被某模式占用的
+        // 键、只判 press2 不武装。
         if state.input_buffer.is_empty()
             && state.committed_text.is_empty()
             && state.candidates.is_empty()
@@ -177,26 +144,14 @@ impl Coordinator {
             return Some(act);
         }
 
-        // 临时英文：Shift+字母（空缓冲 + 无候选 + 已启用）
+        // 临时英文：Shift+字母（空缓冲 + 无候选 + 已启用）。
         //
-        // ★ **联想态例外**（`assoc_active()`）：那里缓冲同样是空的，但 `candidates` 里摆着
-        // 一批输入法自己猜的联想词。原先「无候选」这道门把联想一起挡在外面，于是联想窗
-        // 一弹出来，Shift+字母就进不了临英、字母径直落进中文码表缓冲——用户想打英文，
-        // 得到的是中文输入。这正是下方那条让位**不该管**的情形：`;`/`'` 是二三候选键，
-        // 让位保的是「选第 2/3 条」；而 Shift+字母**不在任何选词键的值域里**，它在联想态
-        // 下没有第二种解释。
+        // 联想态例外（`assoc_active()`）：缓冲空但摆着联想候选，Shift+字母不在任何选词键的
+        // 值域里，不放行就会落进中文码表缓冲。判据不是「候选非空」：空码补全的候选用户真在
+        // 看，行为不动。
         //
-        // ⚠️ 判据仍不是「候选非空」：空码补全那类候选是用户真在看的，行为一字不动。
-        //
-        // ★ **英文方案下不进临英**：用户已经在英文方案里，Shift+字母的意思是「打一个
-        // 大写字母」，不是「切到另一个模式」。此前这道门没问过当前方案，于是英文方案下按
-        // Shift+H 会被换进临英——另一套配置、另一个上屏出口、另一份候选开关，只因两者
-        // 词库桶恰好共用 `english` 才不太看得出来。排除后按键落主路字母臂，那里本就把
-        // 大写存进影子串 `input_buffer_cased`（缓冲仍为小写），正是「英文方案 + 首字母
-        // 大写的输入态」。判据用引擎类型而非方案 id，自定义的英文类方案一并覆盖。
-        //
-        // 判据加在 `if` 上而非分支里：`shift_behavior = "direct_commit"` 那条同样不该在
-        // 英文方案下生效（直接上屏一个 `H` 而不进缓冲，等于打不了以大写开头的词）。
+        // 英文方案下不进临英（也不走 `direct_commit`）：Shift+字母就是「打一个大写字母」，
+        // 落主路字母臂，大写记在影子串 `input_buffer_cased`。判据用引擎类型而非方案 id。
         if state.input_buffer.is_empty()
             && (state.candidates.is_empty() || state.assoc_active())
             && self.rt().config.input.temp_english.enabled
@@ -206,10 +161,8 @@ impl Coordinator {
             && (keymap::VK_A..=keymap::VK_Z).contains(&data.key_code)
         {
             let ch = (b'A' + (data.key_code - 0x41) as u8) as char; // 首字母大写
-            // 先收掉联想再谈进模式：联想候选与临英候选住的是同一个 `state.candidates`，
-            // 不先清就会出现「临英只有一条候选、下面还挂着上一轮的联想词」。
-            // 同时作废未触发的自动隐藏计时（`exit_assoc` 内），否则它会在用户已经打着
-            // 英文的时候到期，把占位组合标成孤儿、下一次透传平白多收一次口。
+            // 先收掉联想再进模式：两者共用 `state.candidates`；`exit_assoc` 同时作废未触发的
+            // 自动隐藏计时，免得它在打英文时到期把占位组合标成孤儿。
             let was_assoc = self.exit_assoc(state, crate::handle_assoc::AssocExit::ModeActivate);
             // shift_behavior == "direct_commit"：不进临时英文，直接上屏大写字母（对齐 Go）。
             if self.rt().config.input.temp_english.shift_behavior == "direct_commit" {
@@ -218,9 +171,8 @@ impl Coordinator {
                 } else {
                     ch.to_string()
                 };
-                // 联想窗要自己收：本分支不经 `notify_ui_update`，而上屏动作只结束宿主组合，
-                // 不会替我们把候选窗关掉。非联想态下候选本就是空的，此调用不必要也无害，
-                // 故按 `was_assoc` 收窄，免得每个 Shift+字母都多发一条 UI 消息。
+                // 联想窗要自己收：本分支不经 `notify_ui_update`，上屏动作不会关候选窗。
+                // 按 `was_assoc` 收窄，免得每个 Shift+字母都多发一条 UI 消息。
                 if was_assoc {
                     self.notify_ui_hide();
                 }
@@ -243,9 +195,7 @@ impl Coordinator {
 
         // 已有编码时 Shift+字母（`temp_english.shift_when_composing = "commit_enter"`）：
         // 上屏高亮候选（含已转换前缀），再以该大写字母进临时英文，对齐临拼「顶字进模式」。
-        // 出厂 `buffer` 不进本分支，大写照旧进编码缓冲（影子串记大小写）。
-        // 门卫与上面空缓冲那支同源（启用、非英文方案、Shift+字母、非快捷键），区别只在
-        // 缓冲非空；联想态没有码、不顶屏，由上面那支处理，这里不碰。
+        // 出厂 `buffer` 不进本分支。门卫与上面那支同源，区别只在缓冲非空；联想态由上面处理。
         if (!state.input_buffer.is_empty() || !state.committed_text.is_empty())
             && !state.assoc_active()
             && self.rt().config.input.temp_english.enabled
@@ -289,35 +239,22 @@ impl Coordinator {
             });
         }
 
-        // 快捷输入已退役为内置类方案 mix 成员（quick_input），不再独立激活：
-        // 想要纯快捷输入，配一个 members=["quick_input"] 的 mix 即可。; 默认走「快捷」融合 mix。
+        // 快捷输入已退役为内置类方案 mix 成员（quick_input），不再独立激活。
 
-        // ★ 联想态让位：此刻缓冲虽空，但屏幕上摆着一批候选，用户按 `;`/`'` 的意图是
-        // **选第 2/3 条**，不是进快捷输入。
+        // 联想态让位：缓冲虽空，但用户按 `;`/`'` 的意图是选第 2/3 条，不是进模式。判据用
+        // `assoc_active()` 而非「候选非空」，不动空码补全那条行为。
         //
-        // 上面那条「统一取不要求候选空」的裁决是针对空码补全那类候选定的——那时用户
-        // 确实没在选词。联想是另一回事：不让位的话，`;` 会把刚出来的联想窗顶掉换成
-        // 模式引导符，而二三候选键在联想态**永远按不出来**。
-        //
-        // 判据用 `assoc_active()` 而非「候选非空」，正是为了不动空码补全那条既有行为。
-        //
-        // ⚠️ **位置刻意在临英 Shift+字母之后**。它原先是本函数的第一句，于是把同一函数里
-        // 的临英分支一起挡掉了——症状是「联想窗弹出时按 Shift+字母进不了英文」。让位保的
-        // 是**选词键**（`;`/`'`，恒不带 Shift，走下面的 `bound_key_decision`），
-        // 与 Shift+字母的值域不相交；上面那两段各自的门（press2 要求候选空、临英要求
-        // 空缓冲 + Shift + 字母）本就把它们与选词区分开了。
+        // 位置必须在临英 Shift+字母之后：放到函数开头会把临英分支一起挡掉。让位保的是选词键
+        // （恒不带 Shift，走下面的 `bound_key_decision`），与 Shift+字母值域不相交。
         if state.assoc_active() {
             return None;
         }
 
         // 方案级按键功能表（方案文件 / schema_overrides 的 `[key_actions]`）。
         //
-        // 位置：**英文模式分水岭之后**（那在 handle_key_event 里，早已 PassThrough 返回）。
-        // 有字符的键必须排在这里而不是热键路径，否则该字符在英文模式下永远打不出来。
-        // 详见 docs/design/schema-key-actions.md §4.1。
-        //
-        // 命中即执行并跳过下方全局引导键链；显式 `none` 则两边都不走（return None 落普通
-        // 输入）；未声明的键才落全局链——这是「未配置者行为逐字节不变」的保证。
+        // 位置在英文模式分水岭之后（handle_key_event 里早已 PassThrough 返回）：有字符的键
+        // 排在热键路径会让该字符在英文模式下永远打不出来。见 docs/design/schema-key-actions.md §4.1。
+        // 命中即执行并跳过全局引导键链；显式 `none` 两边都不走；未声明的键才落全局链。
         if state.input_buffer.is_empty() && data.modifiers & (MOD_SHORTCUT | MOD_SHIFT) == 0 {
             if self.wildcard_takes_lead_key(data.key_code) {
                 debug!(
@@ -332,12 +269,11 @@ impl Coordinator {
                         state.rewind = None; // 首键进入非夺取式，作废任何旧回退登记
                         return Some(act);
                     }
-                    // 门卫没过（目标模式不可用）：不吞键，落普通输入。绝不能返回 Consumed——
-                    // 配了个不可用的目标就等于把这个键废掉，且用户完全看不出原因。
+                    // 门卫没过（目标模式不可用）：落普通输入，绝不能返回 Consumed，否则配了个
+                    // 不可用的目标就等于把这个键废掉且无从察觉。
                     return None;
                 }
-                // 让位（显式 none / 活码前缀 / z 的 repeat 身份）：该键作正常码，同样不落
-                // 全局引导键链——方案既然给这个键表了态，就不该再被全局 trigger_keys 抢走。
+                // 让位：该键作正常码，同样不落全局引导键链。
                 BoundKeyDecision::Yield => return None,
                 BoundKeyDecision::NotBound => {}
             }
@@ -348,23 +284,18 @@ impl Coordinator {
 
     /// 当前方案的 z 键功能（`schema.codetable.z_key_action` 经方案折叠后的生效值）。
     ///
-    /// 走 `codetable_settings()` 而非直接读全局配置：这是**方案级**配置，不同码表里 z 的
-    /// 地位不同（五笔 86 是死码，别的码表未必），全局值只是没有方案覆盖时的回落基线。
+    /// 走 `codetable_settings()` 而非全局配置：不同码表里 z 的地位不同，全局值只是回落基线。
     ///
     /// 与 `[key_actions]` 表的关系见 [`Self::bound_action_for`]：表里显式写了 `z` 就以表为准。
     pub(crate) fn z_key_action(&self) -> BoundAction {
         BoundAction::parse(&self.engine_mgr.codetable_settings().z_key_action)
     }
 
-    /// 方案级按键功能表对某个键的**最终裁决**，供所有「按引导键进模式」的通路共用。
+    /// 方案级按键功能表对某个键的最终裁决，供所有「按引导键进模式」的通路共用。
     ///
-    /// ★ 必须单点：进同一个模式有**两条**通路——空缓冲的 `try_activate_mode`，以及有缓冲/
-    /// 候选时「顶字 + 进模式」的 `decideBufferedTrigger` 链（`coordinator.rs` 的 `_ =>` 臂）。
-    /// 后者的模式触发判定**不要求缓冲非空**，空码按键同样会走到。只接一条的后果是：方案里
-    /// 写了 `semicolon = "none"`，空码按 `;` 仍然进快捷输入——第一条放行、第二条接管。
-    ///
-    /// 同源教训见 `project_mixed_overflow_vs_topcode`（混输上屏三条通路，否决开关必须三处
-    /// 都接）。盘查的判据是「进这个模式有几个入口」，不是「我改的函数里有几个分支」。
+    /// 必须单点：进模式有两条通路，空缓冲的 `try_activate_mode` 与有缓冲/候选时「顶字 +
+    /// 进模式」的 `decideBufferedTrigger` 链（`coordinator.rs` 的 `_ =>` 臂，空码按键也会走到）。
+    /// 只接一条，方案写了 `semicolon = "none"` 空码按 `;` 仍会进快捷输入。
     pub(crate) fn bound_key_decision(&self, key_code: u32) -> BoundKeyDecision {
         self.bound_key_decision_layered(key_code, true)
     }
@@ -381,24 +312,16 @@ impl Coordinator {
         else {
             return BoundKeyDecision::NotBound;
         };
-        // 跨层仲裁：**全局**引导键遇上方案声明的首码要让位——全局配置无从知道某个方案
-        // 把这个符号当码元用了。方案级绑定则相反（同层冲突，显式绑定优先于字符集推导）。
+        // 跨层仲裁：全局引导键遇上方案声明的首码要让位；方案级绑定则显式优先。
         // 见 docs/design/schema-key-actions.md §4.3 与 [`Self::bound_action_with_source`]。
         if !from_schema && self.code_char_takes_lead(key_code) {
             debug!("key_action: vk=0x{key_code:02X} 让位 —— 全局绑定遇方案首码（跨层仲裁）");
             return BoundKeyDecision::Yield;
         }
-        // 注：方案级 `switch_schema` 曾在此整条让位并 warn。**2026-08-30 放开**——
-        // 当时的理由是「单向切走后目标方案没有这条绑定，这个键就再也按不动了」，但那描述的
-        // 是**这把键**按不动，而回程本就可以由别的键负责（用户的实际配法正是「右 Shift 单向
-        // 去英文方案、左 Shift 管中英文态」）。禁令把一个「可能的困扰」升成了「绝对禁止」，
-        // 挡掉了合法配法。
-        //
-        // ★ 但禁令担心的**后果**是真的，只是换了个地方兜：目标方案里该键走到 `NotBound`，
-        // 若就此返回 None 会落到 `is_toggle_mode_keycode`，而 lshift/rshift 出厂就是
-        // `toggle_mode` 键 ⇒「配的是切方案却切了中英文」。现由
-        // `Coordinator::schema_switch_arrival` 记录 + `handle_bound_modifier_key_up` 的
-        // `NotBound` 分支吞键兜底，见那两处。
+        // 方案级 `switch_schema` 不让位（单向切走、回程由别的键负责是合法配法）。目标方案里
+        // 该键走到 `NotBound` 会落到 `is_toggle_mode_keycode`（lshift/rshift 出厂即 toggle_mode），
+        // 由 `Coordinator::schema_switch_arrival` 记录 + `handle_bound_modifier_key_up` 的
+        // `NotBound` 分支吞键兜底。
         match self.bound_action_yield_reason(key_code, &action) {
             Some(reason) => {
                 debug!("key_action: vk=0x{key_code:02X} 让位 —— {reason}");
@@ -413,41 +336,26 @@ impl Coordinator {
 
     /// 这个键在当前方案里绑了什么动作；未绑定返回 `None`（落全局引导键链）。
     ///
-    /// 三个来源，**由具体到一般**：
+    /// 三个来源，由具体到一般：
     /// 1. 方案文件 / `schema_overrides` 的 `[key_actions]`（任意键）
-    /// 2. 全局 `keys.key_actions` 里的**单键**条目（组合键走热键通路，不在此列）
-    /// 3. `schema.codetable.z_key_action`（只管 z，早于本表存在的专用字段）
+    /// 2. 全局 `keys.key_actions` 里的单键条目（组合键走热键通路，不在此列）
+    /// 3. `schema.codetable.z_key_action`（只管 z）
     ///
-    /// 第 2 层是五c「全局层收编」的落点：五处 `trigger_keys` 折算到这里之后，
-    /// 「谁先谁后」由**层级**决定（方案覆盖全局），不再由 `try_activate_mode` 里的
-    /// 硬编码调用顺序决定——那套顺序不是数据、无从配置，且两个实例配同一个键时
-    /// 后者静默失效。
-    ///
-    /// 键名走 `key_name_to_vk_with_letters`——本表**接受字母**，与只认符号的全局
-    /// `trigger_keys` 相反：字母能否借作功能键取决于「这张码表里它是不是死码」，那正是
-    /// 方案级配置才能表达的判断（见 [`Self::bound_action_key_yields`]）。
-    ///
-    /// 再叠一层 `modifier_name_to_vk`：修饰键的键名**不在** `KEY_TABLE` 里（那是引导键的
-    /// 解析口，走 keydown，修饰键在那条路上不工作），故必须显式并进来。少了这一层的表现是
-    /// 「转发集里有这个键、TSF 也发了 keyup，但查表查不到、什么都不发生」——已在测试里
-    /// 复现过一次。
+    /// 先后由层级决定（方案覆盖全局），不靠调用顺序。键名走 `key_name_to_vk_with_letters`，
+    /// 接受字母（字母能否借作功能键取决于它在这张码表里是不是死码，见
+    /// [`Self::bound_action_yield_reason`]）；再叠 `modifier_name_to_vk`：修饰键名不在
+    /// `KEY_TABLE` 里，漏了这层修饰键的 keyup 会查表落空、什么都不发生。
     pub(crate) fn bound_action_for(&self, key_code: u32) -> Option<BoundAction> {
         self.bound_action_with_source(key_code).map(|(a, _)| a)
     }
 
-    /// **指定方案**的 `[key_actions]` 里这个键绑了什么（只查方案层，不回落全局）。
+    /// 指定方案的 `[key_actions]` 里这个键绑了什么（只查方案层，不回落全局）。
     ///
-    /// ⚠️ 与 [`Self::bound_action_for`] 的分工是**动词类别**，不是「另一种取表方式」，
-    /// 见 docs/design/key-resolver-unification.md §4.4：
-    ///
-    /// - 「从这个输入环境去哪」（`special:*` / `temp_pinyin` / `switch_schema`…）恒走
-    ///   `bound_action_for`（主方案 → 全局 → `z_key_action` 三层链）；
-    /// - 「解释用户敲的码」（辅助码触发键、码元、分隔符）在 overlay 里按**产出候选的
-    ///   方案**取，走本函数。
-    ///
-    /// **刻意不回落全局**：全局层那份已经由 `bound_action_for` 那条链覆盖了，在这里再回落
-    /// 一次等于同一条配置在同一个按键上被查两遍，且两遍的优先级无从定义。本函数只回答
-    /// 「目标方案**自己**声明了什么」。
+    /// 与 [`Self::bound_action_for`] 按动词类别分工（docs/design/key-resolver-unification.md §4.4）：
+    /// 「从这个输入环境去哪」（`special:*` / `temp_pinyin` / `switch_schema`…）恒走
+    /// `bound_action_for`；「解释用户敲的码」（辅助码触发键、码元、分隔符）在 overlay 里按
+    /// 产出候选的方案取，走本函数。不回落全局：那份已由 `bound_action_for` 覆盖，再回落就是
+    /// 同一条配置查两遍、优先级无从定义。
     pub(crate) fn bound_action_in_schema(
         &self,
         key_code: u32,
@@ -461,61 +369,34 @@ impl Coordinator {
         None
     }
 
-    /// 同 [`Self::bound_action_for`]，但一并给出**这条绑定来自哪一层**
+    /// 同 [`Self::bound_action_for`]，但一并给出这条绑定来自哪一层
     /// （`true` = 方案级 `[key_actions]`，`false` = 全局 `keys.key_actions` / `z_key_action`）。
     ///
-    /// 层级信息是 `code_char_takes_lead` 仲裁的必需输入，不是锦上添花：
-    ///
-    /// - **全局**引导键 × 方案的 `leading_chars` 是**跨层**冲突 ⇒ 让位给码表。全局配置
-    ///   无从知道某个方案把这个符号当码元用了。
-    /// - **方案级**绑定 × 同方案的 `leading_chars` 是**同层**冲突 ⇒ 绑定优先。两条声明
-    ///   都出自这个方案，显式绑定比从字符集隐式推导更具体。
-    ///
-    /// 见 docs/design/schema-key-actions.md §4.3。合并两层来源时若丢掉这个区分，
-    /// 全局引导键就会变成「绑定优先」，把方案自己的码元抢走。
+    /// 层级是 `code_char_takes_lead` 仲裁的必需输入：全局引导键 × 方案 `leading_chars` 是
+    /// 跨层冲突，让位给码表；方案级绑定 × 同方案 `leading_chars` 是同层冲突，绑定优先。
+    /// 丢掉这个区分，全局引导键会把方案自己的码元抢走。见 docs/design/schema-key-actions.md §4.3。
     pub(crate) fn bound_action_with_source(&self, key_code: u32) -> Option<(BoundAction, bool)> {
         self.bound_action_with_source_layered(key_code, true)
     }
 
-    /// 同上，但可**跳过方案级层**（`use_schema_layer = false` ⇒ 只认全局 `keys.key_actions`）。
+    /// 同上，但可跳过方案级层（`use_schema_layer = false` ⇒ 只认全局 `keys.key_actions`）。
     ///
-    /// # ★★ 为什么英文半角态要跳过方案级层
+    /// 英文半角态要跳过方案级层：此时当前方案整体不参与输入（`handle_key_event` 在英文
+    /// 分水岭直接 `PassThrough`），用户期望的是全局配置。例：英文方案里 `lshift = toggle_mode`、
+    /// 全局 `lshift = switch_schema:wubi86`，英文态按左 Shift 应走全局那条切回五笔。
     ///
-    /// 英文半角态下**当前方案整体已经不参与输入行为**——码元集、标点、候选、引擎全都不
-    /// 工作（`handle_key_event` 在英文分水岭处直接 `PassThrough`）。那么「这个方案的按键
-    /// 表」也就没有理由继续生效：用户此刻不在任何方案的输入语境里，他期望的是**全局配置**。
+    /// 实际只作用于修饰键（有字符的键英文态在分水岭前就透传，组合键走全局编译的
+    /// `compiled_hotkeys`）。推给 C++ 的转发键集不得跟着这个维度裁剪，必须是并集，否则每切
+    /// 一次中英文就要重推（docs/design/key-resolver-unification.md §4.2）。
     ///
-    /// 现场（2026-08-30 用户报障）：英文方案里方案级配了 `lshift = toggle_mode`，全局配了
-    /// `lshift = switch_schema:wubi86`。进系统英文后再按左 Shift，用户期望走全局那条切回
-    /// 五笔，实际却仍命中英文方案那条、只把 `chinese_mode` 翻回来 ⇒ 看起来像「切回了英文
-    /// 方案」（方案其实从未变过，见 project_shift_schema_mode_switch）。
-    ///
-    /// ⚠️ **这不是新增一张表**，是三层链在英文态少查一层——配置面零增长。
-    ///
-    /// # ⚠️ 只有修饰键会走到这里
-    ///
-    /// 英文态下有字符的键在分水岭前就 `PassThrough`，组合键走的 `compiled_hotkeys` 本就是
-    /// 全局编译、不分方案。故本参数实际只作用于 `lshift`/`rshift`/`lctrl`/`rctrl`。
-    ///
-    /// # ⚠️ 可达性并集**不得**跟着这个维度走
-    ///
-    /// 推给 C++ 的转发键集必须是所有维度所有取值的并集（`reachability()` /
-    /// `all_key_action_keys()` 照常枚举两层）。按当前态裁剪的话，每切一次中英文就要重推
-    /// 一次，漏一次就是「切完中英文这个键不灵」——与按活跃方案裁剪同型，见
-    /// docs/design/key-resolver-unification.md §4.2。
-    ///
-    /// # ⚠️ 代价：对称配置负担
-    ///
-    /// 全局一旦配了切方案类动词，**没有方案级同键绑定的方案**在中文态下按这个键就会命中
-    /// 全局那条（`handle_bound_modifier_key_up` 先于 `is_toggle_mode_keycode`）。用户需要
-    /// 在每个方案里都配一遍 `lshift = "toggle_mode"`。这是本设计已知且已被接受的代价
-    /// （2026-08-30 用户拍板），设置页在方案级面板给提示。
+    /// 代价：全局配了切方案类动词后，没有方案级同键绑定的方案在中文态下也会命中全局那条，
+    /// 用户需要在每个方案里配 `lshift = "toggle_mode"`。这是已接受的取舍，设置页方案级面板有提示。
     fn bound_action_with_source_layered(
         &self,
         key_code: u32,
         use_schema_layer: bool,
     ) -> Option<(BoundAction, bool)> {
-        // 宿主临时压制的引导键（移动端触摸 `;`）：按未绑定处理，三层都不查
+        // 宿主临时压制的引导键（移动端触摸 `;`）：按未绑定处理，三层都不查。
         if key_code != 0
             && self
                 .trigger_suppressed
@@ -524,12 +405,8 @@ impl Coordinator {
         {
             return None;
         }
-        // 键名→VK 走与全局层**同一个**解析口（`key_action_name_to_vk`）：两层各留一份解析
-        // 规则，就是「同一张表按维度分裂」。这类分裂曾有过一个样本：`hotkey_action_entry`
-        // 的动词白名单只认几个，而单键那条路的 `BoundAction` 值域大得多 ⇒
-        // `ctrl+alt+e = "temp_english"` 静默失效、`z = "temp_english"` 正常。
-        // **那一条已于 2026-09-18 合流修掉**（见 docs/design/key-resolver-unification.md §2.5
-        // 与 schema-key-actions.md §7 六期）；本处的「两层各一份解析规则」仍然成立。
+        // 键名→VK 走与全局层同一个解析口（`key_action_name_to_vk`），两层各留一份解析规则
+        // 就会按维度分裂（见 docs/design/key-resolver-unification.md §2.5）。
         if use_schema_layer {
             for (name, action) in self.engine_mgr.active_key_actions().iter() {
                 if crate::key_resolver::key_action_name_to_vk(name) == Some(key_code) {
@@ -537,49 +414,35 @@ impl Coordinator {
                 }
             }
         }
-        // 全局 `keys.key_actions` 的单键条目。方案没表态时才落到这里——方案覆盖全局是
-        // 本设计的基本层级，与码表行为、注释模板等其它方案级配置同构。
-        //
-        // 只认单键：组合键条目由热键通路消费（`Compiler::compile` 已按形态分流），
-        // 在这里再认一次就是同一个键两条路都触发。该过滤连同键名→VK、动词→`BoundAction`
-        // 的解析，都已在 `ConfigBundle::build` 的 `KeyResolver` 里做完——**本函数在按键
-        // 热路径上**，原先每键都要线性遍历整张表并逐条做字符串解析。
+        // 全局 `keys.key_actions` 的单键条目，方案没表态时才落到这里。组合键条目由热键通路
+        // 消费，这里再认一次就是两条路都触发。过滤与解析已在 `ConfigBundle::build` 的
+        // `KeyResolver` 里做完，本函数在按键热路径上。
         if let Some(action) = self.rt().key_resolver.global_lead(key_code) {
-            // 查得到就是全局层**表了态**，`none` 同样是表态：语义与方案级同，
-            // 不再往下回落到 `z_key_action`。故 `BoundAction::None` 也原样返回，
-            // 不能在这里过滤掉（`parse` 把空 id 与未知动词一并归为 `None`，
-            // 与折算前 `is_enabled()` 分支的结果逐值相同）。
+            // 查得到就是全局层表了态，`none` 同样是表态，不再回落 `z_key_action`，
+            // 故 `BoundAction::None` 也原样返回。
             return Some((action, false));
         }
-        // 表里没写 z 时，回落到专用字段（其自身已含全局→方案的折叠）。
-        // 跳过方案级层时一并跳过：`z_key_action` 本身就是方案级配置。实际到不了——z 是
-        // 字母键、英文态下在分水岭就 `PassThrough` 了——判据仍写出来，免得日后有人把
-        // 本函数用在别的态上时，这一层成为唯一漏网的方案级来源。
+        // 表里没写 z 时回落专用字段（自身已含全局→方案的折叠）。跳过方案级层时一并跳过：
+        // `z_key_action` 本身是方案级配置（英文态 z 实际到不了这里，判据仍写出来）。
         if use_schema_layer && key_code == keymap::VK_Z {
             let z = self.z_key_action();
             if z.is_enabled() {
-                // z_key_action 本身是方案级配置（经 codetable_settings 折叠），
-                // 故按方案级来源计——它与 leading_chars 同样是同层冲突。
+                // 按方案级来源计：与 leading_chars 同样是同层冲突。
                 return Some((z, true));
             }
         }
         None
     }
 
-    /// 这个键在**会话态**（有编码或候选）绑了什么动作；未绑定返回 `None`。
+    /// 这个键在会话态（有编码或候选）绑了什么动作；未绑定返回 `None`。
     ///
-    /// 两层，**逐键合并**（与 `[key_actions]` 一致）：
-    /// 1. 方案文件 / `schema_overrides` 的 `[session_actions]`
-    /// 2. 全局 `keys.session_actions`（已含 `page_keys` 等四组键组配置的展开结果）
+    /// 两层逐键合并（与 `[key_actions]` 一致）：方案文件 / `schema_overrides` 的
+    /// `[session_actions]`，再到全局 `keys.session_actions`（已含 `page_keys` 等键组的展开）。
+    /// 方案层查得到就是表了态，显式 `"none"` 返回 `None` 且不回落全局（`merge_toml` 只能
+    /// 新增/覆盖，删行禁不掉全局绑定）。
     ///
-    /// ★ 方案层查得到就是**表了态**，显式 `"none"` 同样是表态 ⇒ 返回 `None` 且
-    /// **不再回落全局**。靠「从 override 里删掉那一行」是禁不掉全局绑定的：`merge_toml`
-    /// 只能新增/覆盖。语义与 [`Self::bound_action_with_source`] 的全局 `none` 逐条对应。
-    ///
-    /// ⚠️ **本方法是「当前方案下这个键干什么」，不是「这个键要不要转发」**。后者必须取
-    /// 所有方案的并集（[`crate::config_bundle::schema_bound_modifier_vks`] 那条理由），
-    /// 且并集的消费者另有其人——`capslock_bound` 决定装不装全局钩子，按活跃方案取值会让
-    /// 切方案反复装卸钩子。别拿本方法去回答可达性问题。
+    /// 本方法回答「当前方案下这个键干什么」，不回答「这个键要不要转发」：后者必须取所有方案
+    /// 的并集（[`crate::config_bundle::schema_bound_modifier_vks`]），否则切方案会反复装卸钩子。
     pub(crate) fn session_action_for(
         &self,
         key_code: u32,
@@ -599,23 +462,15 @@ impl Coordinator {
             .classify(key_code, shift, include_printable)
     }
 
-    /// 绑了动作的键是否**让位**给正常输入（此时既不进模式、也不落全局引导键链）。
+    /// 绑了动作的键是否让位给正常输入（既不进模式、也不落全局引导键链），返回让位原因
+    /// （`None` = 不让位），原因进 debug 日志：「配了不生效」有五个同形成因（没绑上 / 显式
+    /// none / 非码表引擎 / repeat / 活码前缀），日志里一眼可辨。
     ///
-    /// 两条判据，都只对**字母键**成立——符号键在码表里不产出编码，按下只可能是为了触发功能：
+    /// 字母键的两条判据（只在码表引擎判；拼音/混输绑了就生效，引导键只在空缓冲触发）：
+    /// - 活码前缀：本方案码表/短语里有以该字母开头的条目，不让位它就打不出编码。
+    /// - z 的 repeat 身份：`z_key_repeat` 开且有上屏历史时 z 归重复输入（z 专有）。
     ///
-    /// - **活码前缀**：本方案的码表/短语里有以该字母开头的条目（如自定义 `zhang`）。不让位的话
-    ///   那个字母在这个方案里就彻底打不出编码了，且毫无提示。这条原是 z 专有的裁决
-    ///   （对齐 Go `judgeZFirstTrigger`），随 `[key_actions]` 泛化到任意字母。
-    /// - **z 的 repeat 身份**：`z_key_repeat` 开且有上屏历史时 z 归重复输入。这条**仍是 z 专有**
-    ///   ——repeat 功能本身就绑死在 z 上，不是通用概念。
-    ///
-    /// 码表引擎的字母键还要过上面两条；非码表引擎（拼音/混输）不做判断，绑了就生效——
-    /// 引导键只在空缓冲触发，不影响组码中间的同一个字母。符号键不限引擎。
-    /// 同上，但返回**让位原因**（`None` = 不让位）供日志说明。
-    ///
-    /// 「配了不生效」是这套机制最常见的求助形态，而它有五个成因（没绑上 / 显式 none /
-    /// 非码表引擎 / repeat / 活码前缀），单看现象完全同形。原因字符串直接进 debug 日志，
-    /// 排查时一眼可辨，不必再逐个假设去试。
+    /// 符号键不让位、不限引擎：它在码表里不产出编码，按下只可能是为了触发功能。
     fn bound_action_yield_reason(
         &self,
         key_code: u32,
@@ -625,13 +480,10 @@ impl Coordinator {
             return Some("显式 none");
         }
         let ch = keymap::vk_to_prefix_char_with_letters(key_code)?;
-        // 反查模式只在码表 / 五笔拼音混输方案里有意义（活跃引擎给得出反查通配键）。
-        // 放在字母 / 符号分流之前：符号键在拼音方案里也让位，照常产出标点（spec §3.1）；
-        // 字母键在码表里仍走下面的活码前缀判据，拼音 / 混输里不判（见下方）。
-        //
-        // ⚠️ 必须在上一行（无字符的修饰键早退）**之后**：修饰键的 keyup 通路把 Yield 当
-        // 「显式 none」吞键，排在前面会让拼音方案里绑了反查的 RShift 连中英切换都失效；
-        // 修饰键保持原通路——Act 后门卫没过返回 None，落回全局链。
+        // 反查模式只在活跃引擎给得出反查通配键时有意义（码表 / 五笔拼音混输）。放在字母 /
+        // 符号分流之前：符号键在拼音方案里也让位、照常产出标点（spec §3.1）。必须在修饰键
+        // 早退之后：修饰键 keyup 把 Yield 当显式 none 吞键，排在前面会让绑了反查的 RShift
+        // 连中英切换都失效。
         if matches!(action, BoundAction::Reverse) && self.engine_mgr.active_reverse_key().is_none()
         {
             return Some("反查模式仅码表 / 五笔拼音混输方案生效");
@@ -639,24 +491,16 @@ impl Coordinator {
         if !ch.is_ascii_alphabetic() {
             return None; // 符号键：不让位，也不限引擎
         }
-        // 非码表引擎（拼音 / 混输）不替用户判断：绑了字母就当引导键，只在空缓冲生效，
-        // 组码中间的 `lv` / `nv` 不受影响。哪些字母适合借用由用户自己定，设置端只做提示。
+        // 非码表引擎不替用户判断：绑了字母就当引导键，只在空缓冲生效，组码中的 `lv` 不受影响。
         if !matches!(
             self.engine_mgr.current_engine_type(),
             Some(wind_engine::EngineType::CodeTable)
         ) {
             return None;
         }
-        // z 的 repeat 身份**只压得住有夺取回路的目标**。
-        //
-        // `temp_pinyin` 有 `try_z_fallback`：首键让位给 repeat 之后，用户继续打字母、`z…`
-        // 破了活码前缀时仍会被夺取进临拼——两个功能真正共存，让位只维持一个按键。
-        //
-        // 其余目标（special / mix / 临英）**只支持首键进入**，没有夺取回路。让位一次就是
-        // 这个方案里再也进不去，尤其快符那种 `show_all_on_enter` 的模式——它的全部价值
-        // 就在首键那一下「进入即列出符号表」，被 repeat 抢掉等于功能不存在。
-        //
-        // 判据落在「目标模式有没有补救通路」，不是「谁更重要」：前者可验证，后者会随人而变。
+        // z 的 repeat 身份只压得住有夺取回路的目标：`temp_pinyin` 有 `try_z_fallback`，让位后
+        // `z…` 破了活码前缀仍会被夺取进临拼。special / mix / 临英只支持首键进入，让位一次就
+        // 再也进不去（快符的 `show_all_on_enter` 价值全在首键那一下）。
         if key_code == keymap::VK_Z
             && matches!(action, BoundAction::TempPinyin)
             && self.z_key_repeat_text().is_some()
@@ -669,10 +513,9 @@ impl Coordinator {
 
     /// 执行 z 键功能：按 `action` 进对应模式（空缓冲进入语义，组合区前缀显示 `z`）。
     ///
-    /// **各目标模式的可用性门卫都在这里**，与引导键进入点用的是同一套判据（临拼的
-    /// `temp_pinyin_target`、mix 的成员非空、特殊模式的 `ensure_schema`）。门卫没过返回
-    /// `None`，调用方让 z 落普通输入作正常码——绝不能吞键，否则配了个不可用的目标就等于
-    /// 把 z 这个编码键废掉，且用户完全看不出原因。
+    /// 各目标模式的可用性门卫都在这里，与引导键进入点同一套判据（临拼的
+    /// `temp_pinyin_target`、mix 成员非空、特殊模式的 `ensure_schema`）。门卫没过返回 `None`，
+    /// 调用方让键落普通输入：绝不能吞键，否则配了个不可用的目标就等于把这个键废掉。
     pub(crate) fn enter_bound_action(
         &self,
         state: &mut State,
@@ -681,8 +524,7 @@ impl Coordinator {
     ) -> Option<KeyAction> {
         match action {
             BoundAction::None => None,
-            // 反查模式的门卫：活跃方案有反查通配键（码表 / 混输主码表）。没有总开关——走到这里
-            // 就是绑了键。没过返回 None，触发键落普通输入，不吞键。
+            // 反查模式门卫：活跃方案有反查通配键。没过返回 None，触发键落普通输入。
             BoundAction::Reverse => {
                 if !self.reverse_mode_available() {
                     return None;
@@ -693,12 +535,8 @@ impl Coordinator {
             // 软键盘不是「模式」，没有编码缓冲也不进 ModeKind——直接开关面板即可。
             // 状态推送由按键路径顶层的 SoftKeyboardPushOnDrop 兜底。
             BoundAction::SoftKeyboard(page) => Some(self.toggle_softkeyboard(page.as_deref())),
-            // 单字输入：与软键盘同类，切的是一个状态，不进 ModeKind、没有编码缓冲。
-            //
-            // **恒吞键**——本动作没有门卫（任何方案、任何时候都切得动），不存在
-            // 「配了个不可用的目标」那种要把键还回去的情形。
-            //
-            // 空缓冲态下状态泡是**唯一**的反馈（没有候选窗可看），故必须弹。
+            // 单字输入：与软键盘同类，不进 ModeKind。没有门卫，恒吞键；空缓冲态下状态泡是
+            // 唯一的反馈，必须弹。
             BoundAction::SingleChar(a) => {
                 if let Some(label) = self.apply_single_char_action(state, *a) {
                     self.show_tip_locked(state, label);
@@ -767,20 +605,14 @@ impl Coordinator {
                 debug!("key_action: entering special idx={}", idx);
                 Some(self.enter_special_mode(state, idx, key_code))
             }
-            // 生僻字模式：用的就是当前活跃方案，无需 `ensure_schema` 门卫——那个方案此刻
-            // 正在被用来打字，必然已加载。
+            // 生僻字模式用的就是当前活跃方案，必然已加载，无需 `ensure_schema` 门卫。
             BoundAction::RareChar => {
                 debug!("key_action: entering rare-char mode");
                 Some(self.enter_rare_char_mode(state, key_code))
             }
-            // C 类**不在这里执行**，见 [`Self::run_toggle_schema_action`]。
-            //
-            // 本函数的契约是「调用方持 `State` 锁」，而 `toggle_schema_by_id` 要走
-            // `finish_user_schema_switch`，那里自己 `self.state.lock()` —— 在这里调就是死锁。
-            //
-            // 这条锁约束与 §4.1 的插入点判据**独立地指向同一结论**：C 类必须在英文模式下
-            // 也生效（否则切到英文方案就回不来），而本函数在分水岭之后的 keydown 路径上，
-            // 英文态根本走不到。故 C 类只在无字符键（修饰键 keyup）上可用。
+            // C 类不在这里执行，见 [`Self::run_toggle_schema_action`]：本函数持 `State` 锁，
+            // 而 `finish_user_schema_switch` 自己加锁，在这里调就是死锁。且 C 类必须在英文态
+            // 也生效，而本函数在分水岭之后的 keydown 路径上，故 C 类只能绑无字符键（修饰键 keyup）。
             BoundAction::ToggleSchema(id) => {
                 warn!("key_actions: toggle_schema:{id} 只能绑修饰键（无字符键），此处忽略");
                 None
@@ -789,18 +621,15 @@ impl Coordinator {
                 warn!("key_actions: switch_schema:{id} 只能绑修饰键（无字符键），此处忽略");
                 None
             }
-            // A 类同样不在这里执行：`dispatch_hotkey` 自加锁，本函数持锁。
-            // keydown 走 `bound_lock_free_action_for_keydown`（判定后 drop 锁），
-            // keyup 走 `handle_bound_modifier_key_up`，两条都在锁外。命令同一分流口。
+            // A 类同样不在这里执行：`dispatch_hotkey` 自加锁。keydown 走
+            // `bound_lock_free_action_for_keydown`（判定后 drop 锁），keyup 走
+            // `handle_bound_modifier_key_up`，两条都在锁外。命令同一分流口。
             BoundAction::Action(_) | BoundAction::Command(_) => None,
         }
     }
 
-    /// 执行 C 类 `toggle_schema`。**必须在不持 `State` 锁时调用**——内部经
-    /// `finish_user_schema_switch` 自行加锁，见 [`Self::enter_bound_action`] 里的说明。
-    ///
-    /// 目标加载不了时返回 `None` 不吞键：与各模式门卫同策略，配了个不可用的目标不该
-    /// 把这个键废掉，且用户看不出原因。
+    /// 执行 C 类 `toggle_schema`。必须在不持 `State` 锁时调用（内部经
+    /// `finish_user_schema_switch` 自行加锁）。目标加载不了时返回 `None` 不吞键。
     fn run_toggle_schema_action(&self, id: &str, trigger_vk: u32) -> Option<KeyAction> {
         if !self.engine_mgr.ensure_schema(id) {
             warn!("key_actions: toggle_schema 目标 {id} 加载失败，不动作");
@@ -813,10 +642,8 @@ impl Coordinator {
 
     /// 执行 C 类 `switch_schema`（单向）。锁约束同 [`Self::run_toggle_schema_action`]。
     ///
-    /// 与往返版的唯一差别是不记来源、不认回程键。**方案级 `[key_actions]` 里出现本动词
-    /// 时不会走到这里**——`bound_action_yield_reason` 已让位并 warn，理由见
-    /// [`BoundAction::SwitchSchema`]：方案级按活跃方案查表，单向切走后目标方案没有这条
-    /// 绑定，键就再也按不动了。
+    /// 与往返版的差别是不记来源、不认回程键。方案级绑定也会走到这里（不让位），目标方案里
+    /// 该键的误触由 `schema_switch_arrival` 兜底。
     fn run_switch_schema_action(&self, id: &str, trigger_vk: u32) -> Option<KeyAction> {
         if !self.engine_mgr.ensure_schema(id) {
             warn!("key_actions: switch_schema 目标 {id} 加载失败，不动作");
@@ -825,15 +652,9 @@ impl Coordinator {
         debug!("key_actions: switch_schema -> {id}");
         let commit = self.switch_schema_by_id(id);
         // 记下「这把键刚把用户单向送到了这里」，供目标方案里再按时吞键（见
-        // `Coordinator::schema_switch_arrival`）。**不是**回程记录——单向没有回程。
-        //
-        // 切换失败时不记：`switch_schema_by_id` 的加载失败分支会让 active 保持原样，
-        // 记了等于宣称「这把键把你送到了当前方案」，而它其实哪也没去（与
-        // `toggle_schema_by_id` 只在 active 确实变成目标后才 `record_schema_toggle_origin`
-        // 同一条判据）。
-        //
-        // 全局配法下这条记录**查不到**也无害：目标方案里该键仍命中全局表走 `Act` 分支，
-        // 根本到不了消费它的 `NotBound`。故此处不必区分绑定来自哪一层。
+        // `Coordinator::schema_switch_arrival`），不是回程记录。切换失败（active 未变）时不记，
+        // 同 `toggle_schema_by_id` 的判据。全局配法下目标方案里该键仍命中全局表走 `Act`，
+        // 到不了消费它的 `NotBound`，故不必区分来源层。
         if trigger_vk != 0 && self.engine_mgr.active_schema_id() == id {
             *self
                 .schema_switch_arrival
@@ -844,14 +665,12 @@ impl Coordinator {
         Some(self.schema_switch_key_action(commit))
     }
 
-    /// 这把键是不是**刚刚把用户单向送到当前方案**的那一把（见
+    /// 这把键是不是刚刚把用户单向送到当前方案的那一把（见
     /// [`Coordinator::schema_switch_arrival`]）。
     ///
-    /// 与 [`Self::schema_toggle_key_authorized`] 是**两件事**，不可合并：那个回答「这把键
-    /// 能不能执行往返」，本函数回答「这把键该不该被安静吃掉」。合并的话，单向绑定会获得
-    /// 它从未声明过的回程语义——那正是用户明确不想要的「切过去还会弹回来」。
-    ///
-    /// 代际不等 = 期间用别的方式切过方案，记录作废，该键恢复原本语义。
+    /// 与 [`Self::schema_toggle_key_authorized`] 不可合并：那个回答「能不能执行往返」，本函数
+    /// 回答「该不该被安静吃掉」；合并会让单向绑定获得未声明的回程语义。代际不等 = 期间用
+    /// 别的方式切过方案，记录作废。
     fn schema_switch_key_arrived(&self, key_code: u32) -> bool {
         if key_code == 0 {
             return false;
@@ -866,16 +685,12 @@ impl Coordinator {
         )
     }
 
-    /// 执行 A 类状态切换，转交 `dispatch_hotkey`（这批动作的既有单点）。
-    ///
-    /// **必须在不持 `State` 锁时调用**——`dispatch_hotkey` 的每个分支都自己 `state.lock()`。
-    /// 与 C 类同一约束，故两者共用 [`Self::run_lock_free_bound_action`] 这个分流口。
-    ///
-    /// 分发端不认的动词返回 `None` 不吞键：白名单已在 `BoundAction::parse` 拦过一道，
-    /// 走到这里还失败说明两处不同步，此时让键落回正常输入比静默吃掉好查。
+    /// 执行 A 类状态切换，转交 `dispatch_hotkey`。必须在不持 `State` 锁时调用，与 C 类共用
+    /// [`Self::run_lock_free_bound_action`] 分流口。分发端不认的动词返回 `None` 不吞键
+    /// （说明与 `BoundAction::parse` 白名单不同步，落回正常输入比静默吃掉好查）。
     fn run_dispatch_action(&self, action: &str) -> Option<KeyAction> {
-        // `_keyed`：本函数在按键路径上，`toggle_mode` / `switch_engine` 的编码要经
-        // 本次按键应答回给宿主，不能走 `dispatch_hotkey` 的 push 出口（见其文档）。
+        // `_keyed`：按键路径上，`toggle_mode` / `switch_engine` 的编码要经本次按键应答回给宿主，
+        // 不能走 `dispatch_hotkey` 的 push 出口。
         let Some(act) = self.dispatch_hotkey_keyed(action) else {
             warn!("key_actions: 动作 {action} 未被 dispatch_hotkey 接受，不动作");
             return None;
@@ -884,36 +699,26 @@ impl Coordinator {
         Some(act)
     }
 
-    /// A/C 两类「不建 overlay、只改全局状态」的动作的统一分流口。
+    /// 该动作是否属于「锁外执行」那一类（A/C：不建 overlay、只改全局状态，目标函数
+    /// `toggle_schema_by_id` / `dispatch_hotkey` 自己加 `State` 锁）。与
+    /// [`Self::run_lock_free_bound_action`] 的 match 臂同源；分成两个函数是因为 keyup 路径要
+    /// 先判断再决定取不取锁。
     ///
-    /// 它们的共同点不是语义而是**调用约束**：目标函数（`toggle_schema_by_id` /
-    /// `dispatch_hotkey`）都自己加 `State` 锁，故一律要在锁外执行。B 类相反——它建
-    /// overlay，需要 `&mut State`。这条线就是 keydown 路径上两个插入点的分界。
-    ///
-    /// 返回 `None` 表示「不是这两类」，调用方继续走原有链路。
-    /// 该动作是否属于「锁外执行」那一类（A/C）。与
-    /// [`Self::run_lock_free_bound_action`] 的 match 臂同源——分成两个函数是因为
-    /// keyup 路径要**先判断再决定取不取锁**，而不是拿到结果才知道。
-    ///
-    /// ⚠️ **穷举 `match`，不用 `matches!`**：本判据是组合键热键分派
-    /// （[`Self::dispatch_bound_action_hotkey`]）锁约束的**唯一支点**——它判 `true` 的走锁外、
-    /// `false` 的在持锁时执行。新变体若静默落进 `false` 而它的执行函数自己取 `State` 锁，
-    /// 结果是**死锁**，且只在那个动词被真的绑上时才复现。列全的话新增变体编译不过。
+    /// 穷举 `match` 不用 `matches!`：这是组合键分派（[`Self::dispatch_bound_action_hotkey`]）
+    /// 锁约束的唯一支点，新变体静默落进 `false` 而执行函数自取锁就会死锁，列全则新增变体编译不过。
     pub(crate) fn is_lock_free_bound(&self, action: &BoundAction) -> bool {
         match action {
-            // 目标函数自取 `State` 锁 ⇒ 必须锁外。命令虽经独立线程执行、持锁调也不死锁，
-            // 但它不建 overlay、不要 `&mut State`，归这一类才与「A/C 类」的分流口同形。
+            // 目标函数自取 `State` 锁 ⇒ 必须锁外。命令持锁调也不死锁，但它不建 overlay，
+            // 归这一类才与分流口同形。
             BoundAction::ToggleSchema(_)
             | BoundAction::SwitchSchema(_)
             | BoundAction::Action(_)
             | BoundAction::Command(_) => true,
             // 建 overlay，要 `&mut State` ⇒ 调用方持锁。
             //
-            // ★ `SoftKeyboard` 在这里是 `false`，但它**也要在锁外执行**：
-            // `softkeyboard_hotkey` 自己取锁（要按 `commit_on_switch` 处置正在打的编码）。
-            // 本函数回答的是「走不走 `run_lock_free_bound_action`」，而软键盘不经那个分流口
-            // ——`dispatch_bound_action_hotkey` 在取锁前单独把它分了出去。别看到 `false`
-            // 就把它塞进持锁分支。
+            // `SoftKeyboard` 在这里是 `false` 但也要锁外执行（`softkeyboard_hotkey` 自己取锁）：
+            // 它不经 `run_lock_free_bound_action`，由 `dispatch_bound_action_hotkey` 在取锁前
+            // 单独分出去。别看到 `false` 就把它塞进持锁分支。
             BoundAction::None
             | BoundAction::TempPinyin
             | BoundAction::TempEnglish
@@ -928,6 +733,8 @@ impl Coordinator {
         }
     }
 
+    /// A/C 两类动作的统一分流口，调用方须不持 `State` 锁。返回 `None` 表示「不是这两类」，
+    /// 调用方继续走原有链路。B 类相反，建 overlay、需要 `&mut State`。
     pub(crate) fn run_lock_free_bound_action(
         &self,
         action: &BoundAction,
@@ -947,49 +754,28 @@ impl Coordinator {
 
     /// 执行按键绑定的命令（`command:<表达式>`，`key_actions` 与 `session_actions` 两张表共用）。
     ///
-    /// 执行体与工具栏自定义按钮同一个（`spawn_user_command`）。异步执行，**不等结果**：
-    /// 按键应答只表达「这个键归我了」，命令的成败由 cmdbar 自己弹 toast。
-    ///
-    /// ⚠️ 日志分级：表达式是用户写的内容（可能含路径 / 网址），只进 debug；info 只记事件本身。
+    /// 执行体与工具栏自定义按钮同一个（`spawn_user_command`）。异步执行、不等结果，命令的
+    /// 成败由 cmdbar 自己弹 toast。表达式是用户内容（可能含路径 / 网址），只进 debug。
     pub(crate) fn run_bound_command(&self, expr: &str) {
         info!("执行了按键绑定的命令");
         debug!("按键绑定命令: {expr}");
         self.spawn_user_command(expr);
     }
 
-    /// **组合键热键**命中后的分派：与单键、修饰键两条通路同一个值域（[`BoundAction`]）。
-    ///
+    /// 组合键热键命中后的分派：与单键、修饰键两条通路同一个值域（[`BoundAction`]）。
     /// 返回 `None` = 本函数不接这个动词，调用方继续走原有按键链路（不吞键）。
     ///
-    /// 2026-09-18 之前这里是 `message_handler` 里一串手写特判（`enter_special:` /
-    /// `enter_rare_char` / `enter_temp_pinyin` / `toggle_schema:` / …），每接一个动词加一段，
-    /// 与编译期那份六项白名单一一对应。合流后组合键能绑的就是 `BoundAction` 的全值域，
-    /// 今后新增功能不必再在两处各加一遍——**那正是组合键长期比单键少一大截功能的成因**。
+    /// 与引导键上下文的差别，都是这条通路专有的：
+    /// 1. `key_code` 恒传 0（哨兵）：热键进入不写引导符。
+    /// 2. `chinese_mode` 守卫：判据取 [`BoundAction::only_in_chinese_mode`]，与编译期给不给
+    ///    `CHINESE_ONLY` 位同一个方法；别的路径转发进来的同一个键会在英文态凭空建组合区。
+    ///    只覆盖 B 类，A 类在它之前分流走（理由见 `only_in_chinese_mode`）。
+    /// 3. 幂等：已在目标模式时安静吃掉，不重开。
+    /// 4. 门卫没过也吃键：与引导键通路刻意相反，见函数末尾。
     ///
-    /// # 热键上下文与引导键上下文的三处差别
-    ///
-    /// 都是这条通路专有的，合流时必须保住：
-    ///
-    /// 1. **`key_code` 恒传 0**（哨兵）：热键进入不写引导符。出处见
-    ///    `commit_and_enter_temp_pinyin` 与 `enter_special_mode`。
-    /// 2. **`chinese_mode` 守卫**：判据取 [`BoundAction::only_in_chinese_mode`]，与编译期
-    ///    给不给 `CHINESE_ONLY` 位是**同一个方法**。策略位已让 TSF 在英文态不转发，这里
-    ///    仍要判——别的路径转发进来的同一个键，会在英文态凭空建组合区。
-    ///    ⚠️ 这道守卫**只覆盖 B 类**：A 类在它之前就被分流走了，那是刻意的，理由写在
-    ///    `only_in_chinese_mode` 的「为什么 A 类不走分派端那道守卫」一节。
-    /// 3. **幂等**：已在目标模式时安静吃掉，不重开。引导键通路不需要这条（模式激活后
-    ///    按键走模式内分派，根本到不了这里）。
-    /// 4. **门卫没过也吃键**：与引导键通路刻意相反。引导键落下去是打出一个字符（无害），
-    ///    组合键落下去是把 `Ctrl+;` 交给宿主执行它自己的加速键。见函数末尾那段。
-    ///
-    /// # 两个动词走独立分支
-    ///
-    /// - `SoftKeyboard` —— `softkeyboard_hotkey` 自己取 `State` 锁（要按
-    ///   `keys.commit_on_switch` 处置正在打的编码），**只能在锁外调**；而 B 类那条要持锁。
-    ///   它也不受 `chinese_mode` 守卫：面板与中英态无关，见 `only_in_chinese_mode`。
-    /// - `add_word` / `open_add_word_dialog` —— 不在 `BoundAction` 值域内，要返回占位
-    ///   composition 激活 C++ 转发全部按键，不符 `dispatch_hotkey` 的 `bool` 契约。
-    ///   调用方在本函数**之前**特判。
+    /// 两个动词走独立分支：`SoftKeyboard`（`softkeyboard_hotkey` 自己取锁，只能锁外调，
+    /// 也不受 `chinese_mode` 守卫）；`add_word` / `open_add_word_dialog` 不在 `BoundAction`
+    /// 值域内（要返回占位 composition 让 C++ 转发全部按键），调用方在本函数之前特判。
     pub(crate) fn dispatch_bound_action_hotkey(&self, action: &str) -> Option<KeyAction> {
         let parsed = BoundAction::parse(action);
         if !parsed.is_enabled() {
@@ -1000,10 +786,8 @@ impl Coordinator {
         if let BoundAction::SoftKeyboard(page) = &parsed {
             return Some(self.softkeyboard_hotkey(page.as_deref()));
         }
-        // A/C 类：不建 overlay，目标函数自加锁，必须在锁外。
-        //
-        // trigger_vk 传 0：组合键在所有方案里都命中，不需要「回程键临时授权」那套——
-        // 那是方案级绑定专有的问题，见 `schema_toggle_key_authorized`。
+        // A/C 类：不建 overlay，目标函数自加锁，必须在锁外。trigger_vk 传 0：组合键在所有
+        // 方案里都命中，不需要回程键临时授权（见 `schema_toggle_key_authorized`）。
         if self.is_lock_free_bound(&parsed) {
             return Some(
                 self.run_lock_free_bound_action(&parsed, 0)
@@ -1015,27 +799,16 @@ impl Coordinator {
         if parsed.only_in_chinese_mode() && !state.chinese_mode {
             return None;
         }
-        // 已在目标模式：安静吃掉。放行会让这个组合键泄漏给宿主，重开则会把用户已经
-        // 打进模式里的编码清掉——两个都不是「再按一次」该有的结果。
+        // 已在目标模式：安静吃掉。放行会让组合键泄漏给宿主，重开会清掉用户已打的编码。
         if let Some(kind) = self.bound_action_mode_kind(&parsed)
             && state.active == Some(kind)
         {
             return Some(KeyAction::Consumed);
         }
-        // ★ 门卫没过（目标模式不可加载 / 临拼目标方案不是码表 / 辅助码无候选可筛）时
-        // **仍然吞键**，不落回按键链。
-        //
-        // 这与引导键通路的策略**刻意相反**，因为落下去的后果不同：引导键落下去是打出
-        // 一个字符（无害，本来也该出那个字符），组合键落下去是把 `Ctrl+;` 原样交给宿主，
-        // 宿主会按自己的加速键执行——用户配的是「进临时拼音」，得到的是宿主的某个功能。
-        //
-        // 被合流掉的旧手写链三处都是这么做的（`enter_temp_pinyin` 那段写着「中文模式下
-        // 一律吞键（不放行，避免把该组合键泄漏给宿主）」）。判据是**责任归属**：中文态
-        // 守卫一过，这个键就归本函数管，门卫没过的正确表现是「什么都没发生」。
-        //
-        // ⚠️ 受影响的不止新放开的动词：`input.temp_pinyin.hotkey` 这条出厂通路现在也编成
-        // `temp_pinyin` 走这里，而活跃方案本身就是拼音方案时 `temp_pinyin_target()` 恒为
-        // `None`（那是正常配置，不是错误路径）。
+        // 门卫没过（目标模式不可加载 / 临拼目标方案不是码表 / 辅助码无候选可筛）时仍然吞键：
+        // 引导键落下去是打出一个字符（无害），组合键落下去是把 `Ctrl+;` 交给宿主执行它自己的
+        // 加速键。中文态守卫一过这个键就归本函数管。出厂 `input.temp_pinyin.hotkey` 也走这里，
+        // 活跃方案是拼音时 `temp_pinyin_target()` 恒为 `None`，属正常配置。
         Some(
             self.commit_and_enter_bound_action(&mut state, &parsed, 0)
                 .unwrap_or(KeyAction::Consumed),
@@ -1044,11 +817,10 @@ impl Coordinator {
 
     /// 动作对应的独占模式身份，供热键路径做幂等判断；没有对应模式的动作返回 `None`。
     ///
-    /// id 解析不出下标时也返回 `None`——那种配置根本进不去，谈不上「已在该模式」。
+    /// id 解析不出下标时也返回 `None`（那种配置根本进不去）。
     ///
-    /// ⚠️ **穷举 `match`，不用 `_` 兜底**：漏掉一个建 overlay 的变体的后果是丢幂等，
-    /// 而丢幂等的表现是「再按一次把用户已经打进模式里的编码清掉」——那是用户会当成
-    /// 数据丢失的一类。列全的话新增变体编译不过，逼人当场判断它有没有模式身份。
+    /// 穷举 `match` 不用 `_` 兜底：漏掉一个建 overlay 的变体就丢幂等，再按一次会清掉用户
+    /// 已打进模式里的编码。列全则新增变体编译不过。
     fn bound_action_mode_kind(&self, action: &BoundAction) -> Option<ModeKind> {
         Some(match action {
             BoundAction::TempPinyin => ModeKind::TempPinyin,
@@ -1058,8 +830,8 @@ impl Coordinator {
             BoundAction::Reverse => ModeKind::Reverse,
             BoundAction::Special(id) => ModeKind::Special(self.special_mode_idx(id)?),
             BoundAction::Mix(id) => ModeKind::Mix(self.mix_mode_idx(id)?),
-            // 不建 overlay ⇒ 没有可比对的模式身份。软键盘有自己的开关态，幂等由
-            // `toggle_softkeyboard` 自己处理（它的语义就是「再按一次关掉」）。
+            // 不建 overlay ⇒ 没有可比对的模式身份。软键盘的幂等由 `toggle_softkeyboard`
+            // 自己处理（再按一次就是关掉）。
             BoundAction::None
             | BoundAction::SingleChar(_)
             | BoundAction::CommentState(_)
@@ -1071,16 +843,13 @@ impl Coordinator {
         })
     }
 
-    /// keydown 路径上的 A 类分派判定：**判定在锁内、执行在锁外**。
+    /// keydown 路径上的 A 类分派判定：判定在锁内、执行在锁外。
     ///
     /// 调用方拿到 `Some` 后须先 `drop` 掉 `State` guard 再执行（见
-    /// [`Self::run_lock_free_bound_action`] 的锁约束）。本函数只读 `state`，不改。
-    ///
-    /// 三道门：
-    /// - **空缓冲**：打字打到一半按下绑定键，意图多半是输入而非切状态；且 A 类不吞
-    ///   已有编码，留给下游的顶字逻辑更合理。
-    /// - **无修饰键**：`Ctrl+\` 是宿主的快捷键，不该被方案绑定截走。
-    /// - **不限修饰键的动作**：`toggle_mode` 那类绑在有字符的键上是单程票，
+    /// [`Self::run_lock_free_bound_action`]）。本函数只读 `state`。三道门：
+    /// - 空缓冲：打字打到一半按下绑定键，意图多半是输入；已有编码留给下游的顶字逻辑。
+    /// - 无修饰键：`Ctrl+\` 是宿主的快捷键，不该被方案绑定截走。
+    /// - 不限修饰键的动作：`toggle_mode` 那类绑在有字符的键上是单程票，
     ///   见 [`BoundAction::requires_modifier_key`]。
     pub(crate) fn bound_lock_free_action_for_keydown(
         &self,
@@ -1098,8 +867,7 @@ impl Coordinator {
             return None;
         };
         if action.requires_modifier_key() {
-            // 有字符的键到不了英文态，绑这类动作等于单程票。core 侧忽略并 warn，
-            // 设置页对同一组合给行内提示。
+            // 有字符的键到不了英文态，绑这类动作等于单程票。忽略并 warn，设置页另有行内提示。
             warn!(
                 "key_actions: {action:?} 只能绑修饰键（无字符键），键 0x{:02X} 上忽略",
                 data.key_code
@@ -1111,62 +879,46 @@ impl Coordinator {
 
     /// 纯修饰键 keyup 上的方案级绑定分派（`rshift = "toggle_schema:english"` 这类）。
     ///
-    /// 与 keydown 侧的 `try_activate_mode` 是**互补的两半**，不是重复：修饰键没有字符，
-    /// 到不了 keydown 那条链（TSF 只在干净单击后于 keyup 转发，见 `KeyEventSink.cpp`）。
-    /// 判据是键的形态（有无字符），不是动词类别——见 schema-key-actions.md §4.1。
+    /// 与 keydown 侧的 `try_activate_mode` 是互补的两半：修饰键没有字符，到不了 keydown 那条链
+    /// （TSF 只在干净单击后于 keyup 转发，见 `KeyEventSink.cpp`）。判据是键的形态（有无字符），
+    /// 不是动词类别，见 docs/design/schema-key-actions.md §4.1。
     ///
     /// 返回 `None` 表示本函数不接管，调用方继续走 `is_toggle_mode_keycode`。
     pub(crate) fn handle_bound_modifier_key_up(&self, key_code: u32) -> Option<KeyAction> {
-        // ★★ 英文半角态跳过方案级层，只认全局配置——理由与代价见
-        // `bound_action_with_source_layered`。**本函数是这条规则的唯一落点**：英文态下
-        // 有字符的键到不了分派（分水岭 `PassThrough`），组合键走全局编译的 hotkeys，
-        // 故只有修饰键这条路需要按态分层。
+        // 英文半角态跳过方案级层，只认全局配置（理由与代价见 `bound_action_with_source_layered`），
+        // 本函数是这条规则的唯一落点。
         //
-        // ⚠️ 在此读 `chinese_mode` 是安全的：本函数由 message_handler 的 keyup 分支直接
-        // 调用，**调用点不持 `State` 锁**（上游 `handle_select_key_up` /
-        // `handle_session_action_key_up` 都是各自 lock 各自释放）。若日后有持锁的调用方
-        // 接进来，必须改为由调用方传入该值，否则死锁。
+        // 在此读 `chinese_mode` 要求调用点不持 `State` 锁（message_handler 的 keyup 分支直接调，
+        // 上游各自 lock 各自释放）。持锁的调用方接进来就得改为传入该值，否则死锁。
         let chinese = {
             let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
             s.chinese_mode
         };
         match self.bound_key_decision_layered(key_code, chinese) {
-            // 活跃方案没绑这个键，但它可能**携带往返语义**——刚才正是用它把用户带到当前
-            // 方案的。少了这一条，「五笔按 RShift 去英文方案」就要求英文方案自己也配一遍
-            // 才回得来。见 `schema_toggle_key_authorized`。
-            //
-            // ★ 授权成立后一律转交 `toggle_schema_by_id`，不在这里自己判「回程还是去程」：
-            //   授权只保证代际未变（⇒ 必然仍在目标方案），至于该回来源还是该重新落地，由
-            //   它按完整落点裁决——**与全局 `keys.key_actions` 配置走的是同一条路**。曾经
-            //   这里有一份只看代际的独立回程实现（`run_schema_return`），判据一分叉，
-            //   同一个 bug 就只在其中一种配置下复现，报障时表现为「换个配法就不灵」。
+            // 活跃方案没绑这个键，但它可能携带往返语义（刚才正是用它把用户带到当前方案），
+            // 见 `schema_toggle_key_authorized`。授权成立后一律转交 `toggle_schema_by_id` 按完整
+            // 落点裁决，与全局 `keys.key_actions` 配置走同一条路；别在这里另写一份回程判断。
             BoundKeyDecision::NotBound => {
                 if self.schema_toggle_key_authorized(key_code) {
                     let commit =
                         self.toggle_schema_by_id(&self.engine_mgr.active_schema_id(), key_code);
                     return Some(self.schema_switch_key_action(commit));
                 }
-                // 方案级**单向**切换刚把用户送到这里：吞键、不动作。
-                //
-                // ★ 绝不能返回 `None` 落回全局链——`lshift`/`rshift` 出厂就是 `toggle_mode`
-                // 键，那样「配的是切方案」会变成「切了中英文」，比没反应难查得多。方案级
-                // 单向曾因此被整条禁掉（见 `bound_key_decision` 的注释），现由本分支兜底。
-                //
-                // ★ 与上面那条的区别是**吞键 vs 回程**：单向没有回程，用户要的就是「切过去
-                // 就完事」。回程由他自己安排的另一把键负责。
+                // 方案级单向切换刚把用户送到这里：吞键、不动作。绝不能返回 `None` 落回全局链：
+                // `lshift`/`rshift` 出厂是 `toggle_mode`，「切方案」会变成「切了中英文」。
+                // 与上面那条的区别是吞键 vs 回程：单向没有回程。
                 if self.schema_switch_key_arrived(key_code) {
                     debug!("switch_schema: 0x{key_code:02X} 是本方案的单向送达键，吞键不动作");
                     return Some(KeyAction::Consumed);
                 }
                 None
             }
-            // 显式 `none`：屏蔽该键的全局绑定（多半是 `toggle_mode`）。必须**接管**并
-            // 返回 Consumed，落到下面就等于 `none` 没生效——这正是 `;` 那次漏接的形态。
+            // 显式 `none`：屏蔽该键的全局绑定（多半是 `toggle_mode`），必须接管并返回 Consumed。
             BoundKeyDecision::Yield => {
                 debug!("bound modifier key_up 0x{key_code:02X} 让位（多为显式 none）");
                 Some(KeyAction::Consumed)
             }
-            // A/C 类必须在**锁外**执行（目标函数自己加锁），故先于取锁分流。
+            // A/C 类必须在锁外执行（目标函数自己加锁），故先于取锁分流。
             BoundKeyDecision::Act(action) if self.is_lock_free_bound(&action) => {
                 self.run_lock_free_bound_action(&action, key_code)
             }
@@ -1174,8 +926,7 @@ impl Coordinator {
                 let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
                 let act = self.enter_bound_action(&mut state, &action, key_code);
                 drop(state);
-                // 门卫没过（目标模式不可用）时**不吞键**：返回 None 让全局链接手，
-                // 与 keydown 侧 `enter_bound_action` 返回 None 的处置一致。
+                // 门卫没过时不吞键：返回 None 让全局链接手，与 keydown 侧一致。
                 act
             }
         }
@@ -1201,14 +952,12 @@ impl Coordinator {
         state.rewind = None;
         state.special_buffer.clear();
         state.special_cursor = 0;
-        // 翻页扩充 / 末页放宽三位：反查模式会写（special 族其余成员不写，对它们是空操作），
-        // 主路与临拼也写。`scope_relaxed` 的失效点 `expire_scope_override` 只挂在按键出口，
-        // 失焦等清缓冲的路径不经过它——不在这里复位，回来后的新组码会继承上一个焦点的放宽态。
+        // 翻页扩充 / 末页放宽三位：`scope_relaxed` 的失效点 `expire_scope_override` 只挂在按键
+        // 出口，失焦等清缓冲的路径不经过它，不在这里复位就会让新组码继承上一个焦点的放宽态。
         state.has_more = false;
         state.candidate_limit = 0;
         state.scope_relaxed = false;
-        // `[overlay]` 段快照随模式一并丢弃。消费点都先判 `active == Special`，残留本不会
-        // 被读到——但那条「先判 active」是消费点的实现细节，不是这里可以依赖的契约。
+        // `[overlay]` 段快照随模式一并丢弃，不依赖消费点「先判 active」的实现细节。
         state.overlay_spec = None;
         state.mix_buffer.clear();
         state.mix_cursor = 0;
@@ -1228,10 +977,8 @@ impl Coordinator {
         state.committed_segs.clear();
         // 焦点/模式切换：解除智能符号待命，避免跨上下文误触发替换。
         self.disarm_smart_symbol();
-        // 快捷加词模式遗留：焦点/模式切换时退出。
-        // 布局无需在此恢复——模式标志已清，下一次候选显示会自动算回全局基线（见 layout.rs）。
-        // 这正是声明式重算相对「保存/恢复」的价值：这条路径当年就是补丁式加上的第 3、第 4 个
-        // 恢复出口，再加四个模式就会有十几处，漏一处即候选窗卡在竖排且无日志。
+        // 快捷加词模式遗留：焦点/模式切换时退出。布局无需在此恢复：模式标志已清，下次候选
+        // 显示会声明式算回全局基线（见 layout.rs），别改回逐出口「保存/恢复」。
         if state.add_word_active {
             state.add_word_active = false;
             state.add_word_chars.clear();
@@ -1248,10 +995,8 @@ impl Coordinator {
 
 #[cfg(test)]
 mod restart_tests {
-    //! 重启服务前的「有没有活跃组合」判据。
-    //!
-    //! 只钉**联想态**这一格：那是四个原有析取项同时为空、而宿主里确实挂着组合
-    //! （`assoc_composition` 占位）的唯一形态，也是这条判据唯一会判错的地方。
+    //! 重启服务前的「有没有活跃组合」判据。只钉联想态这一格：四个原有析取项同时为空、
+    //! 而宿主里挂着 `assoc_composition` 占位的唯一形态。
 
     use crate::Coordinator;
     use wind_candidate::{Candidate, CandidateSource};
@@ -1273,21 +1018,10 @@ mod restart_tests {
         }];
     }
 
-    /// ★ 联想态下重启服务必须认定「有组合」，否则宿主里的占位空格成孤儿。
+    /// 联想态下重启服务必须认定「有组合」，否则宿主里的占位空格成孤儿。
     ///
-    /// # 为什么断言的是 `candidates` 被清空
-    ///
-    /// 判据为真会走 `reset_exclusive_modes`，它末尾清 `state.candidates`；判据为假则整个
-    /// if 都不进。所以清没清，就是判据结论的**可观测投影**——不必去截 `push_server` 上那条
-    /// `ClearComposition`（headless 下没有对端）。`restart_service()` 在单测里可以整条跑完：
-    /// `request_restart()` 的 `RESTART_TX` 是个没注入的 `OnceLock`，是 no-op。
-    ///
-    /// # 这个洞比本次改动老
-    ///
-    /// 出厂 `app_inline` 下联想的 `preedit` 本来就是空串，四项全空 ⇒ 判据早就漏了。
-    /// 只是「编码显示在候选窗顶部」那一档恰好把 `preedit` 填成「联想输入」四个字，
-    /// 把它糊住了。压制态强制嵌入之后那一档也变成空串，糊不住了，才暴露出来。
-    ///
+    /// 断言 `candidates` 被清空：判据为真才走 `reset_exclusive_modes`，清没清就是判据结论的
+    /// 可观测投影（headless 下截不到 `ClearComposition`）。`request_restart()` 在单测里是 no-op。
     /// 变异检验：去掉判据里的 `!state.candidates.is_empty()` ⇒ 本条红。
     #[test]
     fn restarting_during_association_still_clears_the_host_composition() {

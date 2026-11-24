@@ -1,7 +1,6 @@
 //! 功能菜单与工具栏
 //!
 //! 主菜单 / 候选右键菜单的构建与分派、工具栏点击/刷新/位置持久化。
-//! 从 coordinator.rs 拆出（同 crate 内 `impl Coordinator` 块，组织性重构，无逻辑变更）。
 
 use crate::coordinator::ToolbarPush;
 use crate::coordinator::{Coordinator, FILTER_MODES};
@@ -21,17 +20,15 @@ const STATUS_POS_FIELDS: [&str; 3] = ["status_position_mode", "status_x", "statu
 
 /// 菜单打开后的焦点事件豁免期，见 [`Coordinator::menu_close_on_focus_change`]。
 ///
-/// 取 250ms 的依据：下界须盖住跨宿主切换时旧宿主 focus_lost 迟到的约 100ms（实测
-/// 97~111ms，见 `project_toolbar_flash_stale_focus_lost` 的时序），上界须远短于用户
-/// 「点开菜单 → 切走窗口」的最短间隔（看清菜单内容至少几百毫秒）。
+/// 下界须盖住跨宿主切换时旧宿主 focus_lost 迟到的约 100ms，上界须远短于用户「点开菜单 →
+/// 切走窗口」的最短间隔（几百毫秒）。
 pub(crate) const MENU_FOCUS_GUARD: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Linux 自绘菜单的空闲超时：这么久没有任何菜单操作（打开 / 菜单键 / 指针）就当它已经没了。
 ///
-/// 这是**服务端最后一道兜底**，不是正常关闭路径：addon 自己有同样时长的空闲计时（到点收菜单、
-/// 报 `menu.dismiss`），这里防的是 addon 那条报告丢了——`menu_open` 一旦卡在 true，方向键 /
-/// 回车 / Esc 永远被吞（macOS 早期踩过的坑，见 `docs/design/linux-port.md` §7）。所以判据放在
-/// 「下一个按键到来时」：超时后的第一个键照常处理，不被吞。
+/// 服务端最后一道兜底，不是正常关闭路径：addon 自己有同样时长的空闲计时，这里防的是它的
+/// `menu.dismiss` 报告丢了、`menu_open` 卡在 true 后方向键 / 回车 / Esc 永远被吞（见
+/// `docs/design/linux-port.md` §7）。判据放在下一个按键到来时，超时后的第一个键照常处理。
 #[cfg(ext_presenter)]
 pub(crate) const MENU_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
@@ -61,15 +58,11 @@ pub(crate) struct MenuOpenRequest {
     pub(crate) local: Option<(i32, i32)>,
 }
 
-/// `MenuCmd::ToggleToolbar` 的菜单文案。两平台**同一个命令、不同的 UI 实体**，故文案分平台：
-/// Windows 下它显隐的是跟随光标的悬浮工具栏窗口；macOS 下 `UpdateToolbar` 被
-/// `manager_macos` 编码成 mode_status 帧，最终落到 `ModeStatusController` 的
-/// `NSStatusItem.isVisible` —— 显隐的是菜单栏里那个中/英状态图标，压根没有悬浮工具栏。
-/// 照搬「显示工具栏」会让 mac 用户去找一个不存在的东西。Linux 外部宿主形态显隐的是悬浮工具栏，
-/// 与 Windows 同一个实体，故按 macOS / 其余两档分，而不是按 `ext_presenter` 分。
+/// `MenuCmd::ToggleToolbar` 的菜单文案，分平台：Windows / Linux 外部宿主显隐的是悬浮工具栏；
+/// macOS 下 `UpdateToolbar` 最终落到 `ModeStatusController` 的 `NSStatusItem.isVisible`，
+/// 显隐的是菜单栏里的中/英状态图标，压根没有悬浮工具栏。
 ///
-/// 常量而非各处字面量：三处菜单（IMK 输入源 / 候选框右键 / 状态指示器下拉）必须字字一致，
-/// 这正是本次统一要解决的问题，散成字面量迟早再次跑偏。
+/// 常量而非各处字面量：三处菜单（IMK 输入源 / 候选框右键 / 状态指示器下拉）必须字字一致。
 pub(crate) const TOOLBAR_MENU_LABEL: &str = if cfg!(target_os = "macos") {
     "显示状态图标"
 } else {
@@ -77,11 +70,10 @@ pub(crate) const TOOLBAR_MENU_LABEL: &str = if cfg!(target_os = "macos") {
 };
 
 /// 把 (键, 值) 列表拼成设置程序的附加参数串（`--k=v`，空格分隔）。值为空的项跳过
-/// ——设置端把"传了空串"和"没传"当同一回事，少一个参数更省事。
+/// （设置端把空串和没传当同一回事）。
 ///
-/// 值含空白时加双引号：参数串最终经 `ShellExecuteW` 的 params 交给目标进程，由
-/// `CommandLineToArgvW` 重新切分，不加引号的 `--text=你 好` 会被拆成两个 argv，
-/// 设置端只收得到 `--text=你`。引号在切分时会被剥掉，故设置端拿到的仍是裸值。
+/// 值含空白时加双引号：参数串经 `ShellExecuteW` 交给目标进程、由 `CommandLineToArgvW`
+/// 重新切分，不加引号 `--text=你 好` 会被拆成两个 argv。引号在切分时剥掉。
 pub(crate) fn build_settings_args(pairs: &[(&str, &str)]) -> String {
     let mut out = String::new();
     for (k, v) in pairs {
@@ -102,15 +94,12 @@ pub(crate) fn build_settings_args(pairs: &[(&str, &str)]) -> String {
 
 /// 把 `page` + [`build_settings_args`] 产出的参数串还原成设置程序的 argv。
 ///
-/// 与命令行不同，IPC 传的是**结构化 argv**，故必须在此把参数串切回一个个词。切词逻辑
-/// 刻意放在本文件——它和上面加引号的 `build_settings_args` 是一对，两者的引号约定必须
-/// 同源。此前这一步在 Swift 侧重做了一遍，等于让另一门语言去猜 Rust 的引号规则。
+/// IPC 传的是结构化 argv，故要把参数串切回一个个词。切词放在本文件，与加引号的
+/// `build_settings_args` 是一对，引号约定必须同源。仅认双引号、不认转义：值来自本进程
+/// 内部拼装，不含引号字面量。
 ///
-/// 仅认双引号、不认转义：值来自本进程内部拼装，不含引号字面量。
-///
-/// 仅 macOS 走 IPC argv 通路，非 macOS 下无调用点；但引号往返的单元测试要在所有平台上跑
-/// （切词规则与 `build_settings_args` 是一对，任一平台改坏都该被拦住），故不加 `cfg` 编译
-/// 掉本函数，只在非 macOS 下豁免 dead_code。
+/// 仅 ext_presenter 走 IPC argv 通路，但引号往返的单测要在所有平台上跑，故不 `cfg` 掉，
+/// 只在其余平台豁免 dead_code。
 #[cfg_attr(not(ext_presenter), allow(dead_code))]
 pub(crate) fn settings_argv(page: Option<&str>, extra: &str) -> Vec<String> {
     let mut argv = Vec::new();
@@ -141,9 +130,8 @@ pub(crate) fn settings_argv(page: Option<&str>, extra: &str) -> Vec<String> {
 
 /// 组装设置程序的完整命令行参数串。
 ///
-/// `--page <p>` 与附加参数各自独立成段：附加参数**不依附于页**（`--dark` / `--soft`
-/// 这类没有页也有意义），故 `page=None` 时仍原样带上，不能因为没页就丢掉。
-/// macOS 走 IPC 裸串、无命令行概念，故仅非 macOS 使用。
+/// 附加参数不依附于页（`--dark` / `--soft` 没有页也有意义），`page=None` 时仍原样带上。
+/// ext_presenter 走 IPC argv、无命令行概念，故仅其余平台使用。
 #[cfg(not(ext_presenter))]
 pub(crate) fn settings_cmdline(page: Option<&str>, extra: &str) -> String {
     let mut out = String::new();
@@ -162,17 +150,10 @@ pub(crate) fn settings_cmdline(page: Option<&str>, extra: &str) -> String {
 
 /// 全屏探测单飞闸的归还句柄：`Drop` 里必定把闸放回去。
 ///
-/// 为什么值得为一个 bool 造个类型：闸是「取在一条线程、还在另一条线程」的，中间夹着一次
-/// 跨进程阻塞查询和一段会取 `state` 锁、下发 UI 命令、推语言栏图标的通知逻辑。归还点若散在
-/// 那一路的每个早退分支上，漏一个的后果**不是少探一次**，而是此后所有探测（焦点事件的与
-/// 复查线程的）全部 early return —— 全屏缓存永久冻结，症状正是本次要修的 GH#134，且变成
-/// 不可恢复的那一版，日志里还什么都看不到。收进 `Drop` 之后归还点唯一。
-///
-/// ⚠ **别把它当 panic 安全**：release profile 是 `panic = "abort"`（见 `wind_input/Cargo.toml`），
-/// 栈不展开、`Drop` 不执行，出厂版本上 panic 即进程终止，没有「闸被归还」这回事。它买到的
-/// 是跨线程交接与早退路径的收口，不是 panic 恢复。
-///
-/// 持有 `Arc` 而不是 `&AtomicBool`：闸要跨到 `spawn` 出去的线程里归还，借用活不过去。
+/// 闸取在一条线程、还在另一条线程，中间夹着跨进程阻塞查询与一段多早退分支的通知逻辑；
+/// 归还点散在各分支上，漏一个就让此后所有探测 early return、全屏缓存永久冻结。收进 `Drop`
+/// 后归还点唯一。它不是 panic 安全：release profile 是 `panic = "abort"`，`Drop` 不执行。
+/// 持有 `Arc` 而不是 `&AtomicBool`：要跨到 `spawn` 出去的线程里归还。
 pub(crate) struct ProbeGate(std::sync::Arc<Coordinator>);
 
 impl Drop for ProbeGate {
@@ -209,7 +190,7 @@ impl Coordinator {
             MenuKind::Submenu | MenuKind::Separator | MenuKind::Label => {}
         }
         // 派发完再解除 tooltip 抑制：Tooltip 截图命令必须先于本次解除被处理，
-        // 否则 tooltip 会在截图前被隐藏。详见 clear_tooltip_menu_flag 的说明。
+        // 否则 tooltip 会在截图前被隐藏，见 clear_tooltip_menu_flag。
         self.clear_tooltip_menu_flag();
     }
 
@@ -217,8 +198,8 @@ impl Coordinator {
     pub(crate) fn run_menu_cmd(&self, cmd: MenuCmd) {
         match cmd {
             MenuCmd::SchemaEnglish => {
-                // ctrl_held=false：菜单点的，与按键无关。它只被 `ignore_host_ime_switch`
-                // 消费，而那条规则只拦 compartment 来源，菜单永远照办。
+                // ctrl_held=false：菜单点的。它只被 `ignore_host_ime_switch` 消费，
+                // 那条规则只拦 compartment 来源，菜单永远照办。
                 self.handle_system_mode_switch(
                     false,
                     wind_ipc::protocol::ModeSwitchSource::Menu,
@@ -240,9 +221,8 @@ impl Coordinator {
                 self.softkeyboard_menu_toggle(None);
                 self.after_softkeyboard_change();
             }
-            // 分格快捷菜单末尾的「更多…」：弹完整主菜单。锚点取光标位（`i32::MIN` 由 UI
-            // 侧解释成"当前鼠标处"）——用户刚在那里点过，比回头去算工具栏几何更贴合，
-            // 也不必把上一个菜单的锚点一路带过来。
+            // 分格快捷菜单末尾的「更多…」：弹完整主菜单，锚点取光标位（`i32::MIN` 由 UI
+            // 侧解释成当前鼠标处），用户刚在那里点过。
             MenuCmd::OpenMainMenu => {
                 #[cfg(all(target_os = "linux", ext_presenter))]
                 self.send_host_work_area();
@@ -252,13 +232,9 @@ impl Coordinator {
                 // 菜单选面：面板没开就顺带开出来，否则「选了个面却什么都没发生」。
                 if !self.softkeyboard_is_open() {
                     self.softkeyboard_menu_toggle(None);
-                    // ⚠️ **开面板这一步自己负责收口，不能指望下面那句**：
-                    // `ui_softkeyboard_page` 在下标越界时只 `warn!` 就返回，走不到收口。
-                    // 而菜单是照**构建时**的面表列的，配置一重载就可能少一面——那时面板
-                    // 已经开着并接管按键，C++ 却收不到 STATUS_SOFT_KEYBOARD 位、工具栏
-                    // 图标也不亮，正是这组提交要消灭的那对症状。
-                    // 判据：**谁改了状态谁负责收口**。成功路径会多推一次，两处推送都幂等
-                    // （工具栏有 PartialEq 去重），比漏推划算得多。
+                    // 开面板这一步自己负责收口，不能指望下面那句：`ui_softkeyboard_page` 下标越界
+                    // （菜单按构建时的面表列，配置重载后可能少一面）时只 `warn!` 返回，面板已开却
+                    // 不推 STATUS_SOFT_KEYBOARD 位、工具栏不亮。谁改了状态谁收口，两处推送都幂等。
                     self.after_softkeyboard_change();
                 }
                 self.ui_softkeyboard_page(i);
@@ -335,9 +311,8 @@ impl Coordinator {
                     });
                 }
             }
-            // 语言栏图标：总开关写用户配置（`[ui.langbar]`，热重载后重渲重发），
-            // 纯调试的两项走 state.toml / 内存。两类落点不同，见 set_langbar_config 的说明。
-            // 非 Windows 桌面形态下压根没有发布器，菜单项也不会被构建出来，故是空操作。
+            // 语言栏图标：总开关写用户配置（`[ui.langbar]`），纯调试的两项走 state.toml / 内存，
+            // 见 set_langbar_config。非 Windows 桌面形态下菜单项不会被构建，故是空操作。
             #[cfg(all(feature = "desktop-ui", windows))]
             MenuCmd::IconBadgeStyle(i) => {
                 let id = wind_ui::langbar_icon::BadgeStyle::from_index(i).as_id();
@@ -361,9 +336,8 @@ impl Coordinator {
     /// 图标发布器当前的呈现参数 `(总开关档位下标, 是否烧尺寸档标记)`；
     /// 发布器不可用时返回 `None`。
     ///
-    /// 勾选态一律读**渲染器实际生效的值**而不是配置文件：配置写入到生效之间隔着一次
-    /// 热重载，读配置会在重载失败时显示一个并未生效的勾。菜单勾选与实际行为不同步，
-    /// 用户的反应是反复点同一项。
+    /// 勾选态读渲染器实际生效的值而不是配置文件：读配置会在热重载失败时显示一个并未
+    /// 生效的勾。
     #[cfg(all(feature = "desktop-ui", windows))]
     pub(crate) fn icon_debug_state(&self) -> Option<(u8, bool)> {
         let guard = Coordinator::icon_publisher().lock().ok()?;
@@ -371,16 +345,11 @@ impl Coordinator {
         Some((p.style().index(), p.size_marks()))
     }
 
-    /// Dev 变体专属的语言栏图标调试子菜单。
+    /// Dev 变体专属的语言栏图标调试子菜单：16×16 上角标可不可辨只能真机看，接上菜单后
+    /// 比选只需点几下。
     ///
-    /// 为什么值得做：16×16 上角标可不可辨只能真机看，而每改一次就得提权部署 + 重启
-    /// 输入法，成本高到根本比不动。渲染搬到服务端后这些本就是运行时参数，接上菜单后
-    /// 比选退化成点几下——这正是当初把渲染从 DLL 挪到服务端换来的东西。
-    ///
-    /// **这里只留三样**：总开关（写用户配置 `[ui.langbar]`）、烧尺寸档标记、演示动画
-    /// （后两者是纯调试项，走 state.toml 与内存）。角标画哪些状态、什么颜色、在哪个
-    /// 角，是 `[ui.langbar.badges]` 那张规则表的事——设置页有专门的编辑器，菜单再摆
-    /// 一套就是第二个真相源，且在 16px 的比选场景里也帮不上忙。
+    /// 只留三样：总开关（写 `[ui.langbar]`）、烧尺寸档标记、演示动画（后两者纯调试，走
+    /// state.toml 与内存）。角标规则归 `[ui.langbar.badges]` 与设置页编辑器，菜单不另摆一套。
     #[cfg(all(feature = "desktop-ui", windows))]
     fn build_icon_debug_menu(&self) -> Vec<wind_ui_types::MenuItemSpec> {
         use wind_ui::langbar_icon::BadgeStyle;
@@ -407,8 +376,7 @@ impl Coordinator {
             true,
             marks,
         ));
-        // 演示动画单独隔一段：前面几项都是「图标长什么样」的偏好并会被记住，它却是一段
-        // 持续跑的演示、且重启不保留，混在一起会让人以为它也是个呈现选项。
+        // 演示动画单独隔一段：它是持续跑的演示、重启不保留，不是会被记住的呈现偏好。
         items.push(M::separator());
         items.push(M::leaf(
             "演示动画（外圈跑马灯）",
@@ -441,8 +409,7 @@ impl Coordinator {
 
     /// 状态提示气泡右键菜单「焦点切换时显示」：翻转 `ui.status.show_on_focus` 并立即生效。
     ///
-    /// 与 `status_toggle_always` 不同，这里**不立即弹一次气泡**：用户此刻正对着菜单操作，
-    /// 焦点没动，弹出来反而像误触发。下一次真的切换输入框时自然会显示。
+    /// 这里不立即弹一次气泡（与 `status_toggle_always` 不同）：焦点没动，弹出来像误触发。
     pub(crate) fn status_toggle_show_on_focus(&self) {
         let next = !self.rt().config.ui.status.show_on_focus;
         let _ = Config::set_user_value(
@@ -454,8 +421,8 @@ impl Coordinator {
 
     /// 状态提示气泡右键菜单「恢复默认位置」：改回跟随光标，custom_x/y 归零。
     ///
-    /// 当前焦点应用配了气泡定位规则时改**规则**（写成跟随光标、坐标清零），不碰全局——
-    /// 读取侧规则压过全局，只改全局用户看不到任何变化（C2-33 / GH#148）。
+    /// 当前焦点应用配了气泡定位规则时改规则（跟随光标、坐标清零），不碰全局：读取侧规则
+    /// 压过全局，只改全局用户看不到变化。
     pub(crate) fn status_reset_position(&self) {
         let name = self.active_process_name();
         if self
@@ -476,18 +443,14 @@ impl Coordinator {
         });
     }
 
-    /// 拖动状态提示气泡释放后的落位处理——**是否持久化取决于当前模式**：
+    /// 拖动状态提示气泡释放后的落位处理，是否持久化取决于当前模式：
     ///
-    /// - `fixed`（固定坐标）：写回 `custom_x/custom_y`，永久生效。
-    /// - `follow_caret`（跟随光标）：**不落盘**。拖动只是把气泡临时挪开，
-    ///   下次状态变化重新显示时自然回到光标旁——UI 侧仅在拖动进行中锁定位置，
-    ///   松手后的 `show()` 会照常按光标重新定位，无需在此做任何清理。
+    /// - `fixed`：写回 `custom_x/custom_y`，永久生效。
+    /// - `follow_caret` / 锚点：不落盘。拖动只是临时挪开，UI 侧仅在拖动中锁定位置，
+    ///   下次 `show()` 照常按光标定位，无需在此清理。
     ///
-    /// 这样两种模式各自语义自洽：跟随模式拖动是临时的，固定模式拖动才是"重新摆放"。
-    /// 锚点模式同跟随模式：拖动是临时的，不落盘。
-    ///
-    /// per-app 规则配了气泡定位方式时**落到该应用自己的那份坐标**（方式 + 坐标一起写），
-    /// 不碰全局——判据与读取侧 `status_position` 同源，照 `save_candidate_pos`。
+    /// per-app 规则配了气泡定位方式时落到该应用自己的那份坐标（方式 + 坐标一起写），不碰全局，
+    /// 判据与读取侧 `status_position` 同源，照 `save_candidate_pos`。
     pub(crate) fn save_status_tip_pos(&self, x: i32, y: i32) {
         use wind_config::app_compat::StatusPositionMode as SP;
         let name = self.active_process_name();
@@ -501,8 +464,7 @@ impl Coordinator {
         if self.rt().config.ui.status.position() != SP::Fixed {
             return;
         }
-        // 与候选窗同款哨兵规避：状态气泡的 UI 侧同样用 (0,0) 表示"尚未设定"。
-        // 两处共用同一约定，缺一处就会出现"拖到主屏左上角后位置记不住"。
+        // 与候选窗同款哨兵规避：UI 侧用 (0,0) 表示「尚未设定」，缺一处就会拖到主屏左上角后记不住。
         let (x, y) = avoid_unset_sentinel(x, y);
         let _ = Config::set_user_value(
             &["ui", "status", "custom_x"],
@@ -518,17 +480,13 @@ impl Coordinator {
         });
     }
 
-    /// 拖动候选窗释放后的落位处理——**是否持久化取决于当前定位方式**：
+    /// 拖动候选窗释放后的落位处理，是否持久化取决于当前定位方式：
     ///
-    /// - `fixed`（固定位置）：写回 `ui.candidate.custom_x/custom_y`，永久生效。
-    /// - `follow_caret`（跟随光标）：**不落盘**。拖动只是把候选窗临时挪开，
-    ///   本次组合内保持不动，组合结束（`hide()` → `reset_drag()`）即恢复跟随光标。
+    /// - `fixed`：写回 `ui.candidate.custom_x/custom_y`，永久生效。
+    /// - `follow_caret`：不落盘。本次组合内保持不动，组合结束（`hide()` → `reset_drag()`）即恢复。
     ///
-    /// 与 `save_status_tip_pos` 同构：两种模式各自语义自洽，跟随模式的拖动是临时的，
-    /// 固定模式的拖动才是"重新摆放"。
-    /// per-app 规则命中时**落到该应用自己的那份坐标**，不碰全局——否则在 A 应用里拖一下，
-    /// 所有跟随全局的应用位置全被改掉。判据与读取侧 `candidate_fixed_pos` 同源：规则里
-    /// 配了定位方式就以规则为准，没配才看全局。
+    /// per-app 规则命中时落到该应用自己的那份坐标，不碰全局（否则在 A 应用里拖一下所有
+    /// 跟随全局的应用全被改掉）。判据与读取侧 `candidate_fixed_pos` 同源。
     pub(crate) fn save_candidate_pos(&self, x: i32, y: i32) {
         let name = self.active_process_name();
         if let Some((rule_fixed, _, _)) =
@@ -561,9 +519,7 @@ impl Coordinator {
 
     /// 把候选窗落点写进该应用自己的 compat 规则（用户层），并让当前应用立即生效。
     ///
-    /// 与 [`Self::set_first_show_mode`] 的写盘三步同构，但**不弹 toast**：拖动是高频手势，
-    /// 每拖一次弹一个「设置已更新」明显不合适（与全局那条走 `refresh_config_in_memory`
-    /// 而非 `reload_user_config` 是同一个理由）。
+    /// 与 [`Self::set_first_show_mode`] 的写盘三步同构，但不弹 toast：拖动是高频手势。
     fn save_candidate_pos_for_app(&self, name: &str, x: i32, y: i32) {
         let Some(user_dir) = self.compat_dirs.1.clone() else {
             tracing::warn!("save_candidate_pos: 无用户配置目录，无法持久化 process={name}");
@@ -583,10 +539,9 @@ impl Coordinator {
     /// 为当前焦点应用设置候选窗定位方式，并写入用户层 compat.toml。
     /// `mode_id`：0=跟随全局（清除规则）1=跟随光标 2=固定位置。
     ///
-    /// 三步与 [`Self::set_first_show_mode`] 同构，缺一不可，理由见那里。
-    /// 切到「固定位置」时**不预设坐标**：`(0,0)` 由 UI 落到屏幕默认锚点，用户拖一次即定。
-    /// 这与状态气泡「打开固定时以当前实际位置落盘」刻意不同——那个窗口常驻可见，
-    /// 而候选窗此刻多半没显示，拿不到「当前实际位置」。
+    /// 三步与 [`Self::set_first_show_mode`] 同构。切到「固定位置」时不预设坐标：`(0,0)` 由 UI
+    /// 落到屏幕默认锚点，用户拖一次即定。与状态气泡「以当前实际位置落盘」不同：候选窗此刻
+    /// 多半没显示，拿不到当前位置。
     pub(crate) fn set_candidate_position_rule(&self, mode_id: u8) {
         use wind_config::app_compat::CandidatePositionMode as M;
         let mode = match mode_id {
@@ -622,9 +577,8 @@ impl Coordinator {
     /// 为当前焦点应用设置「软件切换中英」（忽略 / 采纳宿主写 compartment 引起的中英切换），
     /// 并写入用户层 compat.toml。`mode_id`：0=跟随全局（清除）1=忽略 2=显式采纳。
     ///
-    /// 三步与 [`Self::set_first_show_mode`] 同构。**没有第四步**：判定发生在服务端的
-    /// `handle_system_mode_switch`，DLL 侧不需要知道这条规则（它照发不误，被拒后由既有的
-    /// 仲裁回路把 compartment 拉回），所以不必给 DLL 推任何东西。
+    /// 三步与 [`Self::set_first_show_mode`] 同构，没有第四步：判定在服务端
+    /// `handle_system_mode_switch`，DLL 照发不误，被拒后由仲裁回路把 compartment 拉回。
     pub(crate) fn set_ignore_host_ime_switch_rule(&self, mode_id: u8) {
         let enabled = match mode_id {
             1 => Some(true),
@@ -662,12 +616,9 @@ impl Coordinator {
 
     /// 状态提示气泡右键菜单「固定位置」：在 fixed / follow_caret 间翻转。
     ///
-    /// 打开时**以气泡当前实际位置**落盘，而不是直接切到陈旧的 custom_x/custom_y——
-    /// 否则用户拖到某处后点「固定位置」，气泡会跳到上次保存的（往往是 0,0）坐标。
-    /// 做法：先把模式改成 fixed，再请 UI 上报当前位置，回来的 `StatusTipMoved`
-    /// 经 `save_status_tip_pos` 落盘（该函数只在 fixed 模式下持久化，此时条件已满足）。
-    ///
-    /// 当前焦点应用配了气泡定位规则时翻转**规则**（固定 ↔ 跟随光标），随后的落盘也走规则。
+    /// 打开时以气泡当前实际位置落盘，而不是切到陈旧的 custom_x/custom_y（否则气泡会跳到
+    /// 上次保存的、往往是 0,0 的坐标）：先改成 fixed，再请 UI 上报当前位置，回来的
+    /// `StatusTipMoved` 经 `save_status_tip_pos` 落盘。当前焦点应用配了气泡定位规则时翻转规则。
     pub(crate) fn status_toggle_pinned(&self) {
         use wind_config::app_compat::StatusPositionMode as SP;
         let name = self.active_process_name();
@@ -701,7 +652,7 @@ impl Coordinator {
         {
             let si = &self.rt().config.ui.status;
             si_always = si.display_mode.eq_ignore_ascii_case("always");
-            // 勾选态看**生效的**定位（规则优先回落全局），与落盘分流同一判据。
+            // 勾选态看生效的定位（规则优先回落全局），与落盘分流同一判据。
             si_fixed =
                 self.status_position().mode == wind_config::app_compat::StatusPositionMode::Fixed;
             si_on_focus = si.show_on_focus;
@@ -716,8 +667,7 @@ impl Coordinator {
                 true,
                 si_always,
             ),
-            // 常驻模式下本项无意义（获焦本就会显示），置灰而非隐藏——项忽隐忽现比置灰更难理解，
-            // 用户会以为功能没了。
+            // 常驻模式下本项无意义，置灰而非隐藏（忽隐忽现更难理解）。
             M::leaf(
                 "焦点切换时显示",
                 cmd(MenuCmd::StatusToggleShowOnFocus),
@@ -742,8 +692,7 @@ impl Coordinator {
 
     /// 输入诊断 HUD 上右键请求的菜单：复制 / 显示分类 / 停止刷新 / 置顶 / 关闭。
     ///
-    /// 勾选态直接读运行时状态，故菜单永远反映当前真值——这类"开关型"菜单最忌讳
-    /// 勾选态与实际行为不同步，那会让用户反复点同一项。
+    /// 勾选态直接读运行时状态，菜单永远反映当前真值。
     pub(crate) fn show_input_diag_menu(&self, x: i32, y: i32) {
         use std::sync::atomic::Ordering::Relaxed;
         use wind_ui_types::{DiagSections, MenuItemSpec as M};
@@ -797,8 +746,8 @@ impl Coordinator {
 
     /// 切换分区显示。
     ///
-    /// ⚠ **必须强制推一次**：冻结中 `push_input_diag_hud_if_visible` 会早退，此时切分类
-    /// 屏幕上毫无变化，用户只能判断为"菜单坏了"。分区是显示配置而非数据，与冻结正交。
+    /// 必须强制推一次：冻结中 `push_input_diag_hud_if_visible` 会早退，切分类就毫无变化。
+    /// 分区是显示配置而非数据，与冻结正交。
     pub(crate) fn toggle_input_diag_section(&self, idx: u8) {
         {
             let mut s = self
@@ -815,7 +764,7 @@ impl Coordinator {
         use std::sync::atomic::Ordering::Relaxed;
         let now = !self.input_diag_frozen.load(Relaxed);
         self.input_diag_frozen.store(now, Relaxed);
-        // 冻结时也推一次：HUD 要立刻显示"⏸ 已停止刷新"这行标注，否则用户无从确认开关生效。
+        // 冻结时也推一次：HUD 要立刻显示「已停止刷新」标注。
         self.push_input_diag_hud(true);
     }
 
@@ -832,15 +781,11 @@ impl Coordinator {
         use std::sync::atomic::Ordering::Relaxed;
         let now = !self.input_diag_hud_visible.load(Relaxed);
         self.input_diag_hud_visible.store(now, Relaxed);
-        // 采集开关随 HUD 显隐下发（广播）。关闭时也必须推——否则 DLL 会在 HUD 早已关掉
-        // 之后继续每次焦点切换都采集窗口链，白付开销且无人消费。
+        // 采集开关随 HUD 显隐下发（广播）。关闭时也必须推，否则 DLL 继续每次焦点切换都采集窗口链。
         self.push_diag_snapshot_config(0);
         if now {
-            // ⚠ 打开时复位置顶与冻结——这两个开关都能把自己的逃生口关上：
-            //   · 非置顶 → HUD 沉到宿主窗口之下 → 右键菜单点不到 → 没法再打开置顶；
-            //   · 冻结中关掉再打开 → 内容停在旧快照，看起来就是「HUD 坏了不刷新」。
-            // 「重新打开」是用户表达「重来一次」的动作，复位到默认最不意外。
-            // 分区显示不复位：它是纯显示偏好，且全关时 HUD 会给出可右键的提示行，不封死。
+            // 打开时复位置顶与冻结：两个开关都能封死自己的逃生口（非置顶 HUD 沉到宿主下面
+            // 右键点不到；冻结中重开看起来像坏了）。分区显示不复位：全关时 HUD 有可右键的提示行。
             self.input_diag_topmost.store(true, Relaxed);
             self.input_diag_frozen.store(false, Relaxed);
             self.push_input_diag_hud_if_visible();
@@ -849,10 +794,8 @@ impl Coordinator {
         }
     }
 
-    /// 高级菜单「密码框强制英文」：翻转 `input.password_force_english` 并落盘（t197 / A2-37）。
-    ///
-    /// 此前只改内存，重启服务即复原——对「宿主把普通输入框误报成密码框」的用户，每次开机
-    /// 都得再关一次。写法同 `status_toggle_show_on_focus`：先写用户层，再刷新内存配置。
+    /// 高级菜单「密码框强制英文」：翻转 `input.password_force_english` 并落盘（先写用户层，
+    /// 再刷新内存配置），否则重启服务即复原。
     pub(crate) fn toggle_password_suppress(&self) {
         let next = !self.rt().config.input.password_force_english;
         let _ = Config::set_user_value(
@@ -864,24 +807,21 @@ impl Coordinator {
     }
 
     /// 把密码框抑制策略开关同步到运行时：关闭时立即解除当前生效的强制英文。
-    /// 菜单切换与配置热重载共用——两条路少回灌一处，就是「改了没反应、重启才好」。
+    /// 菜单切换与配置热重载共用，两条路都要回灌。
     pub(crate) fn set_password_suppress_enabled(&self, enabled: bool) {
         use std::sync::atomic::Ordering::Relaxed;
         self.password_suppress_enabled.store(enabled, Relaxed);
         self.relax_password_suppress_for_focus();
-        // 同步给 DLL：吃键门控在 TSF 侧本地判定（早于 IPC），不推则开关对 DLL 无效——
-        // 关掉抑制后 DLL 仍会放行所有键，这个「误置位时用来救场」的逃生阀就成了摆设。
-        // 逐客户端按各自 pid 现算（per-app 规则优先），见 `push_password_suppress_config`。
+        // 同步给 DLL：吃键门控在 TSF 侧本地判定，不推则关掉抑制后 DLL 仍放行所有键、逃生阀
+        // 成摆设。逐客户端按各自 pid 现算（per-app 规则优先），见 `push_password_suppress_config`。
         self.push_password_suppress_config(0);
     }
 
-    /// 按最近一次输入诊断（焦点 pid + InputScope 掩码）重算抑制态，**只降不升**：
-    /// 判定变成「不抑制」就立即解除；变成「抑制」则留给下一次诊断上报去置位。
+    /// 按最近一次输入诊断（焦点 pid + InputScope 掩码）重算抑制态，只降不升：判定变成
+    /// 「不抑制」就立即解除，「抑制」留给下一次诊断上报去置位。
     ///
-    /// 为什么只降：不变量是 core.suppress ⊆ C++.suppress，而新开关值要经 push 管道异步到达
-    /// DLL。解除方向先于 DLL 生效是安全的（core 照常出字、DLL 还在放行）；置位方向若抢在
-    /// DLL 前面，就是「DLL 吃键、core 回 PassThrough」——密码框丢键。置位等 DLL 下一次上报
-    /// 诊断（那时它手里必然已有新值）再做，与此前全局开关只在关闭时立即清除同一口径。
+    /// 不变量是 core.suppress ⊆ C++.suppress，而新开关值经 push 管道异步到达 DLL：解除先于
+    /// DLL 生效是安全的；置位若抢在前面就是「DLL 吃键、core 回 PassThrough」，密码框丢键。
     pub(crate) fn relax_password_suppress_for_focus(&self) {
         use std::sync::atomic::Ordering::Relaxed;
         let (pid, mask) = {
@@ -918,13 +858,9 @@ impl Coordinator {
 
     /// 「候选窗首显」子菜单的四档：(菜单 id, 档位, 标签)。`None` = 跟随全局。
     ///
-    /// ★★ **菜单项与 [`Self::set_first_show_mode`] 的解析共用这一张表**，因为它们之间的
-    /// 对应关系**没有任何编译或测试信号**：把 id 2 与 3 写反，编译过、全部测试绿，只表现
-    /// 为「点了『等待精确坐标』结果变成立即显示」。而 2026-09-02 加第四档时恰恰重排过这组
-    /// 编号——两处手写、改一处漏一处，正是本仓 `menu_id_tests` 那条注释警告的同一类缺陷。
-    /// ⇒ 收成一张表后，「写反」这件事在结构上不可能发生。
-    ///
-    /// 编号按菜单显示顺序排，与 `InitialMode` / `AutoPairRule` 的「0=跟随全局」约定一致。
+    /// 菜单项与 [`Self::set_first_show_mode`] 的解析共用这一张表：两者的对应关系没有编译或
+    /// 测试信号，id 写反只表现为点了一档生效另一档。编号按菜单显示顺序排，「0=跟随全局」
+    /// 与 `InitialMode` / `AutoPairRule` 一致。
     pub(crate) const FIRST_SHOW_MENU: [(
         u8,
         Option<wind_config::app_compat::FirstShowMode>,
@@ -939,32 +875,22 @@ impl Coordinator {
         ]
     };
 
-    /// 从磁盘整表重载 `app_compat`（系统层 + 定制层 + 用户层，与启动时同一口径），并把
-    /// **所有**依赖这张表、又在别处缓存了结果的东西一并对齐。菜单写规则、拖动落盘等全部
-    /// 重载点都只许调这一个函数。
+    /// 从磁盘整表重载 `app_compat`（系统层 + 定制层 + 用户层，与启动时同一口径），并把所有
+    /// 依赖这张表、又在别处缓存了结果的东西一并对齐。菜单写规则、拖动落盘等全部重载点
+    /// 都只许调这一个函数。
     ///
-    /// ★ 为什么收成一处：重载拿到的是**整份文件的当前内容**，不只是本次菜单改的那一项。
-    /// 用户手写了 `password_force_english = false` 之后随便点一次别的菜单（甚至只是拖一下
-    /// 候选窗），服务端的判定就按新规则走了；若这里不重推，DLL 手里还是旧值 ⇒ 打破
-    /// core.suppress ⊆ C++.suppress ⇒ 密码框丢键。此前只有密码框那一项的菜单会重推。
-    ///
-    /// 对齐项（顺序有意义）：
-    /// 1. HostRender 白名单（Windows）；
-    /// 2. 当前焦点的密码框抑制态（只降不升，理由见 [`Self::relax_password_suppress_for_focus`]）；
-    /// 3. 逐客户端重推 DLL 的密码框吃键门控（与 2 出自同一判定函数）；
-    /// 4. 逐客户端重推英文自动配对配置（DLL 的 `_englishPairEngine` 只认推过去的值）。
-    /// 5. 逐客户端重推空文本兜底占位字符（GH#175，`composition_placeholder`）。
-    /// 6. 逐客户端重推多行上屏方式（`multiline_commit`）。
-    /// 7. 逐客户端重推「本进程可能命中标题规则」开关（DLL 据此采不采窗口标题）。
-    ///
-    /// 3～7 是幂等推送，值没变时 DLL 收到同值，无副作用。
+    /// 重载拿到的是整份文件的当前内容，不只是本次菜单改的那一项（用户手写的规则随任意一次
+    /// 菜单操作生效），所以每次都要重推 DLL 侧的派生值，否则密码框门控会打破
+    /// core.suppress ⊆ C++.suppress。对齐项：HostRender 白名单（Windows）、当前焦点的密码框
+    /// 抑制态（只降不升，见 [`Self::relax_password_suppress_for_focus`]），以及逐客户端重推
+    /// 密码框门控、英文配对、占位字符、多行上屏、标题规则开关等。推送都幂等。
     pub(crate) fn reload_app_compat(&self) {
         let reloaded = wind_config::app_compat::AppCompat::load(
             self.compat_dirs.0.as_deref(),
             self.compat_dirs.1.as_deref(),
         );
         *self.app_compat.lock().unwrap_or_else(|e| e.into_inner()) = reloaded;
-        // 按键路径那三项（占位字符 / 候选窗定位 / 收窗 opt-in）是按旧表预提取的。
+        // 按键路径那几项（占位字符 / 候选窗定位 / 收窗 opt-in）是按旧表预提取的。
         self.refresh_active_compat_lookups();
         self.refresh_mode_scope_after_reload();
         #[cfg(windows)]
@@ -980,12 +906,8 @@ impl Coordinator {
     }
 
     /// 设置端 `compat.*` 写入之后的收口：重载规则表，再让当前前台进程的 `active_compat`
-    /// 立即按新表重算。
-    ///
-    /// 只重载不刷新是不够的：同 pid 时 `update_active_compat` 提前 return，缓存里还是旧值，
-    /// 用户在设置页点了却要切走再切回才生效，且完全看不出为什么（右键菜单路径在
-    /// `set_first_show_mode` 里手工补了这一步，这里是同一件事的通用版）。
-    /// 不动 `.pid` / `.has_initial_rule`：它们同时是「上一次真实 FOCUS_GAINED 落在哪」，
+    /// 立即按新表重算（同 pid 时 `update_active_compat` 提前 return，只重载不刷新要切走再切回
+    /// 才生效）。不动 `.pid` / `.has_initial_rule`：它们同时记录上一次真实 FOCUS_GAINED 的落点，
     /// 见 `refresh_active_compat_rule_fields`。
     pub(crate) fn reload_compat_and_refresh(&self) {
         self.reload_app_compat();
@@ -1003,16 +925,12 @@ impl Coordinator {
     /// 为当前焦点应用设置候选窗首显策略，并写入用户层 compat.toml。
     ///
     /// 三步收口，缺一不可：
-    ///   1. 写用户层 compat.toml（持久化，跨重启保留）；
-    ///   2. **重载规则表**——只改运行时缓存不够，切到别的应用再切回来时
-    ///      `update_active_compat` 会拿这张表重新解析，旧表会把本次设置悄悄回滚；
-    ///   3. 刷新当前 `active_compat` 缓存，使本次设置对当前应用立即生效
-    ///      （同 pid 时 `update_active_compat` 提前 return，不会自己刷）。
+    ///   1. 写用户层 compat.toml（持久化）；
+    ///   2. 重载规则表：切走再切回时 `update_active_compat` 按这张表重新解析，旧表会把设置回滚；
+    ///   3. 刷新当前 `active_compat` 缓存（同 pid 时 `update_active_compat` 提前 return）。
     ///
-    /// `mode_id` 的含义见 [`Self::FIRST_SHOW_MENU`]（菜单项由同一张表生成）。
-    ///
-    /// ⚠ 认不出的编号一律当作「跟随全局」——per-app 覆盖是「用户显式要求」，
-    /// 不该由一个对不上的 id 凭空造出来。
+    /// `mode_id` 的含义见 [`Self::FIRST_SHOW_MENU`]。认不出的编号一律当作「跟随全局」：
+    /// per-app 覆盖不该由一个对不上的 id 凭空造出来。
     pub(crate) fn set_first_show_mode(&self, mode_id: u8) {
         let mode = Self::FIRST_SHOW_MENU
             .iter()
@@ -1020,8 +938,7 @@ impl Coordinator {
             .and_then(|(_, mode, _)| *mode);
         let name = self.active_process_name();
         if name.is_empty() {
-            // 焦点进程未解析（尚无焦点 / OpenProcess 失败）。菜单项此时应是禁用态，
-            // 走到这里说明有别的路径调用，记一条便于排查——静默返回会让用户以为点了没反应。
+            // 焦点进程未解析。菜单项此时应是禁用态，走到这里说明有别的路径调用，记一条。
             tracing::warn!("set_first_show_mode: 当前焦点进程未知，忽略本次设置");
             return;
         }
@@ -1034,10 +951,10 @@ impl Coordinator {
             tracing::error!("set_first_show_mode: 写用户 compat.toml 失败: {e}");
             return;
         }
-        // 2）重载整表（系统层 + 用户层），与启动时同一口径。
+        // 2）重载整表（系统层 + 用户层）。
         self.reload_app_compat();
-        // 3）当前应用立即生效：按新表对焦点窗口**重新解析**，不直接把 `mode` 塞进缓存——
-        //    「跟随全局」清掉的是这一条，`*` / 更低级规则的值会透上来，直接写会与实际生效值不符。
+        // 3）当前应用立即生效：按新表对焦点窗口重新解析，不直接把 `mode` 塞进缓存：
+        //    「跟随全局」清掉这一条后，`*` / 更低级规则的值会透上来。
         let resolved = self.with_active_compat_rule(|r| r.and_then(|r| r.first_show_mode));
         self.active_compat
             .lock()
@@ -1052,10 +969,9 @@ impl Coordinator {
 
     /// 启用 / 禁用当前焦点应用的整条兼容规则，并写入用户层 compat.toml（`disabled`）。
     ///
-    /// 与设置端「应用兼容」窗里的「禁用 / 启用」是同一件事；字段都留着，只是整条不生效——
-    /// 用来快速判断「是不是兼容规则导致的问题」。写盘走 `app_compat::set_user_rule_disabled`
-    /// （与设置端同一套叠加语义），之后走 `reload_compat_and_refresh`：重载规则表并让当前
-    /// 前台进程的缓存立刻按新表重算（同 pid 时 `update_active_compat` 提前 return）。
+    /// 与设置端「应用兼容」窗里的「禁用 / 启用」同一件事（字段都留着，整条不生效），用来
+    /// 快速判断「是不是兼容规则导致的问题」。写盘走 `app_compat::set_user_rule_disabled`，
+    /// 之后 `reload_compat_and_refresh`。
     pub(crate) fn set_compat_rule_enabled(&self, enabled: bool) {
         let name = self.active_process_name();
         if name.is_empty() {
@@ -1082,10 +998,8 @@ impl Coordinator {
     /// 为当前焦点应用设置符号自动配对开关，并写入用户层 compat.toml。
     /// `mode_id`：0=跟随全局（清除规则）1=启用 2=禁用。
     ///
-    /// 三步与 [`Self::set_first_show_mode`] 完全同构，缺一不可，理由见那里的注释。
-    /// 英文配对配置的重推（纯英文模式的配对由 C++ 侧 `_englishPairEngine` 独立处理，它只认
-    /// 推过去的那份值）不在这里单做，收在 [`Self::reload_app_compat`]：任何一次整表重载都
-    /// 可能改变它（用户手写的 `auto_pair` 随别的菜单项一起生效）。
+    /// 三步与 [`Self::set_first_show_mode`] 同构。英文配对配置（C++ 侧 `_englishPairEngine`
+    /// 只认推过去的值）的重推收在 [`Self::reload_app_compat`]，任何一次整表重载都可能改变它。
     pub(crate) fn set_auto_pair_rule(&self, mode_id: u8) {
         let enabled = match mode_id {
             1 => Some(true),
@@ -1106,10 +1020,9 @@ impl Coordinator {
             tracing::error!("set_auto_pair_rule: 写用户 compat.toml 失败: {e}");
             return;
         }
-        // 2）重载整表（系统层 + 用户层），与启动时同一口径。
+        // 2）重载整表。
         self.reload_app_compat();
-        // 3）当前应用立即生效（同 pid 时 `update_active_compat` 提前 return，不会自己刷）：
-        //    按新表重新解析，理由同 `set_first_show_mode`。
+        // 3）当前应用立即生效：按新表重新解析，理由同 `set_first_show_mode`。
         let resolved = self.with_active_compat_rule(|r| r.and_then(|r| r.auto_pair));
         self.active_compat
             .lock()
@@ -1126,13 +1039,11 @@ impl Coordinator {
         self.show_status();
     }
 
-    /// 为当前焦点应用设置「密码框强制英文」，并写入用户层 compat.toml（A2-37 / t197）。
+    /// 为当前焦点应用设置「密码框强制英文」，并写入用户层 compat.toml。
     /// `mode_id`：0=跟随全局（清除规则）1=开 2=关；认不出的编号按「跟随全局」处理。
     ///
-    /// 两步与 [`Self::set_first_show_mode`] 同构（写盘 → 重载整表）。本项不进
-    /// `active_compat`：判定按 pid 直查规则表（`password_force_english_for_pid`），没有焦点槽
-    /// 缓存要刷。重算当前焦点的抑制态与逐客户端重推 DLL 的吃键门控收在
-    /// [`Self::reload_app_compat`]——任何一次整表重载都要做，不只是本项。
+    /// 写盘 → 重载整表。本项不进 `active_compat`：判定按 pid 直查规则表
+    /// （`password_force_english_for_pid`）。重算抑制态与重推 DLL 门控收在 [`Self::reload_app_compat`]。
     pub(crate) fn set_password_force_english_rule(&self, mode_id: u8) {
         let enabled = match mode_id {
             1 => Some(true),
@@ -1170,8 +1081,7 @@ impl Coordinator {
         self.show_status();
     }
 
-    /// 写当前应用的气泡定位规则（方式 + 坐标）并重载规则表。**不弹 toast / 不弹气泡**：拖动
-    /// 落盘走这里，是高频手势（同 `save_candidate_pos_for_app`）。
+    /// 写当前应用的气泡定位规则（方式 + 坐标）并重载规则表。不弹 toast / 气泡：拖动落盘走这里。
     fn write_status_position_rule(
         &self,
         name: &str,
@@ -1201,16 +1111,14 @@ impl Coordinator {
         true
     }
 
-    /// 为当前焦点应用设置状态气泡定位，并写入用户层 compat.toml（C2-33 / GH#148）。
+    /// 为当前焦点应用设置状态气泡定位，并写入用户层 compat.toml。
     /// `code`：0=跟随全局（清除规则）1=跟随光标 2=固定 3+i=`StatusAnchor::ALL[i]`；越界忽略。
     ///
-    /// 模板同 [`Self::set_candidate_position_rule`]：写盘 → 重载整表。本项不进 `active_compat`
-    /// （`status_position` 按进程名现查），下次显示即用新策略。
+    /// 写盘 → 重载整表。本项不进 `active_compat`（`status_position` 按进程名现查）。
     ///
-    /// 「固定」取气泡**当前位置**：先把方式落成 fixed（坐标沿用规则里已有的，没有就是 0 哨兵
-    /// ——UI 落到光标所在屏），再请 UI 报当前位置，回来的 `StatusTipMoved` 经
-    /// `save_status_tip_pos` 覆盖成实际落点。气泡此刻不可见（多半如此，菜单是从工具栏/语言栏
-    /// 开的）时 UI 不回报，留在哨兵，拖一次即定——与候选窗按应用固定同一口径。
+    /// 「固定」取气泡当前位置：先把方式落成 fixed（坐标沿用已有的，没有就是 0 哨兵），再请 UI
+    /// 报当前位置，回来的 `StatusTipMoved` 经 `save_status_tip_pos` 覆盖。气泡不可见时 UI 不回报，
+    /// 留在哨兵、拖一次即定。
     pub(crate) fn set_status_position_rule(&self, code: u8) {
         use wind_config::app_compat::{StatusAnchor, StatusPositionMode as SP};
         let mode = match code {
@@ -1246,7 +1154,7 @@ impl Coordinator {
         }
     }
 
-    /// 为当前焦点应用设置「坐标不可用时」气泡放哪，并写入用户层 compat.toml（C2-33 / GH#148）。
+    /// 为当前焦点应用设置「坐标不可用时」气泡放哪，并写入用户层 compat.toml。
     /// `code`：0=跟随全局（清除规则）1=上次位置 2=不显示 3+i=`StatusAnchor::ALL[i]`；越界忽略。
     pub(crate) fn set_status_fallback_rule(&self, code: u8) {
         use wind_config::app_compat::{StatusAnchor, StatusFallback as SF};
@@ -1286,15 +1194,13 @@ impl Coordinator {
         );
     }
 
-    /// 为当前焦点应用设置输入方案，并写入用户层 compat.toml（C0-7 / C3-3，GH#80）。
+    /// 为当前焦点应用设置输入方案，并写入用户层 compat.toml。
     /// `code`：0=跟随全局（清除规则）1=记住上次（`@remember`）2+i=固定为可用方案表第 i 个；
     /// 越界的下标忽略（菜单构建与点击之间 available 被热重载缩短了）。
     ///
-    /// 模板同 [`Self::set_initial_state_rule`]：写盘 → 重载整表 → 当场对当前焦点生效一次。
-    /// 本项不进 `active_compat`（规则按进程名现查，见 `app_schema_rule`），没有焦点槽要刷。
-    ///
-    /// 「记住上次」且记忆表里还没有这个应用时，先把**当前方案**记进去：否则目标回落全局，
-    /// 用户刚点完菜单，正在用的方案就被切走了——而他选的恰恰是「记住（我现在用的）」。
+    /// 写盘 → 重载整表 → 当场对当前焦点生效一次。本项不进 `active_compat`（规则按进程名现查，
+    /// 见 `app_schema_rule`）。「记住上次」且记忆表里还没有这个应用时先记下当前方案，否则目标
+    /// 回落全局，正在用的方案被切走。
     pub(crate) fn set_app_schema_rule(&self, code: u16) {
         let value = match code {
             0 => None,
@@ -1325,7 +1231,7 @@ impl Coordinator {
             tracing::error!("set_app_schema_rule: 写用户 compat.toml 失败: {e}");
             return;
         }
-        // 2）重载整表（系统层 + 用户层），与启动时同一口径。
+        // 2）重载整表（系统层 + 用户层）。
         self.reload_app_compat();
         // 3）当场对当前焦点生效一次（按新规则算目标方案，不同就轻量切换）。
         if code == 1 && !self.has_remembered_schema(&name) {
@@ -1343,10 +1249,8 @@ impl Coordinator {
     /// 为当前焦点应用设置初始中英状态（`is_punct=false`）或初始标点（`is_punct=true`），
     /// 并写入用户层 compat.toml。`mode_id`：0=跟随全局（清除规则）1=英文 2=中文。
     ///
-    /// 前三步与 [`Self::set_first_show_mode`] 完全同构，缺一不可，理由见那里的注释。
-    /// 第四步是本项特有：规则语义是「初始状态」，只在焦点跨进程切入时参与决策，但用户
-    /// 此刻正是在**当前**应用里显式设置它，必须立即生效一次——否则得切走再切回才看得到
-    /// 效果，会被当成"设了没反应"。
+    /// 前三步与 [`Self::set_first_show_mode`] 同构。第四步是本项特有：规则只在焦点跨进程切入时
+    /// 参与决策，但用户此刻正在当前应用里显式设置它，必须立即生效一次。
     pub(crate) fn set_initial_state_rule(&self, is_punct: bool, mode_id: u8) {
         use wind_config::app_compat::InitialMode as IM;
         let mode = match mode_id {
@@ -1356,8 +1260,7 @@ impl Coordinator {
         };
         let name = self.active_process_name();
         if name.is_empty() {
-            // 与 set_first_show_mode 一致：菜单项此时应是禁用态，走到这里说明有别的调用
-            // 路径，记一条便于排查——静默返回会让用户以为点了没反应。
+            // 与 set_first_show_mode 一致：菜单项此时应是禁用态，走到这里说明有别的调用路径。
             tracing::warn!("set_initial_state_rule: 当前焦点进程未知，忽略本次设置");
             return;
         }
@@ -1381,11 +1284,11 @@ impl Coordinator {
             tracing::error!("set_initial_state_rule: 写用户 compat.toml 失败: {e}");
             return;
         }
-        // 2）重载整表（系统层 + 用户层），与启动时同一口径。
+        // 2）重载整表（系统层 + 用户层）。
         self.reload_app_compat();
-        // 3）刷新 active 缓存的判据位：同 pid 时 update_active_compat 提前 return，不会自己刷。
-        //    漏掉这步会让「切出本应用时是否重算」用上过期的判据。
-        //    注意先取值再持 active_compat 锁，避免与 app_compat 锁形成嵌套顺序。
+        // 3）刷新 active 缓存的判据位（同 pid 时 update_active_compat 提前 return），漏了会让
+        //    「切出本应用时是否重算」用上过期判据。先取值再持 active_compat 锁，避免与
+        //    app_compat 锁嵌套。
         let win = self.active_focus_window();
         let want_mode = self.rule_initial_mode(&name, &win).map(|m| m.is_chinese());
         let want_punct = self.rule_initial_punct(&name, &win).map(|m| m.is_chinese());
@@ -1393,8 +1296,7 @@ impl Coordinator {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .has_initial_rule = want_mode.is_some() || want_punct.is_some();
-        // 4）立即生效一次。清除规则（None）时刻意不动当前状态：撤销规则不等于要求立刻
-        //    切换模式，下次从别的应用切进来时自然走回全局逻辑。
+        // 4）立即生效一次。清除规则（None）时不动当前状态：撤销规则不等于要求立刻切换模式。
         let follow = self.rt().config.input.punct.follow_mode;
         {
             let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -1440,44 +1342,36 @@ impl Coordinator {
     }
 
     /// 统一的「打开设置」入口：优先启动同目录的 wind_setting 桌面应用并跳转到指定页
-    /// （`--page <name>`，name 为 wind_setting cli 的规范页 id：
-    /// schema/input/keys/ui/dict/advanced/about，旧 web 别名如 dictionary 不被识别）；
-    /// 找不到桌面应用再回退到内嵌 web 配置（签发 token 构造 URL，page 以 `#<name>` 片段附加）。
-    /// page=None 打开默认页。设置/词库管理/关于等菜单项统一经此函数。
+    /// （`--page <name>`，name 为 wind_setting cli 的规范页 id：schema/input/keys/ui/dict/advanced/about）；
+    /// 找不到桌面应用再回退到内嵌 web 配置（page 以 `#<name>` 片段附加）。page=None 打开默认页。
     ///
-    /// 执行路径：有 TSF 连接时经 IPC 让宿主进程执行 ShellExecuteW（有前台权限，能拉窗口到前面）；
-    /// 无 TSF 连接时回退到服务进程侧直接启动。
+    /// 有 TSF 连接时经 IPC 让宿主进程执行 ShellExecuteW（有前台权限，能把窗口拉到前面）；
+    /// 无 TSF 连接时由服务进程直接启动。
     pub(crate) fn open_settings(&self, page: Option<&str>) {
         self.open_settings_with(page, "");
     }
 
-    /// 当前宿主是否要求由服务进程自己拉起外部程序（compat `launch_by_service`，GH#339）。
-    /// 开始菜单、便笺等宿主不执行转发来的启动请求，默认的「交给宿主」对它们等于没按。
+    /// 当前宿主是否要求由服务进程自己拉起外部程序（compat `launch_by_service`）：开始菜单、
+    /// 便笺等宿主不执行转发来的启动请求。
     #[cfg(not(ext_presenter))]
     fn launch_by_service(&self) -> bool {
         self.with_active_compat_rule(|r| r.and_then(|r| r.launch_by_service))
             .unwrap_or(false)
     }
 
-    /// 带附加参数的「打开设置」。`extra` 是**原样直通**给设置程序的命令行参数串
+    /// 带附加参数的「打开设置」。`extra` 是原样直通给设置程序的命令行参数串
     /// （如 `--schema=wubi86 --type=shadow`），空串=无附加参数。
     ///
-    /// 刻意不解析 `extra`：设置端每加一个参数就要同步改一遍宿主，才是真正难维护的。
-    /// 宿主只负责拼接与投递，取值合法性由设置端自己判断（它会降级并提示，不会崩）。
-    /// 内部调用方请用 [`build_settings_args`] 构造，含空白的值会被正确加引号。
+    /// 刻意不解析 `extra`：取值合法性由设置端自己判断（会降级并提示）。内部调用方请用
+    /// [`build_settings_args`] 构造，含空白的值会被正确加引号。
     pub(crate) fn open_settings_with(&self, page: Option<&str>, extra: &str) {
         #[cfg(not(ext_presenter))]
         let args = settings_cmdline(page, extra);
 
-        // macOS：经 CmdOpenSettings(0x0507) 让 .app 用 LaunchServices 按 bundleID 启动/激活
-        // 设置应用（app 侧 ModeStatusController.openSettings 已实现）。settings_app_path 拼 .exe，
-        // macOS 恒为 None，旧路径会误落到已废弃的 web 分支并 WARN 失败，故此处直接短路。
-        // payload 沿用「页名后接参数」的裸串形态（既有 add-word 路径就是这样传的），
-        // Swift 侧解析方式不变。
+        // ext_presenter：经扩展信封 `SETTINGS_OPEN` 传结构化 argv，由宿主侧启动/激活设置应用，
+        // 不必知道引号约定。`settings_app_path` 在这里恒为 None，不能落到下面的分支。
         #[cfg(ext_presenter)]
         {
-            // 走扩展信封传结构化 argv：Swift 侧直接拿数组用，不必知道引号约定
-            // （旧路径传的是「页名 + 参数」空格串，切词在 Swift 侧重做了一遍）。
             let argv = settings_argv(page, extra);
             let body = serde_json::json!({ "args": argv }).to_string();
             let encoded = wind_ipc::codec::encode_ext(
@@ -1513,31 +1407,27 @@ impl Coordinator {
     }
 
     /// 菜单「词库管理」：直接落到当前正在用的方案域，而不是默认的命令短语域。
-    /// 用户从输入法菜单进词库，十有八九是要管当前这套方案的词。
-    /// 方案 id 取不到时退化为不带参数，行为与从前一致。
+    /// 方案 id 取不到时退化为不带参数。
     pub(crate) fn open_dictionary(&self) {
         let schema = self.engine_mgr.active_schema_id();
         self.open_settings_with(Some("dict"), &build_settings_args(&[("schema", &schema)]));
     }
 
-    /// 用户开关常驻工具栏（菜单）。仅翻转 toolbar_visible，显隐交 notify_toolbar
-    /// 单点决策（结合 ime_active）。
+    /// 用户开关常驻工具栏（菜单）。仅翻转 toolbar_visible，显隐交 notify_toolbar 单点决策。
     pub(crate) fn toggle_toolbar(&self) {
         let vis = {
             let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
             s.toolbar_visible = !s.toolbar_visible;
             s.toolbar_visible
         };
-        // 持久化到 config.ui.toolbar.visible(单一源:与设置页统一,reload 不会覆盖菜单选择)。
+        // 持久化到 config.ui.toolbar.visible（单一源：与设置页统一，reload 不会覆盖菜单选择）。
         let _ = Config::set_user_bool(&["ui", "toolbar", "visible"], vis);
-        // 内存 config 同步跟上（同 status_toggle_always）：落盘与内存不同步时，下一次
-        // 未经重载的读取会拿到陈旧值。
+        // 内存 config 同步跟上，否则下一次未经重载的读取拿到陈旧值。
         self.refresh_config_in_memory(|c| c.ui.toolbar.visible = vis);
         self.notify_toolbar();
     }
 
-    /// 循环切换到下一个主题，重绘并持久化选择。
-    /// 构建并显示功能主菜单（对齐 Go 统一菜单：方案/主题子菜单 + 勾选态）。
+    /// 构建并显示功能主菜单（方案/主题子菜单 + 勾选态）。
     /// 位置与展开方向全由 `anchor` 描述，见 [`wind_ui_types::MenuPlacement`]。
     pub(crate) fn show_main_menu(&self, anchor: MenuAnchor) {
         let items = self.build_main_menu_items();
@@ -1548,18 +1438,12 @@ impl Coordinator {
     }
 
     /// macOS 精简功能菜单（IMK 输入源菜单 + 候选框右键空白菜单共用）。
-    /// 相比 Windows 完整菜单，只保留必要项、且【无子菜单】（IMK 输入源菜单无法可靠处理嵌套子菜单）：
-    ///   组1 输入方案（展开）：英文 + 各方案单选
-    ///   组2 中文标点 / 全角 / 简入繁出
-    ///   组3 显示状态图标
-    ///   组4 重启服务
-    ///   设置…
-    /// 主题/检索范围/重载配置/高级/词库/关于 移除（配置类交由设置应用）。
+    /// 只保留必要项且无子菜单（IMK 输入源菜单无法可靠处理嵌套子菜单）：输入方案（英文 +
+    /// 各方案单选）/ 中文标点、全角、简入繁出 / 显示状态图标 / 重启服务 / 设置…。
+    /// 配置类交由设置应用。
     ///
-    /// 状态图标开关是**唯一从精简树里保留的显示类开关**，理由是入口自锁：它关掉的正是
-    /// 菜单栏状态指示器，而那个指示器的下拉菜单是完整树的两个入口之一；只留在完整树里
-    /// 的话，用户一旦关掉图标就把开关本身也藏了（只剩候选框右键这个得先打字才碰得到的
-    /// 入口）。IMK 输入源菜单不依赖任何 UI 可见性，是恒定可达的那个。
+    /// 状态图标开关是唯一保留的显示类开关，因为入口自锁：它关掉的菜单栏状态指示器正是完整树
+    /// 的入口之一，只留在完整树里，关掉图标就把开关本身也藏了；IMK 输入源菜单恒定可达。
     #[cfg(ext_presenter)]
     pub(crate) fn build_menu_items_macos(&self) -> Vec<wind_ui_types::MenuItemSpec> {
         use wind_ui_types::MenuItemSpec as M;
@@ -1688,9 +1572,8 @@ impl Coordinator {
             M::leaf("打开日志目录", cmd(MenuCmd::OpenLogDir), true, false),
             M::separator(),
             // ── 输入行为组 ──
-            // 放在诊断类**之前**：它改的是真正的输入行为（密码框里强制走英文），
-            // 是会被日常用到的开关；诊断类只是「把内部状态显示出来」，排在后面。
-            // 两者独立成组——混在一起会让人以为密码框那项也只是个显示开关。
+            // 放在诊断类之前、独立成组：它改的是真正的输入行为（密码框里强制走英文），
+            // 诊断类只是把内部状态显示出来。
             M::leaf(
                 "密码框强制英文",
                 cmd(MenuCmd::TogglePasswordSuppress),
@@ -1700,11 +1583,10 @@ impl Coordinator {
             ),
             M::separator(),
             // ── 诊断组 ──
-            // 「把内部状态显示出来」的工具，彼此同类：HUD 出文字、定位浮窗出几何。
+            // 「把内部状态显示出来」的工具：HUD 出文字、定位浮窗出几何。
             //
-            // 输入诊断 HUD 在 macOS 上整套未实现（`ShowInputDiag` 落在 forwarder 的兜底臂），
-            // 点了没有任何反应。留一个死菜单项比没有更糟，故按平台摘掉。
-            // 要在 macOS 做它得把整个浮层 UI 建在 `.app` 侧，见 wind_macos/AGENTS.md 差距表。
+            // 输入诊断 HUD 在 ext_presenter 下未实现（`ShowInputDiag` 落在 forwarder 的兜底臂），
+            // 留死菜单项比没有更糟，故按平台摘掉（见 wind_macos/AGENTS.md 差距表）。
             #[cfg(not(ext_presenter))]
             M::leaf(
                 "输入诊断 HUD",
@@ -1715,8 +1597,7 @@ impl Coordinator {
             ),
         ];
 
-        // 候选窗定位浮窗：与 HUD 同组（都是诊断显示），但**只在 Dev 变体出现**——
-        // 它画的是还在排查中的内部几何，正式用户看到只会困惑。
+        // 候选窗定位浮窗：与 HUD 同组，但只在 Dev 变体出现（画的是内部排查用的几何）。
         #[cfg(all(feature = "desktop-ui", windows))]
         if wind_config::variant::is_dev() {
             advanced_children.push(M::leaf(
@@ -1728,36 +1609,26 @@ impl Coordinator {
             ));
         }
 
-        // 图标调试项**只在 Dev 变体出现**：它暴露的是"还没定下来的呈现参数"，
-        // 正式用户看到只会困惑（何况其中两种形状已被否决）。
+        // 图标调试项只在 Dev 变体出现：暴露的是还没定下来的呈现参数。
         #[cfg(all(feature = "desktop-ui", windows))]
         if wind_config::variant::is_dev() {
             advanced_children.push(M::separator());
             advanced_children.push(M::submenu("语言栏图标", self.build_icon_debug_menu()));
         }
 
-        // 应用独立配置：所有 per-app 规则（均落在用户层 compat.toml）聚合于此。
+        // 应用独立配置：所有 per-app 规则（均落在用户层 compat.toml）聚合于此。放顶层而不是
+        // 塞进「高级」，维持三层菜单深度。
         //
-        // 放**顶层**而不是塞进「高级」是为了不增加层级深度——「高级 ▸ 应用独立配置 ▸ 初始
-        // 输入模式 ▸ 三选一」是四层，而此前的「高级 ▸ 候选窗首显 ▸ 三选一」是三层；提到顶层
-        // 后维持三层不变。这些项也比截图/打开目录更常用。
-        //
-        // 顶层标签固定为「应用独立配置」，**不嵌入进程名**：进程名长度不一（如
-        // "Everything.exe" vs "chrome.exe"）曾导致主菜单整体宽度随焦点应用忽宽忽窄，
-        // 观感很差——主菜单的宽度由其中最宽的一项撑开，顶层项不该背这个不确定性。
-        // 进程名改放进子菜单的第一行（禁用的展示行，见 `MenuItemSpec::label`），宽度
-        // 波动被限制在这个子菜单自己弹出的窗口里，不影响主菜单。
-        //
-        // 进程未解析时**子项禁用而非隐藏**（父项 enabled 恒 true，见
-        // `MenuItemSpec::submenu`），菜单项位置保持稳定。
+        // 顶层标签固定，不嵌入进程名：主菜单宽度由最宽一项撑开，进程名长短不一会让主菜单
+        // 忽宽忽窄。进程名放进子菜单第一行（禁用的展示行，见 `MenuItemSpec::label`）。
+        // 进程未解析时子项禁用而非隐藏（父项 enabled 恒 true），菜单项位置保持稳定。
         let per_app_children = {
             use wind_config::app_compat::CandidatePositionMode as CP;
             use wind_config::app_compat::InitialMode as IM;
             let proc = self.active_process_name();
             let enabled = !proc.is_empty();
-            // 整条规则的开关：没有规则（系统层与用户层都没有）时没有可开关的东西，置灰。
-            // 勾选 = 规则在生效；点它 = 切到相反的状态（参数是目标状态，不是「切换」，
-            // 避免菜单快照与实际状态错开时点一下反而做反）。
+            // 整条规则的开关：没有规则（系统层与用户层都没有）时置灰。勾选 = 规则在生效；
+            // 参数是目标状态而不是「切换」，菜单快照与实际状态错开时也不会做反。
             let rule_switch = if enabled {
                 self.compat_dirs
                     .1
@@ -1767,12 +1638,12 @@ impl Coordinator {
             } else {
                 wind_config::app_compat::RuleSwitch::NoRule
             };
-            // 整条规则被禁用时，规则行不进规则表：下面各项读到的都是「跟随全局」，此时选了也写得进去
-            // 却不生效，还会显示成没选。所以先置灰，让用户先启用这条规则再逐项设置。
+            // 整条规则被禁用时，下面各项读到的都是「跟随全局」，选了也写得进去却不生效，
+            // 故先置灰，让用户先启用这条规则。
             let has_proc = enabled;
             let enabled = enabled && rule_switch != wind_config::app_compat::RuleSwitch::Disabled;
-            // 勾选显示的是**焦点窗口**生效中的值（与 auto_pair 读 active_compat 同口径）；菜单写回
-            // 仍只写纯进程键（带窗口条件的规则 P4 之前只能手写），见 app_compat 的写回接口。
+            // 勾选显示的是焦点窗口生效中的值（与 auto_pair 读 active_compat 同口径）；菜单写回
+            // 只写纯进程键，见 app_compat 的写回接口。
             let proc_win = self.active_focus_window();
             let (cur_cand_pos, cur_ignore_switch, cur_pfe, cur_schema, cur_status, cur_status_fb) =
                 self.with_compat_rule(&proc, &proc_win, |rule| {
@@ -1799,8 +1670,8 @@ impl Coordinator {
                 "当前应用未知".to_string()
             };
 
-            // 三档单选。「跟随全局」必须是独立一档，不能靠"取消勾选"表达——否则用户设了
-            // 规则之后无从撤销。它对应写盘时的 None，即从 compat.toml 里清掉该字段。
+            // 三档单选。「跟随全局」必须是独立一档（写盘 None，从 compat.toml 里清掉该字段），
+            // 不能靠取消勾选表达，否则设了规则无从撤销。
             let tri = |cur: Option<IM>, mk: fn(u8) -> MenuCmd| {
                 vec![
                     M::leaf("跟随全局（默认）", cmd(mk(0)), enabled, cur.is_none()),
@@ -1808,9 +1679,8 @@ impl Coordinator {
                     M::leaf("中文", cmd(mk(2)), enabled, cur == Some(IM::Chinese)),
                 ]
             };
-            // 方案：跟随全局 / 记住上次 / ── / 各可用方案（选中即固定）。勾选看的是**规则**
-            // 而非当前活跃方案——「固定五笔」的应用里临时手切到拼音，勾仍在五笔上。
-            // 固定的 id 不在 available 时协调器按未配置处理，这里同样勾「跟随全局」。
+            // 方案：跟随全局 / 记住上次 / ── / 各可用方案（选中即固定）。勾选看规则而非当前活跃
+            // 方案。固定的 id 不在 available 时协调器按未配置处理，这里同样勾「跟随全局」。
             let app_schema_children = {
                 use wind_config::app_compat::APP_SCHEMA_REMEMBER;
                 let schemas = self.engine_mgr.available_schemas();
@@ -1845,7 +1715,7 @@ impl Coordinator {
                 v
             };
             // 状态提示位置：跟随全局 / 跟随光标 / 固定 / ── / 各锚点 / 子菜单「坐标不可用时」。
-            // 勾选看**规则**（不是生效值），「跟随全局」独立一档，理由见上面 `tri`。
+            // 勾选看规则（不是生效值），「跟随全局」独立一档，理由见上面 `tri`。
             let status_children = {
                 use wind_config::app_compat::{
                     StatusAnchor, StatusFallback as SF, StatusPositionMode as SP,
@@ -1928,15 +1798,11 @@ impl Coordinator {
                 M::submenu("初始标点模式", tri(cur_punct, MenuCmd::InitialPunct)),
                 M::submenu("方案", app_schema_children),
                 M::separator(),
-                // 三档**互斥**，做成子菜单单选：布尔开关时代它们能同时打开，实测就因此出过
-                // 「fast 配了却从未生效」——instant 抢先放行，fast 的判据根本没机会跑。
-                // 文案按「快 → 慢」以外的另一个维度排：用户真正在选的是**遇到慢宿主时
-                // 宁可等还是宁可先显示**，故括号里写代价而不写机制。
+                // 三档互斥，做成子菜单单选（布尔开关能同时打开，instant 抢先放行会让 fast 永不生效）。
+                // 括号里写代价而不写机制：用户在选遇到慢宿主时宁可等还是宁可先显示。
                 //
-                // 「跟随全局」同样必须是独立一档（理由见上面 `tri`）：全局默认档 2026-09-02
-                // 起由 `ui.candidate.first_show_mode` 配置，「本应用没配过」与「本应用显式
-                // 配了恰好等于当前全局值的那一档」是两件事——后者不会跟着全局设置一起变。
-                // 因此三档上的「（默认）」标记一并移到这一档，两处都写「默认」只会自相矛盾。
+                // 「跟随全局」独立一档（理由见 `tri`），「（默认）」标记也只在这一档：本应用显式
+                // 配了恰好等于全局值的那一档，不会跟着全局 `ui.candidate.first_show_mode` 一起变。
                 M::submenu(
                     "候选窗首显",
                     Self::FIRST_SHOW_MENU
@@ -1951,9 +1817,8 @@ impl Coordinator {
                         })
                         .collect(),
                 ),
-                // 「跟随全局」同样必须是独立一档（理由见上面 `tri`）。禁用一档主要给表格类
-                // 宿主：Excel / WPS 表格「输入态」下方向键 = 确认单元格并移动，配对后的
-                // 光标回退在那里无法实现，关掉配对是唯一可行的兼容策略。
+                // 「跟随全局」独立一档（理由见 `tri`）。禁用一档主要给表格类宿主：Excel / WPS 表格
+                // 输入态下方向键 = 确认单元格并移动，配对后的光标回退无法实现。
                 M::submenu(
                     "符号自动配对",
                     vec![
@@ -1977,9 +1842,8 @@ impl Coordinator {
                         ),
                     ],
                 ),
-                // 「固定位置」给 caret 坐标本就报不准的宿主。位置**不在这里选**——切到固定
-                // 档只是打开它，落点由用户拖一次候选窗定下（存进该应用自己的规则）。
-                // 与全局那个开关同一决策：业界（搜狗、Google 拼音）也只给开关不给坐标框。
+                // 「固定位置」给 caret 坐标报不准的宿主。位置不在这里选：落点由用户拖一次候选窗
+                // 定下（存进该应用自己的规则），只给开关不给坐标框。
                 M::submenu("状态提示位置", status_children),
                 M::submenu(
                     "候选窗定位",
@@ -2004,13 +1868,12 @@ impl Coordinator {
                         ),
                     ],
                 ),
-                // 给自作主张写 compartment 切中英的宿主：WinForms/WPF 那类「焦点落到按钮就关掉
-                // 全局 IME」，以及内部焦点切换时把 IME 打开的（SSMS，GH#312）。开和关两个方向都管。
+                // 给自作主张写 compartment 切中英的宿主（WinForms/WPF 焦点落到按钮就关 IME、
+                // SSMS 内部焦点切换时打开 IME），开和关两个方向都管。
                 //
-                // 第一档「跟随全局」= 清除（下层设了就写 `unset`），全局开关是
-                // `input.ignore_host_ime_switch`。第三档「采纳」与第一档在**当前**行为上可能
-                // 相同，但语义不同：第一档听全局的，第三档是「不管全局怎么设，这个应用就是要
-                // 采纳」——全局开了忽略、而某个应用（gvim）依赖这个状态时，只有第三档能盖住它。
+                // 「跟随全局」= 清除（下层设了就写 `unset`），全局开关是 `input.ignore_host_ime_switch`。
+                // 「采纳」与之当前行为可能相同但语义不同：全局开了忽略、某应用（gvim）依赖这个
+                // 状态时，只有「采纳」能盖住全局。
                 M::submenu(
                     "软件切换中英",
                     vec![
@@ -2156,9 +2019,8 @@ impl Coordinator {
 
     /// 菜单打开的状态收口：所有 `show_*_menu` 都必须经此置位。
     ///
-    /// 单独抽出来是因为 `menu_open` 与 `menu_opened_at` **必须成对写入**，而置位点有四个
-    /// （主菜单 / 候选右键 / 状态气泡 / tooltip）。靠"记得两行都写"在第五个入口出现时必然
-    /// 失守，且失守的表现是「菜单偶尔一弹就没」这种极难复现的时序问题。
+    /// `menu_open` 与 `menu_opened_at` 必须成对写入，置位点有多个（主菜单 / 候选右键 /
+    /// 状态气泡 / tooltip），漏写表现为「菜单偶尔一弹就没」这种难复现的时序问题。
     pub(crate) fn mark_menu_open(&self, page_local: usize, text: String) {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         s.menu_open = true;
@@ -2176,32 +2038,22 @@ impl Coordinator {
 
     /// 焦点发生变化时关闭菜单（焦点路径专用，与 `menu_close` 的区别只在守卫与日志）。
     ///
-    /// 菜单是**模态 UI**，语义是「任何外部动作都该终结它」；而输入态清理是**破坏性操作**，
-    /// 语义是「宁可晚做也不能误做」。此前关菜单寄生在 `FocusLostReason::clears_input` 上，
-    /// 于是被按后者的标准整定——`CtxLost` 豁免、陈旧失焦整条丢弃、DLL 侧翻转沿去重，三道
-    /// 为保护输入态而设的闸门各自都会顺带把关菜单一并吞掉。故本函数自成一路：
+    /// 菜单是模态 UI，「任何外部动作都该终结它」；清输入态是破坏性操作，「宁可晚做不能误做」。
+    /// 为保护输入态而设的闸门（`CtxLost` 豁免、陈旧失焦丢弃、DLL 侧翻转沿去重）不该把关菜单
+    /// 一并吞掉，故本函数自成一路：不看 reason（关菜单幂等、非破坏性）；须在
+    /// `is_stale_focus_event` 之前调用（陈旧失焦同样证明用户动了别处）。
     ///
-    /// - **不看 reason**：关菜单幂等且非破坏性，放在 DocMgr 噪声层是安全的（同理于
-    ///   `has_edit_context` 只翻可见性标志——真正不能放在噪声层的是清 buffer）。
-    /// - **须在 `is_stale_focus_event` 之前调用**：「这条失焦不该动激活态」不等于「没发生
-    ///   焦点变动」；对菜单而言，陈旧失焦同样证明用户动了别处。
-    ///
-    /// ⚠️ 覆盖面有限，**不能替代 UI 层的"点菜单外面就关"**：焦点通路只在宿主真的换了
-    /// DocMgr 时才响。同一个文本框内点一下（焦点没变）、或在 explorer 里从桌面点到任务栏
-    /// （两侧都无可编辑上下文）都不会产生任何 TSF 事件，那些情形本函数无能为力。
-    ///
-    /// ⚠️ 守卫**只保护本函数这条路**。`handle_focus_lost` 的 `clears_input` 分支照旧无条件
-    /// 关菜单（那里 `notify_ui_hide` 会连带隐藏菜单窗口，拦不住也不该拦），故「菜单刚弹出
-    /// 就被一条未被判陈旧的 `Thread` 失焦关掉」这个既有行为不变。
+    /// 覆盖面有限，不能替代 UI 层的「点菜单外面就关」：同一个文本框内点击、explorer 里桌面到
+    /// 任务栏等不产生 TSF 焦点事件。守卫只保护本函数这条路：`handle_focus_lost` 的
+    /// `clears_input` 分支照旧无条件关菜单。
     pub(crate) fn menu_close_on_focus_change(&self, why: &str) {
         {
             let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if !s.menu_open {
                 return;
             }
-            // 守卫期内的焦点事件多半是「打开菜单这个动作本身」的尾迹，而非用户切走：
-            // 跨宿主切换时旧宿主的 focus_lost 实测晚约 100ms 到达（97~111ms），从任务栏
-            // 语言栏图标点开菜单正好落在这个窗口里，不设守卫会表现为「菜单弹出即消失」。
+            // 守卫期内的焦点事件多半是打开菜单这个动作本身的尾迹：跨宿主切换时旧宿主的
+            // focus_lost 晚约 100ms 到达，从任务栏语言栏图标点开菜单正好落在这个窗口里。
             if let Some(at) = s.menu_opened_at
                 && at.elapsed() < MENU_FOCUS_GUARD
             {
@@ -2214,22 +2066,19 @@ impl Coordinator {
         }
         tracing::debug!("menu_close_on_focus_change({why}): 关闭菜单");
         self.menu_close();
-        // 与 UiEvent::MenuClose 同处置：焦点路径没有后续动作派发，可立即解除 tooltip /
-        // 状态气泡的隐藏抑制（`menu_action` 那条路必须延后，理由见 clear_tooltip_menu_flag）。
+        // 与 UiEvent::MenuClose 同处置：焦点路径没有后续动作派发，可立即解除隐藏抑制
+        // （`menu_action` 那条路必须延后，见 clear_tooltip_menu_flag）。
         self.clear_tooltip_menu_flag();
     }
 
     /// 解除 Tooltip 的「菜单打开中」隐藏抑制。
     ///
-    /// **必须在菜单动作派发之后调用，不能并进 `menu_close()`**：`menu_action()` 是先
-    /// `menu_close()` 再 `run_menu_cmd()`，若在前者里解除，UI 线程会按序先处理解除
-    /// （此时光标在菜单窗口上、不在 tooltip 上 → 立即隐藏 tooltip），再处理
-    /// `ScreenshotTooltip`，于是截图恒定失败在「未显示」上。复制不受影响（文本已留存），
-    /// 表现为「复制能用、截图不能用」。
+    /// 必须在菜单动作派发之后调用，不能并进 `menu_close()`：`menu_action()` 先 `menu_close()`
+    /// 再 `run_menu_cmd()`，在前者里解除的话 UI 线程会先隐藏 tooltip（光标在菜单上），
+    /// 再处理 `ScreenshotTooltip`，截图恒定失败。
     pub(crate) fn clear_tooltip_menu_flag(&self) {
         let _ = self.ui_tx.send(UiCommand::SetTooltipMenuOpen(false));
-        // 状态气泡同理：菜单关掉后恢复自动隐藏计时。这里解除是安全的——它只影响
-        // 隐藏抑制，不像 tooltip 那样会立即隐藏窗口，故不受"截图命令尚未处理"的时序制约。
+        // 状态气泡同理，恢复自动隐藏计时。它只影响隐藏抑制、不会立即隐藏窗口，不受截图时序制约。
         let _ = self.ui_tx.send(UiCommand::SetStatusMenuOpen(false));
     }
 
@@ -2288,8 +2137,8 @@ impl Coordinator {
             t if t >= 0 => self.show_candidate_menu(t as usize, x, y),
             MENU_TARGET_STATUS => self.show_status_menu(x, y),
             // 命中（按段 / 按行）要提示文本块的排布，只有渲染端知道：先让 UI 换算，它回
-            // `RequestTooltipMenu`，再走与 Windows 同一个 `show_tooltip_menu`。缺位图内坐标
-            // 就按 (-1, -1)——落在文本块外，等同 Windows 点在内边距上（只给整体操作）。
+            // `RequestTooltipMenu` 再走与 Windows 同一个 `show_tooltip_menu`。缺位图内坐标按
+            // (-1, -1)，等同点在内边距上（只给整体操作）。
             MENU_TARGET_TOOLTIP => {
                 let (local_x, local_y) = req.local.unwrap_or((-1, -1));
                 let _ = self.ui_tx.send(UiCommand::TooltipMenuAt {
@@ -2304,11 +2153,9 @@ impl Coordinator {
     }
 
     /// Linux：面板（工具栏）发起的菜单打开前，把 `host.display` 报的焦点输出工作区下发给 UI。
-    /// 菜单定位只认这份工作区（`open_menu_from_host` 那条由 addon 随请求带），缺了它子菜单
-    /// 不判空间直接朝右展开、也不往回夹，弹到屏外。没报过就不发，沿用 UI 现值。
+    /// 菜单定位只认这份工作区，缺了它子菜单直接朝右展开、弹到屏外。没报过就不发。
     ///
-    /// 不放进 `show_main_menu`：`open_menu_from_host` 也调它，那里的工作区是 addon 随请求报的，
-    /// 会被这份覆盖。
+    /// 不放进 `show_main_menu`：`open_menu_from_host` 也调它，那里 addon 随请求报的工作区会被覆盖。
     #[cfg(all(target_os = "linux", ext_presenter))]
     pub(crate) fn send_host_work_area(&self) {
         let work = *self.host_work.lock().unwrap_or_else(|e| e.into_inner());
@@ -2354,9 +2201,8 @@ impl Coordinator {
             | keymap::VK_ESCAPE => {
                 let _ = self.ui_tx.send(UiCommand::MenuKey(key_code));
             }
-            // 其它键：关闭菜单并吞掉。一并解除气泡 / 状态气泡的隐藏抑制——只收菜单会让它
-            // 残留（气泡从此移出不隐藏、右键被当成「菜单开着」）；这里没有菜单命令要派发，
-            // 不受 clear_tooltip_menu_flag 的截图时序约束。
+            // 其它键：关闭菜单并吞掉，一并解除气泡 / 状态气泡的隐藏抑制（否则气泡移出不隐藏、
+            // 右键被当成菜单开着）。这里没有菜单命令要派发，不受截图时序约束。
             _ => {
                 self.menu_close();
                 self.clear_tooltip_menu_flag();
@@ -2371,8 +2217,8 @@ impl Coordinator {
         if self.grid_tab_of_event(page_local).is_some() {
             return;
         }
-        // 悬停落到被右键的这一格：菜单开着时鼠标消息到不了候选窗，悬停停在上一次右键的那格，
-        // 在另一格上再右键（关旧菜单开新菜单）时，旧格的悬停底色就留在原处，看上去像高亮没跟过来。
+        // 悬停落到被右键的这一格：菜单开着时鼠标消息到不了候选窗，在另一格上再右键时旧格的
+        // 悬停底色会留在原处。
         let ui_idx = page_local as i32;
         let hover_moved = self
             .hover_index
@@ -2412,18 +2258,15 @@ impl Coordinator {
         });
     }
 
-    /// 按**全量绝对下标**构造候选菜单项（不弹菜单、不动菜单状态）；无候选 / 越界 → `None`。
+    /// 按全量绝对下标构造候选菜单项（不弹菜单、不动菜单状态）；无候选 / 越界 → `None`。
     ///
-    /// 桌面右键（[`Self::show_candidate_menu`]，页内下标折算后进来）与移动端长按菜单共用这一份，
-    /// 文案、启用态、顺序因此天然一致——各写一份的话，两端迟早在某个候选类型上分叉，
-    /// 而分叉的表现是「同一个词桌面能置顶、手机上是灰的」，没有任何报错。
-    ///
-    /// 词条操作的启用态/删除文案按候选来源动态化（对齐 Go window_mouse 菜单状态规则）：
+    /// 桌面右键（[`Self::show_candidate_menu`]）与移动端长按菜单共用这一份，文案、启用态、
+    /// 顺序天然一致。词条操作的启用态/删除文案按候选来源动态化：
     /// - 置顶/前移：首项禁用；后移：末项禁用；拼音普通候选禁前移/后移（相对邻居，无稳定语义），
     ///   置顶与「固定到第 N 位」照给。
     /// - 删除：拼音 / 英文 ≥2 字的词→「屏蔽该词」并另给「在此编码下隐藏」；短语→「禁用短语」
     ///   （软删可恢复）；码表用户词/临时词→真删；其余系统词→「在此编码下隐藏」（shadow）。
-    /// - 特殊模式（快符等）：词条操作**照常提供**，编码取其独立缓冲、归属取其引用方案。
+    /// - 特殊模式（快符等）：词条操作照常提供，编码取其独立缓冲、归属取其引用方案。
     /// - 无词库落点者（临拼/临英/混输/网址，以及特殊模式的空码浏览态）：仅提供复制。
     pub fn candidate_menu_items(&self, idx: usize) -> Option<Vec<wind_ui_types::MenuItemSpec>> {
         use wind_ui_types::MenuItemSpec as M;
@@ -2444,10 +2287,8 @@ impl Coordinator {
             .as_ref()
             .and_then(|sc| self.delete_target(&state, &sc.schema, &cand));
         // 删除是否按文字屏蔽：决定文案「屏蔽该词」与有无第二项「在此编码下隐藏」。删除目标取不到
-        // （只有英文数据方案的头部原文条）时按原文条自身判——多字母的照样两项、都灰。
-        // 这一支不能套 `delete_blocks_word`：头部原文条没有来源（不是 English），套进去恒为假，
-        // 菜单就只剩一项「在此编码下隐藏」，与它在英文方案里「本该是屏蔽、只是此刻删不了」的
-        // 身份对不上；写端在目标为 None 时两项都不执行，故这里只影响文案与项数。
+        // （只有英文数据方案的头部原文条）时按原文条自身判。不能套 `delete_blocks_word`：头部
+        // 原文条没有来源，恒为假。写端在目标为 None 时两项都不执行，这里只影响文案与项数。
         let blocks_word = scope.as_ref().is_some_and(|sc| match &delete_target {
             Some(t) => self.delete_blocks_word(&sc.schema, t),
             None => wind_store::shadow::is_blockable_word(cand.freq_text()),
@@ -2455,8 +2296,8 @@ impl Coordinator {
         drop(state);
 
         let op = |o: CandidateOp| MenuKind::Op(o);
-        // 快捷输入历史候选：只给「删除此历史」与复制。它没有位置可调（排序按使用次数），
-        // 也不在任何词库里，词条菜单那几项都没有落点。写端见 `candidate_or_quick_format_op`。
+        // 快捷输入历史候选：只给「删除此历史」与复制（排序按使用次数，不在任何词库里）。
+        // 写端见 `candidate_or_quick_format_op`。
         if history {
             let items = vec![
                 M::leaf("删除此历史", op(CandidateOp::Delete), true, false),
@@ -2465,16 +2306,15 @@ impl Coordinator {
             ];
             return Some(items);
         }
-        // 格式候选优先：它调的是「这种写法排第几」，不是词库里的某个词。
-        // 标签也相应改写——操作对象是格式，不是这次算出来的那串文本。
+        // 格式候选优先：它调的是「这种写法排第几」，标签也相应改写。
         if let Some(q) = quick {
             let has_adjust = {
                 let a = self.quick_adjust_of(q.kind);
                 !a.is_empty()
             };
             let items = vec![
-                // 「同类型内」这个限定不能省：置顶只在本类（日期/数字/计算）内生效，
-                // 类与类之间的先后由 `mix_modes.members` 决定，不归本菜单管。
+                // 「同类型内」不能省：置顶只在本类（日期/数字/计算）内生效，类间先后由
+                // `mix_modes.members` 决定。
                 M::leaf(
                     "置顶（同类型内）",
                     op(CandidateOp::MoveTop),
@@ -2483,27 +2323,21 @@ impl Coordinator {
                 ),
                 M::leaf("上移", op(CandidateOp::MoveUp), q.index_in_kind > 0, false),
                 M::leaf("下移", op(CandidateOp::MoveDown), true, false),
-                // 面向用户说「隐藏」，存储字段叫 `disabled`——两者刻意不同名：
-                // 菜单里它确实是「看不见了」，而设置页的启用开关要让那一行仍可见、能开回来。
+                // 面向用户说「隐藏」，存储字段叫 `disabled`：设置页的启用开关要让那一行仍可见、能开回来。
                 M::leaf("隐藏此格式", op(CandidateOp::Delete), true, false),
                 // 整类恢复：被隐藏的格式不出候选、右键点不到，没有这一项就再也开不回来。
-                // 与候选调整菜单的同名项**语义不同**（那边恢复一条，这里恢复整类），
-                // 但两个菜单互斥出现，用户不会同时看到。
+                // 与候选调整菜单的同名项语义不同（那边恢复一条），但两个菜单互斥出现。
                 M::leaf("恢复默认", op(CandidateOp::Reset), has_adjust, false),
                 M::separator(),
                 M::leaf("复制", MenuKind::Copy, true, false),
             ];
             return Some(items);
         }
-        // 常用/生僻标记：作用域是**全局的那个字**，与词库落点无关，故对上面那两类
-        // 「只有复制」的状态同样成立——它只要求 `cand.text` 是**单个可登记的字符**
-        // （`is_markable`：空白与控制字符以外全放行）。issue #83 起不再限定汉字：
-        // 字根、间架结构符、注音、假名这些非汉字候选正是用户点名要能关掉的。
-        // ⚠️ 刻意不搭 `candidate_op_scope` 的便车：那个判据问的是「有没有词库落点」，
-        // 用它来管这一项，会让临拼/临英/混输/空码浏览态下的字莫名其妙标不了。
+        // 常用/生僻标记：作用域是全局的那个字，与词库落点无关，故对上面「只有复制」的状态同样
+        // 成立，只要求 `cand.text` 是单个可登记的字符。刻意不搭 `candidate_op_scope` 的便车：
+        // 否则临拼/临英/混输/空码浏览态下的字标不了。
         let common_item = self.common_char_mark(&word).map(|m| {
-            // 文案按当前判定二选一。**不加「（全局）」后缀**（2026-08-24 用户要求菜单简洁）：
-            // 作用域差异写进设置页的说明，不占右键菜单的宽度。
+            // 文案按当前判定二选一，不加「（全局）」后缀：作用域差异写进设置页的说明。
             let label = if m.common {
                 "设为生僻字"
             } else {
@@ -2512,29 +2346,24 @@ impl Coordinator {
             M::leaf(label, op(CandidateOp::ToggleCommon), true, false)
         });
 
-        // 有词库落点才给词条操作。无落点的两类状态——没有独立词库归属的 overlay（临拼/临英/
-        // 混输/网址，编码各持独立缓冲且无处落键）与空码浏览态（特殊模式 show_all_on_enter，
-        // 读端 apply_shadow_in 对空码直接 return，写了也永不生效）——仅保留复制。
-        // 判据与写端 `candidate_op` 同源，见 `candidate_op_scope`。
+        // 有词库落点才给词条操作。没有独立词库归属的 overlay（临拼/临英/混输/网址）与空码浏览态
+        // （读端 apply_shadow_in 对空码直接 return）仅保留复制。判据与写端 `candidate_op` 同源，
+        // 见 `candidate_op_scope`。
         let mut items = if let Some(scope) = scope {
             let cand_id = (!cand.id.is_empty()).then_some(cand.id.as_str());
             // 规则键是词库原文，与写端同取 `freq_text`（英文大小写投影后 `text` 对不上）。
             let has_rule =
                 self.shadow_has_rule(&scope.schema, &scope.code, cand.freq_text(), cand_id);
-            // 拼音普通候选**放行置顶与固定到第 N 位**，前移/后移仍禁：那两项是相对邻居的操作，
-            // 邻居随词频、学词、整句每天在变；绝对名次则是用户明确的主张。命令候选不受限。
-            // 引擎类型来自 scope：特殊模式问的是它引用的方案，照抄主方案会在「主方案拼音 +
-            // 快符码表」时整体误禁调位。
+            // 拼音普通候选放行置顶与固定到第 N 位，前移/后移仍禁：邻居随词频、学词、整句每天在变，
+            // 绝对名次则是用户明确的主张。命令候选不受限。引擎类型来自 scope：特殊模式问的是它
+            // 引用的方案。
             //
-            // ⚠️ 判据必须与写端 `candidate_op` 逐字对应：菜单给了入口而写端 return，或反过来，
-            // 都是**完全静默**的错配——用户点得动却毫无反应，或明明能用却是灰的。
+            // 判据必须与写端 `candidate_op` 逐字对应，否则就是点得动却无反应、或能用却是灰的。
             let is_pinyin = matches!(scope.engine_type, Some(wind_engine::EngineType::Pinyin));
             let group_member = candidate_is_group_member(&cand);
-            // emoji 扩展候选：五项词条操作**全部灰显**（不是隐藏——用户要看得出「这条不能调」，
-            // 而不是以为菜单坏了）。它不是词库条目，shadow 规则按 (schema, code, text) 落键，
-            // 而它的 code 恒空、text 是按宿主候选查表来的，写进去既不会被读端命中，还会在
-            // 宿主词换了 emoji 后变成孤儿规则。可调整性的规划见 design/emoji-suggestion.md §9，
-            // 落地时**两端一起放开**（这里与写端 `candidate_op` 的同名守卫）。
+            // emoji 扩展候选：五项词条操作全部灰显（不是隐藏）。它不是词库条目，code 恒空、text
+            // 按宿主候选查表而来，写 shadow 规则既不会被命中、还会变成孤儿。放开要两端一起
+            // （这里与写端 `candidate_op` 的同名守卫），规划见 design/emoji-suggestion.md §9。
             let emoji = cand.is_emoji_suggestion;
             let pinyin_locked = is_pinyin && !cand.is_command;
             // 单字母引导的重复上屏项：不是这个码的候选，调位一律灰（写端同守卫）。
@@ -2589,9 +2418,7 @@ impl Coordinator {
         } else {
             Vec::new()
         };
-        // 尾段两项对**两个分支都成立**，故统一在这里追加，不在各分支里各写一份：
-        // 分支里各写一份正是「加一项时漏改另一处」的经典入口，而漏改的表现是
-        // 「同一个字在临拼下右键没有这一项」——用户绝不会想到那是分支写重了。
+        // 尾段两项对两个分支都成立，统一在这里追加，别在各分支里各写一份。
         items.extend(common_item);
         items.push(M::leaf("复制", MenuKind::Copy, true, false));
         Some(items)
@@ -2599,36 +2426,25 @@ impl Coordinator {
 
     /// 把工具栏移到「输入焦点所在显示器」上的记忆位置（该屏没记过则落到它的右下角）。
     ///
-    /// 仅在显示器**发生变化**时下发，靠 `current_toolbar_monitor` 去重：notify_toolbar
-    /// 在每次模式切换/焦点事件上都跑，无条件下发会把用户拖动过的位置反复重置回记忆值，
-    /// 且拖动中途（save 尚未落地）还会把工具栏拽回原处。
+    /// 仅在显示器发生变化时下发，靠 `current_toolbar_monitor` 去重：notify_toolbar 在每次模式
+    /// 切换/焦点事件上都跑，无条件下发会把用户拖过的位置反复重置。调用点必须在 `UpdateToolbar`
+    /// 之前，否则切屏会先在旧屏闪一帧。`Toolbar::set_anchor` 受 `visible` 门控，不绕过
+    /// `toolbar_gate` 的显示迟滞。
     ///
-    /// 调用点必须在 `UpdateToolbar` **之前**——反过来会先在旧屏渲染一帧再跳过去，
-    /// 表现为切屏闪一下。`Toolbar::set_anchor` 内部受 `visible` 门控（隐藏中只记坐标不显形），
-    /// 故本路径不会绕过 `toolbar_gate` 的显示迟滞。
-    ///
-    /// ⚠️ **已知且有意接受的后果：工具栏无法停在非焦点屏。**
-    /// 本函数的判据是前台窗口所在屏，而拖动落盘（`save_toolbar_anchor`）记的是工具栏落点
-    /// 所在屏。用户把工具栏拖到副屏 B 而焦点仍在主屏 A 时，两者不等，下一次任意
-    /// `notify_toolbar`（切中英、切方案、焦点事件……）就会把它拽回 A —— 跨屏拖动因此
-    /// 是做不到的操作。这不是 bug：工具栏放在用户没在看的那块屏上本就违背它的用途
-    /// （要扭头才能看状态）。2026-08-09 与用户确认后维持此行为，**别把它当缺陷"修"成
-    /// sticky 或加开关**，那会引入一个不可见的模式态。
-    /// 注意跳回只发生在**拖动结束之后**：拖动期间前台窗口未变，key 与缓存相同，
-    /// 本函数一律 early-return，不会出现「拖到一半被拽走」。
+    /// 有意接受的后果：工具栏无法停在非焦点屏（拖到副屏而焦点仍在主屏，下一次 `notify_toolbar`
+    /// 就拽回来）。工具栏放在用户没在看的屏上违背其用途，别「修」成 sticky 或加开关。拖动期间
+    /// 前台窗口未变，本函数 early-return，不会拖到一半被拽走。
     fn sync_toolbar_monitor(&self) {
         let Some(mon) = self.current_monitor() else {
             return;
         };
         let key = mon.key;
         let (_, _, work_right, work_bottom) = mon.work;
-        // 「判定换屏 + 记新屏 + 取该屏坐标」必须在同一临界区里完成，否则中间那道缝会让
-        // 刚拖好的位置被顶掉：本线程认定换到 B 屏并释放锁后、尚未读表时，拖动线程
-        // （`save_toolbar_anchor`）把 B 屏的新坐标写进表——本线程随后读到的是旧值，下发出去
-        // 就把屏上刚拖好的工具栏拽回了旧处，且表里是新值、屏上是旧值，要到下次换屏才纠正。
+        // 「判定换屏 + 记新屏 + 取该屏坐标」必须在同一临界区里完成：否则释放锁后、读表前，拖动线程
+        // （`save_toolbar_anchor`）写入的新坐标会被本线程读到的旧值覆盖到屏上。
         //
-        // 锁序 `current_toolbar_monitor` → `toolbar_anchors`，与 `save_toolbar_anchor`
-        // 的取用先后一致（那边不嵌套）；⚠️ 新增取这两把锁的代码请沿用同一顺序。
+        // 锁序 `current_toolbar_monitor` → `toolbar_anchors`，与 `save_toolbar_anchor` 一致；
+        // 新增取这两把锁的代码请沿用同一顺序。
         let dedup = toolbar_dedup_key(&key, mon.work);
         let saved = {
             let mut cur = self
@@ -2644,8 +2460,8 @@ impl Coordinator {
                 .unwrap_or_else(|e| e.into_inner())
                 .get(&key)
                 .copied();
-            // 无记录且工作区未知：下面不会发任何命令，也就不能记成「已校正」——否则工作区随后
-            // 报到（输出名不变）时会被去重挡掉，默认落点永远发不出去。
+            // 无记录且工作区未知：不发命令，也就不能记成「已校正」，否则工作区随后报到时会被
+            // 去重挡掉、默认落点永远发不出去。
             #[cfg(all(target_os = "linux", ext_presenter))]
             if saved.is_none() && !work_known(mon.work) {
                 tracing::debug!("工具栏跟随焦点显示器 key={key}：无记录且工作区未知，不改位置");
@@ -2654,17 +2470,11 @@ impl Coordinator {
             *cur = Some(dedup);
             saved
         };
-        // ★ 记录必须真的落在这块屏上，否则当作"该屏没记过"。
+        // 记录必须真的落在这块屏上，否则当作「该屏没记过」：旧版本落盘的错屏 key、显示器拓扑
+        // 变化后的旧坐标都会把工具栏发到另一块屏。
         //
-        // 两个来路都会产出错屏记录：①升级前存下的（`monitor_key_from_anchor` 加退 1px
-        // 之前，贴右/下边缘的锚点被记到邻屏 key 下）——盘上的旧数据不会自己消失，光修
-        // 落盘侧的话用户升级后症状照旧；②显示器拓扑变了（拔屏、改排列），旧坐标不再
-        // 属于这块屏。两种情况下若照发 `SetToolbarAnchor`，工具栏会落到**另一块屏**，
-        // 正是"不跟焦点窗口的显示器"的现场。
-        //
-        // ⚠️ 不在这里删表项：那块屏当前可能没接，`DEFAULTTONEAREST` 会答成某块现有的屏，
-        // 据此删就会误删用户在别的显示器上的合法记录。只忽略、不删除——用户在本屏拖一次
-        // 就自然覆盖成正确的 key。
+        // 不在这里删表项：那块屏当前可能没接，`DEFAULTTONEAREST` 会答成某块现有的屏，据此删会误删
+        // 合法记录。只忽略，用户在本屏拖一次就覆盖。
         let saved = saved.filter(|&(right, bottom)| {
             let ok = anchor_on_monitor(right, bottom, &key, mon.work);
             if !ok {
@@ -2679,8 +2489,7 @@ impl Coordinator {
         });
         let cmd = match saved {
             Some((right, bottom)) => UiCommand::SetToolbarAnchor { right, bottom },
-            // 工作区未知且无记录的情形已在上面临界区里返回：无从算右下角，维持 UI 现状，也别发一个
-            // 按 0 算出的负坐标——宿主夹回后会落到左上角。
+            // 工作区未知且无记录的情形已在上面返回（别发按 0 算出的负坐标，宿主会夹到左上角）。
             // 该屏从未拖过：交给 UI 侧按自己的尺寸算右下角（协调器不知道工具栏 w/h）。
             None => UiCommand::SetToolbarCorner {
                 work_right,
@@ -2694,12 +2503,12 @@ impl Coordinator {
     /// 启动时的初始定位：与运行期同一判据（前台窗口所在显示器），并把该 key 记进
     /// `current_toolbar_monitor`，使首个 notify_toolbar 不会重复下发。
     ///
-    /// macOS 上 `focus_monitor` 恒为 None，故本函数恒为 no-op——位置恢复整体不生效。
-    /// 无实际影响：macOS 的 forwarder 本就把 `SetToolbarAnchor`/`SetToolbarCorner` 当留桩丢弃，
-    /// 那边没有悬浮工具栏。Linux 外部宿主形态按 addon 报的输出名定位（见 [`Self::current_monitor`]）。
+    /// macOS 上 `focus_monitor` 恒为 None，本函数是 no-op（那边没有悬浮工具栏，forwarder 把
+    /// `SetToolbarAnchor`/`SetToolbarCorner` 当留桩丢弃）。Linux 外部宿主形态按 addon 报的输出名
+    /// 定位（见 [`Self::current_monitor`]）。
     ///
-    /// 桌面构造路径（`new`）专用；headless/Android 入口不经此，故仅在无 desktop-ui 时放行
-    /// dead_code——**不要**整体 feature 门控（同 impl 块的运行期工具栏逻辑配置重载仍要用）。
+    /// 桌面构造路径（`new`）专用，仅在无 desktop-ui 时放行 dead_code；不要整体 feature 门控
+    /// （同 impl 块的运行期工具栏逻辑仍要用）。
     #[cfg_attr(not(feature = "desktop-ui"), allow(dead_code))]
     pub(crate) fn init_toolbar_pos(&self) {
         self.sync_toolbar_monitor();
@@ -2707,17 +2516,14 @@ impl Coordinator {
 
     /// 持久化工具栏锚点（窗口**右下角**屏幕坐标，按显示器 key 独立存储，best-effort）。
     ///
-    /// key 取自**工具栏落点自身**而非光标：拖动结束时光标压在工具栏上，两者碰巧同屏，
-    /// 但工具栏坐标才是「这条工具栏属于哪块屏」的直接事实。存取两侧由此共用同一个
-    /// 键空间语义——取那侧问的是「焦点屏上记过什么位置」，存那侧答的是「这块屏上
-    /// 工具栏在哪」，只有 key 同源才对得上。
+    /// key 取自工具栏落点自身而非光标：存取两侧共用同一个键空间语义（取侧问「焦点屏上记过
+    /// 什么位置」，存侧答「这块屏上工具栏在哪」），只有 key 同源才对得上。
     pub(crate) fn save_toolbar_anchor(&self, right: i32, bottom: i32) {
         #[cfg(all(target_os = "linux", ext_presenter))]
         let key = self.panel_drop_key(wind_ipc::protocol::overlay::OVERLAY_KIND_TOOLBAR);
         #[cfg(not(all(target_os = "linux", ext_presenter)))]
         let Some(key) = monitor_key_from_anchor(right, bottom) else {
-            // 查不到显示器就别存：这块表的读取侧（`focus_monitor`）在同样的失败下返回
-            // None，存进任何兜底 key 都只会是永远读不出来的垃圾。
+            // 查不到显示器就别存：读取侧（`focus_monitor`）同样失败返回 None，兜底 key 永远读不出来。
             tracing::debug!("工具栏位置未保存：查不到 ({},{}) 所在显示器", right, bottom);
             return;
         };
@@ -2744,16 +2550,15 @@ impl Coordinator {
             map.insert(key, (right, bottom));
             map.clone()
         };
-        // 整份快照交给写入器（覆盖语义要求闭包自带完整目标值，不能做增量修改）。
-        // 合并 + 串行化 + 关机 flush 全在那一侧，见 `state_writer`。
+        // 整份快照交给写入器（覆盖语义要求闭包自带完整目标值）。合并 + 串行化 + 关机 flush
+        // 在 `state_writer` 那一侧。
         self.state_writer.schedule("toolbar_anchors", move |rs| {
             rs.toolbar_anchors = snapshot.clone();
         });
     }
 
-    /// 持久化软键盘锚点（面板**右下角**屏幕坐标）。与 `save_toolbar_anchor` 同构，
-    /// 但**不碰** `current_toolbar_monitor`——那是工具栏跟随焦点换屏的去重缓存，
-    /// 软键盘不参与那套跟随（它由用户显式开关，不跟着焦点跑）。
+    /// 持久化软键盘锚点（面板右下角屏幕坐标）。与 `save_toolbar_anchor` 同构，但不碰
+    /// `current_toolbar_monitor`：软键盘由用户显式开关，不参与跟随焦点换屏。
     pub(crate) fn save_softkeyboard_anchor(&self, right: i32, bottom: i32) {
         #[cfg(all(target_os = "linux", ext_presenter))]
         let key = self.panel_drop_key(wind_ipc::protocol::overlay::OVERLAY_KIND_SOFTKEYBOARD);
@@ -2791,17 +2596,15 @@ impl Coordinator {
                 work: None,
             };
         };
-        // ⚠️ 取值与校验分两步：`.lock()` 的临时 guard 活到整条 `let` 语句结束，把校验
-        // 链在后面会让 `monitor_key_from_anchor` 那次系统调用**在持锁状态下**执行，
-        // 而 `save_softkeyboard_anchor` 要写同一把锁（拖动落盘）。
+        // 取值与校验分两步：`.lock()` 的临时 guard 活到整条 `let` 语句结束，链在一起会让
+        // `monitor_key_from_anchor` 的系统调用在持锁时执行，而拖动落盘要写同一把锁。
         let saved = self
             .softkeyboard_anchors
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(&mon.key)
             .copied();
-        // 与 `sync_toolbar_monitor` 同一道闸门（理由见那里）：记录不在这块屏上就当
-        // 没记过，落回该屏默认位置。软键盘的症状是"在副屏点开却开到主屏去"。
+        // 与 `sync_toolbar_monitor` 同一道闸门：记录不在这块屏上就当没记过，落回该屏默认位置。
         let anchor =
             saved.filter(|&(right, bottom)| anchor_on_monitor(right, bottom, &mon.key, mon.work));
         // 工作区未知（Linux 旧 addon）时不带：UI 侧回退到自己的默认落点。
@@ -2927,8 +2730,8 @@ impl Coordinator {
             ToolbarAction::SwitchEngine => "switch_engine",
             ToolbarAction::TogglePunct => "toggle_punct",
             ToolbarAction::ToggleWidth => "toggle_width",
-            // 上面那个 match 已 return 掉的三支。**加 ToolbarAction 变体时必须一并处理
-            // 上面那个 match**——漏了就落到这里当场 panic，而不是静默不响应。
+            // 上面那个 match 已 return 掉的三支。加 ToolbarAction 变体时必须一并处理上面那个
+            // match，漏了就在这里 panic，而不是静默不响应。
             ToolbarAction::ToggleS2t
             | ToolbarAction::ToggleT2s
             | ToolbarAction::OpenSettings
@@ -2943,14 +2746,9 @@ impl Coordinator {
 
     /// 执行自定义按钮的动作（`ui.toolbar.buttons[i].action`，cmdbar 表达式）。
     ///
-    /// 复用短语动作那条链（`run_command_candidate`），故 `open` / `proc.run` /
-    /// `key.tap` / `wind.cli` 等全部可用，且求值失败会弹 toast 而不是哑失败。
-    ///
-    /// ⚠️ 经 `spawn_command` 起独立线程：`run_command_candidate` 的文档要求「未持
-    /// state 锁时调用」，动作链上的控制器会回调自锁的 coordinator 方法。
-    ///
-    /// 下标取不到就忽略：UI 侧的 spec 与本侧配置之间有一瞬可能错开（配置刚重载、
-    /// 新的 SetToolbarLayout 还没到 UI），越界不是异常。
+    /// 复用短语动作那条链（`run_command_candidate`），故 `open` / `proc.run` / `key.tap` /
+    /// `wind.cli` 等全部可用，求值失败会弹 toast。经 `spawn_command` 起独立线程（动作链会回调
+    /// 自锁的 coordinator 方法）。下标取不到就忽略：配置刚重载时 UI 侧的 spec 可能一瞬错开。
     fn run_toolbar_button(&self, index: u8) {
         let btn = {
             let cfg = self.rt();
@@ -2971,43 +2769,33 @@ impl Coordinator {
         self.spawn_user_command(action);
     }
 
-    /// 执行一段**用户写的** cmdbar 表达式：工具栏自定义按钮与按键绑定 `command:<表达式>`
-    /// 共用这一个入口，于是两处对写法的容忍度（裸表达式 / 已带 `$CC(...)`）永远一致。
-    ///
-    /// 经 `spawn_command` 起独立线程执行（`run_command_candidate` 要求未持 state 锁），
-    /// 故持锁的调用方（会话态按键分派）也可以直接调，不会死锁。
+    /// 执行一段用户写的 cmdbar 表达式：工具栏自定义按钮与按键绑定 `command:<表达式>` 共用这一个
+    /// 入口，两处对写法的容忍度（裸表达式 / 已带 `$CC(...)`）一致。
     pub(crate) fn spawn_user_command(&self, expr: &str) {
         self.spawn_command(wrap_command_source(expr), String::new());
     }
 
-    /// 焦点/激活切换路径专用：先用缓存值立即同步通知（无阻塞），
-    /// 再后台刷新全屏缓存，若状态变化则再次通知。
-    /// 保证 bridge handler 线程立即返回，缓存刷新在独立线程完成。
-    /// 非焦点路径（模式切换/菜单操作）直接调 notify_toolbar()，缓存值仍然有效。
+    /// 焦点/激活切换路径专用：先用缓存值立即同步通知（bridge handler 线程不阻塞），再后台
+    /// 刷新全屏缓存，状态变化则再次通知。非焦点路径直接调 notify_toolbar()。
     ///
-    /// ⚠ 还有一个超出函数名的副作用：它是全屏复查线程（`coordinator/fullscreen_watch.rs`）
-    /// 的**唯一起点**——第一次焦点/激活事件时懒启动，此后常驻。理由见那个模块。
+    /// 副作用：它是全屏复查线程（`coordinator/fullscreen_watch.rs`）的唯一起点，第一次焦点/
+    /// 激活事件时懒启动，此后常驻。
     pub(crate) fn notify_toolbar_async(&self) {
         // 立即用缓存值通知，bridge 线程无阻塞
         self.notify_toolbar();
-        // 全屏复查线程懒启动：焦点事件**捎带**刷新缓存这件事只覆盖「焦点变化的那一刻」，
-        // 用户在焦点稳定之后进出全屏（浏览器全屏播放视频 / F11）没有任何回调，得靠它。
-        // 见 `coordinator/fullscreen_watch.rs`（非 Windows 上是空实现）。
+        // 全屏复查线程懒启动：焦点事件只覆盖焦点变化的那一刻，焦点稳定后进出全屏（F11、
+        // 全屏播放）没有回调，得靠它。非 Windows 上是空实现。
         self.ensure_fullscreen_watch();
-        // 探测**不再**受 `hide_in_fullscreen` 门控：同一次探测还要给候选窗的
-        // 「D3D 独占全屏不弹窗」判据（`fullscreen_exclusive_cached`）刷值，那条没有开关。
+        // 探测不受 `hide_in_fullscreen` 门控：同一次探测还要给候选窗的「D3D 独占全屏不弹窗」
+        // 判据（`fullscreen_exclusive_cached`）刷值，那条没有开关。
         let Some(weak) = self.self_weak.get().cloned() else {
             return;
         };
-        // 单飞：已有探测在途就跳过。探的是**同一个**全局前台状态，重复查没有意义，
-        // 而焦点变化是成串来的（一次应用切换会连着触发多次），此前每次都 spawn 一个线程。
-        // 复查线程走的是同一道闸（见 `ensure_fullscreen_watch`）。
+        // 单飞：已有探测在途就跳过（探的是同一个全局前台状态，而焦点变化成串来）。复查线程
+        // 走同一道闸（`ensure_fullscreen_watch`）。闸在这里取、由起出来的线程持 [`ProbeGate`]
+        // 归还：判在途必须发生在起线程之前。
         //
-        // 闸在这里取、由起出来的那条线程持 [`ProbeGate`] 归还：判「已有探测在途」必须发生
-        // 在**起线程之前**，否则挡不住白起线程这件事本身。
-        //
-        // 这里不并入 first-show 那个共享定时器：foreground_fullscreen_kind 会阻塞
-        // （异步化它正是 1abab9f 的目的），塞进定时器线程会拖垮兜底时限。
+        // 不并入 first-show 那个共享定时器：foreground_fullscreen_kind 会阻塞，会拖垮兜底时限。
         if !self.try_take_probe_gate() {
             return;
         }
@@ -3030,9 +2818,8 @@ impl Coordinator {
 
     /// 取全屏探测的单飞闸；已有探测在途返回 `false`。
     ///
-    /// 取到之后**必须**由真正执行探测的那条线程调 [`Self::adopt_probe_gate`] 接管归还
-    /// （唯一的例外是线程压根没起来，见调用点）。分两步是因为取闸与归还落在两条线程上：
-    /// 判「在途」要在起线程之前，而归还要等探测跑完。
+    /// 取到之后必须由真正执行探测的那条线程调 [`Self::adopt_probe_gate`] 接管归还（唯一例外是
+    /// 线程压根没起来）。分两步是因为判在途要在起线程之前，归还要等探测跑完。
     pub(crate) fn try_take_probe_gate(&self) -> bool {
         !self
             .fullscreen_probing
@@ -3046,12 +2833,9 @@ impl Coordinator {
 
     /// 把一次探测的结果写进两个缓存，有变化就重新通知工具栏 / 候选窗。
     ///
-    /// 与探测分开，是因为两个调用点对「要不要信这一次采样」的态度不同：焦点事件那条直采
-    /// 直信（那一刻本来就要重算），复查线程那条要先连着看两拍（见
-    /// `coordinator/fullscreen_watch.rs` 的 `confirmed`）。
-    ///
-    /// ⚠ 只能在后台线程调用（内部会取 `state` 锁并下发 UI 命令），且调用方须持有
-    /// [`ProbeGate`]。
+    /// 与探测分开：焦点事件那条直采直信，复查线程那条要先连着看两拍（见
+    /// `coordinator/fullscreen_watch.rs` 的 `confirmed`）。只能在后台线程调用（内部取 `state` 锁
+    /// 并下发 UI 命令），且调用方须持有 [`ProbeGate`]。
     pub(crate) fn commit_fullscreen_kind(&self, kind: crate::FullscreenKind) {
         let is_fs = kind != crate::FullscreenKind::None;
         let is_excl = kind == crate::FullscreenKind::D3dExclusive;
@@ -3074,13 +2858,10 @@ impl Coordinator {
             let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
             self.notify_ui_update(&st);
         }
-        // ★ 工具栏要在**任一**位翻转时重算，不能只看 `is_fs`：`notify_toolbar` 的否决项
-        // 里除了 `fullscreen_cached`，还有经 `ui_suppressed_by_host()` 读到的
-        // `fullscreen_exclusive_cached`。只看前者的话，`Covering → D3dExclusive`
-        // （无边框全屏的游戏切独占、PPT 从最大化窗口进放映）这一步 `is_fs` 恒真不翻转，
-        // 工具栏就留在独占全屏上——而它弹在那儿会把游戏踢出独占态（Dota 2 实测冻死）。
-        // 反向（退出放映）则是工具栏再也回不来。改动前这个洞够不着：唯一调用点
-        // `notify_toolbar_async` 会在探测前先无条件 `notify_toolbar()` 一次，顺手糊住了。
+        // 工具栏要在任一位翻转时重算，不能只看 `is_fs`：`notify_toolbar` 的否决项还含经
+        // `ui_suppressed_by_host()` 读到的 `fullscreen_exclusive_cached`。`Covering → D3dExclusive`
+        // （无边框游戏切独占、PPT 进放映）时 `is_fs` 不翻转，工具栏会留在独占全屏上把游戏踢出
+        // 独占态；反向则工具栏回不来。
         if prev != is_fs || prev_excl != is_excl {
             tracing::info!(
                 "前台全屏态={kind:?}（此前 fs={prev} excl={prev_excl}），工具栏重算可见性"
@@ -3089,16 +2870,11 @@ impl Coordinator {
         }
     }
 
-    /// 只提交「前台铺满显示器」这一格（判据②），**不碰** `fullscreen_exclusive_cached`。
+    /// 只提交「前台铺满显示器」这一格（判据②），不碰 `fullscreen_exclusive_cached`。
     ///
-    /// 复查线程专用：它按固定节拍采样，因此刻意不问判据①（`SHQueryUserNotificationState`
-    /// 是跨进程 RPC，见 `coordinator/fullscreen_watch.rs` 的开销三条）。既然没问，就不能
-    /// 拿「没问到」去清独占位——那会把一台正在放 PPT / 跑独占全屏游戏的机器误判成不独占。
-    ///
-    /// ⚠ 只能在后台线程调用（内部会取 `state` 锁并下发 UI 命令），且调用方须持有
-    /// [`ProbeGate`]。
-    ///
-    /// 唯一的生产调用点在 `cfg(windows)` 的复查线程里，故非 Windows 下它只有测试在用。
+    /// 复查线程专用：它按固定节拍采样，刻意不问判据①（`SHQueryUserNotificationState` 是跨进程
+    /// RPC），没问就不能拿「没问到」去清独占位。只能在后台线程调用，调用方须持有 [`ProbeGate`]。
+    /// 生产调用点只在 `cfg(windows)` 的复查线程里。
     #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn commit_fullscreen_covering(&self, covering: bool) {
         let prev = self
@@ -3110,14 +2886,10 @@ impl Coordinator {
         }
     }
 
-    /// 工具栏「三项合取」的当前值（**不含**全屏否决）——即「用户此刻停在某个宿主的可编辑
-    /// 控件里，且开着工具栏」。全屏复查线程拿它当开销闸，见 `coordinator/fullscreen_watch.rs`。
-    ///
-    /// ⚠ 自带取锁，**不可在持 `state` 锁时调用**（`std::sync::Mutex` 不可重入）。
-    /// `notify_toolbar` 里那份判据直接读它已持有的 `s`，两处共用
-    /// [`State::toolbar_conjunction`] 保持同源。
-    ///
-    /// 唯一的生产调用点在 `cfg(windows)` 的复查线程里，故非 Windows 下它只有测试在用。
+    /// 工具栏「三项合取」的当前值（不含全屏否决），即「用户此刻停在某个宿主的可编辑控件里，
+    /// 且开着工具栏」。全屏复查线程拿它当开销闸。自带取锁，不可在持 `state` 锁时调用；
+    /// 与 `notify_toolbar` 共用 [`State::toolbar_conjunction`] 保持同源。生产调用点只在
+    /// `cfg(windows)` 的复查线程里。
     #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn toolbar_wants_display(&self) -> bool {
         let hide_in_english = self.rt().config.ui.toolbar.hide_in_english;
@@ -3125,19 +2897,16 @@ impl Coordinator {
         toolbar_gate_open(s.toolbar_conjunction(), hide_in_english, s.chinese_mode)
     }
 
-    /// 推送当前状态到常驻工具栏（中英/方案/标点/全半角）
-    /// 工具栏可见性单点决策 + 内容刷新。合取公式（由 Go toolbar_reducer 的两项扩到四项）：
-    /// 仅当 `ime_active && has_edit_context && toolbar_visible && !全屏否决` 时显示
-    /// （UpdateToolbar 会刷内容+定位+显示），否则下发 HideToolbar。所有调用点（启动/切模式/
-    /// 切方案/激活/失活）经此单点决策，不再各自直接显示，根治”工具栏总是显示、切走输入法
-    /// 不隐藏”。前三项见 [`State::toolbar_conjunction`]；第四项是**环境否决**，变量名叫
-    /// `hide_fullscreen` 但装的不止全屏——它还含 `ui_suppressed_by_host()`（宿主自绘候选、
-    /// D3D 独占全屏），故排查日志里那句 `fullscreen=` 为真时未必是全屏惹的。
+    /// 推送当前状态到常驻工具栏（中英/方案/标点/全半角），可见性单点决策：仅当
+    /// `ime_active && has_edit_context && toolbar_visible && !全屏否决` 时 UpdateToolbar，否则
+    /// HideToolbar。所有调用点（启动/切模式/切方案/激活/失活）经此决策。前三项见
+    /// [`State::toolbar_conjunction`]；第四项变量名叫 `hide_fullscreen`，但还含
+    /// `ui_suppressed_by_host()`（宿主自绘候选、D3D 独占全屏），日志里 `fullscreen=` 为真时
+    /// 未必是全屏惹的。
     pub(crate) fn notify_toolbar(&self) {
-        // 前台应用全屏时隐藏工具栏（读缓存，由 notify_toolbar_async 后台刷新，无阻塞）。
-        // 「宿主接管 UI / D3D 独占全屏」一律压住，不受 hide_in_fullscreen 开关管：
-        // 那个开关管的是「无边框全屏要不要收工具栏」这种偏好；独占全屏下工具栏弹出去
-        // 会把游戏踢出独占态，不是偏好。见 handle_uielement.rs。
+        // 前台应用全屏时隐藏工具栏（读缓存，由 notify_toolbar_async 后台刷新）。「宿主接管 UI /
+        // D3D 独占全屏」一律压住，不受 hide_in_fullscreen 管：独占全屏下工具栏弹出去会把游戏踢出
+        // 独占态，不是偏好。见 handle_uielement.rs。
         let hide_fullscreen = (self.rt().config.ui.toolbar.hide_in_fullscreen
             && self
                 .fullscreen_cached
@@ -3145,26 +2914,17 @@ impl Coordinator {
             || self.ui_suppressed_by_host().is_some();
         let hide_in_english = self.rt().config.ui.toolbar.hide_in_english;
         let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        // 四项合取：本输入法在服务某宿主（ime_active）、焦点在可编辑控件里
-        // （has_edit_context）、用户开着工具栏（toolbar_visible）、且未处于全屏。
-        // 前两项正交且缺一不可——只看 ime_active 会让应用内点到非文本框时工具栏不隐藏。
-        // 前三项收在 `State::toolbar_conjunction`：全屏复查线程的开销闸读的是同一个判据。
+        // 四项合取：ime_active、has_edit_context（只看前者会让应用内点到非文本框时不隐藏）、
+        // toolbar_visible、未处于全屏。前三项收在 `State::toolbar_conjunction`。
         //
-        // ★ 复查线程的唤醒判据取**闸**（三项合取）而不是「本函数要不要显示工具栏」（四项）。
-        // 两者只差全屏那一项，而那一格恰恰是唯一要紧的：工具栏正因全屏隐藏、此时三项合取
-        // 由假转真（用户点进全屏页面里的搜索框），若按四项判就走隐藏分支、信号发不出去，
-        // 挂着的线程要等 `PARK_FALLBACK` 兜底才醒 —— 用户退出全屏后十来秒工具栏才回来。
-        // 「隐藏 ⇒ 闸随后会关」这个想当然，正是 `watch_gate_stays_open_while_hidden_by_fullscreen`
-        // 那条测试钉着要否掉的。
-        //
-        // 「英文状态隐藏」（`hide_in_english`）并进**闸**而不是与全屏否决并列：英文态下工具栏
-        // 横竖不显示，前台全不全屏无人关心，复查线程不该为它醒着；切回中文时本函数会被
-        // 重新调用，闸随之打开、照常叫醒复查线程。
+        // 复查线程的唤醒判据取闸（三项合取）而不是四项：工具栏因全屏隐藏、三项合取由假转真时，
+        // 按四项判信号发不出去，退出全屏后要等 `PARK_FALLBACK` 才回来（见
+        // `watch_gate_stays_open_while_hidden_by_fullscreen`）。「英文状态隐藏」并进闸而不与全屏
+        // 否决并列：英文态下工具栏横竖不显示，复查线程不该为它醒着。
         let gate_open = toolbar_gate_open(s.toolbar_conjunction(), hide_in_english, s.chinese_mode);
         if !gate_open || hide_fullscreen {
-            // 记录是哪一项否决了显示：UI 层日志只看得到「HideToolbar」，判不出成因，
-            // 而四条路径的排查方向完全不同（激活态乱序 / 焦点离开输入框 / 用户关了开关 /
-            // 全屏探测）。
+            // 记录是哪一项否决了显示：四条路径的排查方向完全不同（激活态乱序 / 焦点离开输入框 /
+            // 用户关了开关 / 全屏探测）。
             tracing::debug!(
                 "notify_toolbar: 隐藏 ime_active={} has_edit_ctx={} toolbar_visible={} fullscreen={} english={}",
                 s.ime_active,
@@ -3174,42 +2934,31 @@ impl Coordinator {
                 hide_in_english && !s.chinese_mode
             );
             drop(s);
-            // 闸开着却走到隐藏分支 = 「三项合取成立，只是被全屏否决了」，正是复查线程最该
-            // 醒着的那一格（它得盯着用户什么时候退出全屏）。判据见上面 `gate_open`。
+            // 闸开着却走到隐藏分支 = 三项合取成立、只是被全屏否决，复查线程最该醒着盯退出全屏。
             if gate_open {
                 crate::coordinator::fullscreen_watch::wake();
             }
-            // 内容没变就不再推：焦点抖动时这条 Hide 会被连发数次（真机：飞书 200ms 内
-            // 5 轮 focus_lost，每轮一条），全挤在 UI 线程上。见 `last_toolbar_push`。
+            // 内容没变就不再推：焦点抖动时这条 Hide 会被连发数次，见 `last_toolbar_push`。
             if self.take_toolbar_push_if_changed(ToolbarPush::Hidden) {
                 let _ = self.ui_tx.send(UiCommand::HideToolbar);
             }
-            // ⚠ 去重**只挡 UI 推送这一条**：下面两个各有自己的去重与触发条件
-            // （HUD 看的是诊断开关、图标看的是 label/角标），跟着一起跳过就会出现
-            // 「工具栏没变但图标该变了却没变」。
+            // 去重只挡 UI 推送这一条：HUD 与图标各有自己的去重与触发条件，不能跟着跳过。
             self.push_input_diag_hud_if_visible(); // 见函数末尾同一行的说明
-            // 语言栏图标同样收口于此，且**两个出口都要**——「不可输入」恰恰走的是本分支，
-            // 只在下面那个出口补的话，图标永远等不到变「英」。同 HUD 刷新的理由。
+            // 语言栏图标同样收口于此，且两个出口都要：「不可输入」恰恰走的是本分支。
             self.publish_langbar_icon_now();
             return;
         }
         let (chinese_mode, caps_lock) = (s.chinese_mode, s.caps_lock);
         drop(s);
-        // 走到这里 ⇒ 闸必开（`gate_open` 为真才不进上面那个分支），叫醒挂着的复查线程。
-        // 放在推送去重**之前**：去重看的是工具栏内容变没变，而这个信号问的是「闸是不是
-        // 该开了」，内容没变但刚从隐藏转为显示时，去重会挡掉推送、信号却必须发出去。
+        // 走到这里 ⇒ 闸必开，叫醒挂着的复查线程。放在推送去重之前：内容没变但刚从隐藏转为显示时，
+        // 去重会挡掉推送、信号却必须发出去。
         crate::coordinator::fullscreen_watch::wake();
-        // ⚠ **必须在取 state 锁之前算**：effective_input_block() 内部要读 state，
-        // 而 std::sync::Mutex 不可重入——写在下面的初始化式里就是当场自死锁
-        // （工具栏一显示就走到这里，表现为输入法整个卡住）。
+        // 必须在取 state 锁之前算：effective_input_block() 内部要读 state，Mutex 不可重入，
+        // 写进下面的初始化式就是当场自死锁。
         let input_blocked = self.effective_input_block().shows_english();
-        // 不可输入（密码框 / 无编辑上下文 / 系统禁用）时模式格显英文标签：此刻键已全部
-        // 透传给宿主，与英文半角态干的是同一件事，故**共用同一个标签、不另设配置键**。
-        //
-        // 在协调器算而不是留给 wind-ui 覆盖：wind-ui 读不到配置，它自己兜底就只能写死
-        // 一个字面量——那正是这处硬编码的由来。ToolbarState 不下发 TSF，没有
-        // `_inputTypeLabel` 那种持久值顾虑，可以直接改 icon_label 本身；语言栏图标那条
-        // 路**不行**，只能在 spec 上覆盖（见 publish_langbar_icon 的 label 一行）。
+        // 不可输入（密码框 / 无编辑上下文 / 系统禁用）时模式格显英文标签：键已全部透传，与英文
+        // 半角态同一件事，共用同一个标签、不另设配置键。在协调器算是因为 wind-ui 读不到配置；
+        // 语言栏图标那条路只能在 spec 上覆盖（见 publish_langbar_icon）。
         let icon_label = if input_blocked {
             self.rt().config.ui.labels.english_label()
         } else {
@@ -3231,8 +2980,7 @@ impl Coordinator {
             s2t_shown: s.s2t_enabled,
             soft_keyboard_on: self.softkeyboard_is_open(),
             // 不可输入（密码框 / 无编辑上下文 / 系统禁用）：模式格显 "英" 且不高亮。
-            // 与语言栏图标读**同一个** effective_input_block，不会再出现「图标说英文、
-            // 工具栏说中文」的错位——那正是把判据分给两个负责者的代价。
+            // 与语言栏图标读同一个 effective_input_block，两者不会错位。
             input_blocked,
         };
         drop(s);
@@ -3242,12 +2990,9 @@ impl Coordinator {
         if self.take_toolbar_push_if_changed(ToolbarPush::Shown(Box::new(tb.clone()))) {
             self.emit_status(tb, latin_input);
         }
-        // HUD 刷新收口于此（两个出口各一次）。诊断 HUD 展示的 ime_active /
-        // has_edit_context 正是上面那道合取的输入，而**凡是改动它们的路径都必须调
-        // notify_toolbar 才能生效**，所以这里是唯一不会漏的落点。
-        // 反例（2026-07-26 实测）：起初只在 apply_input_diag 里推，于是 focus_gained
-        // 之外的路径（CtxLost 等）改了状态却不刷新，HUD 一直显示上一次的快照。
-        // 在此调用是安全的：state 锁已 drop，且 HUD 关闭时该函数首行即返回，零开销。
+        // HUD 刷新收口于此（两个出口各一次）：HUD 展示的 ime_active / has_edit_context 正是上面
+        // 合取的输入，凡是改动它们的路径都必须调 notify_toolbar，所以这里是唯一不会漏的落点。
+        // state 锁已 drop，HUD 关闭时该函数首行即返回。
         self.push_input_diag_hud_if_visible();
         // 语言栏图标收口（与上面那个出口成对）。内部对相同位图跳过重渲与刷新推送，
         // 故多调无副作用；漏调则是「状态变了图标不跟」。
@@ -3256,11 +3001,9 @@ impl Coordinator {
 }
 
 /// 「固定到第 N 位 ▸ 第 1 位…第 K 位」子菜单，K = 每页条数（不超过 [`PIN_AT_MAX`] 与界面
-/// 候选条数）。N 是**界面名次**；已在第 N 位、或那一格落不到（紧跟着变体等后插入项）时灰；
-/// 列表里有 emoji 扩展时整组灰（见 `PinAtSlots::has_emoji`）。
-///
-/// ⚠️ 判据与写端 `candidate_op_in` 的 `PinAt` 分支逐字对应（同用 `pin_at_slots`）：失配的
-/// 表现是「点得动却毫无反应」。
+/// 候选条数）。N 是界面名次；已在第 N 位、或那一格落不到（紧跟着变体等后插入项）时灰；
+/// 列表里有 emoji 扩展时整组灰（见 `PinAtSlots::has_emoji`）。判据与写端 `candidate_op_in`
+/// 的 `PinAt` 分支同用 `pin_at_slots`，失配表现为点得动却毫无反应。
 fn pin_at_submenu(
     per_page: usize,
     slots: &crate::candidate_grid::PinAtSlots,
@@ -3283,9 +3026,8 @@ fn pin_at_submenu(
     item
 }
 
-/// 是否 $SS/$AA 展开后的组成员候选：顺序/成员由短语定义决定，禁一切调整
-/// （改动走编辑短语路径，不允许 shadow 双轨漂移；对齐 Go isGroupMember 规则）。
-/// 组导航候选本身（is_group，text 是组名）不算成员：可禁用整组。
+/// 是否 $SS/$AA 展开后的组成员候选：顺序/成员由短语定义决定，禁一切调整（改动走编辑短语
+/// 路径，不允许 shadow 双轨漂移）。组导航候选本身（is_group，text 是组名）不算成员，可禁用整组。
 pub(crate) fn candidate_is_group_member(cand: &wind_candidate::Candidate) -> bool {
     cand.is_phrase
         && !cand.is_group
@@ -3297,8 +3039,7 @@ pub(crate) fn candidate_is_group_member(cand: &wind_candidate::Candidate) -> boo
 /// 右键「删除」菜单项（[`CandidateOp::Delete`]）的动态文案与可用性（按候选来源）：
 /// 拼音 / 英文按文字屏蔽的词（`blocks_word`，判据见 `Coordinator::delete_blocks_word`）→
 /// 「屏蔽该词」；短语→禁用短语（软删可恢复）；用户词/临时词→真删；系统词→「在此编码下隐藏」
-/// （shadow）。单字同样允许隐藏（shadow 按 code+word 键控，只隐藏该编码下的该字，其它编码仍可
-/// 打出，且设置页可恢复，不存在"某字彻底打不出"）。
+/// （shadow，单字同样允许：只隐藏该编码下的该字，设置页可恢复）。
 pub(crate) fn candidate_delete_menu(
     cand: &wind_candidate::Candidate,
     blocks_word: bool,
@@ -3323,23 +3064,12 @@ pub(crate) fn candidate_delete_menu(
     }
 }
 
-/// 把一段动作源补成 `run_command_candidate` 能执行的**短语格式**。
+/// 把一段动作源补成 `run_command_candidate` 能执行的短语格式。
 ///
-/// # 为什么需要这一步
-///
-/// `run_command_candidate` 走 `evaluate_phrase`，那是短语系统的格式——命令必须带顶层
-/// `$CC(…)` 标记。裸的 `proc.run("x.exe")` 会被当成**字面文本**，一个动作都不跑，
-/// **而且不报错**：症状是「按钮显示正常、日志一条告警都没有、点了什么都不发生」。
-/// 2026-08-26 用户真机报到这个 bug。
-///
-/// 判据：**按钮的 action 本来就只可能是命令**。`$CC` 标记存在的意义是让短语区分
-/// 「这条是要上屏的文本」还是「这条是要执行的命令」，而工具栏按钮没有这个歧义
-/// ——它不可能是文本。要求用户为一个不存在的歧义写一个标记，是把内部格式当成了 API。
-///
-/// 已带标记的原样放行：用户从短语那边抄一条过来照样能用，且不会被包成
-/// `$CC("", $CC(...))` 这种嵌套。
-///
-/// 第一个参数是**候选显示文本**，工具栏按钮不进候选列表，故给空串。
+/// `run_command_candidate` 走 `evaluate_phrase`，命令必须带顶层 `$CC(…)` 标记，裸的
+/// `proc.run("x.exe")` 会被当成字面文本、不跑也不报错。按钮的 action 只可能是命令，不该要求
+/// 用户为不存在的歧义写标记。已带标记的原样放行（不包成嵌套）。第一个参数是候选显示文本，
+/// 工具栏按钮不进候选列表，故给空串。
 fn wrap_command_source(action: &str) -> String {
     if action.starts_with("$CC(") {
         return action.to_string();
@@ -3363,10 +3093,8 @@ fn cursor_pos() -> (i32, i32) {
 
 /// 软键盘开面板时的摆放依据，随 `ShowSoftKeyboard` 下发。
 ///
-/// 两项都是 `Option` 且语义不同：`anchor` 的 `None` 表示**这块屏没有记录**
-/// （UI 侧据此落该屏默认位置），`work` 的 `None` 表示**查不到显示器**（UI 侧只好回退
-/// 主屏）。合成一个"没有位置信息"的标志会丢掉这个区别——前者是正常的首次使用，
-/// 后者是降级路径。
+/// 两项都是 `Option` 且语义不同：`anchor` 的 `None` 表示这块屏没有记录（落该屏默认位置，
+/// 正常的首次使用），`work` 的 `None` 表示查不到显示器（回退主屏，降级路径）。
 pub(crate) struct SoftKeyboardPlacement {
     pub anchor: Option<(i32, i32)>,
     pub work: Option<(i32, i32, i32, i32)>,
@@ -3383,19 +3111,13 @@ pub(crate) struct MonitorInfo {
 
 /// 位置记忆的分桶 key。
 ///
-/// # 三个维度各自挡什么
+/// - `workRight` / `workBottom`：显示器身份 + 分辨率。换屏或改分辨率 ⇒ 记录失配 ⇒ 落回默认
+///   位置，比按比例换算旧坐标安全（换算可能整块出界）。
+/// - `scalePct`：DPI 缩放。只改缩放时工作区物理像素边界不变，带上它才会失配，坐标本体因此
+///   可以一路保持物理像素。
 ///
-/// - `workRight` / `workBottom`：**显示器身份 + 分辨率**。换屏或改分辨率 ⇒ key 变 ⇒
-///   记录失配 ⇒ 落回默认位置。这比"按比例换算旧坐标"安全：面板是整块的，屏幕变窄时
-///   换算出来的落点可能整块出界，而"记不住"永远好过"记到屏幕外"。
-/// - `scalePct`：**DPI 缩放**。同一块屏改缩放而不改分辨率时，工作区的物理像素边界
-///   **不变**，只用前两维的话记录仍然命中，可窗口尺寸已按新 scale 变了，锚点算出的落点
-///   不再是用户当初摆的地方。带上缩放即失配、落回默认——于是坐标本体可以一路保持物理
-///   像素，不必为这一格另引一套 dp 单位（那会让这一族窗口里只有它一个不同口径）。
-///
-/// ⚠️ 存侧（`monitor_key_from_point`）与取侧（`focus_monitor`）**共用这一个函数**。
-/// 两侧格式一旦分叉，存进去的 key 就永远问不出来，症状是"位置压根没被记住"，
-/// 而两边的代码单独看都对。
+/// 存侧（`monitor_key_from_point`）与取侧（`focus_monitor`）共用这一个函数，格式分叉就会
+/// 「位置压根没被记住」。
 #[cfg(target_os = "windows")]
 fn monitor_info(hmon: windows::Win32::Graphics::Gdi::HMONITOR) -> Option<MonitorInfo> {
     use std::mem::{size_of, zeroed};
@@ -3408,8 +3130,7 @@ fn monitor_info(hmon: windows::Win32::Graphics::Gdi::HMONITOR) -> Option<Monitor
             return None;
         }
         let wa = mi.rcWork;
-        // 取不到 DPI 时按 100% 记：这一维只用来分桶，回落到"不区分缩放"退化成改动前的
-        // 行为（位置仍记得住，只是改缩放后可能偏），比整条记录作废好。
+        // 取不到 DPI 时按 100% 记：退化成不区分缩放，比整条记录作废好。
         let mut dpi_x: u32 = 0;
         let mut dpi_y: u32 = 0;
         let scale_pct = if GetDpiForMonitor(hmon, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y).is_ok()
@@ -3438,8 +3159,8 @@ fn work_known((left, top, right, bottom): (i32, i32, i32, i32)) -> bool {
 
 /// 工具栏跟随焦点换屏的去重键（`current_toolbar_monitor` 里存的值）。
 ///
-/// Windows 的显示器 key 本就含工作区右下角与缩放，分辨率一变 key 就变。Linux 的 key 只是输出名，
-/// 改分辨率、或工作区晚于输出名报到时名字都不变——单按名字去重会挡掉这两次校正，故拼上工作区。
+/// Windows 的显示器 key 本就含工作区右下角与缩放。Linux 的 key 只是输出名，改分辨率、或工作区
+/// 晚于输出名报到时名字都不变，单按名字去重会挡掉这两次校正，故拼上工作区。
 fn toolbar_dedup_key(key: &str, work: (i32, i32, i32, i32)) -> String {
     #[cfg(all(target_os = "linux", ext_presenter))]
     {
@@ -3473,40 +3194,29 @@ fn anchor_on_monitor(right: i32, bottom: i32, key: &str, work: (i32, i32, i32, i
     }
 }
 
-/// 窗口**右下角锚点**所在显示器的 key。查不到时返回 None。
+/// 窗口右下角锚点所在显示器的 key。查不到时返回 None，与 `focus_monitor` 对称（回落到任何
+/// 兜底 key 都会存进读取侧永远问不出来的位置）。
 ///
-/// 失败语义要与 `focus_monitor` 对称——它同样在查不到时返回 None。此前这里回落到
-/// `"0,0"`，于是保存侧会把坐标写进一个**读取侧永远问不出来的 key**（`focus_monitor`
-/// 不可能产出 `"0,0"`），位置静默丢失。存取共用一张表，两侧的失败也得共用一套语义。
-///
-/// ★★★ 参数是**排他**边界，函数内部退 1px 才拿去查屏，见 [`anchor_probe_point`]。
-/// 这一步封在函数里而不是交给调用方，是因为漏掉它的后果**极隐蔽**：位置被存到
-/// 右邻/下邻那块屏的 key 下 ⇒ 回到本屏读不到记录（像"没记住"）、切到邻屏却读到本屏
-/// 的坐标 ⇒ **工具栏跑到另一块屏上去，看起来像"不跟焦点窗口的显示器"**。
-/// ⚠️ 新增调用点一律传窗口右下角，不要在调用侧自己减 1（两处各减一次就减多了）。
-// Linux 外部宿主形态的记录按 addon 报的输出名分桶，不反查（见 `anchor_on_monitor`）。
+/// 参数是排他边界，函数内部退 1px 才拿去查屏（见 [`anchor_probe_point`]），否则贴边的位置会
+/// 存到邻屏 key 下，工具栏跑到另一块屏上。新增调用点一律传窗口右下角，不要在调用侧自己减 1。
 #[cfg_attr(all(target_os = "linux", ext_presenter), allow(dead_code))]
 fn monitor_key_from_anchor(right: i32, bottom: i32) -> Option<String> {
     let (x, y) = anchor_probe_point(right, bottom);
     monitor_key_from_point(x, y)
 }
 
-/// 排他的右下角锚点 → **落在窗口内**的探针点。
+/// 排他的右下角锚点 → 落在窗口内的探针点。
 ///
-/// 窗口占据 `[left, right) × [top, bottom)`（Win32 `RECT` 语义），故 `(right, bottom)`
-/// 本身在窗口**之外**。工具栏被 `clamp_to_work_area` 贴到工作区右边缘时
-/// （`nx = br - w` ⇒ 窗口 right 恰好 == 工作区 right），这个点正好落在**右邻显示器**的
-/// 第一列像素上，而 `MonitorFromPoint` 用的是 `DEFAULTTONEAREST`——不报错，只是答错。
-///
-/// 抽成纯函数是为了可单测：`MonitorFromPoint` 本身在测试环境里问不出多屏拓扑，
-/// 而出错的从来是"该退这 1px 没退"，不是那次系统调用。
+/// 窗口占据 `[left, right) × [top, bottom)`（Win32 `RECT` 语义），`(right, bottom)` 在窗口之外；
+/// 工具栏贴到工作区右边缘时它正好落在右邻显示器上，而 `MonitorFromPoint` 的
+/// `DEFAULTTONEAREST` 不报错只答错。抽成纯函数为可单测。
 fn anchor_probe_point(right: i32, bottom: i32) -> (i32, i32) {
     (right - 1, bottom - 1)
 }
 
 /// 根据屏幕坐标定位显示器。查不到时返回 None。
 ///
-/// ⚠️ 传进来的必须是**落在目标窗口/屏幕内**的点。要用窗口右下角定位请走
+/// 传进来的必须是落在目标窗口/屏幕内的点。要用窗口右下角定位请走
 /// [`monitor_key_from_anchor`]，它负责把排他边界退成屏内点。
 #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] // 显示器查询仅 Windows 有
 #[cfg_attr(all(target_os = "linux", ext_presenter), allow(dead_code))]
@@ -3528,16 +3238,8 @@ fn monitor_key_from_point(x: i32, y: i32) -> Option<String> {
 
 /// 输入焦点所在显示器；查不到返回 None（不动工具栏）。
 ///
-/// 判据取**前台窗口**而非光标：键盘切窗（Alt+Tab、窗口热键）时光标根本不动，用光标
-/// 问不出「用户在哪块屏上打字」。前台窗口恒有值、查询不阻塞，`foreground_fullscreen_kind`
-/// 已用同一套 `GetForegroundWindow` + `MonitorFromWindow`。
-///
-/// ⚠ 这里刻意**不用** caret 坐标：caret 属于 TSF 层、常处于未就绪态（coords_ready /
-/// caret_pending），拿它当窗口层的判据会在首帧把工具栏定到错屏上——两层判据不可互换。
-///
-/// 前台窗口是桌面/Shell（无应用在前台）时回退到光标所在屏：仍是同一层的「屏幕上某点」，
-/// 只是换了个更弱的信号源，不引入跨层耦合。
-// Linux 外部宿主形态改问 addon 的报告（见 `Coordinator::current_monitor`）。
+/// 判据取前台窗口而非光标（键盘切窗时光标不动），也不用 caret 坐标（属于 TSF 层，常未就绪，
+/// 会在首帧把工具栏定到错屏）。前台窗口是桌面/Shell 时回退到光标所在屏。
 #[cfg_attr(all(target_os = "linux", ext_presenter), allow(dead_code))]
 pub(crate) fn focus_monitor() -> Option<MonitorInfo> {
     #[cfg(target_os = "windows")]
@@ -3591,20 +3293,16 @@ fn status_anchor_label(a: wind_config::app_compat::StatusAnchor) -> &'static str
 
 /// 固定位置落盘前的哨兵规避（候选窗与状态气泡共用）。
 ///
-/// UI 侧用 `(0, 0)` 表示"已开启固定但尚未设定位置"（落到屏幕默认锚点），可主屏工作区
-/// 的左上角**往往正是** `(0, 0)`（任务栏在底部时）——用户真把候选窗拖到屏幕最左上角，
-/// 落盘值就撞上哨兵，下次显示被判为"没设过"而跳回默认锚点，表现为"位置没被记住"。
-///
-/// 哨兵值与合法值域重叠是根因；这里在落盘侧下移 1px 避开：视觉不可察觉，语义无歧义。
+/// UI 侧用 `(0, 0)` 表示「已开启固定但尚未设定位置」，而主屏工作区左上角往往正是 `(0, 0)`，
+/// 拖到最左上角就撞上哨兵、下次跳回默认锚点。这里在落盘侧下移 1px 避开。
 fn avoid_unset_sentinel(x: i32, y: i32) -> (i32, i32) {
     if (x, y) == (0, 0) { (0, 1) } else { (x, y) }
 }
 
 /// 工具栏的**闸**：三项合取（见 [`State::toolbar_conjunction`]）再减去「英文状态隐藏」。
 ///
-/// 抽成自由函数是为了让 `notify_toolbar` 与全屏复查线程的开销闸
-/// （`toolbar_wants_display`）共用同一判据——两处一旦分叉，复查线程就会在工具栏根本
-/// 不显示时白跑，或者在该显示时睡着。
+/// `notify_toolbar` 与全屏复查线程的开销闸（`toolbar_wants_display`）共用这一判据，分叉就会
+/// 让复查线程白跑或该醒时睡着。
 fn toolbar_gate_open(conjunction: bool, hide_in_english: bool, chinese_mode: bool) -> bool {
     let english_veto = hide_in_english && !chinese_mode;
     conjunction && !english_veto
@@ -3620,8 +3318,7 @@ mod command_source_tests {
 
     use super::wrap_command_source;
 
-    /// 裸表达式补上标记。**这是本函数存在的全部理由**：不补的话
-    /// `evaluate_phrase` 把它当字面文本，一个动作都不跑且不报错。
+    /// 裸表达式补上标记：不补的话 `evaluate_phrase` 把它当字面文本，不跑也不报错。
     #[test]
     fn bare_expression_gets_wrapped() {
         assert_eq!(
@@ -3637,8 +3334,8 @@ mod command_source_tests {
         assert_eq!(wrap_command_source(src), src);
     }
 
-    /// 含中文路径与双反斜杠的真实配置（用户 2026-08-26 报的那条）原样进包装，
-    /// 转义留给 cmdbar 的 lexer 处理——包装层**不得**碰字符串内容。
+    /// 含中文路径与双反斜杠的真实配置原样进包装，转义留给 cmdbar 的 lexer 处理，包装层不得碰
+    /// 字符串内容。
     #[test]
     fn windows_path_with_escapes_passes_through_verbatim() {
         let action = r#"proc.run("D:\\Download\\知符\\知符.exe")"#;
@@ -3689,13 +3386,10 @@ mod toolbar_push_dedup_tests {
         );
     }
 
-    /// ★ `Hidden` 与 `Shown` 必须是两个可区分的值。
+    /// `Hidden` 与 `Shown` 必须是两个可区分的值。
     ///
-    /// 若只缓存 `Option<ToolbarState>`（用 None 表示隐藏），Hide→Show→Hide 里的第二个
-    /// Hide 会和「上次是 Show」比出「不同」……但反过来 Show→Hide→Show 的第二个 Show
-    /// 又会因为中间那次 Hide 把缓存清成 None 而恒被判成变化。真正致命的是前者的对偶：
-    /// 用 None 兼表「没推过」和「推过 Hide」，首帧的 Hide 会被误判成重复而跳过，
-    /// 工具栏就再也藏不掉。这里把两种状态的交替钉死。
+    /// 若只缓存 `Option<ToolbarState>`、用 None 兼表「没推过」和「推过 Hide」，首帧的 Hide 会被
+    /// 误判成重复而跳过，工具栏就再也藏不掉。这里把两种状态的交替钉死。
     #[test]
     fn hidden_and_shown_are_distinguishable() {
         let c = Coordinator::new_headless(wind_config::Config::default(), None);
@@ -3719,9 +3413,8 @@ mod toolbar_push_dedup_tests {
         );
     }
 
-    /// 配置热重载后必须重推：热重载可能改变工具栏的显隐策略（`ui.toolbar.visible`、
-    /// 全屏策略），而那些量**不在** `ToolbarState` 里——光比内容会把该重推的那一次
-    /// 判成「没变」。同 `last_status_text` 在 reload 里被清空的理由。
+    /// 配置热重载后必须重推：显隐策略（`ui.toolbar.visible`、全屏策略）不在 `ToolbarState` 里，
+    /// 光比内容会把该重推的那一次判成「没变」。
     #[test]
     fn reset_forces_next_push() {
         let c = Coordinator::new_headless(wind_config::Config::default(), None);
@@ -3743,8 +3436,7 @@ mod fullscreen_veto_tests;
 impl Coordinator {
     /// 主菜单里的「软键盘」项：本身是开关，子菜单直接选面。
     ///
-    /// 面多于一个时才给子菜单——只有一面的话，子菜单里孤零零一项，点它和点父项
-    /// 效果一样，纯属多一层。
+    /// 面多于一个时才给子菜单，只有一面时子菜单孤零零一项、纯属多一层。
     pub(crate) fn soft_keyboard_menu_item(&self) -> wind_ui_types::MenuItemSpec {
         use wind_ui_types::MenuItemSpec as M;
         let on = self.softkeyboard_is_open();
@@ -3763,9 +3455,8 @@ impl Coordinator {
 
     /// 软键盘的「开关 + 各面单选」项列表。
     ///
-    /// 抽成独立函数供两处用：主菜单的「软键盘」子菜单、右键软键盘格的快捷菜单。
-    /// ⚠️ 只有一面时这份列表**仍然有意义**（开关那一项），故这里不做 `pages.len() < 2`
-    /// 的退化——那条判断属于「主菜单该不该给子菜单」，是调用方的问题。
+    /// 供主菜单的「软键盘」子菜单与右键软键盘格的快捷菜单共用。只有一面时这份列表仍有意义
+    /// （开关那一项），「该不该给子菜单」是调用方的问题。
     pub(crate) fn soft_keyboard_menu_children(&self) -> Vec<wind_ui_types::MenuItemSpec> {
         use wind_ui_types::MenuItemSpec as M;
         let on = self.softkeyboard_is_open();
@@ -3786,7 +3477,7 @@ impl Coordinator {
                 p.name.clone(),
                 MenuKind::Command(MenuCmd::SoftKeyboardPage(i)),
                 true,
-                // 勾选当前面，但面板关着时不勾——那会让人以为它开着。
+                // 勾选当前面，但面板关着时不勾（否则让人以为它开着）。
                 on && i == cur,
             ));
         }
@@ -3795,9 +3486,8 @@ impl Coordinator {
 
     /// 输入方案的「英文 + 各方案单选」项列表（主菜单的「输入方案」子菜单内容）。
     ///
-    /// `chinese` 由调用方传入而不是这里现读：主菜单构建时已在一次加锁里把几个状态
-    /// 一并取出，重读一次是第二次加锁，且两次之间状态可能变——勾选态与同一菜单里
-    /// 别的项就会互相矛盾。
+    /// `chinese` 由调用方传入：主菜单已在一次加锁里取出几个状态，这里再读一次是第二次加锁，
+    /// 两次之间状态可能变，勾选态会与同一菜单里别的项矛盾。
     pub(crate) fn schema_menu_children(&self, chinese: bool) -> Vec<wind_ui_types::MenuItemSpec> {
         use wind_ui_types::MenuItemSpec as M;
         let cmd = |c: MenuCmd| MenuKind::Command(c);
@@ -3818,25 +3508,15 @@ impl Coordinator {
         children
     }
 
-    /// 右键工具栏某一格时给的**精简快捷菜单**；这一格没有定制则返回 `None`。
+    /// 右键工具栏某一格时给的精简快捷菜单；这一格没有定制则返回 `None`。
     ///
-    /// # 为什么按格分而不是一律给主菜单
+    /// 右键一个具体的格，意图几乎总是「就在这一格管的事情里换一个」：
+    /// - 中英格：整份方案列表（含「英文」），即主菜单「输入方案」子菜单的内容。
+    /// - 软键盘格：开关 + 各面单选。
+    /// - 标点格 / 全半角格 / 简繁格：共用一份「输出形态」（中文标点、全角、简入繁出）。
     ///
-    /// 主菜单是完整的功能面，而右键一个具体的格，意图几乎总是「就在这一格管的事情里
-    /// 换一个」。把方案切换从「右键 → 输入方案 → 展开子菜单 → 点」压成「右键 → 点」，
-    /// 省的正是最高频那条路径上的两步。
-    ///
-    /// # 各格给什么
-    ///
-    /// - **中英格**：整份方案列表（含「英文」），即主菜单「输入方案」子菜单的内容。
-    /// - **软键盘格**：开关 + 各面单选。
-    /// - **标点格 / 全半角格**：共用一份「输出形态」——中文标点、全角、简入繁出。
-    ///   三者是同一类「打出来长什么样」的量，分给两个格各做一份反而要用户记住
-    ///   哪个格管哪个；一次看全三个开关，右键谁都对。
-    ///
-    /// ⛔ **齿轮格 / 自定义按钮格 / 拖动柄不在此列**，返回 `None` 回落完整主菜单：
-    /// 隐藏了齿轮之后，右键工具栏是主菜单**仅剩的鼠标入口**（`toolbar-customization.md`
-    /// §2.2 判据③），这条回落断了就等于让用户可以把自己锁在外面。
+    /// 齿轮格 / 自定义按钮格 / 拖动柄返回 `None` 回落完整主菜单：隐藏齿轮后右键工具栏是主菜单
+    /// 仅剩的鼠标入口（`toolbar-customization.md` §2.2 判据③），不能让用户把自己锁在外面。
     pub(crate) fn build_toolbar_cell_menu(
         &self,
         action: ToolbarAction,
@@ -3852,33 +3532,27 @@ impl Coordinator {
                 Some(self.schema_menu_children(chinese))
             }
             ToolbarAction::ToggleSoftKeyboard => Some(self.soft_keyboard_menu_children()),
-            // 简繁格也走这一份：它本来就是那三项之一，右键给同一张表最省记忆。
+            // 简繁格也走这一份：它本来就是那三项之一。
             ToolbarAction::TogglePunct | ToolbarAction::ToggleWidth | ToolbarAction::ToggleS2t => {
                 let (punct, full, s2t) = {
                     let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
                     (s.chinese_punct, s.full_width, s.s2t_enabled)
                 };
-                // 文案、勾选态**与顺序**都跟主菜单里那三项一致（见 `build_main_menu_items`
-                // 的 items 开头）：同一组开关在两处排得不一样，用户每次都要重新找。
+                // 文案、勾选态与顺序都跟主菜单里那三项一致（见 `build_main_menu_items` 开头）。
                 Some(vec![
                     M::leaf("全角", cmd(MenuCmd::ToggleWidth), true, full),
                     M::leaf("中文标点", cmd(MenuCmd::TogglePunct), true, punct),
                     M::leaf("简入繁出", cmd(MenuCmd::ToggleS2t), true, s2t),
                 ])
             }
-            // ⚠️ 繁入简出**刻意不给分格菜单**，也不进上面那张三项表：它是小众功能，
-            // 塞进「全角 / 中文标点 / 简入繁出」那组会让所有人每次都多读一行。
-            // 返回 None 走下面的回落——右键这一格仍弹主菜单，不会把用户锁在外面。
+            // 繁入简出刻意不给分格菜单（小众功能，不进上面那张三项表），返回 None 回落主菜单。
             ToolbarAction::ToggleT2s | ToolbarAction::OpenSettings | ToolbarAction::Custom(_) => {
                 None
             }
         }
         .map(|mut items| {
-            // 每份分格菜单末尾都挂一条回主菜单的路。
-            //
-            // ⛔ 不可省：隐藏齿轮后右键工具栏是主菜单**仅剩的鼠标入口**（§2.2 判据③），
-            // 而分格右键把功能格的右键让给了精简菜单，只剩 12dp 的拖动柄还通向主菜单
-            // ——那是个要瞄准的目标。有了这一条，判据③就不再依赖那 12dp。
+            // 每份分格菜单末尾都挂一条回主菜单的路，不可省：分格右键占了功能格后，只剩 12dp 的
+            // 拖动柄通向主菜单（§2.2 判据③）。
             items.push(M::separator());
             items.push(M::leaf("更多…", cmd(MenuCmd::OpenMainMenu), true, false));
             items
@@ -3892,9 +3566,8 @@ impl Coordinator {
             self.show_main_menu(anchor);
             return;
         };
-        // 空列表同样回落：一个弹出来什么都没有的菜单比不弹更让人以为坏了。
-        // （软键盘一面都没有时 `soft_keyboard_menu_children` 只剩个禁用的开关项，
-        //  不为空，走的仍是定制那条。）
+        // 空列表同样回落：弹一个空菜单比不弹更让人以为坏了。（软键盘一面都没有时列表仍有个
+        // 禁用的开关项，不为空。）
         if items.is_empty() {
             self.show_main_menu(anchor);
             return;
@@ -3908,10 +3581,7 @@ impl Coordinator {
 
 #[cfg(test)]
 mod candidate_double_click_tests {
-    //! 双击候选窗截图（`ui.candidate.double_click_screenshot`，论坛 t109）。
-    //!
-    //! 走 `inject_ui_event` 而不直调处理函数：UI 事件分发那一臂漏接同样是「双击没反应」，
-    //! 直调测不到。
+    //! 双击候选窗截图（`ui.candidate.double_click_screenshot`）。
 
     use crate::coordinator::Coordinator;
     use wind_config::Config;
@@ -3943,7 +3613,7 @@ mod candidate_double_click_tests {
 
 #[cfg(test)]
 mod english_veto_tests {
-    //! 「英文状态隐藏工具栏」（`ui.toolbar.hide_in_english`，论坛 t167）。
+    //! 「英文状态隐藏工具栏」（`ui.toolbar.hide_in_english`）。
 
     use crate::coordinator::Coordinator;
     use wind_config::Config;
@@ -4136,9 +3806,8 @@ mod linux_menu_tests {
         }
     }
 
-    /// 候选菜单不再挂「更多…」：主菜单的入口是 Fcitx5 状态区的「清风输入法菜单」（弹在指针处）。
-    /// 原先的「更多…」点下去时屏幕菜单已关，随后下发的主菜单在 Wayland 下落进候选窗的 popup，
-    /// 把候选窗挤走（2026-10-12 KDE 真机）。
+    /// 候选菜单不挂「更多…」：主菜单的入口是 Fcitx5 状态区的「清风输入法菜单」。屏幕菜单关闭后
+    /// 再下发的主菜单在 Wayland 下会落进候选窗的 popup，把候选窗挤走。
     #[test]
     fn candidate_menu_has_no_main_menu_entry() {
         let (c, rx) = coord();
@@ -4426,12 +4095,10 @@ mod linux_menu_tests {
     /// 已知竞态（`linux-port.md` §7）：`HideMenu` 回送的 `MenuClose` 不带代际，分不出是哪个菜单的。
     ///
     /// 候选右键菜单 A 开着 → 候选收起，协调器发 `HideMenu`（持锁路径不复位 `menu_open`，靠 UI
-    /// 回送收口）→ UI 还没处理，addon 又报 `menu.open` 弹主菜单 B → UI 按序先收 A（可见，回送
-    /// `MenuClose`）再弹 B → 协调器处理到这条 `MenuClose`，把 B 当成被关掉。
-    ///
-    /// 后果只是 B 刚弹出就被收掉（时间窗是一次跨线程往返，毫秒级），**两端认识仍然一致**：
-    /// 协调器复位的同时补发 `HideMenu`，UI 随即收掉 B，不会出现「屏上没菜单、键却被吞」。
-    /// 本例钉住的就是这条一致性；若日后给 `MenuClose` 加代际，把末段改成「B 仍开着」。
+    /// 回送收口）→ UI 还没处理，addon 又报 `menu.open` 弹主菜单 B → UI 按序先收 A（回送
+    /// `MenuClose`）再弹 B → 协调器把 B 当成被关掉。后果只是 B 刚弹出就被收掉，两端认识仍一致
+    /// （协调器复位并补发 `HideMenu`）。本例钉住这条一致性；若日后给 `MenuClose` 加代际，把末段改成
+    /// 「B 仍开着」。
     #[test]
     fn stale_menu_close_echo_closes_new_menu_consistently() {
         let (c, rx) = coord();
