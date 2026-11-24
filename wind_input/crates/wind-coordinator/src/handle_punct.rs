@@ -1,6 +1,5 @@
 //! 标点编排 + 智能符号状态机
 //!
-//! 从 coordinator.rs 拆出（同 crate 内 `impl Coordinator` 块，组织性重构，无逻辑变更）。
 //! 纯转换逻辑在 wind-punct crate；此处是 coordinator 包装（锁转换器/读状态）+ 智能符号
 //! 连按替换的状态机（武装/触发/解除）。
 
@@ -22,24 +21,14 @@ fn single_char(s: &str) -> Option<char> {
 }
 
 impl Coordinator {
-    /// 当前输入语境下**生效**的标点配置——`wind_punct::*` 一切读 `punct.*` 的入口都从这里取。
+    /// 当前输入语境下生效的标点配置，`wind_punct::*` 读 `punct.*` 都从这里取。
     ///
-    /// # 归属方案：`effective_data_schema`，不是活跃方案
+    /// 归属方案取 `effective_data_schema` 而非活跃方案：自定义映射是数据，与 `[phrases]` 同源，
+    /// 按活跃方案取会让快符/临英方案的符号表永不生效。同段的 `[punct] mode` 刻意走活跃方案，
+    /// 理由见 [`wind_config::PunctSpec`]，别统一成一个判据。
     ///
-    /// 自定义映射表回答的是「这个键出什么字」，是**数据**，与 `[phrases]` 同源：临英归
-    /// `english` 桶、快符归快符方案，两者的活跃方案都还是主方案（五笔/拼音）。按活跃方案取
-    /// 会让快符方案配的符号表永远不生效——而特殊方案本就是「该有自己一套」的那一类。
-    ///
-    /// ⚠️ 同段的 `[punct] mode` 走的是 `active_behavior()`（活跃方案），**刻意不同**，
-    /// 理由见 [`wind_config::PunctSpec`] 的字段对照表。别看见同一个段就统一成一个判据。
-    ///
-    /// # 整表替换：连 `custom_enabled` 一起换
-    ///
-    /// 方案声明了表 ⇒ 全局表整份不参与，全局的总开关也随之失效（`Some({})` = 本方案不用任何
-    /// 自定义映射）。`smart_after_digit` / `smart_list` 不在下放范围，故仍是全局值原样带过来。
-    ///
-    /// 返回 `Cow`：没有方案表时零拷贝借用全局那份（绝大多数用户、每一次标点按键），
-    /// 只有真配了方案表才 clone 一次。
+    /// 方案声明了表就整表替换，连 `custom_enabled` 一起换（`Some({})` = 本方案不用自定义映射）；
+    /// `smart_after_digit` / `smart_list` 不下放，仍取全局值。无方案表时借用全局那份，不 clone。
     pub(crate) fn effective_punct<'a>(
         &self,
         bundle: &'a ConfigBundle,
@@ -64,18 +53,15 @@ impl Coordinator {
     /// 数字后智能标点：在中文标点模式下，若 ch 在智能标点列表且光标前一字符为数字，
     /// 则该标点应按英文（半角）输出（如 "3." 不转成 "3。"）。
     ///
-    /// 读的是 `smart_after_digit` / `smart_list`，**不在方案级下放范围**，故直接取全局那份，
-    /// 不必为它去查方案。
+    /// `smart_after_digit` / `smart_list` 不在方案级下放范围，直接取全局那份。
     pub(crate) fn is_smart_punct_after_digit(&self, ch: char, prev_char: u16) -> bool {
         wind_punct::is_smart_punct_after_digit(&self.rt().config.input.punct, ch, prev_char)
     }
 
-    /// 「标点前一字符是拉丁字母」的**默认**口径：锁存的 `state.spacing_prev`
-    /// （见 `crate::auto_spacing`）。
+    /// 「标点前一字符是拉丁字母」的默认口径：锁存的 `state.spacing_prev`（见 `crate::auto_spacing`）。
     ///
-    /// 只在**没有输入会话**（或联想态）时成立——那时 `spacing_prev` 正是光标前那个字符。
-    /// 组合中它停在组合开始前，顶屏出口要用被顶出那段文本的末字符，走
-    /// [`Self::convert_punct_after`]，不能用这里的值。
+    /// 只在无输入会话（或联想态）时成立；组合中它停在组合开始前，顶屏出口要用被顶出文本的
+    /// 末字符，走 [`Self::convert_punct_after`]。
     fn latin_before_idle(state: &State) -> bool {
         (!Self::has_input_session(state) || state.assoc_active())
             && state.spacing_prev == wind_punct::spacing::CharClass::Latin
@@ -91,18 +77,13 @@ impl Coordinator {
         )
     }
 
-    /// 小键盘恒半角（`input.numpad_half_width`）对**本次按键**是否生效。
+    /// 小键盘恒半角（`input.numpad_half_width`）对本次按键是否生效。
     ///
-    /// 为真时调用方必须**原样输出 ASCII**：跳过整条标点流水线（自定义映射 / 中文标点 /
-    /// 全半角三步全不走），而不是只跳过全半角那一步。用户拍板的语义是「小键盘就是数字
-    /// 键盘」，`direct` 与 `follow_main` 两档在此统一——此前同一个小键盘 `.`，direct 出
-    /// `．`、follow_main 出 `。`。
-    ///
-    /// ⚠️ **凡是「小键盘字符直接上屏」的路径都必须问它**，漏接一处的症状是「某个模式下
-    /// 开关静默无效、零日志」。现有调用点：本文件 `convert_punct`（流水线总口）、
-    /// `commit_highlight_then_char`（普通模式 direct）、临拼 numpad 臂、数字键越界
-    /// `commit_and_input`。缓冲类模式（临英 / URL / mix）**刻意不接**，见
-    /// `InputConfig::numpad_half_width` 的能力边界说明。
+    /// 为真时调用方必须原样输出 ASCII，跳过整条标点流水线（不只是全半角一步），
+    /// `direct` 与 `follow_main` 两档在此统一。凡是小键盘字符直接上屏的路径都必须问它，漏接一处
+    /// 就是某模式下开关静默无效。现有调用点：`convert_punct`、`commit_highlight_then_char`、
+    /// 临拼 numpad 臂、数字键越界 `commit_and_input`。缓冲类模式（临英 / URL / mix）刻意不接，
+    /// 见 `InputConfig::numpad_half_width`。
     pub(crate) fn numpad_raw_output(&self, state: &State) -> bool {
         state.numpad_origin && self.rt().config.input.numpad_half_width
     }
@@ -148,10 +129,7 @@ impl Coordinator {
     }
 
     fn convert_punct_latin(&self, state: &State, ch: char, prev_char: u16, latin: bool) -> String {
-        // 小键盘恒半角：整条流水线跳过（不只是第 4 步）。`ch` 进来时已是 ASCII 原形，
-        // 故原样返回即可，无须回推字符。这是本开关最主要的一处收口——英文全角、
-        // CapsLock 全角、follow_main 归一化后的数字/标点臂、临英的 convert_punct_char
-        // 全都汇聚于此。
+        // 小键盘恒半角的主收口：整条流水线跳过；`ch` 进来时已是 ASCII 原形，原样返回。
         if self.numpad_raw_output(state) {
             return ch.to_string();
         }
@@ -169,22 +147,15 @@ impl Coordinator {
         )
     }
 
-    /// 引号 × 自动配对：若 `ch` 是引号、且其**当前模式下的实际左右形**在生效配对表中构成一对，
-    /// 则把交替态**钉回「左」**并返回 true（该引号已由配对接管，按下即开新的一对）。
+    /// 引号 × 自动配对：若 `ch` 是引号、且其当前模式下的实际左右形在生效配对表中构成一对，
+    /// 则把交替态钉回「左」并返回 true。
     ///
-    /// 不钉的后果就是「一次出对、一次出单」交替循环：`to_chinese` 每次按引号都翻转交替开关，
-    /// 但开了配对后**一次按键已经把左右两个引号都吐出去了**，开关却只前进一格 → 下次按键
-    /// 给出右引号 → 既不是左符号（不插对）、又走右符号分支（跳出或裸提交单个右引号）。
-    /// 两套状态机（交替开关 / 配对栈）就此错位。钉死在左即把引号的左右判定**单一收口**到配对栈。
+    /// 不钉会「一次出对、一次出单」：配对一次吐出左右两个引号，交替开关却只前进一格，
+    /// 下次按键给出右引号走右符号分支。钉左即把左右判定单一收口到配对栈。
     ///
-    /// 左右形取自 [`wind_punct::quote_forms`]（含自定义映射的 `"1`/`"2` 两行），**不可**直接用
-    /// 内置的 `quote_pair`：那样判定按 `“”`、上屏按自定义值，用户把引号自定义成 `「」` 后判定
-    /// 不命中却照样配对插入，错位复发。同时这也是「第二次」那行在配对下的唯一出路——钉左之后
-    /// 它不再由交替态取用，而是作为**右符号**由配对补出。
-    ///
-    /// 多字符自定义值（如 `……`）不能充当配对符，此时返回 false 落普通标点流程。
-    ///
-    /// 须在标点流水线**之前**调用：钉的是本次转换的输入态，兼带清掉历史残留的「右」态。
+    /// 左右形必须取 [`wind_punct::quote_forms`]（含自定义的 `"1`/`"2`），不可用内置 `quote_pair`，
+    /// 否则引号自定义成 `「」` 后判定不命中却照样配对插入。多字符自定义值不能充当配对符，返回 false。
+    /// 须在标点流水线之前调用：钉的是本次转换的输入态。
     pub(crate) fn pin_quote_left_if_paired(&self, state: &State, ch: char) -> bool {
         let bundle = self.rt();
         let Some((l, r)) = wind_punct::quote_forms(
@@ -241,15 +212,11 @@ impl Coordinator {
         wind_punct::participates(&self.rt().config.input, cn)
     }
 
-    /// press1 **实际会上屏**的串（无副作用镜像 `convert_punct`）。
+    /// press1 实际会上屏的串（无副作用镜像 `convert_punct`）。
     ///
-    /// 与 [`Self::compute_punct_str_pure`] 的差别**只在英文半角这一格**：pure 那条路刻意不查
-    /// 自定义（它的语义是「press2 的替换目标，须保持原样英文」），而武装串必须等于真正插进
-    /// 文档的东西——用户把 `;` 的英半列配成 `#` 时，press1 上屏 `#` 而武装串若还是 `;`，
-    /// press2 的 `prev_char` 比对就永远失配，功能静默失效。
-    ///
-    /// 三条反向通路（数字后智能 / 英文标点状态 / 英文输入模式）的 press1 都落在英文列，
-    /// 故都必须走这里而不是 pure。
+    /// 与 [`Self::compute_punct_str_pure`] 只差英文半角这一格：pure 刻意不查自定义（它是 press2 的
+    /// 替换目标），而武装串必须等于真正插进文档的东西，否则 press2 的 `prev_char` 比对永远失配。
+    /// 三条反向通路（数字后 / 英文标点状态 / 英文输入模式）的 press1 都落英文列，必须走这里。
     fn press1_committed_str(&self, state: &State, ch: char, chinese: bool) -> Option<String> {
         if !chinese && !state.full_width {
             let bundle = self.rt();
@@ -271,27 +238,16 @@ impl Coordinator {
     }
 
     /// 计算 `ch` 本次按下会进入的武装态：`Some((press1 实际上屏串, reverse))`；不参与返回 None。
-    /// 对齐 Go `smartSymbolArmStr`（Go 版只有正向）：仅中文标点模式 + 在参与集合内。
     ///
-    /// **判据是「实际会上屏的产物」，含自定义映射的产物**（用户拍板，不给自定义键开后门）：
-    /// 把 `"2` 配成 `￥` 而 `￥` 在 `symbol.smart_chars` 里 → 按第二次引号照常进入 `￥` 预览态、
-    /// 再按一次换英文。不想要就把该符号从 `smart_chars` 移除，纯配置解决。
+    /// 判据是实际会上屏的产物，含自定义映射的产物（不给自定义键开后门，不想要就从
+    /// `smart_chars` 移除）。数字后 / 英文后智能标点走反向：press1 仍出英文，时限内再按换回中文。
+    /// 参与集合恒按中文产物查 `smart_chars`（反向时也一样，避免两方向答案不一致）；英文标点状态
+    /// 则按源字符查 `english_chars`，见 [`wind_punct::english_participates`]。
     ///
-    /// **数字后智能标点走反向**（`reverse=true`）：`3.` 这类场景 press1 照旧出英文 `.`（数字后
-    /// 语义不变），但**不再是终点**——时限内再按一次换回中文 `。`。此前这里直接 `return None`
-    /// 拒绝武装，于是数字后想打中文标点只能去关掉「数字后智能」总开关，粒度粗到没法用。
+    /// 优先级：智能符号（短路）> 自定义映射（定产物）> 自动配对。武装 `HoldComposition` 会直接
+    /// return，配对当次不执行；排查「配对忽然不生效」先看日志有无 `SmartSymbol(HoldComposition): press1`。
     ///
-    /// **参与集合恒按中文产物判定**：`symbol.smart_chars` 存的是中文标点（`。，？！…`），反向时
-    /// 上屏的虽是英文形，参与与否仍问它的中文形——否则用户得再维护一份英文列表，且同一个键在
-    /// 两个方向上会给出不一致的答案。**英文标点状态则相反**，按源字符查 `symbol.english_chars`
-    /// （理由见 [`wind_punct::english_participates`]）。
-    ///
-    /// 另注意三者的优先级：**智能符号（短路） > 自定义映射（定产物） > 自动配对（按产物补右符）**。
-    /// 武装并 `HoldComposition` 会直接 return，配对逻辑当次完全不执行——排查「配对忽然不生效」
-    /// 时先看这里有没有把键截走（真机指纹：日志出现 `SmartSymbol(HoldComposition): press1`）。
-    ///
-    /// 只管中文输入模式下的两种上下文；英文输入模式走 [`Self::english_mode_smart_symbol`]
-    /// （那条路的标点键要先从 DLL 手里要回来，state 上的 `chinese_punct` 也不代表实际产物列）。
+    /// 只管中文输入模式；英文输入模式走 [`Self::english_mode_smart_symbol`]。
     pub(crate) fn smart_symbol_arm_str(
         &self,
         state: &State,
@@ -314,16 +270,15 @@ impl Coordinator {
         if !sym.smart_mode {
             return None;
         }
-        // 英文后智能标点同样反向。⚠️ 只认空闲态（见 `latin_before_idle`）：主路顶屏时 press1
-        // 在顶屏之前就武装了，那时还拿不到被顶出候选的末字符，故顶屏场景不反向（与数字后同）。
+        // 英文后智能标点同样反向，但只认空闲态（见 `latin_before_idle`）：顶屏时 press1 武装在
+        // 顶屏之前，拿不到被顶出候选的末字符，故不反向。
         let reverse = self.is_smart_punct_after_digit(ch, prev_char)
             || self.is_smart_punct_after_latin_idle(state, ch);
         let cn = self.compute_punct_str_pure(state, ch, true)?;
         if !self.smart_symbol_participates(&cn) {
             return None;
         }
-        // press1 实际上屏串：反向取英文产物——与普通标点流程一致（`convert_punct` 对数字后智能
-        // 同样落英文列），两条路必须产出同一个串，否则 press2 的删除数就对不上光标前的内容。
+        // 反向取英文产物，须与 `convert_punct` 产出同一个串，否则 press2 的删除数对不上。
         let out = if reverse {
             self.press1_committed_str(state, ch, false)?
         } else {
@@ -334,9 +289,8 @@ impl Coordinator {
 
     /// 与自动配对互斥：被配对的符号（单字符且在生效配对表）不武装智能符号，返回 None。
     ///
-    /// 否则 press1 插入配对并回退光标至中间，press2 时 `prev_char` 恰为配对左符号 → 误删左符号
-    /// 改成另一形态、留下孤零零的右符号。判据用**实际上屏串**：反向时插进文档的是英文形，
-    /// 配对与否得问它。
+    /// 否则 press2 时 `prev_char` 恰为配对左符号，误删左符号、留下孤零零的右符号。
+    /// 判据用实际上屏串（反向时是英文形）。
     fn reject_if_auto_paired(&self, state: &State, out: String) -> Option<String> {
         if out.chars().count() == 1 {
             let c0 = out.chars().next().unwrap();
@@ -417,8 +371,7 @@ impl Coordinator {
 
     /// press2 判定（同键、时限内）：命中则解除武装并返回替换响应，未命中返回 None 不动武装态。
     ///
-    /// 替换目标由 `arm.reverse` 定：正向换英文产物、反向换中文产物。两个方向共用同一套删改/组合
-    /// 覆盖机制——差别只在「取哪一列产物」，故此处只有 `!arm.reverse` 这一个分歧点。
+    /// 替换目标由 `arm.reverse` 定：正向换英文产物、反向换中文产物，两方向共用同一套删改/组合覆盖机制。
     fn smart_symbol_press2(
         &self,
         state: &State,
@@ -429,33 +382,12 @@ impl Coordinator {
     ) -> Option<KeyAction> {
         if !arm.armed
             || ch != arm.key
-            // 上下文必须与 press1 时一致：三种上下文各有独立开关与独立产物列，press1 后用户
-            // 切了中英模式或标点模式，这一按就该当全新 press1，而不是按旧方向删掉文档里的字。
+            // 上下文必须与 press1 时一致，切了中英/标点模式就当全新 press1，不按旧方向删字。
             || arm.mode_snapshot != (state.chinese_mode, state.chinese_punct)
-            // ★ press1 之后又打了编码 ⇒ 这一按不是 press2。
-            //
-            // 依据是一条不变式：三条武装通路的 press1 之后编码缓冲**必为空**（空闲态直接上屏、
-            // 顶屏上屏都会清缓冲）。故 press2 这一刻缓冲非空，只可能是中间又敲了编码——光标
-            // 此刻在组合区里，替换目标已不是文档里那个符号，而是正在看的候选。真机现象：
-            // 「。」后快打字母出候选、再按「。」，候选被 `ReplaceBackward` 削掉换成「.」
-            // （`HoldComposition` 方案则是 `CommitReplacingHeld` 覆盖掉整个组合）。
-            //
-            // 为什么不能指望下方 `_` 分支那道 `prev_char` 对照兜住：它有两个**恒定**绕过口——
-            //   ① 宿主读不回文档时 `prev_char == 0`，那里刻意判作「读失败」而非「不匹配」；
-            //   ② 候选窗自显 preedit（`preedit_display = candidate_top/inline`）时应用侧组合是
-            //      「占位空格 + 光标置前」，读回的光标前一字符恰好就是 press1 上屏的那个符号，
-            //      与武装串完美匹配。
-            // 两条都通向同一次误删，且都与宿主是否正常无关，故判据必须在服务端自己这侧立。
-            //
-            // 只问编码缓冲、**不问 `candidates`**：联想态（标点联想就会进）候选非空而缓冲为空，
-            // 那是 press1 上屏后的正常延续，press2 在那里必须照常工作。
-            //
-            // ⚠️ **别当它是 `handle_key_event_policed` 那道「非同键按键解除武装」的冗余副本**。
-            // 那道判据挂在 bridge 的按键出口上，而 `wind-mobile` 的 `MobileCore::key_down` 直接
-            // 调内层 `handle_key_event`（见 `crates/wind-mobile/src/lib.rs`），整个出口都不经过
-            // ⇒ 移动端上**只有这一条**拦得住。两者各有一条独立会红的用例
-            // （`intervening_letters_do_not_trigger_press2_mobile_entry` 盯这条，
-            // `intervening_passthrough_key_disarms` 盯那条），删任意一道都有红。
+            // press1 之后缓冲必为空，此刻非空说明中间又敲了编码，替换会削掉候选。`prev_char`
+            // 对照兜不住；只问缓冲不问 `candidates`（联想态须照常 press2）。这不是
+            // `handle_key_event_policed` 解除武装的冗余副本：移动端只有这一道拦得住。
+            // 见 docs/architecture/smart-symbol-compat-notes.md 的「press1 与 press2 之间又有输入」。
             || !state.input_buffer.is_empty()
             || !state.committed_text.is_empty()
             || !arm
@@ -465,11 +397,11 @@ impl Coordinator {
         {
             return None;
         }
-        // 替换产物取**武装方向的另一侧**：正向 press1 出中文 → press2 出英文；反向反之。
+        // 替换产物取武装方向的另一侧。
         let target_chinese = arm.reverse;
         // 引号交替态修正：正向时 press1 已由 `convert_punct` 推进过一格，换英文后须退回；
         // 反向时 press1 出的是英文（未推进），而 press2 真吐了一个中文引号，须补进一格。
-        // 引号只有左/右两态，「退回」与「补进」都是同一个翻转，故两个方向共用 revert_last_quote。
+        // 引号只有左/右两态，退回与补进是同一个翻转。
         let fix_quote = |this: &Self| {
             if ch == '\'' || ch == '"' {
                 this.punct
@@ -491,23 +423,17 @@ impl Coordinator {
                     "SmartSymbol(HoldComposition): press2 {}, commit: {}",
                     dir, rep
                 );
-                // 必须是 CommitReplacingHeld 而非 InsertText：held 的符号此刻正显示在 C++ 的
-                // 组合态里，press2 要**覆盖**它。普通 InsertText 在 hold 活跃时是追加语义
-                // （held 并入前缀一起上屏），会打出「。.」。
+                // 必须是 CommitReplacingHeld：InsertText 在 hold 活跃时是追加语义，会打出「。.」。
                 Some(KeyAction::CommitReplacingHeld {
                     text: rep,
                     chinese_mode: state.chinese_mode,
                 })
             }
-            // 两条走删改的路：DeleteReplace 方案，以及 HoldComposition 方案下 press1 时有活跃编码
-            // （标点已作文本顶屏提交、非组合态）或符号由模式进入键直接上屏（见
-            // `arm_smart_symbol_after_commit`）——`held_text.is_none()` 即这两种降级情形。
+            // 删改路径：DeleteReplace 方案，以及 HoldComposition 下 `held_text.is_none()` 的降级
+            // （press1 时有活跃编码而顶屏提交，或模式进入键直接上屏）。
             //
-            // 光标前字符须与武装串末位匹配；prev_char==0 视为"宿主读不回文档"（微信/Windows
-            // Terminal 等 Qt/ConPTY 宿主的 TSF OnEndEdit 里 GetSelection/GetText 经常拿不到内容），
-            // 而不是"确定不匹配"——press2 时光标前必然至少有 press1 刚提交的符号，真读到 0 只可能
-            // 是读失败。此时退回只信服务端自己的武装态（armed+key+timeout，与文档内容无关），
-            // 否则永远判定不是 press2。
+            // 光标前字符须与武装串末位匹配；`prev_char == 0` 视为宿主读不回文档（微信/终端一族），
+            // 而非不匹配，此时只信服务端武装态，否则这些宿主上永远判不成 press2。
             _ => {
                 let armed_runes: Vec<char> = arm.str.chars().collect();
                 let &last = armed_runes.last()?;
@@ -531,25 +457,17 @@ impl Coordinator {
         }
     }
 
-    /// 「符号已实打实上屏」后的智能符号武装 —— 模式进入键二次按下专用。
+    /// 符号已经 `CommitText` 上屏后的智能符号武装，模式进入键二次按下专用。
     ///
-    /// 场景：`;`（快捷输入）/ `` ` ``（临时拼音）/ `\`（特殊模式）这类**被模式占用的符号键**，
-    /// 在模式内空缓冲时再按一次会上屏它的中文标点并退出模式（三处调用：`handle_mode.rs` /
-    /// `handle_temp.rs` / `handle_special.rs`）。此前那就是终点——想要英文形没有任何便捷通路，
-    /// 因为该键在空闲态一按就又进模式了。现在这一步顺手武装智能符号：时限内再按同键即换英文。
-    ///
-    /// **恒按删改语义武装**（`held_text=None`）：符号是经 `CommitText` 真上屏的，不存在组合态可
-    /// 覆盖，故 press2 必须走 `ReplaceBackward`。用户选 `HoldComposition` 方案时亦然——
-    /// `smart_symbol_press2` 的 `held_text.is_none()` 分支就是这条降级路径。
-    ///
-    /// **press2 的拦截点在 `try_activate_mode` 开头**（`handle_lifecycle.rs`），必须早于模式激活
-    /// 链：空闲态按 `;` 会被模式进入抢走，永远走不到标点分支的智能符号判定，武装也就白武装。
+    /// `;` / `` ` `` / `\` 这类被模式占用的键在模式内空缓冲时再按会上屏中文标点并退出模式
+    /// （`handle_mode.rs` / `handle_temp.rs` / `handle_special.rs`），此处顺带武装。恒按删改语义
+    /// （`held_text=None`），即使选了 `HoldComposition`。press2 的拦截点在 `try_activate_mode`
+    /// 开头，必须早于模式激活链，否则空闲态再按会被模式进入抢走。
     pub(crate) fn arm_smart_symbol_after_commit(&self, state: &State, ch: char, out: &str) {
         if !self.rt().config.input.symbol.smart_mode || !state.chinese_punct {
             return;
         }
-        // 参与集合按实际上屏串判定（与 `smart_symbol_arm_str` 同一判据）：符号不在
-        // `symbol.smart_chars` 里就不武装，行为与改造前完全一致。
+        // 参与集合按实际上屏串判定，与 `smart_symbol_arm_str` 同一判据。
         if !self.smart_symbol_participates(out) {
             return;
         }
@@ -567,36 +485,14 @@ impl Coordinator {
 
     /// 英文输入模式（`chinese_mode=false`）的智能符号：press2 判定 + press1 武装，一次收口。
     ///
-    /// 与中文输入模式那条路分开的三个理由：
-    ///   1. **键得先要回来**。英文半角下 DLL 默认透传标点键，引擎收不到；开了 `english_mode`
-    ///      后 core 把 `english_chars` 并入 `CONFIG_KEY_CUSTOM_EN_PUNCT` 推送，DLL 才吃下转发。
-    ///      因此本函数的调用点必须在 [`Self::handle_english_custom_punct`] /
-    ///      [`Self::handle_english_full_width`] 里——那是英文模式下标点键唯一的落点。
-    ///   2. **`state.chinese_punct` 在这条路上不代表产物列**。英文模式恒按英文列出字，与工具栏
-    ///      的中/英标点开关无关（`handle_english_custom_punct` 里临时置 false 就是这个意思），
-    ///      故上下文判定只能看 `chinese_mode`。
-    ///   3. 开关独立（`english_mode` vs `english_punct_mode`）——用户可以只要其中一个。
+    /// 与中文输入模式分开：英文半角下标点键要先经 `CONFIG_KEY_CUSTOM_EN_PUNCT` 从 DLL 要回来，
+    /// 故调用点只能在 [`Self::handle_english_custom_punct`] / [`Self::handle_english_full_width`]；
+    /// 这条路上 `state.chinese_punct` 不代表产物列，上下文只看 `chinese_mode`；开关也独立。
     ///
-    /// `committed` 是本次 press1 会上屏的串（调用方已算好，含配对/全角处理前的标点本体）。
-    /// 返回 `Some` 表示这次是 press2，调用方应短路返回该替换响应。
+    /// `committed` 是本次 press1 会上屏的串。返回 `Some` 表示这次是 press2，调用方应短路返回。
     ///
-    /// # ⚠️ 已知限制：英文**半角**下「中间打了别的字」服务端看不见
-    ///
-    /// 另外两条上下文靠两道判据挡住「press1 与 press2 之间又输入了东西」：
-    /// `smart_symbol_press2` 的「编码缓冲非空」与 `handle_key_event_policed` 的「非同键按键
-    /// 解除武装」。**英文半角这条路两道都够不着**：
-    ///   - 英文模式无编码缓冲 ⇒ 第一道恒为假；
-    ///   - 半角下 DLL 只吃标点键（`_IsCustomEnglishPunctKey` → `IsPunctuationKey`，11 个 OEM 键），
-    ///     字母/数字/空格/退格**直接透传给宿主**，服务端连事件都收不到 ⇒ 第二道没有触发机会。
-    ///     连 `event_seq` 都帮不上忙：它在 C++ 的 `_SendKeyToService` 里才自增，透传的键不计数。
-    ///
-    /// 于是在 `prev_char` 读不回的宿主上（微信/终端那族恒为 0，press2 会当作「读失败」放行）
-    /// 仍存在这条时序：`.` → 快打 `abc` → 时限内再按 `.` ⇒ `ReplaceBackward` 把 `c` 换成 `。`。
-    ///
-    /// 要真修只能由 DLL 补上报——它**知道**自己透传了哪些键（`_lastPassthroughDigit` 就是同款
-    /// 机制），加一位「上一键是透传的非标点键」随下一个标点事件带上来即可。服务端这侧没有新
-    /// 信息可用，靠改 `prev_char == 0` 的语义去堵会让那批宿主上本功能整体失效，代价更大。
-    /// 英文全角不在此列：`english_fullwidth` 分支把字母也吃下转发，第二道判据照常生效。
+    /// 已知限制：英文半角下 press1 与 press2 之间打的字母服务端看不见，`prev_char` 恒 0 的宿主上
+    /// 会误替换。见 docs/architecture/smart-symbol-compat-notes.md 的「press1 与 press2 之间又有输入」。
     pub(crate) fn english_mode_smart_symbol(
         &self,
         state: &State,
@@ -613,9 +509,8 @@ impl Coordinator {
         if let Some(act) = self.smart_symbol_press2(state, ch, prev_char, &method, &mut arm) {
             return Some(act);
         }
-        // press1：仅参与集合内的键武装。配对符天然被排除——调用点在配对分支**之后**，插对/跳出
-        // 的键根本走不到这里（理由同 `reject_if_auto_paired`：press1 插了一对后 `prev_char`
-        // 会是配对左符号，press2 会误删它）。
+        // press1：仅参与集合内的键武装。调用点在配对分支之后，插对/跳出的键走不到这里
+        // （理由同 `reject_if_auto_paired`）。
         if !wind_punct::english_participates(&bundle.config.input, ch) {
             arm.armed = false;
             arm.held_text = None;
@@ -628,17 +523,15 @@ impl Coordinator {
         arm.str = committed.to_string();
         arm.at = Some(std::time::Instant::now());
         arm.mode_snapshot = (state.chinese_mode, state.chinese_punct);
-        // 恒按删改语义武装：英文模式下 press1 是经 `CommitText` 真上屏的（无组合态可覆盖），
-        // 与模式进入键那条通路同理，press2 走 `ReplaceBackward` 降级分支。
+        // 恒按删改语义武装：press1 经 `CommitText` 真上屏，无组合态可覆盖。
         arm.held_text = None;
         arm.hold_pending_commit = false;
         debug!("SmartSymbol(english mode): press1 armed: {}", committed);
         None
     }
 
-    /// 只做 press2 判定、不做 press1 武装 —— 供 `try_activate_mode` 抢在模式激活链之前调用。
-    /// 武装职责仍单一收口在 `try_smart_symbol_replace`（标点分支）与
-    /// `arm_smart_symbol_after_commit`（模式进入键），此处只负责「别让模式进入吃掉 press2」。
+    /// 只做 press2 判定、不做 press1 武装，供 `try_activate_mode` 抢在模式激活链之前调用。
+    /// 武装仍收口在 `try_smart_symbol_replace` 与 `arm_smart_symbol_after_commit`。
     pub(crate) fn try_smart_symbol_press2_only(
         &self,
         state: &State,
@@ -660,17 +553,13 @@ impl Coordinator {
         arm.reverse = false;
         arm.held_text = None;
         arm.hold_pending_commit = false;
-        // 注：HoldComposition 模式下若组合尚未提交，C++ 端的 SetTimer 计时器会在 timeout
-        // 到期后自动提交中文符号，或在焦点切换时由 OnCompositionTerminated 自然结束。
+        // HoldComposition 下未提交的组合由 C++ 端计时器到期提交，或焦点切换时自然结束。
     }
 
     /// 英文模式 + 全角：按键经完整标点流水线转全角后上屏（含自动配对）。
     ///
-    /// **必须出字**：这些键已被 TSF 在 `OnTestKeyDown` 的 `english_fullwidth` 分支吃下
-    /// （Letter|Number|Punctuation|Space，含小键盘）。此处返回 None → 调用方 PassThrough →
-    /// 形成 `OnTestKeyDown(TRUE)+OnKeyDown(FALSE)` 的「吃了再吐」翻转，而 Chrome/Electron 等
-    /// 严格 TSF 宿主不会回退合成 WM_CHAR，键会直接丢失（半角宿主则表现为出半角）。
-    /// 故此处接住的键集必须覆盖 C++ 的吃键集，二者须同增同减。
+    /// 必须出字：这些键已被 TSF `OnTestKeyDown` 的 `english_fullwidth` 分支吃下，返回 None 会变成
+    /// 「吃了再吐」，Chrome/Electron 等严格宿主上键直接丢失。接住的键集必须覆盖 C++ 吃键集，同增同减。
     pub(crate) fn handle_english_full_width(
         &self,
         state: &mut State,
@@ -678,8 +567,7 @@ impl Coordinator {
     ) -> Option<KeyAction> {
         let shift = data.modifiers & MOD_SHIFT != 0;
         let is_letter = (keymap::VK_A..=keymap::VK_Z).contains(&data.key_code);
-        // 键被吃下后系统不再代劳大小写，故由 CapsLock 镜像 XOR Shift 定。镜像每键都用事件
-        // 携带的 toggles 快照校准（见 handle_key_event 开头），英文模式下同样可靠。
+        // 键被吃下后系统不再代劳大小写，由 CapsLock 镜像 XOR Shift 定（镜像每键按事件快照校准）。
         let effective_shift = if is_letter {
             shift != state.caps_lock
         } else {
@@ -688,32 +576,27 @@ impl Coordinator {
         // 覆盖面须 ⊇ C++ 全角吃键集（含空格/小键盘），由 full_width_source_char 统一收口。
         let ch = full_width_source_char(data.key_code, effective_shift)?;
 
-        // 「英全」= 英文标点 + 全角（自定义映射四态的列 1）。经完整流水线而非裸 to_full_width，
-        // 确保用户自定义中英文符号生效（与 CapsLock+全角 路径同构）。
+        // 「英全」列（col 1）。走完整流水线而非裸 to_full_width，自定义映射才生效。
         let saved_punct = state.chinese_punct;
         state.chinese_punct = false;
         let piece = self.convert_punct_char(state, ch);
         let pairs = self.english_pairs_via_pipeline(state);
         state.chinese_punct = saved_punct;
 
-        // 统计：C++ `OnKeyTraceDown` 在全角态主动跳过计数（注释「will be eaten by
-        // OnTestKeyDown for full-width conversion」），把英文统计让给本路径；不记则恒为 0。
+        // C++ `OnKeyTraceDown` 在全角态跳过计数，英文统计由本路径记，不记则恒为 0。
         self.record_english_key_stat(data.key_code, shift);
 
         debug!("English full-width: {:?} -> {:?}", ch, piece);
 
         if let Some(pairs) = pairs {
             let pch = piece.chars().last().unwrap_or(' ');
-            // 智能跳过：输右符号且栈顶正是它 → 光标右移越过，不重复插入。
-            // 对称配对（`＂＂` 等左右同形）除外：按键不携带开/闭这一位，无从判断跳出还是嵌套，
-            // 故一律按「开新的一对」处理，跳出交给 `auto_pair.jump_out_keys`。
-            // 非对称配对是否跳出由该列表里的 `right_symbol` 决定。
+            // 输右符号且栈顶正是它 → 光标右移越过。对称配对（`＂＂`）除外：分不清跳出还是嵌套，
+            // 一律开新的一对，跳出交给 `auto_pair.jump_out_keys`。
             if self.rt().jump_out_on_right_symbol
                 && pairs.iter().any(|(l, r)| *r == pch && *l != *r)
             {
                 let mut tr = self.pair_tracker.lock().unwrap_or_else(|e| e.into_inner());
-                // 右符号跳出只认单字符右段：本路径的触发源是一次标点按键，多字符右段
-                // （直通 `ime.pair` 压入的）永远配不上它，只能靠 Tab/Enter。
+                // 只认单字符右段；`ime.pair` 压入的多字符右段只能靠 Tab/Enter 跳出。
                 if tr.peek().is_some_and(|e| e.right_is_char(pch)) {
                     tr.pop();
                     return Some(KeyAction::MoveCursorRight { count: 1 });
@@ -723,9 +606,7 @@ impl Coordinator {
             // 插入配对：左符号 → 补右符号，光标置于其间。
             if let Some((_, right)) = pairs.iter().find(|(l, _)| *l == pch).copied() {
                 self.push_pair(pch, right);
-                // 回退格数 = 右符号所占的格数（从末尾往回退，DLL 按格合成 VK_LEFT）：右符号是单个
-                // 字符，恒为 1。曾取 `piece` 的长度：对出厂单字符映射恰好相等，自定义成多字符左段时
-                // 光标会落错。
+                // 回退格数 = 右符号格数，恒为 1；别取 `piece` 长度，左段自定义成多字符时会落错。
                 let cursor_offset = 1;
                 return Some(KeyAction::InsertTextWithCursor {
                     text: format!("{}{}", piece, right),
@@ -733,36 +614,16 @@ impl Coordinator {
                 });
             }
         }
-        // 英文智能符号（`symbol.english_mode`）：同键连按把英文标点换成中文形。置于配对分支
-        // **之后**——插对/跳出的键不参与武装，否则 press2 会误删配对左符号。
+        // 英文智能符号置于配对分支之后：插对/跳出的键不参与武装，否则 press2 会误删配对左符号。
         if let Some(act) = self.english_mode_smart_symbol(state, ch, data.prev_char, &piece) {
             return Some(act);
         }
         Some(Self::commit_action(piece, false))
     }
 
-    /// 英文态下的配对表：把 `english_pairs` 的左右符号各过一遍**同一条**标点转换，即
-    /// 「打出什么就配对什么」——用户改「英全 / 英半」列时配对自动跟随，无需另设配对自定义。
-    /// 列随 `state.full_width` 定（英全 1 / 英半 3）。
-    ///
-    /// **不可复用 `cn_pairs`**：那是中文标点（【】《》「」），与 ASCII 的全角形并非同一字符
-    /// （`to_full_width('[')` = `［` U+FF3B，而 cn_pairs 里是 `【` U+3010；只有 `（）｛｝`
-    /// 恰好重合）。混用会出现「打 `[` 出 `【` 却配 `］`」的错位。
-    ///
-    /// **必须用 `peek_custom` 而非 `convert_punct_char`**：后者命中自定义映射时会推进引号交替
-    /// 态，而本函数每次按键都要把整张配对表过一遍 → 一次按键就把引号态推进 N 格
-    /// （`english_pairs` 含引号时立刻错位）。构造配对表是**查询**，不该有副作用。
-    ///
-    /// 调用前须已置 `state.chinese_punct = false`（「英文标点」列语义）。
-    /// 当前焦点应用生效的智能符号替换方案。per-app 规则（`compat.toml` 的 `smart_method`）
-    /// 优先，未配则跟随全局 `input.symbol.smart_method`。
-    ///
-    /// 收敛成单一入口而非在各调用点重复 `config.input.symbol.smart_method`：本判定原有
-    /// **三个**读取点（press1 两条 + press2 一条），分散写必然漏掉新增的那个。
-    ///
-    /// 典型用途：全局默认 `DeleteReplace`（体感更好）在多数宿主正常，但它依赖对宿主做
-    /// 删改，Tabby 一类终端下会出严重错误——给那类宿主单独配 `HoldComposition`，
-    /// 全程不做删改。
+    /// 当前焦点应用生效的智能符号替换方案：per-app 规则（`compat.toml` 的 `smart_method`）优先，
+    /// 未配则跟随全局。所有读取点都须经此入口。典型用途是给 Tabby 一类删改出错的终端单配
+    /// `HoldComposition`。
     pub(crate) fn effective_smart_method(&self) -> SmartMethod {
         if let Some(m) = self
             .active_compat
@@ -775,8 +636,14 @@ impl Coordinator {
         self.rt().config.input.symbol.smart_method
     }
 
+    /// 英文态下的配对表：`english_pairs` 左右符号各过一遍同一条标点转换（「打出什么就配对什么」），
+    /// 列随 `state.full_width` 定（英全 1 / 英半 3）。
+    ///
+    /// 不可复用 `cn_pairs`：中文标点与 ASCII 的全角形不是同一字符（`［` U+FF3B ≠ `【` U+3010）。
+    /// 必须用 `peek_custom` 而非 `convert_punct_char`：后者会推进引号交替态，每键过一遍整表就推 N 格。
+    /// 调用前须已置 `state.chinese_punct = false`。
     fn english_pairs_via_pipeline(&self, state: &State) -> Option<Vec<(char, char)>> {
-        // per-app 关闭：与 `active_pairs()` 同一道闸门，两条通路都要问（见那里的说明）。
+        // per-app 关闭：与 `active_pairs()` 同一道闸门。
         if !self.auto_pair_allowed_here() {
             return None;
         }
@@ -785,10 +652,8 @@ impl Coordinator {
             return None;
         }
         let col = wind_punct::punct_col_idx(false, state.full_width);
-        // ⚠️ 这一处直调 `PunctuationConverter::peek_custom`（wind-transform），**绕过了**
-        // wind-punct 那层——所以自定义标点方案级化时它不会因签名变更而编译失败。生效表必须
-        // 在这里显式取，否则方案把 `(` 配成别的形态后，英文配对仍按全局表判定与插入。
-        // 守门测试见本文件末 `english_pairs_pipeline_uses_effective_punct`。
+        // 这里直调 `peek_custom` 绕过了 wind-punct 层，签名变更不会让它编译失败，生效表必须显式取。
+        // 见 `english_pairs_pipeline_uses_effective_punct`。
         let punct = self.effective_punct(&rt, state);
         let conv = self.punct.lock().unwrap_or_else(|e| e.into_inner());
         let form = |c: char| -> Option<char> {
@@ -812,21 +677,13 @@ impl Coordinator {
 
     /// 英文模式 + 半角：只接手「英半列有自定义映射覆盖」的标点键，按英半列（col 3）出字。
     ///
-    /// 为什么需要这条分支：英文模式非全角时 TSF 默认**直接透传**标点键，引擎收不到，四列里的
-    /// 「英半」因此是打不到的死格（真机日志指纹：`decision=passthrough_not_handled`）。现由
-    /// core 把「哪些源字符配了英半列」推给 DLL，DLL 精确吃下这些键转发过来，此处出字。
+    /// 英文半角下 TSF 默认透传标点键，英半列本是死格；core 把配了英半列的源字符推给 DLL，
+    /// DLL 吃下转发到这里出字。必须出字（同 `handle_english_full_width`）：接手判据与推给 DLL
+    /// 的集合同源，返回 None 只发生在 DLL 本就没吃的键上。
     ///
-    /// **必须出字**（同 `handle_english_full_width` 的铁律）：接手判据与推给 DLL 的集合同源
-    /// （`custom_english_punct_chars`），集合内即必有非空英半列值，故 `convert_punct` 必然命中
-    /// 自定义、必然返回该值。返回 None 只发生在「键不在集合里」——那 DLL 本来就没吃它。
-    ///
-    /// 引号在此照常按左右形交替（`"1` → `"2` → `"1`…），交替态与中文侧共用同一个转换器，
-    /// 中英模式切换时由 `punct.reset()` 归零（`coordinator.rs` 的两处 mode_switch）。
-    ///
-    /// **本路径同时接手英文半角的普通配对键**（此前由 DLL 的 `_englishPairEngine` 本地插入）。
-    /// 合并的理由是消除记账处：配对状态原先分散在协调器的 `pair_tracker` 与 DLL 的英文栈两处，
-    /// 谁也看不见谁，于是「中文里打的配对切到英文跳不出、反之亦然」。现在四条配对建立路径
-    /// （中文标点 / 英文全角 / 英半自定义 / 英半普通）全部入 `pair_tracker`，DLL 只留吃键判据。
+    /// 引号照常左右交替，交替态与中文侧共用转换器，中英切换时由 `punct.reset()` 归零。
+    /// 本路径同时接手英文半角的普通配对键：四条配对建立路径都入 `pair_tracker`，
+    /// 中英之间才能互相跳出，DLL 只留吃键判据。
     pub(crate) fn handle_english_custom_punct(
         &self,
         state: &mut State,
@@ -834,7 +691,7 @@ impl Coordinator {
     ) -> Option<KeyAction> {
         let shift = data.modifiers & MOD_SHIFT != 0;
         let ch = punct_char(data.key_code, shift)?;
-        // 判据必须与 DLL 的吃键判据**逐条同源**，漂移即「吃了再吐」丢键。DLL 吃两类键：
+        // 判据必须与 DLL 的吃键判据逐条同源，漂移即「吃了再吐」丢键。DLL 吃两类键：
         //   ① 英半列配了自定义映射的源字符（`push_custom_en_punct_config` 推送的集合）
         //   ② 英文配对表内的字符（`push_english_pair_config` 推送 `en_pairs` + `enabled`；
         //      DLL 侧判据是 `IsEnabled() && (IsLeft(c) || IsRight(c))`）
@@ -848,8 +705,7 @@ impl Coordinator {
             return None; // DLL 未吃此键，透传给宿主
         }
 
-        // 「英半」= 英文标点 + 半角（列 3）。英文模式恒按英文标点列输出，与工具栏的
-        // 中/英标点开关无关——这与改造前「DLL 透传、宿主出 ASCII」的既有语义一致。
+        // 「英半」列（col 3）。英文模式恒按英文标点列输出，与工具栏中/英标点开关无关。
         let saved_punct = state.chinese_punct;
         state.chinese_punct = false;
         let piece = self.convert_punct_char(state, ch);
@@ -868,8 +724,7 @@ impl Coordinator {
                 && pairs.iter().any(|(l, r)| *r == pch && *l != *r)
             {
                 let mut tr = self.pair_tracker.lock().unwrap_or_else(|e| e.into_inner());
-                // 右符号跳出只认单字符右段：本路径的触发源是一次标点按键，多字符右段
-                // （直通 `ime.pair` 压入的）永远配不上它，只能靠 Tab/Enter。
+                // 只认单字符右段；`ime.pair` 压入的多字符右段只能靠 Tab/Enter 跳出。
                 if tr.peek().is_some_and(|e| e.right_is_char(pch)) {
                     tr.pop();
                     return Some(KeyAction::MoveCursorRight { count: 1 });
@@ -878,9 +733,7 @@ impl Coordinator {
             }
             if let Some((_, right)) = pairs.iter().find(|(l, _)| *l == pch).copied() {
                 self.push_pair(pch, right);
-                // 回退格数 = 右符号所占的格数（从末尾往回退，DLL 按格合成 VK_LEFT）：右符号是单个
-                // 字符，恒为 1。曾取 `piece` 的长度：对出厂单字符映射恰好相等，自定义成多字符左段时
-                // 光标会落错。
+                // 回退格数 = 右符号格数，恒为 1；别取 `piece` 长度，左段自定义成多字符时会落错。
                 let cursor_offset = 1;
                 return Some(KeyAction::InsertTextWithCursor {
                     text: format!("{}{}", piece, right),
@@ -888,19 +741,15 @@ impl Coordinator {
                 });
             }
         }
-        // 英文智能符号（`symbol.english_mode`）：同键连按把英文标点换成中文形。置于配对分支
-        // **之后**——插对/跳出的键不参与武装，否则 press2 会误删配对左符号。
-        //
-        // 注意本函数的接手判据 `custom_en_punct_chars` 已在 `ConfigBundle::build` 里并入了
-        // `english_chars`，所以开了 `english_mode` 的键即使没配英半自定义也会走到这里
-        // （出原样 ASCII，与透传等价），press1 才有落点。
+        // 英文智能符号置于配对分支之后：插对/跳出的键不参与武装，否则 press2 会误删配对左符号。
+        // `custom_en_punct_chars` 已并入 `english_chars`，开了 `english_mode` 的键才能走到这里。
         if let Some(act) = self.english_mode_smart_symbol(state, ch, data.prev_char, &piece) {
             return Some(act);
         }
         Some(Self::commit_action(piece, false))
     }
 
-    /// 英文模式按键的统计归类：**镜像** C++ `_RecordEnglishKeyTrace` 的分桶（Shift+数字算标点、
+    /// 英文模式按键的统计归类：镜像 C++ `_RecordEnglishKeyTrace` 的分桶（Shift+数字算标点、
     /// 小键盘数字算数字…），保证全角/半角两条路径统计口径一致。
     fn record_english_key_stat(&self, key_code: u32, shift: bool) {
         let (chars, digits, puncts, spaces) = if (keymap::VK_A..=keymap::VK_Z).contains(&key_code) {
@@ -917,13 +766,10 @@ impl Coordinator {
         self.handle_english_stats(chars, digits, puncts, spaces);
     }
 
-    /// 清空配对跟踪栈（失焦 / 组合被意外终止时的防御性复位）。
-    /// 这两种场景下光标已离开原位置，旧的「光标紧贴右符号」假设失效，残留栈会让跳出键/
-    /// 右符号跳出误判，故必须清空。
+    /// 清空配对跟踪栈（失焦 / 组合被意外终止时）：光标已离开原位，残留栈会让跳出误判。
     ///
-    /// **中英模式切换不在此列**（曾经在，已移除）：切模式既不移动光标也不消除已插入的
-    /// 右符号，前提仍成立；清掉只会让用户切走再切回后跳不出去。C++ 侧的 `_pairPendingDepth`
-    /// 同步保留（`ResetComposingState(TRUE)`）。
+    /// 中英模式切换不调它：切模式不移动光标，清掉只会让切走再切回后跳不出去。
+    /// C++ 侧的 `_pairPendingDepth` 同样保留。
     pub(crate) fn clear_pair_tracker(&self) {
         self.pair_tracker
             .lock()
@@ -934,10 +780,8 @@ impl Coordinator {
     /// 聚焦到与配对状态归属不同的客户端时清栈。配对栈是全局单栈、不分宿主，
     /// 换了宿主之后栈顶可能是别人压的那层。`token == 0`（未归属/未知）不做判断。
     ///
-    /// **跨焦点保留放弃后，本校验退化为防御性保险**：真实失焦（Thread / DocChanged /
-    /// NoEditCtx）已在 `handle_focus_lost` 里清过栈，能活到这里的只有 `CtxLost` 噪声，
-    /// 而那是同一应用内的 DocMgr 抖动，不会换宿主。保留它是因为成本为零（一次整数比较），
-    /// 且「全局单栈」这个事实没变——判据一旦再放宽，它就是最后一道防串台的闸。
+    /// 真实失焦已在 `handle_focus_lost` 清过栈，这里是防御性保险：成本为零，且栈仍是全局单栈，
+    /// 失焦判据一旦放宽它就是最后一道防串台的闸。
     pub(crate) fn clear_pair_tracker_if_foreign(&self, client_token: u64) {
         if client_token == 0 {
             return;
@@ -962,10 +806,8 @@ impl Coordinator {
 
     /// 配对状态是否已陈旧（距最后一次按键超过 `state_ttl_secs`）。
     ///
-    /// 判定点在协调器，但**吃键闸门在 DLL**：DLL 用同一个阈值本地判 `_pairPendingDepth`
-    /// 是否还作数。两侧刷新时机天然不对称——英文模式下协调器收不到普通字母键，这边的
-    /// 时间戳会偏旧。该不对称的失效方向是安全的：协调器偏保守地认为已陈旧，结果是打右
-    /// 符号时正常插入而不是误跳出。**宁可不跳出，不要误跳出。**
+    /// 吃键闸门在 DLL，用同一阈值本地判 `_pairPendingDepth`。英文模式下协调器收不到普通字母键，
+    /// 时间戳偏旧；这个不对称的失效方向是安全的：宁可不跳出，不要误跳出。
     pub(crate) fn pair_state_stale(&self) -> bool {
         let ttl = self.rt().config.input.auto_pair.state_ttl_secs;
         self.pair_tracker
@@ -976,12 +818,10 @@ impl Coordinator {
 
     /// 配对跳出键的统一前置判定（全模式生效）。命中则光标越过右符号并弹栈。
     ///
-    /// **必须置于英文模式分支之前**：英文模式下协调器对普通键直接 `PassThrough`，判定若留在
-    /// 中文 composition 分派路径里就是死代码——这正是「英文模式跳不出中文配对」的根因之一。
+    /// 必须置于英文模式分支之前：英文模式下普通键直接 `PassThrough`，判定留在中文分派路径里就是死代码。
     ///
-    /// 守卫（任一不满足即不拦截，让键落回原有路径，绝不吞键）：
-    /// - 不在独占模式（`state.active`）：网址/临拼/快捷输入/特殊模式里的 Tab/Enter 是它们自己的
-    ///   语义，前置之后本判定会跑在那些分支之前，不挡就会被抢走
+    /// 守卫（任一不满足即不拦截，绝不吞键）：
+    /// - 不在独占模式（`state.active`）：那些模式里的 Tab/Enter 有自己的语义
     /// - 无编码、无候选：避免吞掉正常的选词/编辑按键
     /// - 无 Ctrl/Alt/Shift：Shift+Tab 是反向切焦点，不能当跳出
     /// - 命中 `jump_out_keys` 且配对栈非空、未陈旧
@@ -1002,8 +842,7 @@ impl Coordinator {
         }
         let mut tr = self.pair_tracker.lock().unwrap_or_else(|e| e.into_inner());
         tr.peek()?;
-        // 右移格数取自被弹出的那一层：标点配对恒 1，直通 `ime.pair` 的多字符右段按其
-        // 声明值。取 `max(1)` 是为了「压栈时算出 0 格」也不至于变成吞键不动。
+        // 右移格数取自弹出的那层（标点配对恒 1，`ime.pair` 按声明值）；`max(1)` 防吞键不动。
         let steps = tr.pop().map(|e| e.jump_steps).unwrap_or(1).max(1);
         Some(KeyAction::MoveCursorRight { count: steps })
     }
@@ -1020,24 +859,13 @@ impl Coordinator {
 
     /// `ime.pair(left, right, jump=N)`：上屏 `left+right`、光标落两段之间，并压入配对栈。
     ///
-    /// **走 push 通道而非 KeyAction**：命令动作在独立线程执行（`run_command_candidate`），
-    /// 此刻按键响应早已返回。代价是 DLL 侧的 `_pairPendingDepth` 必须在它自己的 push 分支里
-    /// 递增——那个计数是中文模式下 Enter 能否被转发给协调器的闸门，漏掉的症状是
-    /// 「Tab 跳得出、Enter 毫无反应」（Tab 无条件转发，Enter 受会话门控）。
+    /// 走 push 通道而非 KeyAction：命令在独立线程执行，按键响应早已返回。DLL 须在 push 分支里
+    /// 递增 `_pairPendingDepth`（中文模式下 Enter 能否转发的闸门），漏了就「Tab 跳得出、Enter 无反应」。
     ///
-    /// 关掉 `input.auto_pair` 时退化为**纯上屏**（整串上屏、光标落末尾）：该开关的语义是
-    /// 「本输入模式下要不要有配对行为」，显式命令也归它管，关了就一律不摆光标、不压栈。
-    ///
-    /// ⚠️ 这里**不是**因为「压了栈也跳不出去」——[`Self::try_jump_out`] 的判据里没有这个
-    /// 开关（只看独占模式/编码/候选/修饰键/`jump_out_keys`/栈非空未陈旧），压了栈跳出键
-    /// 照常可用。旧注释写反了这一点，据此推理会得出错误结论。
-    ///
-    /// 代价是显式写了 `ime.pair` 的词条在开关关闭时只上屏、不摆光标，用户会觉得「命令没
-    /// 生效」（2026-08-23 真机反馈即为此；出厂 `chinese`/`english` 均为 false）。已知取舍：
-    /// 保持「一个开关管住所有配对行为」的语义统一，不为显式命令开后门。
-    /// 顺带保证 DLL 的 `_pairPendingDepth` 与本侧配对栈严格同步：带光标偏移的那条命令**只在
-    /// 真的压栈时**发出，不存在「C++ 记了一层、Rust 没记」的中间态。
-    /// 开关按当前输入模式取（中文看 `chinese`、英文看 `english`），与自动配对同口径。
+    /// `input.auto_pair` 关时退化为纯上屏（光标落末尾、不压栈）：该开关管住所有配对行为，
+    /// 显式命令也不开后门（并非压了栈跳不出去，[`Self::try_jump_out`] 不看这个开关）。代价是出厂
+    /// 关闭时 `ime.pair` 词条看似没生效。带光标偏移的命令只在真压栈时发出，保证 DLL 计数与本侧栈同步。
+    /// 开关按当前输入模式取（中文看 `chinese`、英文看 `english`）。
     pub(crate) fn cmd_pair_commit(&self, left: &str, right: &str, jump_steps: u32) {
         if left.is_empty() && right.is_empty() {
             return;
@@ -1061,15 +889,9 @@ impl Coordinator {
             self.push_commit_text_from(crate::session_exit::ActionOrigin::Command, &text);
             return;
         }
-        // `cursor_offset` 的语义是「插入全部文本后向左移几格」（DLL 侧 `KeyEventSink` 按它
-        // 循环合成 VK_LEFT），**不是**从文本开头的偏移。而「把光标退回到右段之前」与
-        // 「跳出时越过右段」本就是同一段距离的正反两向，故两端共用 `jump_steps` 一个量：
-        // 用户在自己宿主上调准了 `jump=N`，进出就自动对称，不会出现「进得去、出不来」。
-        //
-        // 换行改写在此接一次（push 路不经按键收口，A3-3）。不影响 `jump_steps`：它是用户
-        // 配的**格数**，不是从文本长度算出来的，改写行尾不会让它失配。
-        //
-        // 收尾按命令输出走（`Command` 不补空格，文本原样返回）；撤销计数只计光标前的左段。
+        // `cursor_offset` 是「插入后向左移几格」，不是从开头的偏移；退回右段之前与跳出越过右段
+        // 是同一段距离，故两端共用 `jump_steps`，进出自动对称。换行改写在收尾里做，不影响
+        // `jump_steps`（它是用户配的格数）。`Command` 收尾不补空格；撤销计数只计左段。
         let act = {
             let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
             self.finish_session_action(

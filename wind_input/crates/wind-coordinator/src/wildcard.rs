@@ -3,11 +3,9 @@
 //!
 //! # 为什么「哪几位是通配」由协调器定，而不是引擎按内容自判
 //!
-//! 缓冲本身不带标记：首位让位后进缓冲的字面 `z`（`zz*` 短语的活码）与作通配的 `z` 同形。
-//! 故裁决按**同一套规则**从缓冲内容重算，不记标志位——理由同 `buffer_has_literal_symbol`：
-//! 缓冲会被退格、光标中插改写，来源标志迟早与内容对不上，而字符与规则不会。规则必须
-//! **与历史无关**（`z_key_repeat` 取配置开关而非「有没有上屏历史」），否则同一串缓冲
-//! 前后两次重算会得出不同结论。
+//! 缓冲不带标记：首位让位进来的字面 `z` 与作通配的 `z` 同形。缓冲会被退格、中插改写，
+//! 来源标志迟早与内容对不上，故裁决按同一套规则从缓冲内容重算。规则必须与历史无关
+//! （`z_key_repeat` 取配置开关而非「有没有上屏历史」），否则同一串缓冲两次重算结论不同。
 
 use crate::coordinator::{Coordinator, State};
 use crate::key_convert::{punct_char, punct_source_vk};
@@ -16,10 +14,8 @@ use wind_candidate::{Candidate, CandidateSource};
 use wind_dict::WILDCARD_SLOT;
 use wind_keys::keymap;
 
-/// 通配组码的首批候选上限（spec §11）。不走 `initial_candidate_limit` 的码长分级
-/// （码表 1/2/≥3 码 → 100/300/1000）：那套是给前缀补全配的，通配首位即退化成全表扫描；
-/// 首批小、翻到边界再由 `expand_candidates` ×2 扩，`has_more = engine_count >= limit`
-/// 才自然成立（旧实现首批 1000、引擎至多回 100 ⇒ `has_more` 恒假）。
+/// 通配组码的首批候选上限（spec §11）。不走 `initial_candidate_limit` 的码长分级（那是给
+/// 前缀补全配的）：首批小、翻到边界由 `expand_candidates` 加倍，`has_more` 判据才成立。
 pub(crate) const WILDCARD_INITIAL_LIMIT: usize = 100;
 
 /// 通配键此刻的去向。
@@ -43,9 +39,7 @@ fn wildcard_key_vk(key: char) -> Option<(u32, bool)> {
 /// 拼音分段续转态：最后一段是拼音选词，剩余编码按混输的拼音子方案转换（`build_candidates`）。
 /// 该态下通配一律字面（spec §10）——剩余串是拼音的后半截，不是码表码。
 ///
-/// ★ 与 `build_candidates` 选拼音子方案用的是同一个函数：两处各写一份，改一处另一处就会
-/// 出现「续转走拼音、却又按通配查码表」。本判据看会话状态（已上屏段），退格回退段时随之
-/// 失效，仍满足模块文档「同一状态前后两次重算结论相同」。
+/// 与 `build_candidates` 选拼音子方案共用本函数，否则会「续转走拼音、却按通配查码表」。
 pub(crate) fn last_seg_is_pinyin(state: &State) -> bool {
     state
         .committed_segs
@@ -57,10 +51,8 @@ impl Coordinator {
     /// 按下的字符 `ch` 此刻是否作通配进缓冲——两个接线点（字母臂、`try_code_char_gate`）
     /// 的唯一入口。
     ///
-    /// ★ overlay（临拼 / 临英 / 快捷输入 / 特殊模式 / 辅助码…）激活时恒 `false`：通配键取自
-    /// **活跃方案**的引擎，而 overlay 用的是别的方案或别的输入语义（临拼里 `z` 是拼音字母）。
-    /// 引擎管理器没有 overlay 状态，这道门只能由协调器把。现有分派里 overlay 在两个接线点之前
-    /// 就 return 了，这里是结构性兜底：日后哪条 overlay 路径复用了这两个接线点，不会静默带上通配。
+    /// overlay 激活时恒 `false`：通配键取自活跃方案，overlay 用的是别的方案或输入语义，
+    /// 而引擎管理器不知道 overlay 状态。现有分派里 overlay 已先 return，这里是结构性兜底。
     pub(crate) fn wildcard_enters(&self, state: &State, ch: char) -> bool {
         state.active.is_none()
             && !last_seg_is_pinyin(state)
@@ -70,9 +62,8 @@ impl Coordinator {
 
     /// §3.3 按键裁决。`buffer` 是**按下前**的输入缓冲。
     ///
-    /// ⚠️ 调用点必须晚于 `try_activate_mode` 与 `try_z_fallback`（顺序铁律，见
-    /// `codetable-input-chars.md` §3.4）：首位让位本就是它们先赢；这里的首位判据只处理
-    /// 「它们都没接手」之后的去向。
+    /// 调用点必须晚于 `try_activate_mode` 与 `try_z_fallback`（见 `codetable-input-chars.md`
+    /// §3.4）：首位让位本就是它们先赢，这里只处理它们都没接手之后的去向。
     pub(crate) fn wildcard_decision(&self, buffer: &str, key: char) -> WildcardDecision {
         let yield_ = if self.wildcard_past_full(buffer.chars().count()) {
             true
@@ -94,8 +85,7 @@ impl Coordinator {
     /// `max_code_length` ⇒ 按字面，与关闭通配时逐键相同（`aaaa` + `z` 照常顶字）。
     /// 作通配的话只会得到一条比任何码都长的死串：无候选、又因通配不顶字。
     ///
-    /// ★ 按键裁决与 [`Self::wildcard_pattern`] 共用本判据：同一串缓冲前后两次重算须得出
-    /// 同一结论（见模块文档）。通配码长（`wildcard_code_length`，混输取主码表的）为 0 时恒 `false`。
+    /// 按键裁决与 [`Self::wildcard_pattern`] 共用本判据（见模块文档）。通配码长为 0 时恒 `false`。
     fn wildcard_past_full(&self, pos: usize) -> bool {
         let max = self.engine_mgr.active_wildcard_code_length();
         max > 0 && pos >= max
@@ -103,14 +93,10 @@ impl Coordinator {
 
     /// 首位：通配键已绑定任何功能 / 模式即让位（spec §3.3 首位一行）。
     ///
-    /// **符号键与字母分开判**（论坛 t302）：符号通配键首位**作通配**，只有方案级
-    /// `[key_actions]` 显式绑了它才让位，见 [`Self::wildcard_symbol_takes_lead`]。
+    /// 符号键与字母分开判：符号通配键首位作通配，见 [`Self::wildcard_symbol_takes_lead`]。
     fn wildcard_lead_yields(&self, key: char) -> bool {
-        // 五笔拼音混输：字母通配键首位一律字面（spec §10）。z 是拼音声母（`zhang` / `zai`），而混输下
-        // `has_code_prefix("z")` 只在装了 `zz*` 短语时成立（单字母够不着 `min_pinyin_length`，
-        // 五笔主库无 z 码），靠它让位的话没装短语的用户打 `zhang` 会变成 `?hang`。
-        //
-        // 只管字母：符号不是拼音字母，作首码通配不会夺走拼音输入，走下面的符号键判据。
+        // 混输：字母通配键首位一律字面（spec §10）。靠 `has_code_prefix` 让位不可靠（没装
+        // `zz*` 短语时不成立），`zhang` 会变成 `?hang`。符号不是拼音字母，走下面的符号键判据。
         if key.is_ascii_alphabetic() && self.engine_mgr.active_wildcard_mixes_pinyin() {
             return true;
         }
@@ -124,8 +110,7 @@ impl Coordinator {
         if self.bound_action_for(vk).is_some_and(|a| a.is_enabled()) {
             return true;
         }
-        // 取**配置开关**而不是 `z_key_repeat_text()`（有无上屏历史）：本判据要从缓冲反复
-        // 重算，随历史变化的判据会让同一串缓冲前后解释不一。
+        // 取配置开关而非 `z_key_repeat_text()`：判据须与历史无关（见模块文档）。
         if key == 'z' && self.engine_mgr.codetable_settings().z_key_repeat {
             return true;
         }
@@ -135,19 +120,13 @@ impl Coordinator {
         self.has_code_prefix(&key.to_string())
     }
 
-    /// 符号通配键在空缓冲时是否**作首码**（论坛 t302）。
+    /// 符号通配键在空缓冲时是否作首码。
     ///
-    /// 通配出厂关闭，开了并选了符号键就是方案作者 / 用户明说「这个键是码元」——码元理应
-    /// 能出现在任何一位，包括第一位。此前符号键首位一律让位给标点 / 模式，于是反引号要先被
-    /// 出厂的临拼触发抢走、再按一次退出临拼，才轮到通配（用户实测「要按两次」）。
+    /// 选了符号通配键即声明它是码元，码元理应能出现在第一位，故不再让位给全局的标点 / 模式
+    /// 绑定（全局配置不知道本方案把它当码元）。只有方案级 `[key_actions]` 显式绑了它才让位，
+    /// 与 [`Self::code_char_takes_lead`] 的跨层仲裁同一口径。
     ///
-    /// 让位只剩：
-    /// - **方案级** `[key_actions]` 显式绑了这个键：同层冲突，显式绑定优先（与
-    ///   [`Self::code_char_takes_lead`] 的跨层仲裁同一口径）。全局层的绑定则由
-    ///   `code_char_takes_lead` 判让位——全局配置无从知道本方案把它当码元用了。
-    ///
-    /// 这个键原本的标点产物（反引号 → `·`）就此在首位拿不到，与把符号写进 `input_chars`
-    /// 的代价相同；需要时用快捷输入 / 短语出。
+    /// 代价：这个键的标点产物（反引号 → `·`）在首位拿不到，同把符号写进 `input_chars`。
     pub(crate) fn wildcard_symbol_takes_lead(&self, key: char) -> bool {
         if key.is_ascii_alphabetic() || self.engine_mgr.active_wildcard_key() != Some(key) {
             return false;
@@ -170,8 +149,8 @@ impl Coordinator {
 
     /// 非首位：通配键若是组码中途的功能键，返回占用它的功能名（空 = 不冲突）。
     ///
-    /// 判据反查现有函数，与 `code_char_conflicts` / `symbol_buffer_key_free` 同源——
-    /// ⚠️ 那两处的 owners 链增减时这里要跟着改。
+    /// 判据与 `code_char_conflicts` / `symbol_buffer_key_free` 同源，那两处的 owners 链增减时
+    /// 这里要跟着改。
     ///
     /// 会话表里一个键只有一个动作，故按动作**细分**成一条名字：`select_key_offset` /
     /// `select_char_index` 都是 `session_action_for` 的派生，再单独问一遍就会把同一个 `;`
@@ -190,7 +169,7 @@ impl Coordinator {
 
     /// 通配键此刻在会话表里的身份名（`None` = 会话表没占它），组码中（[`Self::wildcard_mid_owners`]）用。
     ///
-    /// ⚠️ 反查模式内**不能**用它：组码中选词 / 以词定字键会让通配让位，是冲突；反查模式里
+    /// 反查模式内不能用它：组码中选词 / 以词定字键会让通配让位，是冲突；反查模式里
     /// 它们不被导航吃掉，见 [`Self::reverse_wildcard_conflicts`]。
     fn wildcard_session_owner(&self, vk: u32, shift: bool) -> Option<&'static str> {
         use wind_config::{AuxCodeShare, SessionAction};
@@ -282,7 +261,7 @@ impl Coordinator {
     /// 通配组码的缓冲（`azzd`）是查询串，不是任何词条的码位——按它记账会写出读端永远查不中
     /// 的孤儿键。改记候选自己的全码，即该字在正常输入时所在的码位。
     ///
-    /// ★ 只接在主输入路的上屏记账点，`freq_code` 本体不动：mix / 临拼缓冲用的是别的方案，
+    /// 只接在主输入路的上屏记账点，`freq_code` 本体不动：mix / 临拼缓冲用的是别的方案，
     /// 通配键不适用于它们（同 `wildcard_enters` 的 overlay 门）；读侧调频
     /// （`apply_freq_rerank`）按通配串查，查无记录 ⇒ 通配结果不参与调频，是有意的。
     ///
@@ -335,7 +314,7 @@ impl Coordinator {
             return Vec::new();
         };
         use wind_config::{AuxCodeShare, SessionAction};
-        // 只报 `apply_session_action` **真正消费**的动作。选词 / 以词定字它刻意返回 None
+        // 只报 `apply_session_action` 真正消费的动作。选词 / 以词定字它刻意返回 None
         // （落到各自消费点，而反查的符号通配键臂排在选词臂之前）；独立辅助码的
         // `enter_aux_code` 在 overlay 模式里拒绝、同样返回 None——这三类键在模式内照常
         // 作通配进缓冲，报出来是误报。共键 `aux_code:page_next` 被拒后降级为翻页，照吃。

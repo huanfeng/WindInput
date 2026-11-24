@@ -1,44 +1,34 @@
 //! 软键盘：常驻符号面板的状态与按键接管。
 //!
-//! # 它和别的模式不是一回事
-//!
-//! 软键盘不组码、不产候选、不进 [`ModeKind`](crate::pipeline::ModeKind)——它只把键位
-//! 直接换成符号，语义与自定义标点同族，只是范围扩大到整个主键区。所以它与 `State.active`
-//! **正交**，状态也不住在 `State` 里（理由见 `Coordinator::softkeyboard_active` 的注释）。
+//! 软键盘不组码、不产候选、不进 [`ModeKind`](crate::pipeline::ModeKind)，只把键位换成符号，
+//! 与 `State.active` 正交，状态也不住在 `State` 里（见 `Coordinator::softkeyboard_active`）。
+//! 设计见 `docs/design/soft-keyboard.md`。
 //!
 //! # 两种面
 //!
 //! | | 符号面（默认） | 键盘面（`send_keys`） |
 //! |---|---|---|
 //! | 画的是 | 键盘打不出的字符 | 键盘本来就有的键 |
-//! | 点键帽 | 查表 → 上屏那个字符 | **合成一次真实按键** |
-//! | 敲物理键 | 查表 → 上屏 | **完全不接管**，落回常规输入链路 |
+//! | 点键帽 | 查表 → 上屏那个字符 | 合成一次真实按键 |
+//! | 敲物理键 | 查表 → 上屏 | 完全不接管，落回常规输入链路 |
 //! | 打 `nihao` | 出五个符号 | 出「你好」 |
 //!
-//! 键盘面存在的理由：用户在标准 PC 键盘面上点 `n` `i` `h` `a` `o`，期待的是打出中文，
-//! 不是往文档里塞五个字母。两条路（点击、物理键）都必须汇进常规输入链路，所以
-//! **C++ 侧也要知道当前是哪种面**（`STATUS_SOFT_KEYBOARD_KEYS`）：键盘面时不启用
-//! 软键盘总闸，否则英文模式下会「吃了不发」——总闸吃掉键，常规链路却 PassThrough。
+//! 键盘面上点击与物理键都要汇进常规输入链路，所以 C++ 侧也要知道当前是哪种面
+//! （`STATUS_SOFT_KEYBOARD_KEYS`）：键盘面不启用软键盘总闸，否则英文模式下会「吃了不发」。
 //!
 //! # 谁被接管，谁不被接管（符号面）
 //!
 //! | 键 | 处置 |
 //! |---|---|
-//! | 布局里的**符号键位**（字母 / 数字 / 符号） | 接管 → 查表上屏；无映射则吃掉忽略 |
-//! | 布局里的**特殊键**（Tab/Enter/退格/空格/Ins/Del/方向键） | 透传（封闭集，不可映射） |
-//! | 布局**之外**的一切（F1–F12、小键盘、Ctrl/Alt 组合） | 透传 |
+//! | 布局里的符号键位（字母 / 数字 / 符号） | 接管 → 查表上屏；无映射则吃掉忽略 |
+//! | 布局里的特殊键（Tab/Enter/退格/空格/Ins/Del/方向键） | 透传（封闭集，不可映射） |
+//! | 布局之外的一切（F1–F12、小键盘、Ctrl/Alt 组合） | 透传 |
 //! | Esc / 翻页键 | 面板自己的控制键 |
 //!
-//! 特殊键**硬编码透传、不接受映射**：放开可配会带来一族判据（映射过的退格还能不能长按
-//! 连删？映射过的回车还换不换行？），而它买到的灵活性没人要。本模块不列举它们——
-//! **凡是不在布局表里的键一律不接管**，透传是「没被拦下」的自然结果而不是一条规则，
-//! 于是不存在第二份需要同步的清单。
+//! 本模块不列举特殊键：不在布局表里的键一律不接管，透传是自然结果，不存在第二份清单。
 //!
-//! # 长按重复不在这里
-//!
-//! 物理键长按由系统 auto-repeat 连发 keydown，逐次走本模块，**不要去抖**；特殊键既然
-//! 透传，它们的重复干脆由宿主自己处理，我们完全不参与。只有面板上的鼠标长按需要定时器，
-//! 那是 UI 侧的事（见 `docs/design/soft-keyboard.md` §5）。
+//! 物理键长按由系统 auto-repeat 连发 keydown，逐次走本模块，不要去抖；鼠标长按归 UI 侧
+//! （设计文档 §5）。
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -58,28 +48,21 @@ use wind_config::Config;
 ///
 /// `with_user = false` 只叠到定制层为止——设置端编辑器的「下层」（恢复默认回到哪里）。
 ///
-/// ⚠️ 这里**不走** `resolve_data_file`：那个函数的语义是「靠前的层存在就整份取代
-/// 出厂」，而软键盘要的是按面合并——用户只想改一个键时不该失去其余 12 个面，
-/// 更不该在出厂新增面之后永远看不到它们（同 `system.quick.toml` 的用户设置分文件
-/// 那条理由）。故显式取各层路径，出厂铺底、逐层叠加。定制者由此也能只改几个面，
-/// 不必整份复制（同 `config.toml` 的四层深合并、`compat.toml` 的按条目合并）。
+/// 不走 `resolve_data_file`（整份取代）：软键盘要按面合并，只改一个键不该失去其余的面，
+/// 也不该看不到出厂新增的面。故显式取各层路径，出厂铺底、逐层叠加。
 pub(crate) fn load_softkeyboard_table(
     data_dir: Option<&std::path::Path>,
     with_user: bool,
 ) -> wind_softkeyboard::SoftKeyboardTable {
     let layers = Config::resource_layers_named_with(data_dir);
-    // 出厂画布只认 data 层：缺了就回落内置兜底表（部署损坏时软键盘仍可用）。
-    // 定制层不接这个位置——它的语义是叠加，把它当画布会让「只改一个面」的定制包
-    // 丢掉出厂其余 12 个面，正是本段一开始就拒绝掉的那种整份取代。
+    // 出厂画布只认 data 层，缺了回落内置兜底表。定制层是叠加，不能当画布。
     let system = layers
         .iter()
         .find(|l| l.name == "data")
         .map(|l| l.path.join(wind_softkeyboard::FILE_NAME));
     let mut table = wind_softkeyboard::SoftKeyboardTable::load(system.as_deref());
-    // ⚠️ 层序方向：`resource_layers_named_with` 返回的是**优先级从高到低**的
-    // `[user, custom, data]`，而按面合并必须**从低到高**依次叠加（出厂铺底、
-    // 定制层次之、用户层最后）。故 `.rev()`。反过来叠的现象是
-    // 「用户改了一个键，定制版把它盖回去」。
+    // `resource_layers_named_with` 是优先级从高到低的 `[user, custom, data]`，叠加须从低到高，
+    // 故 `.rev()`；反了会让定制层盖回用户的改动。
     for layer in layers
         .iter()
         .rev()
@@ -119,8 +102,7 @@ pub(crate) fn load_softkeyboard_table(
 
 /// 虚拟键码 → 软键盘键位名。
 ///
-/// 由 [`wind_softkeyboard::all_slots`] 反查构建，**不手写第二份映射**——手写的那份
-/// 与布局表迟早分叉，症状是「某个键在面板上画着符号，敲下去却没反应」。
+/// 由 [`wind_softkeyboard::all_slots`] 反查构建，不手写第二份映射，免得与布局表分叉。
 fn vk_to_slot() -> &'static HashMap<u32, &'static str> {
     static MAP: OnceLock<HashMap<u32, &'static str>> = OnceLock::new();
     MAP.get_or_init(|| {
@@ -173,7 +155,7 @@ impl Coordinator {
         self.softkeyboard_page.load(Ordering::Relaxed).min(n - 1)
     }
 
-    /// 当前面是不是**键盘面**（按键交还输入法）。
+    /// 当前面是不是键盘面（按键交还输入法）。
     pub(crate) fn softkeyboard_send_keys(&self) -> bool {
         self.softkeyboard_table()
             .pages()
@@ -190,49 +172,23 @@ impl Coordinator {
             .unwrap_or_default()
     }
 
-    /// 软键盘开合 / 换面**之后**要做的三件事，一处收口。
-    ///
-    /// # 为什么必须收口
-    ///
-    /// 关闭软键盘有五条路径（Esc、面板关闭按钮、热键、工具栏点击、菜单、失焦），此前
-    /// 只有工具栏与菜单两条记得刷工具栏 ⇒ **用 Esc 或面板关闭按钮关掉后，工具栏上的
-    /// 软键盘图标一直亮着**。让每个调用点各记一次注定要漏，且漏的表现是「图标不对」
-    /// 这种没人会当成 bug 报的小事。
-    ///
-    /// 三件事：
+    /// 软键盘开合 / 换面之后要做的三件事，一处收口（关闭路径有多条，各记一次注定要漏）：
     /// 1. 推 C++（`STATUS_SOFT_KEYBOARD*` 位，吃键判定要跟上）；
     /// 2. 刷工具栏（图标高亮 = `softkeyboard_is_open()`）；
     /// 3. 记住当前面（换面才写盘，见 [`Self::save_softkeyboard_page`]）。
     ///
-    /// ⚠️ **只能在不持 `State` 锁时调用**：`notify_toolbar` 内部要读 state，而
-    /// `std::sync::Mutex` 不可重入。按键路径上由 `SoftKeyboardPushOnDrop` 负责——那个
-    /// RAII 守卫声明在 `handle_key_event` 最开头，故析构得最晚，那时 guard 已经还了。
+    /// 只能在不持 `State` 锁时调用（`notify_toolbar` 要读 state）。按键路径上由
+    /// `SoftKeyboardPushOnDrop` 负责，它析构时 guard 已经还了。
     pub(crate) fn after_softkeyboard_change(&self) {
         self.push_state_update();
         self.notify_toolbar();
         self.save_softkeyboard_page();
     }
 
-    /// 把当前面的 id 记进 `state.toml`。存 id 而非下标的理由见
-    /// `RuntimeState::last_softkeyboard_page`。
-    ///
-    /// # ★ 只在面板**关着**时写，且同一面不重复写
-    ///
-    /// 翻页键（PgUp/PgDn）走系统 auto-repeat，长按会连发 keydown 且**本模块刻意不去抖**
-    /// （见设计文档 §5）。每翻一面 id 都不同，去重挡不住 ⇒ 若开着时也写，长按翻页就成了
-    /// 在**按键返回路径上**每秒几十次 load-序列化-写-rename 整个 state.toml。输入法的
-    /// 按键路径上不该有同步磁盘 I/O。
-    ///
-    /// 「关着时才写」同时也正是这个状态的语义——记的是**上次用完时停在哪一面**，而不是
-    /// 翻页过程中的每一帧。关闭是必经路径（失焦也会关，见
-    /// [`Self::close_softkeyboard_on_focus_change`]），故不会漏记；代价只是「开着面板
-    /// 直接杀进程」时丢掉最后一次换面，后果不过是下次开在上上次那一面。
-    /// 这次该不该记、记什么。`None` = 不记。**判据全在这里，写盘全在外面**——
-    /// 分两层是为了让判据可测：写盘那半要碰进程外的全局路径，测试碰不得（见
-    /// [`Self::save_softkeyboard_page`] 里那道 store 门）。同 `expand_cells` /
-    /// `expand_cells_raw` 分层的理由。
+    /// 这次该不该记当前面、记什么（`None` = 不记）。判据在这里、写盘在
+    /// [`Self::save_softkeyboard_page`]，分层是为了让判据可测。
     pub(crate) fn softkeyboard_page_to_persist(&self) -> Option<String> {
-        // 开着时不记：翻页键走 auto-repeat 且刻意不去抖，见 `save_softkeyboard_page`。
+        // 开着时不记，见 `save_softkeyboard_page`。
         if self.softkeyboard_is_open() {
             return None;
         }
@@ -252,22 +208,17 @@ impl Coordinator {
         Some(id)
     }
 
+    /// 把当前面的 id 记进 `state.toml`（存 id 而非下标，见 `RuntimeState::last_softkeyboard_page`）。
+    ///
+    /// 只在面板关着时写、且同一面不重复写：翻页键走 auto-repeat 且刻意不去抖，开着时写会在
+    /// 按键路径上高频写盘。这也正是语义（记上次用完停在哪一面）；关闭是必经路径，代价只是
+    /// 开着面板直接杀进程时丢掉最后一次换面。
     fn save_softkeyboard_page(&self) {
         let Some(id) = self.softkeyboard_page_to_persist() else {
             return;
         };
-        // ⚠️ **无 store 的实例不写本机状态**——那道门现在收在 `state_writer` 的构造里
-        // （`StateWriter::new(store.is_some(), ..)`），语义不变：`state_dir()` 是进程外的
-        // 全局路径（`%LOCALAPPDATA%\WindInput[Dev]`），单测构造的协调器同样走得到，
-        // 于是跑一次 `cargo test` 就会改掉开发者本机的状态、还与正在运行的服务抢同一个
-        // 文件。判据借 `store`（其文档本就写着「None = 无持久化」），Android 生产形态经
-        // `new_headless_with_ui_at` 拿到用户目录、是有 store 的，故这道门只挡测试夹具。
-        //
-        // ★ 镜像在此处即时更新，**不再等"写成功"**。此前那套「写成功才更新去重镜像」是
-        // 为了防止一次偶发失败（文件被同步/备份工具锁住、磁盘满）让镜像谎称已存、
-        // 此后同一面永远被去重挡掉。异步化之后这里拿不到写入结果了，而那个自愈需求
-        // **原样上移到了写入器**：失败会把整批变更原样重放（`MAX_RETRIES`），
-        // 且对所有字段一视同仁，比原来只保护这一个字段更强。
+        // 无 store 的实例（测试夹具）不写本机状态，这道门收在 `StateWriter::new(store.is_some(), ..)`。
+        // 去重镜像即时更新、不等写成功：写失败的重试由写入器整批重放负责（`MAX_RETRIES`）。
         let saved = id.clone();
         self.state_writer.schedule("softkeyboard_page", move |rs| {
             rs.last_softkeyboard_page = saved.clone();
@@ -280,9 +231,8 @@ impl Coordinator {
 
     /// 开关软键盘。
     ///
-    /// `page` 非空时**无论开关状态都切到那一面**（直通车语义）：按一次进数学面，再按
-    /// 一次仍是数学面而不是关掉——否则用户给两个面各配一个直通键，两键就会互相打架。
-    /// 想关就用不带面的那条绑定，或 Esc。
+    /// `page` 非空时无论开关状态都切到那一面（直通车语义），否则给两个面各配直通键会互相打架。
+    /// 想关就用不带面的绑定，或 Esc。
     pub(crate) fn toggle_softkeyboard(&self, page: Option<&str>) -> KeyAction {
         match page {
             Some(id) if self.softkeyboard_is_open() => {
@@ -300,16 +250,11 @@ impl Coordinator {
 
     /// 热键入口：先处置正在打的编码，再开关面板。
     ///
-    /// ★ **必须先收掉未上屏的编码**。软键盘一开就接管主键区，用户没法再往下打，
-    /// 而候选窗还挂着旧候选——看起来就是「卡住了」。处置策略直接沿用切换那一套
-    /// （`keys.commit_on_switch`：开则上屏原码，关则丢弃），因为对「这串码还要不要」
-    /// 这个问题，开软键盘与切方案的答案相同。
+    /// 必须先收掉未上屏的编码：面板一开就接管主键区，旧候选挂着像卡住了。处置沿用切方案那套
+    /// （`keys.commit_on_switch`）。空文本也要走 `InsertText`：C++ `CommitText` 空文本也会
+    /// `EndComposition` 清掉宿主残留编码，只发状态更新清不掉。
     ///
-    /// ⚠️ **空文本也要走 `InsertText`**：C++ 的 `CommitText` 即便文本为空也会
-    /// `EndComposition`，清掉宿主里残留的编码；只发状态更新是清不掉的——那正是
-    /// 「切了方案编码还挂在应用里」的根因。
-    ///
-    /// ⚠️ 内部要取 `State` 锁，**只能在不持锁时调用**（热键分派点正好在取锁之前）。
+    /// 内部要取 `State` 锁，只能在不持锁时调用。
     pub(crate) fn softkeyboard_hotkey(&self, page: Option<&str>) -> KeyAction {
         // 关闭方向不必处置：软键盘态下本就没有输入会话。
         if self.softkeyboard_is_open() && page.is_none() {
@@ -334,13 +279,10 @@ impl Coordinator {
         }
     }
 
-    /// 菜单入口（无按键上下文）：开关面板；**开出来了**才处置正在打的编码并收候选窗。
+    /// 菜单入口（无按键上下文）：开关面板；开出来了才处置正在打的编码并收候选窗。
     ///
-    /// 与 [`Self::softkeyboard_hotkey`] 同一道理（面板一开就接管主键区，旧候选挂着像卡住了），
-    /// 只是出口不同：菜单没有按键应答可搭，编码经 push 出口交还宿主。
-    ///
-    /// 先开后处置、且以「开出来了」为准：映射表为空时开不出面板，那里不能把用户
-    /// 正在打的码白白清掉。关闭方向不必处置（软键盘态下本就没有输入会话）。
+    /// 同 [`Self::softkeyboard_hotkey`]，只是编码经 push 出口交还宿主。以「开出来了」为准：
+    /// 映射表为空时开不出，不能白清用户的码。
     pub(crate) fn softkeyboard_menu_toggle(&self, page: Option<&str>) {
         let was_open = self.softkeyboard_is_open();
         self.toggle_softkeyboard(page);
@@ -352,10 +294,8 @@ impl Coordinator {
         }
     }
 
-    /// 开启软键盘。表为空时不开——弹一个一个符号都打不出的面板只会让用户以为坏了。
-    ///
-    /// 宿主贴不了面板（Linux 旧 addon，见 [`Self::host_has_panels`]）时也不开：主键区会被接管而
-    /// 屏上什么都没有——打字全变符号。热键、菜单、工具栏都经此处，键交还宿主。
+    /// 开启软键盘。表为空时不开。宿主贴不了面板（见 [`Self::host_has_panels`]）时也不开、
+    /// 键交还宿主，否则主键区被接管而屏上什么都没有。
     pub(crate) fn open_softkeyboard(&self, page: Option<&str>) -> KeyAction {
         if !self.host_has_panels() {
             debug!("软键盘: 宿主没声明面板能力，忽略开启请求");
@@ -395,7 +335,7 @@ impl Coordinator {
 
     /// 关闭软键盘。
     ///
-    /// 保留当前面下标：再开时停在同一面，符合「面板是把工具，放下再拿起来还是刚才那把」。
+    /// 保留当前面下标，再开时停在同一面。
     pub(crate) fn close_softkeyboard(&self) -> KeyAction {
         if self.softkeyboard_active.swap(false, Ordering::Relaxed) {
             // 钉住是持久偏好，关闭不复位（UI 侧 `hide` 只复位按钮外观，下次打开再下发）。
@@ -408,12 +348,8 @@ impl Coordinator {
 
     /// 开关「钉住」，返回切换后的状态；面板没开时不动、返回 `false`。
     ///
-    /// 钉住 = 焦点怎么变都不自动关闭（Esc / 关闭按钮 / 工具栏仍可关）。是持久偏好：
-    /// 关闭不复位，经 `state.toml` 跨重启保留。落盘走异步 `state_writer`——这是鼠标点击，
-    /// 不在按键路径上，也没有 auto-repeat，无需像换面那样攒到关闭时再写。
-    ///
-    /// ★ **这是钉住的唯一入口**：面板按钮（`UiEvent::SoftKeyboardPin`）经此处，将来要给
-    /// 钉住绑快捷键（热键 / 面板内按键）也应只调它，不要再各写一份翻转逻辑。
+    /// 钉住 = 焦点怎么变都不自动关闭。持久偏好，关闭不复位，经 `state.toml` 跨重启保留
+    /// （鼠标点击无 auto-repeat，直接落盘）。这是钉住的唯一入口，将来绑快捷键也只调它。
     pub(crate) fn toggle_softkeyboard_pin(&self) -> bool {
         if !self.softkeyboard_is_open() {
             return false;
@@ -428,18 +364,15 @@ impl Coordinator {
         pinned
     }
 
-    /// 焦点事件到达时，面板是否该关。**纯判据**，不碰状态，便于单测。
+    /// 焦点事件到达时，面板是否该关。纯判据，便于单测。
     ///
-    /// 「焦点变化」里绝大多数是同宿主内的噪声：Excel 退出单元格是 `CtxLost` /
-    /// `NoEditCtx`，点到下一格是同进程的 `focus_gained`，Excel 同一 DocMgr 6ms 抖动
-    /// 一次也各发一条。这些都不代表用户不再需要面板——连续录入正是它的用途。
+    /// 焦点变化绝大多数是同宿主内的噪声（如 Excel 换单元格），不代表用户不再需要面板。
     /// 只有两类才算离开：
     ///
     /// - 整个应用失去前台（`Thread`）或切走本输入法（`ImeDeactivated`）；
-    /// - 焦点落到**另一个宿主进程**（`Gained` 的 pid 与开启时记的不同）。
+    /// - 焦点落到另一个宿主进程（`Gained` 的 pid 与开启时记的不同）。
     ///
-    /// `host_pid == 0`（开启时无活动宿主）或事件 pid 为 0（取不到）时保守地**不关**：
-    /// 误关会打断录入，误留只是多一个面板，用户可 Esc / 点关闭按钮收掉。
+    /// 任一 pid 为 0 时保守地不关：误关打断录入，误留只是多一个面板。
     pub(crate) fn softkeyboard_should_close_on(signal: SoftKbFocusSignal, host_pid: u32) -> bool {
         match signal {
             SoftKbFocusSignal::Lost(reason) => reason.clears_ime_active(),
@@ -450,22 +383,16 @@ impl Coordinator {
 
     /// 焦点切换时关闭。
     ///
-    /// ⚠️ 与工具栏的失焦**隐藏**不同，这里是**关闭**：切回来不自动恢复。复用的是
-    /// 「什么算失焦」那套判定，不是「失焦后做什么」的动作——两者分不清就会写成
-    /// 「切回应用软键盘自己弹出来」。
-    ///
-    /// 「什么算离开」见 [`Self::softkeyboard_should_close_on`]：同宿主内的焦点抖动不关。
-    ///
-    /// ★ 这条行为完全依赖面板不抢焦点（`WS_EX_NOACTIVATE`）：面板一旦可激活，
-    /// 用户点它上面任何一个键都是在改变焦点，它会把自己关掉。
+    /// 与工具栏的失焦隐藏不同，这里是关闭，切回来不自动恢复。判据见
+    /// [`Self::softkeyboard_should_close_on`]。依赖面板不抢焦点（`WS_EX_NOACTIVATE`），
+    /// 否则点面板上的键就会把自己关掉。
     pub(crate) fn close_softkeyboard_on_focus_change(&self, signal: SoftKbFocusSignal) {
         if !self.softkeyboard_is_open() {
             return;
         }
         let host_pid = self.softkeyboard_host_pid.load(Ordering::Relaxed);
-        // 宿主跟着最近一次获焦的进程走：钉住期间用户在别的应用里继续用，之后取消钉住时，
-        // 判据要拿「现在这个应用」当宿主，否则在新应用里第一次换焦点就把面板关了。
-        // 宿主未知（0）时同理补记，否则同宿主判据此后永不起作用。
+        // 钉住期间或宿主未知时，宿主跟着最近获焦的进程走，否则取消钉住后在新应用里第一次
+        // 换焦点就会关掉面板。
         if let SoftKbFocusSignal::Gained { pid } = signal
             && pid != 0
             && (host_pid == 0 || self.softkeyboard_pinned.load(Ordering::Relaxed))
@@ -484,9 +411,8 @@ impl Coordinator {
             debug!("softkeyboard: 焦点事件 {signal:?}（宿主 pid={host_pid}）不算离开，保留");
             return;
         }
-        // 守卫期：跨宿主切换时旧宿主的 focus_lost 实测晚约 100ms 到达，而「从工具栏图标
-        // 点开面板」正好落在这个窗口里。不设守卫的表现是「点一下弹出即消失」——菜单为
-        // 这件事踩过一轮，这里直接复用它的守卫期常量。
+        // 守卫期：跨宿主切换时旧宿主的 focus_lost 晚约 100ms 到达，从工具栏点开面板正落在
+        // 这个窗口里，不设守卫会「弹出即消失」。复用菜单的守卫期常量。
         if let Some(at) = *self
             .softkeyboard_opened_at
             .lock()
@@ -504,9 +430,7 @@ impl Coordinator {
         self.after_softkeyboard_change();
     }
 
-    /// 切到指定 id 的面。面不存在返回 `false` 并告警——**不静默忽略**：用户配了
-    /// `softkeyboard:math` 而表里没有 math 时，静默会表现成「按了没反应」，
-    /// 与「这个键根本没绑上」完全同形，用户无从分辨。
+    /// 切到指定 id 的面。面不存在返回 `false` 并告警，不静默（否则与「键没绑上」无从分辨）。
     fn softkeyboard_goto(&self, id: &str) -> bool {
         match self.softkeyboard_table().index_of(id) {
             Some(idx) => {
@@ -551,8 +475,7 @@ impl Coordinator {
 
     /// 软键盘态的按键处理。
     ///
-    /// 返回 `None` = 本模块不管这个键，调用方继续走常规链路。**特殊键与布局外按键的
-    /// 处置就在这里**：不拦，它们自然回到宿主。
+    /// 返回 `None` = 本模块不管这个键，调用方继续走常规链路（特殊键与布局外按键即如此）。
     pub(crate) fn handle_softkeyboard_key(
         &self,
         state: &State,
@@ -563,9 +486,7 @@ impl Coordinator {
         }
         let vk = data.key_code;
         let send_keys = self.softkeyboard_send_keys();
-        // 正在打字（有编码或有候选）时，面板的控制键要让位给输入本身：Esc 是「清空这串
-        // 码」、翻页是「翻候选页」，都比「关面板 / 切面」更贴近用户当下在做的事。
-        // 只有键盘面会出现这种局面——符号面根本不组码。
+        // 键盘面上正在打字时，Esc / 翻页让位给输入本身（清码 / 翻候选页）。
         let typing = send_keys && (!state.input_buffer.is_empty() || !state.candidates.is_empty());
 
         // ── 面板自己的控制键 ──
@@ -590,11 +511,7 @@ impl Coordinator {
             return None;
         }
 
-        // ── 键盘面：不接管，键归常规输入链路 ──
-        //
-        // 只把按下的样子画到面板上（跟手的高亮 + 切层），然后 `None` 放行。C++ 侧对称地
-        // 不吃这些键（`STATUS_SOFT_KEYBOARD_KEYS`），于是这一面上打字与没开面板时完全
-        // 一样：能组码、能出候选、能打中文。
+        // ── 键盘面：只画按下反馈，`None` 放行；C++ 侧对称地不吃这些键 ──
         if send_keys {
             if let Some(slot) = vk_to_slot().get(&vk) {
                 self.softkeyboard_press_feedback(slot, data.modifiers & MOD_SHIFT != 0);
@@ -608,8 +525,7 @@ impl Coordinator {
         self.softkeyboard_press_feedback(slot, shift);
         let table = self.softkeyboard_table();
         let page = table.pages().get(self.softkeyboard_page_idx())?;
-        // ★ 取档与面板显示**同一份判据**（`slot_layer`）：面板画着 A，敲下去就得出 A。
-        // 各写一份的症状是显示与输出分叉，比不支持 CapsLock 更糟。
+        // 取档与面板显示同一份判据（`slot_layer`），否则显示与输出分叉。
         let layer = slot_layer(slot, shift, state.caps_lock);
         match page.output(slot, layer) {
             Some(text) => {
@@ -621,8 +537,7 @@ impl Coordinator {
                 Some(self.softkeyboard_commit(state, &text))
             }
             None => {
-                // 空键位：**吃掉并忽略**。透传是错的——面板上画着一个灰键位，敲下去却在
-                // 宿主里出了个字母，比什么都不发生更让人困惑。
+                // 空键位吃掉并忽略：透传会在灰键位上打出字母。
                 debug!("softkeyboard: {slot} 是空键位，已忽略");
                 Some(KeyAction::Consumed)
             }
@@ -631,8 +546,7 @@ impl Coordinator {
 
     /// 面板跟随物理按键：切层与键帽高亮。
     ///
-    /// 高亮不需要 keyup 配对——面板收到后自行短时清除，而物理长按会连发 keydown 不断
-    /// 续期，视觉上就是持续按下。
+    /// 高亮不需要 keyup 配对：面板自行短时清除，长按连发 keydown 不断续期。
     fn softkeyboard_press_feedback(&self, slot: &str, shift: bool) {
         let _ = self.ui_tx.send(UiCommand::SoftKeyboardLayer { shift });
         let _ = self.ui_tx.send(UiCommand::SoftKeyboardKeyState {
@@ -643,8 +557,7 @@ impl Coordinator {
 
     /// 把一个符号交给上屏出口。
     ///
-    /// ⚠️ **必须过 `maybe_convert`**，不能把字面量直接塞进 `InsertText`：简繁转换出口曾经
-    /// 七处全漏、事后才收口，新增上屏路径正是那类缺陷的典型来源。
+    /// 必须过 `maybe_convert`，不能把字面量直接塞进 `InsertText`。
     fn softkeyboard_commit(&self, state: &State, text: &str) -> KeyAction {
         KeyAction::InsertText {
             text: self.maybe_convert(state, text),
@@ -659,8 +572,7 @@ impl Coordinator {
 impl Coordinator {
     /// 把当前面下发给渲染端（开启 / 切面 / 内容变都走这里）。
     ///
-    /// 只发当前面：切面时重发一次即可，而那一刻本来就要重排整块面板；一次性发全部
-    /// 13 面要搬一千多个键位，其中 92% 当场用不上。
+    /// 只发当前面：切面时本就要重排整块面板，一次发全部面大多用不上。
     pub(crate) fn push_softkeyboard_view(&self) {
         let idx = self.softkeyboard_page_idx();
         let pages: Vec<String> = self
@@ -684,9 +596,8 @@ impl Coordinator {
                     .to_string(),
             })
             .collect();
-        // 位置随每次刷新重发：切面会改面板尺寸（各面键数不同），锚右下角正是为了让那次
-        // 尺寸变化朝屏幕内侧展开。协调器的内存镜像随拖动上报即时更新，故这里带的
-        // 恒是最新值，不会与用户刚拖到的位置打架。
+        // 位置随每次刷新重发：切面会改面板尺寸，锚右下角让尺寸变化朝屏幕内侧展开。
+        // 内存镜像随拖动即时更新，这里恒是最新值。
         let placement = self.softkeyboard_placement();
         let _ = self.ui_tx.send(UiCommand::ShowSoftKeyboard {
             pages,
@@ -700,17 +611,13 @@ impl Coordinator {
 
     /// 面板上点了一个符号键帽。
     ///
-    /// ⚠️ 走 `push_commit_text` 而不是返回 `KeyAction`：UI 事件不在按键路径上，没有那条
-    /// 回程通道（同点击候选那条路）。文本仍要过 `maybe_convert`——上屏出口只有一个。
+    /// 走 push 上屏而不是返回 `KeyAction`：UI 事件不在按键路径上。文本仍要过 `maybe_convert`。
     pub(crate) fn ui_softkeyboard_key(&self, slot: &str, shift: bool, ctrl: bool) {
         let table = self.softkeyboard_table();
         let Some(page) = table.pages().get(self.softkeyboard_page_idx()) else {
             return;
         };
-        // ── Ctrl 粘滞：一律合成组合键，**不看当前是哪种面** ──
-        //
-        // Ctrl+C 要的是复制，跟这一面在 `c` 那个位置画着什么符号没有关系。所以它排在
-        // 取 `output` 之前——符号面上那些位置查表得到的是「©」之类，拿去当组合键毫无意义。
+        // ── Ctrl 粘滞：一律合成组合键，不看当前是哪种面，故排在取 `output` 之前 ──
         if ctrl {
             let combo = if shift {
                 format!("ctrl+shift+{slot}")
@@ -724,14 +631,8 @@ impl Coordinator {
         let Some(text) = page.output(slot, shift) else {
             return; // 空键位：面板上是灰的，点了不该有反应
         };
-        // ── 键盘面：合成一次真实按键，交给输入法 ──
-        //
-        // ★ 发的是**键位**不是画布上那个字：键盘面的画布只管显示，点 `q` 就该发 q 键，
-        // 于是它经宿主 → TSF → 常规输入链路，点 n-i-h-a-o 出的是「你好」。
-        // 面板 `WS_EX_NOACTIVATE` 不抢焦点，合成的键落在真正的焦点窗口上。
-        //
-        // 这一轮不会被自己拦回来：C++ 侧在键盘面不启用软键盘总闸，Rust 侧
-        // `handle_softkeyboard_key` 也对键盘面放行。
+        // ── 键盘面：合成一次真实按键（发键位而非画布上的字），经常规输入链路出中文 ──
+        // 不会被自己拦回来：C++ 不启用总闸，`handle_softkeyboard_key` 也对键盘面放行。
         if page.send_keys {
             let combo = if shift {
                 format!("shift+{slot}")
@@ -764,8 +665,7 @@ impl Coordinator {
         }
         self.softkeyboard_page.store(idx, Ordering::Relaxed);
         self.push_softkeyboard_view();
-        // UI 事件不在按键路径上，没有那个 RAII guard 兜底，得自己推：切面可能改变
-        // `STATUS_SOFT_KEYBOARD_KEYS`，C++ 的吃键判定要跟上；换了面也要记下来。
+        // UI 事件没有按键路径的 RAII guard 兜底，得自己推。
         self.after_softkeyboard_change();
     }
 
@@ -777,9 +677,7 @@ impl Coordinator {
 
     /// 面板上点了特殊键（退格 / Tab / 回车 / 空格 / Ins / Del）。
     ///
-    /// 焦点在宿主、我们不能插文本，只能让那个键真的发生一次。本仓「勿用按键模拟实现
-    /// `type()`」的禁令**不适用**——那条禁的是把待上屏文本降级成按键序列（会绕开 CR
-    /// 规范化与跟打统计）；功能键点击走的正是 `key.tap` 那条正路。
+    /// 只能让那个键真的发生一次。「勿用按键模拟实现 `type()`」的禁令不适用，见设计文档 §7.4。
     pub(crate) fn ui_softkeyboard_fn_key(&self, name: &str) {
         self.softkeyboard_tap(name);
     }
@@ -793,15 +691,8 @@ impl Coordinator {
                 warn!("软键盘: 合成按键 {combo:?} 失败: {e}");
             }
         }
-        // ⛔ macOS **不能**在本进程 post CGEvent。
-        //
-        // 服务是 LaunchAgent 拉起的进程，没有辅助功能授权，而向别的进程注入键盘事件
-        // 恰恰需要它——`CGEventPost` 会**返回成功、事件被静默丢弃**。拿着授权的是 `.app`，
-        // 所以按键合成一律推下行帧交给它的 `KeySynthesizer`，与命令直通车 `key.tap`
-        // 走同一条路（见 `handle_cmdbar_macos` 模块头）。
-        //
-        // 这不是理论顾虑：0.121 那版就是照搬 Windows 分支直接调 `SysKeys`，
-        // 表现为「软键盘上 Tab / 退格 / 回车 / Del 一个都不管用」。
+        // macOS 不能在本进程 post CGEvent：服务没有辅助功能授权，`CGEventPost` 返回成功但事件
+        // 被丢弃。按键合成推下行帧交给 `.app` 的 `KeySynthesizer`，见设计文档 §11.7。
         #[cfg(ext_presenter)]
         {
             let (key, mods) = crate::handle_cmdbar_macos::split_combo(combo);
@@ -821,8 +712,7 @@ impl Coordinator {
 
 // ───────────────────────── 映射表的读取、重载与设置端编辑 ─────────────────────────
 
-/// 设置端编辑器的整批写入互斥：读用户层 → 改 → 写回全程持锁。设置端可能开着不止一个
-/// 连接（主窗 + 冷启动的子页面），交错时后写的会把先写的整份覆盖掉。
+/// 设置端编辑器的整批写入互斥：读用户层 → 改 → 写回全程持锁，防多个连接交错覆盖。
 static SOFTKEYBOARD_EDIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 impl Coordinator {
@@ -850,8 +740,7 @@ impl Coordinator {
 
     /// 重新加载映射表（设置端编辑器写完用户层后）。
     ///
-    /// 当前面按 **id** 找回（编辑可能在它前面增删了面）；找不到就回第一面。面板开着时当场
-    /// 重发视图，表空了就关掉——与 `open_softkeyboard` 拒开空表同理。
+    /// 当前面按 id 找回（编辑可能增删了面），找不到回第一面。面板开着时当场重发视图，表空了就关掉。
     pub(crate) fn reload_softkeyboard(&self) {
         // 与按键路径同一个收口：面的类型（send_keys）可能变了，C++ 吃键判定要跟上。
         let _push = SoftKeyboardPushOnDrop(self);
@@ -940,19 +829,15 @@ impl Coordinator {
 
 /// 按键返回时把软键盘状态推给 C++（`STATUS_SOFT_KEYBOARD` 位）。
 ///
-/// ★ 用 RAII 而不是在各 return 点手写：`handle_key_event` 有几十个 return，漏一个的
-/// 症状极隐蔽——Rust 这边认为软键盘开着并接管按键，C++ 那边仍按「没开」判定而不吃
-/// 数字键，于是数字行整行失效、别的键都正常。
+/// 用 RAII 而不是在几十个 return 点手写，漏一个就两侧状态不一致（数字行整行失效）。
 ///
-/// ⚠️ **必须声明在函数最开头**：局部变量按声明的逆序析构，声明得最早 ⇒ 析构得最晚
-/// ⇒ 那时 `state` 的 `MutexGuard` 已经还了，推送里的 `state.lock()` 不会撞上自己。
+/// 必须声明在函数最开头：最早声明、最晚析构，那时 `state` 的 `MutexGuard` 已经还了。
 pub(crate) struct SoftKeyboardPushOnDrop<'a>(pub(crate) &'a Coordinator);
 
 impl Drop for SoftKeyboardPushOnDrop<'_> {
     fn drop(&mut self) {
         if self.0.softkeyboard_dirty.swap(false, Ordering::Relaxed) {
-            // 这一支内部已 push_state_update（推的是完整快照，热键会话位自然在内），
-            // 不必再推一次；但缓存要跟着对齐，否则下一次按键会据陈旧缓存白推一次。
+            // 这一支已推完整快照（含热键会话位），只需对齐缓存，免得下次按键白推一次。
             self.0.after_softkeyboard_change();
             self.0.sync_hotkey_session_cache();
             return;

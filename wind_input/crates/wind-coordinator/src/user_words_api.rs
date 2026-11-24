@@ -2,28 +2,20 @@
 //!
 //! # 为什么在这里而不在 wind-webdata
 //!
-//! 这些逻辑原本是 wind-webdata 里 `dict.listPaged` / `dict.add` / `dict.remove` /
-//! `dict.clear` 的 RPC 本体。移动端设置页要做同样的「词库」页，但 **Android 闭包刻意不含
-//! wind-webdata**（它带 wind-transfer/fontdb 这些 C 依赖，见本 crate Cargo.toml 的 ⚠ 注释），
-//! wind-mobile 依赖不了它。若移动端照抄一份，ü 归一、边界求解、三条分流的搜索语义迟早
-//! 两边各改各的——本仓「写入归一了、查询入口没跟上」那类 bug 就是这么来的。
-//!
-//! 它们实际只依赖 [`WebDataHost`] 窄面（引擎管理器 + 用户库），所以下沉到这里，两端各自
-//! 委托。先例是统计报表（`wind_store::stats_report`）。
+//! Android 闭包不含 wind-webdata（它带 C 依赖，见本 crate Cargo.toml 的注释），移动端
+//! 又不能照抄一份（ü 归一、边界求解、搜索语义会两边各改各的），故把只依赖
+//! [`WebDataHost`] 窄面的逻辑下沉到这里，两端各自委托。
 //!
 //! # 边界：只管存储域
 //!
-//! 这里收发的是**存储域**——真实文本、扁平码（`nihao` + boundary bitmask）。显示域的投影
-//! 各端自己做：桌面的 `ui_text`/`store_text` 转义与列表项 JSON 形状仍在 wind-webdata；
-//! 带音节空格的显示码可用 [`display_code`] 从记录得到。
+//! 收发真实文本与扁平码（`nihao` + boundary bitmask）。显示域投影（转义、JSON 形状）各端
+//! 自己做；带音节空格的显示码用 [`display_code`] 得到。
 //!
 //! # 不在这里做的
 //!
-//! - **只读模式拒写**：桌面在只读模式下根本不打开 store（`user_store()` 为 `None`，写口
-//!   自然报「无持久化存储」），本层不另加闸，以保桌面 RPC 的行为与错误文案一字不变。
-//!   需要显式闸门的调用方（移动端门面）自己先查 `storage_readonly_reason()`。
-//! - **页缓存回收**：全表扫描后的标记、批量写后的回收是 RPC 出口的策略（wind-webdata 的
-//!   `web_data_rpc`），不属于单个操作。
+//! - 只读模式拒写：桌面只读时 `user_store()` 为 `None`，写口自然报错；移动端门面自己先查
+//!   `storage_readonly_reason()`。
+//! - 页缓存回收：属于 RPC 出口的策略（wind-webdata 的 `web_data_rpc`）。
 
 use wind_store::user_words::UserWordRecord;
 
@@ -69,24 +61,13 @@ pub fn list_paged<H: WebDataHost + ?Sized>(
     let store = h
         .user_store()
         .ok_or_else(|| anyhow::anyhow!("无持久化存储"))?;
-    // 编码前缀须用扁平码（key 是扁平的），用户可能照着列表显示的 `ni hao` 来搜。
-    // 下面的**词条内容**搜索仍用原串——那是拿汉字去匹配 text，与音节空格无关。
-    //
-    // ★ 再过一道 ü 归一：写入侧（`normalize_add_code`）已把 `xv` 落成 `xu`，而
-    // `search_user_words_prefix` 是**裸字节前缀匹配**——不归一则用户手打 `xv` 搜
-    // 自己刚加的词一条也出不来。写入归一了、查询入口没跟上，正是本仓踩过多次的
-    // 那个形态（见 `docs/design/pinyin-code-domains.md`）。
+    // 编码前缀须拆成扁平码并做 ü 归一，与写入侧 `normalize_add_code` 同域，否则搜 `xv`
+    // 找不到已落成 `xu` 的词（见 `docs/design/pinyin-code-domains.md`）。词条内容搜索仍用原串。
     let (code_prefix, _) = wind_store::wdict::split_spaced_code(query);
     let code_prefix = normalize_pinyin_code(h, &schema, code_prefix);
 
-    // ★ 不搜也不排序：按 key 序**流式**取一页，全表只物化 `limit` 条。
-    //
-    // 设置页打开词库标签走的就是这条，是三条路里最常被走的。从前它与另外两条一样
-    // 「先全收进 Vec 再 skip/take」——19 万条的库要先造 38 万个 `String` 才切出 50 条。
-    //
-    // ⚠️ 仍然**扫完整表**，不能中途早退：`total` 要精确（分页器显示「共 N 条」）。
-    // 省掉的是物化，不是扫描；redb 的读缓存该填还是填（见 wind-store 的
-    // `tests/redb_cache_high_water.rs`）。那笔高水位另有出路，不在这里解决。
+    // 不搜也不排序（最常走的路）：按 key 序流式取一页，只物化 `limit` 条。仍须扫完整表
+    // 以得到精确 `total`，省的是物化不是扫描。
     if query.is_empty() && sort.is_none() {
         let mut items = Vec::new();
         let mut total = 0usize;
@@ -104,15 +85,8 @@ pub fn list_paged<H: WebDataHost + ?Sized>(
         // 要排序：排序是跨页全局的，只能全量物化。
         store.search_user_words_prefix(&schema, &code_prefix, 0)?
     } else {
-        // 有搜索词：**一遍**扫描分两组，编码前缀命中在前、其余命中在后。
-        //   ① 词条内容包含搜索词（拿汉字匹配 text，用原串）
-        //   ② **编码中段包含**搜索词（用拆过的扁平码）—— 前缀扫描只能命中开头，
-        //      `haoya` 搜 `ya` 一条也出不来，而用户并不知道搜索框只认前缀。
-        //
-        // 从前这里扫**两遍**全表（一遍前缀、一遍全量），再拿一个全量 clone 的
-        // `HashSet<(String,String)>` 去重——而前缀命中本就是全量扫描的子集，第二遍
-        // 纯属重复，那个 HashSet 更是把整张表的 code/text 又抄了一份。分两组天然互斥，
-        // 去重结构一并不需要了。顺序与从前逐条相同。
+        // 有搜索词：一遍扫描分两组，编码前缀命中在前；其余组收词条内容包含（用原串）
+        // 与编码中段包含（用扁平码，用户不知道搜索框只认前缀）。两组互斥，无需去重。
         let q = query.to_lowercase();
         let code_q = code_prefix.to_lowercase();
         let mut head = Vec::new();
@@ -148,9 +122,8 @@ pub fn list_paged<H: WebDataHost + ?Sized>(
 
 /// 手动加词（已存在则按 store 的合并语义：权重取 max、旧边界为 0 时补上）。
 ///
-/// `text` 是**存储域**真实文本——桌面设置页传来的转义形态须由调用方先还原。`code` 可带
-/// 音节空格。落库经 `Store::add_user_word`，它推进该方案的结构代次（`bump_words_gen`），
-/// 引擎据此失效候选缓存——加完立刻打得出，各端走同一函数故自动一致。
+/// `text` 是存储域真实文本（转义形态须由调用方先还原），`code` 可带音节空格。落库会推进
+/// 该方案的结构代次，引擎据此失效候选缓存，加完立刻打得出。
 pub fn add<H: WebDataHost + ?Sized>(
     h: &H,
     schema_id: &str,
@@ -200,13 +173,12 @@ pub fn add_batch<H: WebDataHost + ?Sized>(
     Ok(())
 }
 
-/// **单条显式**加词（加词对话框 / 快捷加词 / 命令栏 `dict.add`、设置页加词改词、单条手动转正）
+/// 单条显式加词（加词对话框、快捷加词、命令栏 `dict.add`、设置页加改词、单条手动转正）
 /// 成功后的收口：撤掉同 (数据方案, 编码, 文本) 的候选调整删除规则。
 ///
-/// 读端 `apply_shadow` 按文本过滤、不看来源：用户删过某个系统词后再手动加回同码同文的词，
-/// 规则不撤就永远打不出来。**自动**学词 / 自动晋升不走这里——删过的词不该因为又打到一次就复活。
-/// **批量**操作（导入词库、全部转正）也不撤：一批词里混着用户删过的，不该悄悄全复活；它们改用
-/// [`count_hidden_by_shadow`] 在结果里报数。
+/// `apply_shadow` 按文本过滤、不看来源，不撤的话删过再手动加回的词永远打不出来。
+/// 自动学词 / 晋升不走这里（删过的词不该因再打到一次而复活）；批量导入、全部转正也不撤，
+/// 改用 [`count_hidden_by_shadow`] 报数。
 ///
 /// 规则的匹配范围见 [`delete_rule_buckets`] 与 [`delete_rule_key_forms`]。
 ///
@@ -354,19 +326,12 @@ pub fn clear<H: WebDataHost + ?Sized>(h: &H, schema_id: &str) -> anyhow::Result<
 
 /// 规范化手动提交的编码，返回 `(扁平 code, boundary)`。`schema` 为已折叠的数据方案 id。
 ///
-/// 两条边界来源，按可信度取：
-/// 1. **用户在码里打了空格**（`ni hao`）—— 显式声明的切分，直接采信。同时必须拆成扁平
-///    码：带空格的串若原样落库，key 就成了 `ni hao`，前缀查询再也匹配不到它。
-/// 2. 无空格 → 交给 [`wind_engine::Engine::resolve_boundary`] 的四层求解链。
+/// 边界来源按可信度取：
+/// 1. 码里带空格（`ni hao`）：显式切分，直接采信，并拆成扁平码落库（否则前缀查询匹配不到）。
+/// 2. 无空格：交给 [`wind_engine::Engine::resolve_boundary`] 的求解链。
 ///
-/// ★ 这里原本是一个私有的 `infer_boundary_for`，只做「手输码 == 引擎推导码则借用其
-/// 切分」这一条判据——**那正是求解链的层 3**，是重复实现。收敛掉之后手输码额外获得
-/// 层 2（词典点查）与层 4（字数约束求解）两条来源：以前用户手打 `xianning` +「西安宁」
-/// 因推导码对不上而拿 0，现在能解出 `xi|an|ning`。
-///
-/// ⚠️ **有意不在这里拒收** `Unresolvable`：本函数服务于手动加词，那是用户明确
-/// 的意图，静默拒绝会变成「点了保存没反应」。合法性拦截只放在导入闸口（那里有预览
-/// 可以如实告知）。此处非法码照旧落 `boundary = 0`，与改动前等价。
+/// 有意不拒收 `Unresolvable`：手动加词是用户明确意图，静默拒绝会变成「点了保存没反应」；
+/// 合法性拦截只放在有预览的导入闸口。求解不出照旧落 `boundary = 0`。
 pub fn normalize_add_code<H: WebDataHost + ?Sized>(
     h: &H,
     schema: &str,
@@ -388,13 +353,8 @@ pub fn normalize_add_codes<H: WebDataHost + ?Sized>(
         .iter()
         .map(|(code, _)| {
             let (flat, explicit) = wind_store::wdict::split_spaced_code(code);
-            // ü 拼写归一（`xv` → `xu`、`nue` → `nve`）。**落库 key 与查询侧必须同域**：
-            // 查询侧 `PinyinEngine::convert` 已把击键归一成正字法形态，key 若停在 `xv`
-            // 就成了「加得进、打不出」——用户看得见这条词，永远召不回。
-            //
-            // ⚠️ 必须先于下面「显式边界不求解」的分流：带空格的码（`nue yao`）漏了它就只有
-            // 「手打空格声明切分」的用户中招，而那恰恰是最难复现的一档。
-            // 归一化是等长替换，故 `explicit` 这个按位置算的 bitmask 不受影响。
+            // ü 归一：落库 key 须与 `PinyinEngine::convert` 归一后的查询同域，否则加得进打不出。
+            // 须先于「显式边界不求解」的分流，带空格的码也要归一；等长替换，不影响 `explicit`。
             (normalize_pinyin_code(h, schema, flat), explicit)
         })
         .collect();
@@ -420,12 +380,7 @@ pub fn normalize_add_codes<H: WebDataHost + ?Sized>(
         })
         .collect();
     for (i, r) in resolved {
-        // 探测器：手输码落在契约之外时留一条痕。**不改变行为**（照旧落 boundary=0），
-        // 它是「有多少手输码求解不出」的唯一观测点——这类词的简拼会退化成 DAG 现猜，
-        // 而那在歧义码上必错，用户侧的表现是「加了词但简拼召不回」，无从追溯。
-        //
-        // ⚠️ 用 `debug!` 而非 `info!`：本行含 code 与 text，属用户词库内容。
-        // INFO 生产默认开启，不得记录用户输入类信息。
+        // 求解不出的唯一观测点（这类词的简拼会退化成现猜）。含用户词条，只能用 `debug!`。
         if r == wind_engine::BoundaryResolution::Unresolvable {
             tracing::debug!(
                 "加词：拼音码求解失败，按无边界落库 code={} text={}",
@@ -448,12 +403,10 @@ pub fn target_is_pinyin<H: WebDataHost + ?Sized>(h: &H, schema_id: &str) -> bool
 
 /// 拼音方案的 ü 拼写归一（`xv` → `xu`、`nue` → `nve`）；非拼音方案原样返回。
 ///
-/// 落点在这一层而非 `wind_store::import_formats::CodePolicy`（那是导入解析期的
-/// 编码归一策略，概念上更贴），是因为 `wind-store` 在依赖图里位于 `wind-engine`
-/// **下游**，拿不到 `normalize_u_umlaut`；复制一份规则则必然随时间漂移。
+/// 不放在 `wind_store::import_formats::CodePolicy`：`wind-store` 拿不到 `wind-engine` 的
+/// `normalize_u_umlaut`，复制规则会漂移。
 ///
-/// ⚠️ 判据必须是「目标方案是不是拼音」而不是「码里有没有 v」：码表/五笔/快符的
-/// 码里 `v` 是正经码元（五笔 `v` = 女字旁），动它会把用户的词改成打不出的码。
+/// 判据必须是「目标方案是不是拼音」而不是「码里有没有 v」：码表的 `v` 是正经码元。
 pub fn normalize_pinyin_code<H: WebDataHost + ?Sized>(
     h: &H,
     schema_id: &str,

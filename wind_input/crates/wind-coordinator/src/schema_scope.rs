@@ -1,48 +1,24 @@
-//! 方案级行为覆盖（`[punct]` / `[candidate]` / `[phrases]`）的**代际同步点**。
+//! 方案级行为覆盖（`[punct]` / `[candidate]` / `[phrases]`）的代际同步点。
 //!
-//! 设计见 `docs/design/schema-scoped-behavior.md` §4。
+//! 规则：方案意图是默认值；用户在该方案期间手动改的值胜出，但只在当前代际内有效。
+//! 设计与取舍见 `docs/design/schema-scoped-behavior.md` §4。
 //!
-//! # 规则
+//! 用代际而非「切方案时设一次」：切方案路径有多条（含启动载入），命令式写法漏一条即永久失效；
+//! 惰性同步漏调一处只是晚一拍，下一次按键必经 `handle_key_event`。
+//! `schema_generation` 不能当 `invalidate_schema` 的失效判据（设置页改 `schema_overrides`
+//! 不 bump 代际，见 `key_resolver.rs` 头部），但本处要的正是「活跃方案变了」。
 //!
-//! > 方案意图是**默认值**；用户在该方案期间手动改的值胜出，但只在**当前代际**内有效。
-//!
-//! 切到英文方案 → 英文标点；用户按 `toggle_punct` → 中文标点（本代际内一直有效）；
-//! 切到五笔 → 代际 +1，手动值自动失效；切回英文 → 又是英文标点。
-//!
-//! # 为什么是代际，不是「切方案时设一次」
-//!
-//! `finish_user_schema_switch` 自己的注释写明「本函数只覆盖五条切方案路径中的两条」，
-//! 加上启动时载入 `schema.active` 一条都不走 ⇒ 命令式的「切方案时设一次」**必然漏接**，
-//! 而漏接的表现是「配了没反应」。代际方案不需要枚举切换路径。
-//!
-//! ⚠️ 反向提醒：`schema_generation` **不能**当 `invalidate_schema` 的失效判据（设置页改
-//! `schema_overrides` 不 bump 代际，见 `key_resolver.rs` 头部）。本处要的恰好是
-//! 「活跃方案变了」这一个语义，用它是对的。
-//!
-//! # 为什么标点走「惰性同步写状态」而不是纯声明式
-//!
-//! 布局是「算出来再下发」的派生值，可以每次重算（见 [`crate::layout`]）；标点不是——
-//! `state.chinese_punct` 被语言栏图标、工具栏、`convert_punct`、`active_pairs`、
-//! `push_config`、智能符号的 press1 快照等七八处**直接读取**，全改成取值函数是一次大范围
-//! 散射，且智能符号那处存的是**状态快照**，语义会歪。
-//!
-//! ★ 这个形态的关键性质：**漏调一个同步点的后果是「晚一拍」而不是「永不生效」**——
-//! 下一次按键必然经过 `handle_key_event`。这正是它优于命令式写法的地方，也是可以接受
-//! 「调用点不止一个」的理由。命令式写法漏一条路径就是永久失效。
-//!
-//! # 标点为什么**不需要**一个 `punct_manual` 字段
-//!
-//! 因为 `schema_scope_gen` 守卫本身就实现了「手动值在当前代际内胜出」：代际未变时
-//! [`Coordinator::sync_schema_scope`] 直接返回，压根不会去覆盖用户刚 toggle 出来的值。
-//! 布局则不同——它每次显示都重算，没有「不去覆盖」这一说，故需要显式的
-//! [`State::layout_manual`]。
+//! 标点走惰性同步写 `state.chinese_punct`，而不是纯声明式：它被语言栏、工具栏、
+//! `convert_punct`、智能符号快照等多处直接读取。标点不需要 `punct_manual`：代际未变时
+//! [`Coordinator::sync_schema_scope`] 直接返回，本就不会覆盖用户刚 toggle 的值；布局每次显示
+//! 都重算，才需要显式的 [`State::layout_manual`]。
 
 use crate::coordinator::{Coordinator, State};
 
 impl Coordinator {
-    /// 活跃方案代际变化时，把方案级意图落到运行时状态。**幂等**：代际未变即刻返回。
+    /// 活跃方案代际变化时，把方案级意图落到运行时状态。幂等：代际未变即刻返回。
     ///
-    /// 调用点（都幂等、可重复调，漏一个只是晚一拍）：
+    /// 调用点（漏一个只是晚一拍）：
     /// - `handle_key_event` 入口——兜底，保证最迟下一次按键必然收敛；
     /// - `push_state_update` / `show_status`——让工具栏与状态泡当场反映新方案的标点态；
     /// - `apply_ui_config`（热重载）。
@@ -56,37 +32,24 @@ impl Coordinator {
         self.send_candidate_min_size();
         // 布局手动值随代际失效。标点态不需要对应动作，理由见模块文档最后一节。
         state.layout_manual = None;
-        // 单字输入的临时态随代际失效：切走方案就回到新方案配的取值。
-        //
-        // ★ 这里**不需要** `punct_before_schema` 那种「保存原值」的配套：临时态本身就是
-        // `Option`，清成 `None` 即回落配置层，没有「被覆盖的原值存在哪」这个问题。
-        // 那条真机教训（`Follow` 退化成「保持上一个方案强加的值」）在此天然不成立——
-        // 它的成因是 `state.chinese_punct` 既是当前值又是唯一存储，本项两者是分开的。
+        // 单字输入的临时态随代际失效。它本身是 `Option`，清成 `None` 即回落配置层，
+        // 不需要 `punct_before_schema` 那种保存原值的配套。
         state.single_char_override = None;
-        // 引号交替态随代际归位。`PunctuationConverter` 是 Coordinator 单例、跨方案共享，而
-        // 左右形是**按方案取的**（方案 A 把 `"` 配成 `「」`、方案 B 用默认 `“”`）。不归位的话
-        // 切过去第一次按引号可能直接拿到右形。
-        //
-        // 与「⛔ 进入时保存、退出时回放」那条否决无关：这里是无条件复位到左形，没有需要被记住
-        // 的原值。锁序 state → punct 与 `convert_punct` 一致（调用方均已持 state 锁）。
+        // 引号交替态随代际归位：`PunctuationConverter` 跨方案共享，而左右形按方案取，
+        // 不归位的话切过去第一次按引号可能拿到右形。锁序 state → punct 与 `convert_punct` 一致。
         self.punct.lock().unwrap_or_else(|e| e.into_inner()).reset();
         match self.engine_mgr.active_behavior().punct.resolve() {
             Some(v) => {
-                // 首次被方案意图覆盖时记下原值。已经是 `Some` 就不再覆写——从一个有意图的
-                // 方案切到另一个有意图的方案时，要还原的仍是**最初那个**全局态，
-                // 而不是上一个方案强加的值。
+                // 首次被覆盖时记原值；已是 `Some` 就不覆写，在有意图的方案间切换时
+                // 要还原的仍是最初那个全局态。
                 if state.punct_before_schema.is_none() {
                     state.punct_before_schema = Some(state.chinese_punct);
                 }
                 state.chinese_punct = v;
             }
             None => {
-                // 方案没意见：把被覆盖的值还回去。`take` 同时清掉标记——下次再进有意图的
-                // 方案时重新记，故连续切换不会越还越旧。
-                //
-                // ⚠️ 这里**不能**写成「什么都不做」：那正是 2026-08-23 真机报的
-                // 「从五笔切到英文标点变英文，切回五笔还是英文」——`Follow` 的语义是
-                // 「回到不受方案影响的那个值」，而不是「保持上一个方案留下的值」。
+                // `Follow` 是「回到不受方案影响的那个值」，不是保持现状，所以不能什么都不做。
+                // `take` 同时清标记，连续切换不会越还越旧。
                 if let Some(v) = state.punct_before_schema.take() {
                     state.chinese_punct = v;
                 }
@@ -94,24 +57,14 @@ impl Coordinator {
         }
     }
 
-    /// 「非用户手动」的入口要改标点态时走这里：`value` 是该入口想设的值，但**活跃方案声明了
-    /// `[punct]` 意图就以意图为准**（GH#164：范围更小的意图优先）。
+    /// 「非用户手动」的入口要改标点态时走这里：活跃方案声明了 `[punct]` 意图就以意图为准
+    /// （范围更小的意图优先）。适用于 `follow_mode` 的中英跟随、IME 激活时重置全局默认；
+    /// 用户手动 `toggle_punct` 不走这里。
     ///
-    /// 适用入口：`follow_mode` 的中英跟随、IME 激活对全局默认的重置。用户手动 `toggle_punct`
-    /// 不走这里——它本来就该在本代际内压过方案意图。
+    /// 先 sync 再写：否则在「代际已变、还没 sync」的窗口里，随后的 sync 会把本入口写的值记成
+    /// `punct_before_schema` 基线。有意图时 `value` 记进基线，切回 Follow 方案时还原到它。
     ///
-    /// # 为什么先 sync 再写
-    ///
-    /// 方案意图只在代际变化时落地。这些入口可能恰好发生在「代际已变、还没 sync」的窗口里：
-    /// 直接写会让随后的 sync 把**本入口写的值**记成 `punct_before_schema` 基线，切回 Follow
-    /// 方案时还原出错值。先 sync 让基线取到进方案前的真值。
-    ///
-    /// # 有意图时基线跟着走
-    ///
-    /// 意图压住了 `value`，但 `value` 仍是「不受方案影响时该有的值」——记进基线，切回 Follow
-    /// 方案时还原到它，而不是进方案前的旧值。
-    ///
-    /// ⚠️ 调用方已持 `state` 锁（同 [`Self::sync_schema_scope`]）。
+    /// 调用方须已持 `state` 锁。
     pub(crate) fn set_punct_below_schema_intent(&self, state: &mut State, value: bool) {
         self.sync_schema_scope(state);
         match self.engine_mgr.active_behavior().punct.resolve() {
@@ -125,23 +78,17 @@ impl Coordinator {
 
     /// 不持 state 锁的调用点用的包装。
     ///
-    /// ⚠️ 调用方必须**没有**持有 `self.state` 锁——本仓的 state 锁不可重入。
+    /// 调用方必须没有持有 `self.state` 锁（不可重入）。
     pub(crate) fn sync_schema_scope_locked(&self) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         self.sync_schema_scope(&mut state);
     }
 
-    /// 当前输入语境的**短语加载规格**（`[phrases]` 段）。
+    /// 当前输入语境的短语加载规格（`[phrases]` 段）。
     ///
-    /// # ★ 归属方案取 `effective_data_schema`，不是 active
-    ///
-    /// 它已经是词频读端（`apply_freq_rerank_in`）、写端（`record_selection_in`）与右键菜单
-    /// （`candidate_op_scope`）三处共用的归属源 ⇒ 临时英文自动按 `english` 方案的
-    /// `[phrases]` 走，不会出现「候选归 english 桶、短语归五笔」的错配。
-    ///
-    /// ⚠️ **绝不能改用 `overlay_engine_schema`**：它在 `show_candidates = false` 时返回
-    /// `None`（它回答的是「要不要出候选」，不是「数据算谁的」）。拿它当归属，用户一关候选
-    /// 显示，短语作用域就静默换回主方案。这条坑 2026-08-21 已经踩过一次。
+    /// 归属取 `effective_data_schema`，与词频读写、右键菜单同源，临时英文因此按 `english`
+    /// 方案的 `[phrases]` 走。不能改用 `overlay_engine_schema`：它在 `show_candidates = false`
+    /// 时返回 `None`（回答的是「要不要出候选」），用户一关候选显示短语作用域就静默换回主方案。
     pub(crate) fn phrase_spec_of(&self, state: &State) -> std::sync::Arc<wind_config::PhrasesSpec> {
         let id = self
             .effective_data_schema(state)
@@ -163,21 +110,18 @@ impl Coordinator {
         self.candidate_font_of(&state)
     }
 
-    /// 当前**生效**的单字输入状态（测试/诊断用）。三层折叠后的结果，见
+    /// 当前生效的单字输入状态（测试/诊断用）。三层折叠后的结果，见
     /// [`Coordinator::effective_single_char`]。
     pub fn debug_effective_single_char(&self) -> bool {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         self.effective_single_char(&state)
     }
 
-    /// 配置层（**不含**临时态）里的单字输入（测试/诊断用）。
+    /// 配置层（不含临时态）里的单字输入（测试/诊断用）。取码表那一份
+    /// （`schema.codetable.single_char` ⊕ 方案级覆盖），相关用例都跑在码表方案下。
     ///
-    /// 取的是**码表那一份**（`schema.codetable.single_char` ⊕ 方案级覆盖）——本函数只服务
-    /// 「热键切换有没有写回配置」那条断言，而那些用例都跑在码表方案下。
-    ///
-    /// 与 [`Self::debug_effective_single_char`] 分开暴露是刻意的：「热键切换不写配置」
-    /// 这条契约，只有同时问得到「生效值」与「配置值」才断言得了。合成一个的话，
-    /// 一个把临时态写回配置的错误实现照样全绿。
+    /// 与 [`Self::debug_effective_single_char`] 分开暴露：「热键切换不写配置」只有同时问得到
+    /// 生效值与配置值才断言得了。
     pub fn debug_config_single_char(&self) -> bool {
         self.engine_mgr.codetable_settings().single_char
     }
@@ -191,19 +135,12 @@ impl Coordinator {
             .is_some()
     }
 
-    /// 当前输入语境的候选**文字字族**覆盖（`[candidate] font_family`）；空 = 不覆盖。
+    /// 当前输入语境的候选文字字族覆盖（`[candidate] font_family`）；空 = 不覆盖。
     ///
-    /// # ⚠️ 与同段的 `layout` 归属判据**刻意不同**
-    ///
-    /// `layout` 取 `active_behavior`（它是用户可见的呈现态），字体取
-    /// `effective_data_schema`（「这些字用什么渲染」＝数据属性，与 `[phrases]`、
-    /// `[punct] custom_mappings` 同源）。同住一个 `[candidate]` 段就统一判据是错的——
-    /// 那会让临英期间候选归 `english` 桶、字体却还跟着五笔走。
-    /// `[punct]` 段的 `mode` 与 `custom_mappings` 已经踩过同一个形状。
-    ///
-    /// ⇒ 它随输入语境**逐次按键**变化，不随方案代际变化：挂到 `sync_schema_scope` 那条
-    /// 代际驱动的路上会整个失效（`schema_scope_gen == generation` 直接 return，临英进出
-    /// 根本不改代际）。故下发点与布局同处，见 `Coordinator::sync_candidate_font`。
+    /// 与同段的 `layout` 归属判据刻意不同：`layout` 是呈现态，取 `active_behavior`；字体是数据
+    /// 属性，取 `effective_data_schema`（与 `[phrases]`、`[punct] custom_mappings` 同源），
+    /// 否则临英期间字体仍跟着五笔走。它逐次按键变化，不能挂到代际驱动的 `sync_schema_scope`
+    /// 上（临英进出不改代际），下发点见 `Coordinator::sync_candidate_font`。
     pub(crate) fn candidate_font_of(&self, state: &State) -> String {
         let id = self
             .effective_data_schema(state)
@@ -214,21 +151,11 @@ impl Coordinator {
             .clone()
     }
 
-    /// 当前输入语境的**横排时文字排列**（`[candidate] text_orientation`）。
+    /// 当前输入语境的横排时文字排列（`[candidate] text_orientation`）。
     ///
-    /// # 与候选字体同源，与同段的 `layout` 不同
-    ///
-    /// 「这些字怎么排」和「这些字用什么字体」是同一个问题的两面 ⇒ 判据必须一致，
-    /// 都取 [`Coordinator::effective_data_schema`]。临英期间候选是英文、归 `english` 桶，
-    /// 于是字体和排列一起跟着归它——**不会出现「打英文却还按蒙古文方案转 90°」**。
-    ///
-    /// `layout`（横/竖）走的是另一条链（`layout.rs` 的模式 > 手动 > 方案 > 基线），
-    /// 因为它回答的是用户对呈现的偏好。同段两字段判据不同这件事，`[punct]` 的
-    /// `mode` 与 `custom_mappings` 已经是同一个形状。
-    ///
-    /// ⇒ 它随输入语境**逐次按键**变化，与 [`Self::candidate_font_of`] 一样不能挂到
-    /// `sync_schema_scope` 那条代际驱动的路上（临英进出根本不改代际）。
-    /// 下发点在 `desired_orientation` 里，那是每次显示都重算的。
+    /// 与候选字体同源，取 [`Coordinator::effective_data_schema`]，临英期间不会按蒙古文方案
+    /// 转 90°；与同段 `layout` 判据不同，理由同 [`Self::candidate_font_of`]。逐次按键变化，
+    /// 下发点在每次显示都重算的 `desired_orientation` 里。
     pub(crate) fn candidate_text_orientation_of(
         &self,
         state: &State,
@@ -239,15 +166,13 @@ impl Coordinator {
         self.engine_mgr.behavior_for(&id).candidate_text_orientation
     }
 
-    /// 当前输入语境是否**只出单字**。取值的唯一入口。
+    /// 当前输入语境是否只出单字。取值的唯一入口。
     ///
     /// | 层 | 来源 |
     /// |---|---|
-    /// | ⓪ 引擎不变量 | 英文/未知引擎恒关，**压过临时态**（见下方 ★） |
+    /// | ⓪ 引擎不变量 | 英文/未知引擎恒关，压过临时态 |
     /// | ① 临时态 | `State::single_char_override`（热键切的），压过配置层 |
-    /// | ② 全局 + 方案级 | **按当前引擎分流**，见下表 |
-    ///
-    /// # ★ 全局那一层按引擎分成两份
+    /// | ② 全局 + 方案级 | 按当前引擎分流，见下表 |
     ///
     /// | 引擎 | 取值 | 方案级覆盖 |
     /// |---|---|---|
@@ -256,29 +181,17 @@ impl Coordinator {
     /// | 拼音 | `schema.pinyin.single_char` | 无（刻意） |
     /// | 英文等 | 恒关 | — |
     ///
-    /// 两种引擎对这件事的诉求本就不同：码表用户开单字是为了**定长盲打**（单字恒 ≤ 全码长
-    /// ⇒ 满码唯一即上屏），拼音没有定长、开了只是「不出词」。分成两份之后，「五笔只出单字、
-    /// 拼音照常出词」在全局层就表达得了，不必逐方案配（用户 2026-09-08 拍板）。
+    /// 码表与拼音分两份：码表开单字是为了定长盲打，拼音开了只是「不出词」，分开后「五笔只出
+    /// 单字、拼音照常出词」在全局层就能表达。
     ///
-    /// ⚠️ **英文引擎恒关不是遗漏**：英文候选是单词，开了会把它们全滤光，
-    /// 而英文方案下用户要的从来不是「只出单字母」。
+    /// 英文引擎恒关不是遗漏：开了会把单词候选全滤光。它是不变量，必须问在临时态之前，否则英文
+    /// 方案下按一次 `single_char:on` 词库候选整批消失。
     ///
-    /// ★ 正因为它是**不变量**而非默认值，这道判据必须问在**临时态之前**——写在后面
-    /// 就被 ① 绕过去了：英文方案下按一次 `single_char:on`，词库候选整批消失，只剩
-    /// `english_head_candidates` 追加的输入原文（那批插在过滤之后）。用户按 `toggle`
-    /// 就撞得上，而他要的只是在中文方案里开关它。
-    ///
-    /// # ⚠️ 只有主输入路问得到这个函数
-    ///
-    /// 过滤只接在 `update_candidates`（主输入路）上。临拼 / 临英 / mix / 特殊模式各有各的
-    /// 候选装配函数，都不受本项管辖——这是当前的实际作用域，别照着上面那张表推断临拼会
-    /// 跟着拼音那一份走（它压根不经过这里）。
-    ///
-    /// ⚠️ **逐次按键重算**，不能挂到 `sync_schema_scope` 那条代际驱动的路上：临英/临拼
-    /// 进出根本不改代际。同 `candidate_font_of`。
+    /// 只有主输入路（`update_candidates`）问这个函数；临拼 / 临英 / mix / 特殊模式各自装配
+    /// 候选，不受本项管辖。逐次按键重算，不能挂到代际驱动的 `sync_schema_scope` 上。
     pub(crate) fn effective_single_char(&self, state: &State) -> bool {
         use wind_engine::engine::EngineType;
-        // 英文/未知引擎恒关，**先于临时态**判——理由见上方 ★。
+        // 英文/未知引擎恒关，先于临时态判。
         let engine = self.engine_mgr.current_engine_type();
         if !matches!(
             engine,
@@ -320,8 +233,7 @@ mod tests {
 
     /// `PunctIntent::resolve` 的三态：`Follow` 必须是 `None`（不干预）而不是某个默认值。
     ///
-    /// 返回 `Option` 是刻意的——调用方据此决定「要不要写」，而不是「写什么」。
-    /// 若这里给 `Follow` 返回 `Some(true)`，每次切方案都会把用户的英文标点态强行掰回中文。
+    /// 若 `Follow` 返回 `Some(true)`，每次切方案都会把用户的英文标点态掰回中文。
     #[test]
     fn punct_intent_follow_means_no_write() {
         assert_eq!(PunctIntent::Follow.resolve(), None);

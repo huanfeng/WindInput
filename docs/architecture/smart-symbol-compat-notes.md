@@ -281,6 +281,44 @@ if (holdActiveBeforeResponse && !(*pfEaten)
 
 另有一个易错点：press1 的武装串必须用 `press1_committed_str` 而非 `compute_punct_str_pure`。后者的英文半角列**刻意不查自定义**（它的语义是「press2 的替换目标，须保持原样英文」），而武装串要等于真正插进文档的东西——用户把 `;` 的英半列配成 `#` 时，press1 上屏 `#` 而武装串若还是 `;`，press2 的 `prev_char` 比对永远失配、功能静默失效。三条反向通路的 press1 都落在英文列，都必须走前者。
 
+### press1 与 press2 之间又有输入
+
+三条武装通路的 press1 之后编码缓冲必为空，故 press2 这一刻缓冲非空只能是中间又敲了编码，此时光标在组合区里，
+替换会削掉候选（`ReplaceBackward`）或覆盖整个组合（`CommitReplacingHeld`）。`prev_char` 对照兜不住，它有两个恒定绕过口：
+
+- 宿主读不回文档时 `prev_char == 0`，被刻意判作「读失败」放行；
+- 候选窗自显 preedit（`preedit_display = candidate_top/inline`）时应用侧组合是「占位空格 + 光标置前」，读回的光标前字符恰是 press1 上屏的符号。
+
+因此有两道服务端判据：`smart_symbol_press2` 的「编码缓冲非空即不是 press2」（只问缓冲、不问 `candidates`，
+联想态 press2 须照常工作），与 `handle_key_event_policed` 的「非同键按键解除武装」。后者挂在 bridge 出口上，
+`wind-mobile` 的 `MobileCore::key_down` 直调内层 `handle_key_event` 不经过它，移动端只有前一道拦得住。
+两道各有用例：`intervening_letters_do_not_trigger_press2_mobile_entry`、`intervening_passthrough_key_disarms`。
+
+**已知限制：英文半角下两道都够不着。** 英文模式无编码缓冲；半角下 DLL 只吃标点键（`_IsCustomEnglishPunctKey`），
+字母/数字/空格/退格直接透传，服务端收不到事件（`event_seq` 也只在 `_SendKeyToService` 里自增）。于是在
+`prev_char` 恒 0 的宿主上，`.` → 快打 `abc` → 时限内再按 `.` 会把 `c` 换成 `。`。要修只能由 DLL 补上报
+「上一键是透传的非标点键」（同 `_lastPassthroughDigit` 机制）；改 `prev_char == 0` 的语义会让那批宿主上本功能整体失效。
+英文全角不受影响：`english_fullwidth` 分支把字母也吃下转发，第二道判据照常生效。
+
+## 产物不变的标点要透传，不能吃了再原样吐回
+
+中文输入模式下，产物就是原样半角 ASCII 的标点（`wind-punct` 的 `chinese_passthrough_punct_chars` /
+`english_passthrough_punct_chars`）由 DLL 直接透传。吃下再经 CUAS 吐回时，非 TSF-aware 宿主（如 Tkinter）
+会把送达的字符码当虚拟键码解释：`#`(0x23)→`VK_END`、`%`(0x25)→`VK_LEFT`、`&`(0x26)→`VK_UP`、
+`(`(0x28)→`VK_DOWN`，字不上屏反而移动光标；英文标点态更凶，`.`(0x2E)→`VK_DELETE` 吞掉光标后一字、
+`[`(0x5B)→`VK_LWIN` 弹开始菜单、`'`→`VK_RIGHT`、`;`→`VK_F1`。`@`、`*` 只是撞上的 VK 恰好没有默认绑定。
+微软拼音对这批符号不吃键，宿主拿到真实 VK，透传集就是对齐这一行为。
+
+判据的几条约束：
+
+- 吃键集必须 ⊆ 出字集：凡中文标点表、自定义映射（任一列）、智能符号、自动配对会改写或接管的字符都不能透传。
+- 智能符号与自动配对必须连同开关一起判。两张表出厂有值而开关出厂关闭，只看表会凭一个没开的功能把
+  撞码最狠的 `(` `)` `.` 等挡在透传之外。中文标点态看 `smart_mode` + `smart_chars`，英文标点态看
+  `english_punct_mode` + `english_chars`；中文那份不能拿 `english_chars` 排除。
+- 英文标点态的集合在出厂配置下通常是中文那份的超集，但这不是不变量：两态的智能符号判据来源不同。
+- 按键占用（引导键、方案码元首码、通配键）不归 `wind-punct` 管，由 `ConfigBundle` 在结果上再减去；
+  方案声明了 `[punct] custom_mappings` 时是整表替换，方案表覆盖的键也要减。
+
 ## 相关代码位置
 
 - `wind_macos/Sources/WindInputKit/IPC/SmartPunctDigitTracker.swift`：macOS 侧 `prevChar` 记账（无主路径，见第 5 条）；喂食点在 `BridgeResponseRouter.insertCommitted` / `applyMarkedText` 与 `InputController.passThroughToHost`。

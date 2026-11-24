@@ -646,6 +646,10 @@ SDL2 `SDL_windowskeyboard.c`（`UILess_GetCandidateList`）。
 形状，微软拼音则正常，见 Microsoft Q&A #5631957），故收敛为当页。翻页/上下移高亮后 DLL
 重拉，宿主看到的就是新的一页。文本走 `cand_convert_text`（简繁显示与本地候选窗一致）。
 
+另一个方向「喂整条列表」（想让 CUAS 桥认出可翻页列表、开宿主候选盒）也已证伪：Dota 2 把 100 条
+全部读走却并不据此开候选盒，且独占全屏下读完整条列表第一键即冻死游戏。微软五笔 / 搜狗在 Dota 2
+里的候选是游戏自绘，差别只在它们只喂当页。勿改回整条列表。
+
 ### 4.4 服务端：按 pid 记账不弹窗（`handle_uielement.rs`）
 
 - **两张 pid 账**：`uielement_host_pids`（宿主**声明**接管，无覆盖）与
@@ -756,6 +760,11 @@ SDL2 `SDL_windowskeyboard.c`（`UILess_GetCandidateList`）。
 候选窗 / 状态气泡 / 工具栏每次**真正显示前**再问一次前台形态，独占全屏就改 hide。
 Dota 2 实测第一版（只有事件缓存）一输入就弹窗把游戏卡死，这道闸就是为它加的。
 探测函数因此从协调器搬到 wind-keys（wind-ui 不能依赖协调器）。
+
+**`host_draws` 不能只当诊断，必须无条件压窗**：独占判据逐键抖动（同一个 Dota `SDL_app` 窗口，
+`SHQueryUserNotificationState` 一会儿回 D3dExclusive、一会儿按矩形落到 Covering）。若只压独占，
+抖到 Covering 的那一键弹窗把游戏踢出独占 → 黑屏 → 游戏重抢独占 → 下一键又判独占，形成持续黑屏
+卡死的反馈环。按 `host_draws` 无条件压窗后环断开。
 
 **不设配置键**：这不是偏好而是物理事实（独占全屏下别的进程的窗口盖不上去，弹出去只剩副作用），
 按 config-design-rules R1「可由程序判定的走自动判定」。误判排查看 info 日志
