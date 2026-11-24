@@ -52,6 +52,37 @@ pub fn change_passphrase(
     Ok(())
 }
 
+/// 已持有 DEK 的设备改口令（不需旧口令）：校验 DEK 与远端一致后，用新口令重新封装。
+pub fn rewrap_passphrase(
+    b: &dyn Backend,
+    dek: &Dek,
+    new: &str,
+    kdf: KdfParams,
+) -> Result<(), SyncError> {
+    if !read_meta(b)?.check_dek(dek) {
+        return Err(crate::crypto::CryptoError::BadKey.into());
+    }
+    b.put(&manifest::meta_key(), &Meta::new(dek, new, kdf)?.to_json())?;
+    Ok(())
+}
+
+/// 重置远端：删光 `windinput-sync/v1/` 下所有对象，再用 `dek` 与新口令写 meta。
+/// 之后各设备以自己的本地内容为准重新上传。调用方负责取得用户的明确确认。
+pub fn reset_remote(
+    b: &dyn Backend,
+    dek: &Dek,
+    pass: &str,
+    kdf: KdfParams,
+) -> Result<(), SyncError> {
+    let meta = Meta::new(dek, pass, kdf)?.to_json();
+    for o in b.list(&format!("{}/", manifest::ROOT))? {
+        // meta 最后写：中途失败时远端仍是「已清空但未初始化」，重试即可
+        b.delete(&o.key)?;
+    }
+    b.put(&manifest::meta_key(), &meta)?;
+    Ok(())
+}
+
 /// 回收：任一设备最新两代清单都不引用、且修改时间早于 `now - min_age_secs` 的 blob。
 /// 返回被删的 blob 键。后端给不出修改时间的 blob 一律保留。
 pub fn gc_blobs(
@@ -89,4 +120,32 @@ pub fn gc_blobs(
         }
     }
     Ok(removed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::MemBackend;
+
+    #[test]
+    fn rewrap_keeps_dek_and_rejects_foreign_dek() {
+        let b = MemBackend::new();
+        let dek = init_remote(&b, "old", KdfParams::FAST_TEST).unwrap();
+        rewrap_passphrase(&b, &dek, "new", KdfParams::FAST_TEST).unwrap();
+        assert!(join_with_passphrase(&b, "old").is_err());
+        assert_eq!(join_with_passphrase(&b, "new").unwrap(), dek);
+        assert!(rewrap_passphrase(&b, &Dek::generate(), "x", KdfParams::FAST_TEST).is_err());
+    }
+
+    #[test]
+    fn reset_clears_everything_then_writes_meta() {
+        let b = MemBackend::new();
+        let dek = init_remote(&b, "old", KdfParams::FAST_TEST).unwrap();
+        b.raw_put("windinput-sync/v1/blobs/x", vec![1]);
+        b.raw_put("other/keep", vec![1]);
+        reset_remote(&b, &dek, "fresh", KdfParams::FAST_TEST).unwrap();
+        assert_eq!(b.keys("windinput-sync/"), vec![manifest::meta_key()]);
+        assert_eq!(b.keys("other/").len(), 1);
+        assert_eq!(join_with_passphrase(&b, "fresh").unwrap(), dek);
+    }
 }

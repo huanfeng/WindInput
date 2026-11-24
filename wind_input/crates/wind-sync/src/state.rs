@@ -71,6 +71,9 @@ pub struct SyncState {
     pub pending: Vec<String>,
     #[serde(default)]
     pub retry: RetryState,
+    /// 最近一次成功同步的 unix 秒（由同步进程维护，供状态展示）。
+    #[serde(default)]
+    pub last_ok: Option<u64>,
 }
 
 impl SyncState {
@@ -84,6 +87,7 @@ impl SyncState {
             published_digest: String::new(),
             pending: Vec::new(),
             retry: RetryState::default(),
+            last_ok: None,
         }
     }
     pub fn new_random() -> Self {
