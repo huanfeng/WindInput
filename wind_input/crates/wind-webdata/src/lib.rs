@@ -7180,6 +7180,21 @@ outside: rare
     /// 去匹配真实文本的 key —— 查不到、不报错、静默失败，表现为「删了没反应」。
     /// 本测试逐个入口用「列表回什么就拿什么去操作」的方式走一遍，正是为了让漏接
     /// 在这里失败，而不是等用户发现。
+    /// 设置端正文框是原文，出门前过 `escape_text_field`；core 还原后候选须逐字等于原文。
+    /// 字符画里的 `\\`、行尾 `\` 连换行，曾被当成转义符吃掉、变出明文 `\n`。
+    #[test]
+    fn phrase_raw_backslash_text_roundtrips_to_candidate() {
+        let c = coord("phrase_art");
+        let art = "  /  \\\\|||  :  |||//  \\\n /  _||||| -:- |||||-  \\\n |   | \\\\\\  -  /// |";
+        c.web_data_rpc(
+            "phrase.add",
+            &json!({ "code": "cott", "text": wind_store::wdict::escape_text_field(art) }),
+        )
+        .unwrap();
+        c.rebuild_phrases();
+        assert_eq!(c.debug_phrase_texts("cott"), [art]);
+    }
+
     #[test]
     fn phrase_ui_escape_boundary_roundtrips() {
         let c = coord("phrase_esc");
