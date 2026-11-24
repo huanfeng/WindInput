@@ -449,6 +449,7 @@ impl SyncHost {
             "last_error": last_error,
             "pending": inner.status.pending,
             "conflicts": inner.status.conflicts,
+            "conflict_paths": inner.status.conflict_paths,
             "has_secret": inner.status.has_secret,
         })
     }
@@ -699,6 +700,7 @@ mod tests {
             last_ok: Some(100),
             pending: 2,
             conflicts: 1,
+            conflict_paths: vec!["config.conflict-a-1.toml".into()],
             has_secret: true,
             ..Default::default()
         }));
@@ -706,6 +708,7 @@ mod tests {
         let st = r.host.rpc("sync.status", &Value::Null).unwrap();
         assert_eq!(st["pending"], 2);
         assert_eq!(st["conflicts"], 1);
+        assert_eq!(st["conflict_paths"][0], "config.conflict-a-1.toml");
         assert_eq!(st["last_ok"], 100);
         assert_eq!(st["running"], true);
         let ev = lock(&r.events).clone();
@@ -724,6 +727,7 @@ mod tests {
             last_ok: Some(100),
             pending: 2,
             conflicts: 1,
+            conflict_paths: vec!["config.conflict-a-1.toml".into()],
             has_secret: true,
             ..Default::default()
         }));

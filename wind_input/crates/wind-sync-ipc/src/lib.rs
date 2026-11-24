@@ -189,6 +189,9 @@ impl ToSync {
     }
 }
 
+/// [`Status::conflict_paths`] 的条数上限。
+pub const MAX_CONFLICT_PATHS: usize = 50;
+
 /// 同步进程上报的状态。不带文件内容或路径以外的数据。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -200,6 +203,8 @@ pub struct Status {
     pub last_error: Option<String>,
     pub pending: u32,
     pub conflicts: u32,
+    /// 当前仍在本地的冲突副本（相对用户目录，`/` 分隔），新→旧，最多 [`MAX_CONFLICT_PATHS`] 条。
+    pub conflict_paths: Vec<String>,
     /// 本机是否已有机密（凭据与密钥）。
     pub has_secret: bool,
 }
@@ -331,6 +336,13 @@ mod tests {
             params: json!({}),
         });
         roundtrip(FromSync::command_reply(2, Ok(json!({}))));
+    }
+
+    #[test]
+    fn status_without_conflict_paths_still_decodes() {
+        let st: Status = serde_json::from_str(r#"{"phase":"idle","conflicts":2}"#).unwrap();
+        assert_eq!(st.conflicts, 2);
+        assert!(st.conflict_paths.is_empty());
     }
 
     #[test]

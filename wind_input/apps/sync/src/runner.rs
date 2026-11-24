@@ -178,6 +178,12 @@ impl Runner {
                 .or_else(|| self.state.retry.last_error.clone()),
             pending: self.state.pending.len() as u32,
             conflicts: self.conflicts.len() as u32,
+            conflict_paths: self
+                .conflicts
+                .iter()
+                .take(wind_sync_ipc::MAX_CONFLICT_PATHS)
+                .cloned()
+                .collect(),
             has_secret: self.ready(),
         }
     }

@@ -326,6 +326,30 @@ fn begin_edit_refusal_blocks_the_batch_then_recovers() {
 }
 
 #[test]
+fn conflict_paths_are_reported_capped_and_vanish_when_deleted() {
+    let remote = MemBackend::new();
+    let mut a = Node::new(&remote, false);
+    a.setup("p");
+    a.put("config.toml", "a = 1\n");
+    a.put("themes/t/x.conflict-d-1.toml", "x");
+    let s = a.sync();
+    assert_eq!(s.conflicts, 1, "{s:?}");
+    assert_eq!(s.conflict_paths, vec!["themes/t/x.conflict-d-1.toml"]);
+
+    std::fs::remove_file(a.user().join("themes/t/x.conflict-d-1.toml")).unwrap();
+    let s = a.sync();
+    assert_eq!(s.conflicts, 0, "{s:?}");
+    assert!(s.conflict_paths.is_empty());
+
+    for i in 0..60 {
+        a.put(&format!("config.conflict-d{i:02}-1.toml"), "x");
+    }
+    let s = a.sync();
+    assert_eq!(s.conflicts, 60, "总数照实报");
+    assert_eq!(s.conflict_paths.len(), wind_sync_ipc::MAX_CONFLICT_PATHS);
+}
+
+#[test]
 fn auth_failure_halts_until_user_acts() {
     let remote = MemBackend::new();
     let mut a = Node::new(&remote, false);

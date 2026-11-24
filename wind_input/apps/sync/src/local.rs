@@ -176,9 +176,10 @@ impl FsLocal {
         out
     }
 
-    /// 冲突副本（含范围外、只落本地的）。设置端据此提示用户去处理。
+    /// 冲突副本（含范围外、只落本地的），按修改时间新→旧（同刻按路径）。
+    /// 设置端据此提示用户去处理。
     pub fn conflict_files(&self) -> Vec<String> {
-        let mut v: Vec<String> = self
+        let mut v: Vec<(std::time::SystemTime, String)> = self
             .all_files()
             .into_iter()
             .filter(|p| {
@@ -186,9 +187,15 @@ impl FsLocal {
                     .next()
                     .is_some_and(|f| f.contains(".conflict-"))
             })
+            .map(|p| {
+                let t = std::fs::metadata(self.abs(&p))
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::UNIX_EPOCH);
+                (t, p)
+            })
             .collect();
-        v.sort();
-        v
+        v.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        v.into_iter().map(|(_, p)| p).collect()
     }
 
     fn write_atomic(&self, rel: &str, bytes: &[u8]) -> io::Result<()> {
@@ -526,12 +533,29 @@ mod tests {
         put(d.path(), "config.conflict-dev1-2026-11-24.toml", "x");
         put(d.path(), "themes/t/a.conflict-d-1.toml", "x");
         put(d.path(), "config.toml", "x");
+        let set_age = |rel: &str, secs: u64| {
+            let f = std::fs::File::options()
+                .write(true)
+                .open(d.path().join(rel))
+                .unwrap();
+            f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+                .unwrap();
+        };
+        set_age("config.conflict-dev1-2026-11-24.toml", 1000);
+        set_age("themes/t/a.conflict-d-1.toml", 2000);
+        // 新的在前
         assert_eq!(
             l.conflict_files(),
             vec![
+                "themes/t/a.conflict-d-1.toml",
                 "config.conflict-dev1-2026-11-24.toml",
-                "themes/t/a.conflict-d-1.toml"
             ]
+        );
+        // 用户删掉后下一次收集即消失
+        std::fs::remove_file(d.path().join("themes/t/a.conflict-d-1.toml")).unwrap();
+        assert_eq!(
+            l.conflict_files(),
+            vec!["config.conflict-dev1-2026-11-24.toml"]
         );
     }
 
