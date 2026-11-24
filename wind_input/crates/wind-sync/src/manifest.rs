@@ -1,6 +1,6 @@
 //! 每设备清单与远端布局（设计 §4）。
 
-use crate::crypto::{self, CryptoError, Dek, ObjKind};
+use crate::crypto::{self, CryptoError, FilesKey, ObjKind};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -90,10 +90,10 @@ fn obj_id(dev: &str, gen_: u64) -> String {
 }
 
 impl Manifest {
-    pub fn encode(&self, dek: &Dek) -> Vec<u8> {
+    pub fn encode(&self, key: &FilesKey) -> Vec<u8> {
         let json = serde_json::to_vec(self).expect("Manifest 可序列化");
         crypto::seal(
-            dek,
+            key,
             ObjKind::Manifest,
             &obj_id(&self.device, self.gen_),
             &json,
@@ -101,8 +101,13 @@ impl Manifest {
     }
 
     /// 解密并核对内部的设备号与代数与键一致。
-    pub fn decode(dek: &Dek, dev: &str, gen_: u64, data: &[u8]) -> Result<Manifest, CryptoError> {
-        let json = crypto::open(dek, ObjKind::Manifest, &obj_id(dev, gen_), data)?;
+    pub fn decode(
+        key: &FilesKey,
+        dev: &str,
+        gen_: u64,
+        data: &[u8],
+    ) -> Result<Manifest, CryptoError> {
+        let json = crypto::open(key, ObjKind::Manifest, &obj_id(dev, gen_), data)?;
         let m: Manifest =
             serde_json::from_slice(&json).map_err(|e| CryptoError::Format(format!("清单: {e}")))?;
         if m.device != dev || m.gen_ != gen_ {
@@ -139,7 +144,7 @@ mod tests {
 
     #[test]
     fn encode_decode_and_swap_rejected() {
-        let d = Dek::generate();
+        let d = crate::crypto::Dek::generate().files_key();
         let m = sample();
         let c = m.encode(&d);
         assert_eq!(Manifest::decode(&d, "d1", 4, &c).unwrap(), m);

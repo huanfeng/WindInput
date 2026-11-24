@@ -4,6 +4,7 @@ use argon2::{Algorithm, Argon2, Params, Version};
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -56,6 +57,138 @@ impl Dek {
             .try_into()
             .map_err(|_| CryptoError::Format("密钥长度不对".into()))?;
         Ok(Dek(a))
+    }
+}
+
+/// 子密钥用途；每种用途对应一个固定的 HKDF `info` 标签。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Purpose {
+    /// 文件同步对象加密与 blob id。
+    Files,
+    /// 设备名册里的设备信息对象。
+    DevInfo,
+    /// 剪贴板消息。
+    Clip,
+    /// 图片 / 文件传输。
+    Xfer,
+    /// 局域网直连的预共享密钥。
+    Lan,
+}
+
+impl Purpose {
+    pub fn info(self) -> &'static [u8] {
+        match self {
+            Purpose::Files => b"windinput-sync/files",
+            Purpose::DevInfo => b"windinput-sync/devinfo",
+            Purpose::Clip => b"windinput-sync/clip",
+            Purpose::Xfer => b"windinput-sync/xfer",
+            Purpose::Lan => b"windinput-sync/lan",
+        }
+    }
+}
+
+/// 由 DEK 经 HKDF-SHA256 派生的用途子密钥。
+#[derive(Clone, PartialEq, Eq)]
+pub struct SubKey([u8; 32]);
+
+impl std::fmt::Debug for SubKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SubKey(..)")
+    }
+}
+
+impl SubKey {
+    /// 原始字节：仅供子密钥的最终使用方（如局域网握手）取用。
+    pub fn expose(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+/// 能做对象加解密的密钥（子密钥或按用途的新类型；不含 DEK 与 [`LanPsk`]）。
+pub trait ObjKey {
+    fn sub(&self) -> &SubKey;
+}
+
+impl ObjKey for SubKey {
+    fn sub(&self) -> &SubKey {
+        self
+    }
+}
+
+macro_rules! typed_key {
+    ($(#[$m:meta])* $name:ident, $purpose:expr, $method:ident, obj) => {
+        typed_key!(@def $(#[$m])* $name, $purpose, $method);
+        impl ObjKey for $name {
+            fn sub(&self) -> &SubKey {
+                &self.0
+            }
+        }
+    };
+    ($(#[$m:meta])* $name:ident, $purpose:expr, $method:ident) => {
+        typed_key!(@def $(#[$m])* $name, $purpose, $method);
+    };
+    (@def $(#[$m:meta])* $name:ident, $purpose:expr, $method:ident) => {
+        $(#[$m])*
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub struct $name(SubKey);
+
+        impl $name {
+            pub fn expose(&self) -> &[u8; 32] {
+                self.0.expose()
+            }
+        }
+
+        impl Dek {
+            pub fn $method(&self) -> $name {
+                $name(self.derive($purpose))
+            }
+        }
+    };
+}
+
+typed_key!(
+    /// 文件同步（清单、blob）。
+    FilesKey,
+    Purpose::Files,
+    files_key,
+    obj
+);
+typed_key!(
+    /// 设备信息对象。
+    DevInfoKey,
+    Purpose::DevInfo,
+    devinfo_key,
+    obj
+);
+typed_key!(
+    /// 剪贴板消息（P3）。
+    ClipKey,
+    Purpose::Clip,
+    clip_key,
+    obj
+);
+typed_key!(
+    /// 图片 / 文件传输（P5）。
+    XferKey,
+    Purpose::Xfer,
+    xfer_key,
+    obj
+);
+typed_key!(
+    /// 局域网预共享密钥（P4）：不用于对象加密。
+    LanPsk,
+    Purpose::Lan,
+    lan_psk
+);
+
+impl Dek {
+    /// HKDF-SHA256 派生用途子密钥（无盐，`info` 为用途标签）。
+    pub fn derive(&self, purpose: Purpose) -> SubKey {
+        let mut out = [0u8; 32];
+        Hkdf::<Sha256>::new(None, &self.0)
+            .expand(purpose.info(), &mut out)
+            .expect("32 字节在 HKDF 输出上限内");
+        SubKey(out)
     }
 }
 
@@ -138,22 +271,29 @@ fn open_with(key: &[u8; 32], aad: &[u8], data: &[u8]) -> Result<Vec<u8>, CryptoE
 pub enum ObjKind {
     Manifest,
     Blob,
+    DevInfo,
 }
 
 fn aad(kind: ObjKind, id: &str) -> Vec<u8> {
     let k = match kind {
         ObjKind::Manifest => "manifest",
         ObjKind::Blob => "blob",
+        ObjKind::DevInfo => "devinfo",
     };
     format!("windinput-sync/v1/{k}/{id}").into_bytes()
 }
 
-pub fn seal(dek: &Dek, kind: ObjKind, id: &str, plain: &[u8]) -> Vec<u8> {
-    seal_with(&dek.0, &aad(kind, id), plain)
+pub fn seal(key: &impl ObjKey, kind: ObjKind, id: &str, plain: &[u8]) -> Vec<u8> {
+    seal_with(&key.sub().0, &aad(kind, id), plain)
 }
 
-pub fn open(dek: &Dek, kind: ObjKind, id: &str, data: &[u8]) -> Result<Vec<u8>, CryptoError> {
-    open_with(&dek.0, &aad(kind, id), data)
+pub fn open(
+    key: &impl ObjKey,
+    kind: ObjKind,
+    id: &str,
+    data: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    open_with(&key.sub().0, &aad(kind, id), data)
 }
 
 /// 内容的 SHA-256（小写十六进制）。
@@ -163,24 +303,24 @@ pub fn content_hash(bytes: &[u8]) -> String {
 
 type HmacSha256 = Hmac<Sha256>;
 
-fn hmac(dek: &Dek, msg: &[u8]) -> Vec<u8> {
-    let mut m = <HmacSha256 as Mac>::new_from_slice(&dek.0).expect("HMAC 接受任意长度密钥");
+fn hmac(key: &[u8; 32], msg: &[u8]) -> Vec<u8> {
+    let mut m = <HmacSha256 as Mac>::new_from_slice(key).expect("HMAC 接受任意长度密钥");
     m.update(msg);
     m.finalize().into_bytes().to_vec()
 }
 
-/// blob id = base32(HMAC(DEK, sha256(明文)))，小写无填充。入参为 [`content_hash`] 的十六进制。
-pub fn blob_id(dek: &Dek, hash_hex: &str) -> String {
+/// blob id = base32(HMAC(files 子密钥, sha256(明文)))，小写无填充。入参为 [`content_hash`] 的十六进制。
+pub fn blob_id(key: &FilesKey, hash_hex: &str) -> String {
     let raw = data_encoding::HEXLOWER
         .decode(hash_hex.as_bytes())
         .unwrap_or_else(|_| hash_hex.as_bytes().to_vec());
     data_encoding::BASE32_NOPAD
-        .encode(&hmac(dek, &raw))
+        .encode(&hmac(key.expose(), &raw))
         .to_lowercase()
 }
 
 fn key_check(dek: &Dek) -> String {
-    B64.encode(hmac(dek, b"windinput-sync/v1/key-check"))
+    B64.encode(hmac(&dek.0, b"windinput-sync/v1/key-check"))
 }
 
 /// `meta.json`：明文，含 KDF 参数、盐、口令封装的 DEK、密钥校验值。
@@ -254,66 +394,5 @@ impl Meta {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn roundtrip_and_aad_binding() {
-        let d = Dek::generate();
-        let c = seal(&d, ObjKind::Blob, "a", b"hello");
-        assert_eq!(open(&d, ObjKind::Blob, "a", &c).unwrap(), b"hello");
-        assert!(open(&d, ObjKind::Blob, "b", &c).is_err());
-        assert!(open(&d, ObjKind::Manifest, "a", &c).is_err());
-        assert!(open(&Dek::generate(), ObjKind::Blob, "a", &c).is_err());
-        let mut bad = c.clone();
-        *bad.last_mut().unwrap() ^= 1;
-        assert!(open(&d, ObjKind::Blob, "a", &bad).is_err());
-    }
-
-    #[test]
-    fn nonce_is_random() {
-        let d = Dek::generate();
-        assert_ne!(
-            seal(&d, ObjKind::Blob, "a", b"x"),
-            seal(&d, ObjKind::Blob, "a", b"x")
-        );
-    }
-
-    #[test]
-    fn meta_unlock_and_wrong_pass() {
-        let d = Dek::generate();
-        let m = Meta::new(&d, "pw", KdfParams::FAST_TEST).unwrap();
-        let m2 = Meta::from_json(&m.to_json()).unwrap();
-        assert_eq!(m2.unlock("pw").unwrap(), d);
-        assert_eq!(m2.unlock("nope"), Err(CryptoError::BadPassphrase));
-        assert!(m2.check_dek(&d));
-        assert!(!m2.check_dek(&Dek::generate()));
-    }
-
-    #[test]
-    fn same_pass_different_salt() {
-        let d = Dek::generate();
-        let a = Meta::new(&d, "pw", KdfParams::FAST_TEST).unwrap();
-        let b = Meta::new(&d, "pw", KdfParams::FAST_TEST).unwrap();
-        assert_ne!(a.salt, b.salt);
-        assert_ne!(a.wrapped_dek, b.wrapped_dek);
-    }
-
-    #[test]
-    fn dek_base64_roundtrip_and_blob_id_stable() {
-        let d = Dek::generate();
-        assert_eq!(Dek::from_base64(&d.to_base64()).unwrap(), d);
-        assert!(Dek::from_base64("abc").is_err());
-        let h = content_hash(b"x");
-        assert_eq!(blob_id(&d, &h), blob_id(&d, &h));
-        assert_ne!(blob_id(&d, &h), blob_id(&Dek::generate(), &h));
-    }
-
-    #[test]
-    fn hostile_kdf_params_rejected() {
-        let d = Dek::generate();
-        let mut m = Meta::new(&d, "pw", KdfParams::FAST_TEST).unwrap();
-        m.kdf.m_kib = u32::MAX;
-        assert!(Meta::from_json(&m.to_json()).is_err());
-    }
-}
+#[path = "crypto_tests.rs"]
+mod tests;

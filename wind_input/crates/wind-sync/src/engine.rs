@@ -5,7 +5,7 @@
 //! 清单只在全部 blob 就位后才写。
 
 use crate::backend::{Backend, ObjMeta};
-use crate::crypto::{self, Dek, ObjKind, content_hash};
+use crate::crypto::{self, Dek, FilesKey, ObjKind, content_hash};
 use crate::error::SyncError;
 use crate::local::{LocalError, LocalStore};
 use crate::manifest::{self, Entry, Manifest};
@@ -171,7 +171,7 @@ struct Out {
 /// 取 blob 明文；缺失或损坏（被调换、hash 对不上）记警告返回 None，该文件本轮跳过。
 fn fetch_blob(
     backend: &dyn Backend,
-    dek: &Dek,
+    dek: &FilesKey,
     hash: &str,
     warnings: &mut Vec<String>,
 ) -> Result<Option<Vec<u8>>, SyncError> {
@@ -193,9 +193,10 @@ fn run(
     backend: &dyn Backend,
     local: &mut dyn LocalStore,
     state: &mut SyncState,
-    dek: &Dek,
+    root: &Dek,
     ctx: &SyncCtx,
 ) -> Result<SyncReport, SyncError> {
+    let dek = &root.files_key();
     let mut rep = SyncReport::default();
     let me = state.device.clone();
 
@@ -203,7 +204,7 @@ fn run(
     let raw = backend
         .get(&manifest::meta_key())?
         .ok_or(SyncError::NotInitialized)?;
-    if !crypto::Meta::from_json(&raw)?.check_dek(dek) {
+    if !crypto::Meta::from_json(&raw)?.check_dek(root) {
         return Err(crypto::CryptoError::BadKey.into());
     }
 
@@ -707,7 +708,7 @@ fn run(
     state.pending.clear();
 
     if ctx.gc {
-        match remote::gc_blobs(backend, dek, ctx.now, GC_MIN_AGE_SECS) {
+        match remote::gc_blobs(backend, root, ctx.now, GC_MIN_AGE_SECS) {
             Ok(v) => rep.gc_removed = v.len(),
             Err(e) => rep.warnings.push(format!("回收 blob 失败: {e}")),
         }

@@ -97,6 +97,7 @@ pub fn gc_blobs(
     now: u64,
     min_age_secs: u64,
 ) -> Result<Vec<String>, SyncError> {
+    let files = dek.files_key();
     let mut gens: std::collections::BTreeMap<String, Vec<u64>> = Default::default();
     for o in b.list(&manifest::devices_prefix())? {
         if let Some((d, g)) = manifest::parse_manifest_key(&o.key) {
@@ -111,9 +112,9 @@ pub fn gc_blobs(
                 continue;
             };
             // 读不出来的清单：为安全起见中止回收（不能确定它引用了什么）。
-            let m = Manifest::decode(dek, &dev, g, &raw)?;
+            let m = Manifest::decode(&files, &dev, g, &raw)?;
             for e in m.files.values().filter(|e| !e.deleted) {
-                referenced.insert(manifest::blob_key(&crate::crypto::blob_id(dek, &e.hash)));
+                referenced.insert(manifest::blob_key(&crate::crypto::blob_id(&files, &e.hash)));
             }
         }
     }
