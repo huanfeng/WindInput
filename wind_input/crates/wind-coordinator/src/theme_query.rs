@@ -1,22 +1,11 @@
-//! 主题的**拉取面**：列主题、切主题、取求值后的调色板。
+//! 主题的拉取面：列主题、切主题、取求值后的调色板。
 //!
-//! # 为什么单开一个面而不是复用推送通道
+//! 桌面主题是推给宿主的（`push_theme` → `UiCommand::SetTheme`，载荷是 `RvNode` 视图树）；移动端
+//! 键盘原生自绘，要的是语义色表（`bg`/`surface`/`text`/`accent_soft`…）。故这里给拉取式的
+//! [`Coordinator::theme_palette`]，与 `candidate_pull` 同形。
 //!
-//! 桌面的主题是**推**给宿主的（`push_theme` → `UiCommand::SetTheme`，载荷是求值完的
-//! `RvNode` 视图树），因为桌面候选窗由 wind-ui 渲染，节点树正是它要的东西。移动端的
-//! 键盘是 Android 原生自绘的，那棵桌面视图树对它没有意义——它要的是**语义色表**
-//! （`bg`/`surface`/`text`/`accent_soft`…），自己决定哪个控件用哪个色。
-//!
-//! 所以这里给的是拉取式的 [`Coordinator::theme_palette`]，与 `candidate_pull` 同一种
-//! 形状：宿主要的时候自己来取，核心不替它决定渲染。
-//!
-//! # 明暗必须由宿主注入
-//!
-//! `theme_palette` 收一个 `system_dark` 参数而不是自己探测——
-//! [`crate::theme_style::system_prefers_dark`] 在非 Windows/macOS 上**恒 false**，
-//! Android 若走桌面那条 `resolve_dark()`，「跟随系统」会静默退化成恒亮色（不报错、
-//! 不崩溃，只是那个选项永远不生效）。系统明暗在 Android 上只有 Java 层的
-//! `Configuration.uiMode` 知道。
+//! 明暗必须由宿主注入（`system_dark` 参数）：[`crate::theme_style::system_prefers_dark`] 在
+//! 非 Windows/macOS 上恒 false，Android 的系统明暗只有 Java 层 `Configuration.uiMode` 知道。
 
 use std::collections::HashMap;
 
@@ -42,15 +31,11 @@ impl Coordinator {
             .clone()
     }
 
-    /// 按 id 切主题（持久化到用户配置）。返回是否命中。
+    /// 按 id 切主题（持久化到用户配置）。返回是否命中。按 id 而不是按下标：下标随主题目录
+    /// 增删漂移。
     ///
-    /// 按 id 而不是按下标：下标是桌面菜单的产物，随主题目录增删漂移，
-    /// 宿主存下来下次再用会指向另一个主题。
-    ///
-    /// ⚠ 刻意**不走** [`Coordinator::select_theme`]（桌面那条路）：它会 `push_theme`，
-    /// 即加载整棵桌面视图树并下发 `UiCommand::SetTheme`。移动端不消费该指令
-    /// （键盘由 Android 原生自绘，按 [`Self::theme_palette`] 拉色），那棵树纯属白造。
-    /// 白造的代价不只是慢——见 [`Self::set_theme_style_name`] 上的栈说明。
+    /// 刻意不走 [`Coordinator::select_theme`]：它会 `push_theme` 造整棵桌面视图树，移动端不消费，
+    /// 且有爆栈风险（见 [`Self::set_theme_style_name`]）。
     pub fn select_theme_by_id(&self, id: &str) -> bool {
         let Some((_, name)) = self.list_themes().into_iter().find(|(tid, _)| tid == id) else {
             warn!("select_theme_by_id: 未知主题 {}", id);
@@ -72,14 +57,9 @@ impl Coordinator {
 
     /// 设置明暗（取值同 [`Self::theme_style_name`]；未知值按跟随系统）。
     ///
-    /// ⚠ 同 [`Self::select_theme_by_id`]，刻意不走桌面的 [`Coordinator::set_theme_style`]
-    /// ——它尾部会 `push_theme`。除了白造一棵移动端不消费的视图树，那条链在**小栈线程上
-    /// 会直接爆栈**：`wind_theme::Resolved` 单个 13,440 字节，debug 构建下沿
-    /// `resolve → load_resolved_dirs → load_theme_with_fallback → push_theme` 逐层按值
-    /// 返回要复制多次，实测 2 MiB 栈的测试线程稳定 `STATUS_STACK_OVERFLOW`。
-    ///
-    /// Android 的后台线程默认栈约 1 MiB（核心构造正跑在后台线程上），比测试线程更窄，
-    /// 所以这不是「测试环境的怪癖」而是真实崩溃路径。移动端不碰 `push_theme` 即绕开。
+    /// 刻意不走桌面的 [`Coordinator::set_theme_style`]：它尾部会 `push_theme`，除了白造视图树，
+    /// 那条链逐层按值返回大结构体 `wind_theme::Resolved`，在小栈线程（Android 后台线程约 1 MiB）
+    /// 上会爆栈。
     pub fn set_theme_style_name(&self, style: &str) {
         let style = ThemeStyle::from_config(style);
         *self.theme_style.lock().unwrap_or_else(|e| e.into_inner()) = style;
@@ -98,7 +78,7 @@ impl Coordinator {
     /// 求值后的语义色表：`(语义名, ARGB)`，按语义名排序。
     ///
     /// 已完成 `${var}` 递归展开与 `{light, dark}` 变体选择，宿主拿到的就是终值，
-    /// **不需要也不该**自己存两套色表——切明暗时重新调本方法即可。
+    /// 不需要也不该自己存两套色表——切明暗时重新调本方法即可。
     ///
     /// 排序是稳定性要求：`HashMap` 的遍历序每次进程都不同，宿主若按序号缓存会错位。
     pub fn theme_palette(&self, system_dark: bool) -> Vec<(String, u32)> {
@@ -106,7 +86,7 @@ impl Coordinator {
         let dirs = self.theme_search_dirs();
         let name = self.active_theme_id();
         // 与桌面 push 链同一裁决：被定制版 `[themes] hide` 删掉的主题按不存在处理。
-        // 这条**不能**指望列表侧过滤兜底——`ui.theme.name` 是存量用户配置里带过来的，
+        // 这条不能指望列表侧过滤兜底——`ui.theme.name` 是存量用户配置里带过来的，
         // 列表里没有它照样能被拉取到。
         let name = Self::theme_id_honoring_hide(&name);
 

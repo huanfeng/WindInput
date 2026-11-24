@@ -1,31 +1,12 @@
-//! 按键管线 / 模式决策（对齐 Go `pipeline_decider.go` 的*意图*，按 Rust 现状裁剪）。
+//! 按键管线 / 模式决策。设计依据：`docs/redesign/key-pipeline.md`。
 //!
-//! 设计依据：`docs/redesign/key-pipeline.md`。本模块是 S1「模式收编为单点决策」的落点。
+//! 独占模式收敛为单一 [`ModeKind`] 字段 `State.active`：结构上保证「同一时刻至多一个独占
+//! 模式」，键事件分派是对它的单次 `match`；新增模式只加一个变体 + 一条 `match` 臂。
 //!
-//! ## 与 Go 决策器的差异（刻意为之）
-//!
-//! Go 的 `decider` 持有一组 `Processor` trait 对象，并用 `applyEngineDiff(Capability)`
-//! 在切换 processor 时挂卸**共享引擎**的词典层。Rust 现状不需要这套机制：
-//!
-//! - **Capability 不移植**：Rust 各模式按 schema id 独立查询引擎
-//!   （`EngineManager::convert_with(schema_id, ...)`），不存在被多模式改写的共享引擎，
-//!   因此没有「引擎副作用」需要单点统一。强行引入 Capability 只是死抽象。
-//! - **CommitStrategy 推迟到 S4**：全码/空码上屏逻辑在 Rust coordinator 里尚未实现
-//!   （`codetable::engine::should_auto_commit` 为空实现），现在没有调用点消费策略归属。
-//!   按「避免过早抽象」原则，等 S4 实现全码上屏时再与真实调用点一起设计。
-//!
-//! ## 本阶段交付：单一活跃模式 + 单点分派
-//!
-//! 原先三个散装 bool（`temp_pinyin_mode/quick_input_mode/temp_english_mode`）+ 三处串行
-//! `if` 分派 + 分散的激活/复位入口，收敛为单一 [`ModeKind`] 字段 `State.active`：
-//!
-//! - 结构上保证「同一时刻至多一个独占模式」（三 bool 无法表达这一不变式）。
-//! - 键事件分派变为对 `state.active` 的单次 `match`（唯一入口）。
-//! - S3 新增 URL / 特殊模式时，只需加 `ModeKind` 变体 + 一条 `match` 臂，而非再加 bool + 分支。
-//!
-//! 决策链顺序仍由 `Coordinator::handle_key_event` 承载（对齐 key-pipeline.md §2.1）；
-//! 各模式的具体按键处理仍是 `Coordinator` 上与其紧耦合的 `handle_*_key` 方法，
-//! 故采用 enum 分派而非 trait 对象（避免把 ~600 行逻辑套进 `Ctx` 间接层，更「boring」）。
+//! 不引入 Capability / 共享引擎挂卸：各模式按 schema id 独立查询引擎
+//! （`EngineManager::convert_with(schema_id, ...)`），没有需要单点统一的引擎副作用。
+//! 决策链顺序由 `Coordinator::handle_key_event` 承载；各模式的按键处理是 `Coordinator` 上紧耦合的
+//! `handle_*_key` 方法，故用 enum 分派而非 trait 对象。
 
 /// 当前激活的独占输入模式。`None` 表示普通码表/拼音输入（default processor）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -38,57 +19,37 @@ pub enum ModeKind {
     Url,
     /// 邮箱模式：正常输入中按下 `@` 时夺取（缓冲非空），续打后缀并补全常用邮箱。
     ///
-    /// # 它与 [`Self::Url`] 的差别只在**触发判据**
-    ///
-    /// url / unicode 是**前缀夺取式**（缓冲 + 本键 == 某个前缀，全等）；本模式是
-    /// **后缀触发**（本键是 `@`，缓冲整体作为用户名被带进来）。`abc@` 里缓冲是 `abc`，
-    /// 与任何前缀都不相等，照前缀式那条路写会撞墙（`docs/design/prefix-hijack-modes.md`
-    /// §5.2 早就点明了这一点）。
-    ///
-    /// 触发之后两者完全同构：同一道闸门 `try_prefix_hijack`、同一套 [`Rewind`] 回退骨架、
-    /// 同一个补全候选源。故 `handle_email.rs` 与 `handle_url.rs` 的结构刻意逐行平行。
+    /// 与 [`Self::Url`] 只差触发判据：后缀触发（本键是 `@`，缓冲整体作为用户名），见
+    /// `docs/design/prefix-hijack-modes.md` §5.2。触发后同一道闸门、同一套 [`Rewind`] 骨架、同一个
+    /// 补全候选源，故 `handle_email.rs` 与 `handle_url.rs` 结构刻意逐行平行。
     Email,
     /// Unicode 码点模式：普通输入累积到某前缀（出厂 `u+`）时夺取，续打十六进制出该码点。
     ///
-    /// 与 [`Self::Url`] 同属**前缀夺取式**（两者共用 `try_prefix_hijack` 那道闸门与
+    /// 与 [`Self::Url`] 同属前缀夺取式（两者共用 `try_prefix_hijack` 那道闸门与
     /// [`Rewind`] 回退骨架），差别只在缓冲怎么解释：url 原样累积文本、不产候选，
     /// 本模式把缓冲当十六进制求值、产一条候选。
     Unicode,
     /// 特殊模式：引导键触发，自带码表 + 全码上屏策略。载荷为 `features.special_modes` 下标。
     Special(u8),
-    /// 生僻字模式：引导键/热键触发，**用当前活跃方案的编码**输入，候选只留生僻字。
+    /// 生僻字模式：引导键/热键触发，用当前活跃方案的编码输入，候选只留生僻字。
     ///
-    /// # 为什么它与 [`Self::Special`] 共用整套按键处理
-    ///
-    /// special 模式的实质是「overlay 生命周期 + 一个码表引擎 + 候选」。本模式只换其中一项
-    /// ——引擎从「overlay 方案自带的那张码表」换成「当前活跃方案」（`overlay_engine_schema`
-    /// 的分支），再给候选加一道生僻准入。故按键处理、缓冲、光标、选词、退格全部复用
-    /// `handle_special_key` 那一套，**不另写一份**：另写等于把同一条输入流实现两遍，
-    /// 两份迟早分叉，而分叉的表现是「生僻字模式里退格/翻页行为和别处不一样」。
-    ///
-    /// ⚠️ 由此本模式会走到一切 `Special(_)` 的既有路径上。凡是从 `overlay_spec`
-    /// （方案 `[overlay]` 段快照）取值的地方，本模式恒为 `None` ⇒ 落到该项的默认档，
-    /// 这是**刻意**的：那些是「被叠加使用的那张码表怎么表现」，本模式没有那张码表。
-    ///
-    /// 无载荷：实例是单例（不像 special 那样一个引导键一份码表），身份不来自任何方案，
-    /// 故也没有下标可带——同 [`Self::TempPinyin`] / [`Self::AuxCode`]。
+    /// 是 [`Self::Special`] 的参数变体：只把引擎换成当前活跃方案（`overlay_engine_schema`）、
+    /// 加一道生僻准入，按键处理全部复用 `handle_special_key`，免得同一条输入流实现两遍后分叉。
+    /// 从 `overlay_spec` 取值的地方本模式恒为 `None`、落默认档，这是刻意的（它没有 overlay 码表）。
+    /// 无载荷：单例，身份不来自任何方案。
     RareChar,
-    /// 反查模式：用户自绑键进入，**用当前活跃方案的编码**查字，缓冲里通配键在任何位置
+    /// 反查模式：用户自绑键进入，用当前活跃方案的编码查字，缓冲里通配键在任何位置
     /// （含首位）都作通配，不看 `schema.codetable.wildcard` 主开关（spec
     /// `codetable-reverse-mode.md` §3）。
     ///
-    /// 与 [`Self::RareChar`] 同理是 special 的参数变体：缓冲 / 光标 / 退格 / 选词 / 退出
-    /// 全部复用 `handle_special_key` 与 `special_buffer`，只有候选另由 `handle_reverse`
-    /// 构建（`convert_reverse` + 检索范围过滤，不做自动上屏、不吃词频重排与候选调整）。
-    /// 与 special 族不同的是它会写 `has_more` / `candidate_limit` / `scope_relaxed`，
-    /// 故 `exit_special_mode` 一并复位这三位。
-    ///
-    /// 无载荷：单例，身份不来自任何方案——同 [`Self::RareChar`]。
+    /// 与 [`Self::RareChar`] 同理是 special 的参数变体，只有候选另由 `handle_reverse` 构建（不做
+    /// 自动上屏、不吃词频重排与候选调整）。它会写 `has_more` / `candidate_limit` /
+    /// `scope_relaxed`，故 `exit_special_mode` 一并复位这三位。无载荷：单例。
     Reverse,
     /// 临时 mix：引导键触发，合并多个成员方案候选。载荷为 `features.mix_modes` 下标。
     Mix(u8),
     /// 辅助码：拼音候选的字形二次筛选。独占输入流（组码中无法同时打拼音），但候选
-    /// 列表**只保留命中者**——被滤候选直接丢弃，候选窗只显示匹配词（还原不靠残留
+    /// 列表只保留命中者——被滤候选直接丢弃，候选窗只显示匹配词（还原不靠残留
     /// 标记，退出/退格都从会话快照恢复）。
     AuxCode,
 }
@@ -100,7 +61,7 @@ pub enum ModeKind {
 /// 而非停留在无候选的独占模式里。URL 与 z（后续）共用这一套，避免各写各的回退。
 #[derive(Clone, Debug)]
 pub struct Rewind {
-    /// 夺取前的**来源流**缓冲快照（回放目标由 [`Self::origin`] 决定）。
+    /// 夺取前的来源流缓冲快照（回放目标由 [`Self::origin`] 决定）。
     pub snapshot: String,
     /// 夺取瞬间的模式 buffer（「是否退到边界」判定：当前模式 buffer == 此值即在边界）。
     pub host_text: String,
@@ -108,18 +69,11 @@ pub struct Rewind {
     pub origin: RewindOrigin,
 }
 
-/// 夺取的**来源流** —— 决定 `Coordinator::rewind_hijack` 把 `snapshot` 放回哪里。
+/// 夺取的来源流 —— 决定 `Coordinator::rewind_hijack` 把 `snapshot` 放回哪里。
 ///
-/// # 为什么需要它
-///
-/// 回退一直被写死为「放回 `input_buffer` 并重算候选」，因为此前每个夺取式模式都只有
-/// 一个入口、来源恒是正常输入流。Unicode 模式打破了这一点：小写 `u+` 从码表缓冲夺取，
-/// 大写 `U+` 却是从**临时英文**转交过来的（Shift+U 先被 `try_activate_mode` 截进临英）。
-/// 两者若共用一条回放路径，`U+` 退回去就会把大写 `U` 塞进码表缓冲——码表拿一个它不认
-/// 的字符去查词，用户看到的是空候选，而他明明只按了一次退格。
-///
-/// ⚠️ 新增来源时，除了本枚举还要在 `rewind_hijack` 的 `match` 里接住它。只加变体不接
-/// 分支会落到既有分支上，症状与上面那条一模一样（状态清得掉、回错地方），且不报错。
+/// 同一模式可从不同流进入：小写 `u+` 从码表缓冲夺取，大写 `U+` 从临时英文转交。共用一条回放
+/// 路径会把大写 `U` 塞进码表缓冲、得到空候选。新增来源时必须同时在 `rewind_hijack` 的 `match`
+/// 里接住它，否则静默落到既有分支、回错地方。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum RewindOrigin {
     /// 正常码表/拼音输入流（`State::input_buffer`）。URL 夺取、z 夺取、小写 `u+` 走这条。
@@ -129,9 +83,8 @@ pub enum RewindOrigin {
     TempEnglish,
     /// 快捷输入缓冲（`State::mix_buffer`）。快捷输入里按 `@` 转交邮箱模式走这条。
     ///
-    /// 比临英多带两样：`idx` 是哪个融合实例（`State::mix_id`），`prefix` 是显示态前缀
-    /// （`;`，或字母引导时的 `z`）。临英回放可以把前缀清空（Shift+字母进入的临英本就没有），
-    /// 快捷输入不行——前缀是组合区里用户看得见的那个引导符，回放丢了它组合区就少一截；
-    /// 字母引导的实例回车上屏还要靠它把那个字母还回去（`guide_to_return`）。
+    /// `idx` 是融合实例（`State::mix_id`），`prefix` 是显示态前缀（`;`，或字母引导时的 `z`）。
+    /// 不能像临英那样清空前缀：它是组合区里看得见的引导符，字母引导的实例回车上屏还要靠它
+    /// 把字母还回去（`guide_to_return`）。
     Mix { idx: u8, prefix: String },
 }

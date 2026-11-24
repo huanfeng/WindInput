@@ -1,21 +1,18 @@
 //! 直接辅助码（双拼）：不按引导键，输入末 1～2 位自动当辅码，字形对得上的字词提到前面。
-//! 连续辅助码（`docs/design/aux-code-continuous.md`）开着时（出厂随 `direct`），主转换已带辅码，
-//! 本模块的串尾一步只做奇数长末字 1 位（`DirectPhraseRule::Last`）；下述完整行为是逃生口下的。
-//! 设计见 `docs/design/aux-code-direct.md`；切分 / 匹配 / 并入的纯逻辑在
-//! `wind_aux_code::direct`，本模块只做协调器那一半：
+//! 设计见 `docs/design/aux-code-direct.md`；连续辅助码（`docs/design/aux-code-continuous.md`）
+//! 开着时（出厂随 `direct`）主转换已带辅码，本模块的串尾一步只做奇数长末字 1 位
+//! （`DirectPhraseRule::Last`），下述完整行为是逃生口下的。纯逻辑在 `wind_aux_code::direct`，
+//! 本模块只做协调器那一半：
 //!
-//! - **门卫**（§4）：主输入路、双拼、`enabled` + `direct`、前缀恰好切成完整双拼音节、
-//!   辅码来源就绪（方案来源的系统层未就绪 → 本键原样、派后台构建，与引导键进入同一处理）；
-//! - **前缀候选**：连打时前缀恰是几键前的整个输入，直接取那一键的主候选快照
-//!   （[`DirectAuxPrev`]，只留有资格的拼音候选；那一键被截断过、或检索范围 / 单字 / 放宽状态
-//!   与当时不同都不用）；否则对前缀单独调一次引擎（`convert_with_opts`，引擎无状态，不碰本次
-//!   会话），走与主候选同一条加工链（展开 / 常用字标记 / 显示序 / 检索范围 / 单字 / 调频 /
-//!   shadow），所以「命中项之间的顺序」就是用户单打前缀时看到的顺序；
-//! - **标记**：命中项的 `consumed_length` 改成整串（上屏连辅码一起吃掉），`code` 保留前缀
-//!   的拼音码（调频与学习记在前缀下，「释读」记 `shidu`）；组码区形态存 `direct_aux_body`。
+//! - 门卫（§4）：主输入路、双拼、`enabled` + `direct`、前缀恰好切成完整双拼音节、辅码来源
+//!   就绪（未就绪 → 本键原样、派后台构建）；
+//! - 前缀候选：优先取 [`DirectAuxPrev`] 快照，否则对前缀单独调一次引擎（无状态），走与主候选
+//!   同一条加工链，故命中项之间的顺序就是用户单打前缀时看到的顺序；
+//! - 标记：命中项的 `consumed_length` 改成整串（上屏连辅码一起吃掉），`code` 保留前缀的拼音码
+//!   （调频与学习记在前缀下）；组码区形态存 `direct_aux_body`。
 //!
-//! ★ 调用点钉在 `build_candidates` 的 `apply_shadow` **之前**、全部重排之后：翻页扩容
-//! （`expand_candidates`）只重跑 `build_candidates`，放到 `update_candidates` 会在翻页时丢失。
+//! 调用点钉在 `build_candidates` 的 `apply_shadow` 之前、全部重排之后：翻页扩容只重跑
+//! `build_candidates`，放到 `update_candidates` 会在翻页时丢失。
 
 use crate::aux_code_source::AuxLookupNow;
 use crate::coordinator::{Coordinator, State};
@@ -24,17 +21,12 @@ use wind_aux_code::DirectPhraseRule;
 use wind_candidate::{Candidate, CandidateSource, candidate_display_order};
 
 /// 「上一个整音节输入」的主候选快照（`State.direct_aux_prev`）：连打时前缀恰是几键前的整个
-/// 输入（`uidup` / `uidupl` 的前缀 `uidu` 就是敲到第 4 键时的输入），那一键的候选早已算好，
-/// 直接取用即可，不必对前缀再调一次引擎（设计附录 A「取上一次按键的候选，免重算」）。
+/// 输入（`uidupl` 的前缀 `uidu` 就是第 4 键时的输入），直接取用、不必对前缀再调一次引擎。
 ///
-/// 存的是那一键**并入命中项之前、shadow 之前**的主候选：已走完展开 / 常用字 / 显示序 / 检索
-/// 范围 / 单字 / 调频（调频的码就是那时的输入 = 现在的前缀），也就是用户单打前缀时所见的
-/// 顺序（shadow 在取用时按前缀的码补上）。只在输入恰好切成完整双拼音节时才更新；奇数键不动它，
-/// 留给紧随其后的偶数键。组合复位（上屏 / 清空）、分段上屏、退回已上屏段时丢弃。
-///
-/// ★ 那一键的引擎产出**到了上限**（被截断过）就不存：兜底解码按辅码首字母在截断**前**准入，
-/// 截断过的快照会漏掉排在后面的命中（单音节前缀 `wu` 数百个同音字，`wuk` 曾少了 喔 呒 圄），
-/// 于是连打与退格重打给出的命中项不一样。
+/// 存的是那一键并入命中项之前、shadow 之前的主候选，即用户单打前缀时所见的顺序（shadow 在
+/// 取用时按前缀的码补上）。只在输入恰好切成完整双拼音节时更新；组合复位、分段上屏、退回
+/// 已上屏段时丢弃。那一键的引擎产出被截断过就不存：截断的快照会漏掉排在后面的命中，
+/// 连打与退格重打给出的命中项就不一样。
 pub(crate) struct DirectAuxPrev {
     input: String,
     /// 取快照时的候选裁剪状态：检索范围档位、单字模式、末页放宽。输入不变而切了其中任一项
@@ -53,7 +45,7 @@ pub(crate) struct DirectAuxPrev {
     admit: Option<(char, usize)>,
     /// 取快照时是否在连续模式（主转换走击键图 + 辅码表）。两种模式的主候选不同，不能互用。
     pub(crate) continuous: bool,
-    /// 只存**有资格**的拼音候选（`is_direct_source`），不整表克隆。
+    /// 只存有资格的拼音候选（`is_direct_source`），不整表克隆。
     candidates: Vec<Candidate>,
     /// 那一键的双拼音节分段（`ui'du`），组码区用。
     preedit: String,
@@ -379,10 +371,10 @@ impl Coordinator {
         let common = (state.filter_mode == wind_candidate::FilterMode::Smart)
             .then(|| (self.common_chars.clone(), self.engine_mgr.charsets()));
         let opts = wind_engine::engine::ConvertOptions {
-            // 只要吃满前缀的候选，且在截断**之前**丢掉其余（否则同音单字会把词挤出配额）。
+            // 只要吃满前缀的候选，且在截断之前丢掉其余（否则同音单字会把词挤出配额）。
             require_full_match: true,
             no_abbrev_quota: true,
-            // 按辅码**首字母**准入（2 位辅码的命中集是 1 位的子集，见 `direct_matches`）：
+            // 按辅码首字母准入（2 位辅码的命中集是 1 位的子集，见 `direct_matches`）：
             // 截断前就只剩可能命中的——`ui`（shi）有几百个同音字，全量取一遍要多花十几毫秒。
             admit: Some(Arc::new(move |text: &str| {
                 wind_aux_code::direct_matches(text, &*admit_lookup, &letter, rule, max_phrase_len)

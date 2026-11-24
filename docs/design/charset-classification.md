@@ -494,7 +494,7 @@ HashSet、`-` 前缀行进 `excluded`（**优先于 `ranges` 与成员表**，�
 几个生僻汉字设成常用，一点反应都没有，且连一条 warn 都没有**。
 
 ⇒ 对策是给新建模板一个显式的、比所有出厂类都小的 `order`
-（`handle_charset::TEMPLATE_ORDER` = 5），并由一条读**仓里真实 `data/charsets/`** 的
+（`handle_charset::NEW_CLASS_ORDER` = 5），并由一条读**仓里真实 `data/charsets/`** 的
 测试钉住「模板 < 最小出厂 order」。
 
 ⛔ 不改 `DEFAULT_ORDER`：那会让所有没写 `order` 的已有自建类的仲裁结果静默翻转。

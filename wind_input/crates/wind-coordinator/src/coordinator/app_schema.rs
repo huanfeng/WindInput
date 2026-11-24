@@ -1,30 +1,27 @@
-//! 按应用方案（compat.toml `[[apps]] schema`，C0-7 / C3-3，GH#80）。
+//! 按应用方案（compat.toml `[[apps]] schema`）。设计见 `docs/design/per-app-overrides.md`
+//! 「① ② 按应用方案」。三件事：
 //!
-//! 设计见 `docs/design/per-app-overrides.md`「① ② 按应用方案」。三件事：
+//! 1. 切入：焦点跨进程切入时（与 initial_mode 同一个 `crossed` 判据）按规则算目标方案，
+//!    不同就轻量切换——只换引擎与方案绑定的运行期资源，不写 `schema.active`、不归位中文、
+//!    不弹状态气泡。见 [`Coordinator::apply_app_schema_on_focus`]。
+//! 2. 手切分流：所有手切入口汇到 `finish_user_schema_switch`，经
+//!    [`Coordinator::route_manual_schema_switch`]：规则应用内只改本应用方案（`@remember`
+//!    另记记忆表）、不写盘；无规则应用照旧改全局。
+//! 3. 全局方案取 [`AppSchemaState::global`]，不是 `rt().config.schema.active`：手切只写磁盘，
+//!    内存 config 只在 `reload_user_config` 时整份重读，读它拿到的是启动时的旧值。
 //!
-//! 1. **切入**：焦点跨进程切入时（与 initial_mode 同一个 `crossed` 判据）按规则算目标方案，
-//!    与当前不同就**轻量切换**——只换引擎与方案绑定的运行期资源，不写 `schema.active`、
-//!    不归位中文、不弹状态气泡。见 [`Coordinator::apply_app_schema_on_focus`]。
-//! 2. **手切分流**：所有手切入口汇到 `finish_user_schema_switch`，在那里问
-//!    [`Coordinator::route_manual_schema_switch`]：规则应用内只改本应用的方案（`@remember`
-//!    另记记忆表），不写盘；无规则应用照旧改全局。
-//! 3. **全局方案**的来源是 [`AppSchemaState::global`]，**不是** `rt().config.schema.active`：
-//!    手切写的是磁盘上的 config.toml，内存里的 config 不刷新（没有文件监视，只在
-//!    `reload_user_config` 时整份重读），读它拿到的是启动时的旧值。
+//! 本模块的任何函数都不得进 `get_current_mode`（DLL 同步阻塞路径）：切方案可能要构建引擎、
+//! 起后台线程。
 //!
-//! ⛔ 本模块的任何函数都不得进 `get_current_mode`（DLL 同步阻塞路径）：切方案可能要构建
-//! 引擎，冷方案还要起后台线程。
+//! # 锁序（焦点线程、`app-schema-load` 后台线程、设置页 RPC、菜单线程并发调用）
 //!
-//! # 锁序（本模块的函数被焦点线程、`app-schema-load` 后台线程、设置页 RPC、菜单线程并发调用）
-//!
-//! 1. [`AppSchemaState::switch_lock`] 是**最外层**：「比对/检查 + 轻量切换」整段持有它。
-//!    ⛔ 持有任何别的锁时不得去取它；持有它期间可以取下面任何一把。
-//! 2. `Coordinator::schema_toggle_origin` 与 [`AppSchemaState::parked_toggle`] 是**叶子锁**：
-//!    两者**永不嵌套**——一边 take 出值、放锁，再取另一边写入。曾经一段先 origin 后 parked、
-//!    另一段先 parked 后 origin，两条线程各走一段即死锁。
-//! 3. `remembered` → `state_writer` 的内部锁：写记忆表时持 `remembered` 调 `schedule`
-//!    （见 [`Coordinator::remember_app_schema`]）；`schedule` 只取它自己的 `pending` 锁，
-//!    写盘闭包在 writer 线程上跑、不碰 `remembered`，故不成环。
+//! 1. [`AppSchemaState::switch_lock`] 是最外层：「比对/检查 + 轻量切换」整段持有它。
+//!    持有任何别的锁时不得去取它；持有它期间可取下面任何一把。
+//! 2. `Coordinator::schema_toggle_origin` 与 [`AppSchemaState::parked_toggle`] 是叶子锁，
+//!    永不嵌套——一边 take 出值、放锁，再取另一边写入；两段代码嵌套顺序相反即死锁。
+//! 3. `remembered` → `state_writer` 内部锁：写记忆表时持 `remembered` 调 `schedule`
+//!    （见 [`Coordinator::remember_app_schema`]）；写盘闭包在 writer 线程上跑、不碰
+//!    `remembered`，故不成环。
 //! 4. 其余（`global` / `pending_load` / `warned_invalid`）只在单独一句里取、取完即放。
 
 use super::*;
@@ -34,10 +31,10 @@ use wind_config::app_compat::AppSchema;
 /// 按应用方案的运行时态。独立成结构体：五个量只服务这一个功能，散在 `Coordinator` 的
 /// 百来个字段里既难找也难看出它们之间的约束。
 pub(crate) struct AppSchemaState {
-    /// 「全局方案」：最近一次**全局手切**（无规则应用里手切）的结果，启动取引擎的活跃方案，
+    /// 「全局方案」：最近一次全局手切（无规则应用里手切）的结果，启动取引擎的活跃方案，
     /// `reload_user_config` 重建方案集后取引擎新的活跃方案（即磁盘上的 `schema.active`）。
     ///
-    /// ⚠ 不能读 `rt().config.schema.active`，理由见模块文档第 3 条。
+    /// 不能读 `rt().config.schema.active`，理由见模块文档第 3 条。
     global: Mutex<String>,
     /// `@remember` 应用的记忆表（进程名小写 → 方案 id），`state.toml` `app_schemas` 的内存镜像。
     remembered: Mutex<HashMap<String, String>>,
@@ -56,7 +53,7 @@ pub(crate) struct AppSchemaState {
     /// [`Coordinator::finish_deferred_app_schema`] 的「检查意图代际 + 切换」都整段持有它。
     ///
     /// 没有它时后者是 check-then-act：后台线程比对代际通过之后、真正切换之前，焦点线程
-    /// 可以完成下一次切入（代际 +1、切到新目标），随后后台线程把方案切回**旧**目标。
+    /// 可以完成下一次切入（代际 +1、切到新目标），随后后台线程把方案切回旧目标。
     /// 锁序：最外层，见模块文档。
     switch_lock: Mutex<()>,
     /// 已报过「固定 id 不在 available」的 `(进程名, id)`：每次切入/手切都会问规则，不去重
@@ -81,11 +78,11 @@ impl AppSchemaState {
 /// 轻量切换时对未上屏编码的处置，见 [`Coordinator::switch_schema_light`]。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PendingInput {
-    /// 只丢弃，不上屏、不推任何东西给宿主。**焦点切入**用：此刻 active token 已指向新宿主，
+    /// 只丢弃，不上屏、不推任何东西给宿主。焦点切入用：此刻 active token 已指向新宿主，
     /// 缓冲里若还有旧宿主的编码，按 `commit_on_switch` 上屏就会把 A 应用的码打进 B 应用。
     Discard,
-    /// 与手切同一条策略（`keys.commit_on_switch`：开则上屏原码，关则丢弃）。只给**冷方案
-    /// 加载完成**那条路用：那时焦点仍在该应用（意图代际未变），缓冲属于它。
+    /// 与手切同一条策略（`keys.commit_on_switch`：开则上屏原码，关则丢弃）。只给冷方案
+    /// 加载完成那条路用：那时焦点仍在该应用（意图代际未变），缓冲属于它。
     CommitPerPolicy,
 }
 
@@ -97,7 +94,7 @@ pub(crate) enum AppSchemaRule {
 }
 
 impl Coordinator {
-    /// 该进程**生效中**的方案规则：未配、或固定的 id 不在当时的 `schema.available` 内
+    /// 该进程生效中的方案规则：未配、或固定的 id 不在当时的 `schema.available` 内
     /// ⇒ `None`（视为未配置并 WARN）。
     ///
     /// available 校验放在这里而不是解析层：available 可热重载，按当时的值判才能随之生效；
@@ -169,10 +166,10 @@ impl Coordinator {
     /// 焦点跨进程切入（或菜单改了规则、热重载重建了方案集）时，把活跃方案对齐到该进程的
     /// 目标方案。调用方负责「何时该算」（`crossed` 判据在 `handle_focus_gained`）。
     ///
-    /// 目标方案没加载好（开机预热未完）⇒ **不阻塞**：保持当前方案，后台加载，完成时若
+    /// 目标方案没加载好（开机预热未完）⇒ 不阻塞：保持当前方案，后台加载，完成时若
     /// 意图代际未变（焦点没离开、用户没手切）再切。焦点路径上同步构建一个大词库会卡住宿主。
     ///
-    /// 同步切换时缓冲**只丢弃**（[`PendingInput::Discard`]）：焦点切入那一刻 active token 已是
+    /// 同步切换时缓冲只丢弃（[`PendingInput::Discard`]）：焦点切入那一刻 active token 已是
     /// 新宿主，上屏会把旧应用的码打进新应用。菜单改规则、热重载对齐也走这里，那两处缓冲
     /// 本就已被菜单/重载清掉，丢弃与上屏同效。
     pub(crate) fn apply_app_schema_on_focus(&self, proc: &str, win: &FocusWindow) {
@@ -222,7 +219,7 @@ impl Coordinator {
         }
     }
 
-    /// 冷方案加载完成后的收尾：意图代际未变才切，且按**此刻**的规则重算目标——加载期间
+    /// 冷方案加载完成后的收尾：意图代际未变才切，且按此刻的规则重算目标——加载期间
     /// 菜单可能改过规则，拿旧目标会切到一个已被撤销的方案。
     ///
     /// 「检查 + 切换」整段持 `switch_lock`：否则检查通过后、切换之前焦点线程可以完成下一次
@@ -249,7 +246,7 @@ impl Coordinator {
         self.switch_schema_light(target, proc, PendingInput::CommitPerPolicy);
     }
 
-    /// **轻量切换**：换引擎 + 方案绑定的运行期同步，是 `finish_user_schema_switch` 去掉
+    /// 轻量切换：换引擎 + 方案绑定的运行期同步，是 `finish_user_schema_switch` 去掉
     /// 「写 `schema.active` / 归位中文与取消大写 / 状态气泡」之后的部分。
     ///
     /// 不归位中文：中英态归 initial_mode 那套管，两者正交；自动切换强行改中英会与用户在
@@ -258,14 +255,11 @@ impl Coordinator {
     ///
     /// # 往返记录（`toggle_schema:<id>`）
     ///
-    /// 引擎切方案会让 `schema_generation` +1，往返键的去程记录随之失效。对手切这是想要的
-    /// （期间用别的方式切过方案 ⇒ 来源作废），对自动切换则是误伤：在 A 应用按往返键去了
-    /// 英文、切到一个固定五笔的应用再切回 A，A 会被自动切回英文，但再按往返键却没反应。
-    /// 故自动切走时把仍有效的记录**挂起**，之后某次自动切换又落回同一个方案时按新代际
-    /// 恢复；任何手切都丢弃挂起的记录（见 [`Self::route_manual_schema_switch`]）。
-    ///
-    /// ⚠ 两段都是「从一把锁 take 出值、放锁，再取另一把写入」，`schema_toggle_origin` 与
-    /// `parked_toggle` **永不同时持有**（锁序见模块文档）。
+    /// 引擎切方案会让 `schema_generation` +1、往返键去程记录失效；对自动切换这是误伤（A 应用
+    /// 往返去了英文、切走再切回后往返键没反应）。故自动切走时把仍有效的记录挂起，之后自动
+    /// 切换落回同一方案时按新代际恢复；任何手切都丢弃挂起记录（见
+    /// [`Self::route_manual_schema_switch`]）。两段都是 take 出值、放锁再取另一把，
+    /// `schema_toggle_origin` 与 `parked_toggle` 永不同时持有。
     ///
     /// `pending` 决定未上屏编码怎么处置，见 [`PendingInput`]。
     pub(crate) fn switch_schema_light(&self, target: &str, proc: &str, pending: PendingInput) {
@@ -328,7 +322,7 @@ impl Coordinator {
     }
 
     /// 手切收尾的分流（`finish_user_schema_switch` 调）：返回 `true` = 当前焦点应用有方案
-    /// 规则，本次手切只属于该应用，调用方**不得**写 `schema.active`；`false` = 全局手切，
+    /// 规则，本次手切只属于该应用，调用方不得写 `schema.active`；`false` = 全局手切，
     /// 全局方案随之更新，调用方照旧持久化。
     ///
     /// 固定应用的手切是临时覆盖：不记任何东西，离开再回来由规则重算、自然恢复规则值。
@@ -363,12 +357,10 @@ impl Coordinator {
         }
     }
 
-    /// 写记忆表并经 `state_writer` 落盘。闭包带**整张表**（覆盖语义，见 `state_writer` 模块文档）。
+    /// 写记忆表并经 `state_writer` 落盘。闭包带整张表（覆盖语义，见 `state_writer` 模块文档）。
     ///
-    /// ★ **持 `remembered` 锁调 `schedule`**：快照与登记必须是同一个原子步骤。放锁后再
-    /// 登记的话，两条线程并发时后取的（更新的）快照可能先登记、先取的（更旧的）后登记，
-    /// 而 `schedule` 是同种覆盖语义 ⇒ 落盘的是旧表。持锁保证「登记顺序 = 快照顺序」。
-    /// 不成环：`schedule` 只取 writer 自己的 `pending` 锁，写盘闭包在 writer 线程上跑。
+    /// 持 `remembered` 锁调 `schedule`，保证「登记顺序 = 快照顺序」：放锁后再登记，并发时
+    /// 旧快照可能后登记而覆盖新表。不成环：`schedule` 只取 writer 自己的 `pending` 锁。
     pub(crate) fn remember_app_schema(&self, proc: &str, schema_id: &str) {
         let mut m = self
             .app_schema
@@ -382,7 +374,7 @@ impl Coordinator {
         });
     }
 
-    /// 该进程在记忆表里有没有**有效**记录（菜单设 `@remember` 时用来决定要不要播种）。
+    /// 该进程在记忆表里有没有有效记录（菜单设 `@remember` 时用来决定要不要播种）。
     pub(crate) fn has_remembered_schema(&self, proc: &str) -> bool {
         self.remembered_schema(proc).is_some()
     }

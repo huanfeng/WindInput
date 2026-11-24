@@ -4,18 +4,17 @@
 //! （`wind_store::charsets`）；要整份手改走词库页的「编辑文件」（`data.beginEdit`
 //! `kind: charsets`），载入时按出厂校验。
 //!
-//! # ★ 两种操作的差别必须让用户看见（§7.3）
+//! # 两种操作的差别必须让用户看见（§7.3）
 //!
 //! | | 改类的 `default` | 逐条覆盖（候选右键 / 词库管理） |
 //! |---|---|---|
-//! | 作用面 | **整个类**，不问词库里有没有 | 只作用于点过的那个字 |
-//! | 跟随出厂更新 | ✅ 出厂给类补了新成员，一并生效 | ⛔ 只有当时扫到的那些 |
+//! | 作用面 | 整个类，不问词库里有没有 | 只作用于点过的那个字 |
+//! | 跟随出厂更新 | ✅ 出厂给类补了新成员，一并生效 | 只有当时扫到的那些 |
 //! | 可逆 | 改回去即可 | 要反向再来一次 |
-//! | 优先级 | 低 | **高**，压住前者 |
+//! | 优先级 | 低 | 高，压住前者 |
 //!
-//! 最后一行是「配了没反应」的现成来源：用户曾整类点过生僻，库里躺着上千条覆盖；他现在
-//! 把类的 `default` 改成常用——**一点反应都没有**。故 [`CharsetClassRow::override_count`]
-//! 必须显示出来，并给一个「清理冗余」的出口。
+//! 最后一行是「配了没反应」的现成来源：库里躺着上千条逐条覆盖时，改类的 `default` 毫无反应。
+//! 故 [`CharsetClassRow::override_count`] 必须显示出来，并给一个「清理冗余」的出口。
 
 use std::collections::BTreeMap;
 
@@ -43,12 +42,12 @@ pub struct CharsetClassRow {
     pub in_rare: bool,
     /// 有没有被停用。
     pub enabled: bool,
-    /// **出厂类**（data / custom 两层里有这个 key）。`ranges` 只读、不能删，只能「恢复默认」。
+    /// 出厂类（data / custom 两层里有这个 key）。`ranges` 只读、不能删，只能「恢复默认」。
     /// 反之是用户自建类：范围可改、可删。
     pub builtin: bool,
     /// 用户层对这个类有调整。决定「恢复默认」能不能点。
     pub overridden: bool,
-    /// ⚠️ **有多少条逐条覆盖压在这个类上**（§7.2）。
+    /// 有多少条逐条覆盖压在这个类上（§7.2）。
     ///
     /// 大于 0 时界面必须提示，否则用户改了 `default` 会觉得开关坏了。
     pub override_count: usize,
@@ -116,7 +115,7 @@ impl crate::Coordinator {
             })
             .collect();
 
-        // ⚠️ **被停用的类不在 registry 里**（装配时就 remove 了），但必须列出来——否则
+        // 被停用的类不在 registry 里（装配时就 remove 了），但必须列出来——否则
         // 用户停用之后界面上再也找不到它，「停用」就成了不可逆操作。
         for (key, doc) in &user {
             if doc.def.enabled == Some(false) && reg.class_by_key(key).is_none() {
@@ -143,10 +142,10 @@ impl crate::Coordinator {
 
     /// 改一个类的属性：写库 + 立即热载。
     ///
-    /// ⚠️ **写库与热载必须在同一处完成**。分开的话就多出一条「写了但没生效」的路径，
+    /// 写库与热载必须在同一处完成。分开的话就多出一条「写了但没生效」的路径，
     /// 而它的表现是「设置页改完没反应、重启才生效」——本仓反复出现的那类缺陷。
     pub(crate) fn charset_edit(&self, key: &str, edit: &CharsetEdit) -> anyhow::Result<()> {
-        // ⚠️ 存在性判据不能只看 registry：**被停用的类不在里面**，只看它的话用户停用
+        // 存在性判据不能只看 registry：被停用的类不在里面，只看它的话用户停用
         // 之后就再也启用不回来（报「没有名为 X 的字符类」）。用户层里留着那份 `key: X`
         // 的调整，正是「这个类存在过」的凭据。
         let mut doc = self.user_doc(key)?;
@@ -163,7 +162,7 @@ impl crate::Coordinator {
         Ok(())
     }
 
-    /// 新建一个**空的**自建分类：只有文件名（key）、显示名与可选的默认判定 / 优先级。
+    /// 新建一个空的自建分类：只有文件名（key）、显示名与可选的默认判定 / 优先级。
     /// 成员与码位范围之后在设置页用「编辑文件」补。
     pub(crate) fn charset_create(
         &self,
@@ -175,7 +174,7 @@ impl crate::Coordinator {
             charset_def::is_valid_key(key),
             "文件名不合法：不能为空、首尾不能有空格，不能含 / \\ . : * ? \" < > |，最多 64 字节"
         );
-        // 只差大小写也算重名：一类一个文件，Windows 的文件名不分大小写。用户层按**文件**
+        // 只差大小写也算重名：一类一个文件，Windows 的文件名不分大小写。用户层按文件
         // 判（不按解析结果）：手改写坏的那份解析不出来、列表里看不见，新建同名会把它整份覆盖。
         let lower = key.to_lowercase();
         let files: Vec<String> = self
@@ -220,7 +219,7 @@ impl crate::Coordinator {
         Ok(())
     }
 
-    /// 删一个**自建**类。出厂类不能删，只能停用或恢复默认。
+    /// 删一个自建类。出厂类不能删，只能停用或恢复默认。
     ///
     /// 与 [`Self::charset_reset`] 的实体一样，分开是为了让「删出厂类」在入口就被拒：
     /// 走 reset 的话出厂类会"恢复"而不是消失，用户以为删了、列表里还在。
@@ -237,9 +236,9 @@ impl crate::Coordinator {
         Ok(())
     }
 
-    /// 清理压在某个类上的**冗余**逐条覆盖：方向与当前默认判定相同的那些。
+    /// 清理压在某个类上的冗余逐条覆盖：方向与当前默认判定相同的那些。
     ///
-    /// ★ 判据复用写端已有的那条（`is_cluster_common_by_default(k) != common` 才值得留），
+    /// 判据复用写端已有的那条（`is_cluster_common_by_default(k) != common` 才值得留），
     /// 不新写一份——两处判据分叉的表现是「设置页说有 N 条，清理完还剩几条」。
     pub(crate) fn charset_clear_redundant(
         &self,
@@ -289,7 +288,7 @@ impl crate::Coordinator {
 
     /// 每个类身上压着多少条逐条覆盖。
     ///
-    /// 归属按 [`wind_candidate::CharsetRegistry::class_of`]——它给的是**仲裁赢家**，
+    /// 归属按 [`wind_candidate::CharsetRegistry::class_of`]——它给的是仲裁赢家，
     /// 也就是「谁决定了这个字的常用性」，正是用户在这一行上想知道的那个类。
     fn override_counts_by_class(&self) -> BTreeMap<String, usize> {
         let mut out = BTreeMap::new();
@@ -322,7 +321,7 @@ impl crate::Coordinator {
 
     /// 用户层现有的全部调整，按 key 索引。没有 store 时为空。
     ///
-    /// ★ 与装配走的是同一个 `user_docs_from_store`：读写两侧必须同源，否则设置页读 A、
+    /// 与装配走的是同一个 `user_docs_from_store`：读写两侧必须同源，否则设置页读 A、
     /// 装配读 B，表现就是「改了没反应」而两边各自看都没错。
     fn user_docs(&self) -> BTreeMap<String, CharsetDoc> {
         let Some(store) = self.store.as_deref() else {
@@ -336,7 +335,7 @@ impl crate::Coordinator {
 
     /// 用户层里某个 key 的调整；没有就给一份只带 key 的空壳。
     ///
-    /// ★ 给空壳而不是 `None`：调用方拿到它就能直接改字段再存回去，不必在「有没有这条」
+    /// 给空壳而不是 `None`：调用方拿到它就能直接改字段再存回去，不必在「有没有这条」
     /// 上分两条路——而那两条路一旦分开，新建类的那条几乎必然少写点什么。
     fn user_doc(&self, key: &str) -> anyhow::Result<CharsetDoc> {
         let empty = CharsetDoc {
@@ -379,33 +378,19 @@ impl crate::Coordinator {
     }
 }
 
-/// 新建的自建类缺省的 `order`，**比所有出厂类都小**。
+/// 新建的自建类缺省的 `order`，比所有出厂类都小。
 ///
-/// ★★ 不留空走 [`charset_def::DEFAULT_ORDER`]（100）的理由是一个实测出来的坑：出厂值
-/// 是 `common_han` = 10、`emoji` = 20、50 个区块类 = 900，而 `common_han` 带
-/// `scope: han` + `outside: rare`，等于**对整个汉字域都表态**。缺省 100 的自建类排在
-/// 它后面 ⇒ 用户新建一个类想把几个生僻汉字设成常用，**一点反应都没有**。
+/// 不走 [`charset_def::DEFAULT_ORDER`]（100）：`common_han` 以 `scope: han` 对整个汉字域表态，
+/// 缺省 100 的自建类排在它后面永不生效，且 `shadowed_keys` 查不出这种形态（见设计文档 §6.5.1）。
+/// 也不改 `DEFAULT_ORDER`：那会让已有自建类的仲裁结果静默翻转。
 ///
-/// ⚠️ 这条路连告警都收不到：`CharsetRegistry::shadowed_keys` 只比对区间型的 `ranges`，
-/// `scope` 型的全域表态不在它的判据里（设计文档 §6.5 那道防线盖不住这种形态）。
-///
-/// ⛔ 对策**不是**改 `DEFAULT_ORDER`：那会让所有没写 `order` 的已有自建类的仲裁结果
-/// 静默翻转。只给新建的类一个显式值——**已存的类一个字节都不改**。
-///
-/// ⚠️ 这个决定有三条代价，不是零成本，写在这里免得下次误以为它只有好处：
-///
-/// 1. **「老类不动」只在字面上成立，相对次序变了**：新建的类（5）会压过用户先前建的、
-///    走 `DEFAULT_ORDER` 的老类（100）——改动前两者同为 100、靠 key 字典序打平。
-///    用户若要老类优先，得自己去把它的 `order` 调小。
-/// 2. **新建的类彼此打平**：每个都拿 5，两个自建类之间只能靠 key 字典序破
-///    （`CharsetRegistry` 编译时那条 `then_with(key)`）。确定，但语义是任意的。
-/// 3. **护栏只盖 `data/`**：钉住它的测试喂的是仓里的自带层；`charset_factory()` 实际
-///    还合并 `data_custom/`（定制版层）。定制包若发一个 `order < 5` 的类，测试不会响。
+/// 代价：新类（5）会压过走 `DEFAULT_ORDER` 的老自建类；新类彼此打平，靠 key 字典序破；
+/// 钉住它的测试只喂 `data/`，定制层 `data_custom/` 发 `order < 5` 的类测试不会响。
 const NEW_CLASS_ORDER: i32 = 5;
 
 /// 把一次编辑叠加到用户层的那份 doc 上。
 ///
-/// ★ `"inherit"` 写成 `None` 而不是某个具体值：那是「本层不表态、沿用下层」，与
+/// `"inherit"` 写成 `None` 而不是某个具体值：那是「本层不表态、沿用下层」，与
 /// 显式设成常用不是一回事——前者跟随出厂更新，后者钉死。
 fn apply_edit(doc: &mut CharsetDoc, edit: &CharsetEdit) -> anyhow::Result<()> {
     if let Some(v) = &edit.default_common {

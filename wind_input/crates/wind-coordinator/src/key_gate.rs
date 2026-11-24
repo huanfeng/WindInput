@@ -1,31 +1,17 @@
-//! **吃键判定：唯一真相源。**
+//! 吃键判定：唯一真相源。
 //!
-//! # 这个模块解决什么
-//!
-//! 「这个键该不该由输入法处理」这条判据，此前有**两份实现**：
-//! - C++ `CKeyEventSink::OnTestKeyDown`（约 400 行，含热键白名单/切换键/配对跳出/…）
-//! - 协调器内部散落的各处分支
-//!
-//! 它们靠注释和纪律维持同步，那些注释本身就是证据：「判据须与服务端保持单一真相源」
-//! 「判据镜像 core」「漂移即『吃了再吐』丢键」。
-//!
-//! Android 接入后出现了**第三份**——FFI 层手写的谓词。一个开发会话里同形 bug 出现三次：
-//! 空缓冲的空格/回车/退格/数字全无效、切到英文模式字母打不出。两次的形态完全一样：
-//! 协调器对不该收的键返回 `Consumed`（意为「已在输入法内处理」），宿主当成消费后
-//! **既不上屏也不执行默认行为**，键静默消失。
-//!
-//! 本模块把判据收进核心。宿主侧只做自己独有的前置（只读上下文、密码框、自注入按键
-//! 跳过）与后置（TSF 的 pending toggle 计时），中间的判定一律调 [`Coordinator::should_handle_key`]。
+//! 「这个键该不该由输入法处理」曾在 C++ `CKeyEventSink::OnTestKeyDown`、协调器各处分支、
+//! Android FFI 手写谓词里各有一份，漂移的表现是协调器对不该收的键返回 `Consumed`、宿主既不
+//! 上屏也不执行默认行为，键静默消失。本模块把判据收进核心：宿主侧只做自己独有的前置（只读
+//! 上下文、密码框、自注入按键跳过）与后置（TSF 的 pending toggle 计时），中间的判定一律调
+//! [`Coordinator::should_handle_key`]。
 //!
 //! # 迁移状态
 //!
-//! - Android：已切到本模块，FFI 层的手写谓词已删除。
-//! - C++ TSF：**尚未迁移**（保持现状，桌面零风险）。迁移时 C++ 只需保留
-//!   TSF 特有的前置/后置，中间整段替换为一次 IPC 查询或本地镜像调用。
-//! - macOS IMKit：**没有前置闸门**——`InputController.handle` 把每个 keyDown 都发给协调器，
-//!   再照 `KeyAction` 决定吃不吃。于是本模块第 3 条（快捷键组合归宿主）在那边完全不生效，
-//!   全靠协调器返回 `PassThrough`；而「有组合时按 ⌘C」这条返回的是 `ClearComposition`，
-//!   Swift 侧一度按「已消费」处理 → 键被吞（issue #64）。现由
+//! - Android：已切到本模块。
+//! - C++ TSF：尚未迁移。迁移时 C++ 只保留 TSF 特有的前置/后置，中间整段替换。
+//! - macOS IMKit：没有前置闸门，每个 keyDown 都发给协调器，本模块第 3 条（快捷键组合归宿主）
+//!   在那边不生效；「有组合时按 ⌘C」返回的 `ClearComposition` 由
 //!   `BridgeResponseRouter.apply(hostShortcut:)` 顶住，迁移本模块后可撤掉那个参数。
 
 use wind_config::hotkey::KeyDownPolicy;
@@ -46,7 +32,7 @@ fn key_hash(modifiers: u32, vk: u32) -> u32 {
     (modifiers << 16) | (vk & 0xFFFF)
 }
 
-/// 只有**有输入会话**时才承担输入法语义的键。
+/// 只有有输入会话时才承担输入法语义的键。
 ///
 /// 空缓冲时它们该交还宿主：空格出空格、回车换行、退格删字、方向键移光标、数字出数字。
 /// 有会话时它们是上屏/取消/删码/翻页/选词。
@@ -93,9 +79,9 @@ fn is_punct(vk: u32) -> bool {
 }
 
 impl Coordinator {
-    /// **该键是否交给输入法处理。**
+    /// 该键是否交给输入法处理。
     ///
-    /// 返回 `false` 时宿主必须执行默认行为，且**不要**再调用 `handle_key_event`。
+    /// 返回 `false` 时宿主必须执行默认行为，且不要再调用 `handle_key_event`。
     ///
     /// 判定顺序镜像 TSF `OnTestKeyDown`（顺序本身有语义，热键优先于常规分类）：
     /// 1. 宿主只读 → 一律放行
@@ -120,7 +106,7 @@ impl Coordinator {
                 KeyDownPolicy::Always => return true,
                 KeyDownPolicy::ChineseOnly => return chinese,
                 KeyDownPolicy::Session => return chinese && session,
-                // 仅转发：有会话时吃；无会话**继续往下**按常规分类判
+                // 仅转发：有会话时吃；无会话继续往下按常规分类判
                 // （中文模式下 `-=` `;'` 要当标点处理，直接放行会丢标点）
                 KeyDownPolicy::ForwardOnly => {
                     if session {
@@ -151,29 +137,20 @@ impl Coordinator {
 
         // ── 6. 中文模式 ──
         //
-        // 先问「这个键该不该**透传**」——它横跨上挡符号（Shift+数字）与 OEM 标点两类，
-        // 故提在下面的分类之前统一判一次。
+        // 先问「这个键该不该透传」，它横跨上挡符号与 OEM 标点两类，故提在分类之前。产物不变的
+        // 标点不能吃了再原样吐回：非 TSF-aware 宿主会把字符码当 VK 解释（见
+        // docs/architecture/smart-symbol-compat-notes.md「产物不变的标点要透传」）。
         //
-        // 为什么产物不变的标点不能吃：吃了再把原样 ASCII 吐回去不是无害的往返。非 TSF-aware
-        // 宿主会把 CUAS 送达的字符码当**虚拟键码**解释 —— Tkinter 实测（B-9）
-        // `#`(0x23)→VK_END、`%`(0x25)→VK_LEFT、`&`(0x26)→VK_UP，字不上屏反倒移了光标；
-        // `-`(0x2D)→VK_INSERT 更会把宿主切进改写模式。微软拼音对这批符号根本不吃键，
-        // 宿主拿到的是真实 VK，故无此问题；这里就是对齐那个行为。
-        //
-        // 判据取 `{cn,en}_passthrough_punct_chars`，与推给 DLL 的那两份**同源**
-        // （`ConfigBundle` 里由标点转换层 + 按键占用层两道合成）——两侧漂移就是老问题的
-        // 另一面。**中英标点态各一份**，因为英文态不走中文标点表、集合是中文态的超集。
-        //
-        // 两道**动态**闸门必须叠在集合之外，因为它们不是配置、是当下状态：
-        //   · 有输入会话 ⇒ 组码中按标点是**顶码**语义，必须吃；
-        //   · 全角 ⇒ `#` 要出 `＃`，必须吃。
+        // 集合取 `{cn,en}_passthrough_punct_chars`，与推给 DLL 的那两份同源，两侧漂移就是老问题。
+        // 两道动态闸门叠在集合之外（是当下状态不是配置）：有输入会话 ⇒ 顶码语义必须吃；
+        // 全角 ⇒ `#` 要出 `＃`，必须吃。
         if !session && let Some(ch) = punct_char(probe.vk, mods & MOD_SHIFT != 0) {
             let (full_width, chinese_punct) = {
                 let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
                 (s.full_width, s.chinese_punct)
             };
             let rt = self.rt();
-            // 按**当下标点态**二选一。英文标点态那份是中文那份的超集：那个态不走中文标点
+            // 按当下标点态二选一。英文标点态那份是中文那份的超集：那个态不走中文标点
             // 表，`,` `.` `;` 这些的产物也是原样 ASCII，撞码还更凶（`.`→VK_DELETE 吞字符）。
             let set = if chinese_punct {
                 &rt.cn_passthrough_punct_chars
@@ -185,13 +162,9 @@ impl Coordinator {
             }
         }
 
-        // Shift+数字是**上挡标点**（`!@#$%^&*()`），不是数字键：它要走标点转换，
-        // 空缓冲时也得吃。必须排在下面那条之前——[`is_session_only_key`] 只看 VK、
-        // 不看修饰位，会把 Shift+1 一并判成「数字，空缓冲交还宿主」。
-        //
-        // 漏掉这一条的表现：中文标点态下上挡整排标点**绕过标点层直出半角**
-        // （`!` 而不是 `！`），而且只在空缓冲时如此——有编码时它们又是全角，
-        // 于是看起来像「有时候转有时候不转」。安卓端实测就是这个形状。
+        // Shift+数字是上挡标点（`!@#$%^&*()`），要走标点转换，空缓冲时也得吃。必须排在下面那条
+        // 之前：[`is_session_only_key`] 只看 VK、不看修饰位，会把 Shift+1 判成「数字，空缓冲交还
+        // 宿主」，表现为上挡标点只在空缓冲时直出半角。
         if mods & MOD_SHIFT != 0 && is_digit(probe.vk) {
             return true;
         }
@@ -201,7 +174,7 @@ impl Coordinator {
         is_letter(probe.vk) || is_punct(probe.vk)
     }
 
-    /// 当前是否有活跃输入会话（编码缓冲非空 **或** 有候选）。
+    /// 当前是否有活跃输入会话（编码缓冲非空 或 有候选）。
     ///
     /// 判据必须含候选：顶码/联想等场景下缓冲已清空但候选仍在，此时回车/退格仍是
     /// 输入法语义。只看缓冲会让这些键在候选未消时漏给宿主。
@@ -237,13 +210,8 @@ mod tests {
         Coordinator::new_headless(cfg, None)
     }
 
-    /// 透传用哪份集合，取决于**当下标点态**。
-    ///
-    /// 这条必须写在 crate 内部：`state` 是 `pub(crate)`，`tests/` 里够不着标点态，
-    /// 在那边写就是个永远走中文态分支的假护栏（见 `is_chinese_punct` 只读不写）。
-    ///
-    /// 用 `'` 做判据是因为它在两个态下**结论相反**：中文态转 `‘`/`’` 必须吃，英文态产物
-    /// 即原样该透传。若哪天两个态给出同样答案，说明二选一那段没生效。
+    /// 透传用哪份集合，取决于当下标点态。必须写在 crate 内部：`tests/` 够不着 `state`，在那边
+    /// 写就是永远走中文态分支的假护栏。用 `'` 判：中文态转 `‘`/`’` 必须吃，英文态该透传。
     #[test]
     fn passthrough_set_follows_punct_mode() {
         let c = coord();

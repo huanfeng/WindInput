@@ -1,26 +1,17 @@
 //! 方案附加词库（扩展库 / 细胞词库）的列表与开关，桌面设置页与移动端门面共用。
 //!
-//! # 为什么在这里而不在 wind-webdata
+//! 放在这里而不在 wind-webdata：Android 闭包不含 wind-webdata（见本 crate Cargo.toml），两份实现
+//! 迟早在「override 只落 `{id, enabled}` 稀疏项」与「先持久化再 live 翻、含混输扇出」上分叉
+//! （前者漂了冻结整份词库定义，后者漂了「关了没反应」）。只依赖 [`WebDataHost`] 窄面，故同
+//! [`crate::user_words_api`] 下沉到这里，两端各自委托。
 //!
-//! 开关的本体原是 wind-webdata 的 `schema.setDictEnabled`。移动端设置页要在「方案 → 拼音」
-//! 等页逐个开关同一批库，但 **Android 闭包刻意不含 wind-webdata**（见本 crate Cargo.toml
-//! 的 ⚠ 注释），wind-mobile 调不到它。照抄一份的话，「override 只落 `{id, enabled}` 稀疏项」
-//! 与「先持久化再 live 翻、含混输扇出」这两条迟早两边各改各的——前者漂了会冻结整份词库
-//! 定义，后者漂了就是「关了没反应」（见 `EngineManager::set_dict_enabled_live` 的说明）。
-//! 它们只依赖 [`WebDataHost`] 窄面，故同 [`crate::user_words_api`] 下沉到这里，两端各自委托。
+//! `user:` 用户分库也走这里：「方案里有没有这个库」的校验对两类库是同一份，分流点放在校验之后，
+//! 保住桌面对未知 id 的报错文案。
 //!
-//! # `user:` 用户分库也走这里
-//!
-//! 合并后的 `dictionaries` 里也登记着用户分库（`user:<名>`），「方案里有没有这个库」的校验
-//! 对两类库是同一份；分流点放在校验之后，才能保住桌面对未知 id 的报错文案一字不变。用户分库
-//! 那一支只用到 store 与 `set_dict_enabled_live`，同样在窄面之内，没有理由单独留在 webdata。
-//!
-//! # 不在这里做的
-//!
-//! - **扩展库的只读闸**：桌面扩展库开关从来不查只读模式（override 落在配置目录，不属于
-//!   用户数据库），本层不另加闸以保桌面行为不变；移动端门面自己先查。用户分库那一支照旧查。
-//! - **用户分库的列表**：它有自己的条目数 / 文件 / 损坏状态等字段，见 `userDicts.list`，
-//!   [`list`] 只列方案文件（含发现目录）登记的附加库。
+//! 不在这里做的：
+//! - 扩展库的只读闸：桌面扩展库开关不查只读模式（override 落在配置目录，不属于用户数据库），
+//!   本层不另加闸；移动端门面自己先查。用户分库那一支照旧查。
+//! - 用户分库的列表：见 `userDicts.list`；[`list`] 只列方案文件（含发现目录）登记的附加库。
 
 use serde_json::{Value, json};
 use wind_config::schema::DictSpec;
@@ -297,14 +288,11 @@ fn set_user_dict_enabled<H: WebDataHost + ?Sized>(
         .set_dict_enabled_live(schema_id, dict_id, enabled))
 }
 
-/// 构造 `dictionaries` 的 override 值：**每库只落 `{id, enabled}` 稀疏项**。
+/// 构造 `dictionaries` 的 override 值：每库只落 `{id, enabled}` 稀疏项。
 ///
-/// 词库的 path/label/base_order/顺序等结构定义始终以方案文件为准（合并侧见
-/// `EngineManager::merge_dict_overrides`）。若在此写入完整数组，override 就会冻结整份
-/// 词库定义——方案后续新增的库透不过来、改过的 path 仍指向旧文件、顺序也停在写快照那一刻。
-///
-/// 入参取合并后的 dictionaries：`enabled.is_some()` 即"该库有显式启用态"，逐条落盘以
-/// 保留其它库已翻的开关。
+/// 结构定义（path/label/base_order/顺序）始终以方案文件为准（见
+/// `EngineManager::merge_dict_overrides`）；写完整数组会冻结整份词库定义。入参取合并后的
+/// dictionaries，`enabled.is_some()` 的逐条落盘以保留其它库已翻的开关。
 fn sparse_dict_overrides(dicts: &[DictSpec]) -> toml::Value {
     toml::Value::Array(
         dicts

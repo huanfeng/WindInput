@@ -1,8 +1,8 @@
 //! 方案常驻策略（`schema.keep_all_loaded`，设计 `docs/design/memory-footprint.md` §5）。
 //!
-//! - `true`：启动预热全部可用方案 + 临拼目标 + 英文，常驻不淘汰（此前的唯一行为）。
+//! - `true`：启动预热全部可用方案 + 临拼目标 + 英文，常驻不淘汰。
 //! - `false`：启动只建用得着的（[`EngineManager::residency_protected`]：当前方案、临拼目标、
-//!   临英开着时的英文；混输成员不保护，混输自建子引擎），其余可用方案在后台**只校验派生缓存**
+//!   临英开着时的英文；混输成员不保护，混输自建子引擎），其余可用方案在后台只校验派生缓存
 //!   （[`EngineManager::refresh_schema_cache`]，过期即重建、建完即释放），切过去时现建；
 //!   清扫拍子每分钟一次，30 分钟没用的方案引擎摘掉（[`EngineManager::evict_idle`]）。
 //!
@@ -44,15 +44,11 @@ impl Coordinator {
     /// `keep_all_loaded = true`：建好 `available` 全部方案 + 临拼 / 临英目标的引擎。
     pub(crate) fn prewarm_all_schemas(&self) {
         let active = self.engine_mgr.active_schema_id();
-        // available_schemas 只含「可切换的方案」。临时拼音 / 临时英文的目标引擎
-        // **不在其中**（它们是模式的实现，不是可切换方案），此前因此漏出预热范围：
-        // 实测首次按引导键进临拼时才同步加载 52 万词条的拼音库 + 英文库，用户感到
-        // 顿一下。两者都只在启用时才预热，不给没开这些功能的用户白付内存。
+        // 临拼 / 临英的目标引擎不在 available_schemas 里（它们是模式的实现），须另加，否则首次
+        // 进临拼时同步加载卡顿；两者都只在启用时才预热。
         let mut targets: Vec<String> = self.engine_mgr.available_schemas().to_vec();
-        // ⚠ `temp_pinyin_target()` **自身就会 `ensure_loaded`**（它的语义是「可用才
-        // 返回」），故这一行本身即完成了临拼引擎的加载，下面循环里那次只是复查跳过。
-        // 看着绕，但比在此复制一份「开关 + 方案适用性 + 目标解析」的判据强——那套判据
-        // 是所有临拼入口的公共门卫，抄一份必然漂移。
+        // `temp_pinyin_target()` 自身就会 `ensure_loaded`，这一行即完成临拼加载；不在此另抄
+        // 一份「开关 + 方案适用性 + 目标解析」的判据，那是所有临拼入口的公共门卫。
         if let Some(t) = self.engine_mgr.temp_pinyin_target() {
             targets.push(t);
         }
@@ -122,7 +118,7 @@ impl Coordinator {
 
     /// 清扫拍子的主体：
     ///
-    /// - 懒建缓存（单字全码表、按词查编码用户层，设计 §7）闲置 `idle` 以上就释放——**恒生效**，
+    /// - 懒建缓存（单字全码表、按词查编码用户层，设计 §7）闲置 `idle` 以上就释放——恒生效，
     ///   与常驻策略无关（[`wind_engine::EngineManager::evict_idle_caches`]）；
     /// - 常驻关着时再摘掉闲置 `idle` 以上的方案引擎。
     ///

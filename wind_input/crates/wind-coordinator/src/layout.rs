@@ -1,41 +1,26 @@
-//! 候选布局（竖排 / 横排）的**唯一**决策点。
+//! 候选布局（竖排 / 横排）的唯一决策点。设计见 `docs/design/mode-candidate-layout.md`。
 //!
-//! ⚠️ 「横排时文字怎么排」（旋转 90° / 文字竖排）**不在这条链上**：它是方案属性，
-//! 归属判据是数据方案而非活跃方案，取值在 [`crate::schema_scope`] 与候选字体同处。
+//! 「横排时文字怎么排」（旋转 90° / 文字竖排）是方案属性，取值在 [`crate::schema_scope`]；
 //! 本模块只在最后 [`Orientation::normalized`] 那一步把两根轴合起来。
 //!
-//! 设计见 `docs/design/mode-candidate-layout.md`。
-//!
-//! 这里刻意**不**做「进入模式时保存旧布局、退出时回放」——那需要在 `state.active` 的
-//! 8 个清空点各写一遍恢复（此前 quick / add_word 两个模式就已各写了三处），漏一处的表现是
-//! 候选窗卡在竖排且没有任何日志。改为**声明式重算**：
-//!
-//! > 任何时刻的方向 = f(全局基线, 当前模式意图)
-//!
-//! 「恢复」于是不再是一个需要被执行的动作，而是模式退出后重算的自然结果。副作用是**自愈**：
-//! 即使某条退出路径什么都没做（失焦、或将来新增一条谁都没想到的退出路径），
-//! 下一次候选显示会自动算回基线。
+//! 刻意不做「进入模式时保存旧布局、退出时回放」（要在 `state.active` 的每个清空点各写恢复，
+//! 漏一处就卡在竖排且无日志），而是声明式重算：方向 = f(全局基线, 当前模式意图)。
+//! 「恢复」是重算的自然结果，任何退出路径都会在下次显示时自愈。
 //!
 //! 决策（纯函数 [`intent_for`] / [`orientation_for`]）与取值（`impl Coordinator` 的包装）
-//! 刻意分开：前者可直接用 `Config` + `ModeKind` 测出完整矩阵，不必构造协调器。
+//! 分开，前者可直接用 `Config` + `ModeKind` 测出完整矩阵。
 
 use crate::coordinator::{Coordinator, State};
 use crate::pipeline::ModeKind;
 use wind_config::{Config, LayoutIntent, Orientation, OverlaySpec};
 use wind_ui_types::UiCommand;
 
-/// 「模式 → 布局意图」映射。**唯一一处**把这层对应关系写死的地方——新增模式只加一行。
+/// 「模式 → 布局意图」映射。唯一一处写死这层对应关系的地方——新增模式只加一行。
 ///
-/// 优先级：加词 > 独占模式 > 全局。加词面板是覆盖在任意输入态之上的临时面板，
-/// 其显示需求（逐字确认）与底层模式无关，故优先。
+/// 优先级：加词 > 独占模式 > 全局。`add_word` 不在 `state.active` 里（独立的
+/// `add_word_active` 标志），故必须在这里一起收进来。
 ///
-/// 注意 `add_word` **不在** `state.active` 里（它是独立的 `add_word_active` 标志），
-/// 所以「当前是什么模式」的判定必须把它一起收进来——这正是需要一个集中函数、
-/// 而不是各模式内部各判各的理由。
-///
-/// `overlay` = 当前特殊模式的 `[overlay]` 段快照（`State::overlay_spec`）。特殊模式的
-/// 配置住在方案文件而不是 `Config` 里，故它必须单独传入——保持本函数是纯函数，
-/// 测试直接造 `OverlaySpec` 即可，不必构造 `EngineManager`。
+/// `overlay` = 当前特殊模式的 `[overlay]` 段快照（`State::overlay_spec`），单独传入以保持纯函数。
 pub(crate) fn intent_for(
     cfg: &Config,
     overlay: Option<&OverlaySpec>,
@@ -70,16 +55,12 @@ pub(crate) fn intent_for(
 
 /// 意图叠加到基线上得出实际方向。
 ///
-/// 完整优先级链：**加词 > 独占模式 > 手动值 > 方案 > 全局基线**，
-/// 其中前两级已由 [`intent_for`] 折成 `mode` 这一个参数。
-///
-/// ★ `Follow` 的语义是**「跟随下一层」**，不是「跟随全局基线」——加了方案层之后这两者
-/// 不再等价。唯一能区分新旧实现的格子是「模式 `Follow` + 方案 `Vertical` + 基线横排」，
-/// 旧实现给横排、新实现给竖排，测试必须钉住它。
+/// 完整优先级链：加词 > 独占模式 > 手动值 > 方案 > 全局基线，前两级已由 [`intent_for`]
+/// 折成 `mode`。`Follow` 是「跟随下一层」而非「跟随全局基线」——「模式 `Follow` + 方案
+/// `Vertical` + 基线横排」须得竖排，测试钉住这一格。
 ///
 /// `manual` = 用户在本方案期间手动切换的方向（已判过代际，见 [`crate::schema_scope`]）。
-/// 它排在模式之下：模式（临英、快符、加词面板）是更内层的临时态，其布局意图是「这段时间
-/// 的候选长这样」，本就该压过用户对整个方案的偏好；且模式退出后手动值自动重新生效。
+/// 排在模式之下：模式是更内层的临时态，退出后手动值自动重新生效。
 pub(crate) fn orientation_for(
     mode: LayoutIntent,
     manual: Option<bool>,
@@ -88,7 +69,7 @@ pub(crate) fn orientation_for(
 ) -> Orientation {
     /// 意图 → 竖排位。`Follow` 交给调用方续查下一层，故这里返回 `None`。
     ///
-    /// 返回 `bool` 而不是 `Orientation`：这条链**只决定竖排位**，返回整个结构会让人
+    /// 返回 `bool` 而不是 `Orientation`：这条链只决定竖排位，返回整个结构会让人
     /// 以为它也管文字排列，而各层的 `Orientation` 常量里那一位恒是 `Normal`——
     /// 一路 `or` 下来就把 baseline 带的方案意图冲掉了（本轮正是这么写错的，
     /// 且只有「手动切一下方向」这一条路径能测出来）。
@@ -104,7 +85,7 @@ pub(crate) fn orientation_for(
         .or(manual)
         .or_else(|| of(schema))
         .unwrap_or(baseline.vertical);
-    // ★ 文字排列**原样带过**：它是方案属性，这条链上的四层（模式/手动/方案 layout/基线）
+    // 文字排列原样带过：它是方案属性，这条链上的四层（模式/手动/方案 layout/基线）
     // 没有一层有资格改它。用户临时切一下方向不该把方案声明的「这套文字要竖着写」丢掉——
     // 这正是把两根轴拆开的主要收益。
     Orientation {
@@ -127,7 +108,7 @@ impl Coordinator {
 
     /// 期望的候选方向（竖排位 + 旋转位）。
     ///
-    /// 基线取运行时镜像 `candidate_orientation`，**不读 `config.ui.candidate.layout`**：
+    /// 基线取运行时镜像 `candidate_orientation`，不读 `config.ui.candidate.layout`：
     /// 命令栏 `ime.toggle("layout")` 改的是镜像，config 要等写盘 + 热重载回灌才跟上，
     /// 期间读 config 会按旧方向恢复。此前的 `force_vertical` 实现读的正是 config，
     /// 这是它的既存缺陷之一。
@@ -142,7 +123,7 @@ impl Coordinator {
             self.schema_layout_intent(),
             baseline,
         );
-        // 第二根轴：方案声明的「横排时文字怎么排」。归属是**数据方案**，与候选字体同源
+        // 第二根轴：方案声明的「横排时文字怎么排」。归属是数据方案，与候选字体同源
         // （见 `candidate_text_orientation_of`），故不经上面那条「模式 > 手动 > 方案 > 基线」
         // 的链——那条链回答的是用户的呈现偏好，这一根回答的是这套文字怎么写。
         want.text = self.candidate_text_orientation_of(state);
@@ -170,18 +151,14 @@ impl Coordinator {
         self.desired_orientation(&state).upright()
     }
 
-    /// 把期望方向下发 UI，仅在与**上次真正下发的值**不同时发送。
+    /// 把期望方向下发 UI，仅在与上次真正下发的值不同时发送。
     ///
-    /// 去重不是性能优化：没有它每次按键都会发一条 `SetCandidateLayout`，UI 侧
-    /// `set_orientation` 触发重排，在首显时序敏感的路径上会引入抖动。
+    /// 去重不是性能优化：每键都发 `SetCandidateLayout` 会触发 UI 重排、在首显路径上抖动。
+    /// 测试因此要断言 [`Self::desired_orientation`] 的返回值，别断言「有没有发出 UiCommand」。
     ///
-    /// ⚠️ 它同时是测试的假绿来源——断言要落在 [`Self::desired_orientation`] 的返回值上，
-    /// 不要断言「有没有发出 UiCommand」：值没变时本就不发，测试会拿不到信号却看起来通过。
-    ///
-    /// 调用点是 `UpdateCandidates` 的**两个**发送点之前：`notify_ui_update`（主路径）与
-    /// `show_add_word_preview`（加词面板走独立绘制路径，不经 notify_ui_update）。
-    /// 同 channel 按序处理，UI 先改方向再填候选，不会闪。隐藏路径无需调用——布局只在
-    /// 显示时有意义，退出模式必然伴随「隐藏 + 下次显示」，恢复发生在显示之前。
+    /// 调用点是 `UpdateCandidates` 的两个发送点之前：`notify_ui_update`（主路径）与
+    /// `show_add_word_preview`（加词面板独立绘制）。同 channel 按序处理，不会闪。隐藏路径
+    /// 无需调用：恢复发生在下次显示之前。
     pub(crate) fn sync_candidate_layout(&self, state: &State) {
         let want = self.desired_orientation(state);
         let mut last = self
@@ -200,11 +177,8 @@ impl Coordinator {
 
     /// 把方案级候选字体下发 UI，同样只在变化时发送。
     ///
-    /// ★ **必须与 [`Self::sync_candidate_layout`] 在同一批调用点**（`UpdateCandidates`
-    /// 的两个发送点之前）。它的归属是 `effective_data_schema`，而那个判据随**输入语境**
-    /// 逐次按键变化（临英/快符叠加），不是随方案代际变化——挂到 `sync_schema_scope`
-    /// 那条代际驱动的路上会整个失效：`state.schema_scope_gen == generation` 直接 return，
-    /// 临英进出根本不改代际。
+    /// 必须与 [`Self::sync_candidate_layout`] 在同一批调用点：归属判据 `effective_data_schema`
+    /// 随输入语境逐键变化（临英/快符叠加），挂到代际驱动的 `sync_schema_scope` 上会整个失效。
     pub(crate) fn sync_candidate_font(&self, state: &State) {
         let want = self.candidate_font_of(state);
         let mut last = self

@@ -1,25 +1,18 @@
 //! 悬停提示（候选气泡）的右键菜单：按段 / 按行复制、上屏，复制全部，截图此窗口。
+//! 设计见 `docs/design/candidate-tooltip-sections.md` §7。
 //!
-//! 气泡的显示结构（`TooltipDoc`）下发给 UI，原始行（复制 / 上屏的取值）留在协调器——
-//! 候选页组装时把本页每个候选的 [`RenderedTooltip`] 连同候选文本缓存进
-//! `Coordinator::tooltip_page`。UI 右键时只回报「哪个候选、点中哪段哪行」，取值在这边做。
+//! 气泡显示结构（`TooltipDoc`）下发给 UI，原始行（取值）留在协调器的
+//! `Coordinator::tooltip_page`；UI 右键时只回报「哪个候选、点中哪段哪行」，取值在这边做。
 //!
 //! # 两道一致性闸门
 //!
-//! 同一个候选的气泡可能在任何时刻被重算（光标上报触发重组装、反查索引后台建好后前面多出
-//! 一个 `[编码]` 段……）。段下标一错位，「上屏此行」就会取到别的段的内容。故：
-//!
-//! 1. **弹菜单时**核对 UI 所画与缓存一致：`RequestTooltipMenu` 带上 UI 所画 `TooltipDoc` 的
-//!    指纹，与缓存条目的指纹不等就不给任何取值类菜单项（只剩「截图此窗口」）。命中是按 UI
-//!    所见换算的，缓存换了结构，那个 `(段, 行)` 在缓存里指的就不是用户点的那一行。
-//!    「复制全部」此时也不给：协调器手里只有缓存那一份，复制它等于复制一份用户没看见的内容。
-//! 2. **执行动作时**一律从弹菜单那一刻的**整份快照**（`TooltipMenuTarget::entry`）取值，
-//!    菜单标签与取值因此恒来自同一个结构。复制到此为止——候选变了照样复制快照里的内容。
-//!    上屏还要再核对会话与当前候选：候选原文已变或会话已结束就放弃（上屏要落在用户右键时
-//!    的那个组合语境里）。
+//! 气泡随时可能被重算，段下标一错位「上屏此行」就取到别段内容。故：
+//! 1. 弹菜单时核对 UI 所画与缓存的 `TooltipDoc` 指纹，不等就只给「截图此窗口」（「复制全部」
+//!    也不给：缓存那份不是用户看见的）。
+//! 2. 执行动作一律从弹菜单那一刻的整份快照（`TooltipMenuTarget::entry`）取值，标签与取值
+//!    同源。上屏还要核对会话与当前候选，原文已变或会话已结束就放弃。
 //!
 //! 放弃时发 Toast「候选已变化，未执行」，并记 warn（不含候选原文）。
-//! 设计见 `docs/design/candidate-tooltip-sections.md` §7。
 
 use crate::coordinator::Coordinator;
 use crate::tooltip::RenderedTooltip;
@@ -154,7 +147,7 @@ fn tooltip_value(
 impl Coordinator {
     /// 右键悬停提示：核对 UI 所画与缓存一致、记下快照、弹出菜单。
     ///
-    /// **先**发 SetTooltipMenuOpen(true) 抑制 tooltip 的 WM_MOUSELEAVE 自动隐藏——
+    /// 先发 SetTooltipMenuOpen(true) 抑制 tooltip 的 WM_MOUSELEAVE 自动隐藏——
     /// 右键弹出菜单后鼠标会移到菜单窗口上，若不抑制 tooltip 会当场消失，菜单就指向一个
     /// 已不存在的窗口，「截图此窗口」会截空。抑制标志在菜单关闭时由 menu_close 统一清除。
     pub(crate) fn show_tooltip_menu(
@@ -277,7 +270,7 @@ impl Coordinator {
 
 /// 一个候选悬停提示的一段（纯文本），给按下标取提示的宿主（移动端长按）用。
 ///
-/// 行取**原始行**（[`RenderedTooltip::raw`]），不带桌面气泡的单行截断与折行——手机卡片
+/// 行取原始行（[`RenderedTooltip::raw`]），不带桌面气泡的单行截断与折行——手机卡片
 /// 自己按屏宽折行，截断的 `…` 只会丢信息。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CandidateTooltipSection {
@@ -290,7 +283,7 @@ pub struct CandidateTooltipSection {
 }
 
 impl Coordinator {
-    /// 第 `idx`（全量**绝对**下标）个候选的悬停提示，按 `ui.tooltip.sections` 渲染——
+    /// 第 `idx`（全量绝对下标）个候选的悬停提示，按 `ui.tooltip.sections` 渲染——
     /// 与桌面候选窗气泡同一份模板、同一份求值上下文（[`crate::coordinator::TooltipEvalCtx`]）。
     ///
     /// 越界返回 `None`；提示总开关关着或各段都为空返回空列表。编码段依赖的反查索引没建好时

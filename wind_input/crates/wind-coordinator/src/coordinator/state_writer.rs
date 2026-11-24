@@ -1,32 +1,18 @@
-//! `state.toml` 的**单点延迟写入器**：合并短时间内的多次写，并且把整个进程的
+//! `state.toml` 的单点延迟写入器：合并短时间内的多次写，并把整个进程的
 //! load-modify-save 收敛到一条线程上。
 //!
-//! # 为什么要有它
-//!
-//! 两个问题各自都不致命，叠在一起才难查：
-//!
-//! 1. **互相吞更新**。此前每个写入点各自 `RuntimeState::load` → 改一个字段 → `save`。
-//!    两处几乎同时写（拖工具栏 + 关软键盘记住当前面）时，后写的那次读到的是**改动前**
-//!    的快照，落盘时把先写的那次原样覆盖回去。`handle_softkeyboard::save_softkeyboard_page`
-//!    的注释早就点出过这个形态（"一次丢更新就能吞掉刚存好的 toolbar_positions"），
-//!    但当时只在**测试与生产之间**加了道门，进程内多个写入点之间的竞争仍在。
-//!    收到一条线程上之后，"读—改—写"整体串行，这类丢更新在进程内不再可能。
-//! 2. **写得太碎**。位置类状态天然会被连续微调（拖一下、看一眼、再拖一下），
-//!    每次都是一轮完整的读文件 + 序列化 + 写临时文件 + rename。
+//! 解决两个问题：各写入点各自「读—改—写」时并发会互相吞更新（后写的读到旧快照、覆盖先写
+//! 的）；位置类状态被连续微调时写得太碎。收到一条线程后进程内不再丢更新。
 //!
 //! # 合并语义：按「变更种类」覆盖，不是按次数排队
 //!
-//! [`StateWriter::schedule`] 的 `kind` 是变更种类（`"toolbar_anchors"` 等）。同一种类
-//! 的后一次请求**覆盖**前一次待落的那次（位置类状态只有最后一次有意义），不同种类
-//! 并存。故待落队列的长度恒等于种类数，不随用户拖多少次增长。
-//!
-//! ⚠️ 正因为是覆盖语义，`schedule` 的闭包必须**自带完整的目标值**（从调用方的内存
-//! 镜像整份克隆过来），不能写成"在旧值上增量修改"——被覆盖掉的那次增量会凭空消失。
+//! [`StateWriter::schedule`] 的 `kind` 是变更种类（`"toolbar_anchors"` 等），同种类后一次
+//! 覆盖前一次待落的，不同种类并存，队列长度恒等于种类数。正因为是覆盖语义，闭包必须自带
+//! 完整目标值（从内存镜像整份克隆），不能写成增量修改——被覆盖的那次增量会凭空消失。
 //!
 //! # 关机时必须 flush
 //!
-//! 防抖窗口内进程退出就会丢掉最后一次改动，而"最后一次"恰恰是用户最在意的那次
-//! （拖完就关机）。[`StateWriter`] 的 `Drop` 会把待落变更写完再返回，
+//! 防抖窗口内退出会丢掉最后一次改动（拖完就关机）。`Drop` 会把待落变更写完再返回，
 //! 见 [`StateWriter::flush_blocking`]。
 
 use std::collections::BTreeMap;
@@ -37,14 +23,11 @@ use std::time::{Duration, Instant};
 use tracing::warn;
 use wind_config::RuntimeState;
 
-/// 合并窗口：末次请求之后再等这么久才真正落盘。
-///
-/// 取 1s 的判据是"比人连续微调的间隔长、比人拖完就关机的反应时间短"。调大能进一步
-/// 减少写盘，但会让 `Drop` 里那次 flush 承担更多"本该早就写掉"的变更——而进程被强杀
-/// （任务管理器、安装程序升级）时 `Drop` 根本不跑，那些变更就真的丢了。
+/// 合并窗口：末次请求之后再等这么久才落盘。比人连续微调的间隔长、比拖完就关机的反应
+/// 时间短；调大会让更多变更压到 `Drop` 的 flush 上，而进程被强杀时 `Drop` 不跑。
 const DEBOUNCE: Duration = Duration::from_millis(1000);
 
-/// ⚠️ 是 `Fn` 而不是 `FnOnce`：写失败要能**原样重放**（见 `run` 的重试）。
+/// 是 `Fn` 而不是 `FnOnce`：写失败要能原样重放（见 `run` 的重试）。
 /// 故闭包内取用捕获值时要 `clone`，不能 move 走。
 type Edit = Box<dyn Fn(&mut RuntimeState) + Send>;
 
@@ -68,16 +51,14 @@ struct Inner {
 pub(crate) struct StateWriter {
     /// `None` = 本实例不写盘（无 `store` 的测试夹具，或取不到状态目录）。
     ///
-    /// 判据刻意保留在**构造方**：`store.is_none()` 表示"headless 测试夹具"这个语义不是
-    /// 这里赋予的，而 `state_dir()` 是进程外的全局路径（`%LOCALAPPDATA%\WindInput[Dev]`），
-    /// 测试夹具同样取得到——只靠路径判断挡不住"跑一次 cargo test 就改掉开发者本机状态、
-    /// 还与正在运行的服务抢同一个文件"。
+    /// 判据刻意由构造方给：`state_dir()` 是进程外的全局路径，测试夹具同样取得到，只靠路径
+    /// 判断挡不住 cargo test 改掉开发者本机状态、与运行中的服务抢同一个文件。
     inner: Option<Arc<Inner>>,
     worker: Option<std::thread::JoinHandle<()>>,
 }
 
 impl StateWriter {
-    /// `enabled = false` 或 `state_dir = None` 时构造出一个**不写盘的空实现**：
+    /// `enabled = false` 或 `state_dir = None` 时构造出一个不写盘的空实现：
     /// `schedule` 变成 no-op，不起线程。
     pub(crate) fn new(enabled: bool, state_dir: Option<PathBuf>) -> Self {
         let Some(dir) = state_dir.filter(|_| enabled) else {
@@ -106,11 +87,8 @@ impl StateWriter {
         }
     }
 
-    /// 本实例是否是**不写盘的空实现**（无 `store` 的测试夹具 / 取不到状态目录）。
-    ///
-    /// 供测试直接断言"这个协调器没有落盘能力"。⚠️ 别用副作用（某个内存镜像有没有变）
-    /// 去代理这件事——那种判据会在写入路径重构时静默失效，而失败信息还会指向错误的
-    /// 结论（"测试正在改开发者本机的 state.toml"，实际并没有）。
+    /// 本实例是否是不写盘的空实现（无 `store` 的测试夹具 / 取不到状态目录）。
+    /// 供测试直接断言；别用「某个内存镜像变没变」代理，那种判据会在重构时静默失效。
     #[cfg(test)]
     pub(crate) fn is_noop(&self) -> bool {
         self.inner.is_none()
@@ -118,7 +96,7 @@ impl StateWriter {
 
     /// 登记一次变更：`kind` 相同的前一次待落变更被本次覆盖。
     ///
-    /// `edit` 会在 worker 线程上、拿着**刚从磁盘读出来的** [`RuntimeState`] 执行，
+    /// `edit` 会在 worker 线程上、拿着刚从磁盘读出来的 [`RuntimeState`] 执行，
     /// 所以它必须只改自己那几个字段、把值整份写进去（见模块文档的覆盖语义警告）。
     pub(crate) fn schedule(
         &self,
@@ -140,9 +118,7 @@ impl StateWriter {
 
     /// 把待落变更立刻写完并停掉 worker。幂等；`Drop` 会调用它。
     ///
-    /// **不带超时**：这里要等的是一次本地小文件写入，而漏写的代价是用户刚拖好的位置
-    /// 凭空丢失。若哪天 worker 真的可能卡住（写入换成网络路径之类），该加的是那一侧的
-    /// 超时，而不是在这里放弃等待——那只会把丢数据变成偶发。
+    /// 不带超时：漏写的代价是用户刚拖好的位置丢失。worker 若真可能卡住，该在那一侧加超时。
     fn flush_blocking(&mut self) {
         let Some(inner) = self.inner.take() else {
             return;
@@ -168,11 +144,8 @@ impl Drop for StateWriter {
     }
 }
 
-/// 写失败后的重放次数上限。
-///
-/// `state.toml` 偶发写不进去是有真实来源的：同步盘/备份工具短暂持有文件句柄、
-/// 杀毒软件扫描、磁盘瞬时满。这类都是**几秒内自愈**的，重放一两次就过去了；
-/// 而真正的持久故障（目录被删、只读介质）重试多少次都没用，只会刷日志。
+/// 写失败后的重放次数上限。偶发失败（同步盘/杀毒短暂持有句柄、磁盘瞬时满）几秒内自愈，
+/// 重放一两次就过；持久故障重试多少次都没用，只会刷日志。
 const MAX_RETRIES: u32 = 3;
 
 fn run(inner: &Arc<Inner>) {
@@ -205,7 +178,7 @@ fn run(inner: &Arc<Inner>) {
                 break std::mem::take(&mut p.edits);
             }
         };
-        // ⚠️ 锁已释放再做文件 IO：`schedule` 在任意线程上调用（UI 事件线程、
+        // 锁已释放再做文件 IO：`schedule` 在任意线程上调用（UI 事件线程、
         // bridge 线程），不该被一次磁盘写入阻塞。
         match apply(&inner.state_dir, &batch) {
             Ok(()) => retries = 0,
@@ -219,7 +192,7 @@ fn run(inner: &Arc<Inner>) {
                     continue;
                 }
                 retries += 1;
-                // 原样放回重排。⚠️ 期间若有同 kind 的新值进来，**保留新值**——
+                // 原样放回重排。期间若有同 kind 的新值进来，保留新值——
                 // 位置类状态只有最后一次有意义，拿旧值盖回去等于把用户刚拖到的位置
                 // 退回上一处，比这次没写成还糟。
                 let mut p = inner.pending.lock().unwrap_or_else(|e| e.into_inner());

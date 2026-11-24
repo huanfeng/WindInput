@@ -1,11 +1,7 @@
 //! 主题明暗（亮 / 暗 / 跟随系统）的类型与系统明暗探测。
 //!
-//! # 为什么单独成型而不是继续用 `u8`
-//!
-//! 此前运行时明暗态是裸 `u8`（0 跟随 / 1 亮 / 2 暗），而三个消费点一律写成
-//! `let dark = style == 2;`——「跟随系统」于是静默退化成亮色，且 `match` 的 `_` 通配分支
-//! 让编译器全程沉默。改成枚举后 [`ThemeStyle::resolve_dark`] 是唯一的明暗出口，
-//! 新增分支必须在此显式回答，漏处理会编译失败而不是悄悄按亮色跑。
+//! 用枚举而非裸 `u8`：[`ThemeStyle::resolve_dark`] 是唯一的明暗出口，新增分支必须在此显式回答，
+//! 漏处理会编译失败，而不是被 `_` 分支悄悄按亮色跑。
 
 // 两个消费点分别在 `cfg(windows)` 与 `cfg(target_os = "macos")` 的 `system_prefers_dark`
 // 里，其余平台（Android/Linux 的 headless 形态）走空实现，此 import 在那里即死代码。
@@ -62,7 +58,7 @@ impl ThemeStyle {
         }
     }
 
-    /// 本次渲染该用暗色吗——主题解析的**唯一**明暗出口。
+    /// 本次渲染该用暗色吗——主题解析的唯一明暗出口。
     ///
     /// `System` 每次调用都实时探测：系统明暗可在运行中被用户改掉，缓存会让
     /// 「切了系统主题但输入法没跟上」重新出现。探测本身是一次注册表读，量级远低于
@@ -73,13 +69,9 @@ impl ThemeStyle {
 
     /// 同 [`Self::resolve_dark`]，但由宿主告知系统明暗。
     ///
-    /// **移动端必须走这一个**：[`system_prefers_dark`] 在非 Windows/macOS 上恒 false
-    /// （见其文档），Android 若走 [`Self::resolve_dark`]，`System` 会静默退化成恒亮色
-    /// ——不报错、不崩溃，只是「跟随系统」这个选项永远不生效。系统明暗在 Android 上
-    /// 只有 Java 层的 `Configuration.uiMode` 知道，拿不到就只能由宿主传进来。
-    ///
-    /// 明暗判定的 `match` 仍然只有这一处，`resolve_dark` 委托给它——新增分支照旧
-    /// 必须在此显式回答。
+    /// 移动端必须走这一个：[`system_prefers_dark`] 在非 Windows/macOS 上恒 false，走
+    /// [`Self::resolve_dark`] 会让「跟随系统」静默退化成恒亮色。明暗判定的 `match` 只有这一处，
+    /// `resolve_dark` 委托给它。
     pub fn resolve_dark_with(self, system_dark: bool) -> bool {
         match self {
             Self::Light => false,
@@ -100,12 +92,9 @@ impl ThemeStyle {
 
 /// 系统当前是否为深色模式。
 ///
-/// Windows 读 `HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize` 下的
-/// `AppsUseLightTheme`（REG_DWORD，0=深色 / 1=浅色）。注意与同键下的 `SystemUsesLightTheme`
-/// 区分：后者管任务栏与开始菜单，前者才是「应用」的明暗——输入法浮层属应用范畴。
-///
-/// 键在 Win10 1803 之前不存在，且用户可能从未动过明暗设置（此时值缺失）。缺失与读取失败
-/// 一律按浅色：深色是更"重"的假设，猜错会让浅底主题上叠深色文本导致不可读，浅色兜底更安全。
+/// Windows 读 `HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize` 的
+/// `AppsUseLightTheme`（0=深色）；同键下的 `SystemUsesLightTheme` 管任务栏，不是应用明暗。
+/// 值缺失（老系统或用户从未设过）与读取失败一律按浅色：猜错深色会在浅底主题上叠深色文本。
 #[cfg(windows)]
 pub fn system_prefers_dark() -> bool {
     use winreg::RegKey;
@@ -122,16 +111,11 @@ pub fn system_prefers_dark() -> bool {
     dark
 }
 
-/// macOS 读全局偏好 `AppleInterfaceStyle`：浅色时该键**不存在**，深色时值为 `"Dark"`。
+/// macOS 读全局偏好 `AppleInterfaceStyle`：浅色时该键不存在，深色时值为 `"Dark"`。
 ///
-/// 走 `CFPreferencesCopyAppValue` 而不是读 `.GlobalPreferences.plist` 文件：偏好由
-/// cfprefsd 托管并带写回延迟，直接读文件会拿到用户刚改过、尚未落盘的旧值。也不用
-/// `defaults` 子进程——本函数在每次主题解析时调用，spawn 的量级不合适。
-///
-/// 服务进程是用户会话内的 LaunchAgent，读到的就是当前用户域，无需额外指定 user/host。
-///
-/// 与 Windows 分支同样的兜底方向：取不到一律按浅色（深色是更"重"的假设，猜错会让浅底
-/// 主题叠深色文本而不可读）。
+/// 走 `CFPreferencesCopyAppValue`：直接读 plist 会拿到 cfprefsd 尚未落盘的旧值，`defaults` 子进程
+/// 对每次主题解析都 spawn 太重。服务是用户会话内的 LaunchAgent，读到的就是当前用户域。
+/// 取不到一律按浅色（同 Windows 分支）。
 #[cfg(target_os = "macos")]
 pub fn system_prefers_dark() -> bool {
     use core_foundation_sys::base::{CFGetTypeID, CFRelease, CFTypeRef, kCFAllocatorDefault};
@@ -163,7 +147,7 @@ pub fn system_prefers_dark() -> bool {
         }
         // 必须先验类型再当 CFString 用。
         //
-        // 这里原先写的是「拿到别的类型时 CFStringGetCString 会失败并返回 false」——**那是错的**：
+        // 这里原先写的是「拿到别的类型时 CFStringGetCString 会失败并返回 false」——那是错的：
         // CoreFoundation 对入参做类型断言，类型不符是直接 abort 整个进程，不是返回 0。偏好键
         // 理论上只会是字符串，但它是全局可写的（第三方工具、损坏的 plist 都能塞进别的类型），
         // 而代价是输入法服务当场崩掉、用户完全没法打字。一次 CFGetTypeID 换掉这个风险很划算。

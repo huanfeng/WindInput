@@ -1,17 +1,12 @@
-//! 命令栏（cmdbar）宿主集成
-//!
-//! 对照 Go `wind_input/internal/coordinator/cmdbar_context.go` + `cmdbar_services.go`。
-//! 负责三件事：
+//! 命令栏（cmdbar）宿主集成。负责三件事：
 //! 1. [`Coordinator::init_cmdbar`]：构造后装配 [`Services`] 与自身 Weak 引用；
 //! 2. [`CmdbarCtx`]：把 coordinator 运行时状态适配为 [`EvalContext`]；
 //! 3. 控制器（[`CoordIme`] / [`CoordDict`]）：把 cmdbar 动作映射到 coordinator 能力。
 //!
-//! **平台缺口**：search 留 `None`（经 open 默认可用），相关动作缺失时返回
-//! ServiceUnavailable（宿主侧记 WARN 降级）；已接通 ime.toggle/ime.schema/
-//! dict.add/proc/open/clip/keys/config（get/set/toggle 注册表校验 + 热重载）/
-//! wind.cli（自身 exe 跑 CLI 子命令）。
+//! 平台缺口：search 留 `None`（经 open 默认可用），缺失的动作返回 ServiceUnavailable
+//! （宿主侧记 WARN 降级）。
 //!
-//! **线程/锁**：动作经独立线程执行（见 `Coordinator::spawn_command`），故控制器回调
+//! 线程/锁：动作经独立线程执行（见 `Coordinator::spawn_command`），故控制器回调
 //! 自锁的 coordinator 方法是安全的（此刻按键处理已释放 state 锁）。
 
 use crate::coordinator::Coordinator;
@@ -28,7 +23,7 @@ use wind_ui_types::{ToastKind, ToastPosition};
 /// 告诉被 `wind.cli` 拉起的 CLI 子进程：输出走管道，别去附着父控制台。
 ///
 /// 服务多数时候没有控制台（`AttachConsole` 失败即放弃，继承来的管道句柄得以保留），
-/// 但**开发期从终端启动服务**时子进程会 attach 到那个终端，`println!` 就不进管道了——
+/// 但开发期从终端启动服务时子进程会 attach 到那个终端，`println!` 就不进管道了——
 /// 表现为「开发机上直通命令永远拿不到结果、装机版却正常」。用一个显式开关杜绝。
 pub const WIND_CLI_PIPED_ENV: &str = "WIND_INPUT_CLI_PIPED";
 
@@ -65,15 +60,13 @@ impl Coordinator {
         let _ = self.cmdbar_services.set(svc);
     }
 
-    /// 执行一个 `$CC` 命令源：解析 → 求值 → **按列表顺序**跑动作链。
+    /// 执行一个 `$CC` 命令源：解析 → 求值 → 按列表顺序跑动作链。
     /// type() 文本经 push 管道上屏；其余为副作用。文本上屏后稍候再跑后续副作用，
     /// 让落字先于后续按键（如 `type("「」")` 后 `key.tap("Left")` 才能把光标落到括号中间）。
-    /// **必须在独立线程、未持 state 锁时调用**（控制器会回调自锁的 coordinator 方法）。
+    /// 必须在独立线程、未持 state 锁时调用（控制器会回调自锁的 coordinator 方法）。
     ///
-    /// 失败一律弹 toast：此前求值/动作错误只进 `warn!` 日志，用户侧是「选了没反应」的
-    /// 哑失败——短语写错一个函数名或变量名，除了翻日志没有任何线索。这里是动作链的
-    /// 唯一失败出口，各动作自身不再重复弹（成功回显仍归各动作，见 `cmd_dict_add`）。
-    /// 整条链只弹**第一个**错误：链上后续动作往往因同一根因连环失败，逐个弹会刷屏。
+    /// 失败一律弹 toast（否则是「选了没反应」的哑失败）。这里是动作链的唯一失败出口，各动作
+    /// 不再重复弹；整条链只弹第一个错误，后续动作常因同一根因连环失败。
     pub(crate) fn run_command_candidate(&self, src: &str, input: &str) {
         let Some(services) = self.cmdbar_services.get() else {
             return;
@@ -186,7 +179,7 @@ impl Coordinator {
         Ok(())
     }
 
-    /// 测试入口：按**用户同层**的路径执行一条命令源（如 `ime.schema("pinyin")`）。
+    /// 测试入口：按用户同层的路径执行一条命令源（如 `ime.schema("pinyin")`）。
     ///
     /// 直接调 `cmd_set_schema` 之类的内部函数验不出「这条命令是否真能走到那里」——
     /// 求值、动作分派、`Services` 装配三段都在这条链上，任一段断了内部函数照样通过。
@@ -207,17 +200,13 @@ impl Coordinator {
         );
     }
 
-    /// 顶码等同步场景：求值命令源，动作链**全为 Text**（无副作用）时返回拼接文本 `Some(text)`；
-    /// 含任一 Effect（shell/key/clip 等需异步回调 coordinator 锁）返回 `None`，交异步 spawn 执行。
-    ///
-    /// **不跑任何 Effect**——纯文本求值只碰 `CmdbarCtx` 读快照（input/last/clip/now/env）与
-    /// 反查表读锁，无副作用，可在持 state 锁的按键线程内安全调用。
+    /// 顶码等同步场景：求值命令源，动作链全为 Text（无副作用）时返回拼接文本 `Some(text)`；
+    /// 含任一 Effect（需异步回调 coordinator 锁）返回 `None`，交异步 spawn 执行。
     /// `$SS` 组 / 求值失败 / services 未装配亦返回 None。
     ///
-    /// ⚠️ 「无锁」已不再成立：`dict.rev` 经 `reverse_render` 取 `self.reverse` 的**读**锁。
-    /// 这与候选构建路径（`build_candidates` 在同一按键线程、同样持 state 锁时取该读锁）
-    /// 是同一个加锁顺序，故不引入新的死锁面；但新增会取其它锁的 `EvalContext` 方法时
-    /// 必须回到这里重新核对顺序。
+    /// 可在持 state 锁的按键线程内调用：只读 `CmdbarCtx` 快照，外加 `dict.rev` 取
+    /// `self.reverse` 读锁——与 `build_candidates` 同一加锁顺序。新增会取其它锁的
+    /// `EvalContext` 方法时必须回来核对顺序。
     pub(crate) fn eval_command_text_only(&self, src: &str, input: &str) -> Option<String> {
         let services = self.cmdbar_services.get()?;
         let (front_app, front_title, front_sel) = self.front_ctx_snapshot();
@@ -429,7 +418,7 @@ impl ProcessRunner for CoordProc {
         #[cfg(ext_presenter)]
         {
             let _ = &self.0;
-            // verb/show 是 ShellExecuteW 的概念，本平台没有对应物。**必须留 WARN**：
+            // verb/show 是 ShellExecuteW 的概念，本平台没有对应物。必须留 WARN：
             // 词条能跨机器走，用户在 macOS 上写了 verb="runas" 却什么都不发生时，
             // 日志是唯一能说明「被忽略了」而不是「没生效」的线索。
             if !spec.verb.is_empty() || !spec.show.is_empty() {
@@ -462,11 +451,8 @@ impl ProcessRunner for CoordProc {
     }
     fn run_self(&self, spec: &CliSpawn<'_>) -> anyhow::Result<()> {
         // wind.cli：以服务自身 exe 跑 CLI 子命令。CLI 进程经控制管道回连本服务
-        // 执行（热重载/重建等）；GUI 子系统下 spawn 无控制台闪窗。
-        //
-        // 反馈：CLI 早就把结果写在自己的 stdout 上了（「✓ 用户词库: 新增 12 · 更新 3」），
-        // 但它是 GUI 子系统的短命子进程、没有控制台，那行字过去一直掉进黑洞。
-        // 这里把它接回来变成 toast——**不新造一套结果描述**，避免与 CLI 的说法漂移。
+        // 执行（热重载/重建等）；GUI 子系统下 spawn 无控制台闪窗。CLI 写在 stdout 的结果
+        // 没有控制台可看，这里接回来变成 toast，不另造一套结果描述以免与 CLI 漂移。
         let exe = std::env::current_exe()?;
         let mut cmd = std::process::Command::new(exe);
         cmd.args(spec.args);
@@ -486,7 +472,7 @@ impl ProcessRunner for CoordProc {
         let wait = std::time::Duration::from_millis(spec.wait_ms);
         // 收集与计时分成两层线程：
         // 内层只管阻塞读到子进程结束（`wait_with_output` 无法中途放弃）；外层
-        // `recv_timeout` 到点就走人。**不 kill 子进程**——它可能正在写词库。
+        // `recv_timeout` 到点就走人。不 kill 子进程——它可能正在写词库。
         // 只有子进程真的永不退出时才会留下内层这一个线程，这是刻意的取舍。
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::Builder::new()
@@ -499,7 +485,7 @@ impl ProcessRunner for CoordProc {
         std::thread::Builder::new()
             .name("wind-cli-wait".into())
             .spawn(move || {
-                // ⚠️ 隐私：子进程输出可能带词条/路径，只允许进 toast（UI 通道），
+                // 隐私：子进程输出可能带词条/路径，只允许进 toast（UI 通道），
                 // 日志里只记退出码（见 handle_addword 的同款约定）。
                 let out = match rx.recv_timeout(wait) {
                     Ok(Ok(o)) => o,
@@ -507,7 +493,7 @@ impl ProcessRunner for CoordProc {
                         warn!("wind.cli: 等待子进程失败: {e}");
                         return;
                     }
-                    // 超时**不能静默**：那正是这个功能要消灭的症状（命令跑了、
+                    // 超时不能静默：那正是这个功能要消灭的症状（命令跑了、
                     // 用户什么也没看到）。给一条中性提示，说清"还在跑、结果未知"，
                     // 迟到的真结果不再补弹——几十秒后冒出来的提示比没有更扰人。
                     Err(_) => {
@@ -565,7 +551,7 @@ pub(crate) fn cli_toast_message(
     }
     if ok {
         // 成功文案三级：显式 ok= > CLI 自己打印的最后一行 > 兜底。
-        // 取**最后**一行而不是第一行：多段导入时最后一行是总结性的那条。
+        // 取最后一行而不是第一行：多段导入时最后一行是总结性的那条。
         let text = if !ok_text.trim().is_empty() {
             ok_text.to_string()
         } else if let Some(l) = last_nonempty_line(stdout) {
@@ -600,7 +586,7 @@ fn last_nonempty_line(s: &str) -> Option<String> {
         .map(String::from)
 }
 
-/// 压成单行并按**字符**截断（不是字节——中文报告按字节切会切出半个字）。
+/// 压成单行并按字符截断（不是字节——中文报告按字节切会切出半个字）。
 pub(crate) fn clip_single_line(s: &str, max: usize) -> String {
     let joined = s.split_whitespace().collect::<Vec<_>>().join(" ");
     let clipped: String = joined.chars().take(max).collect();
@@ -636,7 +622,7 @@ impl NotifyService for CoordNotify {
 /// （落回按 kind 取色）而不是 panic。
 pub(crate) fn parse_hex_rgba(s: &str) -> Option<[u8; 4]> {
     let hex = s.strip_prefix('#')?;
-    // `is_ascii` 不是多余的：下面按**字节**下标切片，而 `len()` 也是字节数——
+    // `is_ascii` 不是多余的：下面按字节下标切片，而 `len()` 也是字节数——
     // `#中中` 恰好 6 字节，能穿过长度闸门，再切 `hex[0..2]` 就在字符中间 panic。
     // 现有调用方都先过 `validate_toast_args`，但本函数的契约是"非法返回 None"。
     if !matches!(hex.len(), 6 | 8) || !hex.is_ascii() {
@@ -732,7 +718,7 @@ pub(crate) fn set_comment_dict(
 struct CoordConfig(Weak<Coordinator>);
 
 impl CoordConfig {
-    /// `set` 的共同实现。`quiet` 只压热重载**成功**的「设置已更新」；写回 / 重载失败
+    /// `set` 的共同实现。`quiet` 只压热重载成功的「设置已更新」；写回 / 重载失败
     /// 的提示两档都照常弹（`config.set` 词条里写错键该当场看见，静默只会变成「没生效」）。
     fn set_inner(this: &CoordConfig, key: &str, value: &str, quiet: bool) -> anyhow::Result<()> {
         use wind_config::config_schema::{parse_str_value, validate};
@@ -748,7 +734,7 @@ impl CoordConfig {
 
     /// 读某键当前值（四层合并后），字符串裸值、其余紧凑 JSON。
     ///
-    /// `require_trustworthy` = 调用方要拿这个值**当种子写回**（`toggle`）。此时本次加载
+    /// `require_trustworthy` = 调用方要拿这个值当种子写回（`toggle`）。此时本次加载
     /// 若在该键处降级过就必须报错而不是照读：降级时读到的是出厂值，翻转它写回去等于
     /// 把用户真实的设置改成「出厂值的反面」——单键版的整表抹除，同样静默、同样不可逆。
     /// 纯读（`get`）不设这道闸：显示一个出厂值不造成任何损失。
@@ -881,7 +867,7 @@ enum WorkdirFallback {
 /// 解析被启动进程的工作目录，并在需要时记 WARN。
 ///
 /// 所有经 [`Coordinator::push_shell_exec`] 拉起进程的调用方都应先过这里——该通路
-/// 在 TSF 侧是**由前台宿主应用进程执行**的，不定目录就等于把宿主的当前目录
+/// 在 TSF 侧是由前台宿主应用进程执行的，不定目录就等于把宿主的当前目录
 /// （随文件对话框漂移）连同它的 DLL 搜索路径一起交给子进程。
 pub(crate) fn resolve_workdir(func: &str, cmd: &str, explicit: &str) -> String {
     let (dir, fallback) = resolve_workdir_with(cmd, explicit, |p| p.is_dir(), home_dir);
@@ -898,17 +884,12 @@ pub(crate) fn resolve_workdir(func: &str, cmd: &str, explicit: &str) -> String {
     dir
 }
 
-/// [`resolve_workdir`] 的纯逻辑内核：文件系统探测与主目录解析都从外部注入，
-/// 便于用假映射做确定性单测（与 `cli_util::expand_with` 同款做法）。
+/// [`resolve_workdir`] 的纯逻辑内核：文件系统探测与主目录解析都从外部注入，便于确定性单测。
 ///
-/// 默认策略 = **目标程序所在目录**，等价于在资源管理器里双击它；靠相对路径找
-/// 数据文件的程序（词典等）正是按这个假设写的。定位不到目标目录时退到主目录，
-/// 刻意**不**用输入法自身目录：那会把第三方进程的 CWD 挂到我们的安装目录上，
-/// 既可能被写入垃圾文件，也让它的 DLL 搜索路径指向我们这里。
-///
-/// 返回空串仅当连主目录都拿不到——空串下游即"不设置"，也就是继承调用方的当前
-/// 目录。在 Windows 上那是**前台宿主应用**的 CWD（还会被文件对话框改掉），
-/// 正是本函数要消除的不确定性，所以它是最后手段而非默认路径。
+/// 默认 = 目标程序所在目录（等价于资源管理器里双击它，靠相对路径找数据的程序按此假设写）；
+/// 定位不到时退到主目录，刻意不用输入法自身目录（第三方进程可能往里写垃圾，DLL 搜索路径也会
+/// 指向这里）。返回空串仅当连主目录都拿不到：下游即继承调用方 CWD（前台宿主的，不确定），
+/// 是最后手段。
 fn resolve_workdir_with(
     cmd: &str,
     explicit: &str,
@@ -1047,7 +1028,7 @@ mod workdir_tests {
     }
 
     /// 裸命令名由 ShellExecute 走 PATH 解析，反推不出目录 → 中性目录。
-    /// 关键是**不能**返回空串：空串下游即继承前台宿主应用的当前目录。
+    /// 关键是不能返回空串：空串下游即继承前台宿主应用的当前目录。
     #[test]
     fn bare_command_name_falls_back_to_home_not_empty() {
         let (dir, fb) = resolve_workdir_with("notepad.exe", "", dirs(&[]), home);
@@ -1057,7 +1038,7 @@ mod workdir_tests {
 
     /// URL 不能走 Path::parent：`https://a/b/c` 会切出 `https://a/b` 这种似是而非的路径。
     ///
-    /// ⚠️ 白名单里放的正是 `Path::parent()` 对该 URL **真会产出**的那个值——这样
+    /// 白名单里放的正是 `Path::parent()` 对该 URL 真会产出的那个值——这样
     /// 一旦 `://` 短路被删掉，本例就会返回那个假路径而变红。若随便填一个对不上的
     /// 字符串，`is_dir` 恒 false 会让它无论有没有短路都绿，成为典型的假绿用例。
     #[test]

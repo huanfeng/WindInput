@@ -1,14 +1,9 @@
-//! 网址输入模式（劫持缓冲 + 回退），**兼所有前缀夺取式模式的共享骨架**。
-//!
-//! 从 coordinator.rs 拆出（同 crate 内 `impl Coordinator` 块，组织性重构，无逻辑变更）。
-//!
-//! # 本文件里哪些是共享的
+//! 网址输入模式（劫持缓冲 + 回退），兼所有前缀夺取式模式的共享骨架。
 //!
 //! [`Coordinator::try_prefix_hijack`]（入口闸门）、[`Coordinator::active_hijack_buffer`]、
 //! [`Coordinator::can_rewind`]、[`Coordinator::rewind_hijack`] 四个不属于 url，是
-//! url / unicode / z 夺取共用的骨架。新增一个前缀夺取式模式要碰哪些地方，见
-//! `docs/design/prefix-hijack-modes.md` 的清单——那份清单是照着本文件与
-//! `handle_unicode.rs` 的实际接线点列的。
+//! url / unicode / email 等夺取模式共用的骨架。新增前缀夺取式模式要碰哪些地方，见
+//! `docs/design/prefix-hijack-modes.md` 的清单。
 
 use crate::coordinator::{Coordinator, State, numpad_char, printable_char};
 use crate::pipeline::{ModeKind, Rewind, RewindOrigin};
@@ -21,20 +16,11 @@ use wind_keys::keymap;
 impl Coordinator {
     /// 前缀夺取闸门：正常输入累积到某个已注册前缀时，夺取进入对应模式。
     ///
-    /// # ★ 未开启时的代价必须是常数
+    /// 在逐键热路径上且出厂全关，未开启时代价必须是常数：先在同一次 `rt()` 借用里读完所有
+    /// 总开关，全关立刻返回，不做键码转换、不构造 `String`、不遍历前缀表。
     ///
-    /// 本函数在**逐键热路径**上，而出厂态两个模式都关着——绝大多数用户永远不该为它们
-    /// 付出任何代价。故先一次性读完所有总开关，全关就立刻返回：不做 `printable_char`
-    /// 键码转换、不构造探针 `String`、不遍历前缀表。
-    ///
-    /// 两个开关刻意在**同一次** `rt()` 借用里读完，而不是每个模式各借一次——那样加一个
-    /// 模式就多一次运行时借用，正是「未开启也变慢」的来源。
-    ///
-    /// # 扩展
-    ///
-    /// 新增一个前缀夺取式模式 = 开关元组加一位 + 下方链里加一条分支。刻意保留**显式
-    /// 分支**而不做注册表：优先级由代码顺序表达，一眼可读可调。这与 `try_activate_mode`
-    /// 的既有取舍一致（见 `handle_mode.rs` 「不强塞统一表，避免死抽象」）。
+    /// 新增模式 = 开关元组加一位 + 下方链里加一条分支。刻意用显式分支而非注册表：优先级由
+    /// 代码顺序表达（同 `try_activate_mode` 的取舍）。
     pub(crate) fn try_prefix_hijack(
         &self,
         state: &mut State,
@@ -60,34 +46,22 @@ impl Coordinator {
                 return Some(self.enter_url_mode(state, probe));
             }
         }
-        // Unicode：**字面**比较，不归一大小写（理由见 `UnicodeConfig::prefixes`）。
+        // Unicode：字面比较，不归一大小写（理由见 `UnicodeConfig::prefixes`）。
         if unicode_on {
             let probe = format!("{}{}", state.input_buffer, ch);
             if self.is_unicode_prefix(&probe) {
                 return Some(self.enter_unicode_mode(state, probe, RewindOrigin::Normal));
             }
         }
-        // 邮箱：**后缀触发**，判据与上面两条不同类——不是「缓冲 + 本键 == 某前缀」，
-        // 而是「本键是 `@` 且缓冲非空」，缓冲整体作为用户名带进模式（见
-        // `handle_email.rs` 文件头的对照表与 `docs/design/prefix-hijack-modes.md` §5.2）。
+        // 邮箱：后缀触发——「本键是 `@` 且缓冲非空」，缓冲整体作为用户名带进模式（见
+        // `handle_email.rs` 文件头与 `docs/design/prefix-hijack-modes.md` §5.2）。
         //
-        // 排在最后：`@` 不可能是出厂的任何 url/unicode 前缀，但用户可以把它配进
-        // `input.url.prefixes`。排在后面 = 显式配置的前缀优先，不去猜用户的意图。
+        // 排在最后：用户可能把 `@` 配进 `input.url.prefixes`，显式配置的前缀优先。
+        // 空缓冲不触发：否则单独打 `@` 都会掉进邮箱模式。
         //
-        // **空缓冲不触发**：否则用户每次想单独打一个 `@` 都会掉进邮箱模式。这个条件
-        // 同时也是「用户名从哪来」的答案。
-        //
-        // **分段上屏中途不夺取**（`committed_text` 非空即已有半句中文待在组合区里）：
-        // 那个状态下的 `@` 几乎一定是标点，而不是邮箱。更要紧的是夺取不处置
-        // `committed_text` —— 拼音打 `nihaoma`、选「你好」分段上屏后 `input_buffer` 是
-        // `ma`，此时按 `@` 会进邮箱模式而「你好」留在 state 里成孤儿：上屏只给宿主
-        // `ma@qq.com`，随后再打一个字母，`update_candidates` 又把「你好」拼回 preedit，
-        // 用户看到的是乱序的两截。
-        //
-        // ⚠️ url / unicode 结构上有同一个洞，但它们要求「缓冲恰好等于前缀去掉末键」
-        // （`www` + `.`、`u` + `+`），触发面窄得多；本模式是「任意非空缓冲 + `@`」，
-        // 不挡就会从潜在变成常见。那两个的既有洞另案处理，不在本闸门里一并改——
-        // 那会动到既有行为。
+        // 分段上屏中途不夺取（`committed_text` 非空）：夺取不处置 `committed_text`，已选的半句
+        // 会成孤儿、随后被拼回 preedit 造成乱序。url / unicode 结构上有同一个洞，但触发面窄
+        // （缓冲须恰等于前缀去末键），另案处理，不在这里改动既有行为。
         if email_on
             && ch == crate::handle_email::EMAIL_AT
             && !state.input_buffer.is_empty()
@@ -144,15 +118,9 @@ impl Coordinator {
         state.active = None;
         state.url_buffer.clear();
         state.url_cursor = 0;
-        // ★ 候选与翻页视图必须一起清。加历史补全**之前**这里漏了也无害——网址模式恒无
-        // 候选，`enter_url_mode` 清完就再没人填；`update_url_candidates` 一接上，漏清就
-        // 变成真缺陷：退出后 `state.candidates` 仍非空而候选窗已隐藏，用户看不见它，
-        // 可下一次按空格会命中 `message_handler` 的「有候选则选词」分支，凭空再上屏一条
-        // 历史网址。数字选词键、翻页键、`has_input_session`（它把非空候选算作「有会话」）
-        // 同样被这批幽灵候选骗过。
-        //
-        // 四条退出路径都经这里：上屏 / Esc / Ctrl-Alt 守卫 / 退格删空。其中删空那条最狠
-        // ——`update_url_candidates("")` 列的是**整张**历史表。
+        // 候选与翻页视图必须一起清：否则退出后 `state.candidates` 仍非空而候选窗已隐藏，下一次
+        // 空格 / 数字键 / 翻页会命中这批幽灵候选、凭空上屏一条历史网址，`has_input_session` 也被
+        // 骗过。四条退出路径（上屏 / Esc / Ctrl-Alt 守卫 / 退格删空）都经这里。
         state.candidates.clear();
         self.reset_candidate_view(state);
         state.preedit.clear();
@@ -179,11 +147,9 @@ impl Coordinator {
     /// 是否可回退：已登记 + 当前模式 buffer 已退回到夺取边界（== 登记时的 host_text）
     /// + 没有分步上屏留下的已转换前缀。
     ///
-    /// ★ `committed_text` 非空时缓冲等于边界只是巧合：临拼 / 快捷输入打 `lalal` 选「拉拉」
-    /// 分步上屏后缓冲剩 `l`，恰等于残余码，此刻回退会经 `exit_*` 把「拉拉」一并清掉、组合区
-    /// 跳回 `z`。判据收在这里而不是「分步上屏时清 `rewind`」：分步出口有键盘 / 次选键 keyup /
-    /// 鼠标 / 辅助码转交多条，这里是唯一的汇合点；且段全部退回后（`committed_text` 又空、
-    /// 缓冲回到边界）那一帧正是夺取边界本身，回退仍应可用，清掉登记就回不去了。
+    /// `committed_text` 非空时缓冲等于边界只是巧合（`lalal` 选「拉拉」后剩 `l`），此刻回退会把
+    /// 「拉拉」一并清掉。判据收在这里而不是分步上屏时清 `rewind`：分步出口有多条，这里是唯一
+    /// 汇合点；且段全部退回后那一帧正是夺取边界，回退仍应可用。
     pub(crate) fn can_rewind(&self, state: &State) -> bool {
         match (&state.rewind, self.active_hijack_buffer(state)) {
             (Some(rw), Some(buf)) => buf == rw.host_text && state.committed_text.is_empty(),
@@ -199,7 +165,7 @@ impl Coordinator {
             .map(|r| (r.snapshot, r.origin))
             .unwrap_or_default();
         // 退出当前夺取式模式：URL / z-fallback 的临拼、临英、mix、生僻字。
-        // ⚠️ 必须与 `active_hijack_buffer` 枚举的模式**一一对应**：那边认得、这边漏了，
+        // 必须与 `active_hijack_buffer` 枚举的模式一一对应：那边认得、这边漏了，
         // 就会走 `reset_exclusive_modes` 兜底——状态清得掉，但各模式自己的收尾
         // （committed_segs、cursor、mix 的透镜态）不会跑，回退后留下半清理的残局。
         match state.active {
@@ -215,7 +181,7 @@ impl Coordinator {
                 self.reset_exclusive_modes(state)
             }
         }
-        // 回放目标由**来源**决定，不是恒定的 `input_buffer`（见 `RewindOrigin`）。
+        // 回放目标由来源决定，不是恒定的 `input_buffer`（见 `RewindOrigin`）。
         match origin {
             RewindOrigin::Normal => {
                 state.input_buffer = snapshot;
@@ -256,7 +222,7 @@ impl Coordinator {
                 // 重进同一个快捷输入实例，前缀原样放回（理由见 `RewindOrigin::Mix`）。
                 // 不走 `enter_mix_mode`：它按进入键重算前缀、并把缓冲清空。
                 //
-                // ⚠️ 若该快捷输入当初是 z 夺取进来的，那份回退登记已在转交邮箱时被覆盖，
+                // 若该快捷输入当初是 z 夺取进来的，那份回退登记已在转交邮箱时被覆盖，
                 // 回到这里后再退到边界不会继续退回码表缓冲——`Rewind` 只有一层，临英转交
                 // 同此。
                 state.active = Some(ModeKind::Mix(idx));
@@ -297,14 +263,8 @@ impl Coordinator {
         {
             return act;
         }
-        // 会话态按键绑定（`keys.session_actions`）。⚠️ 网址模式此前是**唯一**没接这条的
-        // overlay——另外四个都经 `handle_candidate_nav` 接了。一期没暴露是因为那时的动词
-        // 全是导航类，而网址模式原样累积文本、从不产候选，导航在这里本就无事可做；二期
-        // 的 `cancel` 一加进来，缺口立刻变成「Tab 在网址模式里按了没反应」。
-        //
-        // ★ 判据：**新增一类动词时，要重查每条通路是不是都接了这个消费点**，不能因为
-        // 「现有动词在那条路上没意义」就默认它不需要接。这与本仓「一个能力多条通路、
-        // 闸门必须每条都接」是同一条，那个已经栽过四次。
+        // 会话态按键绑定（`keys.session_actions`），与其余 overlay 一样经 `handle_candidate_nav`。
+        // 新增一类动词时要重查每条通路都接了这个消费点，别因「现有动词在这条路上没意义」就漏接。
         if let Some(act) = self.handle_candidate_nav(state, data) {
             return act;
         }

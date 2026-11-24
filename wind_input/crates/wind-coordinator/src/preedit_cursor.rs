@@ -1,12 +1,8 @@
 //! 编码区（preedit）光标：缓冲区内的编辑位置，及「buffer 位置 → 显示串位置 → TSF caret」换算。
 //!
-//! 对齐 Go `internal/coordinator/pinyin_mode_shared.go` 与 `handle_candidates.go` 的光标模型：
-//!
-//! - 光标是 **buffer 内的字节偏移**，定义域 `[0, buf.len()]`。缓冲恒为 ASCII（拼音/五笔字母 +
-//!   `'` 分隔符），故字节 == 字符 == UTF-16 单元；但本模块不假设这点，一律走 char boundary，
-//!   避免将来缓冲混入非 ASCII 时 `String` 切片 panic（Go 切 `string` 越界只是运行时错，Rust
-//!   切非边界直接 panic，这是移植中唯一必须收紧的地方）。
-//! - 光标**不参与引擎查询**：`update_candidates` 恒以整串 buffer 查询，移动光标不重算候选。
+//! - 光标是 buffer 内的字节偏移，定义域 `[0, buf.len()]`。缓冲目前恒为 ASCII，但本模块不假设
+//!   这点，一律走 char boundary，免得将来混入非 ASCII 时切片 panic。
+//! - 光标不参与引擎查询：`update_candidates` 恒以整串 buffer 查询，移动光标不重算候选。
 //!   中间插入字符后按新的完整 buffer 全量重算，与在末尾输入无差别。
 //! - 已转换前缀（`committed_text`）是只读前缀，光标进不去：Home 只到 buffer 开头。
 
@@ -40,16 +36,14 @@ pub(crate) fn map_buf_pos_to_display_pos(buffer: &str, display: &str, buf_pos: u
 ///
 /// 组合区显示串 = `prefix`（已转换前缀/模式引导符，只读）+ `body`（buffer 的显示形态）。
 /// `cursor` 是 `buffer` 内字节位，先映射到 body 内位置，再连同 prefix 一起折算为 UTF-16。
-///
-/// 单位取 UTF-16 而非字符数：C++ 侧 `TextService::_UpdateComposition` 用 `ITfRange::ShiftEnd`
-/// 定位，其偏移单位是 UTF-16 code unit。Go 用 rune 数是因为汉字都在 BMP（见 Go
-/// `displayCursorPos` 注释），扩展 B 区汉字（生僻字候选）会错位；Rust 直接按 UTF-16 算。
+/// 单位取 UTF-16：C++ 侧 `_UpdateComposition` 用 `ITfRange::ShiftEnd` 定位，按字符数算扩展区
+/// 汉字会错位。
 pub(crate) fn caret_utf16(prefix: &str, buffer: &str, body: &str, cursor: usize) -> u32 {
     let dpos = floor_boundary(body, map_buf_pos_to_display_pos(buffer, body, cursor));
     (prefix.encode_utf16().count() + body[..dpos].encode_utf16().count()) as u32
 }
 
-/// 组合区光标在**显示串内的字节偏移**（`prefix + body` 拼成的串），供自绘候选窗按字节切分
+/// 组合区光标在显示串内的字节偏移（`prefix + body` 拼成的串），供自绘候选窗按字节切分
 /// preedit 画插入符。与 [`caret_utf16`] 同源、只是单位不同——TSF 要 UTF-16 偏移，自绘窗要
 /// UTF-8 字节以便 `&s[..n]` 切片（对齐 Go 的 `displayCursorPos` / `uiCursorPos` 之分）。
 pub(crate) fn caret_display_bytes(prefix: &str, buffer: &str, body: &str, cursor: usize) -> usize {
@@ -59,10 +53,8 @@ pub(crate) fn caret_display_bytes(prefix: &str, buffer: &str, body: &str, cursor
 
 /// 「原始大小写影子串」是否作数：非空且与缓冲逐字符同形（仅 ASCII 字母大小写可能不同）。
 ///
-/// 缓冲恒为全小写（引擎查询、顶码判定、词频记账都按它），用户按 Shift+字母打出的大写只存在
-/// 影子串里。**校验而非信任**是这套结构的关键：缓冲有二十余处写入点（清空、整体替换、
-/// 顶码截断…），逐个接线必然漏。失配即视为「没有大写」，于是漏接的后果是丢大写（显示退化成
-/// 小写，功能照常），而不是把上一轮的大写错套到新缓冲上。
+/// 缓冲恒为全小写，用户打出的大写只存在影子串里。校验而非信任：缓冲有二十余处写入点，逐个
+/// 接线必然漏；失配即视为「没有大写」，漏接的后果只是显示退化成小写，不会错套上一轮的大写。
 pub(crate) fn cased_is_valid(buffer: &str, cased: &str) -> bool {
     !cased.is_empty() && buffer.eq_ignore_ascii_case(cased)
 }
@@ -128,7 +120,7 @@ pub(crate) struct BufEdit<'a> {
     cased: Option<&'a mut String>,
 }
 
-/// 把拼音拆分串（`fang'xiang`）对回缓冲（`fangxiang`），得到每个音节在**缓冲内**的字节区间。
+/// 把拼音拆分串（`fang'xiang`）对回缓冲（`fangxiang`），得到每个音节在缓冲内的字节区间。
 ///
 /// 对不上（双拼的拆分串是展开后的全拼、字母与击键不同；缓冲里混了非字母）返回 `None`
 /// ——调用方据此退回按字母移动，宁可不跳也不跳错。
@@ -146,10 +138,10 @@ pub(crate) fn syllable_spans(buffer: &str, split: &str) -> Option<Vec<(usize, us
     (at == buffer.len() && !spans.is_empty()).then_some(spans)
 }
 
-/// 把拆分串（`ni'hao`）对回缓冲，得到**音节起点**在缓冲内的字节位置（升序、含 0 与缓冲末尾）。
+/// 把拆分串（`ni'hao`）对回缓冲，得到音节起点在缓冲内的字节位置（升序、含 0 与缓冲末尾）。
 ///
 /// 与 [`syllable_spans`] 的区别：缓冲里手敲的分隔符 `'` 也算数——拆分串里有没有这个 `'` 都行，
-/// 起点取分隔符**之后**（rime 默认 `after_delimiter`），故 `ni'hao` 的停靠点是 `{0, 3, 6}`，
+/// 起点取分隔符之后（rime 默认 `after_delimiter`），故 `ni'hao` 的停靠点是 `{0, 3, 6}`，
 /// 光标在 `ni|'hao`（分隔符之前）不是停靠点。对不上（双拼、缓冲里混了拆分串没有的字符）返回
 /// `None`，调用方退回按字符移动。
 pub(crate) fn syllable_stops(buffer: &str, split: &str) -> Option<Vec<usize>> {
@@ -184,12 +176,12 @@ pub(crate) fn syllable_stops(buffer: &str, split: &str) -> Option<Vec<usize>> {
 
 /// rime 的音节跳转（`Navigator::JumpLeft` / `JumpRight`，`syllable_jump_position: after_delimiter`）。
 ///
-/// - 向左：落到前一个停靠点；已在开头则**回绕**到最后一个音节的起点；
-/// - 向右：落到后一个停靠点；已在末尾则**回绕**到第一个音节之后的停靠点；
+/// - 向左：落到前一个停靠点；已在开头则回绕到最后一个音节的起点；
+/// - 向右：落到后一个停靠点；已在末尾则回绕到第一个音节之后的停靠点；
 /// - 不足两个音节（`stops` 少于 3 个）没有「跳」可言，返回 `None`。
 ///
-/// `smart` = 真：rime 默认的 ←/→（`Rewind` / `Forward`）——**光标不在停靠点上（音节中间）时返回
-/// `None`**，由调用方按单字符移动；假：Ctrl+←/→（`left_by_syllable` / `right_by_syllable`），
+/// `smart` = 真：rime 默认的 ←/→（`Rewind` / `Forward`）——光标不在停靠点上（音节中间）时返回
+/// `None`，由调用方按单字符移动；假：Ctrl+←/→（`left_by_syllable` / `right_by_syllable`），
 /// 音节中间也直接跳到最近的停靠点。
 pub(crate) fn syllable_jump(
     stops: &[usize],
@@ -228,7 +220,7 @@ impl<'a> BufEdit<'a> {
         }
     }
 
-    /// 带影子串的编辑视图（普通输入的 `input_buffer` 专用）。**构造即校准**：影子串与缓冲
+    /// 带影子串的编辑视图（普通输入的 `input_buffer` 专用）。构造即校准：影子串与缓冲
     /// 失配（别处清空或整体替换过缓冲）时就地清空，故陈旧的大写活不过下一次编辑。
     pub(crate) fn new_cased(
         buf: &'a mut String,
@@ -261,7 +253,7 @@ impl<'a> BufEdit<'a> {
     }
 
     /// 插入字符：`ch` 进缓冲（引擎查询用，恒小写），`raw` 进影子串（用户所打的形态）。
-    /// 两者相同且影子串还空着时**什么都不多做**——没有大写就不付维护成本，也就没有
+    /// 两者相同且影子串还空着时什么都不多做——没有大写就不付维护成本，也就没有
     /// 「影子串悄悄跟缓冲分叉」的机会。
     ///
     /// `raw` 必须与 `ch` 等字节长（大小写变体），否则影子串与缓冲的字节位置会错开。
@@ -307,7 +299,7 @@ impl<'a> BufEdit<'a> {
         true
     }
 
-    /// 影子串按与缓冲**相同的字节区间**同步删除（构造时已校准同形，故区间通用）。
+    /// 影子串按与缓冲相同的字节区间同步删除（构造时已校准同形，故区间通用）。
     fn cut_cased(&mut self, range: std::ops::Range<usize>) {
         if let Some(cased) = self.cased.as_deref_mut()
             && !cased.is_empty()

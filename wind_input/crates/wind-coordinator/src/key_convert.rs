@@ -60,29 +60,17 @@ pub(crate) fn punct_char(key_code: u32, shift: bool) -> Option<char> {
     Some(if shift { shifted } else { base })
 }
 
-/// **键面字符 → 按法**：`(字符, VK, 是否按住 Shift)`。软键盘宿主启动时取一次。
+/// 键面字符 → 按法：`(字符, VK, 是否按住 Shift)`。软键盘宿主启动时取一次。
 ///
-/// # 谁要它
-///
-/// 软键盘手里只有「用户点了键面上的哪个字符」，而引擎的入口是键事件。两者之间必须有
-/// 一张字符 → 键的表。
-///
-/// 表含两部分，合成一张给出去（宿主只需要一次查询，不必先判断字符是不是中文标点）：
+/// 软键盘只知道用户点了哪个字符，引擎入口却是键事件。表含两部分，合成一张给出去：
 /// 1. 可打印 ASCII —— 反向枚举 [`printable_char`]；
-/// 2. 中文标点 —— 键面上写着 `，`、`、`、`……`，但引擎那边**不存在直接产出中文标点的键**：
-///    它们是 ASCII 键经标点层转换来的，转成什么由中英标点态、自定义映射、智能符号共同
-///    决定。故这些字符登记的是**其 ASCII 源键**的按法（源自
-///    [`wind_transform::punctuation::chinese_punct_sources`]）。
+/// 2. 中文标点 —— 登记其 ASCII 源键的按法（源自
+///    [`wind_transform::punctuation::chinese_punct_sources`]），转成什么由标点层决定。
 ///
-/// # 为什么由核心给，而不是宿主自己写一张
+/// 由核心给而不是宿主自己写一张：两份表无编译期约束，宿主漏一个字符，那个键就绕过引擎、
+/// 智能符号 / 标点配对 / 自定义映射对它统统静默失效。
 ///
-/// 宿主写一张就是第二份真相源，且没有任何编译期约束把两份钉在一起。漂移的表现极难归因：
-/// 宿主漏了某个字符 ⇒ 那个键**绕过引擎直接上屏** ⇒ 智能符号、标点配对、自定义标点映射、
-/// 中英标点切换对它统统失效，而设置页里那些开关还好端端地摆着，点了没反应也不报错。
-/// 安卓端一度就是这样：宿主只认 `a-z 0-9 , .`，其余标点全走宿主默认行为。
-///
-/// 同一字符有多种按法时保留先遇到的（无 Shift 优先）；ASCII 优先于中文标点（`~` 这类
-/// 两边都有的，按它自己那个键送）。
+/// 同一字符有多种按法时保留先遇到的（无 Shift 优先）；ASCII 优先于中文标点。
 pub fn char_strokes() -> Vec<(char, u32, bool)> {
     let mut out: Vec<(char, u32, bool)> = Vec::new();
     let push = |ch: char, vk: u32, shift: bool, out: &mut Vec<(char, u32, bool)>| {
@@ -110,12 +98,9 @@ pub fn char_strokes() -> Vec<(char, u32, bool)> {
 
 /// 小键盘键 → 主键盘等价键 `(vk, 是否需 Shift)`。非小键盘键返回 None。
 ///
-/// `numpad_behavior = follow_main` 的**唯一实现手段**：在分派前把小键盘键重写成主键盘等价键，
-/// 此后全部模式（普通 / 临拼 / 临英 / 特殊 / mix / URL）自动与主键盘一致，无需各 handler
-/// 各自复制一份数字键语义——「各处自行实现」正是小键盘在多数模式下被静默吞掉的成因。
-///
-/// 运算符须连 Shift 一并归一（主键盘 `*` = Shift+8、`+` = Shift+=），归一后 `punct_char`
-/// 自然给出正确字符，且 `if modifiers & MOD_SHIFT == 0` 的选词臂会正确地不匹配。
+/// `numpad_behavior = follow_main` 的唯一实现手段：分派前重写成主键盘键，全部模式自动一致，
+/// 无需各 handler 各写一份。运算符须连 Shift 一并归一（`*` = Shift+8），`punct_char` 才给出
+/// 正确字符、无 Shift 的选词臂才不误配。
 pub(crate) fn numpad_to_main(key_code: u32) -> Option<(u32, bool)> {
     use keymap::*;
     Some(match key_code {
@@ -131,13 +116,10 @@ pub(crate) fn numpad_to_main(key_code: u32) -> Option<(u32, bool)> {
 
 /// 全角态下「TSF 已吃下的键」→ 待转换的源字符。
 ///
-/// **覆盖面必须 ⊇ C++ 的全角吃键集**（`KeyEventSink.cpp` 的 `english_fullwidth` /
-/// `chinese_fullwidth_number` / `chinese_fullwidth_space` 三个分支：Letter|Number|
-/// Punctuation|Space，含小键盘）。返回 None 会让调用方 PassThrough → 键已被吃下 →
-/// 「吃了再吐」→ 严格 TSF 宿主(Chrome/Electron)直接丢键。C++ 吃键分支增删时须同步此处。
-///
-/// 空格与小键盘都不在 `printable_char` 覆盖内（`punct_char` 无 VK_SPACE），故在此收口，
-/// 供英文全角与 CapsLock+全角两条路径共用，避免两处各记一套而漂移。
+/// 覆盖面必须 ⊇ C++ 的全角吃键集（`KeyEventSink.cpp` 的 `english_fullwidth` /
+/// `chinese_fullwidth_number` / `chinese_fullwidth_space` 三个分支，含小键盘）：返回 None
+/// 会「吃了再吐」，严格 TSF 宿主（Chrome/Electron）直接丢键。C++ 吃键分支增删时须同步此处。
+/// 空格与小键盘不在 `printable_char` 覆盖内，故在此收口，供两条全角路径共用。
 pub(crate) fn full_width_source_char(key_code: u32, shift: bool) -> Option<char> {
     if key_code == keymap::VK_SPACE {
         return Some(' ');
@@ -158,17 +140,11 @@ pub(crate) fn numpad_char(key_code: u32) -> Option<char> {
     }
 }
 
-/// 用户输入的大小写**变形候选**：按 全小写 → 首字母大写 → 全大写 的固定次序产出，
-/// 并剔除与原文相同的那一项（原文自身是首候选，无需重复）。纯 ASCII 语义即够用——
-/// 临英缓冲只可能由 VK 字母 / 数字 / ASCII 标点组成。
+/// 用户输入的大小写变形候选：按 全小写 → 首字母大写 → 全大写 的固定次序产出，
+/// 并剔除与原文相同的那一项（原文自身是首候选）。纯 ASCII 语义即够用。
 ///
-/// 之所以是「枚举三形态」而非旧的「检测输入形态 → 适配词库候选」（`detect_en_case` /
-/// `adapt_en_case`，已删）：Shift+字母是临英的进入方式，缓冲首字母**恒为大写**，
-/// 于是旧检测恒返回 Title，把整列词库候选强制套成 `Hello`/`Help`/`Held`，
-/// 而词库里 86% 的词本是小写。触发方式的副作用被当成了用户的大小写意图。
-/// 现在词库候选一律保持原文，大小写改由用户在这几个变形候选里显式选。
-///
-/// 副产物：对全大写、混合大小写输入也自洽——原文是哪种形态，缺的另两种就自动补齐。
+/// 不做「检测输入形态 → 适配词库候选」：Shift+字母是临英的进入方式，缓冲首字母恒为大写，
+/// 检测会把触发方式的副作用当成大小写意图。词库候选保持原文，大小写由用户在这几个变形里选。
 /// 无字母的缓冲（如 `123`）三形态皆等于原文，返回空表。
 pub(crate) fn en_case_variants(s: &str) -> Vec<String> {
     let lower = s.to_lowercase();
@@ -195,14 +171,11 @@ pub(crate) fn char_to_main_vk(ch: char) -> Option<u32> {
     (0x20u32..=0xFF).find(|&vk| punct_char(vk, false) == Some(ch))
 }
 
-/// 标点字符 → 产生它的 VK，**两态都查**（`-`/`_`、`[`/`{` 这些一个 VK 两个字符）。
+/// 标点字符 → 产生它的 VK，两态都查（`-`/`_`、`[`/`{` 这些一个 VK 两个字符）。
 /// [`punct_char`] 的反向查询，与 [`char_to_main_vk`] 是孪生——那个只认无 Shift 态。
 ///
-/// 同样用线性扫描而非反查表，理由见 [`char_to_main_vk`]：多一张表就多一份要与
-/// `punct_char` 保持同步的真相源。调用方在配置生效期用它（构造 / 热重载），非热路径。
-///
-/// 值域无歧义：`punct_char` 只覆盖 `0x30-0x39` 与 11 个 OEM VK，小键盘另走
-/// [`numpad_to_main`] 归一，不会出现「一个字符命中两个 VK」。
+/// 线性扫描而非反查表（少一份要同步的真相源），仅在配置生效期调用。值域无歧义：小键盘另走
+/// [`numpad_to_main`] 归一，不会一个字符命中两个 VK。
 pub(crate) fn punct_source_vk(ch: char) -> Option<u32> {
     (0x20u32..=0xFF)
         .find(|&vk| punct_char(vk, false) == Some(ch) || punct_char(vk, true) == Some(ch))

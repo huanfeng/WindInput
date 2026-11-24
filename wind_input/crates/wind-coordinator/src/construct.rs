@@ -1,8 +1,7 @@
 //! Coordinator 构造器族：生产构造 `new`（desktop-ui）与 headless 家族。
 //!
-//! 共同核心 `build`（83 字段的结构体字面量装配点）**留在 coordinator.rs**——
-//! 23 个私有字段的可见性以 coordinator 模块为界，装配点不外迁。
-//! （自 coordinator.rs 平移，纯搬运。）
+//! 共同核心 `build`（结构体字面量装配点）留在 coordinator.rs：私有字段的可见性以
+//! coordinator 模块为界，装配点不外迁。
 
 use std::path::Path;
 use std::sync::Arc;
@@ -93,7 +92,7 @@ impl Coordinator {
         #[cfg(ext_presenter)]
         let (ui_tx, event_rx) = {
             let (tx, rx) = std::sync::mpsc::channel::<UiCommand>();
-            // 候选/菜单的**鼠标**交互确实经 push/bridge 协议从 .app 回流，不走这里；
+            // 候选/菜单的鼠标交互确实经 push/bridge 协议从 .app 回流，不走这里；
             // 但进程内仍有 UiEvent 源——全局热键由服务进程自己注册（语义要求本输入法
             // 未激活时也生效，.app 只在被 IMK 拉起后才在），触发后经本通道回协调器。
             // 后续拖动落点回报（CandidateWindowMoved / StatusTipMoved）等也走这条。
@@ -162,7 +161,7 @@ impl Coordinator {
 
         // 简繁两方向互斥：启动时若配置里两个都开着，关掉 t2s 并落盘。
         //
-        // 内部构造那一步只是**读时**压掉（state 里 t2s 恒 false），配置文件仍留着那个
+        // 内部构造那一步只是读时压掉（state 里 t2s 恒 false），配置文件仍留着那个
         // 非法组合。不在这里归一的话，一个从没打开过设置页的用户会一直带着它——每次
         // 启动都被静默压一次，而他从界面上看到的是两个都开着。
         coordinator.normalize_conversion_exclusivity_on_start();
@@ -180,23 +179,20 @@ impl Coordinator {
         // （Go 版把同步放在 UI 回调装配里，UI 创建失败会静默跳过——已规避）。
         coordinator.sync_direct_switch_hotkey();
 
-        // 后台预热：提前构建其余方案的引擎与缓存（拼音 merged/unigram、码表 per-dict），
-        // 避免首次切换到拼音/临时拼音/码表时同步重熔大词库造成几十秒卡顿。
-        // single-flight 构建锁保证预热与用户切换不重复构建；按方案顺序逐个建（后台低频）。
+        // 后台预热其余方案的引擎与缓存，避免首次切换时同步重熔大词库卡几十秒。single-flight
+        // 构建锁保证预热与用户切换不重复构建；按方案顺序逐个建。
         //
-        // ⚠ 移动端可经 `set_eager_prewarm(false)` 关掉这段：手机上「把所有已装方案的
-        // 词库都编译一遍」的代价是几秒 CPU + 数十 MB 内存，而启动那几秒正是用户最可能
-        // 在打字的时候——预热线程与按键线程抢 state 锁，实测直接把主线程拖到 ANR。
-        // 关掉后方案在**首次切换时**按需加载（切换时等一下可以接受，启动卡死不行）。
+        // 移动端经 `set_eager_prewarm(false)` 关掉：启动预热与按键线程抢 state 锁会拖到 ANR，
+        // 关掉后方案首次切换时按需加载（切换时等一下可接受，启动卡死不行）。
         {
             let c = Arc::clone(&coordinator);
             std::thread::spawn(move || {
                 // 延迟启动有两个作用，缺一不可：
                 // ① 让宿主有机会在构造返回后调 `set_eager_prewarm(false)`——本线程在
-                //    构造**末尾**就已 spawn，不等就会抢在宿主表态之前读到默认值 true；
+                //    构造末尾就已 spawn，不等就会抢在宿主表态之前读到默认值 true；
                 // ② 避开启动期的锁竞争高峰（宿主此时正在建视图、要焦点、可能已在收键）。
                 std::thread::sleep(std::time::Duration::from_millis(1500));
-                // 草稿表的启动清理。刻意放在 eager_prewarm 闸**之前**：移动端关掉的是
+                // 草稿表的启动清理。刻意放在 eager_prewarm 闸之前：移动端关掉的是
                 // 「把所有已装方案的词库都编译一遍」那几秒 CPU，不是数据库维护，而草稿
                 // 在手机上一样会攒。这一次不碰任何引擎，代价只有一次 redb 事务。
                 c.purge_drafts_on_start();
@@ -217,7 +213,7 @@ impl Coordinator {
         coordinator.init_toolbar_pos();
 
         // 加载并下发初始主题。明暗必须走 resolve_theme_dark（system 实时探测系统明暗），
-        // 不能硬编码 false——否则跟随系统在**冷启动**这一刻永远回落亮色（实时跟随另有 WM_SETTINGCHANGE
+        // 不能硬编码 false——否则跟随系统在冷启动这一刻永远回落亮色（实时跟随另有 WM_SETTINGCHANGE
         // 路径，故只在启动瞬间错、切一次系统主题就"自愈"，与 theme_style 的其余消费点保持同一出口）。
         let name = coordinator
             .theme_name
@@ -265,7 +261,7 @@ impl Coordinator {
         coordinator
     }
 
-    /// 生产构造器在 `build` 之后的**非 UI** 数据装载（快捷输入调整、拆字、注释库、emoji）。
+    /// 生产构造器在 `build` 之后的非 UI 数据装载（快捷输入调整、拆字、注释库、emoji）。
     ///
     /// 抽出来是为了让 `debug_desktop_startup_and_prewarm`（本机复现内存的探针入口）与
     /// `new` 走同一份序列，不各抄一份而漂移。
@@ -281,7 +277,7 @@ impl Coordinator {
         self.sync_emoji_dict();
     }
 
-    /// 启动预热线程的主体（`new` 里延迟 1.5 秒后调；**阻塞**，只可在后台线程 / 测试里调）：
+    /// 启动预热线程的主体（`new` 里延迟 1.5 秒后调；阻塞，只可在后台线程 / 测试里调）：
     /// 按方案常驻策略建方案引擎（[`Self::prewarm_schemas_on_start`]：全部常驻，或只建
     /// 用得着的），再 [`Self::prewarm_indexes`]，常驻关着时最后校验其余方案的缓存
     /// （[`Self::refresh_schema_caches_on_start`]）。
@@ -290,18 +286,10 @@ impl Coordinator {
     pub(crate) fn prewarm_on_start(&self) {
         self.prewarm_schemas_on_start();
 
-        // 反查索引（悬停[编码]/编码提示/词语联想的数据源）同样要提前建好。
-        //
-        // 它此前是**首次按键时**才懒构建的，而对大词库那是秒级操作，恰好落在
-        // TSF→服务的同步 IPC 链路上：真机 feihuzj2（253 万条）实测让整机卡了
-        // 29.5 秒。放到这里之后，绝大多数用户永远碰不到那次构建。
-        //
-        // 只预热**当前用得着的方案**（悬停编码段与词语联想各自的来源方案，
-        // 混输下通常同为主码表成员）：其余方案的索引切过去时才有意义，而每份
-        // 索引对超大词库是百 MB 量级（护栏本就只保留两份），全量预热等于把内存
-        // 花在用户未必会用的方案上。
-        //
-        // 与测试、移动端 prepare() 共用 `prewarm_indexes`，避免三处各写一份。
+        // 反查索引（悬停[编码]/编码提示/词语联想的数据源）提前建好：大词库构建是秒级，
+        // 懒建会落在 TSF→服务的同步 IPC 链路上卡住宿主。只预热当前用得着的方案——每份
+        // 索引对超大词库是百 MB 量级，全量预热是把内存花在未必会用的方案上。
+        // 与测试、移动端 prepare() 共用 `prewarm_indexes`。
         self.prewarm_indexes();
         // 常驻关着时，其余方案只校验派生缓存（排在索引之后，见该函数文档）。
         self.refresh_schema_caches_on_start();
@@ -324,10 +312,10 @@ impl Coordinator {
         Self::build(config, data_dir, push_server, ui_tx, None, None, None)
     }
 
-    /// 无头 + **指定方案 override 目录**（测试用）。
+    /// 无头 + 指定方案 override 目录（测试用）。
     ///
     /// `new_headless` 让 `EngineManager` 自己取 `Config::user_config_dir()/schema_overrides`
-    /// ——那是**真实用户目录**，测试写进去会污染用户配置，于是一切「方案级覆盖」的行为都
+    /// ——那是真实用户目录，测试写进去会污染用户配置，于是一切「方案级覆盖」的行为都
     /// 没法在集成测试里验证。方案级 `[key_actions]` 的分派 bug 正是因此漏到了真机上。
     pub fn new_headless_with_override(
         config: Config,
@@ -370,12 +358,10 @@ impl Coordinator {
         )
     }
 
-    /// 无头 + **保留 UI 通道接收端**（测试用）。
+    /// 无头 + 保留 UI 通道接收端（测试用）。
     ///
-    /// `new_headless` 丢弃 rx，于是一切「发给 UI 的内容」在测试里都不可见——而候选的注释段、
-    /// 悬停提示这些是在**发送路径上**算出来的，不回写 `state.candidates`。要验证它们只有两条路：
-    /// 收这个 rx，或者另写一个「按同样规则再算一遍」的 debug 方法。后者是假测试的经典形态——
-    /// 它证明不了生产路径接对了，决策函数写好但消费端没接的情况照样全绿。
+    /// 候选注释、悬停提示等是在发送路径上算出来的、不回写 `state.candidates`，测试要验证
+    /// 它们就收这个 rx；另写「按同样规则再算一遍」的 debug 方法证明不了生产路径接对了。
     pub fn new_headless_with_ui(
         config: Config,
         data_dir: Option<&Path>,
@@ -383,10 +369,10 @@ impl Coordinator {
         Self::new_headless_with_ui_at(config, data_dir, None)
     }
 
-    /// 无头 + UI 通道 + **用户数据目录**（Android 生产路径）。
+    /// 无头 + UI 通道 + 用户数据目录（Android 生产路径）。
     ///
     /// 与 [`Self::new_headless_with_ui`] 的唯一区别是开不开 redb store，而这个区别不小：
-    /// store 为 `None` 时**系统短语层为空**（构造期的 `sync_system_phrases` 整段跳过）、
+    /// store 为 `None` 时系统短语层为空（构造期的 `sync_system_phrases` 整段跳过）、
     /// 用户词频与自造词不落盘。表现是「短语一条也不出」而不是报错，故无头宿主一旦要
     /// 进入生产形态（而非只跑按键逻辑测试），必须走这个入口给出用户目录。
     pub fn new_headless_with_ui_at(
@@ -442,7 +428,7 @@ impl Coordinator {
         )
     }
 
-    /// 无头 + UI 通道 + 用户数据目录 + **指定输入档位**。移动端宿主与档位测试走这里；
+    /// 无头 + UI 通道 + 用户数据目录 + 指定输入档位。移动端宿主与档位测试走这里；
     /// 其余无头构造器一律是桌面档位。
     pub fn new_headless_with_profile(
         config: Config,
@@ -566,21 +552,10 @@ impl Coordinator {
                 // 协调器交来系统短语（之后协调器会再升一次）。
                 finish_format_upgrade(&s, dir);
                 let s = Arc::new(s);
-                // 空闲一分钟就把 redb 的页缓存还给系统。那笔缓存只涨不落
-                // （上界 ≈ min(配额, 库文件大小)，19 万词实测 41 MB、50 万词约 90 MB），
-                // 是「导入大词库后内存占用变高」的正主。写那一路已在 `dict.import` /
-                // `backup.restore` / `dict.clear` 之后直接丢；读那一路躲不掉——设置页的
-                // 分页要给精确 `total` 就不能早退，照样扫完整表——只能靠这条兜。
-                //
-                // 长档 60 秒：判据是「真的没人在用」，那时重开 Database 的几毫秒与随后几次
-                // 冷查询都没人感知得到。短档 3 秒：设置页列表 / 导出、后台建索引这类全表扫描
-                // 做完只标记（`Store::mark_scan_pending[_rows]`），停手 3 秒就还——持续打字时
-                // 长档等不到，而自动造词让打字中反复重建索引，当场回收会让按键线程陪等关库重开。
-                // 1 秒一拍。
-                // 时长不做成配置键（见 wind-store `RECLAIM_IDLE` 的文档）。
-                //
-                // 同一时刻顺带整理堆：丢掉的页缓存、此前构建索引与全表扫的临时分配都只是回到
-                // 分配器手里，不整理的话私有内存停在历史峰值（见 heap_trim.rs）。
+                // 空闲时把 redb 页缓存还给系统：它只涨不落，读路径（设置页分页要精确 `total`
+                // 须扫全表）躲不掉，只能靠这条兜；写路径已在导入/恢复/清空后直接丢。长档与短档
+                // 的取值依据见 wind-store `RECLAIM_IDLE` / `SCAN_RECLAIM_IDLE` 的文档。
+                // 同一时刻顺带整理堆，否则私有内存停在历史峰值（见 heap_trim.rs）。
                 s.spawn_idle_cache_reclaimer_then(
                     wind_store::store::RECLAIM_IDLE,
                     wind_store::store::SCAN_RECLAIM_IDLE,
@@ -609,7 +584,7 @@ impl Coordinator {
         Self::new_headless_with_store_override(config, data_dir, store, None)
     }
 
-    /// 无头 + store + **指定方案 override 目录**（测试用）。
+    /// 无头 + store + 指定方案 override 目录（测试用）。
     ///
     /// 特殊模式的实例集合来自「带 `[overlay]` 段的已安装方案」，而测试不能往真实
     /// `data/schemas` 里写方案文件。走 override 层即可：`read_schema` 会把它深合并进

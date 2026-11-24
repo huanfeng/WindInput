@@ -1,32 +1,16 @@
 //! 邮箱输入模式（`@` 后缀触发 + 后缀补全）。
 //!
-//! # 与 [`crate::handle_url`] 的关系
+//! 夺取骨架（`try_prefix_hijack` / `active_hijack_buffer` / `can_rewind` / `rewind_hijack`）住在
+//! `handle_url.rs`，本模式共用，只在闸门里多一条判据。本文件结构刻意与 `handle_url.rs` 逐行
+//! 平行，否则两个模式的退格/光标/Esc 行为会悄悄分叉。
 //!
-//! 夺取骨架（`try_prefix_hijack` / `active_hijack_buffer` / `can_rewind` /
-//! `rewind_hijack`）住在 `handle_url.rs`，本模式**共用**那一套，只在闸门里多一条判据。
-//! 本文件的结构刻意与 `handle_url.rs` 逐行平行：同一类模式的按键处理不该无谓地分叉，
-//! 分叉的表现是「网址模式里退格/光标/Esc 的行为和邮箱模式不一样」，而没人会想到去查。
+//! 触发判据是后缀不是前缀：本键是 `@` 且缓冲非空（`abc` + `@`），见
+//! `docs/design/prefix-hijack-modes.md` §5.2。空缓冲按 `@` 刻意不触发：单独打 `@` 该走标点流水线；
+//! 「缓冲非空」同时就是用户名。
 //!
-//! # 触发判据是**后缀**，不是前缀
-//!
-//! | | 判据 | 例 |
-//! |---|---|---|
-//! | 前缀夺取（url / unicode） | 缓冲 + 本键 **全等**某个前缀 | `www.` / `u+` |
-//! | 本模式 | 本键是 `@` 且**缓冲非空** | `abc` + `@` |
-//!
-//! `abc@` 里缓冲是 `abc`，与任何前缀都不相等——照前缀式那条路抄会撞墙
-//! （`docs/design/prefix-hijack-modes.md` §5.2 早就点明了）。
-//!
-//! **空缓冲按 `@` 刻意不触发**：那样用户每次想单独打一个 `@` 都会掉进邮箱模式，而
-//! `@` 在中文模式下本就该走标点流水线（出全角＠或半角 @，随 `punct` 配置）。
-//! 这也是「缓冲非空」这个条件同时承担的第二个职责——它就是用户名。
-//!
-//! # C++ 侧不用改
-//!
-//! `@` 是 Shift+2，在 `CHotkeyManager::ClassifyInputKey` 里归 `Punctuation`，中文模式
-//! **无条件吃**。本模式让 Rust 在更多情形下出字，是「C++ 吃键集 ⊆ Rust 出字集」这条
-//! 硬约定的安全方向。模式内续打的 `.`/`-`/`_`/数字同理（Punctuation 或 Number，后者
-//! 在有 session 时吃）。
+//! C++ 侧不用改：`@`（Shift+2）在 `CHotkeyManager::ClassifyInputKey` 归 `Punctuation`，中文模式
+//! 无条件吃；模式内续打的 `.`/`-`/`_`/数字同理。本模式只让 Rust 多出字，是「C++ 吃键集 ⊆
+//! Rust 出字集」的安全方向。
 
 use crate::coordinator::{Coordinator, State, numpad_char, printable_char};
 use crate::pipeline::{ModeKind, Rewind, RewindOrigin};
@@ -42,14 +26,10 @@ pub(crate) const EMAIL_AT: char = '@';
 impl Coordinator {
     /// 进入邮箱模式：以 `用户名@` 作初始缓冲，清空普通输入/候选。
     ///
-    /// 登记夺取回退：snapshot = 夺取前的正常输入（= 用户名），host_text = `用户名@`
-    /// （夺取边界）。退格删到只剩 `abc@` 时再按一次，就回到夺取前的输入流的 `abc`。
-    ///
-    /// `origin` 决定快照从哪个缓冲取、回退放回哪条流（见 [`RewindOrigin`]）：正常输入流
-    /// 走 `try_prefix_hijack`；临时英文里打 `@` 由 `handle_temp_english_key` 转交
-    /// （与大写 `U+` 转交 Unicode 模式同构）——五笔用户名常超过四码，正常流里早已顶字上屏，
-    /// 只有临英才能把完整用户名攒到 `@`。快捷输入同理，由 `handle_mix_key` 转交
-    /// （闸门见 `mix_email_handoff`）。
+    /// 登记夺取回退：snapshot = 夺取前的正常输入（= 用户名），host_text = `用户名@`。
+    /// `origin` 决定快照从哪个缓冲取、回退放回哪条流（见 [`RewindOrigin`]）：正常流走
+    /// `try_prefix_hijack`；临英由 `handle_temp_english_key` 转交（五笔用户名常超过四码，正常流
+    /// 早已顶字上屏，只有临英能攒到 `@`）；快捷输入由 `handle_mix_key` 转交（`mix_email_handoff`）。
     pub(crate) fn enter_email_mode(
         &self,
         state: &mut State,
@@ -97,8 +77,8 @@ impl Coordinator {
 
     /// 退出邮箱模式并清空相关状态（含作废回退登记）。
     ///
-    /// ⚠️ 与 `active_hijack_buffer` / `rewind_hijack` / `cancel_session` /
-    /// `reset_exclusive_modes` 四处**成对**：那边认得本模式、这边漏了收尾，症状是
+    /// 与 `active_hijack_buffer` / `rewind_hijack` / `cancel_session` /
+    /// `reset_exclusive_modes` 四处成对：那边认得本模式、这边漏了收尾，症状是
     /// 「退得出去但状态不对」，且只在退到边界那一次出现。
     pub(crate) fn exit_email_mode(&self, state: &mut State) {
         state.active = None;
@@ -112,9 +92,9 @@ impl Coordinator {
         state.rewind = None;
     }
 
-    /// 缓冲里 `@` **之后**的部分（已打的后缀片段）。没有 `@` 时返回空串。
+    /// 缓冲里 `@` 之后的部分（已打的后缀片段）。没有 `@` 时返回空串。
     ///
-    /// 取**最后一个** `@`：邮箱本体不该含第二个 `@`，但用户手滑打出 `a@b@` 时，按最后
+    /// 取最后一个 `@`：邮箱本体不该含第二个 `@`，但用户手滑打出 `a@b@` 时，按最后
     /// 一个切分才能让他继续把后半截打完，按第一个切则会拿 `b@` 去查后缀、一条也匹配不上。
     pub(crate) fn email_suffix_part(buffer: &str) -> &str {
         match buffer.rfind(EMAIL_AT) {
@@ -123,7 +103,7 @@ impl Coordinator {
         }
     }
 
-    /// 缓冲里 `@` **之前**的部分（用户名）。没有 `@` 时返回整串。
+    /// 缓冲里 `@` 之前的部分（用户名）。没有 `@` 时返回整串。
     pub(crate) fn email_user_part(buffer: &str) -> &str {
         match buffer.rfind(EMAIL_AT) {
             Some(i) => &buffer[..i],
@@ -196,7 +176,7 @@ impl Coordinator {
                 }
             }
             // 空格选候选、回车上屏原文（分工见 `mode_completion.rs` 文件头）。
-            // ⛔ 不要把这两个键并回一条 —— 那样打了一半的邮箱就再也上不了屏。
+            // 不要把这两个键并回一条 —— 那样打了一半的邮箱就再也上不了屏。
             // 有候选那一支与 `commit_highlighted` 动词同一出口；无候选上屏原文。
             keymap::VK_SPACE => self
                 .commit_highlighted(state)

@@ -40,7 +40,7 @@ impl Coordinator {
         self.eff_candidate().effective_min_rows()
     }
 
-    /// 当前**已启用**的方案列表（`schema.available`，测试/诊断用）。
+    /// 当前已启用的方案列表（`schema.available`，测试/诊断用）。
     ///
     /// 与 [`Self::active_schema_id`] 不同，这里回答的是「哪些方案会被启动预热覆盖」。
     /// 测试用它守住「目标方案确实未启用」这个前提——失去前提的回归用例会在已启用
@@ -77,25 +77,15 @@ impl Coordinator {
         self.show_candidate_menu(page_local, 0, 0);
     }
 
-    /// 某个 mix 实例**实际生效的成员方案**（测试/诊断用）：[`Self::mix_members`] 的直通，
-    /// 不另算一遍（另算一遍的 debug 方法证明不了生产路径接对了）。
-    ///
-    /// ★ 暴露它是因为「某个成员被跳过了」**在候选面上不可观察**：被跳过的成员本来就不
-    /// 产候选，少了几条与「那个方案没词」无从区分。定制版 `[schemas] hide` 掉一个 mix
-    /// 成员正是这种形状——跳过是对的，但「其余成员照常」必须能被断言，否则一个把整个
-    /// mix 判空的实现同样全绿。
+    /// 某个 mix 实例实际生效的成员方案（测试/诊断用）：[`Self::mix_members`] 的直通。
+    /// 被跳过的成员在候选面上不可观察（与「那个方案没词」无从区分），需直接断言。
     pub fn debug_mix_members(&self, idx: u8) -> Vec<String> {
         self.mix_members(idx)
     }
 
-    /// 当前联想候选的文本（测试/诊断用）。空 = 这批候选不是联想来的。
-    ///
-    /// 集成测试（`tests/` 下、crate 外）够不着 `state`，而联想的端到端验证恰恰必须从
-    /// 真实按键入口进——headless 无词库时词语联想恒空，验不出真机行为。
-    ///
-    /// ★ 判据走 `assoc_active()`（候选来源）而非「候选非空」：联想候选与普通候选住在
-    /// 同一个 `candidates` 里，不看来源就会把正常输入的候选也当成联想报出去，
-    /// 于是「联想出来了吗」这个断言恒真。
+    /// 当前联想候选的文本（测试/诊断用）。空 = 这批候选不是联想来的。供 crate 外集成测试
+    /// 从真实按键入口验联想。判据走 `assoc_active()` 而非「候选非空」：联想与普通候选同住
+    /// `candidates`，不看来源断言恒真。
     pub fn debug_assoc_texts(&self) -> Vec<String> {
         let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if !s.assoc_active() {
@@ -116,7 +106,7 @@ impl Coordinator {
             .collect()
     }
 
-    /// 按前文 `preceding` 与上屏 `text` 算出的联想，取**候选条上显示的**文本（智能联想下
+    /// 按前文 `preceding` 与上屏 `text` 算出的联想，取候选条上显示的文本（智能联想下
     /// 前缀词只显示补出的那截）。不进联想态、不改状态；离线评测用（`tests/assoc_eval.rs`）。
     /// `char_wise` 模拟逐字上屏的用户（运行时按方案定，见 `assoc_char_wise`）。
     pub fn debug_assoc_display(&self, preceding: &str, text: &str, char_wise: bool) -> Vec<String> {
@@ -168,31 +158,22 @@ impl Coordinator {
         self.rt().compiled_hotkeys.key_up_tsf_hashes()
     }
 
-    /// 直接装载短语层（仅测试用）：`(code, text, weight, position, is_system)`。
-    ///
-    /// ★ 补的是一个**结构性**测试缺口：真机短语层经 redb `store` 建立，而 headless 测试的
-    /// `store` 是 `None` → 短语层恒空 → 所有依赖短语的判据（`has_code_prefix` 的前缀命中、
-    /// z 的活码身份、夺取回路的触发条件）在测试里全都走不到。测试演示的是「z 是死码」那条
-    /// 分支，真机跑的是「z 有 37 条 `zz*` 前缀」那条——两边结构性分叉，测试再绿也盖不住真机。
-    ///
-    /// 这个缺口让「让位判据与候选构建门槛不同源」整个漏到真机（见 `has_code_prefix` 文档）。
     /// 「这个码位归短语管」的判据（测试/诊断用）。
     ///
-    /// ★ 暴露它是因为它的失效**不可从候选面观察**：方案级作用域漏接时，候选面上短语已经
-    /// 消失了（那两处过滤生效了），而顶码与全码自动上屏仍被否决 ⇒ 打字卡住不上屏、零日志。
-    /// 测试只能直接问这一位，断言「候选里有没有短语」在漏接时照样通过。
-    /// 见 `docs/design/schema-scoped-behavior.md` §6.3。
+    /// 它的失效从候选面观察不到：方案级作用域漏接时候选里短语已消失，而顶码与全码自动上屏
+    /// 仍被否决 ⇒ 打字卡住不上屏、零日志。见 `docs/design/schema-scoped-behavior.md` §6.3。
     pub fn debug_phrase_owns_code(&self, code: &str) -> bool {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         self.phrase_owns_code(&state, code)
     }
 
+    /// 直接装载短语层（仅测试用）。headless 测试的 `store` 是 `None`、短语层恒空，依赖短语的
+    /// 判据（`has_code_prefix` 前缀命中、z 的活码身份、夺取回路）在测试里走不到；用它补上。
     pub fn debug_install_phrases(&self, records: Vec<wind_phrase::PhraseSeed>) {
         *self.phrases.write().unwrap_or_else(|e| e.into_inner()) =
             wind_phrase::PhraseLayer::from_records(records);
     }
 
-    /// 是否还有更多候选未加载（测试/诊断用）
     /// 当前激活的 overlay 模式类别名；`None` = 普通输入。仅供测试断言。
     pub fn debug_active_mode(&self) -> Option<&'static str> {
         match self.state.lock().unwrap_or_else(|e| e.into_inner()).active {
@@ -212,16 +193,13 @@ impl Coordinator {
 
     /// 走一次 CapsLock 的「英文候选大小写档位循环」，返回是否真的夺取了本键。
     ///
-    /// **存在理由是那条路测不到**：真实触发点是全局低级键盘钩子（`CapsLockHook`），
-    /// 它在 CI 的 Linux 上装不起来，在 headless 测试里也没有键盘事件可拦。业务逻辑
-    /// （三道守卫 + 档位推进 + 候选重建）却必须有守门断言——否则「开关开了没反应」
-    /// 这类缺陷只能靠真机发现。
-    ///
-    /// 钩子回调本身只做非阻塞投递，真正的动作与本函数是同一个：`try_english_case_cycle`。
+    /// 真实触发点是全局低级键盘钩子（`CapsLockHook`），CI 与 headless 测试里都装不起来；
+    /// 钩子回调只做非阻塞投递，真正的动作与本函数同为 `try_english_case_cycle`。
     pub fn debug_cycle_english_case(&self) -> bool {
         self.try_english_case_cycle().is_some()
     }
 
+    /// 是否还有更多候选未加载（测试/诊断用）。
     pub fn debug_has_more(&self) -> bool {
         self.state
             .lock()
@@ -325,7 +303,7 @@ impl Coordinator {
 
     /// 短语层查询,返回命中文本(仅测试)。
     ///
-    /// 反查（`dict.rev`）接**真实**实现：这个探针的用途正是「这条短语实际会显示成什么」，
+    /// 反查（`dict.rev`）接真实实现：这个探针的用途正是「这条短语实际会显示成什么」，
     /// 塞个空桩进去就只能验到「求值没崩」。剪贴板仍留空桩——headless 测试没有剪贴板，
     /// 要验剪贴板相关短语得由调用方另行注入。
     pub fn debug_phrase_texts(&self, code: &str) -> Vec<String> {
@@ -340,7 +318,7 @@ impl Coordinator {
         self.phrases
             .read()
             .unwrap_or_else(|e| e.into_inner())
-            // 诊断口径：看**全部**短语，不套方案级作用域——这个 API 回答的是「库里有什么」，
+            // 诊断口径：看全部短语，不套方案级作用域——这个 API 回答的是「库里有什么」，
             // 不是「当前方案能用什么」。后者由候选路径自己过滤。
             .lookup(code, &[], &host, &wind_phrase::PhraseScope::ALL)
             .into_iter()
@@ -348,9 +326,9 @@ impl Coordinator {
             .collect()
     }
 
-    /// 三层合并后的软键盘映射表（测试/诊断用）：**就是**运行时那一份，不另算一遍。
+    /// 三层合并后的软键盘映射表（测试/诊断用）：就是运行时那一份，不另算一遍。
     ///
-    /// ★ 暴露它是因为 `data < data_custom < %APPDATA%` 的按面合并在候选面/菜单上不可
+    /// 暴露它是因为 `data < data_custom < %APPDATA%` 的按面合并在候选面/菜单上不可
     /// 观察：定制层被整层忽略、或叠加顺序反了（用户改的键被定制版盖回去），现象都只是
     /// 「某个键出的字不对」，与「面写错了」无从区分。
     pub fn debug_softkeyboard(&self) -> std::sync::Arc<wind_softkeyboard::SoftKeyboardTable> {
@@ -472,7 +450,7 @@ impl Coordinator {
         self.sync_emoji_dict();
     }
 
-    /// 诊断：桌面构造器 `new` 在 `build` 之后的非 UI 装载与启动预热线程的主体，**同步**跑完。
+    /// 诊断：桌面构造器 `new` 在 `build` 之后的非 UI 装载与启动预热线程的主体，同步跑完。
     ///
     /// 供本机复现内存（`tests/typing_memory_repro.rs`）把 headless 协调器拉到与桌面相同的
     /// 常驻状态。两段都与 `new` 共用同一个函数（[`Self::load_data_on_start`] /
