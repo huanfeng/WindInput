@@ -118,10 +118,10 @@ impl RpcServer {
 }
 
 /// 处理一帧请求字节，返回响应帧字节（4 字节大端长度前缀 + JSON）。
-/// dispatch 平台无关，供各传输实现复用。
-pub(crate) fn handle_frame(state: &DispatchState, frame: &[u8]) -> Vec<u8> {
+/// dispatch 平台无关，供各传输实现复用；`trusted` 由传输层按连接对端核验。
+pub(crate) fn handle_frame(state: &DispatchState, frame: &[u8], trusted: bool) -> Vec<u8> {
     let resp = match serde_json::from_slice::<Request>(frame) {
-        Ok(req) => crate::dispatch::dispatch(state, req),
+        Ok(req) => crate::dispatch::dispatch_as(state, req, trusted),
         Err(e) => {
             tracing::warn!("RPC 请求解析失败: {}", e);
             // id 未知，返回 id=0 的错误响应。

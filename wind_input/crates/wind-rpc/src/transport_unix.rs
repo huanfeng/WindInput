@@ -60,9 +60,38 @@ pub(crate) fn run_ctrl_server(endpoint: &str, state: Arc<DispatchState>) {
     }
 }
 
+/// 对端是否与本进程同一 uid（SO_PEERCRED / getpeereid）。取不到凭据按不可信处理。
+/// socket 落在 /tmp 时他人也能 connect，不能只靠文件权限。
+fn peer_is_same_user(stream: &UnixStream) -> bool {
+    use std::os::fd::AsRawFd;
+    let fd = stream.as_raw_fd();
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        let rc = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                &mut cred as *mut _ as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        rc == 0 && cred.uid == unsafe { libc::geteuid() }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        let (mut uid, mut gid): (libc::uid_t, libc::gid_t) = (0, 0);
+        let rc = unsafe { libc::getpeereid(fd, &mut uid, &mut gid) };
+        rc == 0 && uid == unsafe { libc::geteuid() }
+    }
+}
+
 fn handle_ctrl_client(mut stream: UnixStream, state: Arc<DispatchState>) {
+    let trusted = peer_is_same_user(&stream);
     while let Some(frame) = read_frame(&mut stream) {
-        let resp = handle_frame(&state, &frame);
+        let resp = handle_frame(&state, &frame, trusted);
         if resp.is_empty() {
             continue;
         }
@@ -107,5 +136,16 @@ fn events_writer_loop(mut stream: UnixStream, rx: std::sync::mpsc::Receiver<Vec<
         if stream.write_all(&data).is_err() {
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn same_process_peer_is_trusted() {
+        let (a, _b) = UnixStream::pair().unwrap();
+        assert!(peer_is_same_user(&a));
     }
 }

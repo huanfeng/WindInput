@@ -91,6 +91,23 @@ impl DispatchState {
 /// 的外部错误类型 `?` 进来的那些（如 `zip::result::ZipError::Io`，它的 Display 里已经嵌了
 /// 一遍 io 错误，链上会再追加一遍），那类会重复一句——观感问题，不影响判读。
 pub fn dispatch(state: &DispatchState, req: Request) -> Response {
+    dispatch_as(state, req, true)
+}
+
+/// 拒绝文案：不可信调用方（AppContainer / 低完整性 / 他人 uid）碰机密相关方法时返回。
+pub const DENY_UNTRUSTED: &str = "拒绝：调用方权限不足";
+
+/// 需要「可信调用方」才能调用的方法：同步（含导出密钥、改后端）。
+fn requires_trusted(method: &str) -> bool {
+    method.starts_with("sync.")
+}
+
+/// 带调用方可信度的分发。`trusted=false` 来自传输层对连接对端的核验（见各 transport）；
+/// 进程内调用（同步进程的受限请求通道）本身可信，走 [`dispatch`]。
+pub fn dispatch_as(state: &DispatchState, req: Request, trusted: bool) -> Response {
+    if !trusted && requires_trusted(&req.method) {
+        return Response::error(req.id, DENY_UNTRUSTED.to_string());
+    }
     match handle(state, &req.method, &req.params) {
         Ok(v) => Response::success(req.id, v),
         Err(e) => Response::error(req.id, format!("{e:#}")),
@@ -755,6 +772,20 @@ mod tests {
         let resp = dispatch(&state(), req("bogus.method", json!({})));
         assert!(resp.result.is_none());
         assert!(resp.error.is_some());
+    }
+
+    #[test]
+    fn untrusted_caller_cannot_reach_sync_methods() {
+        for m in ["sync.command", "sync.setSettings", "sync.status"] {
+            let r = dispatch_as(&state(), req(m, json!({})), false);
+            assert_eq!(r.error.as_deref(), Some(DENY_UNTRUSTED), "{m}");
+        }
+        // 对照：可信调用方放行（假 core 对未知方法报 unknown method，说明确实转发了）。
+        let r = dispatch_as(&state(), req("sync.status", json!({})), true);
+        assert!(r.error.unwrap().contains("unknown method"));
+        // 非 sync 方法不受影响。
+        let r = dispatch_as(&state(), req("dict.stats", json!({})), false);
+        assert!(r.error.is_none());
     }
 
     #[test]

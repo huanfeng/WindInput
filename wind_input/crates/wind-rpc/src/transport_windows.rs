@@ -10,8 +10,12 @@ use std::ffi::CString;
 use std::sync::Arc;
 
 use windows::Win32::Foundation::*;
+use windows::Win32::Security::*;
 use windows::Win32::Storage::FileSystem::*;
 use windows::Win32::System::Pipes::*;
+use windows::Win32::System::Threading::{
+    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+};
 
 use wind_ipc::rpc::MAX_MESSAGE_SIZE;
 
@@ -169,10 +173,98 @@ fn ctrl_accept_loop(pipe_name_c: &CString, state: Arc<DispatchState>) {
     }
 }
 
+/// 读进程令牌的变长信息（TokenUser / TokenIntegrityLevel 等），失败返回 None。
+fn token_info(token: HANDLE, class: TOKEN_INFORMATION_CLASS) -> Option<Vec<u8>> {
+    let mut len = 0u32;
+    unsafe {
+        let _ = GetTokenInformation(token, class, None, 0, &mut len);
+    }
+    if len == 0 {
+        return None;
+    }
+    let mut buf = vec![0u8; len as usize];
+    unsafe {
+        GetTokenInformation(
+            token,
+            class,
+            Some(buf.as_mut_ptr() as *mut std::ffi::c_void),
+            len,
+            &mut len,
+        )
+        .ok()?;
+    }
+    Some(buf)
+}
+
+/// 令牌的用户 SID 是否与本进程相同、不是 AppContainer、完整性级别不低于 Medium。
+fn token_is_trusted(client: HANDLE, own: HANDLE) -> bool {
+    // AppContainer：浏览器沙箱 / UWP，一律不可信。
+    match token_info(client, TokenIsAppContainer) {
+        Some(b) if b.len() >= 4 && u32::from_ne_bytes([b[0], b[1], b[2], b[3]]) == 0 => {}
+        _ => return false,
+    }
+    // 完整性级别（SID 末位子权限 RID）≥ Medium(0x2000)。
+    let Some(il) = token_info(client, TokenIntegrityLevel) else {
+        return false;
+    };
+    let label = unsafe { &*(il.as_ptr() as *const TOKEN_MANDATORY_LABEL) };
+    let sid = label.Label.Sid;
+    let rid = unsafe {
+        let n = *GetSidSubAuthorityCount(sid);
+        if n == 0 {
+            return false;
+        }
+        *GetSidSubAuthority(sid, (n - 1) as u32)
+    };
+    if rid < 0x2000 {
+        // SECURITY_MANDATORY_MEDIUM_RID
+        return false;
+    }
+    // 同一用户：多用户机器上他人进程同样能连 Everyone 可写的管道。
+    let (Some(cu), Some(ou)) = (token_info(client, TokenUser), token_info(own, TokenUser)) else {
+        return false;
+    };
+    let (cu, ou) = unsafe {
+        (
+            &*(cu.as_ptr() as *const TOKEN_USER),
+            &*(ou.as_ptr() as *const TOKEN_USER),
+        )
+    };
+    unsafe { EqualSid(cu.User.Sid, ou.User.Sid).is_ok() }
+}
+
+/// 管道对端进程是否可信（见 [`token_is_trusted`]）。任何一步取不到信息都按不可信处理。
+fn peer_is_trusted(pipe: HANDLE) -> bool {
+    unsafe {
+        let mut pid = 0u32;
+        if GetNamedPipeClientProcessId(pipe, &mut pid).is_err() || pid == 0 {
+            return false;
+        }
+        let Ok(proc) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return false;
+        };
+        let mut client = HANDLE::default();
+        let ok = OpenProcessToken(proc, TOKEN_QUERY, &mut client).is_ok();
+        let _ = CloseHandle(proc);
+        if !ok {
+            return false;
+        }
+        let mut own = HANDLE::default();
+        let trusted = OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut own).is_ok()
+            && token_is_trusted(client, own);
+        let _ = CloseHandle(client);
+        if !own.is_invalid() {
+            let _ = CloseHandle(own);
+        }
+        trusted
+    }
+}
+
 fn handle_ctrl_client(pipe: PipeHandle, state: Arc<DispatchState>) {
     let handle = pipe.0;
+    let trusted = peer_is_trusted(handle);
     while let Some(frame) = read_frame(handle) {
-        let resp = handle_frame(&state, &frame);
+        let resp = handle_frame(&state, &frame, trusted);
         if resp.is_empty() {
             continue;
         }
