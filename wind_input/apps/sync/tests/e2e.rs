@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use wind_sync::{KdfParams, MemBackend, backend::BackendError};
+use wind_sync::{DeviceClass, KdfParams, MemBackend, backend::BackendError};
 use wind_sync_host::secrets::{FILE_NAME, FileSecretStore};
 use wind_sync_host::testing::{FakeCore, MemFactory};
 use wind_sync_host::{Config, Input, Runner, Timing};
@@ -54,6 +54,24 @@ impl Node {
     }
 
     fn with(remote: &MemBackend, watch: bool, settings: SyncSettings) -> Node {
+        Self::spawn(
+            remote,
+            watch,
+            settings,
+            DeviceClass::Desktop,
+            false,
+            timing(),
+        )
+    }
+
+    fn spawn(
+        remote: &MemBackend,
+        watch: bool,
+        settings: SyncSettings,
+        class: DeviceClass,
+        on_demand: bool,
+        timing: Timing,
+    ) -> Node {
         let dir =
             tempfile::tempdir_in(std::env::var_os("TMPDIR").unwrap_or("/tmp".into())).unwrap();
         std::fs::create_dir_all(dir.path().join("user")).unwrap();
@@ -67,9 +85,11 @@ impl Node {
             settings,
             link: core.clone(),
             factory: Box::new(MemFactory(remote.clone())),
-            timing: timing(),
+            timing,
             kdf: KdfParams::FAST_TEST,
             watch,
+            class,
+            on_demand,
         };
         let tx2 = tx.clone();
         let handle = std::thread::spawn(move || Runner::new(cfg, tx2).run(rx));
@@ -873,4 +893,56 @@ fn list_devices_needs_a_joined_device() {
     let remote = MemBackend::new();
     let mut a = Node::with(&remote, false, named("甲"));
     assert!(a.cmd(Op::ListDevices, Value::Null).is_err());
+}
+
+/// 桌面与手机共用同一远端：词库互通，config.toml 各自为政。
+#[test]
+fn mobile_and_desktop_share_dicts_but_not_config() {
+    let remote = MemBackend::new();
+    let mut pc = Node::new(&remote, false);
+    let mut ph = Node::spawn(
+        &remote,
+        false,
+        settings(),
+        DeviceClass::Mobile,
+        true,
+        timing(),
+    );
+    pc.put("config.toml", "who = \"pc\"\n");
+    pc.put(
+        UD,
+        "---\nname: user\ncolumns: [code, text, weight]\n...\na\t啊\t1\n",
+    );
+    ph.put("config.toml", "who = \"phone\"\n");
+    pc.setup("pass");
+    pc.sync();
+    ph.setup("pass");
+    ph.sync();
+    pc.sync();
+    assert!(ph.read(UD).unwrap().contains("a\t啊"));
+    assert_eq!(ph.read("config.toml").unwrap(), "who = \"phone\"\n");
+    assert_eq!(pc.read("config.toml").unwrap(), "who = \"pc\"\n");
+    assert!(
+        ph.core.methods().iter().any(|m| m == "dict.reload"),
+        "{:?}",
+        ph.core.methods()
+    );
+    assert!(!ph.core.methods().iter().any(|m| m == "config.reload"));
+}
+
+/// 按需模式：设置、机密变更与定时都不自行起一轮，只有 sync_now 才跑。
+#[test]
+fn on_demand_runner_only_syncs_when_asked() {
+    let remote = MemBackend::new();
+    let t = Timing {
+        first_delay: Duration::from_millis(50),
+        settings_delay: Duration::from_millis(50),
+        ..timing()
+    };
+    let mut n = Node::spawn(&remote, false, settings(), DeviceClass::Mobile, true, t);
+    n.setup("pass");
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(n.syncing_count(), 0, "未要求时不应同步");
+    n.sync();
+    assert_eq!(n.syncing_count(), 1);
 }

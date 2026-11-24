@@ -99,6 +99,8 @@ pub fn run_process() -> i32 {
         timing: Timing::default(),
         kdf: KdfParams::DEFAULT,
         watch: true,
+        class: wind_sync::DeviceClass::Desktop,
+        on_demand: false,
     };
     Runner::new(cfg, tx).run(rx);
     0

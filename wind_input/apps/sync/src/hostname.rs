@@ -1,5 +1,8 @@
 //! 本机主机名（不引入新依赖）：Windows 读 `COMPUTERNAME`，Unix 调 `gethostname`。
 
+#[cfg(target_os = "android")]
+const FALLBACK: &str = "Android 设备";
+#[cfg(not(target_os = "android"))]
 const FALLBACK: &str = "未命名设备";
 
 pub fn host_name() -> String {
@@ -14,7 +17,13 @@ fn raw() -> Option<String> {
     std::env::var("COMPUTERNAME").ok()
 }
 
-#[cfg(unix)]
+// Android 的 gethostname 恒为 localhost，没有意义：交给宿主经 device_name 传入型号。
+#[cfg(target_os = "android")]
+fn raw() -> Option<String> {
+    None
+}
+
+#[cfg(all(unix, not(target_os = "android")))]
 fn raw() -> Option<String> {
     let mut buf = [0u8; 256];
     // SAFETY: 缓冲区有效且长度如实传入；失败返回非 0。

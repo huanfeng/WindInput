@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use wind_sync::crypto::{Dek, KdfParams, Meta, content_hash};
 use wind_sync::devices::{DeviceInfo, list_devices, put_device_info, remove_device};
-use wind_sync::scope::{ScopeFlags, in_scope};
+use wind_sync::scope::{DeviceClass, ScopeFlags, in_scope, to_remote};
 use wind_sync::state::backoff_secs;
 use wind_sync::{Backend, SyncCtx, SyncError, SyncReport, SyncState, manifest, remote, sync_once};
 use wind_sync_ipc::{Backend as Target, FromSync, Op, Scope, Status, SyncSettings, ToSync};
@@ -106,8 +106,13 @@ pub struct Config {
     pub factory: Box<dyn BackendFactory>,
     pub timing: Timing,
     pub kdf: KdfParams,
-    /// 是否监听文件变化（测试可关）。
+    /// 是否监听文件变化（测试可关；进程内运行的手机端不监听）。
     pub watch: bool,
+    /// 本机设备类别：平台相关文件在远端的命名空间。
+    pub class: DeviceClass,
+    /// 只在被要求时（`sync_now` / 确认大批量删除）才跑一轮，不按间隔与设置变更自行调度。
+    /// 进程内运行的手机端由宿主决定何时同步。
+    pub on_demand: bool,
 }
 
 pub fn flags_of(s: &Scope) -> ScopeFlags {
@@ -359,6 +364,9 @@ impl Runner {
         if self.force_now {
             return Some(now);
         }
+        if self.cfg.on_demand {
+            return None;
+        }
         let mut t = self.periodic_at;
         if let Some(d) = self.debounce_until {
             t = t.min(d);
@@ -472,7 +480,7 @@ impl Runner {
         let synced = self
             .state
             .files
-            .get(rel)
+            .get(&to_remote(rel, self.cfg.class))
             .and_then(|e| e.value())
             .unwrap_or_default();
         if synced == hash {
@@ -505,6 +513,7 @@ impl Runner {
         let now = now_unix();
         let scope = flags_of(&self.settings.scope);
         let mut ctx = SyncCtx::new(scope, now);
+        ctx.class = self.cfg.class;
         ctx.force = force;
         ctx.gc = true;
         ctx.allow_mass_delete = allow_mass;
@@ -973,6 +982,8 @@ mod tests {
             timing: Timing::default(),
             kdf: KdfParams::FAST_TEST,
             watch: false,
+            class: DeviceClass::Desktop,
+            on_demand: false,
         };
         (Runner::new(cfg, tx), rx)
     }
