@@ -6,10 +6,9 @@
 //! 用 `WIND_INSTALL_ROOT` 把安装根重定向到临时目录（`data/` 与 `data_custom/` 同级），
 //! 用 `WIND_DATADIR_CONF` 把用户目录重定向（与 `datadir_conf.rs` 同一杠杆）。
 //!
-//! ⚠️ 全文件仅此一个 `#[test]`：多个测试在同一二进制里并行会争抢这两个环境变量与
-//! OnceLock，先跑的那个会把层定死，后跑的静默测到错误的目标。
-//! ⚠️ 两个环境变量都**必须**设：漏掉 `WIND_DATADIR_CONF` 时 `prune_user_config()`
-//! 会真写用户的 `%APPDATA%\WindInput\config.toml`（本仓已有前科）。
+//! 全文件仅此一个 `#[test]`：并行的多个测试会争抢这两个环境变量与 OnceLock，
+//! 后跑的静默测到错误的目标。两个环境变量都必须设：漏掉 `WIND_DATADIR_CONF` 时
+//! `prune_user_config()` 会真写用户的 `%APPDATA%\WindInput\config.toml`。
 
 use std::path::{Path, PathBuf};
 use wind_config::Config;
@@ -35,7 +34,7 @@ fn custom_layer_sits_between_system_and_user() {
     std::fs::create_dir_all(&tmp).unwrap();
     std::fs::write(&conf, user.to_string_lossy().as_bytes()).unwrap();
 
-    // 清单必须在**任何** OnceLock 初始化之前就位，否则本次进程里定制层恒为关闭。
+    // 清单必须在任何 OnceLock 初始化之前就位，否则本次进程里定制层恒为关闭。
     write_at(
         &custom,
         "custom.toml",
@@ -76,7 +75,7 @@ hide = ["msime"]
     assert_eq!(m.custom.id, "huma-edition");
     assert_eq!(m.custom.name, "虎码定制版");
     assert_eq!(m.custom.version, "1.2");
-    // 本期只解析保存、不做强制版本检查（留 P3）。
+    // 只解析保存，不做强制版本检查。
     assert_eq!(m.custom.base_version, "0.9.30");
     assert_eq!(m.schemas.hide, ["wubi86", "wubi86_pinyin"]);
     assert_eq!(m.themes.hide, ["msime"]);
@@ -110,7 +109,7 @@ hide = ["msime"]
         cfg.degradation.sections
     );
     assert_eq!(cfg.schema.active, "pinyin", "用户层(L3)压过定制层(L2.5)");
-    // ★ 本组断言里最关键的一条：用户层没写的键必须落到 L2.5，而不是穿透回 L2。
+    // 本组断言里最关键的一条：用户层没写的键必须落到 L2.5，而不是穿透回 L2。
     assert_eq!(
         cfg.ui.candidate.per_page, 7,
         "用户层缺失的键须回落 L2.5（定制层），不是 L2"
@@ -121,7 +120,7 @@ hide = ["msime"]
     );
     assert_eq!(cfg.debug.log_max_files, 3, "定制层未触及的段不受影响");
 
-    // `system_preset_value` = L1⊕L2⊕L2.5，**不含**用户层。
+    // `system_preset_value` = L1⊕L2⊕L2.5，不含用户层。
     // 漏了 L2.5 就会把「用户点到定制默认位」判成「与默认不同」而永久钉死。
     let preset = Config::system_preset_value(Some(&data)).unwrap();
     assert_eq!(
@@ -258,7 +257,7 @@ caret_use_top = true
         compat.get_rule("c.exe").unwrap().caret_use_top,
         "用户层规则须生效"
     );
-    // ★ 两段各自合并：用户层为 c.exe 写了 [[apps]]，不得连带丢掉定制层给 c.exe 配的
+    // 两段各自合并：用户层为 c.exe 写了 [[apps]]，不得连带丢掉定制层给 c.exe 配的
     // [[initial_mode_scope]]。把两段并成一段就会在这里翻车。
     assert!(
         compat.initial_mode_applies_to_window("c.exe", "CustomCls"),

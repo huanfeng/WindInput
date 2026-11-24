@@ -107,12 +107,9 @@ fn add_test_client(srv: &PushServer, token: u64) {
     });
 }
 
-/// hook 注册前已完成握手的客户端必须被补跑。
-///
-/// 真机根因（2026-07-21 复现）：`push_server.start()` 早于
-/// `set_client_connected_hook` 约 230ms（中间隔着 `Coordinator::new()`），
-/// SearchHost 的 DLL 在该窗口内重连成功，回调被静默丢弃 → 它是白名单宿主拿到
-/// activation push 的唯一通路 → HostRender 永不激活，开始菜单候选窗被压在后面。
+/// hook 注册前已完成握手的客户端必须被补跑：`start()` 与注册 hook 之间隔着
+/// `Coordinator::new()`，这段窗口里重连的 SearchHost 会丢掉 activation push，
+/// HostRender 永不激活。
 #[test]
 fn hook_registration_replays_clients_connected_before_it() {
     let srv = PushServer::new(PushConfig::default());
@@ -177,12 +174,8 @@ fn reconnected_client_can_be_claimed_again() {
     );
 }
 
-/// 就绪前连上的客户端**不能**先拿到 SERVICE_READY，要等 `mark_ready` 补发。
-///
-/// 真机根因（t254，2026-10-09 靶机复现）：改了词库后重启，`Coordinator::new` 同步重建
-/// 拼音合并缓存约 2.6 s，DLL 1 s 退避后重连落在这段窗口里。连上即发的 SERVICE_READY
-/// 让持焦点的 DLL 立刻发 IME_ACTIVATED，被未就绪的 DeferredHandler 静默丢弃，DLL 又已
-/// 清掉同步标志——工具栏要等用户切焦点或按键才出来。
+/// 就绪前连上的客户端不能先拿到 SERVICE_READY，要等 `mark_ready` 补发：否则 DLL 的
+/// IME_ACTIVATED 被未就绪的 DeferredHandler 丢弃，工具栏要等切焦点或按键才出来。
 #[test]
 fn clients_registered_before_ready_get_service_ready_on_mark_ready() {
     let srv = PushServer::new(PushConfig::default());
@@ -211,7 +204,7 @@ fn clients_registered_after_ready_get_service_ready_immediately() {
     assert!(rx.try_recv().is_err(), "只发一次");
 }
 
-/// 补发的 SERVICE_READY 必须排在 hook 补跑推的握手配置**之前**：DLL 收到 SERVICE_READY
+/// 补发的 SERVICE_READY 必须排在 hook 补跑推的握手配置之前：DLL 收到 SERVICE_READY
 /// 会把会话级开关（标题采集）清零，晚到就会冲掉刚推来的新值。main.rs 先 `mark_ready`
 /// 再 `set_client_connected_hook`，同一条发送队列保证这个顺序。
 #[test]

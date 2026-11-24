@@ -74,12 +74,9 @@ fn search_composes_url() {
     assert_eq!(rec.0.lock().unwrap()[0], "https://www.baidu.com/s?wd=a+b");
 }
 
-/// 空查询词**不开浏览器**，报错。
+/// 空查询词不开浏览器，报错。
 ///
-/// 此前会开一个空搜索页 —— 命令看上去跑了、结果什么也没搜到，这正是最难归因的那种
-/// 失败：用户分不清是取值没成、引擎名写错、还是命令压根没执行。
-///
-/// 变异判据：去掉 `fn_search` 里的空查询守卫，两条断言同时转红。
+/// 开一个空搜索页的话，用户分不清是取值没成、引擎名写错还是命令没执行。
 #[test]
 fn search_refuses_an_empty_query_instead_of_opening_a_blank_page() {
     let rec = Arc::new(RecordOpener::default());
@@ -100,8 +97,7 @@ fn search_refuses_an_empty_query_instead_of_opening_a_blank_page() {
 }
 
 /// 记录 `ProcessRunner` 收到的全部字段，供两个测试共用。
-/// 把每个字段都拼进字符串是刻意的：漏传某个选项会直接体现在断言串上，
-/// 而只断言关心的那个字段会让"其它选项被悄悄丢掉"逃过检查。
+/// 每个字段都拼进字符串，漏传任何选项都会体现在断言串上。
 #[derive(Default)]
 struct RecProc(Mutex<Vec<String>>);
 impl crate::services::ProcessRunner for RecProc {
@@ -159,10 +155,9 @@ fn proc_run_dispatches_cmd_and_args() {
     assert_eq!(log[4], "shell:dict -q x::cwd=D:/Dict");
 }
 
-/// 枚举型具名参数的**值**要校验白名单，且报错要列出合法取值。
+/// 枚举型具名参数的值要校验白名单，且报错要列出合法取值。
 ///
-/// 这一条**不带 cfg(windows)**：verb/show 只在 Windows 生效，但校验必须跨平台
-/// 一致——短语文件跟着用户跨机器走，不能在 macOS 上写错了不报、到 Windows 才炸。
+/// 不带 cfg(windows)：verb/show 只在 Windows 生效，但短语文件跨机器走，校验必须跨平台一致。
 #[test]
 fn proc_run_validates_enum_named_values_on_all_platforms() {
     let rec = Arc::new(RecProc::default());
@@ -185,7 +180,7 @@ fn proc_run_validates_enum_named_values_on_all_platforms() {
         fn_run_named(&ctx, &["x.exe".into()], &[("show".into(), (*s).into())]).unwrap();
     }
 
-    // 非法值必须在调用服务**之前**挡下：上面两次报错不该留下任何启动记录，
+    // 非法值必须在调用服务之前挡下：上面两次报错不该留下任何启动记录，
     // 否则就成了"报了错但程序已经用错参数启动了"。
     assert_eq!(
         rec.0.lock().unwrap().len(),
@@ -195,9 +190,8 @@ fn proc_run_validates_enum_named_values_on_all_platforms() {
 
 /// 按程序名给出预设结果的假 runner，记录尝试顺序。未登记的名字 = 不存在。
 ///
-/// 「不存在」给的是**真的** `io::Error(NotFound)`（经 `?` 包成 anyhow），与宿主
-/// `run_native` 里 `Command::spawn()?` 产生的错误同形——用字符串冒充的话，
-/// `is_not_found` 的判定根本没被测到。
+/// 「不存在」给真的 `io::Error(NotFound)`，与 `run_native` 里 `Command::spawn()?` 同形，
+/// 用字符串冒充就测不到 `is_not_found`。
 struct ScriptedProc {
     ok: Vec<&'static str>,
     denied: Vec<&'static str>,
@@ -245,8 +239,6 @@ fn names(v: &[&str]) -> Vec<String> {
 }
 
 /// 按顺序试，第一个成功的即停，后面的不再启动。
-///
-/// 变异判据：去掉 `Ok(()) => return` 的提前返回，`tried` 会多出 c 转红。
 #[test]
 fn proc_any_falls_back_in_order_and_stops_at_first_success() {
     let p = Arc::new(ScriptedProc::new(&["b", "c"], &[]));
@@ -271,8 +263,6 @@ fn proc_any_falls_back_past_a_candidate_that_fails_to_spawn() {
 }
 
 /// 全部失败：报错里列出每个试过的名字，并把「没装」与「起不来」分开说。
-///
-/// 变异判据：`is_not_found` 恒返回 false，a 就跑到「启动失败」那一段去，第二条断言转红。
 #[test]
 fn proc_any_all_fail_lists_every_candidate_by_reason() {
     let p = Arc::new(ScriptedProc::new(&[], &["b"]));
@@ -296,7 +286,7 @@ fn proc_any_all_missing_mentions_only_missing() {
     assert!(!err.contains("启动失败"), "{err}");
 }
 
-/// 空名在启动**任何**程序之前挡下，而不是先开了前面的再报错。
+/// 空名在启动任何程序之前挡下，而不是先开了前面的再报错。
 #[test]
 fn proc_any_rejects_blank_names_before_spawning() {
     let p = Arc::new(ScriptedProc::new(&["a"], &[]));
@@ -366,10 +356,9 @@ fn wind_cli_splits_single_arg_and_passes_multi_verbatim() {
     assert_eq!(log[0].3, crate::services::DEFAULT_CLI_WAIT_MS);
 }
 
-/// `wind.cli` 的三个具名参数**原样落到 spec**，且非法值在调用服务前挡下。
+/// `wind.cli` 的三个具名参数原样落到 spec，且非法值在调用服务前挡下。
 ///
-/// 变异判据：把 `check_enum("wind.cli", "toast", …)` 删掉，第二段断言转红——
-/// 那正是「toast 写错一个字母就静默变成不提示」的形态。
+/// 否则 toast 写错一个字母就静默变成不提示。
 #[test]
 fn wind_cli_named_feedback_params_reach_host_and_validate() {
     let rec = Arc::new(RecSelf::default());

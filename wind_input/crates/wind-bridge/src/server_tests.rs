@@ -287,7 +287,7 @@ fn panel_pointer_dispatches_to_handler() {
 }
 
 /// host 模式翻页按钮点击：DLL SendAsync 发负 index（-1 上页 / -2 下页），
-/// 必须按 i32 路由到 handler（u32 解码会丢弃翻页，真机踩坑），且异步不回响应
+/// 必须按 i32 路由到 handler（u32 解码会丢弃翻页），且异步不回响应
 /// （回 ack 会污染管道，DLL 不读响应）。
 #[test]
 fn candidate_select_negative_pager_routed_async_silent() {
@@ -367,7 +367,7 @@ fn candidate_scroll_routed_async_silent() {
 
 /// 键事件必须刷新 host-render 活跃实例：SearchHost 等 transient DocMgr 宿主二次聚焦时
 /// focus_gained 被 DLL 跳过、IME_ACTIVATED 不重发，键事件是唯一可靠的焦点信号
-/// （否则 active 停留在别的进程 → 二次输入回退本地渲染，真机踩坑）。
+/// （否则 active 停留在别的进程，二次输入回退本地渲染）。
 #[cfg(windows)]
 #[test]
 fn key_event_notes_focus_for_host_render() {

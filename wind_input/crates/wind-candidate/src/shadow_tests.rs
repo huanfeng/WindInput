@@ -219,7 +219,7 @@ fn one_candidate_many_rules_takes_smallest_position() {
     assert_eq!(hits, 1);
 }
 
-/// 核心回归：规则的 `word` 是**写入当天**的求值文本，今天候选文本已全变。
+/// 核心回归：规则的 `word` 是写入当天的求值文本，今天候选文本已全变。
 /// 按 id 匹配才命中——这正是 `date` 置顶「第二天被还原」的场景。
 #[test]
 fn pin_by_id_survives_text_change() {
@@ -241,11 +241,11 @@ fn pin_by_id_survives_text_change() {
     );
 }
 
-/// 反向闸门：`cand_id` 非空时**不得**回退到 word 匹配。
+/// 反向闸门：`cand_id` 非空时不得回退到 word 匹配。
 /// 否则过期文本会误伤当天碰巧同文的另一条候选。
 #[test]
 fn pin_by_id_does_not_fall_back_to_word() {
-    // 「2026-07-29」今天仍存在，但它是**另一条**短语（固定字面量）产出的。
+    // 「2026-07-29」今天仍存在，但它是另一条短语（固定字面量）产出的。
     let mut c = cands_with_id(&[
         ("2026-07-30", "phrase:date:$Y-$MM-$DD"),
         ("2026-07-29", "phrase:date:literal-fixed"),

@@ -115,10 +115,7 @@ fn lunar_rejects_unknown_part() {
     assert!(e.is_err(), "未知 part 必须报错而不是给空串");
 }
 
-/// ★ 取不到农历时**报错**，不返回空串。
-///
-/// 空串会让 `农历{lunar()}` 把「农历」二字单独上屏——表达式路径是整条插值，
-/// 字面前缀不会因为函数返回空串而消失。报错才能让整条候选不出现。
+/// 取不到农历时报错而非返回空串：空串会让 `农历{lunar()}` 把「农历」二字单独上屏。
 #[test]
 fn lunar_errors_instead_of_returning_empty() {
     let c = ctx_without_lunar();
@@ -131,11 +128,11 @@ fn lunar_errors_instead_of_returning_empty() {
             "part={p} 取不到值时应报错"
         );
     }
-    // 对照：公历函数在同一上下文里仍给空串（既有约定，不受本次改动影响）
+    // 对照：公历函数在同一上下文里仍给空串（既有约定）
     assert_eq!(fn_year(&c, &[]).unwrap(), "2025");
 }
 
-/// ★ 无参调用必须与对应的 `$` 变量逐字相同——两条路径同源是整个设计的前提。
+/// 无参调用必须与对应的 `$` 变量逐字相同——两条路径同源是整个设计的前提。
 #[test]
 fn bare_calls_equal_factory_variables() {
     let c = ctx();
@@ -237,8 +234,7 @@ fn outside_quick_context_yields_empty() {
 
 /// `pct()` 默认 ×100 保两位小数并去尾零；具名参数可换成千分比/基点等任意倍数与后缀。
 ///
-/// ★ 换算基于 `$EXACT`（未截断精度），不是 `$RESULT`：`ctx()` 的 `RESULT`/`EXACT`
-/// 均固定为 "7"，这里换上 1/3 的真实精度值才能验出「不会二次舍入」。
+/// 换算基于 `$EXACT` 而非 `$RESULT`；`ctx()` 里二者都是 "7"，这里换成 1/3 才能验出不二次舍入。
 #[test]
 fn percent_default_and_custom() {
     let mut c = ctx();
@@ -271,11 +267,8 @@ fn percent_rejects_bad_named_args() {
     assert!(fn_pct_named(&c, &[], &nm(&[("decimals", "-1")])).is_err());
 }
 
-/// ★ 宽度/位数类参数必须有上界。
-///
-/// 三个消费者都会按这个数分配（`pad_left` 造 N 个字符、`format!("{:.*}")` 造 N 位
-/// 小数），不设限时**一条模板就能让求值线程卡在分配上**。上限恰好那个值要放行、
-/// 再多一个要拒——只测一个大数的话，把上限写成 1 也照样绿。
+/// 宽度/位数类参数必须有上界，否则一条模板就能让求值线程卡在分配上。
+/// 上限值放行、多一个拒绝，两端都测。
 #[test]
 fn width_args_are_bounded() {
     let c = ctx();
@@ -305,12 +298,8 @@ fn percent_rejects_non_finite_result() {
     let mut c = ctx();
     c.vars.insert("EXACT", "1e300");
     assert!(fn_pct_named(&c, &[], &nm(&[("scale", "1e300")])).is_err());
-    // 反向对照：同样是大数，只要乘出来仍是有限值就照常出结果——别把上面那条写成
-    // 「大数一律拒」。
-    //
-    // 不断言具体数字：`{:.*}` 打印的是 f64 的**精确**值，而最接近 1e300 的那个 double
-    // 并不是整十次幂，展开出来后半截全是尾数噪声（…5250476025520442…）。这里要钉的是
-    // 「没被拒、按定点展开了」，那就按形状断言。
+    // 反向对照：乘出来仍是有限值的大数照常出结果。按形状断言，因为 `{:.*}` 打印 f64
+    // 精确值，1e300 展开后半截是尾数噪声。
     let big = fn_pct_named(&c, &[], &nm(&[("scale", "1")])).unwrap();
     assert!(
         big.starts_with('1') && big.ends_with('%') && big.len() > 300,
@@ -319,11 +308,7 @@ fn percent_rejects_non_finite_result() {
     );
 }
 
-/// ★ quick 函数名不得与既有内置函数重名。
-///
-/// 重名不会报错——`Registry::register` 是同名覆盖，结果是同一个名字在快捷输入里
-/// 和别处含义不同（`num` 就差点这样：它已是进制转换）。将来 cmdbar 新增函数撞名时，
-/// 由这条在 CI 拦住。
+/// quick 函数名不得与既有内置函数重名：`Registry::register` 同名静默覆盖（如 `num` 已是进制转换）。
 #[test]
 fn no_name_clash_with_builtins() {
     let builtins = crate::registry::Registry::full();

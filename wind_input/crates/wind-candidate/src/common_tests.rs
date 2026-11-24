@@ -1,5 +1,5 @@
 /// 与 [`CommonChars::from_base`] 配套的 registry：出厂 `common_han` 类的形态
-/// ——作用域 = 汉字域、名单 = 这些字、名单内常用、**域内名单外生僻**。
+/// ——作用域 = 汉字域、名单 = 这些字、名单内常用、域内名单外生僻。
 ///
 /// 生产路径上这两者分别来自 `schemas/common_chars.txt` 与
 /// `charsets/common_han.yaml`（后者的 `file:` 就指向前者），测试里一并造出来。
@@ -34,9 +34,7 @@ fn test_string_common() {
 
 #[test]
 fn test_cjk_punct_ignored() {
-    // 回归：用户词库里含中文顿号的词条在「常用字/智能」档被滤掉。
-    // 根因＝判定域按 `0x2E80..=0x33FF` 整段圈定，把 CJK 符号和标点区当成必须查表的汉字，
-    // 而字表里只有纯汉字。判据现按语义而非 Unicode 块邻接：符号一律忽略。
+    // 判定域按语义而非 Unicode 块邻接：CJK 符号和标点不查表，否则含顿号的词条会被滤掉。
     let (cc, cs) = base(['我', '们']);
 
     assert!(cc.is_string_common("、", &cs)); // 顿号单条词条（本次上报的现象）
@@ -91,8 +89,7 @@ fn overrides_win_over_base_in_both_directions() {
 
 /// `set_overrides` 是整体替换：撤销掉的那条必须真的消失。
 ///
-/// 若实现成增量合并，「恢复出厂」在下次重灌前不会生效——症状是点了没反应，
-/// 重启后才对，属于最难查的一类（[[project_runtime_mirror_state_config_sync]]）。
+/// 实现成增量合并的话，「恢复出厂」要到下次重灌才生效。
 #[test]
 fn set_overrides_replaces_rather_than_merges() {
     let (mut cc, cs) = base(['我']);
@@ -105,10 +102,9 @@ fn set_overrides_replaces_rather_than_merges() {
     assert!(cc.is_char_common('鬱', &cs));
 }
 
-/// ⚠️ `is_empty` 只看出厂基表：它是上层「退化为不过滤」的判据。
+/// `is_empty` 只看出厂基表：它是上层「退化为不过滤」的判据。
 ///
-/// 把覆盖也算进去的话，出厂表缺失而用户设过一个字时它会返回 false，于是过滤照常
-/// 进行——此刻几乎所有字都不在表里、全被判生僻，智能档会把候选滤到只剩那一个字。
+/// 把覆盖也算进去的话，出厂表缺失而用户设过一个字时过滤照常进行，几乎所有字被判生僻。
 #[test]
 fn is_empty_ignores_overrides() {
     let (mut cc, _cs) = base([]);
@@ -119,8 +115,8 @@ fn is_empty_ignores_overrides() {
 
 /// 判定域自洽：`is_common_scope` 放行的字符，正是 `is_string_common` 会去查表的那些。
 ///
-/// 上层拿 `is_common_scope` 做右键菜单的准入。两处一旦漂移，用户就能给一个读端
-/// 根本不查的字符（`、`、emoji）存下覆盖，然后发现「设了完全没用」且毫无报错。
+/// 域内未表态的字查表，域外未表态的字被忽略。写端准入是更宽的 `is_markable`，
+/// 二者关系由 `markable_char_takes_effect` 钉。
 #[test]
 fn common_scope_matches_string_judgement() {
     let (cc, cs) = base([]);
@@ -134,16 +130,13 @@ fn common_scope_matches_string_judgement() {
     }
     for ch in ['、', '，', '①', '℃', 'あ', '😀', 'A', '7'] {
         assert!(!is_common_scope(ch), "{ch} 应在默认字表管辖域外");
-        // 域外**且用户没表过态** ⇒ 被忽略，不拖累判定。
+        // 域外且用户没表过态 ⇒ 被忽略，不拖累判定。
         assert!(cc.is_string_common(&ch.to_string(), &cs), "{ch} 应被忽略");
     }
 }
 
-/// Unicode 17 的扩展 J（`U+323B0` 起）必须在管辖域内。
-///
-/// 原先 `is_han` 逐块列举到 `0x323AF`（扩展 H 末尾），**只差一个码位**：扩 J 落到域外
-/// ⇒ 恒判常用 ⇒ 常用字档、智能档都放行。虎码跟进 Unicode 17 后，用户的常用字候选里
-/// 冒出一批无字形的扩 J 生僻字（issue #83）。同一份列举还漏了扩展 I 与兼容汉字补充。
+/// Unicode 17 的扩展 J（`U+323B0` 起）、扩展 I 与兼容汉字补充必须在管辖域内；
+/// 落到域外会恒判常用，常用字档放行一批无字形的生僻字。
 #[test]
 fn supplementary_ideographic_planes_are_governed_wholesale() {
     let (cc, cs) = base([]);
@@ -162,14 +155,13 @@ fn supplementary_ideographic_planes_are_governed_wholesale() {
     }
 }
 
-/// 写端放行的字符，设成生僻后读端**一定**判非常用。
+/// 写端放行的字符，设成生僻后读端一定判非常用。
 ///
-/// 这是「词库管理全范围放开」后取代 `common_scope_matches_string_judgement` 那条
-/// 同源性的钉子：准入不再等于读端作用域，两者的关系变成「写得进去就一定生效」。
-/// 它防的还是同一件事——库里躺着一条用户以为生效、实际永不被查询的死记录，全程无报错。
+/// 写端准入宽于读端作用域，两者的关系是「写得进去就一定生效」，否则库里会躺着
+/// 永不被查询的死记录。
 #[test]
 fn markable_char_takes_effect() {
-    // 全都在 `is_common_scope` 之外，正是 issue #83 里用户点名要能关掉的那几类。
+    // 全都在 `is_common_scope` 之外，是用户要能单独设为生僻的几类。
     let outside = ['ㄅ', 'ㆠ', '⿰', 'あ', '、', '㈱', '😀', 'A'];
     for ch in outside {
         assert!(!is_common_scope(ch), "{ch} 本就在默认字表管辖域外");
@@ -197,14 +189,10 @@ fn markable_char_takes_effect() {
     }
 }
 
-/// 用户眼里的「一个字符」= 一个**字素簇**，码位数可以是 1、2、3、5……
+/// 用户眼里的「一个字符」= 一个字素簇，码位数可以是 1、2、3、5……
 ///
-/// 用户报的 `⚽️` 就卡在旧判据上（`chars().count() == 1`），候选右键里根本没有
-/// 「设为生僻字」这一项。词库里存的正是带 FE0F 的那个形态
-/// （`wubi86_jidian_emoji.dict.yaml` 实测）。
-///
-/// ⛔ 中间版本改成「跳过修饰码位、数基础字符」——那仍是自己列规则，`👨‍👩‍👧`、`🇨🇳`、
-/// `1️⃣` 照样被拒。现在直接用 UAX #29 的字素簇，一次覆盖全部形态。
+/// 词库里的 emoji 常带 FE0F（如 `⚽️`），按 `chars().count() == 1` 判会拒掉它。别自己列
+/// 「跳过修饰码位」之类规则（`👨‍👩‍👧`、`🇨🇳`、`1️⃣` 仍会漏），用 UAX #29 字素簇。
 #[test]
 fn one_grapheme_is_one_char_regardless_of_code_points() {
     for (text, what) in [
@@ -235,10 +223,9 @@ fn one_grapheme_is_one_char_regardless_of_code_points() {
     assert_eq!(single_markable_char(" "), None, "空白不可登记");
 }
 
-/// 多码位簇登记后，读端必须对**整簇**生效。
+/// 多码位簇登记后，读端必须对整簇生效。
 ///
-/// ⚠️ 键是整簇，故 `⚽`(裸) 与 `⚽️`(带 FE0F) 是两个不同的键——用户在候选里点的是哪个
-/// 形态就设哪个，而候选文本来自词库，形态是固定的，两者不会互相错过。
+/// 键是整簇，`⚽` 与 `⚽️` 是两个键；候选文本来自词库、形态固定，设与查不会错过。
 #[test]
 fn multi_code_point_cluster_override_takes_effect() {
     let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
@@ -246,7 +233,7 @@ fn multi_code_point_cluster_override_takes_effect() {
     cc.set_overrides([(family.to_string(), false)]);
     assert!(!cc.is_string_common(family, &cs), "整个 ZWJ 序列应判非常用");
     assert!(cc.has_user_rare(family));
-    // 序列里的**单个成员**不受牵连：用户关的是这个组合，不是所有 👨。
+    // 序列里的单个成员不受牵连：用户关的是这个组合，不是所有 👨。
     assert!(
         cc.is_string_common("\u{1F468}", &cs),
         "只登记了组合，单个成员不该跟着被判非常用"
@@ -256,12 +243,10 @@ fn multi_code_point_cluster_override_takes_effect() {
     assert!(!cc.is_string_common(&format!("一家{family}"), &cs));
 }
 
-/// 按字判与按串判**必须一致**，域外字符尤其。
+/// 按字判与按串判必须一致，域外字符尤其。
 ///
-/// 这条自洽性断言防的是一类特别难想到的账对不上：`is_char_common` 走
-/// `is_base_common`、`is_string_common` 走「域外即忽略」，两条路对同一个 `、` 若给出
-/// 相反答案，词库管理页会显示「常用」而候选窗里它已被滤掉——两边都不报错。
-/// 写端的「与默认同向就删覆盖」也建立在这份一致上（见 `is_base_common`）。
+/// 两条路对同一个 `、` 给出相反答案的话，词库管理页显示「常用」而候选窗已把它滤掉。
+/// 写端「与默认同向就删覆盖」也依赖这份一致（见 `is_base_common`）。
 #[test]
 fn char_and_string_judgements_agree() {
     let (mut cc, cs) = base(['我']);
@@ -287,7 +272,7 @@ fn char_and_string_judgements_agree() {
     }
 }
 
-/// 覆盖优先于默认字表——**两个方向都要**。
+/// 覆盖优先于默认字表——两个方向都要。
 #[test]
 fn override_wins_over_base_table() {
     let (mut cc, cs) = base(['我']);
@@ -306,10 +291,9 @@ fn override_wins_over_base_table() {
     );
 }
 
-/// 全表列举：**按字表原序**，用户加的字追加在后。
+/// 全表列举：按字表原序，用户加的字追加在后。
 ///
-/// 顺序是硬要求：`common_chars.txt` 按级别拼接（一级→二级→三级），设置页分页浏览
-/// 全靠它。若从 `HashSet` 迭代，每次启动的顺序都不一样，第 2 页的内容会随机变。
+/// `common_chars.txt` 按级别拼接，设置页分页浏览依赖这个顺序；从 `HashSet` 迭代会让每页内容随机变。
 #[test]
 fn list_all_keeps_table_order_and_appends_extras() {
     let (mut cc, cs) = base(['一', '乙', '二']);
@@ -365,12 +349,7 @@ fn list_all_dedupes_repeated_chars() {
     assert_eq!(cc.list_all(&cs).len(), 2);
 }
 
-/// 域外字符的覆盖**现在生效**（issue #83 放开写端准入的读端前提）。
-///
-/// 本条取代旧的 `overrides_on_out_of_scope_chars_are_inert`：那条钉的是相反的行为
-/// ——域外覆盖形同虚设，因此写端必须按同一个作用域拒绝写入。用户要求词库管理全范围
-/// 放开后，那个前提被替换成了「写得进去就一定生效」，两条断言必然互斥，故整条改写而
-/// 不是加一条新的。
+/// 域外字符的覆盖生效：这是写端全范围放开的读端前提。
 #[test]
 fn overrides_on_out_of_scope_chars_take_effect() {
     let (mut cc, cs) = base(['我']);
@@ -387,10 +366,9 @@ fn overrides_on_out_of_scope_chars_take_effect() {
     assert!(cc.is_string_common("我，", &cs));
 }
 
-/// 行尾不挑食：带 `#` 注释头的 CR 文件，修之前整份被当成注释 → 空表 →
-/// 上层退化成「不过滤」，用户的字表悄无声息地没生效。
+/// 行尾不挑食：带 `#` 注释头的 CR 文件若整份被当成注释，空表会让上层退化成不过滤。
 ///
-/// ⚠️ 样本在代码里构造，不要改用仓库里的 fixture（git core.autocrlf 会改行尾）。
+/// 样本在代码里构造，不要改用仓库里的 fixture（git core.autocrlf 会改行尾）。
 #[test]
 fn line_endings_do_not_change_the_result() {
     let dir = std::env::temp_dir().join(format!("wind-common-eol-{}", std::process::id()));

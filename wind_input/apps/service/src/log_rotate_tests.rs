@@ -121,9 +121,8 @@ fn to_path_puts_index_before_extension() {
     );
 }
 
-/// 当前那份日志的文件名。`init_logger` 拼主文件名用的就是 [`CURRENT_INDEX`]，
-/// 两处同源；这里把拼出来的结果写死，因为这个名字会出现在用户手里、文档里、
-/// 排查步骤里——改它必须是一次显式的决定，而不是某次重构的副作用。
+/// 当前日志的文件名写死：它出现在用户手里和文档里，改名必须是显式决定，
+/// 不能是重构 [`CURRENT_INDEX`] 的副作用。
 #[test]
 fn current_log_file_name_is_index_one() {
     assert_eq!(
@@ -195,8 +194,7 @@ fn second_start_moves_previous_run_to_index_2() {
 
 /// 连续多次启动：序号依次后移，最老的一次被淘汰。
 ///
-/// 这里同时钉住两件事：级联重命名认得回自己上次写的文件（`scan_suffixes` 正确），
-/// 以及 `max_files` 是**不含主文件**的旧文件数。
+/// 同时钉住：级联重命名认得回上次写的文件（`scan_suffixes`），`max_files` 不含主文件。
 #[test]
 fn old_runs_are_evicted_beyond_max_files() {
     let dir = tempfile::tempdir().unwrap();
@@ -221,8 +219,7 @@ fn old_runs_are_evicted_beyond_max_files() {
 }
 
 /// 二代布局（`wind_input.log` 是当前 + `.N.log` 是历史）整体后移一格，
-/// 当前那份落到 `.1`。**这一条是本次改名的要害**：不搬的话，用户目录里那个
-/// 无序号的最新日志会被后续扫描无视，而 `.1`（其实是上一次运行）冒充最新。
+/// 当前那份落到 `.1`。不搬的话无序号的最新日志会被扫描无视，`.1`（上一次运行）冒充最新。
 #[test]
 fn second_generation_layout_shifts_by_one() {
     let dir = tempfile::tempdir().unwrap();
@@ -249,11 +246,8 @@ fn second_generation_layout_shifts_by_one() {
     assert!(!dir.path().join("wind_input.log").exists());
 }
 
-/// ★★ 迁移必须幂等：已经是新布局时**一个文件都不能动**。
-///
-/// 判据若写成「有没有 .N.log」，每次启动都会把整串序号推一格——几次重启之后
-/// 保留窗口里全是空洞，真正的历史被挤光，而且没有任何报错。判据必须是
-/// 「无序号的 wind_input.log 在不在」。
+/// 迁移必须幂等：已是新布局时一个文件都不能动。判据必须是「无序号的 wind_input.log
+/// 在不在」；写成「有没有 .N.log」会每次启动把序号推一格，静默挤光历史。
 #[test]
 fn migration_is_idempotent_on_new_layout() {
     let dir = tempfile::tempdir().unwrap();
@@ -337,8 +331,7 @@ fn migrated_files_participate_in_rotation() {
     let mut r = make_rotate(&path, 10);
     rotate_on_startup(&mut r, &path);
 
-    // 启动滚动把两份各推一格，`.1` 腾给本次运行。级联能推动 `.2` 正是
-    // 「scan_suffixes 认得回迁移来的文件」的证据——认不回就会被原地覆盖。
+    // 级联能推动 `.2` 说明 scan_suffixes 认得回迁移来的文件，否则会被原地覆盖。
     assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
     assert_eq!(
         std::fs::read_to_string(dir.path().join("wind_input.2.log")).unwrap(),

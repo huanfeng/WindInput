@@ -16,7 +16,7 @@ fn parse_failure_is_whole_fragment_error() {
     assert!(parse_fragment("[unclosed\n").is_err());
 }
 
-/// ★ 降级闸：Map 条目的合并种子来自生效配置，坏段处那张表是出厂值 ⇒ 必须拒绝应用，
+/// 降级闸：Map 条目的合并种子来自生效配置，坏段处那张表是出厂值 ⇒ 必须拒绝应用，
 /// 否则「加一条映射」会把用户已有的整表抹掉（永久、无痕）。标量键则不受牵连。
 #[test]
 fn degraded_map_seed_is_rejected_but_scalars_still_apply() {
@@ -45,7 +45,7 @@ fn degraded_map_seed_is_rejected_but_scalars_still_apply() {
         "★ 种子不可信的 Map 条目必须报错——放行它就是把用户已有的映射整表抹掉"
     );
 
-    // ★ 标量键**不受牵连**：它的落盘值是片段里的显式新值，与种子无关。
+    // 标量键不受牵连：它的落盘值是片段里的显式新值，与种子无关。
     // 连它一起拦会让降级期间「导入一份只改几个开关的配置」整个堵死。
     let scalar = entries
         .iter()
@@ -53,7 +53,7 @@ fn degraded_map_seed_is_rejected_but_scalars_still_apply() {
         .expect("标量条目应在");
     assert!(scalar.error.is_none(), "标量键不该被降级闸拦下");
 
-    // 对照：降级发生在**别处**时，同一个 Map 条目必须放行（否则闸恒真、上面那条是假绿）。
+    // 对照：降级发生在别处时，同一个 Map 条目必须放行（否则闸恒真、上面那条是假绿）。
     let mut entries2 = preview_text("[input.punct.custom_mappings]\n\"'1\" = [\"①\"]\n");
     mark_degraded_seeds(
         &mut entries2,
@@ -453,7 +453,7 @@ fn title_with_inner_newline_is_rejected() {
     }
 }
 
-/// 首尾换行**放行**:TOML 多行字符串是写 title 的合法语法,尾随换行是该语法的固有产物,
+/// 首尾换行放行:TOML 多行字符串是写 title 的合法语法,尾随换行是该语法的固有产物,
 /// 不是分发者的错误。「不含换行」挡的是「title 得是单行」,不是「字节里不许出现 \n」。
 #[test]
 fn title_with_surrounding_newline_is_accepted() {
@@ -464,7 +464,7 @@ fn title_with_surrounding_newline_is_accepted() {
     assert_eq!(info.title.as_deref(), Some("尾随换行"));
 }
 
-/// 限额按**字符**不是字节：200 个 CJK 字符（600 字节）的 title 合法,201 个即拒。
+/// 限额按字符不是字节：200 个 CJK 字符（600 字节）的 title 合法,201 个即拒。
 /// description 同理 4000/4001。
 #[test]
 fn length_limit_counts_chars_not_bytes() {
@@ -579,10 +579,8 @@ fn allowlist_keys_stay_out_of_registry() {
     }
 }
 
-/// (b) 名单键必须真实存在于 `Config` 结构：写入样例值后能反序列化，且序列化回来
-/// 原值可读——`Config` 不 deny 未知字段，光「不报错」证明不了字段存在，
-/// 回读同值才能证明。样例值按当前名单全员 `Option<String>` 取字符串；
-/// 若日后加入其他类型的键，需为其单独给样例。
+/// (b) 名单键必须真实存在于 `Config`：它不 deny 未知字段，只有回读同值才能证明字段存在。
+/// 样例值按全员 `Option<String>` 取字符串，加入其他类型的键需单独给样例。
 #[test]
 fn allowlist_keys_deserialize_and_round_trip() {
     for key in ALLOWED_UNREGISTERED_KEYS {
@@ -605,7 +603,7 @@ fn allowlist_keys_deserialize_and_round_trip() {
 
 // ── 风险提示（RISKY_KEYS）────────────────────────────────────
 
-/// 危险键在预览里必须带提示，且**照常可应用**（提示不是阻断）。
+/// 危险键在预览里必须带提示，且照常可应用（提示不是阻断）。
 #[test]
 fn risky_key_is_flagged_but_still_applicable() {
     let frag: toml::Value = toml::from_str(
@@ -637,7 +635,7 @@ fn ordinary_key_has_no_warning() {
     assert!(entries.iter().all(|e| e.warning.is_none()));
 }
 
-/// 写错了的危险键**照样提示**：用户多半会改对再导入一次，那时提示就该已经说过。
+/// 写错了的危险键照样提示：用户多半会改对再导入一次，那时提示就该已经说过。
 #[test]
 fn risky_key_warns_even_when_invalid() {
     // StructList 键给了标量 → 类型不合法。
@@ -652,7 +650,7 @@ fn risky_key_warns_even_when_invalid() {
     assert!(e.warning.is_some(), "写错了也要提示");
 }
 
-/// 名单里的每个键都必须是**真的登记键**——否则那条提示永远不会触发，
+/// 名单里的每个键都必须是真的登记键——否则那条提示永远不会触发，
 /// 而「提示没出现」没有任何信号。同 ALLOWED_UNREGISTERED_KEYS 的守门思路。
 #[test]
 fn risky_keys_are_all_registered() {

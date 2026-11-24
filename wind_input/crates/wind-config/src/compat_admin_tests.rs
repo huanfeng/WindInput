@@ -310,8 +310,8 @@ fn patch_rejects_meta_keys() {
     }
 }
 
-/// P4 起改口径：用户新增规则里的显式 `false` 不再当冗余删掉——合成时它跨级压过 `*` /
-/// 更低级规则的 `true`（P1 起 `*` 对所有字段生效，「系统没有同身份行」不等于「没人设它」）。
+/// 用户新增规则里的显式 `false` 不当冗余删掉：合成时它跨级压过 `*` / 更低级规则的 `true`
+/// （「系统没有同身份行」不等于「没人设它」）。
 #[test]
 fn false_on_a_user_rule_is_kept_because_it_overrides_lower_tiers() {
     let mut l = layers(SYS, "");
@@ -821,7 +821,7 @@ fn import_reports_unknown_keys_and_sections() {
     );
 }
 
-/// 无效取值只丢这一个键并报告，**且不能原样落进用户层文件**。
+/// 无效取值只丢这一个键并报告，且不能原样落进用户层文件。
 #[test]
 fn import_drops_invalid_values_reports_them_and_never_persists_them() {
     let text = "[[apps]]\nprocess = \"A.exe\"\nfirst_show_mode = \"bogus\"\nauto_pair = true\n";
@@ -1229,7 +1229,7 @@ fn rpc_write_on_broken_user_file_errors_and_keeps_it() {
     cleanup(&d, &u);
 }
 
-// ───────────── 独立审查（2026-09-29）提出的回归 ─────────────
+// ───────────── 边界回归 ─────────────
 
 /// data_custom 层禁用的规则：视图与运行时一致（运行时没有它），且可以在用户层重新启用。
 #[test]
@@ -1272,7 +1272,7 @@ fn rule_disabled_in_custom_layer_is_disabled_in_view_and_at_runtime() {
     cleanup(&d, &c);
 }
 
-/// S2 的反方向：运行时接受的写法（别名、带空白）不得被误拒。
+/// 运行时接受的写法（别名、带空白）不得被误拒。
 #[test]
 fn patch_accepts_aliases_and_padded_text() {
     let mut l = layers(SYS, "");
@@ -1290,7 +1290,7 @@ fn patch_accepts_aliases_and_padded_text() {
     .expect("带空白的方案 id 运行时会 trim，应接受");
 }
 
-/// S4：replace 模式的预览要让用户看到「哪些会被删掉」。
+/// replace 模式的预览要让用户看到「哪些会被删掉」。
 #[test]
 fn replace_preview_lists_entries_that_will_be_removed() {
     let l = layers(SYS, "[[apps]]\nprocess = \"Mine.exe\"\nauto_pair = true\n");
@@ -1309,7 +1309,7 @@ fn replace_preview_lists_entries_that_will_be_removed() {
     );
 }
 
-/// S5：用户层语法坏了，界面仍要有恢复手段：resetAll 与 replace 导入不依赖解析用户层。
+/// 用户层语法坏了，界面仍要有恢复手段：resetAll 与 replace 导入不依赖解析用户层。
 #[test]
 fn reset_all_and_replace_import_recover_from_a_broken_user_file() {
     let (d, u) = rpc_dirs("recover");
@@ -1355,7 +1355,7 @@ fn reset_all_and_replace_import_recover_from_a_broken_user_file() {
     cleanup(&d, &u);
 }
 
-/// M3：并发写不得互相覆盖（读-改-写整段持锁）。
+/// 并发写不得互相覆盖（读-改-写整段持锁）。
 #[test]
 fn concurrent_writes_do_not_lose_updates() {
     let (d, u) = rpc_dirs("race");
@@ -1388,7 +1388,7 @@ fn concurrent_writes_do_not_lose_updates() {
     cleanup(&d, &u);
 }
 
-/// 可选 7：`reset` 什么也没删时不该报告写入（否则白白写盘、重载、广播）。
+/// `reset` 什么也没删时不该报告写入（否则白白写盘、重载、广播）。
 #[test]
 fn reset_of_nonexistent_user_entry_reports_no_write() {
     let (d, u) = rpc_dirs("noop_reset");
@@ -1450,9 +1450,9 @@ fn non_boolean_dry_run_is_an_error_not_a_write() {
     cleanup(&d, &u);
 }
 
-// ───────────── 审查（第二轮）补的回归 ─────────────
+// ───────────── 视图与告警 ─────────────
 
-/// `compat.list` 的 warnings 曾恒为空（加载不再经反序列化，回落记录取不到）。
+/// `compat.list` 的 warnings 要报出每一层的无效值（加载不经反序列化，回落记录要单独收集）。
 #[test]
 fn warnings_report_invalid_values_from_every_layer() {
     let sys = "[[apps]]\nprocess = \"A.exe\"\nfirst_show_mode = \"wiat\"\n";
@@ -1713,7 +1713,7 @@ fn fields_ignore_invalid_and_redundant_user_values() {
     assert_eq!(same.user_value, Value::Null);
 }
 
-/// 每条规则的 `fields` 必须包含本段**全部**已登记字段，界面据此逐行渲染，不能漏。
+/// 每条规则的 `fields` 必须包含本段全部已登记字段，界面据此逐行渲染，不能漏。
 #[test]
 fn fields_cover_every_registered_field_of_the_section() {
     let l = layers(SYS, USER_A);

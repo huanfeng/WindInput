@@ -126,8 +126,8 @@ fn phrase_partial_input_keeps_phrase() {
     assert_eq!(kept, vec!["魔法少女"], "4 字词只打 2 位 gd：前缀态，保留");
 }
 
-/// 词组：辅助码位数**超过** N → 词组不匹配。多出的位没有字可对应——否则 2 字词
-/// 「魔法」配 3 位 gdx 会被静默保留，挤掉真正匹配的 3 字词（历史 bug）。位数**不足**
+/// 词组：辅助码位数超过 N → 词组不匹配。多出的位没有字可对应——否则 2 字词
+/// 「魔法」配 3 位 gdx 会被静默保留，挤掉真正匹配的 3 字词。位数不足
 /// N 是前缀态：3 字/4 字词都保留（边打边缩）。
 #[test]
 fn phrase_excess_input_is_filtered() {
@@ -303,7 +303,7 @@ fn empty_store_no_filter() {
     assert!(out.filtered.is_empty());
 }
 
-/// ★ 核心不变量：kept 顺序 == 原候选的子序列（相对顺序不被任何辅助码因素改变）
+/// 核心不变量：kept 顺序 == 原候选的子序列（相对顺序不被任何辅助码因素改变）
 #[test]
 fn kept_preserves_original_relative_order() {
     let t = sample_table();

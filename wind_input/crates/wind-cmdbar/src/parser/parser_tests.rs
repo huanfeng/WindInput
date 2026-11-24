@@ -312,9 +312,8 @@ fn first_action_arg(p: &Phrase) -> &Expr {
 
 #[test]
 fn dir_var_expands_in_action_string_arg() {
-    // 回归：`open("${APP_DIR}")` 曾把 `{APP_DIR}` 当 `{expr}` 插值 → 求值时
-    // `UnknownFunc` → 动作静默失败（候选出得来、选中没反应）。现应在词法期
-    // 展开成绝对目录字面量，AST 里不得留下任何 Interp。
+    // `${APP_DIR}` 在词法期展开成绝对目录字面量，AST 里不得留下 Interp，
+    // 否则求值 UnknownFunc，选中候选没反应。
     let p = pp(r#"$CC("[打开安装目录]", open("${APP_DIR}"))"#);
     assert_eq!(
         *first_action_arg(&p),
@@ -334,7 +333,7 @@ fn dir_var_expands_in_type_action() {
 
 #[test]
 fn dir_var_concatenates_with_surrounding_literals() {
-    // 变量与前后字面量拼成**一个** Text 片段（不被切碎成多段）。
+    // 变量与前后字面量拼成一个 Text 片段（不被切碎成多段）。
     let p = pp(r#"$CC("[日志]", open("前${APP_DIR}\\logs"))"#);
     assert_eq!(
         *first_action_arg(&p),
@@ -348,8 +347,7 @@ fn dir_var_concatenates_with_surrounding_literals() {
 #[test]
 fn unknown_dollar_brace_stays_literal_and_does_not_drop_phrase() {
     // `${YC}` 是旧式模板变量（归 wind_phrase::expand_template 管），命令栏不认识它。
-    // 关键是**不能**把 `{YC}` 当插值 —— 那会 UnknownFunc 让整条候选被静默丢弃。
-    // 未知变量原样留字面，解析必须成功。
+    // 不能把 `{YC}` 当插值（UnknownFunc 会丢掉整条候选），未知变量原样留字面。
     let p = pp(r#"$CC("[日期]", type("${YC}年"))"#);
     assert_eq!(
         *first_action_arg(&p),
@@ -359,7 +357,7 @@ fn unknown_dollar_brace_stays_literal_and_does_not_drop_phrase() {
 
 #[test]
 fn real_interpolation_still_works_without_dollar() {
-    // 不带 `$` 的 `{expr}` 语义不变，仍是插值（本次改动不得波及正常插值）。
+    // 不带 `$` 的 `{expr}` 仍是插值。
     let p = pp(r#"$CC("[粘贴]", type("{last()}"))"#);
     match first_action_arg(&p) {
         Expr::StringLit(parts) => assert!(
@@ -389,7 +387,7 @@ fn escaped_dollar_restores_interpolation_after_it() {
 
 #[test]
 fn dir_var_expands_in_template_phrase_path() {
-    // 模板短语（无 marker、含真插值）走 scan_template_parts 那条**独立**扫描路径。
+    // 模板短语（无 marker、含真插值）走 scan_template_parts 那条独立扫描路径。
     // 两条路径对 `${` 的处置必须一致 —— 只改一条正是本功能最初失效的成因。
     let p = pp(r#"{last()} ${APP_DIR}"#);
     match p {

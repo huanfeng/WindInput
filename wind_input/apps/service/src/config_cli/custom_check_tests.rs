@@ -14,7 +14,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    /// 建一份**干净**的两层夹具：出厂 5 个方案 / 2 个主题 / 2 本 octrie，
+    /// 建一份干净的两层夹具：出厂 5 个方案 / 2 个主题 / 2 本 octrie，
     /// 定制层只有清单。各用例在此基础上按需写坏一处。
     fn new() -> Self {
         let dir = tempfile::TempDir::new().expect("临时目录");
@@ -191,12 +191,10 @@ fn section_given_a_scalar_is_error() {
     assert!(text.contains("整段"), "应说清整段回落：{text}");
 }
 
-// ---- ★ Map 类型不下钻 ------------------------------------------------
+// ---- Map 类型不下钻 ------------------------------------------------
 
-/// 自定义标点映射的**子路径是伪键**：`input.punct.custom_mappings.，` 不是配置项，
-/// 整张表才是。下钻会把定制者的映射逐条报成「未知键」，把整个命令的输出淹掉。
-///
-/// 判据落在端到端：一份只含映射表的定制层应当**一条结论都没有**。
+/// 自定义标点映射的子路径是伪键，整张表才是配置项；下钻会把每条映射报成「未知键」。
+/// 只含映射表的定制层应当一条结论都没有。
 #[test]
 fn map_typed_keys_are_not_walked_into() {
     let f = Fixture::new();
@@ -211,11 +209,9 @@ fn map_typed_keys_are_not_walked_into() {
     );
 }
 
-/// ★ 判据①的收窄（S4）：它只认**不透明叶子**，不认「登记过」。
-///
-/// 行为上①被②完全覆盖（① ⟹ ②），摘掉①一条用例都不会红——所以只能直接钉谓词。
-/// 放宽回「登记过」的危害在嵌套未来：若同时登记 `ui.font` 与 `ui.font.family`，
-/// ①排在②前面会先赢、把整张表当叶子吞掉，里面的 `family` 从此不再被校验。
+/// 判据①只认不透明叶子，不认「登记过」。行为上①被②覆盖，只能直接钉谓词。
+/// 放宽回「登记过」的话，同时登记 `ui.font` 与 `ui.font.family` 时①会把整张表吞掉，
+/// `family` 不再被校验。
 #[test]
 fn is_opaque_leaf_only_matches_opaque_types() {
     // 不透明叶子：整体是一个配置项。
@@ -224,7 +220,7 @@ fn is_opaque_leaf_only_matches_opaque_types() {
     assert!(is_opaque_leaf("ui.font.scripts")); // Map（带键名值域）
     assert!(is_opaque_leaf("schema.mix_modes")); // StructList
 
-    // 登记过、但**不是**不透明叶子的普通标量/数组键：①不得命中。
+    // 登记过、但不是不透明叶子的普通标量/数组键：①不得命中。
     for key in [
         "ui.candidate.per_page",
         "ui.candidate.layout",
@@ -241,10 +237,8 @@ fn is_opaque_leaf_only_matches_opaque_types() {
     assert!(!is_opaque_leaf("no.such.key"));
 }
 
-/// 上一条的直接对照：把展开结果本身摊开断言，钉住「Map 类型的键**整张表**是一个
-/// 配置项」。⚠️ 这里有**两道**判据同时成立——`field(prefix)` 命中（注册表登记过它），
-/// 以及「这个前缀底下一个已登记的键都没有」。当前注册表里两者恒同真，故摘掉任意
-/// 一道，用例都不会红；本用例钉的是它们的**合取结果**。
+/// 直接断言展开结果：Map 类型的键整张表是一个配置项。`field(prefix)` 命中与「前缀下
+/// 无已登记键」两道判据在当前注册表里恒同真，本用例钉的是二者的合取结果。
 #[test]
 fn collect_leaves_stops_at_map_typed_keys() {
     let v: toml::Value = toml::from_str(
@@ -268,12 +262,12 @@ fn collect_leaves_stops_at_map_typed_keys() {
 }
 
 /// Map 带键名值域时（`ui.font.scripts` 只认几个文字类别），越界的键名要报出来，
-/// 但仍然**只报那一个键名**，不把整张表拆成配置项。
+/// 但仍然只报那一个键名，不把整张表拆成配置项。
 #[test]
 fn map_with_key_domain_reports_out_of_domain_entry() {
     let f = Fixture::new();
-    // ⚠️ 值必须写成**数组**（`BTreeMap<String, Vec<String>>`）：写成裸字符串的话
-    // `ui.font` 会整段降级，本用例就会同时命中 M1 那条，分不清钉住的是哪一条。
+    // 值必须写成数组（`BTreeMap<String, Vec<String>>`），否则 `ui.font` 整段降级，
+    // 会同时命中 M1 那条。
     f.config("[ui.font.scripts]\nno_such_script = [\"Arial\"]\n");
     let rep = f.run();
     let text = one(&rep, Level::Warn, "ui.font.scripts.no_such_script");
@@ -317,7 +311,7 @@ fn key_equal_to_factory_value_is_warned_as_redundant() {
     assert!(text.contains("出厂值"), "{text}");
 }
 
-/// 出厂 `data/config.toml` 拿不到时**不做**这项检查：只拿内置默认当对照，
+/// 出厂 `data/config.toml` 拿不到时不做这项检查：只拿内置默认当对照，
 /// 会把 data 层调过的键统统报成「与出厂不同」，那是纯噪音。
 #[test]
 fn redundancy_check_is_skipped_without_the_data_layer() {
@@ -350,9 +344,7 @@ fn manifest_syntax_error_is_error_saying_layer_falls_back() {
     f.manifest("[custom\nid = \"x\"\n");
     let rep = f.run();
     assert_eq!(rep.errors(), 1, "{}", dump(&rep));
-    // 断言必须点到「语法错误」这四个字：清单读不出来时还有一条「字段类型不对」的
-    // 出口，措辞里同样有「整个定制层不启用」——只断言后者的话，语法这一路被摘掉
-    // 用例照样绿（实测过）。
+    // 必须点到「语法错误」：「字段类型不对」那条出口的措辞里同样有「整个定制层不启用」。
     assert!(dump(&rep).contains("TOML 语法错误"), "{}", dump(&rep));
     assert!(dump(&rep).contains("整个定制层不启用"), "{}", dump(&rep));
 }
@@ -543,14 +535,10 @@ fn hidden_theme_still_selected_is_error() {
     assert!(text.contains("兜底主题"), "{text}");
 }
 
-// ---- ★ M1：注册表看不见的坏值（Map / StructList 的内部、越界的整数） ----
+// ---- M1：注册表看不见的坏值（Map / StructList 的内部、越界的整数） ----
 
-/// **本命令存在的唯一理由，恰好差点漏掉的那个洞。**
-///
-/// 定制者写自定义标点，用最自然的写法 `"," = "，"`（值其实必须是数组）。注册表对
-/// `Map` 只做一层形状判定（是不是表），`collect_leaves` 又在这个键上就地停住 ⇒
-/// 表里的**值**没有任何一处被检。运行时 serde 逐个值反序列化，一失败就是段级降级：
-/// 包发出去之后，每个用户、每次启动的 `input.punct` 整段回落出厂默认。
+/// Map 内部的值注册表看不见：`"," = "，"`（值必须是数组）只过了一层形状判定，
+/// 运行时反序列化失败会让 `input.punct` 整段回落出厂默认，体检必须报错。
 #[test]
 fn map_value_with_the_wrong_shape_is_error() {
     let f = Fixture::new();
@@ -582,7 +570,7 @@ fn map_value_wrong_shape_in_font_scripts_is_error() {
     );
 }
 
-/// 注册表表达不了的**值域**：`-1` 是合法整数，但字段是 `usize`。
+/// 注册表表达不了的值域：`-1` 是合法整数，但字段是 `usize`。
 #[test]
 fn out_of_range_integer_is_error() {
     let f = Fixture::new();
@@ -596,7 +584,7 @@ fn out_of_range_integer_is_error() {
     );
 }
 
-/// 免责 2：注册表那条已经点过名的键，第二道判据**不重复报**——它的措辞更好
+/// 免责 2：注册表那条已经点过名的键，第二道判据不重复报——它的措辞更好
 /// （写得出期望类型），两者互补而不是叠加。
 #[test]
 fn registry_named_key_is_not_reported_twice() {
@@ -643,7 +631,7 @@ fn probe_is_skipped_without_the_data_layer() {
     assert_eq!(rep.errors(), 0, "{}", dump(&rep));
 }
 
-/// 错误串里的路径抠不出来时**绝不猜**：猜错的路径会把人带到无关的键上。
+/// 错误串里的路径抠不出来时绝不猜：猜错的路径会把人带到无关的键上。
 #[test]
 fn error_path_extraction_never_guesses() {
     assert_eq!(
@@ -652,8 +640,7 @@ fn error_path_extraction_never_guesses() {
         ),
         Some("ui.font.scripts.latin".to_string())
     );
-    // ⚠️ 真实的 toml 错误串里 `in` 常常在**换行之后**，不能只认空格前缀——
-    // 只认空格的表现是抽不出路径 ⇒ 去重失效 ⇒ 同一个键被报两遍（实测过）。
+    // 真实错误串里 `in` 常在换行之后；只认空格前缀会抽不出路径，去重失效、同一个键报两遍。
     assert_eq!(
         extract_toml_error_path(
             "invalid type: string \"九\", expected usize\nin `ui.candidate.per_page`\n"
@@ -666,11 +653,10 @@ fn error_path_extraction_never_guesses() {
     assert_eq!(extract_toml_error_path("begin `x`"), None);
 }
 
-// ---- ★ M2：config.toml 存在但读不出来 --------------------------------
+// ---- M2：config.toml 存在但读不出来 --------------------------------
 
-/// 中文定制者用记事本编辑 config.toml（注释里有中文），另存为 ANSI/GBK ⇒ 不是合法
-/// UTF-8 ⇒ 定制层的配置差异**一条都不生效**，运行时只有一行 INFO。
-/// 把读失败当成「文件不存在」的话，体检会打印「✓ 没有发现问题」。
+/// config.toml 存成 GBK 时定制层配置一条都不生效（运行时只有一行 INFO）；
+/// 读失败不得当成「文件不存在」而报「没有发现问题」。
 #[test]
 fn config_that_cannot_be_read_is_error_not_silence() {
     let f = Fixture::new();
@@ -686,7 +672,7 @@ fn config_that_cannot_be_read_is_error_not_silence() {
     assert!(text.contains("UTF-8"), "要点出最常见的成因与改法：{text}");
 }
 
-/// 反向对照：**没有** config.toml 是完全正常的（只做减法的包不必有它），不该报。
+/// 反向对照：没有 config.toml 是完全正常的（只做减法的包不必有它），不该报。
 #[test]
 fn absent_config_is_not_a_finding() {
     let f = Fixture::new();
@@ -697,7 +683,7 @@ fn absent_config_is_not_a_finding() {
 
 // ---- 简繁数据 --------------------------------------------------------
 
-/// 半套目录是**正常用法**（按名逐文件覆盖），不报任何问题。
+/// 半套目录是正常用法（按名逐文件覆盖），不报任何问题。
 #[test]
 fn partial_opencc_set_is_fine() {
     let f = Fixture::new();
@@ -723,11 +709,8 @@ fn opencc_file_with_an_unknown_name_is_warned() {
     assert!(text.contains("STPhrases"), "应列出正确的名字：{text}");
 }
 
-/// ★ 只差大小写是**另一种**后果，不能与「完全对不上」共用措辞。
-///
-/// 加载侧按出厂那个拼法 `p.is_file()` 去找，而 Windows NTFS 与 macOS APFS 默认
-/// **大小写不敏感** ⇒ 定制层那本 `stphrases.octrie` 现在**会被命中并加载**。说成
-/// 「永远不会被加载」在本项目的两个发行平台上都是假的，只在 Linux 成立。
+/// 只差大小写不能与「完全对不上」共用措辞：Windows/macOS 文件系统默认大小写不敏感，
+/// 加载侧 `p.is_file()` 会命中它，说「永远不会被加载」只在 Linux 成立。
 #[test]
 fn opencc_name_differing_only_in_case_says_it_currently_works() {
     let f = Fixture::new();
@@ -754,8 +737,7 @@ fn missing_directory_is_error() {
     let dir = tempfile::TempDir::new().unwrap();
     let rep = check_layer(&dir.path().join("nope"), None, APP_VERSION);
     assert_eq!(rep.errors(), 1, "{}", dump(&rep));
-    // 措辞要点到「目录不存在」：只数错误条数的话，摘掉这道判据后会落到「缺少
-    // custom.toml」那条上，条数不变、用例照样绿（实测过）。
+    // 要点到「目录不存在」：摘掉这道判据后会落到「缺少 custom.toml」，条数不变。
     assert!(dump(&rep).contains("这个目录不存在"), "{}", dump(&rep));
 }
 
@@ -769,9 +751,8 @@ fn check_never_touches_the_user_layer() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/config_cli/custom_check.rs");
     let src = std::fs::read_to_string(&path).expect("读自身源码");
     let body = src.split("#[cfg(test)]").next().unwrap();
-    // 判据只列 API 名（文档注释里提到 `%APPDATA%` 是在说明本条不变量，不算违反）。
-    // `custom_manifest`/`custom_data_dir` 也在列：它们是 OnceLock + 安装根，
-    // 用了就会拿本机装的那份定制层去回答「--custom 指的那份」的问题。
+    // 只列 API 名。`custom_manifest`/`custom_data_dir` 读的是本机安装的定制层，
+    // 不是 --custom 指定的那份。
     for forbidden in [
         "user_config_dir",
         "Config::load(",

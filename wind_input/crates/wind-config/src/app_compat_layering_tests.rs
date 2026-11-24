@@ -29,8 +29,8 @@ fn load(sys: &str, user: &str, tag: &str) -> AppCompat {
 const WECHAT: &str =
     "[[apps]]\nprocess = \"Weixin.exe\"\ncaret_use_top = true\nstale_probe_guard = true\n";
 
-/// ★ 靶机实测的真实事故：微信的用户规则只有菜单写的一项 first_show_mode，
-/// 旧的「整条覆盖」让出厂的 caret_use_top / stale_probe_guard 运行时全丢。
+/// 用户规则只写一项 first_show_mode 时，出厂的 caret_use_top / stale_probe_guard 不得丢失
+/// （整条覆盖会全丢）。
 #[test]
 fn a_sparse_user_rule_keeps_every_other_system_field() {
     let c = load(
@@ -222,8 +222,7 @@ fn disabling_and_reenabling_across_layers() {
 }
 
 /// 每个登记过的字段都必须能穿过「叠加 → 结构体」而不丢：稀疏的上层条目不得吞掉任何一个下层字段。
-/// 取代旧的「协议字段登记」源码扫描守门测试——现在没有任何字段享有特殊继承待遇，
-/// 这条对全部登记字段一视同仁地钉住。
+/// 没有任何字段享有特殊继承待遇，对全部登记字段一视同仁。
 #[test]
 fn every_registered_field_survives_layering() {
     use crate::compat_schema::{COMPAT_FIELDS, Kind};
@@ -251,7 +250,7 @@ fn every_registered_field_survives_layering() {
     }
 }
 
-/// GH#339：开始菜单一族与便笺不执行宿主转发的启动请求，出厂必须由服务拉起；用户层显式写 false 能关掉。
+/// 开始菜单一族与便笺不执行宿主转发的启动请求，出厂必须由服务拉起；用户层显式写 false 能关掉。
 #[test]
 fn shipped_launch_by_service_covers_restricted_hosts() {
     let data_dir = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../data"));
@@ -290,7 +289,7 @@ fn shipped_launch_by_service_covers_restricted_hosts() {
     );
 }
 
-/// 守随发布的系统层 `data/compat.toml`：解析失败会**整份静默跳过**，所有应用的所有规则一起失效。
+/// 守随发布的系统层 `data/compat.toml`：解析失败会整份静默跳过，所有应用的所有规则一起失效。
 #[test]
 fn shipped_system_compat_configures_word_and_scopes_explorer_to_desktop() {
     let data_dir = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../data"));
@@ -321,7 +320,7 @@ fn shipped_system_compat_configures_word_and_scopes_explorer_to_desktop() {
         None,
         "只给微信开"
     );
-    // GH#175：出厂按窗口类名给 Chromium / Firefox 内核换零宽空格占位（含所有 Electron 应用），
+    // 出厂按窗口类名给 Chromium / Firefox 内核换零宽空格占位（含所有 Electron 应用），
     // 其余（WPS 等靠空格撑光标矩形）保持空格。
     let placeholder = |process: &str, class: &str| {
         c.resolve(&WindowCtx {
@@ -401,8 +400,8 @@ fn shipped_system_compat_configures_word_and_scopes_explorer_to_desktop() {
     assert!(c.initial_mode_applies_to_window("notepad.exe", ""));
 }
 
-/// ★ 审查实测：写错的值先参与叠加、事后才回落成 None，会把下层的好值一起盖没——
-/// `classes` 里混进一个非字符串甚至让出厂的 explorer 作用域整行丢失。写错 = 没写。
+/// 写错 = 没写：错值若先参与叠加再回落成 None，会把下层的好值一起盖没
+/// （`classes` 混进非字符串会让出厂的 explorer 作用域整行丢失）。
 #[test]
 fn an_invalid_value_in_a_higher_layer_never_hides_a_valid_lower_one() {
     let c = load(
@@ -512,7 +511,7 @@ fn unset_accepts_a_bare_string_and_can_lift_a_disable() {
 
 // ───────────── 写回不得丢用户的东西 ─────────────
 
-/// ★ 审查实测：非 ASCII / 带点的键写回时必须加引号，否则整个用户层文件失效。
+/// 非 ASCII / 带点的键写回时必须加引号，否则整个用户层文件失效。
 #[test]
 fn write_back_quotes_exotic_keys_so_the_file_stays_valid() {
     let dir = tmp("quote");
@@ -533,8 +532,8 @@ fn write_back_quotes_exotic_keys_so_the_file_stays_valid() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// ★ 审查实测：`[apps]` 手误写成单括号，`parse_raw` 只留一条 WARN 就当它不存在，
-/// 下一次重写这条规则就彻底消失。必须按损坏处理：先留 `.bad`。
+/// `[apps]` 手误写成单括号时 `parse_raw` 只留 WARN 当它不存在，重写会让它彻底消失；
+/// 必须按损坏处理，先留 `.bad`。
 #[test]
 fn skipped_content_is_treated_as_damage_and_backed_up() {
     let dir = tmp("skipped");
@@ -1150,7 +1149,7 @@ fn menu_write_migrates_legacy_key_and_keeps_unknown_keys() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// 编辑同一条的**别的**字段，也顺手把这条的旧键换成新键（值不变）。
+/// 编辑同一条的别的字段，也顺手把这条的旧键换成新键（值不变）。
 #[test]
 fn menu_write_of_another_field_also_migrates_legacy_key() {
     let dir = tmp("lg_wb2");

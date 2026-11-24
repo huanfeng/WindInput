@@ -66,7 +66,7 @@ fn rev_echo_ctx() -> MemoryContext {
 }
 
 /// `ime.set` 的状态参数：几种常见写法都认、大小写与首尾空白不敏感，原样带 target 转给宿主；
-/// 认不出的状态报错且**不**调用宿主（不猜：猜错就是把用户想开的关掉）。
+/// 认不出的状态报错且不调用宿主（不猜：猜错就是把用户想开的关掉）。
 #[test]
 fn ime_set_parses_state_and_forwards() {
     let rec = Arc::new(RecIme(Mutex::new(Vec::new())));
@@ -116,10 +116,7 @@ fn ime_set_comment_accepts_state_values() {
     assert_eq!(rec.0.lock().unwrap().pop().unwrap(), "set dict:x=true");
 }
 
-/// ★ 省略 n ⇒ **整串**反查：复制「好吧」查的是「好吧」这个词，不是它的第一个字。
-///
-/// 这是剪贴板反查的主行为（出厂 `cofc` 就写 `dict.rev(clip())`）。宿主拿整串按词条查
-/// 主码表反向索引，故命中词条时拿到的是词码；单字文本自然落回单字。
+/// 省略 n 时整串反查（出厂 `cofc` 即 `dict.rev(clip())`）：「好吧」查词码，不是首字。
 #[test]
 fn rev_defaults_to_whole_text_with_default_format() {
     let ctx = rev_echo_ctx();
@@ -162,7 +159,7 @@ fn whole_text_blank_yields_empty() {
     }
 }
 
-/// n 按 **rune** 定位，不是字节：扩展区汉字走代理对，按字节索引会切在半个字上。
+/// n 按 rune 定位，不是字节：扩展区汉字走代理对，按字节索引会切在半个字上。
 #[test]
 fn rev_picks_nth_char_by_rune() {
     let ctx = rev_echo_ctx();
@@ -218,11 +215,8 @@ fn rev_empty_format_falls_back_to_default() {
     assert_eq!(out, format!("好|{DEFAULT_REV_FORMAT}"));
 }
 
-/// ★ 越界与 n<1 返回**空串而非错误**。
-///
-/// `$SS` 展开时词条固定写 N 个元素、各查第 1..N 个字，剪贴板不足 N 字是常态；
-/// 若报错，`evaluate_phrase` 的 `Err` 分支会把**整条短语**丢掉——连前几个查得到的
-/// 字一起消失。这条守着「只落空那一条候选」。
+/// 越界与 n<1 返回空串而非错误：`$SS` 固定查第 1..N 个字，剪贴板不足 N 字是常态，
+/// 报错会让 `evaluate_phrase` 丢掉整条短语。
 #[test]
 fn rev_out_of_range_yields_empty_not_error() {
     let ctx = rev_echo_ctx();
@@ -234,7 +228,7 @@ fn rev_out_of_range_yields_empty_not_error() {
     assert_eq!(fn_dict_rev(&ctx, &[String::new()]).unwrap(), "");
 }
 
-/// n 写成非数字是**词条作者的笔误**，不是运行时正常输入 —— 必须报错而非静默取默认。
+/// n 写成非数字是词条作者的笔误，不是运行时正常输入 —— 必须报错而非静默取默认。
 #[test]
 fn rev_non_numeric_n_errors() {
     let ctx = rev_echo_ctx();
@@ -248,7 +242,7 @@ fn rev_without_host_capability_is_empty() {
     assert_eq!(fn_dict_rev(&ctx, &["好".to_string()]).unwrap(), "");
 }
 
-/// `jump` 省略时按**右段 char 数**推导，不是 UTF-16 单元数——emoji 右段按单元算会多移一格。
+/// `jump` 省略时按右段 char 数推导，不是 UTF-16 单元数——emoji 右段按单元算会多移一格。
 #[test]
 fn jump_defaults_to_right_char_count() {
     let rec = Arc::new(RecIme::default());

@@ -40,7 +40,7 @@ fn unknown_field_is_rejected() {
     assert!(parse_doc("key: k\ndefualt: rare\n").is_err());
 }
 
-/// ★★★ 字段级合并：用户层只写 `default`，出厂的 `ranges` 与列表必须留下。
+/// 字段级合并：用户层只写 `default`，出厂的 `ranges` 与列表必须留下。
 /// 整文件覆盖会让这个类当场变成空集，且用户从此脱离出厂更新。
 #[test]
 fn overlay_keeps_what_it_did_not_mention() {
@@ -148,7 +148,7 @@ fn rejects_bad_ranges() {
     }
 }
 
-/// ⛔ 一条写错不得连累同类的其余段——否则一个笔误会静默抹掉整类字符。
+/// 一条写错不得连累同类的其余段——否则一个笔误会静默抹掉整类字符。
 #[test]
 fn one_bad_range_does_not_drop_the_rest() {
     let raw = vec![
@@ -200,10 +200,9 @@ fn members_of(body: &str) -> Vec<String> {
     doc.added
 }
 
-/// ★ 一行写了多个字：**切开**，而不是当成一个永远匹配不上的成员。
+/// 一行写了多个字：切开，而不是当成一个永远匹配不上的成员。
 ///
-/// 自带文件一行一个，但用户照旧 `common_chars.txt` 的习惯连写完全可能——静默当成
-/// 一个成员的话，那一行一个字都不生效，而文件、日志、界面三处都不报错。
+/// 用户可能照 `common_chars.txt` 的习惯连写，当成一个成员的话那一行静默全不生效。
 #[test]
 fn a_line_with_several_chars_is_split_rather_than_taken_whole() {
     assert_eq!(members_of("的一是"), vec!["的", "一", "是"]);
@@ -211,9 +210,9 @@ fn a_line_with_several_chars_is_split_rather_than_taken_whole() {
     assert_eq!(members_of("的 一是\n不"), vec!["的", "一", "是", "不"]);
 }
 
-/// ★★ 多码位簇**整体**算一个成员，不会被拆散。
+/// 多码位簇整体算一个成员，不会被拆散。
 ///
-/// 拆散的后果是配置里写 `⚽️` 却匹配不上候选里那个簇——两边各自看都对。
+/// 拆散的话配置里写 `⚽️` 匹配不上候选里那个簇。
 #[test]
 fn a_multi_code_point_cluster_stays_whole() {
     assert_eq!(members_of("⚽\u{FE0F}"), vec!["⚽\u{FE0F}"]);
@@ -224,17 +223,16 @@ fn a_multi_code_point_cluster_stays_whole() {
     assert_eq!(members_of("1\u{FE0F}\u{20E3}"), vec!["1\u{FE0F}\u{20E3}"]);
 }
 
-/// ⚠️ **空白分隔存在的唯一理由**：相邻的区域指示符会合成国旗。
+/// 空白分隔存在的唯一理由：相邻的区域指示符会合成国旗。
 ///
-/// `🇨🇳` 连写是一面旗（一个成员），要表达「两个区域指示符字母」只能用空格分开。
-/// 字素簇切分解决不了「两个成员恰好能拼成第三个」。
+/// `🇨🇳` 连写是一面旗（一个成员），两个区域指示符字母只能用空格分开。
 #[test]
 fn adjacent_regional_indicators_need_a_space_to_stay_apart() {
     assert_eq!(members_of("🇨🇳").len(), 1, "连写合成国旗，是一个成员");
     assert_eq!(members_of("🇨 🇳").len(), 2, "要分开就得用空格");
 }
 
-/// `-` 前缀作用于**整个词**。
+/// `-` 前缀作用于整个词。
 #[test]
 fn the_remove_prefix_covers_the_whole_word() {
     let doc = parse_doc("---\nkey: t\n...\n-的一是 好\n").unwrap();
@@ -255,10 +253,9 @@ fn doc_of(key: &str) -> CharsetDoc {
     }
 }
 
-/// ★★ 渲染**只写用户改过的字段**，不带出厂值。
+/// 渲染只写用户改过的字段，不带出厂值。
 ///
-/// 写全量会把当前的 `ranges` / `order` 固化进用户层 ⇒ 出厂补了新 emoji 或调了顺序，
-/// 这个用户永远拿不到。这是本仓踩过三次的坑（设计文档 §4.1）。
+/// 写全量会把当前的 `ranges` / `order` 固化进用户层，出厂以后的更新这个用户永远拿不到。
 #[test]
 fn rendering_writes_only_what_the_user_changed() {
     let mut doc = doc_of("emoji");
@@ -309,14 +306,12 @@ fn the_rendered_text_explains_it_is_sparse() {
     );
 }
 
-/// ⛔ 危险的 key 在**入口**就被拒，不做「安全化」。
+/// 危险的 key 在入口就被拒，不做「安全化」。
 ///
-/// 安全化会让两个不同的 key 落到同一个文件上，后写的静默覆盖先写的——用户看到的是
-/// 「改了 A 类，B 类的设置没了」。
+/// 安全化会让两个不同的 key 落到同一个文件上，后写的静默覆盖先写的。
 ///
-/// ⚠️ `a/b` 与 `a\b` 两条**在所有平台上都必须被拒**。这里曾因 `is_valid_key` 用了
-/// `std::path::is_separator` 而在 Linux 上挂掉（本机 Windows 全绿、CI 才发现）——
-/// 再挂时要改的是守卫，不是把这两条从表里删掉。
+/// `a/b` 与 `a\b` 在所有平台上都必须被拒（`std::path::is_separator` 在 Linux 不认 `\`）；
+/// 挂了要改守卫，不是删这两条。
 #[test]
 fn dangerous_keys_are_rejected_not_sanitized() {
     for bad in [
@@ -358,11 +353,10 @@ fn stored_docs_skip_the_broken_and_the_mismatched() {
 
 /// 行尾不挑食：字符类文件无论 LF / CRLF / 孤立 CR，解析结果一致。
 ///
-/// 不规整的话孤立 `\r` 会让整份文件算成一行 → 找不到 `...` 分隔行 → 整份都当 head
-/// → 一个类都出不来，而日志里只有一行「解析失败，已跳过」。归一化放在
-/// `split_head_body`（`parse_doc` / `parse_docs` 的共同下游），全链路只扫一遍。
+/// 孤立 `\r` 会让整份文件算成一行、找不到 `...` 分隔行，一个类都出不来。归一化放在
+/// `split_head_body`（`parse_doc` / `parse_docs` 的共同下游）。
 ///
-/// ⚠️ 样本在代码里构造，不要改用仓库 fixture（git core.autocrlf 会按平台改行尾）。
+/// 样本在代码里构造，不要改用仓库 fixture（git core.autocrlf 会按平台改行尾）。
 #[test]
 fn line_endings_do_not_change_the_result() {
     // 带 `...` 分隔行：head 是 YAML、body 是逐行成员，两边都依赖分行

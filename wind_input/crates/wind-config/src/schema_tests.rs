@@ -82,12 +82,10 @@ layout = "xiaohe"
     assert_eq!(spec.shuangpin.layout, "xiaohe");
 }
 
-/// 截断的两个方向都要成立：**该截的截、不该截的别动**。
+/// 截断的两个方向都要成立：该截的截、不该截的别动。
 ///
-/// 只测"长的被截短"会让一个恒返回首字符的实现也绿——那是 issue #85 之前的旧行为，
-/// 它的表现是用户配了 `En` 只显示 `E`，而单看截断断言完全正常。
-/// 反过来只测 `En` 不动，则一个"按字符数取 2"的实现也全绿——那正是 issue #85
-/// 报的缺陷：双汉字整个放行、渲染端只能回缩字号到认不出。**两个方向缺一不可。**
+/// 只测截短会放过「恒返回首字符」（`En` 只显示 `E`）；只测不动会放过「按字符数取 2」
+/// （双汉字整个放行、渲染端缩字号到认不出）。两个方向缺一不可。
 #[test]
 fn icon_label_truncates_by_display_width() {
     assert_eq!(icon_label_trunc("英"), "英", "一个汉字宽 2，恰好满格");
@@ -114,8 +112,7 @@ fn icon_label_trims_whitespace() {
 
 /// 回落方向：空 → fallback，非空 → 不许被 fallback 顶掉。
 ///
-/// 后半条是反向对照。缺了它，一个"永远返回 fallback"的实现能让前半条全绿，
-/// 而那种缺陷的表现是用户怎么配都不生效。
+/// 后半条防「永远返回 fallback」的实现（用户怎么配都不生效）。
 #[test]
 fn icon_label_or_falls_back_only_when_empty() {
     assert_eq!(icon_label_or("", "英"), "英");
@@ -124,14 +121,11 @@ fn icon_label_or_falls_back_only_when_empty() {
     assert_eq!(icon_label_or("English", "英"), "En", "截断后仍是配的");
 }
 
-/// 截断以 **Unicode 标量值**为单位推进，不是 UTF-16 code unit、也不是字节。
+/// 截断以 Unicode 标量值为单位推进，不是 UTF-16 code unit、也不是字节。
 ///
-/// 这条约束 C++ 侧的缓冲容量：宽度上限 2 蕴含**最多 2 个标量值**（每个字符至少
-/// 占 1 宽），而 emoji 在 [`crate::config`] 的粗口径里记 1 宽却占 2 个 wchar，
-/// 故最坏是 4 wchar + NUL = 5，`_inputTypeLabel` 必须 ≥ 5（已改为 8）。
-///
-/// ⚠️ 这条同时钉住"emoji 记 1 宽"：哪天把 emoji 划进双宽字符，本断言会红，
-/// 提醒去重算那个缓冲的最坏值（会降到 3，缓冲富余但结论要重写）。
+/// 这约束 C++ 侧缓冲：宽度上限 2 即最多 2 个标量值，emoji 记 1 宽却占 2 个 wchar，
+/// 最坏 4 wchar + NUL，`_inputTypeLabel` 须 ≥ 5（现为 8）。同时钉住「emoji 记 1 宽」，
+/// 改了要重算缓冲最坏值。
 #[test]
 fn icon_label_limit_counts_scalar_values() {
     let two_emoji = icon_label_trunc("🙂🙃🙂");
@@ -145,9 +139,8 @@ fn icon_label_limit_counts_scalar_values() {
 
 // ── 方案级自定义标点表 ──────────────────────────────────────────────
 
-/// 三态必须由**同一个字段**区分开：不写 = 跟随全局、空表 = 一条都不要、
-/// 非空表 = 整表替换。`None` 与 `Some({})` 混为一谈的话，「本方案不要自定义标点」
-/// 就没法表达，只能退回去加一个方案级 `custom_enabled`。
+/// 三态必须由同一个字段区分开：不写 = 跟随全局、空表 = 一条都不要、
+/// 非空表 = 整表替换。`None` 与 `Some({})` 混为一谈就表达不了「本方案不要自定义标点」。
 #[test]
 fn schema_punct_custom_mappings_three_states() {
     let parse = |s: &str| toml::from_str::<Schema>(s).expect("方案应解析成功").punct;
@@ -177,11 +170,8 @@ fn schema_punct_custom_mappings_three_states() {
     );
 }
 
-/// ★★ `custom_mappings` 在 override 合并里走**整体替换**，不是深合并。
-///
-/// 失效形态：深合并（HashMap 逐键）时 override 层没有「删除」的表达 ⇒ 用户在设置页
-/// 删掉方案作者写的行，保存后那行还在。这条测试直接问「作者的行还在不在」，
-/// 而不是问「我写的行生效没有」——后者在两种合并策略下都通过，测不出差别。
+/// `custom_mappings` 在 override 合并里整体替换而非深合并：深合并下用户删不掉方案作者写的行。
+/// 断言「作者的行还在不在」，因为「我写的行生效没有」在两种策略下都通过。
 #[test]
 fn custom_mappings_override_replaces_whole_table() {
     let mut base = toml::from_str::<toml::Value>(
@@ -207,9 +197,8 @@ fn custom_mappings_override_replaces_whole_table() {
     );
 }
 
-/// 反向对照：同一份 override，换成**别的**键名就该走深合并（作者的行保留）。
-/// 没有这条的话，把上面那条的整体替换误写成「所有 table 都整体替换」也照样通过，
-/// 而那会连带毁掉 `[engine]` 等所有段的合并语义。
+/// 反向对照：同一份 override，换成别的键名就该走深合并（作者的行保留）。
+/// 防止误写成「所有 table 都整体替换」，那会毁掉 `[engine]` 等段的合并语义。
 #[test]
 fn non_custom_mappings_tables_still_deep_merge() {
     let mut base =

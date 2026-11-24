@@ -1,28 +1,20 @@
-//! **闸四**的端到端验证：用户 `config.toml` 语法不合法时，谁都不许覆盖它。
+//! 闸四的端到端验证：用户 `config.toml` 语法不合法时，谁都不许覆盖它。
 //!
-//! # 这条测试对应一次真机数据丢失
+//! 语法错误发生在四层合并之前，段级降级（`degradation`）看不见它；不拦的话
+//! `materialize_key_actions` 会把空表当种子整表写回，整份配置变成空壳。
+//! 见 docs/design/key-actions-materialization.md。
 //!
-//! 用户在 `config.toml` 里重复写了一个字段（TOML 里重复键是语法错误），重启后
-//! 整份配置被替换成只含 `key_actions` 的空壳，全程无提示。链条是：
-//!
-//! 1. `read_toml_value` 的 `Err ⇒ None` 让用户层被**静默丢弃**，而 `degradation`
-//!    全程干净——段级降级只看合并**之后**的 `try_into`，看不见合并**之前**的语法错误；
-//! 2. 于是四道写盘闸（只问 `degradation`）全部放行；
-//! 3. `materialize_key_actions` 里 `unwrap_or_else(空表)` 把空表当成种子整表写回。
-//!
-//! 放大器：`already_materialized(空表)` 恒为 false ⇒ 每次启动都重跑一遍。
-//!
-//! # 两条路径**刻意**不同处置，本文件把这个区别钉住
+//! # 两条路径刻意不同处置
 //!
 //! | 路径 | 触发者 | 处置 |
 //! |---|---|---|
 //! | `materialize_key_actions` | 后台自动（用户没要求任何事） | 一个字节都不写 |
 //! | `set_user_value` | 用户刚点了保存 | 先备份原件，再写救回的部分 |
 //!
-//! 后者不能也拒绝：那会变成「设置页点了没反应」，是本仓反复栽过的另一类坑。
+//! 后者不能也拒绝，否则设置页点了没反应。
 //!
-//! ⚠️ 全文件仅此一个 `#[test]`：这些函数写用户层 config.toml，漏设
-//! `WIND_DATADIR_CONF` 会真写 `%APPDATA%\WindInput\config.toml`（本仓已有前科）。
+//! 全文件仅此一个 `#[test]`：这些函数写用户层 config.toml，漏设
+//! `WIND_DATADIR_CONF` 会真写 `%APPDATA%\WindInput\config.toml`。
 
 use std::path::{Path, PathBuf};
 use wind_config::Config;
@@ -117,9 +109,7 @@ key_actions = { \"F2\" = \"toggle_schema\" }
 
     // ── 三、set_user_value：允许写，但必须先备份 ──────────────────────────────
 
-    // ⚠️ 值必须**不等于**出厂默认（L2 写的是 wubi86）：`set_user_value` 对等于默认的值
-    // 走的是「删除该键」而不是「写入」，拿 wubi86 来测会得到一个没有 schema 段的文件，
-    // 看起来像写丢了，实际是剪枝在正常工作。
+    // 值必须不等于出厂默认（L2 是 wubi86）：等于默认时 `set_user_value` 会剪掉该键而非写入。
     Config::set_user_value(&["schema", "active"], toml::Value::String("wubi98".into()))
         .expect("用户主动保存不该因为语法错而失败——那会变成「点了没反应」");
 

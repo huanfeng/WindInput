@@ -69,7 +69,7 @@ fn assoc_placeholder_overrides_then_follows_composition() {
     );
 }
 
-/// GH#175：`composition_placeholder` 解析 + 查表（含 `process = "*"` 通配与具体进程压过通配）。
+/// `composition_placeholder` 解析 + 查表（含 `process = "*"` 通配与具体进程压过通配）。
 #[test]
 fn composition_placeholder_parses_and_falls_back_to_wildcard() {
     let toml = r#"
@@ -295,9 +295,8 @@ fn blank_placeholder_is_non_whitespace_with_width() {
     );
 }
 
-/// 三个新增 per-app 字段的解析。`auto_pair` / `smart_method` 是 `Option`，
-/// **未配置必须是 `None` 而不是 `Some(false)`/`Some(默认值)`**——那是「跟随全局」
-/// 与「显式关掉」的分界，退化成 bool 就等于给所有未配规则的应用都关掉了功能。
+/// `auto_pair` / `smart_method` 未配置必须是 `None`：那是「跟随全局」与「显式关掉」的分界，
+/// 退化成 bool 等于给所有未配规则的应用关掉功能。
 #[test]
 fn parse_per_app_pair_symbol_and_offset() {
     let toml = r#"
@@ -378,7 +377,7 @@ fn parse_password_force_english_tristate() {
     );
 }
 
-/// 类型写错只让本字段回落 `None`，**不得让整份 compat.toml 失效**：`load_file` 没有
+/// 类型写错只让本字段回落 `None`，不得让整份 compat.toml 失效：`load_file` 没有
 /// 段级降级，一个 `"yes"` 就会连带所有应用的所有规则静默消失。
 #[test]
 fn password_force_english_wrong_type_does_not_sink_the_file() {
@@ -410,7 +409,7 @@ fn password_force_english_wrong_type_does_not_sink_the_file() {
     }
 }
 
-// ── 状态气泡定位（C2-33 / GH#148）────────────────────────────────────────────
+// ── 状态气泡定位 ────────────────────────────────────────────
 
 /// 两个值域表与解析/回写同源：表里每一项都能解析、且回写成同一个串。
 #[test]
@@ -560,7 +559,7 @@ fn parse_app_schema_fixed_and_remember() {
 }
 
 /// `@` 前缀是保留标记空间：只认 `@remember`，其余（拼错、将来的新标记）按未配置处理；
-/// 空串同理。**同文件其它规则必须照常生效**。
+/// 空串同理。同文件其它规则必须照常生效。
 #[test]
 fn unknown_app_schema_marker_degrades_to_none() {
     for bad in [r#""@remeber""#, r#""@global""#, r#""""#, r#""   ""#] {
@@ -675,9 +674,8 @@ fn initial_mode_parses_both_values() {
     assert!(rule.initial_punct.unwrap().is_chinese());
 }
 
-/// 单字段拼错只让**该字段**退化为「不干预」，不得连累同规则的其它字段、
-/// 也不得让整份 compat.toml 解析失败（`load_file` 失败会静默跳过整个文件，
-/// 于是一个错别字就让所有应用的所有规则一起失效且毫无痕迹）。
+/// 单字段拼错只让该字段退化为「不干预」，不得连累同规则的其它字段、
+/// 也不得让整份 compat.toml 解析失败（`load_file` 失败会静默跳过整个文件）。
 #[test]
 fn unknown_initial_mode_degrades_to_none_without_killing_the_file() {
     let toml = r#"
@@ -736,20 +734,15 @@ fn unknown_mode_in_toml_degrades_to_follow_global() {
     assert!(file.apps[0].caret_use_top, "同一条规则的其它字段仍须生效");
 }
 
-/// 默认档位是产品决策，单独钉一条，改动时必须显式过这一关。
-///
-/// 2026-08-03 由 `wait` 改为 `fast`：`fast` 此前不敢作默认，是因为焦点切换/鼠标移动
-/// 光标后的首帧会拿一份属于别处的旧坐标定位；首帧信任门补上该洞后，它在坐标不可信时
-/// 会自动退回去等真值。实测常规连打首帧中位 7ms，焦点后首帧中位 105ms 且位置正确。
+/// 默认档位是产品决策，改动时必须显式过这一关；取舍见
+/// `docs/redesign/candidate-window-positioning.md` 第 6 层。
 #[test]
 fn default_mode_is_fast() {
     assert_eq!(FirstShowMode::default(), FirstShowMode::Fast);
 }
 
-/// 全局默认档现在有**两处**表达：枚举的 `#[default]`（认不出的值回落到它）与
-/// `config.toml` 出厂值 `ui.candidate.first_show_mode`（用户实际读到的那一份）。
-/// 两处分叉的表现是「配置文件写着 fast，某些路径却按另一档跑」，没有任何编译信号，
-/// 故把「必须一致」钉成不变量。顺带也验出厂串本身是个合法档位名（拼错即 None）。
+/// 枚举 `#[default]`（认不出的值回落到它）与出厂 `ui.candidate.first_show_mode` 必须一致，
+/// 分叉没有编译信号。顺带验出厂串是合法档位名。
 #[test]
 fn global_default_config_value_matches_enum_default() {
     let factory = crate::config::UiCandidateConfig::default().first_show_mode;
@@ -776,7 +769,7 @@ fn new_per_app_fields_default_to_follow_global() {
     assert_eq!((rule.candidate_x, rule.candidate_y), (0, 0));
 }
 
-/// 认不出的定位方式退化为 `None`（跟随全局），且**不拖垮同文件其它规则**——
+/// 认不出的定位方式退化为 `None`（跟随全局），且不拖垮同文件其它规则——
 /// 整份 compat.toml 因一个拼错的值静默失效是本仓反复记过的形态。
 #[test]
 fn bad_candidate_position_mode_degrades_to_none() {
@@ -822,8 +815,7 @@ fn mode_scope_match_is_case_insensitive_on_both_keys() {
     assert!(!c.initial_mode_applies_to_window("explorer.exe", "ForegroundStaging"));
 }
 
-/// ★★★ 未配作用域的进程**完全不受影响**。这条守的是「引入本机制不会波及其它应用」，
-/// 也是把判据从黑名单反转成白名单后唯一可能出的新缺陷（把所有人都关进作用域）。
+/// 未配作用域的进程完全不受影响：白名单判据不得把所有进程都关进作用域。
 #[test]
 fn process_without_scope_entry_is_unrestricted() {
     let c = AppCompat::from_parts(Vec::new(), sample_scope());
@@ -834,11 +826,8 @@ fn process_without_scope_entry_is_unrestricted() {
     assert!(c.initial_mode_applies_to_window("", ""));
 }
 
-/// ★★★ 本轮缺陷的钉子：作用域内的进程，窗口类为空时必须**保持现状**。
-///
-/// 实测现场（2026-08-18 17:24:08）：explorer 新起一个 TSF 连接，其首个 focus_gained
-/// 拿不到窗口类（caret 也退到 last_known），旧的黑名单判据把空类名放行 ⇒ 套上
-/// explorer 的 `initial_mode = "english"` ⇒ 语言栏图标闪英。
+/// 作用域内的进程，窗口类为空时必须保持现状（explorer 首个 focus_gained 拿不到窗口类），
+/// 见 docs/architecture/app-compat-host-notes.md 的「初始模式作用域」。
 #[test]
 fn empty_window_class_stays_outside_scope() {
     let c = AppCompat::from_parts(Vec::new(), sample_scope());

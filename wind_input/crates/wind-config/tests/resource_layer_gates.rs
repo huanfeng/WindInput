@@ -1,48 +1,26 @@
-//! 资源层枚举点的**清单守门**：钉住「谁在自己拼资源目录」这件事。
-//!
-//! # 为什么需要它
+//! 资源层枚举点的清单守门：钉住「谁在自己拼资源目录」。
 //!
 //! 单文件读取有收口点（`Config::resolve_data_file` / `resolve_schema_resource` /
-//! `EngineManager::resolve_schema_file` / `resolve_dict_file`），加一层 `data_custom`
-//! 自动继承。**目录枚举没有收口点**——方案列表、主题列表、双拼布局、opencc 数据目录
-//! 各自维护一份自己的目录列表，一共七处，漏接一处的现象是「定制版里那个方案/主题
-//! 静默不见了」，无任何日志，且在没有 `data_custom` 的开发机上永远复现不出来。
+//! `EngineManager::resolve_schema_file` / `resolve_dict_file`），自动继承 `data_custom` 层；
+//! 目录枚举没有，须遍历 [`wind_config::Config::resource_layers`] 系列 API。漏接一处时
+//! 定制版里的方案/主题静默不见，且在没有 `data_custom` 的开发机上复现不出来。
 //!
-//! P1d 已把这七处改成遍历 [`wind_config::Config::resource_layers`] 系列 API。本测试
-//! 存在的理由是**下一个功能**：新写一处 `dir.join("schemas")` 是最自然不过的事，而它
-//! 天然就是两层（或一层）的，漏接不会有任何编译期或运行期信号。
+//! 能钉住：`src/` 下新增或删除一处 `join("schemas")` / `join("themes")` / `join("opencc")`
+//! 即红，作者须在下面的清单里判定「已按层序展开」还是「刻意只要某一层」。
 //!
-//! # 这道测试能钉住什么、钉不住什么
+//! 钉不住：
 //!
-//! **能**：任何 `src/` 下的文件新增（或删除）一处 `join("schemas")` / `join("themes")` /
-//! `join("opencc")`，本测试立刻变红，作者被迫回到下面的清单给它一个明确判定——是
-//! 「已按层序展开」、还是「刻意只要某一层」（写用户目录、判定内置与否等）。
-//!
-//! **钉不住**（老实说清楚）：
-//!
-//! 1. 它只认这三个**字面量**。`join(SCHEMAS_SUBDIR)`、`join(format!("{sub}"))`、
-//!    `push("schemas")`、`Path::new("…/schemas")` 一律扫不到。绕过它不需要恶意，只需要
-//!    换个写法。
-//! 2. 它不看调用的**上下文**：已登记的文件里，在已登记的那一处旁边再写一个只认两层的
-//!    枚举，只要总数对不上就红——但如果作者顺手把清单数字改大（而不去想为什么），
-//!    测试就白设了。判罪仍然靠人读下面那张表。
-//! 3. 跳过测试模块的判据是**精确字面量** `#[cfg(test)]`。`#[cfg(all(test, windows))]`
-//!    这一族（`wind-ui/src/candidate_window.rs`、`wind-bridge` 多处）**不会**被跳过 ⇒
-//!    在那种块里写含 `join("schemas")` 的测试夹具会让本测试**假红**。假红最省事的处理
-//!    方式恰恰是「顺手把清单数字改大」，那这道闸门就废了——遇到假红请扩这里的判据，
-//!    不要改数字。
-//! 4. 测试模块的闭合判据是「缩进精确相等的一行 `}`」（rustfmt 产物必然成立）。手写的、
-//!    缩进对不齐的测试模块会让扫描从 `#[cfg(test)]` 一路吞到文件末尾，那之后的生产代码
-//!    全部漏计。
-//!
-//! （曾在这里写过一条「写在测试模块之后的生产代码同样不计」——**那是错的**，已实测
-//!  推翻：跳过测试模块后扫描会回到主循环继续，`log_rotate.rs` 的 `prune_stale_tsf_logs`
-//!  这类写在测试模块之后的函数照样计入。一条假的「已知盲区」比没有更糟：它会让人相信
-//!  一块其实有覆盖的区域没覆盖。）
+//! 1. 只认这三个字面量；`join(SCHEMAS_SUBDIR)`、`push("schemas")`、`Path::new("…/schemas")`
+//!    等写法扫不到。
+//! 2. 不看上下文：只数次数，作者顺手改大清单数字就白设了，判定仍靠人读清单。
+//! 3. 只跳过精确字面量 `#[cfg(test)]` 的测试模块；`#[cfg(all(test, windows))]` 块里的夹具
+//!    会假红。遇到假红请扩判据，不要改数字。
+//! 4. 测试模块按「缩进相等的 `}`」闭合；缩进对不齐的手写模块会让扫描吞到文件末尾，
+//!    之后的生产代码漏计。测试模块之后的生产代码正常计入。
 
 use std::path::{Path, PathBuf};
 
-/// 允许出现 `join("schemas")` 的文件及**出现次数**，附每一处的判定。
+/// 允许出现 `join("schemas")` 的文件及出现次数，附每一处的判定。
 ///
 /// 新增一处时请回答：「这里枚举/解析资源，要不要看见 `data_custom` 层？」
 /// 要 ⇒ 改用 `Config::resource_layers*`；不要 ⇒ 登记并写明只认哪一层、为什么。
@@ -108,7 +86,7 @@ const SCHEMAS_SITES: &[(&str, usize, &str)] = &[
     ),
 ];
 
-/// 允许出现 `join("themes")` 的文件及**出现次数**。
+/// 允许出现 `join("themes")` 的文件及出现次数。
 const THEMES_SITES: &[(&str, usize, &str)] = &[
     (
         "apps/service/src/config_cli/custom_check.rs",
@@ -123,17 +101,13 @@ const THEMES_SITES: &[(&str, usize, &str)] = &[
     ),
 ];
 
-/// 允许出现 `join("opencc")` 的文件及**出现次数**。
+/// 允许出现 `join("opencc")` 的文件及出现次数。
 ///
-/// **空表是刻意的**：简繁数据已改为「链里每本 octrie 各自走 `resolve_data_file`
-/// （rel = `opencc/<名>.octrie`）」，全仓不该再有任何一处把 opencc 当成一个目录去拼——
-/// 那种写法一定意味着「先选中一个目录再整份加载」，而那正是「定制层只放一本
-/// `STPhrases.octrie` 就一个字都不转」的成因（见 `Converter::load_variant_resolved`）。
+/// 加载侧一处都不该有：每本 octrie 各自走 `resolve_data_file`（rel = `opencc/<名>.octrie`），
+/// 把 opencc 当目录整份加载会让定制层只放一本时整条链失效（见 `Converter::load_variant_resolved`）。
 ///
-/// ⚠️ 上面那句「空表是刻意的」约束的是**加载**侧。下面这一条是**诊断**侧的例外：
-/// `config check --custom` 要把定制层 `opencc/` 里的文件名与出厂目录逐个比对，好报出
-/// 「名字对不上 ⇒ 这本永远不会被任何一条链取到」。它只列目录名、不建 `Converter`，
-/// 成立的前提恰恰就是「链按文件名跨层取」这条性质——与上面要禁的写法方向相反。
+/// 下面一条是诊断侧例外：`config check --custom` 逐个比对定制层 `opencc/` 的文件名，
+/// 只列目录名、不建 `Converter`。
 const OPENCC_SITES: &[(&str, usize, &str)] = &[(
     "apps/service/src/config_cli/custom_check.rs",
     2,
@@ -208,7 +182,7 @@ fn source_files(root: &Path) -> Vec<String> {
     out
 }
 
-/// 数某个片段在**非注释、非 `#[cfg(test)] mod` 块**的行上出现的次数。
+/// 数某个片段在非注释、非 `#[cfg(test)] mod` 块的行上出现的次数。
 ///
 /// 测试模块的判据是 rustfmt 的缩进闭合：`#[cfg(test)]` 之后紧跟 `mod X {`，
 /// 则跳到同缩进的 `}` 为止。不做真正的语法分析——那对一道 grep 式守门来说过重。
