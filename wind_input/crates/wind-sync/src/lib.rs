@@ -14,6 +14,8 @@ pub mod error;
 pub mod local;
 pub mod manifest;
 pub mod merge;
+#[cfg(feature = "net")]
+pub mod net;
 pub mod plan;
 pub mod remote;
 pub mod scope;
@@ -24,5 +26,7 @@ pub use crypto::{Dek, KdfParams};
 pub use engine::{SyncCtx, SyncReport, sync_once};
 pub use error::SyncError;
 pub use local::{LocalError, LocalStore, MemLocal};
+#[cfg(feature = "net")]
+pub use net::{S3Backend, S3Config, WebDavBackend, WebDavConfig};
 pub use scope::{ScopeFlags, in_scope};
 pub use state::SyncState;

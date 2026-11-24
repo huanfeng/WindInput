@@ -1,4 +1,4 @@
-//! 远端存储抽象。WebDAV / S3 实现在 S2；这里只有 trait 与带故障注入的内存后端。
+//! 远端存储抽象。真实后端在 `net`（feature `net`）；这里是 trait 与带故障注入的内存后端。
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -39,6 +39,18 @@ pub trait Backend {
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>, BackendError>;
     fn put(&self, key: &str, bytes: &[u8]) -> Result<(), BackendError>;
     fn delete(&self, key: &str) -> Result<(), BackendError>;
+
+    /// 连通性与读写权限检查：写入、读回并删除一个探测对象。
+    /// 凭据错误返回 `Auth`，网络/超时返回 `Transient`，可据此给用户不同提示。
+    fn test_connection(&self) -> Result<(), BackendError> {
+        const PROBE: &str = ".wind-sync-probe";
+        self.put(PROBE, b"ok")?;
+        match self.get(PROBE)? {
+            Some(v) if v == b"ok" => {}
+            _ => return Err(BackendError::Fatal("探测对象读回不一致".into())),
+        }
+        self.delete(PROBE)
+    }
 }
 
 #[derive(Default)]
