@@ -22,141 +22,72 @@ pub struct Schema {
     /// 注入发生在 `EngineManager::read_schema`，见 docs/design/schema-dict-discovery.md。
     #[serde(default)]
     pub dictionary_dirs: Vec<DictDirSpec>,
-    /// **方案级词库权重归一化**（`[weight_spec]`）。`None` = 不归一化（默认）。
+    /// 方案级词库权重归一化（`[weight_spec]`）。`None` = 不归一化（默认）。
     ///
-    /// ## 为什么是方案级而不是按词库
-    ///
-    /// 一个方案的子词库是**同一套规则下的分组**（主库/扩展/地名/emoji），分库是为了
-    /// 分组与分级，不是各自独立的权重体系。故全方案共用一个映射函数——单调映射天然保序，
-    /// **库间相对关系原样保留**。
-    ///
-    /// ⚠️ 按词库配过一版，实测有反转：给扩展库单独配归一化后，`aaah` 下「欧莱雅」
-    /// （扩展库 1170→3328）反超「葡萄牙」（主库 1485），而作者写的 `base_order = 1`
-    /// 救不回来（`better()` 是 `weight 降 → base_order 升`，weight 在前）。
-    /// 根因就是**两个不同的映射函数之间没有保序保证**。
-    ///
-    /// ## 用途：Rime 生态导入的适配层
-    ///
-    /// 主要场景是从 Rime 生态导入的方案——其权重常是**未归一化的原始语料词频**
-    /// （虎码「的」= 10,359,470），与本仓约定的 `0~10000` 差三个数量级，
-    /// 于是「短语 vs 码表」的权重比较失真。本仓自产方案（五笔等）守约，**不配**。
-    ///
-    /// ⚠️ **拼音方案不要配**：拼音权重刻意在另一条轴（max 1537 万），且
-    /// `pinyin/mod.rs` 的 `COMPLETION_FAR_WEIGHT_FLOOR`(100) /
-    /// `SENTENCE_YIELD_WEIGHT_FLOOR`(50) 是**按原始权重分布标定的绝对阈值**
-    /// （该处代码注释亦有明示）。归一化后拼音 p50 从 20 抬到 target，两道闸门会
-    /// **静默失效**——人人过线，等于没有。
-    ///
-    /// 参数建议由 `wind_input dict weight-check` 按方案实测算出，不必手填。
+    /// 方案级而非按词库：全方案共用一个单调映射才能保住库间相对顺序。主要给 Rime 生态导入的
+    /// 未归一化词频方案用；本仓自产方案不配，拼音方案不要配（拼音若干阈值按原始权重标定，归一化
+    /// 后会静默失效）。依据见 `docs/design/dict-weight-normalization.md`。参数由
+    /// `wind_input dict weight-check` 算出。
     #[serde(default)]
     pub weight_spec: Option<WeightSpec>,
     #[serde(default)]
     pub encoder: Option<EncoderSpec>,
-    /// **方案级按键功能表**（`[key_actions]`）：按键名 → 动词。
+    /// 方案级按键功能表（`[key_actions]`）：按键名 → 动词。与引擎类型无关，故与 `[engine]` 平级。
+    /// 值域见 [`crate::BoundAction`] 与 `docs/design/schema-key-actions.md`。
     ///
-    /// 与 `[engine]` 平级而非放在 `[engine.codetable]` 下：按键功能与引擎类型无关，
-    /// 拼音方案同样需要它。值域与语义见 [`crate::BoundAction`] 与
-    /// `docs/design/schema-key-actions.md`。
-    ///
-    /// 空表 = 不覆盖任何键，各键照常走全局引导键链。**逐键合并**，不是整段替换：
-    /// 方案文件内联段与 `schema_overrides/{id}.toml` 在 toml 层由 `merge_toml` 合并，
-    /// 那里只能新增/覆盖、无法删除键——故「本方案禁用某个全局绑定」必须写显式
-    /// `"none"`，不能靠从 override 里删掉那一行。
-    ///
-    /// 用 `BTreeMap`：顺序无语义（优先级由分派插入点决定），键唯一由类型保证。
+    /// 逐键合并：`merge_toml` 表达不了删除，「本方案禁用某个全局绑定」须写显式 `"none"`。
     #[serde(default)]
     pub key_actions: std::collections::BTreeMap<String, String>,
-    /// **方案级会话态按键表**（`[session_actions]`）：按键名 → 动词。
+    /// 方案级会话态按键表（`[session_actions]`）：按键名 → 动词，只在有会话时生效（与
+    /// [`Self::key_actions`] 到达条件不同，见 `docs/design/session-key-actions.md` §2）。
+    /// 值域见 [`crate::SessionAction`]。逐键合并，禁用全局绑定须写显式 `"none"`。
     ///
-    /// 与 [`Self::key_actions`] 是两张表而不是一张带状态维度的表，因为两者的到达条件不同：
-    /// 本表只在**有会话时**（有编码或候选）生效，那时用户停留在处境里反复按键、有肌肉记忆；
-    /// `key_actions` 则是无会话态的引导键。判据见 `docs/design/session-key-actions.md` §2。
-    /// 值域与语义见 [`crate::SessionAction`]。
-    ///
-    /// **逐键合并**，与 `key_actions` 一致：方案只写想改的键，其余继承全局
-    /// `keys.session_actions` 与四组键组配置的展开结果。⚠️ 故「本方案禁用某个全局绑定」
-    /// 必须写显式 `"none"`——`merge_toml` 只能新增/覆盖，**无法表达删除**，靠从 override
-    /// 里删掉那一行是删不掉 base 里那条的。
-    ///
-    /// ⚠️ 本表参与**可达性并集**：所有方案绑过的键都要让 TSF 转发，否则切方案后 C++ 手里
-    /// 还是旧表。代价是别的方案里也转发这些键——keyup 侧无害，但本表支持减号、方括号等
-    /// **可打印符号键**，它们带 `FORWARD_ONLY` 进 keydown 表，无会话时必须放行给下游按标点
-    /// 处理，否则就是丢键。见 `docs/design/key-resolver-unification.md` §8 注意点 5。
+    /// 本表参与可达性并集：所有方案绑过的键都让 TSF 转发，其中可打印符号键带 `FORWARD_ONLY`，
+    /// 无会话时必须放行给下游（见 `docs/design/key-resolver-unification.md` §8 注意点 5）。
     #[serde(default)]
     pub session_actions: std::collections::BTreeMap<String, String>,
-    /// **overlay 激活面**（`[overlay]`）：本方案可被引导键/直达热键叠加激活时的呈现配置。
+    /// overlay 激活面（`[overlay]`）：本方案被引导键/直达热键叠加激活时的呈现配置。
     ///
-    /// **段存在即声明「我是 overlay 方案」**——这同时是实例集合的枚举依据
-    /// （`EngineManager::overlay_modes`）。`None` = 普通方案，只能作 base 常驻使用。
-    ///
-    /// 不能复用 `[schema] hidden` 作这个判据：两者回答的是不同问题。`hidden` 是**展示**
-    /// 属性（列不列进方案切换列表），本段是**行为**属性（有没有叠加进入/退出的生命周期）。
-    /// 一个 overlay 方案完全可以不 hidden（作者想让它同时能常驻切换），一个 hidden 的
-    /// 码表方案也可能只是 mix 成员、没有 overlay 生命周期。
-    ///
+    /// 段存在即声明「我是 overlay 方案」，也是 `EngineManager::overlay_modes` 的枚举依据。
+    /// 不能复用 `[schema] hidden`：那是展示属性，这是行为属性，两者互不蕴含。
     /// 见 `docs/redesign/overlay-mode-config.md`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overlay: Option<OverlaySpec>,
-    /// **方案级标点**（`[punct]` 段）：标点态意图 `mode` + 自定义映射表 `custom_mappings`。
+    /// 方案级标点（`[punct]` 段）：标点态意图 `mode` + 自定义映射表 `custom_mappings`。
     ///
-    /// `mode` 与 [`Self::candidate`] 共用「代际感知覆盖」：方案意图是默认值，用户在本方案
-    /// 期间手动 `toggle_punct` 的值胜出，切走再切回后手动值随 `schema_generation` 失效。
-    /// 见 `docs/design/schema-scoped-behavior.md` §2、§4。
-    ///
-    /// ⚠️ **两个字段的作用域不同**（`mode` 跟活跃方案、`custom_mappings` 跟数据归属方案），
-    /// 对照表在 [`PunctSpec`] 上，动之前先读。
-    ///
-    /// ⛔ 仍**不含** `smart_after_digit` / `smart_list` / `follow_mode`：前两者是「数字后
-    /// 智能标点」的参数、后者是切中英时的交互习惯，都属全局。段名留成 `punct` 是为了以后
-    /// 能加，但不要顺手塞进来。
+    /// `mode` 与 [`Self::candidate`] 共用「代际感知覆盖」：方案意图是默认值，本方案期间手动
+    /// `toggle_punct` 胜出，切走再切回后失效（见 `docs/design/schema-scoped-behavior.md` §2、§4）。
+    /// 两个字段的作用域不同，对照表在 [`PunctSpec`] 上。`smart_after_digit` 等属全局，别塞进来。
     #[serde(default)]
     pub punct: PunctSpec,
-    /// **方案级候选呈现**（`[candidate]` 段）。默认 `Follow` = 跟随下一层。
+    /// 方案级候选呈现（`[candidate]` 段）。默认 `Follow` = 跟随下一层。
     ///
-    /// ⚠️ 与 [`OverlaySpec::candidate_layout`] **两段并存、语义不同，不要合并**：
-    /// 那份是「本方案被叠加激活期间」的布局（有进入/退出生命周期），本段是「本方案作为
-    /// 常驻 active 方案期间」的布局。一个方案可以两段都写，取值互不干扰。
+    /// 与 [`OverlaySpec::candidate_layout`] 并存、不要合并：那份管叠加激活期间，本段管常驻期间。
     #[serde(default)]
     pub candidate: CandidateSpec,
-    /// **方案级短语加载**（`[phrases]` 段）。默认全开。
+    /// 方案级短语加载（`[phrases]` 段）。默认全开。
     #[serde(default)]
     pub phrases: PhrasesSpec,
-    /// 本次读取中**没能按用户所写生效的项**，人类可读，直接进 toast。
+    /// 本次读取中没能按用户所写生效的项，人类可读，直接进 toast。
     ///
-    /// 两个来源合流，故存的是描述而不是路径：段级降级给出 `[candidate.layout]`
-    /// （整段回落，见 `EngineManager::salvage_schema`），字段级容错给出 `值 "uprigth"`
-    /// （只有那一个字段回落，拿不到字段名——`deserialize_with` 不知道自己在哪，
-    /// 见 [`crate::tolerant_de`]）。原值对用户其实更好用：他在自己的文件里搜得到。
-    ///
-    /// 非配置字段，`#[serde(skip)]`：它是「这份方案是怎么读出来的」这一事实，不是方案内容。
-    /// 由 `EngineManager::read_schema` 填入，供协调器 toast 与日志使用。
-    ///
-    /// # 为什么挂在 `Schema` 上而不是收进全局表
-    ///
-    /// `read_schema` 是关联函数、有约 30 个调用点，且方案会随缓存失效反复重读——用全局
-    /// 收集器就要额外解决去重与清空时机。挂在返回值上则天然跟着 `Schema` 的生命周期走：
-    /// 谁拿到方案谁就看得见它的降级，缓存一起缓存，失效一起失效，没有第二个真相源。
+    /// 存描述而不是路径：段级降级给出段名（见 `EngineManager::salvage_schema`），字段级容错只
+    /// 拿得到原值（见 [`crate::tolerant_de`]）。由 `EngineManager::read_schema` 填入。挂在返回值
+    /// 上而不用全局收集器，是为了随 `Schema` 一起缓存、一起失效。
     #[serde(skip)]
     pub degraded_items: Vec<String>,
 }
 
 /// overlay 激活面配置（`[overlay]`）。
 ///
-/// ★ 这一段装的**不是**「这张码表是什么」（那是 `[engine.codetable]`），而是
-/// 「这张码表**被叠加使用时**怎么表现」——三个字段的语义都依赖 overlay 生命周期：
-/// `show_all_on_enter` 只在存在「进入这一刻」时才有意义；`candidate_layout` 的语义是
-/// 「本模式期间覆盖全局、退出自动恢复」。段名 `overlay` 由此而来。
+/// 装的是「这张码表被叠加使用时怎么表现」，字段语义都依赖 overlay 生命周期。
 ///
-/// ⛔ **刻意不含 `trigger_keys` / `hotkey`**：引导键与直达热键统一住在 `keys.key_actions`
-/// （全局）与方案文件 `[key_actions]`（按源方案分流）两张表里。在此再开一个入口字段
-/// 就是第三个真相源，正是本轮重构要消除的东西。见设计文档 §2.2。
+/// 刻意不含 `trigger_keys` / `hotkey`：入口统一在 `keys.key_actions` 与方案 `[key_actions]`，
+/// 别在这里开第三个真相源（见设计文档 §2.2）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OverlaySpec {
     /// overlay 类别。当前只有 `"special"`（引导键特殊模式）；空 = 按 `special` 处理。
     ///
-    /// 留这个字段是为消歧：`overlay` 在本仓有两个粒度——运行时状态（临拼/临英/mix/URL
-    /// 也都是 overlay，但它们无宿主方案、配置只能待在 `input.*`）与方案文件的这一段
-    /// （仅有宿主方案者）。段说「我可以被当 overlay 用」，本字段说「哪一类」。
+    /// 段说「我可以被当 overlay 用」，本字段说「哪一类」。
     #[serde(default)]
     pub kind: String,
     /// 进入模式即展示候选：空编码（刚进入、尚未敲码）时枚举本方案码表首页候选
@@ -197,55 +128,30 @@ pub struct SchemaInfo {
     pub hidden: bool,
     /// 方案角色。空 = 普通输入方案；`"aux"` = 主要充当辅助码来源的码表方案（如笔画）。
     ///
-    /// aux 方案**仍是可启用的输入方案**（与 `hidden` 不同：hidden 是没有启用概念的
-    /// 特殊方案），只是设置页默认不把它列进方案管理，勾上「显示特殊方案」或已启用时才出现。
-    /// 辅助码来源选择器不看此字段，照旧可选。
+    /// aux 方案仍是可启用的输入方案（与 `hidden` 不同），只是设置页默认不列，勾上「显示特殊方案」
+    /// 或已启用时才出现。辅助码来源选择器不看此字段。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub role: String,
 }
 
-/// 图标主字的**显示宽度**上限（CJK 记 2、其余记 1）——即「一个汉字」或「两个拉丁字符」。
+/// 图标主字的显示宽度上限（CJK 记 2、其余记 1），即一个汉字或两个拉丁字符。
 ///
-/// 定在 2 的两条依据，**缺一都不足以定案**：
-/// ① 渲染：语言栏图标画布只有 16px（DPI 缩放后 20/24/32）。两个 ASCII 字母（`En`）
-///    宽度约等于一个汉字，是"还认得出"的上限；再宽只能靠回缩字号塞进去，糊成一团。
-/// ② 安全：C++ 侧 `CLangBarItemButton::_inputTypeLabel` 走 `wcscpy_s`——**超长不是
-///    静默截断，是触发 invalid parameter handler 终止进程**，而那段代码跑在
-///    Word / QQ 等宿主进程里。宽度 2 蕴含**最多 2 个标量值**（每个字符至少占 1 宽），
-///    最坏 2 个 emoji = 4 wchar + NUL = 5，缓冲现为 `wchar_t[8]`。
-///
-/// ⚠️ 改这个值之前先读上面第 ②：往上调必须同步扩 C++ 侧那个缓冲，否则是在给
-/// 用户配置留一条崩宿主进程的路。
-///
-/// ## 为什么单位是显示宽度而不是字符数（issue #85）
-///
-/// 上限刚放宽到 2 时按**字符数**计，于是 `icon_label = "虎单"` 这类第三方方案的双汉字
-/// 标签被整个放行，渲染端为了不裁切只能把字号回缩到约一半——用户没改配置，升级后
-/// 任务栏图标从清晰的「虎」变成认不出的「虎单」。
-///
-/// 按宽度计同时满足两侧：`En` 仍完整显示（2×1），双汉字截回首字（2 已满）。
-/// 与工具栏按钮 [`crate::config::toolbar_label_trunc`] 现在是**同一条规则、不同上限常量**，
-/// 共用 [`crate::config::display_width_trunc`] 一份实现。
+/// 往上调必须同步扩 C++ 侧 `CLangBarItemButton::_inputTypeLabel` 的缓冲（`wcscpy_s` 超长会
+/// 终止宿主进程）。单位是显示宽度而非字符数，双汉字标签才会截回首字。依据见
+/// `docs/design/mode-icon-label-config.md` 第三节。
 pub const ICON_LABEL_MAX_WIDTH: usize = 2;
 
-/// 图标主字的**统一截断口径**：去首尾空白后，取显示宽度不超过
-/// [`ICON_LABEL_MAX_WIDTH`] 的前缀。未配置 / 全空白返回空串，由调用方决定回落成什么。
+/// 图标主字的统一截断口径：去首尾空白后，取显示宽度不超过 [`ICON_LABEL_MAX_WIDTH`] 的前缀。
+/// 未配置 / 全空白返回空串，由调用方决定回落。
 ///
-/// ## 为什么必须是共享函数
-///
-/// 这条口径有三个调用点（方案标签 `schema_icon_label`、特殊模式 `overlay_modes`、
-/// 非中文态 [`crate::config::LabelsConfig`]）。此前前两处各写了一份 `.chars().next()`，
-/// 其中一处的注释还写着"与 schema_icon_label 同口径"——**一个自我声明的耦合，
-/// 编译器不管**。只改一处的表现是"方案切换显 `Wb`、进特殊模式显 `符`"这种局部
-/// 不一致，且没有任何测试会发现。
+/// 方案标签、特殊模式、非中文态（[`crate::config::LabelsConfig`]）三处共用，别各写一份。
 pub fn icon_label_trunc(raw: &str) -> String {
     crate::config::display_width_trunc(raw, ICON_LABEL_MAX_WIDTH)
 }
 
 /// 同 [`icon_label_trunc`]，但截断结果为空时回落 `fallback`。
 ///
-/// ⚠️ 回落**不能省**：空标签会让语言栏图标画出一个没有主字的空白方块，
-/// 用户既看不出当前模式、也无从理解发生了什么。
+/// 回落不能省：空标签会让语言栏图标画成一个空白方块。
 pub fn icon_label_or(raw: &str, fallback: &str) -> String {
     let s = icon_label_trunc(raw);
     if s.is_empty() {
@@ -301,16 +207,11 @@ impl ChaiziSpec {
 /// 其余条目是码表文件路径（相对 schemas 目录）。见 `docs/design/aux-code-schema-source.md` §3。
 pub const AUX_SCHEMA_SOURCE_PREFIX: &str = "schema:";
 
-/// 辅助码方案段（`[engine.aux_code]`）：**方案作者的码表基线 + 行为 tri-state 覆盖**。
+/// 辅助码方案段（`[engine.aux_code]`）：方案作者的码表基线 + 行为 tri-state 覆盖。
 ///
-/// 与 [`CodeTableSpec`] 同构（见 schema-config-layering.md §4）：
-/// - `files` 是方案属性（全拼配笔画、双拼配小鹤形码——换表不换方案），留在方案文件；
-/// - `enabled` / `max_phrase_len` / `direct` 是用户可配行为，tri-state `Option`：
-///   `Some` 覆盖、`None` 回落全局 `[schema.pinyin.aux_code]`。
-///
-/// ⚠️ **`files` 非空不等于功能开启**。总闸是 `enabled`（出厂 `false`），
-/// 判据见 [`crate::config::AuxCodeGlobal::resolved`]——方案文件里配了推荐码表，
-/// 只是「这个方案该用哪张表」，不代表用户要用它。
+/// 与 [`CodeTableSpec`] 同构：`files` 是方案属性；`enabled` / `max_phrase_len` / `direct` 是
+/// 用户可配行为，`None` 回落全局 `[schema.pinyin.aux_code]`。`files` 非空不等于功能开启，
+/// 总闸是 `enabled`（出厂 `false`，见 [`crate::config::AuxCodeGlobal::resolved`]）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AuxCodeSpec {
     /// 辅助码来源列表，**顺序即优先级**（先出现 = 高优）。两种条目：
@@ -323,18 +224,15 @@ pub struct AuxCodeSpec {
     pub files: Vec<String>,
     /// 本方案是否启用辅助码。`None` = 回落全局 `[schema.pinyin.aux_code].enabled`。
     ///
-    /// ★ **为什么需要方案级覆盖**：全拼与双拼在这个功能上不是「偏好不同」而是
-    /// **键位预算不同**——双拼把韵母塞进字母键、符号键全空闲；全拼的音节边界要靠
-    /// 符号表达，反引号出厂即被 `manual_separator_key` 占用。故「双拼开、全拼关」
-    /// 是常态需求，一个全局开关表达不了。
+    /// 需要方案级覆盖，因为全拼与双拼键位预算不同：双拼符号键空闲，全拼要用符号键分隔音节，
+    /// 「双拼开、全拼关」是常态需求。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
     /// 词组长度上限：字数 > 此值的**词组**一律排除、不参与辅助码筛选（0 = 不限）。
     /// `None` = 回落全局 `[schema.pinyin.aux_code].max_phrase_len`。
     ///
-    /// 长词组（整词补全/组合词，如 `meishijian` 下的「没时间看/没时间做」）首字辅助码
-    /// 前缀匹配会让它们大量残留、污染逐字词筛选，而辅助码字形筛选的目标是短字词；
-    /// 单字恒参与匹配，不受此限。见 wind-aux-code 的 `AuxCodeFilterOptions::max_phrase_len`。
+    /// 长词组按首字辅助码前缀匹配会大量残留、污染筛选；单字恒参与匹配。见 wind-aux-code 的
+    /// `AuxCodeFilterOptions::max_phrase_len`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_phrase_len: Option<usize>,
     /// 本方案是否开直接辅助码（任一音节后 1～2 位自动当该字辅码，**仅双拼**）。`None` = 回落全局
@@ -364,10 +262,8 @@ impl AuxCodeSpec {
 /// 码表引擎配置（[engine.codetable]）：引擎固定参数 + **方案内联行为覆盖**。
 ///
 /// 行为字段为 tri-state `Option`：`None`=回落全局 `schema.codetable`，`Some`=覆盖该字段。
-/// schema 文件与 `schema_overrides/{id}.toml` 用**完全相同的段名/字段**表达行为——前者是作者
-/// 内联基线，后者（设置页写入）经 `read_schema` 的 `merge_toml` 深合并到前者之上，最终由
-/// `CodetableGlobal::resolved` 折叠到全局基线。故不再有独立的 `SchemeOverride` 平行路径
-/// （见 docs/redesign/schema-config-layering.md）。
+/// 方案文件与 `schema_overrides/{id}.toml` 用相同的段名/字段，后者经 `merge_toml` 深合并到
+/// 前者之上，再由 `CodetableGlobal::resolved` 折叠到全局基线。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CodeTableSpec {
     // ── 引擎固定参数 ──
@@ -382,56 +278,37 @@ pub struct CodeTableSpec {
     pub input_chars: String,
     /// 可作**首码**的字符集（`input_chars` 的子集）。空=与 `input_chars` 相同。
     ///
-    /// 典型用途：数字要能作码元（打得出 `Win10`），但不能起头——空缓冲下的数字键是
-    /// 选词/透传，若它同时是首码，用户就永远选不了「第 1 个候选」也拿不回原生数字输入。
+    /// 典型用途：数字能作码元但不能起头，否则空缓冲下的数字键就不能选词或透传了。
     #[serde(default)]
     pub leading_chars: String,
     /// 整句输入：超过 `max_code_length` 的串自动切分成多个编码单元并组句。
     /// 设计与判据见 `docs/design/codetable-sentence-input.md`。
     ///
-    /// **引擎固定参数而非行为 tri-state**：一张码表能不能整句取决于它的编码结构
-    /// （定长与否、简码体系多深），是方案属性，不是「用户偏好」——故不设全局回落，
-    /// 由方案作者在 `.schema.toml` 里声明。出厂 `false`。
+    /// 引擎固定参数而非行为 tri-state：能不能整句取决于码表的编码结构，由方案作者声明，出厂 `false`。
     ///
-    /// ⚠️ 开启后 `top_code_commit` 自动让位：两者抢同一个区间（超码长），
-    /// 而顶码是自动上屏、一触发用户就看不到整句候选（见 `CodeTableEngine::handle_top_code`）。
-    /// `auto_commit_at_full` / `clear_on_empty_max` 同样让位：它们在满码那一键截断句子
-    /// （见 `CodeTableEngine::new`）。
+    /// 开启后 `top_code_commit` 自动让位（同抢超码长区间，见 `CodeTableEngine::handle_top_code`），
+    /// `auto_commit_at_full` / `clear_on_empty_max` 同样让位（见 `CodeTableEngine::new`）。
     #[serde(default)]
     pub sentence_input: bool,
-    /// 逆切分（切分模式）：**恰好** `max_code_length` 长的串若空码，切成前后两段
-    /// （各 `max_code_length / 2` 码）各查词典，把结果拼成组合候选。
-    /// 设计与判据见 `docs/design/codetable-split-input.md`（需求来源：论坛 t11）。
+    /// 逆切分：恰好 `max_code_length` 长的串若空码，切成前后两段各查词典并拼成组合候选。
+    /// 设计见 `docs/design/codetable-split-input.md`。引擎固定参数（同 `sentence_input`），出厂
+    /// `false`，不限定方案类型。
     ///
-    /// **引擎固定参数而非行为 tri-state**（同 `sentence_input`）：能不能逆切分取决于这张
-    /// 码表有没有成体系的二简、二简空间是否留了余量——是编码方案的结构事实，故不设全局
-    /// 回落，由方案作者在 `.schema.toml` 里声明。出厂 `false`。
-    ///
-    /// **不限定方案类型**：音形类码表是它的典型受益者（二简空间大、四码空码位多），但别的
-    /// 码表开了未必没用，只是表现随编码结构而异。要不要开、开了好不好用，交给方案作者与
-    /// 用户实测——用户也可经设置页写 `schema_overrides/{id}.toml` 的同名段自行覆盖。
-    ///
-    /// ⚠️ 与 `sentence_input` 占的是**不同区间**（`==` vs `>` 码长），两者可同开、互不让位；
-    /// 但同开时顶码会因整句而整体让位，逆切分候选的「后码顶首选上屏」随之失效
-    /// （见 `CodeTableEngine::handle_top_code`，构建时会告警）。
-    ///
-    /// ⚠️ **混输方案下整体不生效**（写了会告警）：切分候选的 `code` 是整串，会落进混输
-    /// 档位体系的档 0、压过拼音精确候选。见 `wind_engine::manager::resolve_split_input`。
+    /// 与 `sentence_input` 占不同区间（`==` vs `>` 码长），可同开；但同开时顶码让位，逆切分的
+    /// 「后码顶首选上屏」随之失效（构建时告警）。混输方案下整体不生效：切分候选的 `code` 是
+    /// 整串，会压过拼音精确候选（见 `wind_engine::manager::resolve_split_input`）。
     #[serde(default)]
     pub split_input: bool,
-    /// 逆切分的**前段**取几条候选。0/缺省 = 1（前段恒取首选）。
-    ///
-    /// 取更多会让同前段的变体占满候选窗（后段 4 个重码 × 前段 2 条 = 8 条，其中后 4 条
-    /// 共享一个用户多半不想要的前段）。这个旋钮是给方案作者实测用的，不是终端用户开关。
+    /// 逆切分的前段取几条候选。0/缺省 = 1。取多了同前段变体会占满候选窗；这是给方案作者调的
+    /// 旋钮，不是终端用户开关。
     #[serde(default)]
     pub split_front_candidates: usize,
     /// 逆切分的触发档：`""`/`"empty"`（默认，整串零候选才切）/ `"no_exact"`（无精确解即切，
     /// 切分候选沉底且不参与自动上屏）。非法值回退 `"empty"` 并告警。
     #[serde(default)]
     pub split_trigger: String,
-    /// 逆切分**次选**的显示形态：`""`/`"back"`（默认，次选只显示后段——「① 很可能 ② 困难」，
-    /// 选 ② 上屏「很困难」）/ `"full"`（次选也显示整串「② 很困难」）。只影响显示，
-    /// 上屏恒为整串。非法值回退 `"back"` 并告警。需求来源：论坛 t11 / t231。
+    /// 逆切分次选的显示形态：`""`/`"back"`（默认，次选只显示后段）/ `"full"`（显示整串）。
+    /// 只影响显示，上屏恒为整串。非法值回退 `"back"` 并告警。
     #[serde(default)]
     pub split_alt_display: String,
 
@@ -462,38 +339,18 @@ pub struct CodeTableSpec {
     pub single_code_complete: Option<bool>,
     /// 出简让全的简码级别上限（0 关闭 / 2 一二级 / 3 全部）。
     ///
-    /// 方案级可覆盖：不同码表的简码体系深浅不同，且「短码首选 = 简码」这个等式只对
-    /// 五笔这类前缀式简码成立，别的码表可以在方案里关掉。
+    /// 方案级可覆盖：「短码首选 = 简码」只对五笔这类前缀式简码成立。
     #[serde(default)]
     pub short_code_yield_level: Option<usize>,
-    /// 本方案的**单字输入**覆盖。`None`（不写这一项，出厂）= 跟随全局
-    /// `schema.codetable.single_char`；`Some(_)` 恒压过全局。
+    /// 本方案的单字输入覆盖。`None`（出厂）= 跟随全局 `schema.codetable.single_char`；`Some(_)`
+    /// 恒压过全局。拼音侧没有对应的覆盖层；混输继承主码表方案的取值（见
+    /// `EngineManager::codetable_settings`）。
     ///
-    /// 与同段的 [`Self::short_code_yield_level`] 同一条论证：不同码表的简码体系深浅不同，
-    /// 「只出单字」这件事该由装了这张码表的人自己定。**拼音侧刻意没有对应的覆盖层**
-    /// （拼音方案通常只有一张，全局 `schema.pinyin.single_char` 那一份就够了）。
+    /// 内置方案不要声明这一项：方案级恒覆盖全局，用户在全局页关掉会纹丝不动（守门测试
+    /// `factory_schemas_do_not_declare_single_char`）。第三方方案写它完全正当。
     ///
-    /// ⚠️ 混输方案不写这一项：`EngineManager::codetable_settings` 会把它解析到
-    /// `primary_schema`（主码表方案）——混输继承主方案的取值，不单独配。
-    ///
-    /// # ⛔ 内置方案一项都不要声明
-    ///
-    /// 「五笔常开、拼音不开」是**文档与设置页引导**该解决的事，不是靠出厂值。方案级
-    /// `Some(_)` 恒覆盖全局 ⇒ 给 wubi86 预置 `true` 的话，五笔用户在**全局页**把这一项
-    /// 关掉纹丝不动，而「方案自带」那个标记藏在方案设置里，他不会去找——从他的角度这就
-    /// 是「设置项坏了」。`short_code_yield_level` 在 0.119 恰好这么栽过一次并于当天撤回，
-    /// 判据已成文：**用户在全局页做的事，必须能作用到出厂方案上。**
-    /// 守门测试 `factory_schemas_do_not_declare_single_char`。
-    ///
-    /// ⚠️ 这条只约束**内置**方案。第三方方案作者写这一项完全正当（用户装那张码表时就
-    /// 接受了作者的安排），别推广成「方案文件不许写这一项」。
-    ///
-    /// ⛔ **别挂 `tolerant_de::tolerant`**（本字段一度挂过，测试当场红）。那个适配器
-    /// 第一行就是 `String::deserialize`，只治「字符串枚举写错了值」；布尔字段挂上去，
-    /// 连**正确**的 `single_char = true` 都会解析失败，表现成「方案级配了完全没反应」。
-    /// 见 `tolerant_de` 模块文档的「只治字符串写错，不治类型写错」一节。
-    ///
-    /// ⇒ 写错类型（`single_char = "yes"`）走**段级降级**，与同段其它 `Option` 同一条路。
+    /// 别挂 `tolerant_de::tolerant`：它只治字符串，布尔字段挂上去连正确值都解析失败。写错类型
+    /// 走段级降级。
     #[serde(default)]
     pub single_char: Option<bool>,
     /// z 键重复输入。
@@ -535,8 +392,7 @@ pub struct CodeTableSpec {
     pub frequency: Option<CodeTableFrequencySpec>,
     /// 方案级英文混入覆盖（`[engine.codetable.english_merge]`）。
     ///
-    /// 缺省 = 整段跟随基线。存在的理由与调频同源：同一台机器上不同码表的诉求不同——
-    /// 五笔常打命令行、变量名，开着有用；某张专用符号表或纯汉字表开了只是噪音。
+    /// 缺省 = 整段跟随基线。不同码表对英文混入的诉求不同，故可按方案覆盖。
     #[serde(default)]
     pub english_merge: Option<CodeTableEnglishMergeSpec>,
 }
@@ -569,8 +425,7 @@ pub struct CodeTableEnglishMergeSpec {
 ///
 /// 每个字段都是 `Option`：给了就覆盖基线，没给就跟随。整段缺省 = 全部跟随。
 ///
-/// 存在的理由是「同一台机器上不同码表的调频诉求本就不同」——快符表要的是稳定顺序
-/// （作者精心排过），生僻字表要的是学习，五笔要的是简码位保护。此前这些只有一份全局值。
+/// 不同码表的调频诉求不同（快符表要稳定顺序、生僻字表要学习、五笔要简码位保护）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct CodeTableFrequencySpec {
     #[serde(default)]
@@ -611,11 +466,8 @@ pub struct PinyinSpec {
     /// 本方案的手动音节分隔符策略（`auto` / `quote` / `backtick` / `none`）。
     /// `None`（及空串）= 回落全局 `[schema.pinyin].separator`。
     ///
-    /// ★ **为什么需要方案级覆盖**：与 [`AuxCodeSpec::enabled`] 是同一条论证的另一半——
-    /// 全拼与双拼**键位预算不同**。全拼的音节边界只能靠符号键表达；双拼把韵母塞进字母键、
-    /// 符号键空闲，出厂就把反引号给了辅助码（`shuangpin.schema.toml` 的
-    /// `backtick = "aux_code"`）。全局唯一的 `separator` 表达不了「全拼用反引号作分隔符、
-    /// 双拼用反引号进辅助码」，一改全局就把双拼的辅助码触发键静默夺走。
+    /// 需要方案级覆盖的理由同 [`AuxCodeSpec::enabled`]：双拼出厂把反引号给了辅助码，全局唯一的
+    /// `separator` 一改就会静默夺走它。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub separator: Option<String>,
 }
@@ -810,48 +662,35 @@ impl DictSpec {
 
 /// 方案级标点（`[punct]` 段）。
 ///
-/// 取值词汇刻意与 [`crate::config::LayoutIntent`] 同构（`Follow` 打头且是 default）：
-/// 让「方案级」与「全局」在用户眼里是同一件事的两个层级，而不是两套发明出来的词。
+/// 取值词汇与 [`crate::config::LayoutIntent`] 同构（`Follow` 打头且是 default）。
 ///
-/// # ★★ 两个字段的作用域**刻意不同**，不要「顺手统一」
+/// # 两个字段的作用域刻意不同，不要统一
 ///
-/// | 字段 | 归属方案取自 | 因为它回答的是 |
+/// | 字段 | 归属方案取自 | 回答的是 |
 /// |---|---|---|
-/// | [`Self::mode`] | `active_behavior()`（活跃方案） | 「我此刻该用中文还是英文标点」——**用户可见的模式态**，与语言栏图标、`toggle_punct` 同一层，走代际同步与 `punct_before_schema` 基线 |
-/// | [`Self::custom_mappings`] | `effective_data_schema`（数据归属方案） | 「这个键出什么字」——是**数据**，与 `[phrases]` 同源；临英归 `english`、快符归快符方案 |
+/// | [`Self::mode`] | `active_behavior()`（活跃方案） | 此刻用中文还是英文标点，用户可见的模式态，走代际同步与 `punct_before_schema` 基线 |
+/// | [`Self::custom_mappings`] | `effective_data_schema`（数据归属方案） | 这个键出什么字，是数据，与 `[phrases]` 同源 |
 ///
-/// 把 `custom_mappings` 改成跟活跃方案走，快符/临英就永远拿不到自己的符号表（而那正是
-/// 「特殊方案本质就是码表方案、该有自己的一套」的直接延伸）；把 `mode` 改成跟数据走，则要
-/// 重跑那条已真机修过一轮的链（`Follow` ≠「什么都不做」，见 `sync_schema_scope`）。
+/// `custom_mappings` 跟活跃方案走，快符 / 临英就拿不到自己的符号表；`mode` 跟数据走，则要重验
+/// `sync_schema_scope` 那条链。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PunctSpec {
     #[serde(default, deserialize_with = "crate::tolerant_de::tolerant")]
     pub mode: PunctIntent,
-    /// **方案级自定义标点映射表**（`[punct.custom_mappings]`）。语义是**整表替换**：
+    /// 方案级自定义标点映射表（`[punct.custom_mappings]`），语义是整表替换：
     ///
     /// | 取值 | 含义 |
     /// |---|---|
     /// | `None`（段不写） | 跟随全局——全局的 `custom_enabled` 与整张表原样生效 |
-    /// | `Some(表)` | 本方案只认这张表，全局表**整份不参与**（连 `custom_enabled` 一起换） |
+    /// | `Some(表)` | 本方案只认这张表，全局表整份不参与（连 `custom_enabled` 一起换） |
     /// | `Some({})` | 本方案不用任何自定义映射 |
     ///
-    /// # ⛔ 刻意**没有**方案级的 `custom_enabled`
+    /// 刻意没有方案级的 `custom_enabled`：「一条都不要」已由 `Some({})` 表达，再加开关只会造出
+    /// 矛盾态。推论（设置页与文档站须写明）：全局页关掉「自定义标点」，声明了本表的方案仍出
+    /// 自定义符号。
     ///
-    /// 三态是「跟随 / 用我的表 / 一条都不要」，而第三态已由 `Some({})` 表达。两个字段的代价
-    /// 不是多一个字段，是**矛盾态**（`enabled=None` 配非空表、`=true` 配空表都得再规定一次
-    /// 语义，且规定完没人记得）。同型见 `[phrases]` 的 `categories`——那里的 `Option<Vec>`
-    /// 三态也是因为「一条都不要」已被 `enabled=false` 表达而塌成了普通 `Vec`。
-    ///
-    /// ⇒ 推论（**设置页与文档站必须写明**）：全局页关掉「自定义标点」总开关，声明了本表的
-    /// 方案**仍然出自定义符号**——那个开关管的是全局表，整表替换连开关一起换掉了。
-    ///
-    /// # ⚠️ override 走整体替换，不是深合并
-    ///
-    /// 见 [`merge_toml`] 里的 `custom_mappings` 例外。深合并（HashMap 逐键）会让用户在设置页
-    /// **删不掉方案作者写的行**——override 层没有「删除」的表达。
-    ///
-    /// 列序契约与全局表**完全一致**：`[中半, 英全, 中全, 英半]`，引号用 `"1`/`"2`/`'1`/`'2`
-    /// 区分左右形。见 [`crate::config::PunctConfig`]。
+    /// override 走整体替换而非深合并（见 [`merge_toml`]），否则用户删不掉方案作者写的行。
+    /// 列序契约与全局表一致：`[中半, 英全, 中全, 英半]`，见 [`crate::config::PunctConfig`]。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_mappings: Option<std::collections::HashMap<String, Vec<String>>>,
 }
@@ -869,8 +708,7 @@ pub enum PunctIntent {
 impl PunctIntent {
     /// 折成布尔目标态；`Follow` → `None`（不干预）。
     ///
-    /// 与 `LayoutIntent` 的 `Follow` 一样表示「跟随下一层」，故返回 `Option` 而不是
-    /// 默认值——调用方据此决定「要不要写」，而不是「写什么」。
+    /// 返回 `Option` 让调用方决定「要不要写」，而不是「写什么」。
     pub fn resolve(self) -> Option<bool> {
         match self {
             Self::Follow => None,
@@ -893,51 +731,24 @@ pub struct CandidateSpec {
     pub comment_template_vertical: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment_template_horizontal: Option<String>,
-    /// 本方案候选**文字节点**的字族覆盖。空 = 不覆盖（走主题 / 全局 `ui.font`）。
+    /// 本方案候选文字节点的字族覆盖（如蒙古文方案）。空 = 不覆盖（走主题 / 全局 `ui.font`）。
     ///
-    /// 起因是蒙古文方案需要专用字体，而字体是全局的、主题也是全局的——
-    /// 「切到这个方案就换字体」此前表达不出来。
-    ///
-    /// # 作用域刻意只到 text 节点
-    ///
-    /// 序号、编码栏、注释、翻页栏都**不**跟着换：它们是拉丁/数字，换成蒙文字体反而更差。
-    /// 要给某个脚本单独指派字体，用全局 `ui.font.scripts`——那是按**字符**分的，
-    /// 比按节点分更贴合「哪些字要用什么字体」这个真实问题。
-    ///
-    /// # 归属取 `effective_data_schema`，不是活跃方案
-    ///
-    /// 与 [`Self::layout`]（呈现、跟活跃方案）刻意不同：
-    /// 字体回答的是「**这些字**用什么渲染」＝数据属性，与 `[phrases]`、
-    /// `[punct] custom_mappings` 同源。临英期间候选归 `english` 桶，字体也该跟着归它。
-    /// ⇒ 它随输入语境**逐次按键**变化，不能走「切方案推一次」的下发通路，
-    /// 必须在 `UpdateCandidates` 发送点之前重算（见 `Coordinator::sync_candidate_font`）。
+    /// 只作用于 text 节点：序号、注释等是拉丁/数字，按字符指派字体用全局 `ui.font.scripts`。
+    /// 归属取 `effective_data_schema`（与 [`Self::layout`] 不同），随输入语境逐次按键变化，
+    /// 须在 `UpdateCandidates` 发送前重算（见 `Coordinator::sync_candidate_font`）。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub font_family: String,
-    /// 本方案**横排时**文字的排列方式（默认 / 旋转 90° / 文字竖排）。
+    /// 本方案横排时文字的排列方式（默认 / 旋转 90° / 文字竖排）。是「这套文字怎么写」的方案属性，
+    /// 不是界面偏好，故住在方案里。
     ///
-    /// # 为什么住在方案里、而不在外观页
-    ///
-    /// 它回答的是「这套文字**怎么写**」——蒙古文纵向、汉字可作对联式——是方案自带的属性，
-    /// 不是用户对界面的偏好。放进外观页那个面向所有用户的下拉，既难选，也在暗示它与
-    /// 横排/竖排是同一类东西。
-    ///
-    /// # 归属取 `effective_data_schema`，与同段的 [`Self::font_family`] 同源
-    ///
-    /// 「这些字怎么排」与「这些字用什么字体」是同一个问题的两面，判据必须一致：
-    /// 临英期间候选是英文、归 `english` 桶 ⇒ 字体和排列都该跟着归它，
-    /// 而不是继续按蒙古文方案转 90°。
-    /// ⚠️ 与同段的 [`Self::layout`]（呈现、跟活跃方案）刻意不同，取值时不要复用同一个
-    /// `behavior_for` 结果——`[punct]` 段的 `mode` 与 `custom_mappings` 已经是同一个形状。
+    /// 归属取 `effective_data_schema`，与 [`Self::font_family`] 同源（临英期间该随 `english`），
+    /// 与 [`Self::layout`] 不同，取值时不要复用同一个 `behavior_for` 结果。
     #[serde(default, deserialize_with = "crate::tolerant_de::tolerant")]
     pub text_orientation: crate::config::TextOrientation,
-    /// **通用方案级覆盖**：本段里不属于上面强类型字段的键，原样收下，键名与全局
-    /// `ui.candidate.*` 相同（如 `per_page = 9`）。
+    /// 通用方案级覆盖：本段里不属于强类型字段的键原样收下，键名与全局 `ui.candidate.*` 相同。
     ///
-    /// 是否生效由 [`crate::config_schema::SCHEMA_OVERRIDES`] 里 `fold = true` 的登记决定，
-    /// 值由 `Schema::behavior` 逐项过注册表校验；未登记 / 值不合法的项只进降级清单。
-    /// 新增一个可被方案覆盖的 `ui.candidate.*` 键**只需登记那一行**，不必再来这里加字段。
-    ///
-    /// 强类型字段（`layout` 等）有各自的语义（三态 / 数据归属 / 代际手动覆盖），不走这条路。
+    /// 是否生效由 [`crate::config_schema::SCHEMA_OVERRIDES`] 里 `fold = true` 的登记决定，值由
+    /// `Schema::behavior` 逐项校验，不合法的只进降级清单。新增可覆盖键只需登记那一行。
     #[serde(flatten, default, skip_serializing_if = "toml::Table::is_empty")]
     pub ui: toml::Table,
 }
@@ -955,20 +766,14 @@ pub(crate) const CANDIDATE_TYPED_KEYS: [&str; 5] = [
 
 /// 方案级短语加载（`[phrases]` 段）。
 ///
-/// ## ★ 这里刻意**没有**三态
-///
-/// 设计稿曾把 `categories` 写成 `Option<Vec<String>>`，用「键缺失 = 全部 / 空数组 =
-/// 一条都不要」表达三态。作废理由：**「一条都不要」已经由 `enabled = false` 表达**，
-/// `enabled = true` + `categories = []` 是一个语义重复的状态。既然重复，就不必区分
-/// 缺失与空 ⇒ 两个字段都用朴素 `Vec`，语义完全对称：**空 = 不施加这一项限制**。
-///
-/// 判据可复用：**给一族过滤器加维度前，先问「这个三态里有没有一态已经被别的字段表达了」**。
+/// 刻意没有三态：「一条都不要」已由 `enabled = false` 表达，故两个列表都用朴素 `Vec`，
+/// 空 = 不施加这一项限制。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PhrasesSpec {
     /// 本方案是否加载短语。`false` ⇒ 短语层对本方案整体关闭（六个消费点全部短路）。
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// 分类白名单。**空 = 不施加这一项限制**（全部分类），不是「一条都不要」。
+    /// 分类白名单。空 = 不施加这一项限制（全部分类），不是「一条都不要」。
     ///
     /// 空串 `""` 匹配未分类短语（store 里 `category` 的默认值就是空串，不引入映射名）。
     /// ⚠️ 分类 UI 落地之前所有存量短语都是未分类，此时任何非空白名单都会把短语全部滤掉。
@@ -995,36 +800,29 @@ fn default_true() -> bool {
 
 /// 方案级行为覆盖三段的合订快照（`EngineManager::active_behavior` 的返回体）。
 ///
-/// 三段合成一个缓存条目而不是各存各的：它们同源（一次 `read_schema`）、同批失效，
-/// 分三个缓存等于同一个方案读三次盘、加三个失效点——`key_actions` / `session_actions`
-/// 那两个缓存已经因为「同批失效要接两处」在注释里互相提醒过一次。
+/// 合成一个缓存条目：它们同源（一次 `read_schema`）、同批失效，分开缓存就要多处失效点。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SchemaBehavior {
     pub punct: PunctIntent,
     /// 方案级自定义标点表（整表替换，`None` = 跟随全局）。见 [`PunctSpec::custom_mappings`]。
     ///
-    /// ★ **刻意与 [`Self::punct`] 分成两个字段而不是打包成一个 `PunctSpec`**：两者虽同住
-    /// `[punct]` 段，取归属方案的判据却不同（前者数据归属、后者活跃方案）。打包成一个结构体
-    /// 会让下一个人理所当然地用同一个 `behavior_for(id)` 结果去喂两条路——而那正是错的。
+    /// 刻意与 [`Self::punct`] 分成两个字段：两者取归属方案的判据不同（数据归属 vs 活跃方案），
+    /// 打包会诱使人用同一个 `behavior_for(id)` 结果喂两条路。
     pub punct_custom_mappings: Option<std::collections::HashMap<String, Vec<String>>>,
     pub candidate_layout: crate::config::LayoutIntent,
     /// 方案级通用 UI 覆盖（`[candidate]` 里已登记且值合法的键，键名同全局 `ui.candidate.*`）。
     /// 空 = 本方案不覆盖任何项。见 [`CandidateSpec::ui`]；折叠方法是
     /// [`crate::config::UiCandidateConfig::folded_with`]。
     pub candidate_ui: toml::Table,
-    /// 方案级候选文字字族。见 [`CandidateSpec::font_family`]——⚠️ 它的归属判据与同段的
-    /// `candidate_layout` **不同**（数据方案 vs 活跃方案），取值时不要复用同一个 behavior。
+    /// 方案级候选文字字族，见 [`CandidateSpec::font_family`]。归属判据与 `candidate_layout` 不同
+    /// （数据方案 vs 活跃方案），取值时不要复用同一个 behavior。
     pub candidate_font_family: String,
     /// 方案级「横排时文字排列」。见 [`CandidateSpec::text_orientation`]——归属判据与
     /// `candidate_font_family` 同源（数据方案），与 `candidate_layout` 不同。
     pub candidate_text_orientation: crate::config::TextOrientation,
     pub phrases: PhrasesSpec,
-    /// 这次读取里**没能按用户所写生效的项**（见 [`Schema::degraded_items`]）。
-    ///
-    /// 搭这趟车而不是另开一个缓存：它与三段行为同源（同一次 `read_schema`）、同批失效，
-    /// 而 `behavior_cache` 已经是协调器唯一稳定拿得到方案信息的入口。另开一份就要再解决
-    /// 一次「谁来失效它」——`key_actions` / `session_actions` 那两个缓存已经因为
-    /// 「同批失效要接两处」在注释里互相提醒过一次，不要再添第三处。
+    /// 这次读取里没能按用户所写生效的项（见 [`Schema::degraded_items`]）。与行为同源同批失效，
+    /// 故搭 `behavior_cache` 这趟车，不另开缓存。
     pub degraded_items: Vec<String>,
 }
 
@@ -1077,23 +875,14 @@ impl Schema {
 /// 深合并 TOML：`over` 覆盖到 `base` 之上。两侧皆为 table 时逐键递归；否则 over 整体替换。
 /// 数组按整体替换（如 encoder.rules 覆盖即替换全表）。
 ///
-/// 这是 `schema_overrides/{id}.toml` 折叠到方案文件之上的**唯一**合并实现：
-/// 引擎加载（wind-engine `read_schema`）与方案包导出（wind-transfer）共用，
-/// 两边对「定制后的方案长什么样」必须同源，否则导出的包与实际打字行为不一致。
+/// 这是 `schema_overrides/{id}.toml` 折叠到方案文件之上的唯一合并实现，引擎加载与方案包导出
+/// 共用，否则导出的包与实际打字行为不一致。
 ///
-/// # 两个例外
+/// 两个例外：
+/// - `dictionaries` 走 [`merge_dict_overrides`] 的按 id 稀疏合并，结构定义以方案文件为准。
+/// - `custom_mappings` 走整体替换：逐键深合并表达不了删除，用户会删不掉方案作者写的行。
 ///
-/// - **`dictionaries`** 走 [`merge_dict_overrides`] 的按 id 稀疏合并——词库的
-///   path/label/base_order 等结构定义必须始终以方案文件为准，override 层只表达用户开关。
-/// - **`custom_mappings`**（方案级自定义标点表）走**整体替换**。默认的逐键深合并会让用户
-///   在设置页**删不掉方案作者写的那一行**：override 层没有「删除」的表达，写空只能覆盖成
-///   空串。失效形态是本仓反复栽的那种——界面上删掉了、保存重开又回来，或界面没了打字还在。
-///   整表替换与该字段本身的语义（[`PunctSpec::custom_mappings`]）也一致：方案表是一整份，
-///   不与任何东西逐行混。
-///
-/// ⚠️ 两个例外都按**键名**匹配、与所在路径无关。方案文件里 `custom_mappings` 只出现在
-/// `[punct]` 段下；将来若别处再出现同名键，它会一并按整体替换处理——那时要么改成判路径，
-/// 要么给新键换个名字。
+/// 两个例外都按键名匹配、与路径无关；别处若再出现同名键，要么改成判路径，要么换个键名。
 pub fn merge_toml(base: &mut toml::Value, over: toml::Value) {
     match (base, over) {
         (toml::Value::Table(b), toml::Value::Table(o)) => {
@@ -1115,14 +904,10 @@ pub fn merge_toml(base: &mut toml::Value, over: toml::Value) {
     }
 }
 
-/// `dictionaries` 的 override 合并：**按 `id` 匹配，且只接受 `enabled` 字段**。
+/// `dictionaries` 的 override 合并：按 `id` 匹配，且只接受 `enabled` 字段。
 ///
-/// 方案文件是词库结构（顺序/path/label/base_order/type…）的唯一权威，override 层仅记录
-/// 用户在设置页翻的开关。这么定的两个原因：
-/// 1. 数组整体替换会让 override 冻结整份词库定义——方案升级后新增的词库透不过来、
-///    改过的 path 仍指向旧文件、顺序也停在写快照那一刻。
-/// 2. 字段白名单顺带**净化历史遗留的整表快照**：老 override 里那些 path/label 副本
-///    会被直接忽略，无需单独写迁移代码。
+/// 方案文件是词库结构的唯一权威，override 层只记用户的开关；整体替换会让方案升级后的新词库、
+/// 新 path 透不过来。字段白名单顺带忽略老 override 里的整表快照。
 ///
 /// override 里 id 在方案文件中找不到（词库已被方案删除）的条目静默丢弃。
 fn merge_dict_overrides(base: &mut toml::Value, over: &toml::Value) {

@@ -143,3 +143,19 @@ Service arbitrated mode to ? (requested ?)  ← 服务端仲裁
 2. **拆除一个长期存在的机制前，先确认它实际影响了什么**，而不是只看它声称做什么——
    但反过来，**若实验失败，先检查实验环境里是否还留着为旧设计打的补丁**。
 3. **让日志能自证身份**（构建指纹、实例 id）比多推理一轮更快收敛。
+
+## 7. 宿主自己写 compartment：`ignore_host_ime_switch`（per-app）
+
+值语义下，宿主写 OPENCLOSE 也一律采纳。少数宿主把它当成「本控件不接受输入」来用，写的却是全局中英态：
+
+- WinForms 的 `ImeMode.Disable`、WPF 的 `InputMethod.IsInputMethodEnabled=False` 内部都是
+  `ImmSetOpenStatus(false)`，经 IMM→TSF 兼容层落到 OPENCLOSE=0。用户点一次按钮就被切成英文，回到文本框
+  未必能恢复（宿主的恢复链只在相邻控件都由它托管时才闭合）。实测：X60_Toolbox（WinForms）、beanfun（WPF）。
+- 反方向：SSMS 在内部焦点切换时把 OPENCLOSE 写成「开」，英文态下被切成中文、第一键被吃。
+
+`compat.toml` 的 `ignore_host_ime_switch`（全局 `input.ignore_host_ime_switch`）忽略这类切换，开与关两个
+方向都拦。全局出厂关：gvim 一类宿主正确依赖值语义保存/恢复状态，全局开启等于回到第 2 节的钉死年代。
+
+系统热键 Ctrl+Space 与宿主写 compartment 走同一条通路、无来源可分；唯一可用的区分是伴随按键——系统热键
+触发时 Ctrl 正被按住，宿主自己写则没有按键（判据同 CapsLock 联动抑制窗）。DLL 在发消息时一并交代
+（`MODE_SWITCH_CTRL_HELD`），Ctrl 按住时放行。

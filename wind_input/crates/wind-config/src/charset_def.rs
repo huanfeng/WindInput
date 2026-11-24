@@ -1,20 +1,16 @@
 //! 字符类定义（`charsets/*.yaml`）的解析与多层合并。
 //!
-//! 设计与全部取舍见 `docs/design/charset-classification.md`。本模块只负责
-//! **把配置读成结构**，不做判定——判定结构的编译在 `wind-candidate` 的
-//! `charset_registry`，由 coordinator 把这里的产物转成 `ClassSpec` 喂过去。
+//! 设计与取舍见 `docs/design/charset-classification.md`。本模块只把配置读成结构，不做判定；
+//! 判定结构在 `wind-candidate` 的 `charset_registry` 编译。
 //!
-//! # ⛔ 不要和 [`crate::code_charset`] 混淆
-//!
-//! 那个是**码元**字符集（`[engine.codetable].input_chars`，回答「这一次按键算不算输入码」，
-//! 值域是 ASCII 按键）。本模块是**字符类**（回答「这个字符属于哪一类」，值域是全 Unicode）。
-//! 两者除了名字都带 charset 之外没有任何关系，故本模块的类型一律叫 `Charset*`。
+//! 别和 [`crate::code_charset`] 混淆：那个是码元字符集（按键算不算输入码），本模块是字符类
+//! （字符属于哪一类），两者无关。
 //!
 //! # 文件格式：meta 头 + 列表体，与 `.dict.yaml` 同构
 //!
 //! ```yaml
 //! ---
-//! key: my_symbols          # 唯一标识；覆盖按它匹配，**不是**按文件名
+//! key: my_symbols          # 唯一标识；覆盖按它匹配，不是按文件名
 //! name: 我不要的符号
 //! order: 5
 //! default: rare
@@ -24,26 +20,16 @@
 //! -☯                       # `-` 前缀 = 从本类移除
 //! ```
 //!
-//! 三层：`data/charsets/`（出厂）→ `data_custom/charsets/`（定制）→ **用户层在 redb**
-//! （`wind_store::charsets`，一个类一条、value 就是本格式的文本）。靠后者覆盖靠前者。
-//! 前两层是目录，**文件名任意**，一个类一个文件，新增类只需丢一个文件进去。
+//! 三层：`data/charsets/`（出厂）→ `data_custom/charsets/`（定制）→ 用户层在 redb
+//! （`wind_store::charsets`，一个类一条，value 是本格式文本），靠后者覆盖靠前者。前两层是目录，
+//! 文件名任意。用户层不用目录，因为程序和人不能写同一个文件：人要改走外部编辑，
+//! [`render_edit_view`] 导出完整视图，改完用 [`diff_against_factory`] 折回稀疏 diff 存库。
 //!
-//! 用户层不是目录，是因为**程序和人不能写同一个文件**：设置页改一个开关要重写文件，
-//! 用户此时在编辑器里开着它，谁后保存谁赢。于是程序只写库；人要改就「外部编辑」——
-//! [`render_edit_view`] 导出一份**完整视图**到临时文件，改完用 [`diff_against_factory`]
-//! 折回稀疏 diff 存库。备份包里的 `charsets/<key>.yaml` 是库文本原样，同一格式。
+//! # 覆盖是「字段级 + 列表增量」，不是整文件替换
 //!
-//! # ★★★ 覆盖是「字段级 + 列表增量」，不是整文件替换
-//!
-//! 这是本模块最容易做错、错了又最难发现的一处。用户想把 emoji 的 `default` 改成
-//! `common`，若按整文件覆盖，他必须把 1427 行字表整份复制进用户目录再改一个字段 ⇒
-//! **Unicode 出新版时出厂字表更新对这个用户永久失效**，而界面上看不出任何异常。
-//!
-//! 本仓已在 `key_actions` 物化、扩展词库 override、`compat.toml` 空壳规则上踩过三次
-//! 同一个坑。共同判据：**稀疏 diff 的合并算子里，「删除」和「顺序」有没有表达**。
-//!
-//! ⇒ 于是：meta 头逐字段合并（未写的字段沿用下层），列表体默认**追加**、`-` 前缀
-//! **删除**、只有显式 `replace: true` 才整份替换。用户层通常只有几行：
+//! 整文件覆盖会让只想改一个字段的用户复制整份字表，从此出厂字表更新对他静默失效。故 meta 头
+//! 逐字段合并，列表体默认追加、`-` 前缀删除，只有显式 `replace: true` 才整份替换。用户层通常
+//! 只有几行：
 //!
 //! ```yaml
 //! ---
@@ -70,11 +56,9 @@ const HEAD_BODY_SEP: &str = "...";
 /// 列表体里表示「移除」的行前缀。
 const REMOVE_PREFIX: char = '-';
 
-/// 常用性。三态由 `Option<Commonality>` 表达：`None` = **不表态**，不参与仲裁。
+/// 常用性。三态由 `Option<Commonality>` 表达：`None` = 不表态，不参与仲裁。
 ///
-/// ★ 「不表态」必须是可表达的：那些内置区块类存在的理由只是给类型列一个标签，
-/// 强迫它们在常用性上表态，等于让用户在一个他从没想过的问题上做选择，而任一选择
-/// 都会改变现有行为。
+/// 「不表态」必须可表达：内置区块类只为给类型列打标签，强迫它们表态会改变现有行为。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Commonality {
@@ -91,15 +75,10 @@ impl Commonality {
     }
 }
 
-/// 类的**作用域**来源。
+/// 类的作用域来源。
 ///
-/// # ⛔ 值域是闭集，不接受用户写的码位段
-///
-/// 作用域回答「这个类管得着谁」，它背后是**判定域**（`is_han ∪ is_pua` 那张表）。
-/// 判定域漏一段的后果是**那批字恒判常用、过滤静默失效**（issue #83 就是差一个码位），
-/// 而显示域（`ranges`）漏一段只是标签显示「其它」。
-///
-/// ⇒ 判定域的完整性必须由代码保证。用户能自定义的只有 `ranges` 与列表。
+/// 值域是闭集，不接受用户写的码位段：作用域背后是判定域（`is_han ∪ is_pua`），漏一段就是
+/// 那批字恒判常用、过滤静默失效，其完整性必须由代码保证。用户能自定义的只有 `ranges` 与列表。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ScopeKind {
@@ -109,16 +88,14 @@ pub enum ScopeKind {
     Pua,
 }
 
-/// 一个字符类的 **meta 头**。
+/// 一个字符类的 meta 头。
 ///
-/// **除 `key` 外所有字段都是 `Option`**，这是字段级合并的前提：`None` = 本层没说话，
-/// 沿用下层。若某字段用非 Option 类型 + `#[serde(default)]`，「用户没写」与「用户写了
-/// 默认值」在合并时无法区分，前者会把下层的值覆盖成默认值。
+/// 除 `key` 外所有字段都是 `Option`，这是字段级合并的前提：`None` = 本层没说话，沿用下层。
+/// 改成非 Option + `#[serde(default)]` 会让「没写」把下层的值覆盖成默认值。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CharsetDef {
-    /// 唯一标识。**覆盖按它匹配，不是按文件名**——所以用户可以把文件叫
-    /// 「我的emoji调整.yaml」，一样能覆盖出厂的 emoji 类。
+    /// 唯一标识。覆盖按它匹配，不是按文件名。
     pub key: String,
 
     /// 显示名。缺省 = `key`（内置类的 key 就是中文名，故通常不必写）。
@@ -129,14 +106,11 @@ pub struct CharsetDef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ranges: Option<Vec<String>>,
 
-    /// 成员来自**外部字表文件**（相对 `schemas/`，走 `resolve_schema_resource` 的整体
-    /// 替换语义）。与内嵌列表并存，两者取并集。
+    /// 成员来自外部字表文件（相对 `schemas/`，走 `resolve_schema_resource` 的整体替换语义），
+    /// 与内嵌列表取并集。
     ///
-    /// ⚠️ **出厂不再用它**：常用字表已搬进 `charsets/common_han.yaml` 的列表体
-    /// （2026-09-04，用户拍板）。留着本字段是给「自己的类要引用一个大字表」那种用法。
-    ///
-    /// ⛔ 别拿它做出厂数据的落点：两个文件就是两个数据源，用户改了其中一个，
-    /// 另一个还在生效——而他看不出哪一半是哪一半。
+    /// 出厂不用它，只给用户自己的类引用大字表。别拿它做出厂数据的落点：两个数据源并存，
+    /// 用户改了一个，另一个仍在生效。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
 
@@ -148,25 +122,22 @@ pub struct CharsetDef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<Commonality>,
 
-    /// **作用域内、成员外**的常用性判定。只在配了 `scope` 时有意义。
+    /// 作用域内、成员外的常用性判定。只在配了 `scope` 时有意义。
     ///
-    /// ★★ 这个字段承载的是「生僻字是补集」那件事：`common_han` 的成员是 8104 字的
-    /// 白名单，而「是汉字、却不在名单里 ⇒ 生僻」用成员关系表达不了——那个字压根不是
-    /// 成员。缺了它，「换一本常用字表」这个需求做不到。
+    /// 它承载「生僻字是补集」：`common_han` 是白名单，「是汉字却不在名单里 ⇒ 生僻」用成员关系
+    /// 表达不了。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outside: Option<Commonality>,
 
-    /// 仲裁顺序，**小的优先**。缺省见 [`DEFAULT_ORDER`]。
-    ///
-    /// ★ 用显式数字而不是文件的扫描顺序：目录扫描序在**稀疏覆盖**里表达不了，而且
-    /// `read_dir` 本身不保证顺序。改成一个数就可以只写这个数。
+    /// 仲裁顺序，小的优先。缺省见 [`DEFAULT_ORDER`]。用显式数字而非扫描顺序：后者在稀疏覆盖里
+    /// 表达不了，`read_dir` 也不保证顺序。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order: Option<i32>,
 
     /// 本类成员不参与词频学习与重排。
     ///
-    /// ⚠️ **并集语义**（任一命中的类为真即真），与 `default` 的仲裁语义不同——见设计
-    /// 文档 §2.2。多免一个字符是安全方向；改成仲裁会让一个本该免的字符不免。
+    /// 并集语义（任一命中的类为真即真），与 `default` 的仲裁语义不同（见设计文档 §2.2）：
+    /// 多免一个字符是安全方向。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_freq: Option<bool>,
 
@@ -176,28 +147,22 @@ pub struct CharsetDef {
 
     /// 关掉这个类。
     ///
-    /// ★ 存在的理由：多层合并只能新增/覆盖，**表达不了删除**。用户想去掉一个内置类，
-    /// 没有这个字段就只能靠偏方（把 ranges 覆盖成空），而那会连带改变类型列的显示。
+    /// 多层合并表达不了删除，去掉一个内置类只能靠它。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
 
-    /// 本层的列表体**整份替换**下层，而不是增量叠加。
+    /// 本层的列表体整份替换下层，而不是增量叠加。
     ///
-    /// ⚠️ 用户层写了它就等于接管整份字表，**从此不再跟随出厂更新**——这正是「我只想
-    /// 改一个字段」与「我要接管整个定义」的分界，必须显式声明，不能靠「用户写了列表」
-    /// 隐式推断。
+    /// 写了它就接管整份字表、不再跟随出厂更新，所以必须显式声明，不能从「写了列表」推断。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replace: Option<bool>,
 }
 
-/// `order` 缺省值。取中间值而不是 0，让用户既能插到内置类前面也能插到后面，
-/// 不必给所有内置类重新编号。
+/// `order` 缺省值。取中间值，让用户既能插到内置类前面也能插到后面。
 ///
-/// ⚠️ 「插到前面」在**汉字**上不成立：出厂的 `common_han` 是 10 且对整个汉字域表态
-/// （`scope: han` + `outside: rare`），缺省 100 的类对汉字的 `default` 永远轮不到。
-/// 新建类因此由 `handle_charset::TEMPLATE_ORDER` 显式给一个更小的值；这个常量只管
-/// 「用户层压根没写 order」的老数据，⛔ 不要为上面那件事来改它——改了会让已有自建类的
-/// 仲裁结果静默翻转。
+/// 汉字上缺省值轮不到：出厂 `common_han` 是 10 且对整个汉字域表态，故新建类由
+/// `handle_charset::TEMPLATE_ORDER` 显式给更小的值。别为此改这个常量，否则已有自建类的
+/// 仲裁结果会静默翻转。
 pub const DEFAULT_ORDER: i32 = 100;
 
 impl CharsetDef {
@@ -247,47 +212,21 @@ pub struct MergedClass {
     pub def: CharsetDef,
     /// 合并后的成员（内嵌列表部分；`file` 指向的外部字表由消费方另行加载）。
     pub members: BTreeSet<String>,
-    /// 成员的**配置顺序**（首次出现的先后），与 [`Self::members`] 同集合。
-    ///
-    /// ⚠️ 顺序有意义：设置页按它列全表并分页。`BTreeSet` 给的是**码位序**——拿它去列
-    /// 常用字表，「一级 3500 → 二级 3000 → 三级」的分级顺序就没了，用户翻到第 2 页
-    /// 看到的东西也会随字表内容变动而整体漂移。
+    /// 成员的配置顺序（首次出现的先后），与 [`Self::members`] 同集合。设置页按它列全表并分页；
+    /// `BTreeSet` 是码位序，会丢掉字表的分级顺序。
     pub member_order: Vec<String>,
-    /// 被移除的字素簇。
-    ///
-    /// ★ 合并时不能直接从 `members` 里扣掉就算完：`file` 指向的外部字表是在更后面
-    /// 加载的，用户写的 `-☯` 必须能作用到它上面。故单独留一份，交给判定层当排除集。
+    /// 被移除的字素簇。单独留一份交给判定层当排除集：`file` 外部字表在更后面加载，
+    /// 移除也要作用到它。
     pub removed: BTreeSet<String>,
 }
 
-/// 解析一个 `.yaml` 文件的内容。
+/// 把列表体的一行拆成 `(要不要删, 成员)` 序列。推荐一行一个成员，多码位簇整体算一个。
 ///
-/// 头体以 `...` 分隔；没有分隔符则**整份都是 meta 头**（只调字段、不动列表的覆盖文件
-/// 就长这样，是用户层最常见的形态）。`---` 起始行可有可无，与 `.dict.yaml` 惯例一致。
-/// 把列表体的一行拆成 `(要不要删, 成员)` 序列。
+/// 一行多个字时按空白分词 → 字素簇两级切开（调用方 warn），不能静默当成一个成员，否则它
+/// 永远匹配不上。切分口径须与 [`wind_candidate::split_markable_clusters`] 一致（`graphemes(true)`）。
+/// 空白还用来隔开相邻区域指示符：`🇨🇳` 连写是一面旗，两个字母要写 `🇨 🇳`。
 ///
-/// # 一行一个成员，是**推荐也是自带文件的**写法
-///
-/// | 写法 | 得到 |
-/// |---|---|
-/// | `我` | 一个成员 |
-/// | `⚽️` `👨‍👩‍👧` `1️⃣` | 各**一个**成员（多码位簇整体，不会被拆散） |
-///
-/// # 一行写了多个字怎么办：切开，并 warn
-///
-/// ⚠️ **不能静默当成一个成员**——那样它永远匹配不上任何候选，用户看到的是「我明明加了
-/// 这些字，一个都没生效」，而文件、日志、界面三处都不报错。旧的 `common_chars.txt`
-/// 读端就是逐 `char` 收的，用户照那个习惯写完全可能。
-///
-/// ⇒ 按**空白分词 → 字素簇**两级切开，并由调用方 warn 一句。切分口径与判定层的
-/// [`wind_candidate::split_markable_clusters`] 一致（都是 `graphemes(true)`），
-/// 不一致的后果是配置里写的成员匹配不上候选里的簇，而两边各自看都对。
-///
-/// ⚠️ 空白分隔在这里还有一个不可替代的用途：相邻的区域指示符**会合成国旗**，`🇨🇳`
-/// 连写是一个成员（那面旗）而不是两个字母。要表达两个字母只能写 `🇨 🇳`——字素簇切分
-/// 解决不了「两个成员恰好能拼成第三个」。
-///
-/// `-` 前缀作用于**整个词**：`-的一是` 删三个。
+/// `-` 前缀作用于整个词：`-的一是` 删三个。
 fn split_members(line: &str) -> impl Iterator<Item = (bool, String)> + '_ {
     use unicode_segmentation::UnicodeSegmentation;
     line.split_whitespace().flat_map(|word| {
@@ -299,26 +238,18 @@ fn split_members(line: &str) -> impl Iterator<Item = (bool, String)> + '_ {
     })
 }
 
-/// 解析一份文件，可能含**多个**类。
-///
-/// # 两种形态，按 meta 头的第一个非空字符分辨
+/// 解析一份文件，可能含多个类。按 meta 头第一个非注释非空行分辨形态：
 ///
 /// | 形态 | meta 头 | 列表体 | 用途 |
 /// |---|---|---|---|
-/// | 单类 | 一个映射（`key: xxx`） | ✅ 支持 | 带成员名单的类（emoji、常用汉字） |
-/// | 多类 | 一个**数组**（`- key: xxx`） | ⛔ 不支持 | 一批纯区间类（50 个 Unicode 区块） |
+/// | 单类 | 一个映射（`key: xxx`） | 支持 | 带成员名单的类（emoji、常用汉字） |
+/// | 多类 | 一个数组（`- key: xxx`） | 不支持 | 一批纯区间类（Unicode 区块） |
 ///
-/// ⚠️ 多类文件不带列表体：一份列表归哪个类说不清。要给其中某个类加成员，另起一个同
-/// `key` 的单类文件即可（覆盖按 key 匹配，见设计文档 §3.5）。
-///
-/// ★ 存在的理由：50 个内置区块若一类一文件，`charsets/` 目录会被淹掉、用户看不见真正
-/// 该配的那两三个；而全塞进代码里又等于「这套东西唯独这部分不可配置」——那正是本次
-/// 改造要消灭的形态。
+/// 多类文件不带列表体（归哪个类说不清）；要给其中某类加成员，另起同 `key` 的单类文件
+/// （见设计文档 §3.5）。多类形态让几十个内置区块既可配置又不淹没 `charsets/` 目录。
 pub fn parse_docs(text: &str) -> anyhow::Result<Vec<CharsetDoc>> {
     let (head, body) = split_head_body(text);
-    // ⚠️ 判据要**跳过注释与空行**：出厂的多类文件开头是一段说明注释，按「第一个字符」
-    // 判会把它当成单类文件，于是整份解析失败、52 个类一个都不进 registry——而日志里
-    // 只有一行「解析失败，已跳过」，看不出是判错了形态。
+    // 判据要跳过注释与空行：出厂多类文件以说明注释开头，否则会被误判成单类而整份解析失败。
     let first = head
         .lines()
         .map(str::trim)
@@ -348,12 +279,8 @@ pub fn parse_docs(text: &str) -> anyhow::Result<Vec<CharsetDoc>> {
 
 /// 按 `...` 把文件切成 meta 头与列表体（`---` 行跳过）。
 fn split_head_body(text: &str) -> (String, String) {
-    // 行尾规整放在这里而不是各个 pub 入口：`parse_doc` / `parse_docs` 都经过它，
-    // 而它们各有多个调用方（用户导入字符类、备份恢复、方案装载）。在共同下游做
-    // 一次，全链路只扫一遍。
-    //
-    // 不归一化的话孤立 \r 会让整份文件算成一行：找不到 `...` 分隔行 ⇒ 整份都当 head
-    // ⇒ 一个类都解析不出来，而日志里只有一行「解析失败，已跳过」。
+    // 行尾规整放在两个 pub 入口的共同下游，全链路只做一次。不归一化的话孤立 \r 会让整份
+    // 文件算成一行、找不到 `...` 分隔，一个类都解析不出来。
     let normalized = wind_utils::text::normalize_input(text);
     let text = normalized.as_ref();
     let (mut head, mut body) = (String::new(), String::new());
@@ -377,6 +304,10 @@ fn split_head_body(text: &str) -> (String, String) {
     (head, body)
 }
 
+/// 解析一个单类 `.yaml` 文件的内容。
+///
+/// 头体以 `...` 分隔；没有分隔符则整份都是 meta 头（只调字段的覆盖文件，用户层最常见）。
+/// `---` 起始行可有可无，与 `.dict.yaml` 惯例一致。
 pub fn parse_doc(text: &str) -> anyhow::Result<CharsetDoc> {
     let (head, body_text) = split_head_body(text);
     let body: Vec<&str> = body_text.lines().collect();
@@ -393,9 +324,7 @@ pub fn parse_doc(text: &str) -> anyhow::Result<CharsetDoc> {
             continue;
         }
         let items: Vec<(bool, String)> = split_members(t).collect();
-        // ⚠️ 一行多个成员：解析得了，但提醒一句。自带文件一行一个，用户照旧
-        // `common_chars.txt` 的习惯连写完全可能——而静默当成一个成员的话，
-        // 那一行永远匹配不上任何候选，三处都不报错。
+        // 一行多个成员：已切开，但提醒一句（见 `split_members`）。
         if items.len() > 1 {
             warn!(
                 "字符类「{}」列表体第 {} 行有 {} 个成员：{}。一行写一个更好读，                 也与其余字表一致；本行已按字素簇切开",
@@ -422,11 +351,8 @@ pub fn parse_doc(text: &str) -> anyhow::Result<CharsetDoc> {
 
 /// 扫描一层目录，返回该层的全部文档。
 ///
-/// ⚠️ **按文件名排序后处理**：`read_dir` 不保证顺序，不排序的话同层内两个文件涉及
-/// 同一个 key 时行为随机、极难复现。
-///
-/// 单个文件解析失败只 warn 并跳过该文件——一个写坏的文件不该让整层配置失效
-/// （同 `compat.toml` 的容错纪律）。
+/// 按文件名排序后处理：`read_dir` 不保证顺序，同层两个文件撞 key 时结果会随机。
+/// 单个文件解析失败只 warn 并跳过，不让整层失效。
 pub fn load_layer(dir: &Path) -> Vec<CharsetDoc> {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -451,8 +377,7 @@ pub fn load_layer(dir: &Path) -> Vec<CharsetDoc> {
         match parse_docs(&text) {
             Ok(docs) => {
                 for doc in docs {
-                    // ⚠️ 同层内 key 撞车必须报出来：静默取其一会让用户改了一个文件却
-                    // 看不到效果，而两个文件看上去都是对的。
+                    // 同层 key 撞车要报出来，否则用户改了一个文件却看不到效果。
                     if let Some(prev) = seen.get(&doc.def.key) {
                         warn!(
                             "字符类 key「{}」在同一层重复：{} 与 {}，两者将按文件名序叠加",
@@ -474,9 +399,8 @@ pub fn load_layer(dir: &Path) -> Vec<CharsetDoc> {
 
 /// 出厂两层（`data/charsets` → `data_custom/charsets`）的合并结果。
 ///
-/// ★ 本模块里「出厂」恒指**这两层之和**：定制层是发行方替用户做的决定，对用户而言
-/// 与出厂无异。编辑视图与 diff 都以它为基准——把定制层算进「用户层」的话，diff 会把
-/// 定制方加的成员全记成用户新增，用户「恢复默认」就把定制层一并丢了。
+/// 本模块里「出厂」恒指这两层之和，编辑视图与 diff 都以它为基准；把定制层算进用户层，
+/// 「恢复默认」会把定制层一并丢掉。
 pub fn load_factory(
     data_dir: Option<&Path>,
     custom_dir: Option<&Path>,
@@ -505,8 +429,7 @@ pub fn load_layered(
 
 /// 把库里的 `(key, 文本)` 解析成 docs。坏的一条 warn 并跳过，不影响其余。
 ///
-/// ⚠️ 库键与文本里的 `key` 必须一致，否则跳过：不一致只可能是手工改库或程序 bug，
-/// 按哪一个算都是猜——而猜错的表现是「改了 A 类，B 类变了」。
+/// 库键与文本里的 `key` 不一致则跳过：只可能是手工改库或程序 bug，按哪个算都是猜。
 pub fn parse_stored_docs<'a>(
     rows: impl IntoIterator<Item = (&'a str, &'a str)>,
 ) -> Vec<CharsetDoc> {
@@ -561,14 +484,12 @@ pub fn apply_doc(merged: &mut BTreeMap<String, MergedClass>, doc: CharsetDoc) {
 /// 一个码位段（闭区间）。
 pub type CodeRange = (u32, u32);
 
-/// 存进库 / 进备份包的文本头注释。
-///
-/// 备份包里用户会直接看到这份文本，所以要把「只含改过的字段」这件事说出来——否则他
-/// 会奇怪为什么 emoji 类的备份里一个 emoji 都没有。
-/// 说明行（设计 `user-dict-libraries-and-external-edit.md` §5；其余数据文件的文案在
-/// `wind_userdata::text::banner`）。
+/// 存进库 / 进备份包的文本首行说明（设计 `user-dict-libraries-and-external-edit.md` §5；
+/// 其余数据文件的文案在 `wind_userdata::text::banner`）。
 pub const STORED_DOC_BANNER: &str = "# 清风输入法 · 字符类的个人调整。可手动编辑。";
 
+/// 文本头注释。用户在备份包里会直接看到，要说明「只含改过的字段」，否则会奇怪 emoji 类的
+/// 备份里为什么没有 emoji。
 const STORED_DOC_HEADER: &str = "\
 # 只含你改过的字段与增删的成员；没写的沿用下层（定制层 → 出厂层）。
 # 列表体在 `...` 之后：裸行 = 加进本类，`-` 开头 = 从本类移除。
@@ -576,9 +497,7 @@ const STORED_DOC_HEADER: &str = "\
 
 /// 把一份用户层调整渲染成 yaml 文本（存库 / 进备份包）。
 ///
-/// ⚠️ 只写 `Some` 的字段（`CharsetDef` 全字段 `skip_serializing_if`）。写全量会把当前
-/// 的出厂值**固化**进用户层——出厂改了 `order` 或补了 `ranges`，这个用户永远拿不到。
-/// 同一个坑见设计文档 §4.1。
+/// 只写 `Some` 的字段：写全量会把当前出厂值固化进用户层（见设计文档 §4.1）。
 pub fn render_doc(doc: &CharsetDoc) -> anyhow::Result<String> {
     anyhow::ensure!(
         is_valid_key(&doc.def.key),
@@ -610,19 +529,10 @@ pub fn render_doc(doc: &CharsetDoc) -> anyhow::Result<String> {
 
 /// key 能不能当标识用（也是备份包里的文件名）。
 ///
-/// # ⚠️ 为什么要校验而不是「安全化」
+/// 校验而不是安全化：把非法字符换成 `_` 会让两个 key 落到同一个文件上、后写的静默覆盖先写的。
 ///
-/// 安全化（把非法字符换成 `_`）会让两个不同的 key 落到同一个文件上，后写的**静默**覆盖
-/// 先写的——用户看到的是「改了 A 类，B 类的设置没了」。校验则在入口就拒绝，代价是用户
-/// 得换个名字，而那正是他能理解并处理的。
-///
-/// ⛔ 明确拒绝的：路径分隔符（`/` 与 `\` **都**拦）、`.`（含 `..`）、`:`（Windows 的
-/// `C:name` 数据流语法，见仓内防穿越守卫的同款约定）、控制字符、首尾空白。
-///
-/// ⛔ 不要用 `std::path::is_separator`：它问的是「**当前运行平台**怎么切路径」，Linux 下
-/// 只认 `/`，于是同一个 `a\b` 在 Windows 上被拒、在 Linux 上放行——守卫按宿主平台弱一档。
-/// 这里要问的是「这个 key 将来会被写成**哪些平台**的文件名」：备份包跨平台流转、协调器
-/// 还要上 Linux/Android，判据必须与运行平台无关，两个分隔符一律拦。
+/// 拒绝路径分隔符（`/` 与 `\` 都拦）、`.`、`:`（Windows `C:name` 数据流语法）、控制字符、首尾
+/// 空白。别用 `std::path::is_separator`：它随运行平台变，而备份包跨平台流转，判据须与平台无关。
 pub fn is_valid_key(key: &str) -> bool {
     if key.is_empty() || key.len() > 64 || key.trim() != key {
         return false;
@@ -646,10 +556,8 @@ pub fn is_valid_key(key: &str) -> bool {
     })
 }
 
-/// 这份调整是不是**空壳**（除 `key` 外什么都没说）。
-///
-/// ★ 空壳必须从库里删掉而不是留一条只有 key 的记录：留着的话，「恢复默认」之后列表里
-/// 仍标着「已调整」，下次读还会走一遍合并——`compat.toml` 的 `update_user_raw` 是同一条。
+/// 这份调整是不是空壳（除 `key` 外什么都没说）。空壳须从库里删掉，否则「恢复默认」后
+/// 列表仍标着「已调整」。
 pub fn is_empty_override(doc: &CharsetDoc) -> bool {
     let d = &doc.def;
     doc.added.is_empty()
@@ -669,12 +577,8 @@ pub fn is_empty_override(doc: &CharsetDoc) -> bool {
 
 /// 解析一条码位段：`U+4E00-U+9FFF`（闭区间）或 `U+4E00`（单点）。
 ///
-/// # 为什么用 `U+XXXX` 而不是字面字符或 `\u` 转义
-///
-/// 1. YAML/TOML 的双引号串里 `\u` 必须跟满 4 位十六进制，`\u00-\uFF` 直接解析报错；
-/// 2. `\u` 转义长度定死 4 位（或 8 位 `\U`），写不了 `U+1F600` 这种 5 位码位；
-/// 3. `U+XXXX` 是 Unicode 自己的标准写法（UAX #42），用户在任何 Unicode 资料里见到的
-///    都是这个形态。
+/// 用 `U+XXXX` 而不是 `\u` 转义：后者长度定死 4 位、写不满就解析报错，且这是 Unicode 资料
+/// 里的标准写法。
 pub fn parse_range(s: &str) -> Result<CodeRange, String> {
     let t = s.trim();
     let (lo_s, hi_s) = match t.split_once('-') {
@@ -700,19 +604,14 @@ fn parse_code_point(s: &str) -> Result<u32, String> {
         return Err(format!("码位长度不合法（应为 1~6 位十六进制）：{t}"));
     }
     let v = u32::from_str_radix(hex, 16).map_err(|_| format!("不是十六进制码位：{t}"))?;
-    // 上界按 Unicode 码位空间判，而不是 `char::from_u32`：代理区 D800-DFFF 不是合法
-    // `char`，但作为**区间端点**出现在配置里是合理的（写 `U+0000-U+FFFF` 圈整个 BMP
-    // 没有错）。逐字符判定时代理区本就不可能命中。
+    // 上界按码位空间判而不是 `char::from_u32`：代理区作为区间端点是合理的（`U+0000-U+FFFF`）。
     if v > 0x10FFFF {
         return Err(format!("码位超出 Unicode 上界 10FFFF：{t}"));
     }
     Ok(v)
 }
 
-/// 解析一组码位段，**逐条容错**：返回解析成功的段，失败的逐条 warn。
-///
-/// ⛔ 不得因为一条写错就丢掉整个类（`.ok().unwrap_or(空)` = 丢数据）：那会让用户的
-/// 一个笔误静默地把整类字符从判定里抹掉，而配置文件看上去完全正常。
+/// 解析一组码位段，逐条容错：返回成功的段，失败的逐条 warn。不得因一条写错丢掉整个类。
 pub fn parse_ranges(key: &str, raw: &[String]) -> Vec<CodeRange> {
     let mut out = Vec::with_capacity(raw.len());
     for r in raw {

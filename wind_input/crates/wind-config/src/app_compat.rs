@@ -1,17 +1,15 @@
 //! 应用兼容性规则
 //!
-//! 与 Go 版本 `wind_input/pkg/config/compat.go` 对齐：按进程名为特定应用提供候选窗
-//! 定位 / 光标获取等兼容修正。文件格式为 TOML 的 `[[apps]]` 数组表，加载顺序：
+//! 按进程名为特定应用提供候选窗定位 / 光标获取等兼容修正。文件格式为 TOML 的 `[[apps]]`
+//! 数组表，加载顺序：
 //! 系统预置（`{data_dir}/compat.toml`）→ 定制版（`data_custom/compat.toml`）→
 //! 用户覆盖（`{user_config_dir}/compat.toml`）。
 //!
-//! **整体原则：每一层都是相对下一层的差异，逐字段叠加**（同一条规则内：写了的字段覆盖、没写的继承、
-//! `unset` 取消、`disabled` 禁用）。没有「同名整条替换」，也没有哪个字段享有特殊的继承待遇——
-//! 叠加引擎与全部语义见 [`crate::compat_overlay`]，本模块负责把叠加结果变成运行时结构体。
-//!
-//! `[[apps]]` 可带窗口条件（`class` 顶层窗口类名 / `title` 顶层窗口标题，`*` `?` 通配）。
-//! 跨层叠完之后，一个焦点窗口可能命中多条规则：按具体程度**分级合成**（[`AppCompat::resolve`]），
-//! 设计见 `docs/design/compat-window-match.md`。
+//! 每一层都是相对下一层的差异，逐字段叠加（写了的覆盖、没写的继承、`unset` 取消、`disabled`
+//! 禁用），没有哪个字段有特殊待遇。叠加引擎见 [`crate::compat_overlay`]，本模块把叠加结果变成
+//! 运行时结构体。`[[apps]]` 可带窗口条件，多条命中时按具体程度分级合成（[`AppCompat::resolve`]，
+//! 见 `docs/design/compat-window-match.md`）。宿主行为背景见
+//! `docs/architecture/app-compat-host-notes.md`。
 
 pub use crate::compat_overlay::{ANY_PROCESS, RuleId, RuleKey, wildcard_match};
 use crate::compat_overlay::{
@@ -29,9 +27,7 @@ pub const COMPAT_FILE_NAME: &str = "compat.toml";
 
 /// 写回用户层 compat.toml 时的固定文件头。
 ///
-/// 用户层由右键菜单自动管理，每次切换都会**整份重写**（TOML 序列化不保留注释），
-/// 故必须在文件里就把这件事讲明白，否则用户手写的说明被吞掉时无从得知原因。
-/// 完整的字段文档留在系统层 `data/compat.toml`——那份不会被程序改写。
+/// 用户层每次改动都整份重写（不保留注释），须在文件里讲明。字段文档在系统层 `data/compat.toml`。
 pub(crate) const USER_COMPAT_HEADER: &str = "\
 # 用户层应用兼容规则（相对系统层 data/compat.toml 的差异）
 #
@@ -73,9 +69,8 @@ pub fn lock_user_compat() -> std::sync::MutexGuard<'static, ()> {
 
 /// 落盘：唯一临时名 → 写满 → `fsync` → rename。
 ///
-/// 只 rename 不 `fsync` 的话，断电后可能留下 0 长度或半截的正式文件；而运行时对语法错的
-/// compat.toml 是**整份静默跳过**，下一次菜单操作还会按空集重写，等于用户层全丢。
-/// 临时名带 pid 与序号，两个写入方即便没经过 [`lock_user_compat`] 也不会写同一个临时文件。
+/// 不 `fsync` 的话断电后可能留下半截文件，而语法错的 compat.toml 会整份跳过、下次菜单操作
+/// 按空集重写，等于用户层全丢。临时名带 pid 与序号，没经过 [`lock_user_compat`] 也不撞名。
 pub fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -103,29 +98,15 @@ pub fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
 
 /// 候选窗首显策略：新组合的候选窗**何时**显示。
 ///
-/// 背景：宿主插入组合内容后要 reflow 才能给出正确的光标坐标，而 reflow 需要时间
-/// （实测首帧 GetTextExt 到稳定值要 85~95ms）。这三档是「快」与「准」之间的取舍。
+/// 宿主插入组合内容后要 reflow 才给得出正确坐标，三档是「快」与「准」之间的取舍。
+/// 依据见 `docs/redesign/candidate-window-positioning.md` 第 6 层。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FirstShowMode {
-    /// 等宿主 reflow 后的权威坐标才显示。最准，代价是 85~95ms 首显延迟，
-    /// 快速连打时候选窗只来得及显示几毫秒，观感「迟钝」。
-    ///
-    /// 2026-08-03 起不再是默认档。它的「准」有很大一部分是**碰巧**的：Excel 那类
-    /// 慢宿主上它靠 `caret_pending` 的 600ms 延长兜住，宿主再慢 50ms 一样会错位
-    /// （实测 Excel 需要 808ms 的那次它就没兜住）。真正解决错位的是首帧信任门，
-    /// 而那条判据 `fast` 同样享有。
+    /// 等宿主 reflow 后的权威坐标才显示。最准，代价是可感知的首显延迟。
     Wait,
-    /// 仍等坐标，但等到「可信」即放行：DLL 在首帧 reflow 期间连发几条试探坐标，
-    /// 取第一条「与上一轮权威坐标不同」的采用（宿主未 reflow 时返回的正是上一轮那个
-    /// 位置，一旦变化即说明新位置已就绪）。连续快速输入时更进一步——直接采信首条。
-    /// 实测 EverEdit ~3ms、WPS ~11ms 出候选窗。
-    ///
-    /// **默认档**（2026-08-03 起）。此前不敢作默认，是因为它在焦点切换/鼠标移动光标
-    /// 之后的首帧会拿一份属于别处的旧坐标去定位；首帧信任门补上这个洞之后
-    /// （`caret_cache_verified`，见 `docs/redesign/candidate-window-positioning.md`
-    /// 第 6 层），它在「坐标不可信」的那一刻会自动退回去等真值，其余时候保持 25ms
-    /// 短兜底。实测常规连打首帧中位 7ms，焦点后首帧中位 105ms 且位置正确。
+    /// 默认档。等到坐标「可信」即放行：采用首条与上一轮权威坐标不同的试探坐标，连打时直接采信
+    /// 首条。坐标不可信时（首帧信任门 `caret_cache_verified`）自动退回等真值。
     #[default]
     Fast,
     /// 完全不等，首帧直接沿用上一次的坐标。最快，但只要光标位置变动过
@@ -136,12 +117,8 @@ pub enum FirstShowMode {
 impl FirstShowMode {
     /// 配置串 → 枚举。无法识别返回 `None`。
     ///
-    /// ⚠ 2026-09-02 由「回落默认档」改为返回 `Option`：`first_show_mode` 现在有了
-    /// 「跟随全局」这一档（per-app 规则的 `None`），而全局默认值本身也变成了可配置的
-    /// `ui.candidate.first_show_mode`。回落动作因此只应发生在**全局层那一处**
-    /// （`Self::from_config(s).unwrap_or_default()`），per-app 层认不出的值退化为
-    /// 「没配」＝跟随全局——仍然满足「写错了和没写行为一致」，且不会把一个拼错的值
-    /// 悄悄固化成对该应用的显式覆盖。
+    /// 回落默认档只发生在全局层（`Self::from_config(s).unwrap_or_default()`）；per-app 层认不出的
+    /// 值退化为「没配」＝跟随全局，不把拼错的值固化成显式覆盖。
     pub fn from_config(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "wait" => Some(Self::Wait),
@@ -160,30 +137,16 @@ impl FirstShowMode {
     }
 }
 
-/// 上屏文本里的换行**用什么字符表达**。
+/// 上屏文本里的换行用什么字符表达。
 ///
-/// # 为什么必须按应用配，而不能定一个全局正确值
-///
-/// 「换行」在不同的文本模型里根本不是同一个东西：
-///
-/// · **富文本模型**（Word / WPS / RichEdit / TOM）——文档存储里的段落边界**就是** CR。
-///   LF 在这个模型里不是「另一种换行写法」，而是一个**不构成换行**的控制字符。
-///   2026-08-23 真机现场：同一段带换行的文本，记事本与 WPS 正常分段，Word 里每个换行
-///   处渲染成一段类似 Tab 的空白（见 7c9da37a）。⇒ 对这类宿主转 CR 不是偏好，而是
-///   唯一能成为换行的形式，「保留原样」在它们身上根本不成立。
-///
-/// · **字节即存储的宿主**（VS Code / 终端 / 浏览器 textarea / Edit 控件）——写进去什么
-///   就存什么。这里做任何转换都是在**改写用户的数据**：t112 的「正则直通后行尾从 `\n`
-///   变成 `\r`」正是这么来的，而且这种失败是静默的，用户往往很久之后才发现。
-///
-/// ⇒ 没有哪个值对所有宿主都对，故本项按应用配置（见 [`CommitNewlineRule`]），出厂默认
-///   [`Keep`](Self::Keep)：**不知道宿主要什么的时候，不动用户的数据**。漏配一个富文本
-///   宿主的代价是用户立刻看得见的显示异常（能反馈、加名单即可），漏配的反方向则是静默
-///   改写行尾——可见的失败优于静默的失败。
+/// 富文本宿主（Word 等）里只有 CR 构成换行，字节即存储的宿主里任何转换都是改写用户数据，
+/// 没有全局正确值，故按应用配置（见 [`CommitNewlineRule`]）。出厂 [`Keep`](Self::Keep)：
+/// 漏配的代价是看得见的显示异常，好过静默改写行尾。见
+/// `docs/architecture/app-compat-host-notes.md` 第一节。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NewlineStyle {
-    /// 原样透传，一个字符都不改。**出厂默认**。
+    /// 原样透传，一个字符都不改。出厂默认。
     #[default]
     Keep,
     /// 一律折成单个 CR（`\r`）——Windows 富文本模型的段落分隔符。
@@ -197,8 +160,7 @@ pub enum NewlineStyle {
 impl NewlineStyle {
     /// 按本档位改写 `text` 里的换行。
     ///
-    /// 三种行尾都认（`\r\n` / 孤立 `\n` / 孤立 `\r`），且 **`\r\n` 算一个换行**——
-    /// 逐字符转会把一个换行变成两个（同 `key.type` 的 `split_type_text`）。
+    /// 三种行尾都认（`\r\n` / 孤立 `\n` / 孤立 `\r`），`\r\n` 算一个换行。
     ///
     /// [`Keep`](Self::Keep) 与「文本里压根没有换行」两种情况零拷贝返回。
     pub fn apply<'a>(self, text: &'a str) -> Cow<'a, str> {
@@ -294,28 +256,18 @@ impl InitialMode {
     }
 }
 
-/// 宿主组合区里的**占位字符**（GH#175）。
+/// 宿主组合区里的占位字符。
 ///
-/// 输入法有会话、却没有可见编码要放进宿主时（非嵌入模式、联想态、直达热键进入的模式等），
-/// 组合区里要挂一个占位字符：TSF 不接受空组合，且 WPS 一类宿主对零长度 range 回的是
-/// 退化矩形（height=0），候选窗失去坐标来源。历来用一个空格。
+/// 有会话却没有可见编码时组合区要挂一个占位（TSF 不接受空组合）。空格会被浏览器受控输入框
+/// `trim()` 掉而终止组合，零宽字符又让靠「出现了内容」进编辑态的宿主失灵，故按应用配置，
+/// 各档适用宿主见 `docs/architecture/app-compat-host-notes.md` 第二节。
 ///
-/// 浏览器里的**受控输入框**会把组合中的 value 拿去 `trim()` 再回写（番茄小说搜索框：React 17
-/// `onChange: e => setV(e.target.value.trim())`）：空格一被削掉 state ≠ DOM，React 回写
-/// value，浏览器随即终止组合，一个字都上不了屏。ZWSP（U+200B）不被 `trim()` / `\s` 当空白，
-/// 能躲开这一回写；但它在非浏览器宿主里的光标度量没有实测过，故**按应用配置**，出厂只给
-/// 浏览器开。
-///
-/// ZWSP 也有宿主不吃：钉钉在线表格选中单元格直接打字时，靠「出现了内容」才进入编辑态，
-/// 零宽字符被当成没有内容，组合停在左上角的代理输入框里、候选窗定位错——那里要空格。
-/// 两头都要（非空白 + 有宽度）时用第三档 `blank`（U+2800 盲文空白）。
-///
-/// 消费：协调器按焦点应用解析后直接发出该字符（[`Self::as_str`]）；DLL 的空文本兜底占位
-/// 经 `CONFIG_KEY_COMPOSITION_PLACEHOLDER` 按客户端 pid 下发。DLL 三种字符都认作占位。
+/// 消费：协调器按焦点应用解析后直接发出（[`Self::as_str`]）；DLL 的兜底占位经
+/// `CONFIG_KEY_COMPOSITION_PLACEHOLDER` 按客户端 pid 下发。DLL 三种字符都认作占位。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlaceholderChar {
-    /// U+0020。**不写 = 这一档**（历史行为）。
+    /// U+0020。不写 = 这一档。
     #[default]
     Space,
     /// U+200B ZERO WIDTH SPACE。
@@ -480,15 +432,14 @@ where
 
 /// 含换行的上屏文本怎么交给宿主。
 ///
-/// 有的宿主（新版微信）收到 TSF 上屏的多行文本时，会把组合区的编码显示残留在界面上，
-/// 换哪种 TSF 写法都一样；改为结束组合后写剪贴板、注入 Ctrl+V 粘贴即无残留。粘贴会覆盖
-/// 剪贴板且不恢复，Ctrl+V 不是粘贴的宿主（终端等）不能开，故**按应用配置**。
+/// 有的宿主（新版微信）对 TSF 多行上屏会残留编码显示，改走剪贴板 + Ctrl+V 即无残留。粘贴会
+/// 覆盖剪贴板且 Ctrl+V 未必是粘贴，故按应用配置。
 ///
 /// 消费：DLL 的上屏出口，经 `CONFIG_KEY_MULTILINE_COMMIT` 按客户端 pid 下发。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MultilineCommit {
-    /// TSF 上屏（历史行为）。**不写 = 这一档**。
+    /// TSF 上屏。不写 = 这一档。
     #[default]
     Commit,
     /// 结束组合后经剪贴板 + Ctrl+V 粘贴。只影响含换行的上屏。
@@ -522,15 +473,14 @@ where
 
 /// 应用独立的候选窗定位方式。
 ///
-/// 与全局 `ui.candidate.position_mode` 同语义，但**按应用覆盖**：少数宿主报的 caret
-/// 坐标就是不准（坐标系错、多进程窗口偏移、自绘控件根本不报），全局改成固定又会连累
-/// 其余一切正常的应用。
+/// 与全局 `ui.candidate.position_mode` 同语义，按应用覆盖：少数宿主报的 caret 坐标就是不准，
+/// 全局改成固定又会连累其余应用。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CandidatePositionMode {
-    /// 跟随光标（与全局默认同义）。显式写它 = 「这个应用**不要**跟随全局的 fixed」。
+    /// 跟随光标（与全局默认同义）。显式写它 = 「这个应用不要跟随全局的 fixed」。
     FollowCaret,
-    /// 固定在 `candidate_x/candidate_y`（该应用**自己的**一份坐标）。
+    /// 固定在 `candidate_x/candidate_y`（该应用自己的一份坐标）。
     Fixed,
 }
 
@@ -558,7 +508,7 @@ impl CandidatePositionMode {
 }
 
 /// 容错反序列化 `Option<CandidatePositionMode>`：无法识别的值退化为 `None`（＝跟随全局）。
-/// ⚠ 不可改用 derive，理由见 [`de_initial_mode`]（一个字段拼错会整份 compat.toml 失效）。
+/// 不可改用 derive，理由见 [`de_initial_mode`]。
 fn de_candidate_position_mode<'de, D>(d: D) -> Result<Option<CandidatePositionMode>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -570,7 +520,7 @@ where
     )
 }
 
-/// 状态气泡的锚点（C2-33 / GH#148）：`screen_*` = 前台窗口所在显示器的**工作区**，
+/// 状态气泡的锚点：`screen_*` = 前台窗口所在显示器的工作区，
 /// `window_*` = 前台窗口的可见边框。几何换算在 UI 层（wind-ui 的 `anchor_origin`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusAnchor {
@@ -706,9 +656,8 @@ impl StatusFallback {
     }
 }
 
-// 两个带载荷的枚举在 compat.toml 里都是**扁平字符串**（`"screen_center"`），derive 表达不了，
-// 故手写：序列化走 `as_config`，反序列化走下面的容错函数（不实现 `Deserialize`，免得有人
-// 绕过容错直接 derive 进别的结构）。
+// 两个带载荷的枚举在 compat.toml 里是扁平字符串，derive 表达不了：序列化走 `as_config`，
+// 反序列化走下面的容错函数（不实现 `Deserialize`，免得被绕过容错直接 derive 进别的结构）。
 impl Serialize for StatusPositionMode {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         s.serialize_str(self.as_config())
@@ -723,7 +672,7 @@ impl Serialize for StatusFallback {
 
 /// compat.toml 字符串枚举字段的通用容错：类型写错（非字符串）或值域外的字符串一律回落
 /// `None`（= 跟随全局）并 WARN、记入回落清单。理由同 [`de_initial_mode`]；与它不同的是
-/// **类型错也吞**（同 [`de_app_schema`]）：`load_file` 没有段级降级。
+/// 类型错也吞（同 [`de_app_schema`]）：compat.toml 没有段级降级。
 fn de_opt_str_enum<'de, D, T>(
     d: D,
     field: &str,
@@ -770,9 +719,8 @@ where
 
 /// 容错反序列化 `Option<InitialMode>`：无法识别的值退化为 `None`（＝不干预）。
 ///
-/// ⚠ 不能直接 `#[derive(Deserialize)]` 让 serde 自己认字符串：`load_file` 解析失败时
-/// 返回 `None` 会**整份 compat.toml 静默跳过**，于是一个字段拼错就让该文件里所有应用的
-/// 所有规则一起失效，且日志里毫无痕迹。单字段容错把爆炸半径限制在这一个字段内。
+/// 不能直接 `#[derive(Deserialize)]`：一个字段认不出会让整条规则反序列化失败而被跳过。
+/// 单字段容错把影响限制在这一个字段内。
 fn de_initial_mode<'de, D>(d: D) -> Result<Option<InitialMode>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -782,8 +730,7 @@ where
 
 /// 容错反序列化 `Option<FirstShowMode>`：无法识别的值退化为 `None`（＝跟随全局）。
 ///
-/// ⚠ 与 [`de_initial_mode`] 同理，不能直接让 serde 认字符串：`load_file` 解析失败会
-/// **整份 compat.toml 静默跳过**，一个字段拼错就让该文件里所有应用的所有规则一起失效。
+/// 理由同 [`de_initial_mode`]：一个字段拼错不该让整条规则失效。
 fn de_first_show_mode<'de, D>(d: D) -> Result<Option<FirstShowMode>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -793,10 +740,7 @@ where
 
 /// 容错反序列化 `Option<NewlineStyle>`：无法识别的值退化为 `None`（＝跟随全局）。
 ///
-/// ⚠ 与 [`de_first_show_mode`] 同理，不能直接让 serde 认这个枚举：`load_file` 解析失败会
-/// **整份 compat.toml 静默跳过**，用户照着 compat.toml 的注释手加一条规则、`style` 拼错
-/// 一个字母，就会让该文件里所有应用的所有规则一起失效——而症状与 compat.toml 毫无关联，
-/// 极难归因。
+/// 理由同 [`de_initial_mode`]：用户照注释手加一条、`style` 拼错一个字母，不该让整条规则失效。
 fn de_newline_style<'de, D>(d: D) -> Result<Option<NewlineStyle>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -822,9 +766,8 @@ pub enum AppSchema<'a> {
 /// 容错反序列化 [`AppCompatRule::schema`]：类型写错（`1` / 数组）、空串、`@` 开头但不是
 /// [`APP_SCHEMA_REMEMBER`] 的值一律回落 `None`（＝跟随全局）并 WARN。
 ///
-/// ⚠ 理由同 [`de_initial_mode`]：`load_file` 没有段级降级，不在字段上吞掉就是整份
-/// compat.toml 静默失效。「id 是否在 `schema.available` 内」**不在这里判**：available 可热重载，
-/// 解析层只收字符串，由协调器按当时的 available 校验。
+/// 理由同 [`de_initial_mode`]。「id 是否在 `schema.available` 内」不在这里判：available 可热重载，
+/// 由协调器按当时的 available 校验。
 fn de_app_schema<'de, D>(d: D) -> Result<Option<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -857,9 +800,7 @@ where
 /// 容错反序列化规则的 `process`：类型写错（`process = 1`）时**本条规则作废**（回落空串，
 /// 查找表与各段构建都跳过空进程名），同文件其它规则照常生效。
 ///
-/// 为什么是「本条作废」而不是「整份失败」或「猜一个名字」：`load_file` 没有段级降级，
-/// 整份失败 = 所有应用的所有规则一起静默失效；而进程名是规则的主键，认不出就不知道它
-/// 该套给谁，唯一安全的答案是不套给任何人。
+/// 进程名是规则的主键，认不出就不知道该套给谁，唯一安全的答案是不套给任何人。
 fn de_process<'de, D>(d: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -927,19 +868,11 @@ pub struct AppCompatRule {
     pub caret_use_top: bool,
     /// 拦截「组合期间上报的 caret rect 仍停在上一次组合位置」的宿主。
     ///
-    /// 微信（Qt WebView）实测：用户上屏后移动光标（打空格 / 换行）再输入，它在 composition
-    /// 期间报的 rect 仍是**上一次组合**的位置，与真实插入点差 136~419px。而 probe 判据 1
-    /// （「≠ 上一轮权威坐标 ⇒ 已 reflow」）对此没有判断力——正确答案和陈旧值**都** ≠ 那个
-    /// 基准。开启后，probe 若与「组合前宿主主动上报的空闲坐标」矛盾即判为陈旧、不予采信，
-    /// 让兜底用那份空闲坐标首显（见 `Coordinator::handle_caret_probe`）。
+    /// 开启后，probe 若与组合前宿主主动上报的空闲坐标矛盾即判为陈旧、不予采信（见
+    /// `Coordinator::handle_caret_probe`）。
     ///
-    /// ⚠ **必须逐宿主开启，不能做成全局默认**。曾试过按位置关系写一条通用判据，被真机连
-    /// 推翻三次（字宽、换行、终端重排）。根因是两类宿主的正确答案**恰好相反**：
-    ///   - 微信：probe 陈旧、组合前缓存新   ⇒ 该信缓存
-    ///   - WindTerm：probe 是重排后的新位置、缓存已过时 ⇒ 该信 probe
-    ///
-    /// 同一份位置关系推不出该信谁，任何位置判据都不可能同时答对两者。这是宿主缺陷，
-    /// 按宿主处理——与隔壁 `caret_use_top`（同样为微信而加）同一个理由。
+    /// 必须逐宿主开启：微信该信组合前缓存、WindTerm 该信 probe，同一份位置关系推不出该信谁。
+    /// 见 `docs/architecture/caret-position-host-compat-notes.md` 的 B 类与 D 类。
     #[serde(
         default,
         deserialize_with = "crate::tolerant_de::tolerant_bool",
@@ -949,40 +882,22 @@ pub struct AppCompatRule {
     /// 把连续的 `TSF_COMPOSITION`（selection 无效、以组合起点降级）→ `TSF_SELECTION`
     /// 识别为同一次布局采样的两阶段结果，禁止后半帧把当前 caret 误重锁成组合起点。
     ///
-    /// QQNT 实测：长组合里 reported compStart 始终稳定，但同一按键后的两帧 caret 会在
-    /// 组合起点与当前插入点之间跳变。两点距离超过大偏移阈值后，通用重锁逃生阀会把
-    /// `composition_start` 改成组合末端，下一次降级帧又改回起点，形成左右闪烁。
+    /// 必须逐宿主开启，不能全局信任非零 compStart：别的宿主有 compStart 陈旧、坐标系混用的情形，
+    /// 全局信任会关掉大偏移自愈。协调器还会核对来源顺序、前帧降级点、reported compStart 与当前锁
+    /// 四者一致。宿主行为见 `docs/architecture/caret-position-host-compat-notes.md` 的 E 类。
     ///
-    /// ⚠ **必须逐宿主开启，不能全局信任非零 compStart**：其它宿主已有 compStart 陈旧、
-    /// logical/physical 坐标系混用的实测历史；全局改成“有 compStart 就以它为准”会关闭
-    /// 原有 caret 大偏移自愈，甚至把候选窗重锁到异常坐标。协调器还会核对来源顺序、
-    /// 前帧降级点、reported compStart 与当前锁四者一致，单独一个非零值不构成放行理由。
-    ///
-    /// 三态：未写 = 继承下层，`Some(true)` = 开，`Some(false)` = 显式关闭。（所有字段的继承
-    /// 都由叠加引擎在原始键值上统一处理，见 [`crate::compat_overlay`]，本字段没有特殊待遇。）
+    /// 三态：未写 = 继承下层，`Some(true)` = 开，`Some(false)` = 显式关闭。
     #[serde(
         default,
         deserialize_with = "crate::tolerant_de::tolerant_opt_bool",
         skip_serializing_if = "Option::is_none"
     )]
     pub composition_start_pair_guard: Option<bool>,
-    /// 宿主报的组合起点跟着插入点漂移时，把候选窗锚点**钉在首帧起点**而不是让大偏移
-    /// 逃生阀跟着走；`None` / `Some(false)` = 不干预，逃生阀照常。
+    /// 宿主报的组合起点跟着插入点漂移时，把候选窗锚点钉在首帧起点，而不是让大偏移逃生阀
+    /// 跟着走；`None` / `Some(false)` = 不干预。判据在协调器侧：组合矩形退化成插入点形态。
     ///
-    /// 判据在协调器侧：宿主给出的组合矩形若退化成插入点（`left >= caret.x`，宽度只有
-    /// 光标那么宽），说明它给不出组合范围、报的起点就是插入点本身。
-    ///
-    /// ⚠ **必须逐宿主开启——这一条上不同宿主的期望行为是相反的，而数据完全相同**：
-    /// - WPS 文字（`wps.exe`）实测 compStart 每帧与 caret 同步递增，打字时 caret 持续
-    ///   偏离已锁锚点，逃生阀被这份漂移数据一路骗着重锁：
-    ///   `(1830,861) → (1615,903) → (2591,861)`，把锚点从真实起点 1830 推到 2591。
-    ///   而删除是**逐字**的、每步 15~30px，永远够不到 3 倍行高的阈值——锚点永久卡住，
-    ///   候选窗离组合区 868px。这类宿主需要钉住。
-    /// - Excel / WPS 表格（`et.exe`）矩形形态**一模一样**（w=1~2、起点等于插入点），
-    ///   但它们每输入一个字就换一次 docMgr、候选窗本就该跟着单元格走，靠的正是逃生阀
-    ///   把锚点推过去。给它们钉住反而是回归（2026-09-05 实测确认）。
-    ///
-    /// ⇒ 数据分不出两者，只能按宿主声明。**不要试图改成全局判据**。
+    /// 必须逐宿主开启：WPS 文字需要钉住，Excel / WPS 表格数据一模一样却要靠逃生阀跟着单元格走。
+    /// 见 `docs/architecture/caret-position-host-compat-notes.md` 的「组合矩形的三种形态」。
     #[serde(
         default,
         deserialize_with = "crate::tolerant_de::tolerant_opt_bool",
@@ -991,13 +906,8 @@ pub struct AppCompatRule {
     pub pin_anchor_when_start_drifts: Option<bool>,
     /// 候选窗首显策略；`None` = 不干预，跟随全局 `ui.candidate.first_show_mode`。
     ///
-    /// 三档互斥——做成枚举而不是几个 bool：布尔开关可以同时打开，实测就因此出过一次
-    /// 「fast 配了却从未生效」（instant 优先、抢先放行，fast 的判据根本没机会跑），
-    /// 日志里 630 条试探坐标一条没被消费。互斥语义要由类型保证。
-    ///
-    /// **必须是 `Option`**（2026-09-02，同 `initial_mode` 的理由）：全局默认档一旦可配，
-    /// 「没配过这个应用」与「显式给这个应用配了 fast」就必须能区分，否则用户改了全局默认，
-    /// 所有从未配过的应用会照旧被当成显式 fast——per-app 覆盖凭空长出来，且无从撤销。
+    /// 三档互斥，做成枚举而不是几个 bool，由类型保证互斥。必须是 `Option`：「没配过」与「显式配了
+    /// fast」要能区分，否则改全局默认对从未配过的应用不生效。
     #[serde(
         default,
         deserialize_with = "de_first_show_mode",
@@ -1006,8 +916,7 @@ pub struct AppCompatRule {
     pub first_show_mode: Option<FirstShowMode>,
     /// 进入本应用时的初始中英状态；`None` = 不干预，沿用全局逻辑。
     ///
-    /// **必须是 `Option` 不能是 `bool`**：`#[serde(default)]` 下的 bool 会让所有未配置
-    /// 规则的应用都拿到 `false`，等于给全世界配了「初始英文」。
+    /// 必须是 `Option`：`#[serde(default)]` 下的 bool 会让所有未配置的应用拿到 `false`。
     #[serde(
         default,
         deserialize_with = "de_initial_mode",
@@ -1016,8 +925,7 @@ pub struct AppCompatRule {
     pub initial_mode: Option<InitialMode>,
     /// 进入本应用时的初始中英标点；`None` = 不干预。
     ///
-    /// 显式值**压过** `input.punct.follow_mode` 的推导，否则用户配了它却恰好开着
-    /// follow_mode 时会完全无效且无痕迹。
+    /// 显式值压过 `input.punct.follow_mode` 的推导，否则开着 follow_mode 时它会静默无效。
     #[serde(
         default,
         deserialize_with = "de_initial_mode",
@@ -1027,12 +935,9 @@ pub struct AppCompatRule {
     /// 该进程加入 HostRender 白名单（受限宿主如 Win11 开始菜单 SearchHost.exe，候选窗由
     /// 服务进程渲染后经共享内存转交宿主进程内的 DLL 上屏，绕开普通窗口盖不过的 Band 层级）。
     ///
-    /// 原为独立的 `config.toml` 全局列表 `compat.host_render_processes`，现并入按进程名
-    /// 匹配的兼容规则表——与 `caret_use_top` 等字段同一套查找路径，不再是第二个真相源。
-    /// 消费点须按**事件源 PID 直查** `AppCompat::host_render_processes()` 现算的白名单
-    /// （`HostRenderManager::is_process_whitelisted`），不得经 `ActiveCompat` 全局焦点槽缓存
-    /// ——开始菜单弹出会连带激活兄弟进程，焦点槽会被污染，详见
-    /// `docs/redesign/host-render-windows-port.md` §11.2。
+    /// 消费点须按事件源 PID 直查 `AppCompat::host_render_processes()` 现算的白名单
+    /// （`HostRenderManager::is_process_whitelisted`），不得经 `ActiveCompat` 焦点槽缓存：开始菜单
+    /// 弹出会连带激活兄弟进程而污染焦点槽（见 `docs/redesign/host-render-windows-port.md` §11.2）。
     #[serde(
         default,
         deserialize_with = "crate::tolerant_de::tolerant_bool",
@@ -1041,17 +946,11 @@ pub struct AppCompatRule {
     pub host_render: bool,
     /// 该应用是否启用符号自动配对；`None` = 不干预，沿用全局 `input.auto_pair.*`。
     ///
-    /// **必须是 `Option` 不能是 `bool`**：理由同 `initial_mode`——`#[serde(default)]` 下的
-    /// bool 会让所有未配置规则的应用都拿到 `false`，等于给全世界关掉了自动配对。
+    /// 必须是 `Option`，理由同 `initial_mode`。典型用途是表格类宿主（Excel / WPS 表格）：
+    /// 配对后无法把光标退回两符号之间（见 `docs/architecture/app-compat-host-notes.md` 第五节）。
     ///
-    /// 典型用途是表格类宿主（Excel / WPS 表格）：配对后要把光标退回两符号之间，而它们在
-    /// 「输入态」下把方向键解释成"确认单元格并移动"，光标回退无法实现（TSF `SetSelection`
-    /// 路线已实测失败，见 project_pair_caret_tsf_setselection_rejected）。关掉配对是目前
-    /// 唯一可行的兼容策略。
-    ///
-    /// ⚠ 消费点有**三条**，缺一即半截修复：`active_pairs()`（中文标点态）、
-    /// `english_pairs_via_pipeline()`（英文标点流水线）、`push_english_pair_config()`
-    /// （纯英文模式由 C++ `_englishPairEngine` 独立处理，协调器根本收不到那些键）。
+    /// 消费点有三条，缺一即半截修复：`active_pairs()`（中文标点态）、`english_pairs_via_pipeline()`
+    /// （英文标点流水线）、`push_english_pair_config()`（纯英文模式由 C++ 独立处理）。
     #[serde(
         default,
         deserialize_with = "crate::tolerant_de::tolerant_opt_bool",
@@ -1061,13 +960,11 @@ pub struct AppCompatRule {
     /// 该应用的配对插入是否改走 Unicode 按键注入提交；`None` = 跟随全局
     /// `input.auto_pair.commit_via_composition`（默认直写）。
     ///
-    /// **必须是 `Option`**，理由同 `auto_pair`。三态消费在推送路径
-    /// `push_pair_via_comp_config`：直查目标 PID/窗口的规则表，未配回落全局，
-    /// 不走 `active_compat` 焦点槽（后台进程会收到错误值）。
+    /// 必须是 `Option`，理由同 `auto_pair`。消费在推送路径 `push_pair_via_comp_config`：直查目标
+    /// PID/窗口的规则表，不走 `active_compat` 焦点槽（后台进程会收到错误值）。
     ///
-    /// 典型用途：AutoCAD 表格在位编辑器、Chromium 系（WebView2/Tauri）宿主——
-    /// 它们丢弃 `ITfInsertAtSelection` 直写却谎报 S_OK，字符静默丢失
-    /// （2026-11-18 靶机实测，见 config.rs `commit_via_composition` 注释）。
+    /// 典型用途：AutoCAD 表格在位编辑器、Chromium 系宿主丢弃直写却谎报 S_OK，见
+    /// `docs/architecture/pair-commit-host-compat-notes.md`。
     #[serde(
         default,
         deserialize_with = "crate::tolerant_de::tolerant_opt_bool",
@@ -1088,27 +985,18 @@ pub struct AppCompatRule {
         skip_serializing_if = "Option::is_none"
     )]
     pub auto_spacing: Option<bool>,
-    /// 该应用的密码框是否强制英文；`None` = 跟随全局 `input.password_force_english`（A2-37 / t197）。
+    /// 该应用的密码框是否强制英文；`None` = 跟随全局 `input.password_force_english`。
+    /// 典型用途是宿主把普通输入框误报成密码框。必须是 `Option`，理由同 `initial_mode`。
     ///
-    /// 典型用途是「宿主把普通输入框误报成密码框」：全局开着保护真密码框，只对误报的那个
-    /// 应用关掉；反过来也可以在全局关掉时只给某个应用开。
-    ///
-    /// **必须是 `Option`**（理由同 `initial_mode`）：`None` 与「显式配了恰好等于全局的值」
-    /// 是两件事，后者不随全局开关变。
-    ///
-    /// ★ 消费点必须只有一个判定函数（协调器 `password_force_english_for_pid`）：服务端的
-    /// 抑制态与推给 DLL 的吃键门控出自同一处，否则 core.suppress ⊄ C++.suppress ⇒ 密码框丢键。
-    ///
-    /// 类型写错（`"yes"` / `1`）只让本字段回落 `None`：compat.toml 没有段级降级，
-    /// 不容错就是整份文件静默失效，见 [`crate::tolerant_de::tolerant_opt_bool`]。
+    /// 消费点只能有一个判定函数（协调器 `password_force_english_for_pid`）：服务端抑制态与推给
+    /// DLL 的吃键门控须出自同一处，否则密码框丢键。
     #[serde(
         default,
         deserialize_with = "crate::tolerant_de::tolerant_opt_bool",
         skip_serializing_if = "Option::is_none"
     )]
     pub password_force_english: Option<bool>,
-    /// 该应用使用的输入方案；`None` = 跟随全局（最近一次全局手切的结果 / `schema.active`）
-    /// （C0-7 / C3-3，GH#80）。
+    /// 该应用使用的输入方案；`None` = 跟随全局（最近一次全局手切的结果 / `schema.active`）。
     ///
     /// - 具体方案 id ⇒ 焦点跨进程切入时固定切到它；
     /// - [`APP_SCHEMA_REMEMBER`] ⇒ 切入时恢复本应用上次用的方案（无记录则用全局）。
@@ -1124,9 +1012,8 @@ pub struct AppCompatRule {
     pub schema: Option<String>,
     /// 该应用的智能符号替换方案；`None` = 沿用全局 `input.symbol.smart_method`。
     ///
-    /// `DeleteReplace`（全局默认）依赖对宿主做删改，在 Tabby 一类终端上会出严重错误；
-    /// `HoldComposition` 全程不做删改、兼容性更好。两者本就是现成的全局枚举，这里只是
-    /// 让它可以按宿主覆盖。
+    /// `DeleteReplace`（全局默认）依赖对宿主做删改，在 Tabby 一类终端上出错；`HoldComposition`
+    /// 全程不做删改。
     #[serde(
         default,
         deserialize_with = "crate::tolerant_de::tolerant_opt",
@@ -1135,19 +1022,11 @@ pub struct AppCompatRule {
     pub smart_method: Option<SmartMethod>,
     /// 光标坐标水平校正（dp，96dpi 基准逻辑像素，正=右）。
     ///
-    /// 用于宿主报告的 caret 坐标**系统性偏移**的场景（如 Windows Terminal，其它输入法
-    /// 同样偏），与主题里的候选窗偏移不是一回事：那个是候选窗相对光标的**布局**（样式层），
-    /// 这个修的是光标坐标本身（兼容层），故候选窗/状态气泡/HUD 等所有消费者一并受益。
+    /// 修宿主上报 caret 坐标的系统性偏移（如 Windows Terminal），与主题里候选窗相对光标的布局
+    /// 偏移不是一回事；候选窗、状态气泡等所有消费者一并受益。单位 dp，按目标点所在显示器 DPI
+    /// 换算在协调器侧完成（`apply_caret_compat`）。0 = 不偏移，故不用 `Option`。
     ///
-    /// 单位是 dp 而非物理像素：宿主上报的 caret 坐标是物理像素，同一份配置若直接按物理
-    /// 像素相加，在不同缩放的显示器（尤其多屏混插 100%/150%/200%）上观感会不一致——按
-    /// 目标点所在显示器的 DPI 换算成物理像素在协调器侧完成（`apply_caret_compat`），
-    /// 本字段本身只管「用户想要的视觉量」。
-    ///
-    /// 用 `i32` 而非 `Option`：0 就是"不偏移"，语义无歧义，不存在 bool 那种"默认值污染"。
-    ///
-    /// ⚠ 消费点有**两处**（`apply_focus_caret` / `handle_caret_update`），与 `caret_use_top`
-    /// 同层同处；漏一处的症状是「有时生效有时不生效」。
+    /// 消费点有两处（`apply_focus_caret` / `handle_caret_update`），与 `caret_use_top` 同层同处。
     #[serde(
         default,
         deserialize_with = "crate::tolerant_de::tolerant_i32",
@@ -1163,27 +1042,18 @@ pub struct AppCompatRule {
     pub caret_offset_y: i32,
     /// 该应用的候选窗定位方式；`None` = 不干预，沿用全局 `ui.candidate.position_mode`。
     ///
-    /// **必须是 `Option`**（同 `first_show_mode`）：全局那一档本身可配，「没配过这个应用」
-    /// 与「显式给它配了 follow_caret」必须能区分，否则用户把全局改成 fixed 时，所有
-    /// 从未配过的应用都会被当成显式 follow_caret，全局设置凭空失效。
+    /// 必须是 `Option`，理由同 `first_show_mode`。
     #[serde(
         default,
         deserialize_with = "de_candidate_position_mode",
         skip_serializing_if = "Option::is_none"
     )]
     pub candidate_position_mode: Option<CandidatePositionMode>,
-    /// 固定模式下该应用**自己**的候选窗落点（内容左上屏幕坐标，物理像素）。
+    /// 固定模式下该应用自己的候选窗落点（内容左上屏幕坐标，物理像素）。合适的落点取决于该应用
+    /// 窗口的位置，故各存一份。
     ///
-    /// 为什么每个应用各存一份而不是共用全局那个坐标：合适的落点取决于该应用窗口在屏幕上
-    /// 的位置，共用一份等于只有第一个配的应用是对的。
-    ///
-    /// `(0,0)` = 「已开固定但还没拖过」，由 UI 落到屏幕默认锚点——与全局
-    /// `ui.candidate.custom_x/custom_y` 同一套哨兵约定（含 `avoid_unset_sentinel` 的
-    /// 1px 规避），两处**必须**同款，否则「拖到主屏左上角后位置记不住」会只在其中一边复发。
-    ///
-    /// ⚠ 不分显示器：与全局那份保持同一口径。换屏后落点由 `clamp_to_work_area` 兜住，
-    /// 不会飞到不可见区域（工具栏/软键盘那套按屏分桶的模型**不适用**——它们是常驻窗口，
-    /// 候选窗是临时浮层且随时可以拖）。
+    /// `(0,0)` = 已开固定但还没拖过，与全局 `ui.candidate.custom_x/custom_y` 同一套哨兵约定（含
+    /// `avoid_unset_sentinel` 的 1px 规避），两处必须同款。不分显示器，换屏由 `clamp_to_work_area` 兜住。
     #[serde(
         default,
         deserialize_with = "crate::tolerant_de::tolerant_i32",
@@ -1197,12 +1067,10 @@ pub struct AppCompatRule {
         skip_serializing_if = "is_zero_i32"
     )]
     pub candidate_y: i32,
-    /// 该应用的状态气泡定位方式；`None` = 跟随全局 `ui.status.position_mode`（C2-33 / GH#148）。
+    /// 该应用的状态气泡定位方式；`None` = 跟随全局 `ui.status.position_mode`。
     ///
-    /// 与 [`Self::candidate_position_mode`] 同构：必须是 `Option`（「没配过」与「显式配了
-    /// follow_caret」要能区分），且坐标 [`Self::status_x`]/[`Self::status_y`] 与它**同层取**
-    /// ——规则配了定位方式就用规则自己的那份坐标，没配才整套回落全局。消费点在协调器
-    /// `status_position`。
+    /// 与 [`Self::candidate_position_mode`] 同构；坐标 [`Self::status_x`]/[`Self::status_y`] 与它同层取，
+    /// 没配才整套回落全局。消费点在协调器 `status_position`。
     #[serde(
         default,
         deserialize_with = "de_status_position_mode",
@@ -1232,27 +1100,13 @@ pub struct AppCompatRule {
         skip_serializing_if = "Option::is_none"
     )]
     pub status_fallback_position: Option<StatusFallback>,
-    /// 忽略该宿主自己写 compartment（OPENCLOSE / CONVERSION）引起的中英切换，**开和关两个方向**。
-    /// `None` = 跟随全局 `input.ignore_host_ime_switch`，`Some(v)` 覆盖全局。
+    /// 忽略该宿主自己写 compartment（OPENCLOSE / CONVERSION）引起的中英切换，开和关两个方向。
+    /// `None` = 跟随全局 `input.ignore_host_ime_switch`，`Some(v)` 覆盖全局。旧键
+    /// `ignore_host_ime_close` 作读取别名（`compat_overlay::LEGACY_APP_KEYS`）。
     ///
-    /// 旧键 `ignore_host_ime_close`（0.121 起，只拦「关」）作读取别名：每层原始表解析后即
-    /// 规范化成本键（`compat_overlay::LEGACY_APP_KEYS`），语义随之变成双向。
-    ///
-    /// 背景：WinForms 的 `ImeMode.Disable`、WPF 的 `InputMethod.IsInputMethodEnabled=False`
-    /// 内部都是 `ImmSetOpenStatus(false)`，经 IMM→TSF 兼容层落到 OPENCLOSE=0。它关的是
-    /// **全局中英状态**而非「本控件不接受输入」，于是用户点一次按钮就被切成英文，回到
-    /// 文本框还未必能恢复（宿主的恢复链只在相邻控件都由它托管时才闭合）。实测宿主：
-    /// X60_Toolbox（WinForms）、beanfun（WPF）。反方向同样存在：SSMS 在内部焦点切换时把
-    /// OPENCLOSE 写成「开」，用户在英文态下被切成中文、第一键被吃（GH#312）。
-    ///
-    /// ⚠ **开启有代价**：OPENCLOSE 的值语义是我们对宿主说的唯一真话，gvim 一类宿主正确
-    /// 依赖它保存/恢复状态（见 project_tsf_openclose_compartment_semantics 的四个衍生缺陷）。
-    /// 全局开启等于回到「钉死为 1」那个已被推翻的年代，故全局出厂关、由用户自选。
-    ///
-    /// ⚠ **Ctrl 按住时放行**：系统热键 Ctrl+Space 与宿主写 compartment 走的是**同一条**
-    /// 通路，无来源可分。唯一可用的区分是伴随按键——系统热键触发时 Ctrl 正被按住，宿主
-    /// 自己写则没有任何按键（同款判据已在 C++ 的 CapsLock 联动抑制窗用过并实测过）。判据由
-    /// DLL 在发消息时一并交代（`MODE_SWITCH_CTRL_HELD`），服务端不去猜。
+    /// 开启有代价：gvim 一类宿主正确依赖 OPENCLOSE 值语义，故全局出厂关。Ctrl 按住时放行（区分系统
+    /// 热键 Ctrl+Space，判据由 DLL 经 `MODE_SWITCH_CTRL_HELD` 交代）。宿主背景见
+    /// `docs/architecture/tsf-openclose-compartment-semantics.md` 第 7 节。
     #[serde(
         default,
         deserialize_with = "crate::tolerant_de::tolerant_opt_bool",
@@ -1262,42 +1116,13 @@ pub struct AppCompatRule {
     /// 这个宿主读走候选串时，是否当它在自绘、从而收起我们的候选窗。
     /// `None` = 否（默认），`Some(true)` = 是，`Some(false)` = **显式关闭**。
     ///
-    /// ⚠ `Some(false)` 与 `None` **不同义**，别按「反正默认也是否」来理解：
-    /// ① 用户层不写 = 继承出厂同名规则（出厂已有 `MapleStory.exe = true`），显式写 `false`
-    ///    才挡得住；
-    /// ② 本进程规则逐字段叠在 `process = "*"` 通配之上：写了 `false` 压过通配，不写则继承通配
-    ///    （`a_wildcard_rule_applies_everywhere_and_a_process_rule_wins` 正是靠这点成立）。
+    /// `Some(false)` 与 `None` 不同义：显式 `false` 才挡得住出厂同名规则（如 `MapleStory.exe = true`）
+    /// 与 `process = "*"` 通配。
     ///
-    /// 「宿主接管候选绘制」有两条来源，语气不同，本字段只管后面那条：
-    /// - 宿主**声明**接管（`BeginUIElement` 回 `pbShow=FALSE` / UI-less 线程）——这是事实，
-    ///   本开关**管不着**它：宿主明说了不要我们的 UI，照弹就是两头画。
-    /// - 宿主没声明、却把候选串**读走了**（`UIELEMENT_FLAG_HOST_READS`）——这是推断，
-    ///   本开关管的就是它。
-    ///
-    /// # ⚠ 2026-09-15：默认从「是」反转成「否」
-    ///
-    /// 立案时（`9d9c24f5`）本字段是单向**关闭**开关，推断默认生效。当时的自陈是
-    /// 「『只有真要画的宿主才会来读候选串』至今没有反证样本」——那份日志里 7 个宿主只有
-    /// 新枫之谷读过，另外 6 个一次候选都没出过，构不成负对照。
-    ///
-    /// 反证样本 2026-09-15 在靶机上一次到齐：**Notepad / Illustrator / EverEdit 三个宿主
-    /// 都把候选串整串读走（`GetString(0..4)`），却都不画候选窗**。同机新旧两版 DLL 对照
-    /// 显示记事本在旧版里同样读了 96 次 ⇒ 读取是这些宿主的常态，不是自绘的标志。
-    ///
-    /// 默认值改站「不收窗」这一侧，因为**两种误判的代价不对称**：判错成「宿主在画」
-    /// （实际没画）⇒ 两个候选框一个都没有、完全不能用，且用户无从知道要来配什么；
-    /// 判错成「宿主没画」（实际在画）⇒ 最多多一个框，字照打，配一行即可收。
-    ///
-    /// 新枫之谷那类宿主（CUAS 的 IMM32 桥替它读走候选、画出旧版系统候选窗）改由出厂
-    /// `data/compat.toml` 里一行 `host_drawn_candidates = true` 保住，语义从 opt-out 变
-    /// opt-in，那份修复不丢。
-    ///
-    /// 仍用 `Option<bool>` 而不是裸 `bool`：要区分「没写」与「显式写了 false」，
-    /// 且 `#[serde(default)]` 下的裸 bool 会让用户层规则覆盖掉出厂值（理由同 `initial_mode`）。
-    ///
-    /// `process = "*"` 的通配与其它字段一样参与统一合成（[`AppCompat::get_rule`]），用途是反方向
-    /// ——某类宿主普遍需要收窗时一行开到全局。查表见
-    /// `Coordinator::uielement_host_draws_by_inference`。
+    /// 只管「宿主没声明、却把候选串读走了」（`UIELEMENT_FLAG_HOST_READS`）这条推断；宿主声明接管
+    /// （`BeginUIElement` 回 `pbShow=FALSE`）是事实，本开关管不着。默认「否」：普通桌面宿主读走候选串
+    /// 是常态，误判成「宿主在画」会让候选框一个都没有，代价远大于多一个框。依据见
+    /// `docs/design/game-compat-tsf-uielement.md` §1.4。查表见 `Coordinator::uielement_host_draws_by_inference`。
     #[serde(
         default,
         deserialize_with = "crate::tolerant_de::tolerant_opt_bool",
@@ -1308,16 +1133,15 @@ pub struct AppCompatRule {
     /// `None` / `Some(false)` = 默认：经 IPC 让当前宿主进程执行（宿主有前台权限，窗口能到最前）；
     /// `Some(true)` = 服务进程自己 `ShellExecuteW`。
     ///
-    /// 背景：Win11 开始菜单、便笺（Microsoft.Notes.exe）等宿主由于安全限制，收到拉起请求后
-    /// 并不会真的执行，表现为「点了没反应」（GH#339，开始菜单里打不开设置同理）。
-    /// ⚠ 代价：服务进程没有前台权限，拉起的窗口可能停在后台，故只给确有需要的宿主开。
+    /// Win11 开始菜单、便笺等宿主收到拉起请求后并不执行。代价：服务进程没有前台权限，拉起的
+    /// 窗口可能停在后台，故只给确有需要的宿主开。
     #[serde(
         default,
         deserialize_with = "crate::tolerant_de::tolerant_opt_bool",
         skip_serializing_if = "Option::is_none"
     )]
     pub launch_by_service: Option<bool>,
-    /// 组合区占位字符；`None` = 空格（历史行为）。见 [`PlaceholderChar`]（GH#175）。
+    /// 组合区占位字符；`None` = 空格。见 [`PlaceholderChar`]。
     ///
     /// 查表请走 [`AppCompat::composition_placeholder_for`]：它负责「进程名未知 ⇒ 空格」这条
     /// 例外（`process = "*"` 通配已由统一合成处理）。
@@ -1560,10 +1384,8 @@ pub fn menu_rule_switch(user_dir: &Path, process: &str) -> RuleSwitch {
 /// 启用 / 禁用某进程的整条规则（写用户层 `disabled`；启用 = 去掉这条差异，
 /// 系统层自己就禁用的规则则写显式 `disabled = false`，均由 `apply_edits` 的规范化决定）。
 ///
-/// **不走 [`edit_user_apps`]**：它在「下层禁用了规则、用户层没有 `disabled` 键」时会自动追加
-/// `disabled = false`（给「用户在菜单里选了某个选项」这种隐含的「我要配置它」用），而这里的
-/// 编辑本身就是在明确指定 `disabled` 的值——追加的那条排在后面会把「禁用」冲掉。
-/// 与设置端 `CompatAdmin::set_disabled` 同一套写法。
+/// 不走 [`edit_user_apps`]：它会在下层禁用时自动追加 `disabled = false`，排在后面会把这里写的
+/// 「禁用」冲掉。与设置端 `CompatAdmin::set_disabled` 同一套写法。
 pub fn set_user_rule_disabled(
     user_dir: &Path,
     target: impl Into<RuleKey>,
@@ -1669,11 +1491,8 @@ pub fn set_user_candidate_position_mode(
 
 /// 记住指定进程的候选窗固定落点：**定位方式与坐标一起写**（内容左上，物理像素）。
 ///
-/// 拖动本身就是「这个应用就固定在这儿」的确认，方式与坐标本是一件事，所以一起写；
-/// 这也让用户层的这条差异自成一体，不依赖系统层恰好配了什么。
-///
-/// ⚠ 调用方须先做 `(0,0)` 哨兵规避，与全局那条落盘路径同源；这里不代劳，
-/// 因为规避函数在协调器侧（与状态气泡共用），下沉到配置层会变成第二份实现。
+/// 拖动本身就是「固定在这儿」的确认，方式与坐标一起写，用户层这条差异自成一体。
+/// 调用方须先做 `(0,0)` 哨兵规避（规避函数在协调器侧，这里不代劳）。
 pub fn set_user_candidate_fixed_pos(
     user_dir: &Path,
     target: impl Into<RuleKey>,
@@ -1773,26 +1592,12 @@ pub fn set_user_status_fallback(
 
 /// 「初始模式作用域」规则：某进程的 per-app **初始模式**只在哪些**窗口类**上重算。
 ///
-/// 为什么需要它：per-app 规则（`[[apps]]`）的身份是**进程映像名**，而 `explorer.exe`
-/// 一个名字同时承载语义相反的两类焦点——桌面是「停留型」，任务栏 / Alt+Tab / 任务视图 /
-/// 溢出区 / 资源管理器是「路过或另有用途」。用户为桌面配 `initial_mode = "english"`
-/// 时，那些窗口会被一并命中，而它们恰是每次切换应用的必经之路。
-/// 实测样本（2026-08-18）：非桌面焦点 169 次、桌面 12 次，**14:1**。
+/// `explorer.exe` 一个进程名同时承载桌面与任务栏 / Alt+Tab 等路过型焦点，给桌面配的初始模式
+/// 不该套到后者上。判据必须是白名单「规则在哪生效」，不能是黑名单「哪些是过渡窗口」：拿不到
+/// 窗口类与新出现的类都该落在作用域外、保持现状。见 `docs/architecture/app-compat-host-notes.md`
+/// 第四节。
 ///
-/// ★★★ **判据方向必须是白名单「规则在哪生效」，不能是黑名单「哪些是过渡窗口」**。
-/// 本段初版正是黑名单（`shell_transient`，列出任务栏那几个类），当天即被实测推翻：
-///   17:24:08.579  Client connected to bridge pipe        ← explorer 新起一个 TSF 连接
-///   17:24:08.581  handle_focus_gained token=…0002  caret src=last_known
-///   17:24:08.583  语言栏图标已发布 label=英             ← 闪
-/// 新连接的头一个 focus_gained 拿不到窗口类（TSF 此刻还没有 view，连 caret 都退到
-/// last_known），空类名不在黑名单里 ⇒ 判成「不是过渡窗口」⇒ 套上 explorer 的英文规则。
-/// 黑名单还有第二个失效面：Windows 每个版本都在新增 XAML 岛窗口类，漏一个就套错一次。
-/// 反过来做白名单，两种失效同时消失——「不知道在哪」与「新出现的类」都自动落在作用域外，
-/// 也就是**保持现状**，而保持现状恰是这两种情况下唯一安全的答案。
-///
-/// 独立成段而不是 `[[apps]]` 的字段：它描述的是「规则在哪些窗口上生效」，是进程规则的
-/// 适用范围而不是又一个行为开关；分开写也让 `explorer.exe` 的作用域清单与它的 `[[apps]]`
-/// 行为规则各自叠加、互不牵连。
+/// 独立成段而不是 `[[apps]]` 的字段：它是进程规则的适用范围，不是又一个行为开关。
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
 pub struct InitialModeScopeRule {
     /// 进程映像名（不区分大小写），如 `explorer.exe`。缺失或类型写错 ⇒ 本条作废（见 [`de_process`]）。
@@ -1822,14 +1627,8 @@ pub struct InitialModeScopeRule {
 
 /// 按应用指定上屏文本的换行形式（值域与理由见 [`NewlineStyle`]）。
 ///
-/// **为什么独立成段而不是做成 `[[apps]]` 的字段**
-///
-/// 与合并语义无关（所有段都是逐字段叠加，没有哪个字段享有特殊待遇），理由只有两条：
-/// 1. 本项与候选窗定位毫无关系，`AppCompatRule` 已有 20+ 字段，再塞一个文本项只会更难读；
-/// 2. 本项不参与右键菜单的写回，放进 `[[apps]]` 会让菜单路径的编辑面多一个不相干的字段。
-///
-/// 代价：同一个进程的配置分散在两个 section。将来再加 per-app 项时，「开新段」与「加字段」
-/// 之间没有硬判据，按上面两条逐条对照。
+/// 独立成段而不是 `[[apps]]` 的字段：它与候选窗定位无关，也不参与右键菜单写回。代价是同一
+/// 进程的配置分散在两个段。
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
 pub struct CommitNewlineRule {
     /// 进程映像名（不区分大小写），如 `WINWORD.EXE`。类型写错 ⇒ 本条作废（见 [`de_process`]）。
@@ -2087,21 +1886,16 @@ pub struct AppCompat {
 
 /// 序列化中间体：承载 TOML 的两个顶层数组表，避免把 `lookup` 暴露给 TOML。
 ///
-/// `pub(crate)` 而非模块私有，只为让 `value_domain_guard` 那条守门元测试够得着——
-/// 它要遍历本结构体的每个字符串字段逐个投毒，而集成测试只看得见 pub API。
-/// ⛔ 不要因此把它当成对外类型：`compat.toml` 的读写入口仍只有 `load_file` /
-/// `render_user_compat`。
+/// `pub(crate)` 只为让 `value_domain_guard` 守门元测试够得着，不要当成对外类型。
 #[cfg(test)]
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub(crate) struct AppCompatFile {
     #[serde(default)]
     pub(crate) apps: Vec<AppCompatRule>,
-    /// ⚠ 用户层 compat.toml 由右键菜单**整份重写**（`render_user_compat`），本字段
-    /// 必须一并渲染回去，否则用户写的覆盖会在下一次菜单开关时被静默删掉。
+    /// 对应 `[[initial_mode_scope]]` 段。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) initial_mode_scope: Vec<InitialModeScopeRule>,
-    /// ⚠ 与 `initial_mode_scope` 同理：`render_user_compat` 是整份重写，本字段漏了
-    /// 用户手写的 `[[commit_newline]]` 就会在下一次菜单开关时静默消失。
+    /// 对应 `[[commit_newline]]` 段。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) commit_newline: Vec<CommitNewlineRule>,
 }
@@ -2150,9 +1944,7 @@ impl AppCompat {
 
     /// 该进程上屏时换行用什么表达；**没配返回 `None` = 跟随全局**。
     ///
-    /// 返回 `Option` 而不是回落到 [`NewlineStyle::default()`]：回落动作只应发生在
-    /// 全局层那一处（同 [`FirstShowMode::from_config`] 的取舍），否则 per-app 的
-    /// 「没配」与「显式配成默认档」就分不开了。
+    /// 返回 `Option` 而不是回落默认档，理由同 [`FirstShowMode::from_config`]。
     pub fn commit_newline_for(&self, process_name: &str) -> Option<NewlineStyle> {
         if process_name.is_empty() {
             return None;
@@ -2166,12 +1958,9 @@ impl AppCompat {
     ///
     /// 返回 false 表示调用方应**保持现状**（不重算初始模式、不推进模式归属）。
     ///
-    /// 三种取值来源，必须一并理解：
-    /// - 该进程**没配**作用域 ⇒ true。绝大多数应用走这条，行为与本机制引入前完全一致。
-    /// - 配了且窗口类命中 ⇒ true。
-    /// - 配了但窗口类不命中，**含窗口类为空** ⇒ false。空类名是「拿不到窗口标识」，
-    ///   不是「窗口不在清单里」，但对本函数要回答的问题，两者的正确答案都是「别重算」。
-    ///   曾把空类名当作「不是过渡窗口」放行，实测当场闪英，见 `InitialModeScopeRule` 注释。
+    /// - 该进程没配作用域 ⇒ true；
+    /// - 配了且窗口类命中 ⇒ true；
+    /// - 配了但不命中，含窗口类为空 ⇒ false（拿不到窗口标识时也该别重算，见 `InitialModeScopeRule`）。
     pub fn initial_mode_applies_to_window(&self, process_name: &str, window_class: &str) -> bool {
         match self.mode_scope.get(&process_name.to_ascii_lowercase()) {
             None => true,
@@ -2367,8 +2156,7 @@ impl AppCompat {
             .map(|c| c.id.clone())
     }
 
-    /// 该进程组合区用哪个占位字符（GH#175）。**唯一的查表入口**，协调器发占位与给 DLL
-    /// 下发兜底占位都走这里。
+    /// 该进程组合区用哪个占位字符。唯一的查表入口，协调器发占位与给 DLL 下发兜底占位都走这里。
     ///
     /// 走统一合成（[`Self::get_rule`]）：`process = "*"` 通配对它生效，本进程显式写 `space`
     /// 压过通配，都没配 = 空格。进程名未知（空串）⇒ 空格，不吃通配：不知道是谁时保持历史行为。
@@ -2641,12 +2429,7 @@ mod commit_newline_rule_tests {
         assert_eq!(c.commit_newline_for("WINWORD.EXE"), Some(NewlineStyle::Cr));
     }
 
-    /// ★★★ 拼错的 `style` 不得让整份 compat.toml 失效。
-    ///
-    /// `load_file` 是 `toml::from_str(..).ok()` —— 解析失败**静默跳过整份文件**，该层的
-    /// `[[apps]]`、`[[initial_mode_scope]]`、`[[commit_newline]]` 会一起消失。而 compat.toml
-    /// 的注释明确邀请用户「照下面的格式加一条即可」，拼错一个字母就丢掉全部应用兼容规则、
-    /// 且症状与 compat.toml 毫无关联。同一形态的既有测试见
+    /// 拼错的 `style` 只让这一项回落「跟随全局」，不得牵连其它规则。同形态见
     /// `unknown_mode_in_toml_degrades_to_follow_global`。
     #[test]
     fn unknown_style_in_toml_degrades_to_follow_global() {

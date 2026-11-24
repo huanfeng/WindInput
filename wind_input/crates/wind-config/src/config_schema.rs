@@ -1,11 +1,10 @@
 //! 配置字段注册表（声明式单一真相源）。
 //!
-//! 每个配置叶子键在此声明其值类型。通过测试与 [`Config`](crate::config::Config) 结构体
-//! **反向对照**（注册表覆盖所有键、类型与默认值一致），并与系统预置 `data/config.toml`
-//! 对照（无孤立键）。CLI、core 端校验、设置 UI 均由此注册表派生，杜绝多份手写真相源漂移。
+//! 每个配置叶子键在此声明其值类型，经测试与 [`Config`](crate::config::Config) 结构体及
+//! `data/config.toml` 反向对照。CLI、core 端校验、设置 UI 均由此注册表派生。
 //!
-//! 注：本注册表只描述 **config 类**（用户可改配置）；运行状态（state）与分发数据（data）不在此。
-//! 详见仓库根 `SETTINGS_REVAMP_PLAN.md` 的"数据三分准则"，键名映射见 `docs/config-key-migration.md`。
+//! 只描述 config 类（用户可改配置），运行状态与分发数据不在此（「数据三分准则」见
+//! `docs/architecture/config-design-rules.md`）；键名映射见 `docs/config-key-migration.md`。
 
 use crate::config::Config;
 
@@ -26,53 +25,31 @@ pub enum FieldType {
     StrList,
     /// 键值映射表（如自定义标点 mappings）。
     ///
-    /// 携带**键名值域**：非空表示这张表的键只能取这几个（如 `ui.font.scripts` 的脚本类名），
-    /// 空表示键由用户自由命名（如 `input.punct.custom_mappings`）。
-    ///
-    /// ⚠️ 值域为什么要进注册表：设置端的下拉/预填项若各自手抄一份，core 加了新类名而设置端
-    /// 没跟上，用户就永远看不到新类别；反向漂移（设置端多出 core 不认的键）则是「填了没反应」。
-    /// `ui.candidate.layout` 已经踩过这个形状（值域从 3 变 4，设置端滞后，方案里手写的第 4 个
-    /// 值被静默改写回默认）。有了这一位，设置端可用 capability 做守门比对。
+    /// 携带键名值域：非空表示键只能取这几个（如 `ui.font.scripts` 的脚本类名），空表示键由用户
+    /// 自由命名。值域进注册表，设置端才能用 capability 做守门比对，免得两边各抄一份而漂移。
     Map(&'static [&'static str]),
     /// 结构体数组（如 mix_modes），整体作不透明叶子。
     StructList,
-    /// **可按候选窗排布分档**的枚举（见 `crate::by_layout::ByLayout`）。
+    /// 可按候选窗排布分档的枚举（见 `crate::by_layout::ByLayout`）。
     ///
-    /// 值域与 [`Self::Enum`] 相同，差别只在：值可以是 `"h:hide v:always"` 这样的标签式，
-    /// 或 `{ h = "hide", v = "always" }` 这样的表——**每一档都要落在同一个值域里**。
-    ///
-    /// ★ 之所以是独立变体而不是给 `Enum` 加个 bool：值域校验要拆开逐档验（`Enum` 那条
-    /// 路直接拿整串比对，`"h:hide v:always"` 会被判越界），叶子展开也要在这里停住
-    /// （表写法会被下钻成 `….pager_bar_display.h` 这种注册表里没有的键）。两处行为都变了，
-    /// 不是一个开关能表达的。
+    /// 值域与 [`Self::Enum`] 相同，但值可以是 `"h:hide v:always"` 标签式或 `{ h = …, v = … }` 表，
+    /// 每一档都要落在同一个值域里。独立成变体是因为值域校验要逐档验、叶子展开要在这里停住。
     LayoutEnum(&'static [&'static str]),
 }
 
 impl FieldType {
     /// 这个类型的值在写回时是不是**整体一份**——即「写它 ＝ 用新值把旧值整个换掉」。
     ///
-    /// # 这个判据是给写盘闸用的
+    /// 给写盘闸 [`crate::config::ConfigDegradation::blocks_write_back`] 用：整体一份的值，调用方
+    /// 发来的必然是「读回来的旧值 ⊕ 本次编辑」，降级时读回的是出厂值，写回就抹掉用户数据；
+    /// 标量是显式单值，与种子无关，不该拦。
     ///
-    /// [`crate::config::ConfigDegradation::blocks_write_back`] 的规矩是：凡是拿
-    /// `Config::load()` 的结果当**种子**、再整表写回用户层的路径，落盘前必须先问它。
-    /// 「能不能构成这种路径」取决于**值是不是整体一份**——标量的落盘值是调用方发来的
-    /// 显式单值，与种子无关，拦它只会让降级期间整个设置页存不了盘；而整体一份的值，
-    /// 调用方发来的那一份必然是「读回来的旧值 ⊕ 本次编辑」，读回来的若是降级后的出厂
-    /// 值，写回去就是把用户的真实数据抹掉。
-    ///
-    /// ⛔ **不要写成 `matches!(ty, FieldType::Map(_))`**。闸门第一版就是这么写的，于是
-    /// `ui.toolbar.items`、`ui.langbar.badges`、`ui.toolbar.buttons`、`schema.mix_modes`
-    /// 这些数组型键全部漏在门外——它们同样是整体一份（设置端的 `diff_config` 里数组不是
-    /// 对象、走叶子分支整份发送），失效形态与 Map 一模一样：`[ui.toolbar]` 段因类型错误
-    /// 降级 ⇒ 设置页显示出厂工具栏 ⇒ 用户改一格保存 ⇒ 自定义顺序与自建按钮永久消失。
-    ///
-    /// 加新的 `FieldType` 变体时先回答一句「写它是整体换掉还是只动一个值」，答前者就
-    /// 加进来。
+    /// 不要只写 `Map(_)`：数组型键（`ui.toolbar.items`、`schema.mix_modes` 等）同样整份发送。
+    /// 加新变体时先回答「写它是整体换掉还是只动一个值」。
     pub fn is_whole_value_leaf(&self) -> bool {
         match self {
             Self::Map(_) | Self::StrList | Self::StructList => true,
-            // LayoutEnum 与 Enum 同侧：设置端写它时发的是**一个标量**（标签式字符串），
-            // 与「读回来的旧值 ⊕ 本次编辑」那种整份写回无关。
+            // LayoutEnum 与 Enum 同侧：设置端写它时发的是一个标量（标签式字符串）。
             Self::Bool
             | Self::Int
             | Self::Float
@@ -109,53 +86,38 @@ const NUMBER_OVERFLOW_VALUES: &[&str] =
 /// 翻页键翻不动时：只有吞键与「顶高亮候选 + 输出该键符号」两档。
 const PAGE_KEY_OVERFLOW_VALUES: &[&str] = &["ignore", "commit_and_input"];
 
-/// 空码（缓冲非空但无候选）时终结键怎么处置这串废码——**回车/空格两键**。
-/// **只有两态**：`commit` 上屏原码 / `clear` 丢弃。语义与实现见
-/// `docs/design/enter-behavior-clear-semantics.md`。
-///
-/// ⚠️ 登记成 `Enum` 而非 `Str` 是刻意的：这三键曾因值域不受约束，让设置端 manifest 抄来了
-/// [`OVERFLOW_VALUES`] 的四个选项，用户选「忽略」被静默当成「上屏编码」，界面与行为不一致
-/// 且无任何测试拦得住。值域进注册表后，设置端的守门测试即可比对。
+/// 空码（缓冲非空但无候选）时回车/空格怎么处置这串废码：`commit` 上屏原码 / `clear` 丢弃。
+/// 见 `docs/design/enter-behavior-clear-semantics.md`。登记成 `Enum` 而非 `Str`，设置端的
+/// 守门测试才能比对值域。
 const EMPTY_CODE_BEHAVIOR_VALUES: &[&str] = &["commit", "clear"];
 
 /// 上屏文本的换行形式。四态，语义与「为什么必须按应用配」见
 /// `app_compat::NewlineStyle`（本常量是它的值域在配置注册表里的镜像）。
 ///
-/// ⚠️ 与 `NewlineStyle` 的变体集是两处独立事实，必须一致——由
-/// `newline_style_values_match_enum` 钉住。
+/// 与 `NewlineStyle` 的变体集必须一致，由 `newline_style_values_match_enum` 钉住。
 const NEWLINE_STYLE_VALUES: &[&str] = &["keep", "cr", "lf", "crlf"];
 
 /// 含生僻字的词在检索范围过滤下的处置。语义见 `wind_candidate::RarePhrasePolicy`
 /// （本常量是它的值域在配置注册表里的镜像）。
 ///
-/// ⚠️ 与那个枚举的变体集是两处独立事实，必须一致——由 `registry_values_match_the_policy_enum`
-/// 钉住（在 `wind-coordinator/tests/rare_phrase_contract.rs`，理由同 `input.rare_phrase` 的
-/// 默认值对照：本 crate 看不见 `wind_candidate`）。
+/// 与那个枚举的变体集必须一致，由 `wind-coordinator/tests/rare_phrase_contract.rs` 的
+/// `registry_values_match_the_policy_enum` 钉住（本 crate 看不见 `wind_candidate`）。
 const RARE_PHRASE_VALUES: &[&str] = &["keep", "filter"];
 
-/// 标点键的空码处置——比回车/空格**多一态**，故不能与 [`EMPTY_CODE_BEHAVIOR_VALUES`] 共用。
-///
-/// ★ 这一族配置描述的行为其实是**两根轴**，而值域只有一维：
+/// 标点键的空码处置，比回车/空格多一态，故不能与 [`EMPTY_CODE_BEHAVIOR_VALUES`] 共用。
+/// 行为其实是两根轴，值域只有一维：
 ///
 /// | | 键字符输出 | 键字符吞掉 |
 /// |---|---|---|
 /// | 废码上屏 | `commit` | （无意义，不设值） |
 /// | 废码丢弃 | `clear` | `clear_no_input` |
 ///
-/// 回车/空格的 `clear` 落在**吞键**那一格（返回 `ClearComposition`，键本身不产出任何字符），
-/// 标点的 `clear` 落在**出键**那一格（标点照常上屏）——同一个字面值在第二根轴上取值相反。
-/// 这不是笔误：标点是用户真正想输入的可见字符，吞掉等于吞掉用户的意图，故出键是对的默认。
-/// `clear_no_input` 补的正是这一族缺的第四格：「这串码作废，这个键也当没按过」。
-///
-/// ⚠️ **不要**为了「三键同族」把 `clear_no_input` 也加给回车/空格：它们的 `clear` 本就是
-/// 吞键态，加了会得到两个行为完全相同的值，设置页出现两个无法区分的选项。
-///
-/// ⚠️ 加值前先确认消费点真的分了那一支——`Coordinator::punct_empty_code_policy` 的 `match`
-/// 是唯一解释器，未知值一律落到 `commit`。
+/// 回车/空格的 `clear` 落在吞键格，标点的 `clear` 落在出键格（标点是用户想输入的字符）。
+/// 别把 `clear_no_input` 加给回车/空格：它们的 `clear` 本就吞键，会出现两个等价选项。
+/// 加值前先确认 `Coordinator::punct_empty_code_policy`（唯一解释器）分了那一支，未知值落到 `commit`。
 const PUNCT_EMPTY_CODE_BEHAVIOR_VALUES: &[&str] = &["commit", "clear", "clear_no_input"];
 
-/// 码表词频应用策略。
-/// `ui.comment.assign.global` 的四格键名。⚠️ 与 [`crate::comment_lib::CommentCells`] 的字段名逐项对齐。
+/// `ui.comment.assign.global` 的四格键名。与 [`crate::comment_lib::CommentCells`] 的字段名逐项对齐。
 pub(crate) const COMMENT_CELL_KEYS: &[&str] = &[
     "default_vertical",
     "default_horizontal",
@@ -163,21 +125,22 @@ pub(crate) const COMMENT_CELL_KEYS: &[&str] = &[
     "detail_horizontal",
 ];
 
-/// `ui.comment.state` 的值域。⚠️ 与 [`crate::comment_lib::CommentState`] 的 serde 名逐项对齐。
+/// `ui.comment.state` 的值域。与 [`crate::comment_lib::CommentState`] 的 serde 名逐项对齐。
 pub(crate) const COMMENT_STATE_VALUES: &[&str] = &["default", "detail"];
 
-/// `ui.comment.switch_key` 的值域。⚠️ 与 [`crate::comment_lib::SwitchKey`] 的 serde 名逐项对齐。
+/// `ui.comment.switch_key` 的值域。与 [`crate::comment_lib::SwitchKey`] 的 serde 名逐项对齐。
 pub(crate) const COMMENT_SWITCH_KEY_VALUES: &[&str] = &[
     "none", "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12", "ctrl",
     "lctrl", "rctrl", "alt", "lalt", "ralt",
 ];
 
-/// `ui.comment.switch_mode` 的值域。⚠️ 与 [`crate::comment_lib::SwitchMode`] 的 serde 名逐项对齐。
+/// `ui.comment.switch_mode` 的值域。与 [`crate::comment_lib::SwitchMode`] 的 serde 名逐项对齐。
 pub(crate) const COMMENT_SWITCH_MODE_VALUES: &[&str] = &["session", "persist", "hold"];
 
-/// `input.alt_commit` 的值域。⚠️ 与 [`wind_config::config::AltCommit::from_config`] 逐项对齐。
+/// `input.alt_commit` 的值域。与 [`crate::config::AltCommit::from_config`] 逐项对齐。
 pub(crate) const ALT_COMMIT_VALUES: &[&str] = &["off", "pinyin", "pinyin_plain", "comment"];
 
+/// 码表词频应用策略。
 const FREQ_STRATEGY_VALUES: &[&str] = &["top", "step", "position"];
 
 /// 前缀补全参与词频位置提升的范围（按语义单元数判定）。
@@ -188,9 +151,8 @@ const ENGLISH_CODE_SCOPE_VALUES: &[&str] = &["candidate", "input"];
 
 /// `ui.font.scripts` 的合法键名——**文字类别**，不是脚本的全集。
 ///
-/// 与渲染端 `wind_ui::text::script::ScriptClass::key()` 是同一件事的两处表达，由
-/// wind-ui 侧的 `script_class_keys_match_config_registry` 测试钉住（wind-config 依赖不到
-/// wind-ui，反向才能测）。**加类别时两处一起改，否则设置页永远不会列出新类别。**
+/// 与渲染端 `wind_ui::text::script::ScriptClass::key()` 两处表达，由 wind-ui 侧的
+/// `script_class_keys_match_config_registry` 钉住。加类别时两处一起改。
 pub const FONT_SCRIPT_KEYS: &[&str] = &[
     "latin", "greek", "cyrillic", "cjk", "emoji", "digits", "punct",
 ];
@@ -199,15 +161,11 @@ pub const FONT_SCRIPT_KEYS: &[&str] = &[
 /// mix / special 的同名字段是 StructList 条目内的属性，不在本注册表单独登记。
 const LAYOUT_INTENT_VALUES: &[&str] = &["follow", "vertical", "horizontal"];
 
-/// 「首候选是所打原文」的三档（`RawCandidateMode`）。老配置里本项是 `bool`，
-/// 反序列化侧仍认 `true` / `false`（见 `de_raw_candidate`），但**设置端只写新值域**
-/// ——两侧都认 bool 的话，写回一次就把用户的档位悄悄降级成两档。
+/// 「首候选是所打原文」的三档（`RawCandidateMode`）。反序列化侧仍认老的 `bool`（见
+/// `de_raw_candidate`），但设置端只写新值域，否则写回一次就把档位降成两档。
 const RAW_CANDIDATE_VALUES: &[&str] = &["always", "in_dict", "off"];
 
-/// emoji 扩展的触发范围（`input.emoji.scope`）。
-///
-/// ★ 值域登记在这里而不是只写进注释：core 与设置页 options 各写一份的话，两者脱节了
-/// 无人会报——本仓已经踩过这个坑。登记后设置页从同一个数组取值，改一处即两处同步。
+/// emoji 扩展的触发范围（`input.emoji.scope`）。值域登记在这里，设置页从同一个数组取值。
 const EMOJI_SCOPE_VALUES: &[&str] = &["off", "exact", "all"];
 /// emoji 扩展的呈现形态（`input.emoji.show_as`）。理由同 [`EMOJI_SCOPE_VALUES`]。
 const EMOJI_SHOW_AS_VALUES: &[&str] = &["after", "tail", "comment"];
@@ -217,12 +175,8 @@ const EMOJI_SHOW_AS_VALUES: &[&str] = &["after", "tail", "comment"];
 ///
 /// # 三态键（`Option<T>`，默认 `None`）刻意不登记
 ///
-/// 这类键不在本表内，**这不是遗漏**：注册表是与 `Config::default()` 的序列化键集反向对照的，
-/// 而这类键的出厂值恰恰是「键不存在」，序列化时压根不出现，登记即被判「多余」。
-///
-/// 不登记同时是**正确**的：`prune_redundant` 只清理「已登记且值等于出厂默认」的键，
-/// 未登记键一律不碰——用户手写的值因此永远不会被写回逻辑清掉。这与废弃键、
-/// `Map`/`StructList` 下钻子路径归为同一类处置，理由见该函数的「两道保险」。
+/// 它们的出厂值是「键不存在」，不在 `Config::default()` 的序列化键集里，登记即被判多余。
+/// 不登记也让 `prune_redundant` 永远不碰用户手写的值（同废弃键与 Map/StructList 子路径）。
 static REGISTRY: &[ConfigField] = &[
     // -- schema（方案 + 拼音 + 模式）--
     f("schema.active", Str),
@@ -323,8 +277,8 @@ static REGISTRY: &[ConfigField] = &[
     f("schema.codetable.auto_phrase.draft_flush_batch", Int),
     // 全局拼音
     f("schema.pinyin.use_smart_compose", Bool),
-    // 用户词进整句词图（S2）。**出厂 true**（2026-09-28 起），接用户词与临时词
-    // （不接草稿层）。只在 use_smart_compose 开着时有效，UI 侧 enabled_when 挂在它上面。
+    // 用户词进整句词图。出厂 true，接用户词与临时词（不接草稿层）。只在 use_smart_compose
+    // 开着时有效，UI 侧 enabled_when 挂在它上面。
     f("schema.pinyin.sentence_uses_user_words", Bool),
     // 整句 N-best：露几条 / 算几条（切换键的池子）。出厂 1/1 = 单条整句。
     f("schema.pinyin.sentence_count", Int),
@@ -622,7 +576,7 @@ static REGISTRY: &[ConfigField] = &[
     // -- keys（全部按键，扁平；overflow 保留一层）--
     f("keys.toggle_mode_keys", StrList),
     f("keys.commit_on_switch", Bool),
-    // Ctrl+空格 中英切换开关（GH#172）。消费端读 `KeysConfig::ctrl_space_toggle_effective`。
+    // Ctrl+空格 中英切换开关。消费端读 `KeysConfig::ctrl_space_toggle_effective`。
     f("keys.ctrl_space_toggle", Bool),
     f("keys.switch_engine", Str),
     f("keys.toggle_full_width", Str),
@@ -641,13 +595,9 @@ static REGISTRY: &[ConfigField] = &[
     f("keys.take_screenshot", Str),
     f("keys.softkeyboard", Str),
     f("keys.global_hotkeys", StrList),
-    // `keys.schema_hotkeys` 已废弃并**从登记表移除**（与当年 `schema.special_modes` 同样
-    // 的处置）：改写进下面的 key_actions（动词 `switch_schema:<id>`），**没有兼容折算**
-    // ——加载期只由 `Config::warn_legacy_schema_hotkeys` 告警一次随后清空，残留的老配置
-    // 不生效。serde 字段仍保留（`legacy_schema_hotkeys`），是为了**读得出残留值以便告警**，
-    // 不是为了让它继续工作；移出登记表则让 `config.setItems`
-    // 不再接受对它的写入——写旧键的客户端会收到 skipped 而不是静默成功，这正是我们想要的
-    // 可见性（本仓最忌讳「写进去了、没人读」）。
+    // `keys.schema_hotkeys` 已废弃、不登记：改写进 key_actions（`switch_schema:<id>`），无兼容
+    // 折算。serde 字段 `legacy_schema_hotkeys` 只为读出残留值告警；不登记让 `config.setItems`
+    // 对旧键回 skipped 而不是静默成功。
     f("keys.key_actions", Map(&[])),
     f("keys.session_actions", Map(&[])),
     f("keys.select_key_groups", StrList),
@@ -971,50 +921,30 @@ pub fn is_known_key(key: &str) -> bool {
 pub struct SchemaOverride {
     /// 全局键；**以 `.` 结尾表示段前缀，且只管这一段的直接子键**。
     ///
-    /// ★ 前缀刻意**不递归**到更深的子段。覆盖能力是逐字段实现的（`resolved()` 里一个
-    /// `if let Some` 一行），子段未必跟着——`schema.codetable.` 可覆盖，它下面的
-    /// `auto_phrase` 子段却整个不折叠。递归前缀会把 `auto_phrase.*` 一并标成「可被方案
-    /// 覆盖」，而那是**告诉用户一件不成立的事**：他会去方案里写这一段，写了没反应，
-    /// 然后怀疑是自己写错了。要覆盖某个子段就为它再登记一条。
+    /// 前缀刻意不递归：覆盖能力逐字段实现，子段未必跟着（如 `schema.codetable.auto_phrase`），
+    /// 递归会向用户提示一件不成立的事。要覆盖某个子段就为它再登记一条。
     pub key: &'static str,
     /// 方案文件（`.schema.toml` / `schema_overrides/<id>.toml`）里的落点段名。
     pub section: &'static str,
-    /// 覆盖语义，一句话，直接进设置页的提示——**写给用户，不是写给维护者**。
+    /// 覆盖语义，一句话，直接进设置页的提示（写给用户，不是写给维护者）。
     pub note: &'static str,
-    /// 是否由**通用折叠器**生效：`true` ⇒ 方案文件 `[candidate]` 下写同名叶子键即可覆盖，
-    /// 不需要结构体字段，也不需要 `resolved()` 里的一行（见 [`split_candidate_patch`] 与
-    /// `UiCandidateConfig::folded_with`）。目前只支持 `ui.candidate.*` 的精确键。
-    ///
-    /// `false` 的登记是**手写形态**（码表 `resolved()`、标点、`layout` 的三态等），
-    /// 这张表只负责提示，生效逻辑在别处。
+    /// 是否由通用折叠器生效：`true` ⇒ 方案文件 `[candidate]` 下写同名叶子键即可覆盖（见
+    /// [`split_candidate_patch`] 与 `UiCandidateConfig::folded_with`），目前只支持
+    /// `ui.candidate.*` 的精确键。`false` 的登记是手写形态，这张表只负责提示。
     pub fold: bool,
 }
 
 /// 可被方案级配置覆盖的全局项。
 ///
-/// # 这张表回答的问题
+/// 回答「全局改了，为什么某个方案里没变」，供设置页提示。它是静态事实，走 capability 快照
+/// （随 `system.capabilities` 拉一次）；别为它遍历 [`crate::config::OriginSnapshot`]。
 ///
-/// 「我在全局改了标点行为，为什么某个方案里没变」——因为那个方案自己声明了。这是本仓
-/// 配置模型里用户最常撞到的一层，而全局设置页此前**没有任何地方提示过它的存在**。
+/// 没有编译期约束：对应关系只在各 `resolved()` 函数体里（[`crate::schema::SchemaBehavior`]、
+/// [`crate::config::CodetableGlobal::resolved`]、[`crate::config::AuxCodeGlobal::resolved`]），
+/// 新增方案级字段时必须回来加一行，漏了没有测试会红。
 ///
-/// ★ 它是**静态事实**：某项能不能被方案覆盖由配置模型决定，与用户机器上有什么文件无关。
-/// 因此走 capability 快照（启动时随 `system.capabilities` 拉一次），**零运行时成本**。
-/// ⛔ 不要为它去遍历 [`crate::config::OriginSnapshot`]——那是排查用的重查询，
-/// 回答的也是另一个问题（「实际来自哪一层」）。
-///
-/// # ⚠️ 没有编译期约束，加方案级字段时必须回来加一行
-///
-/// 「方案的 `[engine.codetable].top_code_commit` 覆盖全局的 `schema.codetable.top_code_commit`」
-/// 这层对应关系只存在于 `resolved()` 的函数体里，类型系统看不见。新增方案级字段而漏了
-/// 这张表，后果是设置页那一行**不再提示可被覆盖**——没有任何测试会红。
-/// 各方案级段的权威定义：[`crate::schema::SchemaBehavior`]（punct/candidate/phrases）、
-/// [`crate::config::CodetableGlobal::resolved`]、[`crate::config::AuxCodeGlobal::resolved`]。
-///
-/// # 不在表里的方案级字段
-///
-/// `[candidate]` 的 `font_family` 与 `text_orientation`、`[punct]` 的 `mode`、`[phrases]`
-/// 整段：它们**没有对应的全局配置键**（回落目标分别是主题、运行时中英标点态、方案自身），
-/// 全局设置页上根本没有那一行，无从标记。
+/// 不在表里的：`[candidate]` 的 `font_family` / `text_orientation`、`[punct]` 的 `mode`、
+/// `[phrases]` 整段，它们没有对应的全局配置键。
 pub const SCHEMA_OVERRIDES: &[SchemaOverride] = &[
     SchemaOverride {
         key: "schema.codetable.",
@@ -1102,7 +1032,7 @@ pub fn candidate_fold_entry(leaf: &str) -> Option<&'static SchemaOverride> {
 /// 2. 值过注册表校验（类型 / 枚举值域）；
 /// 3. 注册表表达不了的值域在 [`value_in_domain`] 补一刀。
 ///
-/// ★ 「写错的值 = 没写」：错值若混进补丁，折叠时会把全局的好值一起盖没。
+/// 「写错的值 = 没写」：错值混进补丁会把全局的好值盖掉。
 pub fn split_candidate_patch(raw: &toml::Table) -> (toml::Table, Vec<String>) {
     let mut ok = toml::Table::new();
     let mut problems = Vec::new();
@@ -1158,12 +1088,9 @@ pub fn schema_override_of(key: &str) -> Option<&'static SchemaOverride> {
 /// 回答全局设置页「已被 N 个方案覆盖」的反查（R8.6）。键名与 [`SCHEMA_OVERRIDES`] 的登记
 /// 一一对应（前缀型登记展开成直接子键），每个键至多出现一次。
 ///
-/// 判据逐字段与各 `resolved()` 的折叠条件一致：`Option` 取 `is_some()`、`LayoutIntent`
-/// 取非 `Follow`、码元字符集取非空串——「写了但等于全局值」也算覆盖，因为此后改全局对
-/// 它已无影响，这正是用户要被提示的事。
-///
-/// ⚠️ 与 [`SCHEMA_OVERRIDES`] 一样没有编译期约束：新增方案级字段时两处都要加一行。
-/// 护栏是 `overridden_keys_covers_every_schema_override_entry`（登记了而这里漏了会红）。
+/// 判据逐字段与各 `resolved()` 的折叠条件一致；「写了但等于全局值」也算覆盖（此后改全局
+/// 对它已无影响）。新增方案级字段时与 [`SCHEMA_OVERRIDES`] 两处都要加一行，护栏是
+/// `overridden_keys_covers_every_schema_override_entry`。
 ///
 /// `[punct] mode` 不在内：它没有对应的全局键（见 [`SCHEMA_OVERRIDES`] 的「不在表里」一节）。
 pub fn schema_overridden_keys(schema: &crate::schema::Schema) -> Vec<&'static str> {
@@ -1459,11 +1386,8 @@ pub fn validate(key: &str, value: &toml::Value) -> Result<(), ValidateError> {
             }
             true
         }
-        // 可分档枚举：把值摊成「每一档的实际取值」，逐档过同一个值域。
-        //
-        // ★ 这一层正是「拼错档位名」的兜底：`"x:hide"` 在解析那边不算分档语法（与
-        // `"C:\path"` 同形，分辨不了），会原样落成标量到这里 ⇒ 不在值域内 ⇒ 报
-        // EnumOutOfRange。用户照样看得到错误，且真·路径值不被误伤。
+        // 可分档枚举：把值摊成每一档的实际取值，逐档过同一个值域。拼错档位名（`"x:hide"`）会
+        // 原样落成标量到这里而报 EnumOutOfRange。
         FieldType::LayoutEnum(allowed) => {
             let parts = crate::by_layout::domain_parts(value).ok_or({
                 ValidateError::TypeMismatch {
@@ -1512,14 +1436,8 @@ pub fn validate(key: &str, value: &toml::Value) -> Result<(), ValidateError> {
 /// 故 `[ui.candidate]`（非空表）会下钻，而 `input.punct.custom_mappings = {}`（空表）作叶子保留。
 fn collect_leaf_keys(prefix: &str, value: &toml::Value, out: &mut Vec<String>) {
     match value {
-        // ★ 注册表里登记为 Map 的键**就是叶子**，不再下钻。
-        //
-        // Map 的内容是**数据**（`keys.key_actions` 的键名 → 动词、`schema_hotkeys` 的
-        // 方案 id → 热键），不是配置项。下钻会把 `keys.key_actions.backtick` 这种数据
-        // 当成注册表键去比对——两个方向同时报错：注册表里没有它（"孤立键"），而
-        // `keys.key_actions` 本身又因为没出现过被算作"缺失"。
-        //
-        // 此前没暴露只是因为出厂配置里所有 Map 都是空表（`= {}`），没有子键可下钻。
+        // 登记为 Map 的键就是叶子，不再下钻：Map 的内容是数据（如 `keys.key_actions` 的键名 → 动词），
+        // 下钻会把它当成注册表键比对，两个方向同时报错。
         toml::Value::Table(_)
             if !prefix.is_empty()
                 && matches!(

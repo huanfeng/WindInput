@@ -1,4 +1,4 @@
-//! 候选**注释段**（候选右侧的小字）的模板渲染——`[ui.comment]` 模板的唯一消费点。
+//! 候选注释段（候选右侧的小字）的模板渲染，`[ui.comment]` 模板的唯一消费点。
 //!
 //! # 模板语法
 //!
@@ -6,48 +6,20 @@
 //! |---|---|
 //! | `${name}` | 变量替换 |
 //! | `${name:arg}` | 带参数的变量（如 `${chaizi_all:／}` 指定逐字分隔符） |
-//! | `${name:$[颜色]{分隔符}}` | 分隔符单独上色（参数**整个**写成内联色时；颜色写法同 `$[颜色]{ … }`） |
-//! | `${a\|b\|c}` | 取**首个非空**的变量 |
-//! | `{ … }` | 可选段：段内变量**全为空**则整段（含字面文本）消失；可嵌套，段内字面 `{` 必须配对 |
-//! | `$[颜色]{ … }` | 内联色：只管上色，**不是**可选段（内部变量照常计入外层的「有值」判定，全空时自己也不消失）；颜色写法与回落见 `docs/design/text-span-colors.md` §4 |
-//!
-//! ⚠️ 可选段按层数配对（2026-09 起，为悬停提示合并段的 `{${chaizi}{ [${chaizi_code}]}\t}`）。
-//! 此前段内第一个 `}` 即结束，段里落单的字面 `{`（如 `{(${a}{)}`）原样输出；现在它会去配
-//! 下一个 `}`，输出随之不同。模板里要写字面花括号，请成对出现。
+//! | `${name:$[颜色]{分隔符}}` | 分隔符单独上色（参数整个写成内联色时；颜色写法同 `$[颜色]{ … }`） |
+//! | `${a\|b\|c}` | 取首个非空的变量 |
+//! | `{ … }` | 可选段：段内变量全为空则整段（含字面文本）消失；可嵌套，按层数配对，段内字面 `{` 必须配对 |
+//! | `$[颜色]{ … }` | 内联色：只管上色，不是可选段（内部变量照常计入外层的「有值」判定）；颜色写法与回落见 `docs/design/text-span-colors.md` §4 |
 //!
 //! 另有两条隐含规则：
-//! - **空变量吞掉紧邻的一个空白**：`{(拼: ${pinyin} ${chaizi})}` 在拆字为空时得
-//!   `(拼: nǐ hǎo)` 而非 `(拼: nǐ hǎo )`。
-//! - **整个模板视为一个隐式可选段**：所有变量都为空时输出空串，故 `拼:${pinyin}` 在查不到
-//!   读音时不会剩下一个孤零零的 `拼:`。
+//! - 空变量吞掉紧邻的一个空白：`{(拼: ${pinyin} ${chaizi})}` 在拆字为空时得 `(拼: nǐ hǎo)`。
+//! - 整个模板视为一个隐式可选段：所有变量都为空时输出空串。
 //!
-//! 可用变量见 [`Coordinator::eval_var`]。不做转义：注释模板里出现字面 `$`/`{`/`}` 的概率极低，
-//! 真需要时再加，现在加只是徒增用户要记的规则。
+//! 可用变量见 [`Coordinator::eval_var`]。不做转义（字面 `$`/`{`/`}` 概率极低）。面向用户的完整
+//! 说明在文档站 `settings/appearance/candidate-comment`。
 //!
-//! 面向用户的完整说明在文档站 `settings/appearance/candidate-comment`（设置页对话框里有跳转按钮）——
-//! 语法还会继续长（将来的注释库变量、模式级覆盖），塞进设置页的说明框只会越来越挤。
-//!
-//! # 为什么是模板而不是「来源列表 + 分隔符」
-//!
-//! 前一版是有序来源列表 `comment_sources` 加一个 `comment_separator`。它表达不了装饰字符
-//! （括号、标签文字）、表达不了「A 为空时用 B」，而且**顺序、内容、分隔三件事散在三个键里**。
-//! 模板把它们收进一个字符串，顺带消掉了三处复杂度：分隔符配置、按长度量级硬编码的横排过滤、
-//! 以及为保出厂零回归而引入的「编码类来源互斥」。
-//!
-//! 更要紧的是**可扩展性**：新增一个注释来源（如将来的独立注释库）只是多一个变量名，
-//! 配置结构完全不动。
-//!
-//! # 横竖各持一份模板
-//!
-//! 两种排布的可用横向空间差一个数量级（竖排每行独占，横排全部候选共享一行宽度），能放什么
-//! 本就不是同一个答案。共用一份的结果必是「为竖排配的拼音把横排候选窗撑爆」或「为横排收着
-//! 配的注释让竖排一片空白」。
-//!
-//! **由此，上一版的「溢出转悬停提示」机制已删除**：横排显示什么由横排模板自己决定，
-//! 「放不下所以推去气泡」这个前提不存在了。那套机制本身还有个缺陷——它按同名标签追加
-//! （`拼音:` / `拆字:`），而 `ui.tooltip.pinyin_enabled` 出厂即 `true`，于是气泡里会同时
-//! 出现 tooltip 自己的逐字 `[拼音]` 段和追加的那份，等于把重复做实了。悬停提示现回归由
-//! `ui.tooltip.*` 独家负责。
+//! 横竖各持一份模板：两种排布的可用横向空间差一个数量级。悬停提示由 `ui.tooltip.*` 独家负责，
+//! 注释段不往气泡里溢出。取舍见 `docs/design/candidate-comment-templates.md` 附录。
 //!
 //! # 模板从哪来：模式 → 方案 → 方案类型 → 全局
 //!
@@ -58,12 +30,9 @@
 //!
 //! # 为什么装配收在协调器
 //!
-//! 变量的数据源分属多个 crate —— `Candidate::comment`（wind-engine 产）、候选自身的
-//! `code`/`boundary`、`ReverseLookup`（wind-reverse）、`codetable_reverse_hint`
-//! （wind-engine）。只有协调器同时够得着。
-//!
-//! 解析/渲染（纯函数 [`parse`] / [`render`]）与变量求值（[`Coordinator::comment_for`]）
-//! 刻意分开，与 `layout.rs` 同构：前者可用任意求值闭包测出完整语法矩阵，不必构造协调器。
+//! 变量的数据源分属多个 crate（wind-engine、wind-reverse、候选自身），只有协调器同时够得着。
+//! 解析/渲染（纯函数 [`parse`] / [`render`]）与变量求值（[`Coordinator::comment_for`]）刻意分开，
+//! 前者可用任意求值闭包测出完整语法矩阵，不必构造协调器。
 
 use crate::comment_switch::{SwitchEffect, SwitchOutcome};
 use crate::coordinator::State;
@@ -78,8 +47,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 /// 一次变量引用：名字 + 可选参数（`${chaizi_all:／}` 的 `／`）。
 ///
-/// 参数**不 trim**，名字才 trim：`${chaizi_all: · }` 里那两个空格正是用户要的分隔符，
-/// 削掉它就没法配出「亻尔 · 女子」。而 `${ pinyin }` 这种手滑仍要认。
+/// 参数不 trim、名字才 trim：`${chaizi_all: · }` 里的空格正是用户要的分隔符。
 ///
 /// 参数整个写成 `$[颜色]{分隔符}`（`${chaizi_all:$[text_dim]{／}}`）时，变量收到的参数是
 /// `分隔符`，颜色只标在值里的分隔符上（[`VarValue`]），写法与回落同模板内联色。
@@ -214,9 +182,7 @@ enum Node {
 
 /// 解析模板。**不会失败**——未闭合的 `${` / `{` 一律退化为字面文本。
 ///
-/// 宽容而非报错，是因为这个字符串由用户在设置页手打，且它的产物直接显示在候选栏里：
-/// 语法写错时让他看到自己打的原文（`${pinyn}` 原样出现），比弹一个错误对话框或者静默
-/// 变空更容易自己改对。
+/// 宽容而非报错：语法写错时让用户在候选栏里看到自己打的原文，最容易自己改对。
 fn parse(tpl: &str) -> Vec<Node> {
     let pairs = Pairs::new(tpl.as_bytes());
     parse_range(tpl, &pairs, 0, tpl.len(), 0)
@@ -317,16 +283,12 @@ const COLOR_SPEC_MAX: usize = 64;
 
 /// 可选段 / 内联色的嵌套上限。更深的 `{` 与 `$[…]{` 按字面文字处理。
 ///
-/// 解析与渲染都按层递归，层数不设限的话，一个几千层的模板（手滑粘贴、或故意构造）存进
-/// 配置就能在候选渲染时把服务的栈打穿、进程直接 abort。32 远超任何真实用途：出厂最深的
-/// 是悬停提示合并段的 3 层，手写模板很难超过 5 层；而 32 层 × 每层几百字节的栈帧离线程栈
-/// 上限还有两个数量级。超限不报错、按字面显示，与本解析器「写错就原样给人看」的取向一致。
+/// 解析与渲染都按层递归，不设限的话一个几千层的模板就能把服务的栈打穿。32 远超真实用途
+/// （出厂最深 3 层），离栈上限还有两个数量级。超限按字面显示。
 pub(crate) const MAX_DEPTH: usize = 32;
 
-/// 整个模板的花括号配对表，**一次线性扫描**算好。
-///
-/// 此前 `find_group_end` 每遇到一个 `{` 就往后重扫到配对处，`${` 找 `}` 也是逐次往后找：
-/// 一串未闭合的 `{`（20 万个）就是平方级，实测 37 秒——同样是存进配置就卡死候选渲染的形状。
+/// 整个模板的花括号配对表，一次线性扫描算好；逐次往后重扫是平方级，一串未闭合的 `{` 就能
+/// 卡死候选渲染。
 ///
 /// 配对规则与逐次重扫逐字相同（测试 `pairs_match_rescan_reference` 按随机模板对拍）：
 /// `${` 跳到其后第一个不在参数内联色 `$[…]{…}` 里的 `}`（[`Self::var_end`]；变量未闭合 ⇒ 其后
@@ -478,10 +440,8 @@ pub(crate) fn role_of(name: &str) -> &str {
 
 /// 片段构建器：输出缓冲 + 颜色栈 + 「是否在段名里」。
 ///
-/// `Color` 节点**在当前构建器里原地渲染**（进入时压栈、退出时弹栈），不另开子构建器：
-/// 「空变量吞掉紧邻的一个空白」看的永远是同一个输出缓冲的末尾，跨颜色边界照吞。若 `Color`
-/// 也开子构建器，`${pinyin} $[accent]{${chaizi}}` 里 `${chaizi}` 为空时它看到的是空的子缓冲，
-/// 吞不到外面那个空格（§8.1）。只有 `Group` 用子构建器——它要先渲染再决定整段要不要。
+/// `Color` 节点在当前构建器里原地渲染（压栈 / 弹栈），不另开子构建器，否则「空变量吞掉紧邻
+/// 空白」跨不过颜色边界。只有 `Group` 用子构建器：它要先渲染再决定整段要不要。
 struct Builder {
     out: StyledText,
     colors: Vec<Arc<InlineColor>>,
@@ -589,14 +549,10 @@ impl Builder {
 
 /// 渲染节点序列到构建器，返回「本段里出现过非空（且计数的）变量吗」。
 ///
-/// 后者是可选段与顶层的存废依据，**必须与文本分开返回**：一个段可能渲染出非空文本
-/// （字面装饰字符）却一个变量都没填上，那正是要整段丢弃的情形（`(拼: )`）。
+/// 后者必须与文本分开返回：一个段可能只渲染出字面装饰字符却没填上任何变量，要整段丢弃。
 ///
-/// `eval` 按变量名求值：`None` = **未知变量名**，`Some("")` = 已知但为空。
-///
-/// 两者刻意区分：未知变量名原样输出 `${name}` 并**计作已填充**，于是拼错的变量名一定会
-/// 显示在候选栏里让用户看见。若把未知当空处理，用户得到的是「配了没反应」——本仓记忆里
-/// 反复出现的那类静默失效。回显不带角色：它是错误提示，用正文色，不借任何角色的色。
+/// `eval` 按变量名求值：`None` = 未知变量名，`Some("")` = 已知但为空。未知变量名原样输出
+/// `${name}` 并计作已填充，让拼错的变量名显示出来而不是静默变空；回显用正文色、不带角色。
 ///
 /// `counts(name)` 决定「这个变量填上了」算不算数：悬停提示的逐字段里 `${char}` 恒非空，
 /// 若计入，查不到读音的字会留下孤零零的 `好：`。注释段传恒真。
@@ -720,9 +676,8 @@ impl Template {
 
     /// 渲染为 `(文本, 是否有计数变量非空)`。
     ///
-    /// 与注释段的 [`render`] 不同，这里**既不 trim、也不做「全空则整体消失」**，都留给调用方：
-    /// 悬停提示的原始行是复制 / 上屏的取值来源，完整原文开头的缩进、`\t` 必须原样保留；
-    /// 段内容全空要消失，而段名的字面文字（`编码`）不能消失。
+    /// 与注释段的 [`render`] 不同，这里既不 trim、也不做「全空则整体消失」，留给调用方：悬停提示
+    /// 的原始行要保留缩进与 `\t`，段名字面文字不能消失。
     #[cfg(test)]
     pub(crate) fn render<V: Into<VarValue>>(
         &self,
@@ -749,8 +704,7 @@ impl Template {
 
     /// 上方注释条开关开时的渲染：按模板**字面文字**里第一个 `\n` 拆成 `(上段, 下段)`。
     ///
-    /// ★ 先拆、后各自 trim、再各自截断（`max_chars` 含义为「每段」）。先 trim 整体会让
-    /// `${pinyin}\n${chaizi}` 在拆字为空时吃掉尾部 `\n`，拼音就掉到了右侧。
+    /// 先拆、后各自 trim、再各自截断（`max_chars` 为每段）。先 trim 整体会吃掉尾部 `\n`。
     /// 无字面 `\n`、或上段为空 ⇒ 上段空，下段与 [`Self::render_whole`] 同口径。
     pub(crate) fn render_split<V: Into<VarValue>>(
         &self,
@@ -831,8 +785,7 @@ const SYLLABLE_SEP: &str = " ";
 /// `wind_dict::binformat::DictEntry::boundary`），真值来自词库源数据 `你好\tni hao` 里的
 /// 那个空格。bit 0 是整串起点。
 ///
-/// 超过 64 字节的部分不再有边界信息（bitmask 装不下），并入最后一个音节 —— 拼音词长上限
-/// 远小于此，实际不触发，但不加这个界会读到 `>> 64` 的未定义移位。
+/// 超过 64 字节的部分并入最后一个音节（bitmask 装不下）；这个界也防住 `>> 64` 溢出移位。
 fn syllables_of(code: &str, boundary: u64) -> Vec<&str> {
     let mut out = Vec::new();
     let mut start = 0usize;
@@ -850,15 +803,10 @@ fn syllables_of(code: &str, boundary: u64) -> Vec<&str> {
 
 /// 候选的**带声调注音**。
 ///
-/// 声调只存在于读音表（`pinyin_map.txt`）里，编码域一律无调（拼音输入法不打声调）；而多音字
-/// 的正确读音只有词条编码知道。故两边都要用：**拿编码的音节去筛读音表**，见
-/// `ReverseLookup::toned_pinyin_of`。
+/// 声调只在读音表里，多音字的正确读音只有词条编码知道，故拿编码的音节去筛读音表（见
+/// `ReverseLookup::toned_pinyin_of`）。非拼音来源候选按词推断读音，推不出退回逐字最常用读音。
 ///
-/// 拼音来源候选带 `code` + `boundary` 时给得出音节序列（消歧准确）；其余候选（码表/短语/
-/// 英文…）没有拼音码可依，传 `None` 退回逐字最常用读音，多音字可能不准 —— 这是数据下界。
-///
-/// ⚠️ `boundary == 0` 的语义是「**无边界信息**」而非「单音节」（单音节是 `0b1`），必须当作
-/// 拿不到音节序列。否则五笔码 `wqvb` 会被当成一个拼音音节送去筛读音表。
+/// `boundary == 0` 表示无边界信息而非单音节（单音节是 `0b1`），否则五笔码会被当成拼音音节。
 fn pinyin_text(
     c: &Candidate,
     infer: impl FnOnce(&str) -> String,
@@ -871,12 +819,8 @@ fn pinyin_text(
         let syls = syllables_of(&c.code, c.boundary);
         return lookup(&c.text, Some(&syls));
     }
-    // 路径 B —— 码表/短语等非拼音来源：没有拼音码可依，交给引擎**按词推断**。
-    //
-    // ⚠️ 这条路径此前直接落到「逐字最常用读音」，于是五笔方案下词组注音系统性出错
-    // （「行长」→ `xíng cháng`，两个字都错），而五笔用户恰恰是注音功能最主要的受众
-    // ——打得出但不会读。推断走 `EngineManager::word_pinyin_syllables`，它枚举每字读音的
-    // 笛卡尔积、取第一个**能在拼音词典里查回该词**的组合，查不回的组合直接排除。
+    // 路径 B：码表/短语等非拼音来源按词推断（`EngineManager::word_pinyin_syllables` 取第一个能在
+    // 拼音词典里查回该词的读音组合），否则「行长」一类词组逐字取常用读音会全错。
     let inferred = infer(&c.text);
     if inferred.is_empty() {
         // 推断失败（含非汉字、生僻多音字超组合数护栏）→ 交由查表层逐字取最常用读音。
@@ -888,9 +832,8 @@ fn pinyin_text(
 
 /// 去掉拼音声调符号（`nǐ hǎo` → `ni hao`）。`ü` 保留——它是字母不是声调。
 ///
-/// 与 `wind-reverse` 的 `strip_tone` 平行但口径不同，刻意不合并：本函数产出给人看的
-/// 注释文本（`ü` 保留、`ń`/`ḿ` 去调），那边产出与输入码比对的键（`ü`→`v`、小写、
-/// 不处理 `ń`/`ḿ`）。改其一时核对另一处是否也该改。
+/// 与 `wind-reverse` 的 `strip_tone` 口径不同、刻意不合并：本函数产出给人看的文本，那边产出
+/// 与输入码比对的键（`ü`→`v`）。改其一时核对另一处。
 fn strip_tones(s: &str) -> String {
     s.chars()
         .map(|ch| match ch {
@@ -963,9 +906,8 @@ pub(crate) fn schema_type_of(
 
 // ── 各求值入口认得的变量名 ──────────────────────────────────────────────────────
 //
-// 与各入口的 match 分支一一对应，测试 `entry_name_tables_match_their_bodies` 扫源码逐表核对
-// （多一个、少一个都红）。设置页模板预览按场景取它们的并集判「此处可不可用」，与真实渲染的
-// 求值链同一口径——另写一份清单的话，候选栏里原样回显的 `${word_code}` 在预览里会照常出值。
+// 与各入口的 match 分支一一对应，`entry_name_tables_match_their_bodies` 扫源码逐表核对。
+// 设置页模板预览按场景取它们的并集判「此处可不可用」，与真实求值链同一口径。
 
 /// [`Coordinator::eval_var`]（注释段；气泡整段 / 段名 / 逐字段的最后一层回落）。
 pub(crate) const EVAL_VAR_NAMES: &[&str] = &[
@@ -1012,9 +954,7 @@ pub(crate) const REVERSE_TEXT_VAR_NAMES: &[&str] = &[
 
 /// 裸文本变量里**只依赖反查表**的那一部分（`char` 与 `chaizi*` 一族）。
 ///
-/// 从 [`Coordinator::eval_text_var`] 拆出来，是为了让悬停提示逐字段的对拍测试不构造协调器
-/// 也能走到**生产同一份**求值代码：拆字列正是旧 `merge_chaizi_pinyin` 行序的判据，
-/// 若测试里另写一份，对拍证明的就只是两份手写实现彼此一致。
+/// 从 [`Coordinator::eval_text_var`] 拆出来，让测试不构造协调器也能走到生产同一份求值代码。
 pub(crate) fn reverse_text_var(
     name: &str,
     arg: Option<&str>,
@@ -1603,22 +1543,12 @@ impl crate::coordinator::Coordinator {
 
     /// **任意文本**的反查渲染 —— cmdbar `dict.rev(text, n, format=…)` 的宿主侧实现。
     ///
-    /// 与 [`Self::comment_for`] 共用模板渲染器与**变量词汇表**：用户在候选注释里学会的
-    /// `${code}` / `${pinyin}` / `${chaizi}` 在这里同名同义，学一次。两处的变量求值
-    /// （[`Self::eval_var`] / [`Self::eval_text_var`]）刻意挨着放 —— 它们是同一套词汇的
-    /// 两个入口，分开写必然漂移。
+    /// 与 [`Self::comment_for`] 共用模板渲染器与变量词汇表（[`Self::eval_var`] /
+    /// [`Self::eval_text_var`] 刻意挨着放，免得漂移）。取值对象是一段裸文本而非候选，故
+    /// `${code_hint}` 这类候选专属变量不存在。不截断：产物就是上屏文本。
     ///
-    /// 与注释段的差别只在**取值对象**：那边是「当前候选」（带 source / code / boundary
-    /// 等身份），这边是「一段裸文本」（剪贴板来的，没有候选身份）。故候选专属的
-    /// `${code_hint}` 在这里不存在，写了会被渲染层原样回显让人看见。
-    ///
-    /// `max_chars` 传 0（不截断）：这里的产物**就是上屏文本**，不是显示投影。
-    /// 候选窗的显示截断另有 `ui.candidate.max_chars` 在下游负责，两者不是一回事。
-    ///
-    /// ⚠️ **调用方不得已持有 `self.reverse` 的读锁**：本方法自取一次读锁，而 std 的
-    /// `RwLock` 在有写者排队时同线程重入读会死锁（读锁不可重入）。当前唯一长期持有该
-    /// 读锁的是 `notify_ui_update` 的候选渲染循环，它不经过短语求值，故无嵌套；
-    /// 新增持锁路径时须回到这里核对。
+    /// 调用方不得已持有 `self.reverse` 的读锁：本方法自取一次，std `RwLock` 在有写者排队时同线程
+    /// 重入读会死锁。
     #[allow(dead_code)] // 现仅 reverse_render_min 被调用，保留为 min_len=0 的语义入口
     pub(crate) fn reverse_render(&self, text: &str, tpl: &str) -> String {
         self.reverse_render_min(text, tpl, 0)
@@ -1664,11 +1594,9 @@ impl crate::coordinator::Coordinator {
     ///
     /// 变量语义与 [`Self::eval_var`] 逐项对齐，仅两点差异：
     /// - `char` —— 本入口独有：注释段不需要它（候选文本已在注释左边），而反查产物要自带被查的字；
-    /// - `code_rev` —— 恒取主码表反查，**不带**注释段那道 `hint_source && source==Pinyin`
-    ///   门控。那道门控的理由是「码表方案下候选的码就是用户自己打的，反查是冗余」，而剪贴板
-    ///   文本不是用户打出来的，反查正是这里的全部目的。
-    /// - `shuangpin` —— 同义，但音节来路不同：那边有候选身份可用词条真值 `code`+`boundary`，
-    ///   这边是裸文本，只能按词推断读音再编码。
+    /// - `code_rev` —— 恒取主码表反查，不带注释段那道「仅拼音来源候选」门控：剪贴板文本不是
+    ///   用户打出来的，反查正是这里的目的。
+    /// - `shuangpin` —— 同义，但只能按词推断读音再编码（没有词条真值 `code`+`boundary`）。
     pub(crate) fn eval_text_var(
         &self,
         name: &str,
@@ -1692,14 +1620,8 @@ impl crate::coordinator::Coordinator {
         min_len: usize,
     ) -> Option<VarValue> {
         Some(VarValue::from(match name {
-            // 索引未就绪给空串（而不是 `None`）：`None` 在渲染层专表**未知变量名**，
-            // 会原样输出 `${code_rev}` 让用户看见拼写错误。空串则不计入
-            // `reverse_render` 的 found 判据，整条反查候选这一次照旧不出现 —— 想要的
-            // 效果不变，但不会在「模板里还有别的非空变量」时把字面 `${code_rev}`
-            // 混进上屏文本。索引建好后下一次按键即恢复。
-            //
-            // ★ 没就绪时顺手派后台构建（单飞、已就绪即返回，不阻塞）：运行期格式串不在配置里，
-            // `DataNeeds` 看不见它，没有别人会替它建——不派的话这条反查永远是空的。
+            // 索引未就绪给空串而不是 `None`（`None` 会被当成未知变量名原样回显）。顺手派后台构建
+            // （单飞、不阻塞）：运行期格式串不在配置里，`DataNeeds` 看不见，没有别人会替它建。
             "code_rev" | "code" => {
                 let code = match self.engine_mgr.codetable_reverse_hint(text) {
                     // 已启用词库里没有时，补未启用扩展库的码（`*` 开头，取最长）。
@@ -1721,15 +1643,8 @@ impl crate::coordinator::Coordinator {
                     String::new()
                 }
             }
-            // `code_all` —— 该字在码表里的**全部**码位，默认 `/` 连接（`我` → `q/trn/trnt`）。
-            //
-            // 与 `code` 的分工照搬同文件 `chaizi` / `chaizi_all` 的既有惯例：不带后缀取单个，
-            // `_all` 取全部、且可用 `${code_all:分隔符}` 换连接符。
-            //
-            // ★ 反查默认用它而不是 `code`：`codetable_reverse_hint` 取的是 `codes.last()`，
-            // 而 `codes_of` 按**码长升序**，故它给的恒是最长的全码。那对候选注释是对的
-            // （注释是候选右侧的窄条，塞下三个码会把候选行撑爆），但对「这个字怎么打」
-            // 恰恰是最没用的答案 —— 简码才是用户要的。
+            // `code_all` —— 全部码位，默认 `/` 连接（`我` → `q/trn/trnt`）。反查默认用它而不是 `code`：
+            // 后者恒给最长的全码，而「这个字怎么打」要的是简码。
             "code_rev_all" | "code_all" => {
                 let sid = self.engine_mgr.code_source_schema();
                 // 空串的理由同上面的 `code_rev`。
@@ -1773,12 +1688,8 @@ impl crate::coordinator::Coordinator {
                     reverse.toned_pinyin_of(text, Some(&syls), SYLLABLE_SEP)
                 }
             }
-            // `shuangpin` —— 这段文本的双拼编码。
-            //
-            // 与注释段同义但取音节的路子不同：那边有候选身份，直接用词条真值
-            // `code`+`boundary`；这边是裸文本，只能先按词推断读音（`word_pinyin_syllables`
-            // 会做多音字消歧，「行长」得 `hang zhang` 而非 `xing chang`）。推不出读音
-            // 就给空串 —— 与「查不到」同一档，这条反查候选不出现即可。
+            // `shuangpin` —— 这段文本的双拼编码：先按词推断读音（`word_pinyin_syllables` 做多音字消歧），
+            // 推不出给空串。
             "shuangpin" => {
                 let inferred = self.engine_mgr.word_pinyin_syllables(text);
                 let syls: Vec<&str> = inferred.split(' ').filter(|s| !s.is_empty()).collect();
@@ -1807,46 +1718,10 @@ impl crate::coordinator::Coordinator {
         }))
     }
 
-    /// 变量求值。`None` = 未知变量名（渲染层据此原样回显 `${name}` 让用户看见拼写错误）。
-    ///
-    /// 可用变量：
-    /// - `code_hint` —— 引擎产的编码提示：码表前缀候选的**剩余编码**（输入 `si` 时 `sikao`
-    ///   标 `kao`），以及混输的来源标记 `拼`。取自 `Candidate::comment`，这是该字段的
-    ///   **唯一**消费点（其语义已收窄为「引擎产的编码提示」，不再是最终显示结果）。
-    /// - `code_rev` —— 主码表**整词反查编码**（rev = reverse）。仅对拼音来源候选生效且受
-    ///   `show_code_hint` 门控（临时拼音 / 快捷输入等反查模式强制开启）：码表方案下候选的
-    ///   码就是用户自己打的，反查是冗余信息，故那里恒空。
-    /// - `shuangpin` —— 这个候选的**双拼编码**。与 `code_rev` 正交：后者答「这词在主码表里
-    ///   怎么打」（查词库反向索引），它答「这词的双拼怎么敲」（由 code+boundary 算）。
-    ///   布局来源有回退链，全拼方案下装了双拼方案照样有值。
-    ///
-    /// ★ **`code` / `code_all` 是 `code_rev` / `code_rev_all` 的永久兼容别名**，不进文档站。
-    ///   模板是用户在设置页手打的**自由文本**，不是 serde 键，没有 `RETIRED_KEYS` 那种静默
-    ///   迁移路径；而 [`render_nodes`] 对未知变量名原样回显，删掉别名的后果是老用户的候选
-    ///   旁边直接显示出字面 `${code}` 四个字符 —— 比「功能失效」更难看。留着的成本是这里
-    ///   两条 match arm。
-    /// - `pinyin` —— 带声调注音，见 [`pinyin_text`]。
-    /// - `chaizi` —— 拆字字根串，**仅单字候选**。拆字回答的是「这个**字**由哪些字根构成」，
-    ///   本就是单字概念；词组的字根串是各字字根的机械拼接，用户不会按字根记词，却足以把
-    ///   候选行推得极宽（View 引擎**不支持文本折行**，超宽从窗口右缘硬裁，而注释恰在最右）。
-    /// - `chaizi_code` —— 该字在拆字库里记录的**编码**，仅单字候选。与 `chaizi` 正交，
-    ///   拼在一起即悬停提示拆字段的同款信息（`亻尔 [wq]`），但格式由模板决定而非写死。
-    /// - `chaizi_all[:分隔符]` —— 不限字数的逐字字根，默认空格连接；带参数可改，
-    ///   如 `${chaizi_all:／}` → `亻尔／女子`。长度自负（配 `comment_max_chars` 或只用于竖排）。
-    /// - `chaizi_code_all[:分隔符]` —— 与 `chaizi_all` 对称，取的是逐字**编码**而非字根，
-    ///   不限字数、默认空格连接、参数改分隔符规则相同（t207）。无编码的字同样跳过。
-    /// - `dict` —— 用户挂载的注释词库（`[[ui.comment_dicts]]`）里该词的注释。键是**词**，
-    ///   一份「英汉释义」「emoji 名称」可跨全部方案复用；候选 `code` 作可选消歧。
-    /// - `dict_all[:分隔符]` —— 全部适用注释库**各出一条**，按挂载顺序、去重，默认 `；` 连接
-    ///   （`dict` 只回第一个命中的库）。见 `ReverseLookup::comments_of`。
-    ///
-    /// `arg` = `${name:arg}` 的冒号后部分（未 trim）。只有声明支持参数的变量会读它，
-    /// 其余变量收到参数时**静默忽略**而非报未知——参数写错不该让整个变量退化成错误回显。
     /// `${emoji}` 变量的取值：该词的 emoji（空格分隔，至多 `max_per_word` 个）。
     ///
-    /// 只在 `show_as = "comment"` 档返回非空 —— 理由见调用点的注释（四档互斥，避免同一个
-    /// emoji 既进候选又进注释）。功能关、表没加载、没命中一律 `None`；调用点把它换成空串，
-    /// 模板据此整段消失。
+    /// 只在 `show_as = "comment"` 档返回非空（四档互斥，免得同一个 emoji 既进候选又进注释）。
+    /// 功能关、表没加载、没命中一律 `None`，调用点换成空串让模板整段消失。
     fn emoji_comment_of(&self, text: &str) -> Option<String> {
         let (max_per_word, min_chars) = {
             let rt = self.rt();
@@ -1875,6 +1750,25 @@ impl crate::coordinator::Coordinator {
         }
     }
 
+    /// 变量求值。`None` = 未知变量名（渲染层据此原样回显 `${name}`）。
+    ///
+    /// 可用变量：
+    /// - `code_hint` —— 引擎产的编码提示（码表前缀候选的剩余编码、混输来源标记 `拼`），取自
+    ///   `Candidate::comment`，这是该字段的唯一消费点。
+    /// - `code_rev` / `code_rev_all` —— 主码表整词反查编码（单个最长全码 / 全部码位）。仅对拼音来源
+    ///   候选生效：码表方案下候选的码就是用户自己打的。
+    /// - `shuangpin` —— 候选的双拼编码，由 code+boundary 算出；全拼方案下装了双拼方案照样有值。
+    /// - `code` / `code_all` —— `code_rev` / `code_rev_all` 的永久兼容别名，不进文档站：模板是自由
+    ///   文本，没有静默迁移路径，删掉别名老用户会看到字面 `${code}`。
+    /// - `pinyin` —— 带声调注音，见 [`pinyin_text`]。
+    /// - `chaizi` / `chaizi_code` —— 拆字字根串 / 拆字库编码，仅单字候选（词组的字根拼接会把
+    ///   候选行撑宽，而候选窗不折行）。
+    /// - `chaizi_all[:分隔符]` / `chaizi_code_all[:分隔符]` —— 不限字数的逐字字根 / 编码，默认空格连接。
+    /// - `emoji` —— 见 [`Self::emoji_comment_of`]。
+    /// - `dict[:库 id]` —— 注释词库（`[[ui.comment_dicts]]`）里该词的注释，键是词，候选 `code` 作可选消歧。
+    /// - `dict_all[:分隔符]` —— 全部适用注释库各出一条，去重，默认 `；` 连接。
+    ///
+    /// `arg` = `${name:arg}` 的冒号后部分（未 trim）。不支持参数的变量静默忽略它，不退化成错误回显。
     pub(crate) fn eval_var(
         &self,
         name: &str,
@@ -1883,28 +1777,13 @@ impl crate::coordinator::Coordinator {
         reverse: &wind_reverse::ReverseLookup,
         dict_schema: &str,
     ) -> Option<VarValue> {
-        // 判据是 `chars().count()` 而非 `len()`：扩展区汉字走代理对，按字节数会被当成词组。
+        // 判据是 `chars().count()` 而非 `len()`：汉字是多字节，按字节数单字也会被当成词组。
         let single = c.text.chars().count() == 1;
         Some(VarValue::from(match name {
             "code_hint" => c.comment.clone(),
-            // `${emoji}` —— 该词对应的 emoji（`[input.emoji]`，空格分隔，取前 max_per_word 个）。
-            //
-            // ★ 门控是 `enabled && show_as == "comment"`，不是只看 `enabled`：`show_as` 是
-            // 「emoji 以什么形态出现」的**单一决策点**，四档互斥。只看 enabled 的话，用户
-            // 配了 `after` 又在模板里写了 `${emoji}`，同一个 emoji 会既进候选列表又出现在
-            // 注释里，而两处都「按配置办事」，没人觉得自己错了。
-            //
-            // 本变量为空时按模板的可选段规则整段消失，故绝大多数候选不会留下空括号。
-            // ★ 取不到给空串而不是 `?`：`None` 在渲染层是「未知变量名」，会原样回显
-            // `${emoji}`——功能没开 / 不是 comment 档 / 没命中都属于「已知变量、这次为空」，
-            // 应让所在可选段整段消失（同下面 `code_rev` 那条）。
+            // 取不到给空串而不是 `?`：`None` 在渲染层是「未知变量名」会原样回显，而这里是「已知变量、
+            // 这次为空」，应让所在可选段整段消失。下面 `code_rev` 同理。
             "emoji" => self.emoji_comment_of(&c.text).unwrap_or_default(),
-            // ★ `unwrap_or_default()` 而不是 `?`：`None` 在渲染层的含义是**未知变量名**
-            // （`render_nodes` 会原样输出 `${code_rev}` 并计作已填充，好让拼错的变量名
-            // 显示出来）。反查索引没就绪属于「已知变量，这一次算不出」，给空串才对 ——
-            // 空值会让 `${code_hint|code_rev}` 这样的回退链继续往下试，全空则整段消失。
-            // 用 `?` 的话，切到大词库方案后的头几秒里，候选右边会挂着字面的
-            // `${code_rev}` 四个字符。
             "code_rev" | "code" => {
                 if c.source == CandidateSource::Pinyin {
                     self.engine_mgr
@@ -1914,16 +1793,7 @@ impl crate::coordinator::Coordinator {
                     String::new()
                 }
             }
-            // `code_rev_all` —— 全部码位（`我` → `q/trn/trnt`），`code_rev` 只给最长的那个全码。
-            //
-            // 门控与 `code_rev` **完全一致**（同为拼音来源候选才出）：理由也一样 ——
-            // 码表方案下候选的码就是用户自己打的，反查是冗余信息。
-            //
-            // 与 [`Self::eval_text_var`] 的同名变量同义，两处必须一起改：用户在注释模板里
-            // 学会的写法要能原样用在 `dict.rev(format=…)` 里，反之亦然。
-            //
-            // 出厂注释模板不含它 —— 三个码位会把候选行推得很宽，横排尤甚。它是给愿意
-            // 用竖排、想一眼看全简码的用户的选项，不是默认。
+            // 门控与 `code_rev` 一致。与 [`Self::eval_text_var`] 的同名变量同义，两处须一起改。
             "code_rev_all" | "code_all" => {
                 if c.source == CandidateSource::Pinyin {
                     let sid = self.engine_mgr.code_source_schema();
@@ -1936,19 +1806,8 @@ impl crate::coordinator::Coordinator {
                     String::new()
                 }
             }
-            // `shuangpin` —— 这个候选的**双拼编码**。
-            //
-            // 与 `code_rev` 正交，两者回答的是不同的问题：
-            //   code_rev   这个词在主码表里怎么打 —— 查词库反向索引
-            //   shuangpin  这个词的双拼怎么敲   —— 由 code+boundary 算出
-            //
-            // 双拼编码不存在于任何词库里（双拼词库就是全拼词库，双拼只是「全拼 + 一张
-            // 键盘布局」），所以它只能算不能查。这也是 GH#128 放开码源方案限制解决不了
-            // 的原因。
-            //
-            // ★ **全拼方案下照样有值**：布局来源有回退链（见 `shuangpin_hint_schema`），
-            // 装了双拼方案就能用。会问「这个字双拼怎么敲」的，多半正是用全拼打字、
-            // 想往双拼迁移的人。
+            // 双拼编码不存在于任何词库里（双拼只是「全拼 + 一张键盘布局」），只能算不能查。布局来源有
+            // 回退链（见 `shuangpin_hint_schema`），全拼方案下装了双拼方案照样有值。
             "shuangpin" => {
                 if c.source == CandidateSource::Pinyin {
                     self.engine_mgr
@@ -1988,26 +1847,14 @@ impl crate::coordinator::Coordinator {
                     arg.unwrap_or(" "),
                 ));
             }
-            // 用户挂载的注释词库（`[[ui.comment_dicts]]`）。键是**词**，故一份库可跨方案复用；
-            // 候选自身的 `code` 作可选消歧（注释库声明了 code 列时才生效，跨方案对不上则
-            // 回落该词首条，见 `ReverseLookup::comment_of`）。
-            // 注释库的 `schemas` 白名单在**查询时**求值，作用域取 `dict_schema`
-            // （由调用方按 `effective_data_schema` 解析）：注释库是**数据类**资源，
-            // 归属与词频/短语同源——临英下要按 `english` 查，而不是主方案。
-            // 这与注释**模板**取 active（呈现类）刻意不同，见 `comment_template_for`。
-            // `${dict:id}` 只查那一个库（`${dict}` 只回第一个命中的库，多库并排要靠它）。
-            //
-            // ★ 按输入大小写投影过的英文候选（`case_source` 有值，见 `apply_english_case`）用
-            // **词库原文**查，且回退只往小写走（论坛 t281）：输入 `ASP` 时词库的 `asp`（毒蛇）
-            // 显示成 `ASP`，拿显示形态查会精确命中 IT 库的缩写 `ASP`；拿原文 `asp` 双向回退
-            // 同样会升格命中它。词库已确证这个词是小写的，升格就是换了个词。
+            // 候选 `code` 作可选消歧（见 `ReverseLookup::comment_of`）。注释库的 `schemas` 白名单按
+            // `dict_schema`（`effective_data_schema`）求值：注释库是数据类资源，临英下要按 `english` 查；
+            // 这与注释模板取 active 刻意不同。`${dict:id}` 只查那一个库。查询词与大小写回退见 [`dict_query_key`]。
             "dict" => {
                 let (key, fb) = dict_query_key(c);
                 reverse.comment_of_with(arg, key, Some(&c.code), dict_schema, fb)
             }
-            // `${dict_all[:分隔符]}` —— 全部适用库各出一条（论坛 t282），默认 `；` 连接、按内容
-            // 去重。`${dict}` 只回第一个命中的库，中英释义与 IT 术语库都收了同一个词时另一条
-            // 就看不见；`${dict:id}` 能并排但要逐库写死 id。不带来源库标签：标签该写在库内容里。
+            // 全部适用库各出一条，按内容去重。不带来源库标签：标签该写在库内容里。
             "dict_all" => {
                 let (key, fb) = dict_query_key(c);
                 return Some(VarValue::joined(
@@ -2020,7 +1867,7 @@ impl crate::coordinator::Coordinator {
     }
 }
 
-/// 候选查注释库用的词与大小写回退方向（论坛 t281，理由见 `eval_var` 的 `dict` 分支）。
+/// 候选查注释库用的词与大小写回退方向。
 ///
 /// | 候选 | 查的词 | 回退 |
 /// |---|---|---|
@@ -2028,9 +1875,9 @@ impl crate::coordinator::Coordinator {
 /// | 英文**词库**词被改写（投影 / 大小写档） | 词库原文 `case_source` | 只往小写 |
 /// | 头部候选（用户所打原文及其变形）被大小写档改写 | **显示文本** | 只往小写 |
 ///
-/// 头部候选不是词库词，`case_source` 只是用户打出来的形态，不说明它是哪个词；用户按出了
-/// 哪种形态，就该按那种形态查——全大写档打 `asp` 得到的 `ASP` 要能查到缩写 `ASP`。但全小写档
-/// 打 `ASP` 得到的 `asp` 是用户显式要的小写，双向回退会把它升格回 `ASP`，故同样只往小写走。
+/// 词库已确证是小写的词，向上回退就是换了个词（输入 `ASP` 时词库的 `asp` 不该命中缩写 `ASP`）。
+/// 头部候选的 `case_source` 只是用户打出的形态，按显示文本查；全小写档是用户显式要的小写，同样
+/// 只往小写走。
 fn dict_query_key(c: &Candidate) -> (&str, wind_reverse::CaseFallback) {
     use wind_reverse::CaseFallback::{Both, LowerOnly};
     match &c.case_source {
@@ -2110,22 +1957,16 @@ mod tests;
 
 /// 上方注释条的拆分（`ui.candidate.comment_above`，设计 candidate-comment-above-line.md §3.2）。
 ///
-/// ⚠️ 夹具的 `ev()` 对未列出的变量名返回 `None`（= 未知变量，原样回显），所以每条用例
-/// 都要把模板里引用的变量列全；且模板必须含至少一个**非空**变量，否则整个模板按隐式
-/// 可选段消失，拿到的 `("", "")` 与拆分逻辑无关。
+/// 夹具的 `ev()` 对未列出的变量名返回 `None`（原样回显），每条用例要把引用的变量列全，且至少
+/// 含一个非空变量，否则整个模板按隐式可选段消失。
 #[cfg(test)]
 #[path = "comment_split_tests.rs"]
 mod split_tests;
 
 /// `eval_var` 的变量分发与门控。
 ///
-/// ⚠️ 上面那三个测试模块全部走 **mock 求值闭包**，验的是模板语法；`eval_var` 本身
-/// （变量名 → 数据源的分发、`hint_source && source==Pinyin` 那道门控）此前**一条测试
-/// 都没有**。别名、`shuangpin` 这些都落在这里，所以补上。
-///
-/// 用仓库自带的 `data/` 作数据目录，不是 `build_dev/data`：这些用例只需要方案定义与
-/// 双拼布局文件，不碰词典。`input_flow.rs` 那族 gate 在 build_dev 上，没数据时整族
-/// 静默跳过（判据是耗时 0.00s），这里刻意不走那条路。
+/// 其余测试模块走 mock 求值闭包，只验模板语法；这里验 `eval_var` 本身的分发与门控。
+/// 用仓库自带的 `data/` 作数据目录（只需方案定义与双拼布局），不依赖 `build_dev/data`，免得没数据时静默跳过。
 #[cfg(test)]
 #[path = "comment_eval_var_tests.rs"]
 mod eval_var_tests;
@@ -2149,22 +1990,20 @@ mod legacy_parity;
 #[path = "comment_styled_tests.rs"]
 mod styled_tests;
 
-/// 入参防护：嵌套上限与线性配对（`MAX_DEPTH` / `Pairs`）。
 /// 分隔符角色：`${name:分隔符}` 的分隔符带 `separator` 标记、角色仍是变量名；纯文本与改前逐字相同。
 #[cfg(test)]
 #[path = "comment_separator_tests.rs"]
 mod separator_tests;
 
+/// 入参防护：嵌套上限与线性配对（`MAX_DEPTH` / `Pairs`）。
 #[cfg(test)]
 #[path = "comment_bound_tests.rs"]
 mod bound_tests;
 
 /// `TEXT_ROLES` 契约清单 ⊇ 全部求值入口认得的变量名（设计 text-span-colors.md §3.1）。
 ///
-/// 反方向的守卫：`Span::role` 取自清单，清单外的变量不产角色、主题给它配的色静默不生效。
-/// 求值入口是若干 `match` / 闭包，没有可枚举的集合，故直接扫源码——抽出各入口函数体里的
-/// `"名字" =>` / `"名字" |` / `"名字" if` 分支，经别名表归一后逐个核对。新增变量忘了进清单，
-/// 这里就红。
+/// 清单外的变量不产角色、主题给它配的色静默不生效。求值入口没有可枚举的集合，故扫源码抽出
+/// 各 `match` 分支名，经别名表归一后逐个核对。
 #[cfg(test)]
 #[path = "comment_role_contract_tests.rs"]
 mod role_contract_tests;
