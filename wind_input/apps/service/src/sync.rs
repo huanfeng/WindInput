@@ -10,7 +10,7 @@
 //!
 //! 日志只记启停、崩溃与被拒的请求，不记命令参数（可能含口令）。
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -37,6 +37,8 @@ const LOG_MAX: u64 = 1024 * 1024;
 pub const REQUEST_WHITELIST: &[&str] = &[
     "data.beginEdit",
     "data.endEdit",
+    // 只读：写入前确认用户自己没开着编辑会话
+    "data.editSessions",
     "dict.reload",
     "config.reload",
     "compat.reload",
@@ -145,6 +147,9 @@ pub struct SyncHost {
     next_id: AtomicU64,
     hooks: OnceLock<Hooks>,
     command_timeout: Duration,
+    /// 经同步进程成功 `data.beginEdit`、尚未 `data.endEdit` 的 (进程代次, 路径)。
+    /// 同步进程退出（含被强杀）时据此代为结束，否则 core 会一直暂停该文件的写回。
+    held_edits: Mutex<BTreeSet<(u64, String)>>,
 }
 
 impl SyncHost {
@@ -203,6 +208,7 @@ impl SyncHost {
             next_id: AtomicU64::new(1),
             hooks: OnceLock::new(),
             command_timeout,
+            held_edits: Mutex::new(BTreeSet::new()),
         };
         host.reconcile(&mut lock(&host.inner), Instant::now(), false);
         host
@@ -225,6 +231,49 @@ impl SyncHost {
         self.fail_pending("同步进程已停止");
         if let Some(w) = waiter {
             let _ = w.join();
+        }
+        self.release_held(None);
+    }
+
+    /// 记录 / 移除经同步链路开的编辑会话。`ok` 为请求是否成功执行。
+    fn track_edit(&self, epoch: u64, method: &str, params: &Value, ok: bool) {
+        if !ok {
+            return;
+        }
+        let Some(path) = params.get("path").and_then(Value::as_str) else {
+            return;
+        };
+        let mut held = lock(&self.held_edits);
+        match method {
+            "data.beginEdit" => {
+                held.insert((epoch, path.to_string()));
+            }
+            "data.endEdit" => {
+                held.remove(&(epoch, path.to_string()));
+            }
+            _ => {}
+        }
+    }
+
+    /// 代为结束残留的编辑会话：`epoch` 为 None 时全部。不持有 inner 锁调用。
+    fn release_held(&self, epoch: Option<u64>) {
+        let paths: Vec<String> = {
+            let mut held = lock(&self.held_edits);
+            let take: Vec<(u64, String)> = held
+                .iter()
+                .filter(|(e, _)| epoch.is_none_or(|x| x == *e))
+                .cloned()
+                .collect();
+            for k in &take {
+                held.remove(k);
+            }
+            take.into_iter().map(|(_, p)| p).collect()
+        };
+        for p in paths {
+            warn!("同步进程退出时仍有编辑会话未结束，代为结束: {p}");
+            if let Err(e) = self.run_request("data.endEdit", &json!({ "path": p })) {
+                warn!("代为结束编辑会话 {p} 失败: {e}");
+            }
         }
     }
 
@@ -365,6 +414,7 @@ impl SyncHost {
             }
             FromSync::Request { id, method, params } => {
                 let result = self.run_request(&method, &params);
+                self.track_edit(epoch, &method, &params, result.is_ok());
                 let inner = lock(&self.inner);
                 if let Some(l) = inner.link.as_ref().filter(|l| l.epoch == epoch) {
                     let _ = l.tx.send(ToSync::reply(id, result));
@@ -404,6 +454,7 @@ impl SyncHost {
                 false
             }
         };
+        self.release_held(Some(epoch));
         if was_current {
             self.fail_pending("同步进程已退出");
             self.emit_status();
@@ -625,8 +676,12 @@ mod tests {
             },
             {
                 let executed = executed.clone();
-                Box::new(move |m, _| {
-                    lock(&executed).push(m.to_string());
+                Box::new(move |m, p| {
+                    let tag = match p.get("path").and_then(Value::as_str) {
+                        Some(path) => format!("{m} {path}"),
+                        None => m.to_string(),
+                    };
+                    lock(&executed).push(tag);
                     Ok(json!({ "ran": m }))
                 })
             },
@@ -771,6 +826,66 @@ mod tests {
             m => panic!("{m:?}"),
         }
         assert_eq!(*lock(&r.executed), vec!["dict.reload".to_string()]);
+    }
+
+    fn begin(r: &mut Rig, id: u64, method: &str, path: &str) {
+        r.stub.send(FromSync::Request {
+            id,
+            method: method.into(),
+            params: json!({ "path": path }),
+        });
+        assert!(matches!(r.stub.next(), ToSync::Reply { error: None, .. }));
+    }
+
+    fn end_count(r: &Rig, path: &str) -> usize {
+        lock(&r.executed)
+            .iter()
+            .filter(|m| **m == format!("data.endEdit {path}"))
+            .count()
+    }
+
+    /// 同步进程被强杀（管道断开）时，经它开的编辑会话由 core 代为结束。
+    #[test]
+    fn sessions_left_open_by_a_dead_sync_process_are_ended_by_core() {
+        let mut r = rig();
+        let _hello = r.stub.next();
+        begin(&mut r, 1, "data.beginEdit", "pinyin/user.dict.yaml");
+        begin(&mut r, 2, "data.beginEdit", "phrases.dict.yaml");
+        begin(&mut r, 3, "data.endEdit", "phrases.dict.yaml");
+        let executed = r.executed.clone();
+        drop(r.stub);
+        wait_for(|| lock(&executed).contains(&"data.endEdit pinyin/user.dict.yaml".to_string()));
+        // 已正常结束的不重复结束
+        assert_eq!(
+            lock(&executed)
+                .iter()
+                .filter(|m| m.as_str() == "data.endEdit phrases.dict.yaml")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn stopping_the_host_ends_sessions_still_open() {
+        let mut r = rig();
+        let _hello = r.stub.next();
+        begin(&mut r, 1, "data.beginEdit", "pinyin/user.dict.yaml");
+        r.host.stop();
+        assert_eq!(end_count(&r, "pinyin/user.dict.yaml"), 1);
+    }
+
+    #[test]
+    fn failed_begin_is_not_tracked() {
+        let r = rig();
+        r.host
+            .track_edit(1, "data.beginEdit", &json!({"path": "a"}), false);
+        r.host.release_held(None);
+        assert_eq!(end_count(&r, "a"), 0);
+    }
+
+    #[test]
+    fn edit_sessions_query_is_whitelisted() {
+        assert!(REQUEST_WHITELIST.contains(&"data.editSessions"));
     }
 
     #[test]
