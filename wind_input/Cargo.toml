@@ -34,6 +34,7 @@ members = [
     "crates/wind-rpc",
     "crates/wind-hook",
     "crates/wind-supervise",
+    "crates/wind-sync-ipc",
     "apps/service",
     "apps/extension_host",
     "apps/rpc",

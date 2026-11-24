@@ -1,0 +1,13 @@
+[package]
+name = "wind-sync-ipc"
+version.workspace = true
+edition.workspace = true
+license = "MPL-2.0"
+
+# 只含消息类型与帧读写：core 依赖它，不得引入网络 / 加密依赖。
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
