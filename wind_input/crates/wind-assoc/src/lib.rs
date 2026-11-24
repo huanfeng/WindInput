@@ -1,14 +1,9 @@
 //! wind-assoc: 联想候选的生成与合并（纯逻辑，可原生测试）。
 //!
-//! 与 `wind-phrase` / `wind-punct` / `wind-quick-input` 同构：**输入 → 候选**的
-//! 自包含单元，不持有宿主状态、不做 IO 决策，词典与用户数据以 trait 形式注入。
+//! 与 `wind-phrase` / `wind-punct` / `wind-quick-input` 同构：输入 → 候选的自包含单元，
+//! 不持有宿主状态、不做 IO 决策，词典与用户数据以 trait 形式注入。
 //!
-//! ## 联想与普通输入的根本差别
-//!
-//! 普通候选的输入是**编码缓冲**（`nihao` → 你好），联想候选的输入是**上文文本**
-//! （刚上屏的「你好」→ 「，」「世界」）。所以它接不进 `EngineManager::convert_with(schema, code)`
-//! ——那个签名的第二个参数是编码。硬塞进去会重蹈 `project_mixed_pinyin_exact_tier`
-//! 的覆辙（判据在引擎侧恒为假，误用后静默落错档）。
+//! 联想的输入是上文文本而不是编码缓冲，所以它不走 `EngineManager::convert_with(schema, code)`。
 //!
 //! ## 四个数据源与它们的排序
 //!
@@ -19,10 +14,8 @@
 //! | [`AssocSource::Prefix`] | 码表词的文本前缀索引 | 长词补全，如「北京」→「大学」 |
 //! | [`AssocSource::Punct`] | 静态规则表 + 学习覆盖 | 移动端刚需 |
 //!
-//! ★ **跨源不比较分数，只按固定优先级取配额**。四个源的分值天然不同量纲
-//! （计数 / log 概率 / 词频 i32 / 规则无分），归一化混排是条老路——
-//! `project_freq_weight_model` 记着整句权重那次的教训：**同量纲解决不了系统性偏高**，
-//! 最后还是拆成了独立档位。这里直接不引入那个问题。
+//! 跨源不比较分数，只按固定优先级取配额：四个源的分值量纲不同（计数 / log 概率 / 词频 / 无分），
+//! 归一化混排解决不了系统性偏高。
 
 use std::collections::HashSet;
 
@@ -43,9 +36,8 @@ pub struct AssocContext<'a> {
     pub char_wise: bool,
     /// 连续性是否已断（失焦 / 切宿主 / 鼠标点击 / 方向键 / 超时）。
     ///
-    /// ★ 断链时**不做联想**。`recent_commits` 是一个跨应用、跨焦点的全局队列，
-    /// 「历史上相邻的两次上屏」不等于「屏幕上相邻的两个词」——用户在 A 窗口打完
-    /// 「你好」、切到 B 窗口打「世界」，朴素实现就会拿「你好」当上文。
+    /// 断链时不做联想：`recent_commits` 是跨应用、跨焦点的全局队列，历史上相邻的两次上屏
+    /// 不等于屏幕上相邻的两个词。
     pub boundary_broken: bool,
 }
 
@@ -73,12 +65,10 @@ pub enum AssocSource {
 }
 
 impl AssocSource {
-    /// 全部源，**按优先级升序**。[`associate`] 只遍历这个数组。
+    /// 全部源，按优先级升序。[`associate`] 只遍历这个数组。
     ///
-    /// ⚠️ **它与枚举变体是两处独立维护的**：加了新变体却忘了登记进来，那个源会被
-    /// 静默忽略——不报错、不 panic、只是永远不出候选，属本仓最难自查的一类故障。
-    /// 守门在 [`AssocSource::priority`]：那里的 `match` 是穷尽的，新增变体会**编译失败**，
-    /// 强制作者路过此处。
+    /// 新增变体时必须登记进来，否则那个源被静默忽略。[`AssocSource::priority`] 的穷尽 `match`
+    /// 会让新增变体编译失败，强制作者路过此处。
     pub const ALL: [AssocSource; 4] = [
         AssocSource::History,
         AssocSource::Bigram,
@@ -86,11 +76,8 @@ impl AssocSource {
         AssocSource::Punct,
     ];
 
-    /// 优先级序号（越小越靠前），**唯一的事实源**。
-    ///
-    /// 存在的意义不是被调用——[`associate`] 直接按 [`Self::ALL`] 的顺序遍历——
-    /// 而是让编译器盯着：新增枚举变体时这里的 `match` 不穷尽即编译失败，
-    /// 于是作者必然会看到上面那条「记得登记进 ALL」的告诫。
+    /// 优先级序号（越小越靠前）。存在意义是穷尽 `match` 让新增变体编译失败，提醒登记进
+    /// [`Self::ALL`]（[`associate`] 按 `ALL` 的顺序遍历）。
     pub fn priority(self) -> usize {
         match self {
             AssocSource::History => 0,
@@ -104,20 +91,15 @@ impl AssocSource {
 /// 一条联想候选。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssocHit {
-    /// **展示**文本。词语联想里这是整词（「中国」），不是要上屏的那一半。
+    /// 展示文本。词语联想里这是整词（「中国」），不是要上屏的那一半。
     pub text: String,
-    /// **上屏**文本；`None` = 就用 [`Self::text`]。
+    /// 上屏文本；`None` = 就用 [`Self::text`]。词语联想里显示「中国」、只补「国」。
     ///
-    /// 词语联想里两者必然不同：候选栏显示整词「中国」（用户才看得懂自己在选什么），
-    /// 而「中」已经在屏幕上了，真正要补出去的只有「国」。
-    ///
-    /// ★ 存成一个字段而不是让下游按前缀现算：Smart 档的候选**不以上文开头**
-    /// （「你好」→「，」），下游若统一 `strip_prefix` 会把两种档位的语义搅在一起，
-    /// 而 strip 失败时的兜底又恰好看起来是对的——这类缺陷不会报错，只会偶尔少个字。
+    /// 存成字段而不让下游按前缀现算：Smart 档候选不以上文开头，统一 `strip_prefix` 会混淆两种档位。
     pub commit: Option<String>,
     /// 来源，决定它排在哪一档。
     pub source: AssocSource,
-    /// **源内**排序用的分数，跨源之间没有可比性（量纲不同）。
+    /// 源内排序用的分数，跨源之间没有可比性（量纲不同）。
     pub score: i64,
 }
 
@@ -128,39 +110,31 @@ impl AssocHit {
     }
 }
 
-/// **联想是哪一种**。这是本模块最重要的一个区分——两种「联想」回答的是完全不同的问题。
+/// 联想是哪一种。两种「联想」回答的是完全不同的问题：
 ///
 /// | | 上文怎么用 | 打完「中」之后给什么 | 典型平台 |
 /// |---|---|---|---|
 /// | [`Word`](AssocKind::Word) | 当**前缀** | 「中国」「中间」「中心」——以「中」开头的词 | PC |
 /// | [`Smart`](AssocKind::Smart) | 当**上下文** | 「国」「，」「的」——「中」后面常跟什么 | 移动端 |
 ///
-/// PC 输入法里说的「联想」几乎总是前者：词库里以刚上屏内容开头的更长的词，选中后补出
-/// 剩余部分。它不需要任何上下文模型，只需要一份带权重的词库。
-///
-/// 后者才是移动端刚需——软键盘上每多打一个字都很贵，所以要连标点带下一个词一起猜。
-///
-/// ⚠️ **两者不是「弱版/强版」的关系，不能用一个开关的强弱表达。** 同样打完「中」，
-/// 一个该给「中国」，另一个该给「国」；把它们混在一起出，用户会看到「中国」和「国」
-/// 并排，完全不知道选中哪个会得到什么。
+/// 两者不是弱版/强版的关系，不能用一个开关的强弱表达：混在一起出，用户会看到「中国」和「国」
+/// 并排，不知道选中哪个会得到什么。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AssocKind {
-    /// 关闭。**PC 默认**——PC 上候选窗是浮层，联想常驻会挡正文，且数字键会被占用。
+    /// 关闭。PC 默认：候选窗是浮层，联想常驻会挡正文，且数字键会被占用。
     #[default]
     Off,
     /// 词语联想：上文当前缀，出词库里以它开头的更长的词。
     ///
-    /// ★ **不含标点**。「中」后面接「，」在这个语义下没有意义——它不是以「中」开头的词。
+    /// 不含标点：「，」不是以上文开头的词。
     Word,
-    /// 智能联想：上文当上下文，出下一个可能的词与标点。**移动端默认**。
+    /// 智能联想：上文当上下文，出下一个可能的词与标点。移动端默认。
     Smart,
 }
 
 impl AssocKind {
-    /// 解析配置里的 `kind`。**未知值一律回退 [`Off`](AssocKind::Off)**。
-    ///
-    /// ★ 回退到「关」而不是某个开着的档：拼错了值就不启用，比静默启用一个用户没要求的
-    /// 档要好——后者会让人以为「配置生效了」，实际生效的是另一件事。
+    /// 解析配置里的 `kind`。未知值一律回退 [`Off`](AssocKind::Off)：拼错了值就不启用，
+    /// 好过静默启用一个用户没要求的档。
     pub fn parse(s: &str) -> Self {
         match s {
             "word" => AssocKind::Word,
@@ -171,9 +145,8 @@ impl AssocKind {
 
     /// 本档是否启用该数据源。
     ///
-    /// **词语联想只认 [`AssocSource::Prefix`]**——那正是「以上文为前缀的更长的词」这件事。
-    /// 其余三源（个人搭配、词→后继、标点）问的都是「后面接什么」，属上下文语义，
-    /// 混进词语联想会让候选变成两种不同东西的拼盘。
+    /// 词语联想只认前缀延伸（[`AssocSource::Prefix`] 与 History 里的前缀延伸行）；其余源问的是
+    /// 「后面接什么」，属上下文语义。
     pub fn allows(self, src: AssocSource) -> bool {
         match self {
             AssocKind::Off => false,
@@ -189,24 +162,18 @@ impl AssocKind {
         matches!(self, AssocKind::Word)
     }
 
-    /// 本档下，前缀延伸类候选（「中」→「中国」）是否**只显示补出的那一截**（「国」）。
+    /// 本档下，前缀延伸类候选（「中」→「中国」）是否只显示补出的那一截（「国」）。
     ///
-    /// 智能联想问的是「后面接什么」，同一栏里还有下一词（「的」）与标点（「，」）——
-    /// 前缀词若显示整词，「中国」与「国」会并排出现，用户分不清选哪个得到什么（见上表）。
-    /// 词语联想整栏都是「以上文开头的词」，显示整词用户才看得懂自己在选什么。
-    ///
-    /// 只改**显示与去重的口径**：[`AssocHit::text`] 仍是整词、`commit` 仍是那一截，
-    /// 联想历史（前缀延伸行按「整词 − 补出的一截」还原上文）照旧记。
+    /// 智能联想同栏还有下一词与标点，显示整词会让「中国」与「国」并排；词语联想整栏都是整词。
+    /// 只改显示与去重的口径：[`AssocHit::text`] 仍是整词、`commit` 仍是那一截。
     pub fn shows_continuation(self) -> bool {
         matches!(self, AssocKind::Smart)
     }
 
     /// 本档下某个源最多占几个名额（`remaining` 是此刻还剩的总名额）。
     ///
-    /// 智能联想里前缀词只是「把上文补长」，不是「猜下一个词」：拼音大词库里以「好的」开头的
-    /// 词成百上千，不设上限时它一口气占满全部名额，同栏的标点就永远出不来（实测「你好」后
-    /// 没有「，」）。压到 [`SMART_PREFIX_CAP`] 条，余下的顺延给标点。词语联想整栏就是前缀词，
-    /// 不设限。
+    /// 智能联想里前缀词与下一词各设上限（[`SMART_PREFIX_CAP`] / [`SMART_BIGRAM_CAP`]），否则大词库下
+    /// 它们占满名额、同栏标点出不来。词语联想整栏就是前缀词，不设限。
     pub fn source_cap(self, src: AssocSource, remaining: usize) -> usize {
         match (self, src) {
             (AssocKind::Smart, AssocSource::Prefix) => remaining.min(SMART_PREFIX_CAP),
@@ -217,9 +184,8 @@ impl AssocKind {
 
     /// 本档下这条候选能不能出（源内过滤，先于去重）。
     ///
-    /// 智能联想只显示补出的那一截（[`Self::shows_continuation`]），补出部分过长的前缀词
-    /// （「中」→「华人民共和国」）在候选条上读起来是半截词、也不像「下一个词」，丢掉；
-    /// 短的（「谢谢」→「大家」、「北京」→「大学」）正是下一词。
+    /// 智能联想只显示补出的那一截，补出过长的前缀词（「中」→「华人民共和国」）读起来是半截词，
+    /// 丢掉；短的（「北京」→「大学」）正是下一词。
     pub fn keeps(self, hit: &AssocHit) -> bool {
         match (self, hit.source) {
             (AssocKind::Smart, AssocSource::Prefix) => {
@@ -243,11 +209,8 @@ pub enum AssocMode {
 impl AssocMode {
     /// 解析配置里的 `mode` 字符串。未知值回退 [`OneShot`](AssocMode::OneShot)。
     ///
-    /// ⚠️ 移动端**不靠这里**拿到 `Continuous`——那是 `[mobile.association]` 的职责
-    /// （见 [`AssocConfig::from_config`]）。
-    ///
-    /// ⛔ 别让本函数收一个「平台默认」参数去兜底手机上写错值的情形：解析函数一旦要知道
-    /// 自己跑在哪，值域就不再是纯粹的值域，平台知识会顺着解析链一路渗透。
+    /// 移动端的 `Continuous` 来自 `[mobile.association]`（见 [`AssocConfig::from_config`]）。
+    /// 别给本函数加「平台默认」参数：平台知识会顺着解析链一路渗透。
     pub fn parse(s: &str) -> Self {
         match s {
             "continuous" => AssocMode::Continuous,
@@ -262,19 +225,15 @@ impl AssocMode {
 /// [`AssocConfig::from_config`] 的调用方就已经落定。
 #[derive(Debug, Clone, Copy)]
 pub struct AssocConfig {
-    /// 哪一种联想（含「关」）。**开关与类型合并成一个字段**——分成 `enabled` + `kind`
-    /// 两个会立刻产生「开着但类型没配」的歧义状态，而那种状态没有正确答案。
+    /// 哪一种联想（含「关」）。开关与类型合并成一个字段，免得出现「开着但类型没配」的歧义状态。
     pub kind: AssocKind,
-    /// ⚠️ **[`associate`] 不读这个字段**，它由宿主侧的状态机消费——决定的是
-    /// 「什么时候调用 associate」「什么时候退出联想态」，而不是「给出哪些候选」。
-    /// 放在同一个 config 里只是为了整体传递，不是遗漏。
+    /// [`associate`] 不读这个字段：它由宿主侧状态机消费，决定何时调用、何时退出联想态。
     pub mode: AssocMode,
-    /// 候选总数上限。各源配额由它按优先级分配，**配额本身不暴露给用户**
-    /// ——那是调参项，而用户没有评测手段。
+    /// 候选总数上限。各源配额由它按优先级分配，配额本身是调参项、不暴露给用户。
     pub max_count: usize,
-    /// ⚠️ 与 [`Self::mode`] 同属**宿主侧消费**：空格是否上屏当前高亮联想候选。
+    /// 宿主侧消费：空格是否上屏当前高亮联想候选。
     pub space_commits: bool,
-    /// ⚠️ 宿主侧消费：联想窗自动隐藏的毫秒数，`0` = 不自动隐藏。
+    /// 宿主侧消费：联想窗自动隐藏的毫秒数，`0` = 不自动隐藏。
     pub hide_after_ms: u64,
     pub history: bool,
     pub bigram: bool,
@@ -285,10 +244,8 @@ pub struct AssocConfig {
 impl Default for AssocConfig {
     fn default() -> Self {
         Self {
-            // ★ 本 Default 是**桌面基线**的镜像，必须逐字段等于
-            // `wind_config::AssociationConfig::default()`（由
-            // `config_defaults_agree_with_runtime_defaults` 守着）。
-            // 移动端的差异不在这里，而在 `[mobile.association]`。
+            // 桌面基线的镜像，必须逐字段等于 `wind_config::AssociationConfig::default()`
+            // （见 `config_defaults_agree_with_runtime_defaults`）；移动端差异在 `[mobile.association]`。
             kind: AssocKind::Off,
             mode: AssocMode::OneShot,
             max_count: 9,
@@ -304,17 +261,11 @@ impl Default for AssocConfig {
 }
 
 impl AssocConfig {
-    /// 从配置段构造运行时视图。`cfg` 是桌面基线 `[input.association]`；`mobile` 是
-    /// `[mobile.association]`，**`Some` 时 `kind`/`mode`/`punct`/`space_commits` 改从它取**，其余字段
-    /// 一律走基线（那些键当前没有平台差异，故根本不在移动端段里）。
+    /// 从配置段构造运行时视图。`cfg` 是桌面基线 `[input.association]`；`mobile` 为 `Some` 时
+    /// `kind`/`mode`/`punct`/`space_commits` 改从 `[mobile.association]` 取，其余走基线。
     ///
-    /// ⚠️ 「要不要取用 mobile 段」由**调用方**决定，而不是这里 `cfg!(target_os)` 判断：
-    /// `wind-assoc` 会被桌面与安卓两条构建链同时编译，而「跑在哪」是宿主的知识，
-    /// 不是本 crate 的。
-    ///
-    /// ⚠️ **往 `MobileAssociationConfig` 加字段时必须在这里放行**，否则症状是「手机上
-    /// 改了那一项没反应」，而配置文件看着完全正常。守门在
-    /// `mobile_section_does_not_touch_other_fields`。
+    /// 要不要取 mobile 段由调用方决定，不在这里 `cfg!(target_os)`：跑在哪是宿主的知识。
+    /// 往 `MobileAssociationConfig` 加字段时必须在这里放行（见 `mobile_section_does_not_touch_other_fields`）。
     pub fn from_config(
         cfg: &wind_config::AssociationConfig,
         mobile: Option<&wind_config::MobileAssociationConfig>,
@@ -347,10 +298,7 @@ impl AssocConfig {
         self.kind == AssocKind::Smart && self.source_enabled(AssocSource::History)
     }
 
-    /// 该源是否启用：**先过档位、再过开关**。
-    ///
-    /// 档位是硬性的（词语联想里标点源根本没有语义），用户开关只在档位放行的源上生效。
-    /// 两者顺序反过来会让「词语联想 + punct=true」出标点——那正是用户报的问题。
+    /// 该源是否启用：先过档位、再过开关。档位是硬性的，否则「词语联想 + punct=true」会出标点。
     pub fn source_enabled(&self, s: AssocSource) -> bool {
         if !self.kind.allows(s) {
             return false;
@@ -366,33 +314,18 @@ impl AssocConfig {
 
 /// 一个数据源的查询面。
 ///
-/// 由调用方（协调器）为每个源注入实现——词典句柄、redb、规则表各自封在实现里，
-/// 本 crate 不碰 IO。
-///
-/// ## 实现契约
-///
-/// - `limit` 是该源分到的配额，**可以少给，不得多给**（多给的部分会被丢弃）。
-/// - ★ **必须返回本源内分数最高的那 `limit` 条**，而不是任意 `limit` 条。
-///   [`associate`] 只在收到结果后做源内排序，**它救不回已经被截断掉的候选**——
-///   若实现按「先查到的先给」截断，好候选会在进入排序前就丢了。
-/// - `limit == 0` 时应直接返回空，不要做任何查询工作。
+/// 由调用方（协调器）为每个源注入实现，本 crate 不碰 IO。实现契约：
+/// - `limit` 可以少给，不得多给；
+/// - 必须返回本源内分数最高的那 `limit` 条：[`associate`] 只在收到结果后排序，救不回已被截断的候选；
+/// - `limit == 0` 时直接返回空，不做查询。
 pub trait AssocProvider {
     fn suggest(&self, ctx: &AssocContext<'_>, limit: usize) -> Vec<AssocHit>;
 }
 
 /// 按固定优先级 + 每源配额汇聚四个源。
 ///
-/// ## 配额怎么分
-///
-/// 不是平均分。靠前的源先取，取不满的名额**顺延给后面的源**——否则个人历史为空的
-/// 新用户会白白浪费掉最靠前的几个位置。
-///
-/// ## 去重
-///
-/// 按**显示口径**去重（[`AssocKind::shows_continuation`] 档按上屏的那一截，否则按 `text`），
-/// **先到先得**。智能联想里「中国」（前缀延伸，补「国」）与「国」（下一词）显示同为「国」，
-/// 只留一条，名额顺延。于是同一个词若同时来自历史与 bigram，保留历史那条
-/// （优先级更高），其来源标记也是历史——这对下游按来源做统计是正确的。
+/// 靠前的源先取，取不满的名额顺延给后面的源。按显示口径去重（[`AssocKind::shows_continuation`]
+/// 档按上屏的那一截，否则按 `text`），先到先得，故同一个词保留优先级更高那条的来源标记。
 pub fn associate(
     ctx: &AssocContext<'_>,
     cfg: &AssocConfig,

@@ -6,28 +6,15 @@
 //! wind_input.3.log   ← 再上一次
 //! ```
 //!
-//! # 为什么当前这份也要带序号
+//! 当前这份也带序号，是为了用户打包发来的日志一眼可读：数字越小越新，1 是最新，
+//! 与设置程序的 `wind_setting.N.log` 同一规则。
 //!
-//! 早先是「`wind_input.log` 是当前，`.1` 起为历史」。那套在**收日志的时候**会出事：
-//! 用户把整个 logs 目录打包发过来，里面躺着 `wind_input.log` 与一串 `.N.log`，
-//! 而"没有序号的那个才是最新"完全不是自明的——按名字排序时它还排在 `.1` 后面。
-//! 实际收到的包里常常只有 `.1.log`（用户以为 1 就是最新）。
+//! `file-rotate` 的模型是「无后缀主文件 + 带后缀历史」，于是把 `wind_input.1.log` 整个交给它当
+//! 主文件，库的内部序号 n 映射到磁盘 n+1，换算只走 [`LogIndex::disk`] / [`LogIndex::from_disk`]。
+//! 除命名外，滚动与淘汰语义与 `AppendCount` 一致。
 //!
-//! 全部带序号之后规则只剩一句话：**数字越小越新，1 是最新**。与设置程序的
-//! `wind_setting.1.log` … `.5.log` 完全一致，两份日志一个规则。
-//!
-//! # 实现：内部序号与磁盘序号差 1
-//!
-//! `file-rotate` 的模型是「一个无后缀的主文件 + 若干带后缀的历史」，主文件路径由
-//! 调用方给定、库直接往里写。要让主文件叫 `wind_input.1.log`，就把那个名字整个交给
-//! 它当"主文件"，再让库的内部序号 n 映射到磁盘上的 n+1（见 [`LogIndex::disk`]）。
-//! 映射只有 [`LogIndex::disk`] / [`LogIndex::from_disk`] 两个出口，别在别处手写 ±1。
-//!
-//! 除命名外，滚动与淘汰语义与 `AppendCount` 一致（序号越大越旧，超出 `max_files` 的删除）。
-//!
-//! 注意 trait 的两个默认方法**必须成对覆盖**：[`Representation::to_path`] 决定写出去
-//! 的文件名，[`SuffixScheme::scan_suffixes`] 决定启动时能认回哪些既存文件。只改前者
-//! 会让扫描认不出自己上次写的文件，旧日志既不参与序号推进也永不被淘汰，最终堆满目录。
+//! trait 的两个默认方法必须成对覆盖：[`Representation::to_path`] 决定写出的文件名，
+//! [`SuffixScheme::scan_suffixes`] 决定启动时认回哪些文件；只改前者旧日志永不被淘汰。
 
 use file_rotate::compression::Compression;
 use file_rotate::suffix::{Representation, SuffixScheme};
@@ -40,20 +27,13 @@ use std::time::{Duration, Instant};
 
 /// 磁盘上「当前这次运行」那份日志的序号。历史从 `CURRENT_INDEX + 1` 起。
 ///
-/// 它同时是 `init_logger` 拼主文件名用的那个数字——两处必须同源，否则库写 `.1`、
-/// 调用方开 `.log`，日志会落进两个文件。
+/// 它同时是 `init_logger` 拼主文件名用的那个数字，两处必须同源。
 pub const CURRENT_INDEX: usize = 1;
 
-/// 滚动序号（**库的内部序号**，非磁盘序号）。取值从 1 起，数字越大越旧；
-/// 内部 1 = 磁盘 `.2` = 最新的那份历史。
+/// 滚动序号（库的内部序号，非磁盘序号）。取值从 1 起，数字越大越旧；内部 1 = 磁盘 `.2`。
 ///
-/// ⚠️ 内部序号与磁盘序号差 [`CURRENT_INDEX`]：库认为「主文件无后缀、历史从 1 起」，
-/// 而我们要磁盘上「主文件是 `.1`、历史从 `.2` 起」。换算只走 [`LogIndex::disk`] /
-/// [`LogIndex::from_disk`] 两个出口，别在别处手写 ±1——这类偏移一旦散开，
-/// 症状是某个序号被跳过或两份日志互相覆盖，而两者都只在真机跑上几天才看得出来。
-///
-/// [`Representation`] 要求 `Ord` 按「新→旧」排序（最新的最小），`usize` 的自然序
-/// 恰好满足，故直接 derive。
+/// 与磁盘序号差 [`CURRENT_INDEX`]，换算只走 [`LogIndex::disk`] / [`LogIndex::from_disk`]，
+/// 别在别处手写 ±1。[`Representation`] 要求 `Ord` 按新→旧排序，`usize` 自然序恰好满足。
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LogIndex(usize);
 
@@ -65,8 +45,7 @@ impl LogIndex {
 
     /// 磁盘序号 → 内部序号。
     ///
-    /// `CURRENT_INDEX` 本身返回 `None`：那是**当前文件**，不是历史。认成历史的话，
-    /// 启动扫描会把正在写的这份也算进淘汰队列。
+    /// `CURRENT_INDEX` 本身返回 `None`：那是当前文件，认成历史会被算进淘汰队列。
     fn from_disk(n: usize) -> Option<Self> {
         n.checked_sub(CURRENT_INDEX)
             .filter(|k| *k > 0)
@@ -82,9 +61,7 @@ impl fmt::Display for LogIndex {
 
 /// 把主文件路径拆成 `("wind_input", Some("log"))`。
 ///
-/// ★ 主文件本身带序号（`wind_input.1.log`），末尾那个 `.1` 是**序号占位**而不是文件名
-/// 的一部分，必须剥掉——不剥的话轮转会写出 `wind_input.1.2.log`，而且 `scan_suffixes`
-/// 又认不回来，于是每次启动都新造一批永不淘汰的文件。
+/// 主文件末尾的 `.1` 是序号占位，必须剥掉，否则轮转写出 `wind_input.1.2.log` 且扫描认不回来。
 fn split_stem_ext(basepath: &Path) -> (String, Option<String>) {
     let stem = basepath
         .file_stem()
@@ -222,16 +199,8 @@ impl SuffixScheme for AppendCountBeforeExt {
 
 /// 服务启动时强制滚动一次日志：上一次运行的内容整体推到 `.2`，本次从空的 `.1` 写起。
 ///
-/// 这样 `wind_input.1.log` 恒等于「当前这次运行」，排查时不必在混着多次重启的大文件里
-/// 翻找分界点，也不需要另做「清空日志」的入口——`FileRotate` 常驻持有该文件句柄，
-/// 从外部删除只会留下一个已摘名的幽灵 inode，后续日志全写进去且看不见。
-///
-/// 仅在旧文件非空时滚动：首次启动没有 `wind_input.1.log`，而 `rotate()` 内部是
-/// `fs::rename(old, new)?`，对不存在的文件会直接报错；空文件滚动也只是白占一个序号，
-/// 把真正有用的历史更快挤出保留窗口。
-///
-/// 注意：序号并非「一个序号 = 一次启动」——本次运行写满 `log_max_size_mb` 同样会滚动，
-/// 此时 `.2` 是本次运行的前半段而非上一次运行。
+/// 仅在旧文件非空时滚动：`rotate()` 对不存在的文件会报错，空文件滚动只白占一个序号。
+/// 序号并非「一个序号 = 一次启动」：写满 `log_max_size_mb` 同样会滚动。
 pub fn rotate_on_startup(rotate: &mut FileRotate<AppendCountBeforeExt>, log_path: &Path) {
     if std::fs::metadata(log_path)
         .map(|m| m.len() > 0)
@@ -254,14 +223,9 @@ pub fn rotate_on_startup(rotate: &mut FileRotate<AppendCountBeforeExt>, log_path
 /// 现在：wind_input.1.log   ← 当前      + wind_input.{N+1}.log
 /// ```
 ///
-/// ★ **判据是「无序号的 `wind_input.log` 在不在」**：新命名下永远不会有这个文件，
-/// 它在就说明还是二代布局。不能只看「有没有 `.N.log`」——新命名下那些一直都在，
-/// 那样判会让每次启动都把整串序号推一格，几次之后历史全被挤掉。
-///
-/// 顺序也是判据的一部分：先把 `.N` 倒序推到 `.{N+1}`（腾出 `.1`），再把无序号的当前
-/// 文件搬进 `.1`。反过来做会撞车。
-///
-/// 一代那批放在最后处理，目标被占则跳过：那是更早、更不重要的历史，让位给二代。
+/// 判据是无序号的 `wind_input.log` 在不在（新命名下永远没有它）；只看有没有 `.N.log` 会让每次
+/// 启动都把序号推一格。先倒序推 `.N` → `.{N+1}` 腾出 `.1`，再搬当前文件。一代那批最后处理，
+/// 目标被占则跳过。
 ///
 /// 可在若干版本后删除（存量目录都迁移完之后）。
 pub fn migrate_legacy_suffix(log_path: &Path) {
@@ -331,24 +295,12 @@ fn scan_disk_indices(parent: &Path, stem: &str, ext: &str) -> Vec<usize> {
         .collect()
 }
 
-/// 主日志的写端：在 `FileRotate` 外面包一层，让日志文件**被外部删掉或清空后能自己接回来**。
+/// 主日志的写端：在 `FileRotate` 外面包一层，让日志文件被外部删掉或清空后能自己接回来。
 ///
-/// 日志目录是用户与设置页都会去清的地方（设置 › 高级 › 日志 › 清理，或在资源管理器里
-/// 整个删掉）。裸用 `FileRotate` 时两种删法都有后果：
-///
-/// - **删历史**（`.2.log` 起）：file-rotate 只在构造时扫一次磁盘记下有哪些序号，轮转时
-///   按记忆逐个后挪并 `assert!(old_path.exists())`。记忆里的文件没了 ⇒ 下一次轮转 panic，
-///   而 release 是 `panic = "abort"`——整个输入法服务崩掉。
-/// - **删当前**（`.1.log`）：句柄还吊着已摘名的文件，此后每一行都写进看不见的幽灵文件，
-///   直到重启。
-///
-/// 对策与 TSF 的 `CFileLogger::_ResyncFile` 同一思路：
-///
-/// - 轮转**由这里按大小触发**（内层用 `ContentLimit::None`），且每次轮转前重建内层——
-///   `FileRotate::new` 会重新扫描磁盘，记忆与磁盘一致，后挪就不会撞上不存在的文件。
-///   轮转十 MB 才一次，重扫的开销可以忽略。
-/// - 每 [`RESYNC_INTERVAL`] 对一次表：当前文件没了就重建内层（按原路径重开），还在就以
-///   真实大小校正计数（被清空时不至于提前轮转）。节流按时间而不是按行，安静时零开销。
+/// 裸用 `FileRotate` 时：删历史会让下一次轮转撞上它构造时记下的文件而 panic（release 是
+/// `panic = "abort"`，服务崩溃）；删当前则此后日志写进已摘名的幽灵文件。对策同 TSF 的
+/// `CFileLogger::_ResyncFile`：轮转由这里按大小触发且每次先重建内层（重扫磁盘）；每
+/// [`RESYNC_INTERVAL`] 对一次表，文件没了就重开，还在就以真实大小校正计数。
 pub struct SelfHealingLog {
     path: PathBuf,
     max_files: usize,
@@ -443,34 +395,15 @@ impl io::Write for SelfHealingLog {
 #[path = "log_rotate_tests.rs"]
 mod tests;
 
-/// TSF 日志的专属子目录名。**跨语言契约**，必须与 C++ 侧 `WIND_LOG_SUBDIR_NAME`
-/// （`wind_tsf/include/FileLogger.h`）逐字一致——两边没有任何编译期约束，改一边不改
-/// 另一边的后果是清理静默失效、文件无限堆积。
+/// TSF 日志的专属子目录名。跨语言契约，必须与 C++ 侧 `WIND_LOG_SUBDIR_NAME`
+/// （`wind_tsf/include/FileLogger.h`）逐字一致，见 `subdir_name_matches_cpp_header`。
 const TSF_LOG_SUBDIR: &str = "tsf_log";
 
-/// 清理 TSF DLL 留下的**过期**日志（`wind_tsf.<宿主名>.<pid>.log` 及其 `.old`）。
+/// 清理 TSF DLL 留下的过期日志（`wind_tsf.<宿主名>.<pid>.log` 及其 `.old`）。
 ///
-/// 传入的是 `logs` 根目录。函数会扫两层：
-/// - `logs/tsf_log/` —— 当前落点；
-/// - `logs/` 本身 —— 更早的版本把 TSF 日志平铺在这里（包括所有进程共写一个
-///   `wind_tsf.log` 的那一版）。不扫这层的话，存量机器上那些文件永远没人回收。
-///
-/// # 为什么这件事在 core 做，而不在 DLL 里
-///
-/// TSF 的日志文件改成每进程一个之后（消除了跨进程锁与每行开关文件的开销），文件数会
-/// 随「用过的宿主 × pid」增长，需要有人回收。但 DLL 的 `CFileLogger::Init` 跑在
-/// `DllMain(DLL_PROCESS_ATTACH)` 里 —— loader lock 之下不能做目录遍历这种耗时不可控
-/// 的事。core 是个正常进程，启动时从容做一次即可。
-///
-/// # 判据是修改时间，不是 pid 是否还活着
-///
-/// 「查这个 pid 还在不在」看似更精确，实则是错的：pid 会被系统复用，而且刚退出的宿主
-/// 那份日志恰恰是排查刚才那次故障最需要的。按时间留一段窗口既简单又不会误删现场。
-///
-/// 正在被写的文件也能删掉——DLL 侧开句柄时带了 `FILE_SHARE_DELETE`；但活跃宿主的日志
-/// 修改时间就是此刻，不会落进过期窗口，所以正常情况下轮不到它。
-///
-/// 失败一律忽略：日志清理不该阻塞启动，更不该让服务起不来。
+/// 传入 `logs` 根目录，扫两层：`logs/tsf_log/`（当前落点）与 `logs/`（老版本平铺的存量）。
+/// 在 core 做而不在 DLL：DLL 的 `CFileLogger::Init` 跑在 loader lock 之下，不能做目录遍历。
+/// 判据是修改时间而非 pid 存活：pid 会复用，刚退出宿主的日志正是排查现场。失败一律忽略。
 pub fn prune_stale_tsf_logs(log_dir: &Path, max_age: std::time::Duration) -> usize {
     prune_tsf_logs_in(&log_dir.join(TSF_LOG_SUBDIR), max_age) + prune_tsf_logs_in(log_dir, max_age)
 }
@@ -485,8 +418,7 @@ fn prune_tsf_logs_in(dir: &Path, max_age: std::time::Duration) -> usize {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        // 只碰 TSF 自己那批。前缀与 `WIND_LOG_FILE_PREFIX` 对齐（跨语言契约，无编译期
-        // 约束）；带 `.` 是为了不误伤将来可能出现的 `wind_tsf_xxx.log` 这类别的文件。
+        // 只碰 TSF 自己那批：前缀与 C++ `WIND_LOG_FILE_PREFIX` 对齐，带 `.` 免误伤别的文件。
         if !name.starts_with("wind_tsf.") || !name.ends_with(".log") {
             continue;
         }
@@ -508,9 +440,7 @@ mod prune_tsf_tests {
     use super::*;
     use std::time::{Duration, SystemTime};
 
-    /// 只删过期的 TSF 日志，且只认 `wind_tsf.` 前缀——core 自己的日志、别人的文件
-    /// 都不能碰。同时钉住**两层都要扫**：`logs/tsf_log/`（当前落点）与 `logs/`
-    /// （老版本平铺的存量，含所有进程共写的那个 `wind_tsf.log`）。
+    /// 只删过期的 TSF 日志，只认 `wind_tsf.` 前缀；`logs/tsf_log/` 与 `logs/` 两层都要扫。
     #[test]
     fn prunes_only_stale_tsf_logs() {
         let dir = std::env::temp_dir().join(format!("wind_prune_test_{}", std::process::id()));
@@ -556,9 +486,7 @@ mod prune_tsf_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 子目录名是 Rust 与 C++ 之间的**跨语言契约**，两边各写各的字面量，没有任何编译期
-    /// 约束。改一边不改另一边不会报错，只会让清理静默失效、文件无限堆积——所以在这里
-    /// 扫源码钉死。
+    /// 子目录名是 Rust 与 C++ 之间的跨语言契约，没有编译期约束，在这里扫源码钉死。
     #[test]
     fn subdir_name_matches_cpp_header() {
         const HEADER: &str = include_str!("../../../../wind_tsf/include/FileLogger.h");

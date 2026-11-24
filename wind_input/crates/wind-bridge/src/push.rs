@@ -16,8 +16,7 @@ use crate::server::PipeHandle;
 /// 推送管道配置
 pub struct PushConfig {
     pub suffix: String,
-    /// 单次写超时。⚠ **当前两端都没接上**：写线程是无限期阻塞写，卡住的对端靠发送队列
-    /// 上限 [`PUSH_QUEUE_CAP`] 兜住内存。
+    /// 单次写超时。当前没接上：写线程是无限期阻塞写，卡住的对端靠 [`PUSH_QUEUE_CAP`] 兜住内存。
     pub write_timeout_ms: u64,
 }
 
@@ -32,13 +31,9 @@ impl Default for PushConfig {
 
 /// 每个客户端发送队列的帧数上限。
 ///
-/// 写线程用的是阻塞 `WriteFile`：对端进程挂起（UWP 被挂起、调试器停住）但不断开时，
-/// 64 KB 管道缓冲一满它就停在那里，此前的无界队列会把之后每一帧广播都攒在内存里。
-/// 正常情况下队列几乎是空的（写线程即收即写），连接握手时的一批配置推送约 14 帧，
-/// 64 帧足够吸收突发；真满了说明对端不读了，见 [`offer`] 的处置。
-///
-/// 不取更大：`sync_channel` 创建时就按容量分配槽位（实测 256 槽 ≈ 8.8 KB/客户端，而
-/// 每个加载了 TSF 的进程都有客户端），上限本身不该变成新的常驻开销。
+/// 写线程是阻塞 `WriteFile`：对端挂起但不断开时管道缓冲一满就停住，无界队列会攒下全部广播。
+/// 握手时一批配置推送约 14 帧，64 帧足够吸收突发；真满了说明对端不读了，见 [`offer`]。
+/// 不取更大：`sync_channel` 按容量预分配槽位，而每个加载了 TSF 的进程都有客户端。
 pub(crate) const PUSH_QUEUE_CAP: usize = 64;
 
 pub(crate) fn push_channel() -> (
@@ -50,10 +45,8 @@ pub(crate) fn push_channel() -> (
 
 /// 投一帧进客户端队列，返回该客户端是否已卡死（队列满）。
 ///
-/// 卡死的客户端由调用方移出客户端表：发送端随之析构，写线程一旦解除阻塞就把余下的帧写完、
-/// `recv` 出错、断开管道；DLL 的读线程感知断开后重连，重连握手会做全量状态同步。比起
-/// 「满了就丢帧」，这样对端恢复后拿到的是当前状态，而不是半截过期帧。
-/// 对端已断开（`Disconnected`）不算卡死——写线程自己会清理表项。
+/// 卡死的客户端由调用方移出客户端表：发送端析构后写线程终将断开管道，DLL 重连时做全量状态
+/// 同步，比丢帧更能保证对端恢复后拿到当前状态。对端已断开不算卡死（写线程自己清理表项）。
 fn offer(c: &PushClient, data: Vec<u8>) -> bool {
     matches!(
         c.tx.try_send(data),
@@ -83,12 +76,9 @@ pub(crate) struct PushClient {
     pub(crate) tx: std::sync::mpsc::SyncSender<Vec<u8>>,
     /// 是否已触发过 connected_hook。
     ///
-    /// 存在的意义是**跨越 hook 注册时刻**：`start()` 在 main.rs 早期就开始 accept，而
-    /// `set_client_connected_hook` 要等 Coordinator 构造完才注册（实测窗口约 230ms）。
-    /// 窗口内完成握手的客户端曾被静默跳过——对 SearchHost 这类 locked/transient DocMgr
-    /// 宿主是致命的：它既不发 FOCUS_GAINED 也不重发 IME_ACTIVATED，hook 是它拿到
-    /// activation push 的**唯一**通路，丢一次即永久停留本地渲染（开始菜单候选窗被压在后面）。
-    /// 该标志让 hook 注册时能精确补跑这批客户端，且与连接线程的自发触发互斥去重。
+    /// `start()` 早于 `set_client_connected_hook` 开始 accept，这段窗口内握手的客户端要在 hook
+    /// 注册时补跑；对 SearchHost 这类既不发 FOCUS_GAINED 也不重发 IME_ACTIVATED 的宿主，hook 是
+    /// 拿到 activation push 的唯一通路。该标志让补跑与连接线程的自发触发互斥去重。
     pub(crate) hooked: bool,
     /// 是否已给它发过 CMD_SERVICE_READY。
     ///
@@ -171,15 +161,11 @@ pub struct PushServer {
     clients: Arc<Mutex<Vec<PushClient>>>,
     /// 当前活动（有焦点）客户端 token；commit 仅投递给它，避免广播多发
     active_token: Arc<AtomicU64>,
-    /// 最近一次**真正上报过 `focus_gained`** 的客户端 token（0 = 还没有过）。
+    /// 最近一次真正上报过 `focus_gained` 的客户端 token（0 = 还没有过）。
     ///
-    /// 与 `active_token` 分开存，是因为后者有**两个**来源：`focus_gained` 与
-    /// `ime_activated`，而后者每进程只发一次。两者一旦分叉，就意味着某个宿主的
-    /// `focus_gained` 在上游被吃掉了——2026-08-18 任务管理器正是如此（DLL 的
-    /// locked/transient 守卫把 WinUI 3 宿主的 gained 全判成 transient），表现为
-    /// 「切走再切回工具栏不显示 / per-app 模式不跟随 / 菜单里的应用名是上一个进程」。
-    /// 那种缺口逃得过 `is_stale_focus_event`（token 恰等于 active，照常放行），
-    /// 只能靠这个字段抓；诊断时它是唯一能把「守卫吃了 gained」与「正常失焦」分开的信号。
+    /// 与 `active_token` 分开存：后者还会被 `ime_activated` 设置。两者分叉意味着某个宿主的
+    /// `focus_gained` 在上游被吃掉了（如 DLL 守卫把 WinUI 3 宿主误判成 transient），这是诊断时
+    /// 唯一能把它与正常失焦分开的信号。
     gained_token: Arc<AtomicU64>,
     /// 客户端注册回调（可选，服务侧后置注入）
     connected_hook: Arc<Mutex<Option<ClientConnectedHook>>>,
@@ -201,19 +187,11 @@ impl PushServer {
 
     /// 宣告服务就绪：给就绪前连上的客户端补发 CMD_SERVICE_READY（幂等）。
     ///
-    /// # 为什么不能连上就发
+    /// 不能连上就发：DLL 收到 SERVICE_READY 会立刻做全量同步，协调器未就绪时这些请求被
+    /// `DeferredHandler` 静默丢弃，DLL 却以为同步过了（重建词库缓存时这段窗口可达数秒）。
     ///
-    /// 管道在 `Coordinator::new` 之前就开始 accept，而 DLL 收到 SERVICE_READY 会立刻做全量
-    /// 同步（发 IME_ACTIVATED / 补发 focus_gained）。协调器没就绪时这些请求落在
-    /// `DeferredHandler` 上被静默丢弃，DLL 却以为同步过了、清掉了标志——工具栏要等用户
-    /// 切焦点或按键才出来。平时协调器 0.1 s 就绪、DLL 1 s 退避后才重连，碰不上；改了词库
-    /// 要重建缓存时协调器要好几秒，DLL 必然落进这段窗口（t254，靶机实测 2.6 s）。
-    ///
-    /// # 调用时机
-    ///
-    /// 必须在 `DeferredHandler::set_ready` **之后**（DLL 据此发来的请求才有人接），且在
-    /// [`Self::set_client_connected_hook`] **之前**：DLL 收到 SERVICE_READY 会把会话级开关
-    /// 清零，它必须排在 hook 补跑推来的握手配置前面（同一条发送队列，先投先到）。
+    /// 必须在 `DeferredHandler::set_ready` 之后、[`Self::set_client_connected_hook`] 之前调用：
+    /// DLL 收到 SERVICE_READY 会把会话级开关清零，它必须排在 hook 补跑推来的握手配置前面。
     ///
     /// unix 侧连接即发（客户端注册时 `ready_sent` 已是 `true`），这里对它们是空操作。
     pub fn mark_ready(&self) {
@@ -238,8 +216,7 @@ impl PushServer {
 
     /// 注入客户端注册回调（幂等覆盖）。回调在 push accept 线程执行，须自身线程安全且轻量。
     ///
-    /// **注册时会对已连接但未触发过回调的客户端补跑一次**：`start()` 早于本方法数百毫秒
-    /// 开始 accept，这期间完成握手的客户端此前被静默丢弃（见 `PushClient::hooked`）。
+    /// 注册时会对已连接但未触发过回调的客户端补跑一次（见 `PushClient::hooked`）。
     ///
     /// 锁序固定为 `connected_hook` → `clients`，与连接线程的触发路径一致，不会反转。
     /// 回调在持 `connected_hook` 锁期间执行（与连接线程同构）——回调内只准取 `clients` 锁，
@@ -263,9 +240,8 @@ impl PushServer {
     }
 
     /// 定向投递给指定 token 的客户端（精确匹配，无兜底无广播）。返回是否命中。
-    /// 「按事件源计算」的帧（如 activation status 的 hostRenderAvail 位）必须走此方法——
-    /// 广播会把按别的进程计算的位污染给无关客户端（真机踩坑：SearchHost 收到兄弟进程的
-    /// avail=0 推送后陷入 Band 窗口销毁重建循环）。
+    /// 按事件源计算的帧（如 activation status 的 hostRenderAvail 位）必须走此方法，广播会把
+    /// 按别的进程算的位污染给无关客户端。
     pub fn push_to_token(&self, token: u64, data: &[u8]) -> bool {
         let mut clients = self.clients.lock().unwrap();
         let Some(c) = clients.iter().find(|c| c.token == token) else {
@@ -283,14 +259,12 @@ impl PushServer {
     }
 
     /// 当前活动客户端 token（0 = 尚未有任何客户端获焦）。
-    /// 失焦类命令据此做归属校验：TSF 的 `OnKillThreadFocus` 比 DocMgr 级失焦晚约 100ms
-    /// 发出 focus_lost，跨宿主切换时必然晚于新宿主的 focus_gained，无校验会清掉新宿主
-    /// 刚建立的激活态（工具栏闪一下即消失）。
+    /// 失焦类命令据此做归属校验：跨宿主切换时 focus_lost 会晚于新宿主的 focus_gained 到达。
     pub fn active_token(&self) -> u64 {
         self.active_token.load(Ordering::Relaxed)
     }
 
-    /// 记录「这个 token 真的上报过 `focus_gained`」。**只在 focus_gained 路径调用**，
+    /// 记录「这个 token 真的上报过 `focus_gained`」。只在 focus_gained 路径调用，
     /// `ime_activated` 不许调——两者分叉正是本字段要抓的东西（见 `gained_token`）。
     pub fn note_focus_gained(&self, token: u64) {
         self.gained_token.store(token, Ordering::Relaxed);
@@ -318,14 +292,8 @@ impl PushServer {
 
     /// 获取推送管道名称
     ///
-    /// 必须与 Go/TSF 一致：后缀插在 `wind_input` 与 `_push` 之间。
-    /// Go `endpoint_windows.go`: `\\.\pipe\wind_input` + Suffix + `_push`；
-    /// TSF `Globals.h` dev 变体: `\\.\pipe\wind_input_push_dev`。
-    /// 此前误写成 `wind_input_push{suffix}` (= wind_input_push_dev)，
-    /// 导致 TSF 永远连不上 push 管道、收不到热键白名单 → Shift/Ctrl+Shift+E 不被转发。
-    /// 尾部再追加 per-user SID 后缀（`_S-1-...`）：管道名字空间是机器级的，靠它按
-    /// 用户隔离（详见 [`crate::pipe_scope`]）。C++ TSF 端算同一名字，顺序须一致：
-    /// `wind_input_push{变体后缀}{SID 后缀}`。
+    /// 格式 `wind_input_push{变体后缀}{SID 后缀}`，C++ TSF 端（`Globals.h`）算同一名字，顺序须一致。
+    /// SID 后缀按用户隔离机器级的管道名字空间（见 [`crate::pipe_scope`]）。
     pub fn pipe_name(&self) -> String {
         format!(
             r"\\.\pipe\wind_input_push{}{}",
@@ -387,11 +355,9 @@ impl PushServer {
         self.connected_hook.clone()
     }
 
-    /// 挂一个内存客户端并设为活动客户端，返回它收到的全部推送（**测试接缝**）。
+    /// 挂一个内存客户端并设为活动客户端，返回它收到的全部推送（测试接缝）。
     ///
-    /// 给下游 crate 的测试用（`#[cfg(test)]` 跨不了 crate）：协调器里经 push 投递的
-    /// 上屏（鼠标点选、菜单上屏）没有按键应答可断言，只能在这里截获实际编出的字节。
-    /// 生产代码不调用；它不开管道、不起线程，只往客户端表里加一项。
+    /// 给下游 crate 的测试截获经 push 投递的上屏（`#[cfg(test)]` 跨不了 crate）。生产代码不调用。
     #[doc(hidden)]
     pub fn attach_capture_client(&self, token: u64) -> std::sync::mpsc::Receiver<Vec<u8>> {
         // 测试可能攒很多帧才读，给足余量，别让 [`PUSH_QUEUE_CAP`] 把它当卡死踢掉。
@@ -414,7 +380,7 @@ impl PushServer {
 
     /// 逐客户端生成并投递消息：`make(token)` 按各自的 token 现算内容。
     ///
-    /// 用于 **per-app 配置**——不同宿主进程的取值不同（如 `compat.toml` 按进程关掉自动配对），
+    /// 用于 per-app 配置：不同宿主进程的取值不同（如 `compat.toml` 按进程关掉自动配对），
     /// 拿 [`Self::push_to_active`] 广播同一条会把某个进程的规则套到所有进程头上。
     pub fn push_per_client(&self, make: impl Fn(u64) -> Vec<u8>) {
         let mut clients = self.clients.lock().unwrap();
@@ -440,10 +406,7 @@ impl PushServer {
 
     /// 仅向活动客户端投递（用于 commit 等带副作用的消息，避免广播导致多次上屏）。
     /// 优先按活动 token 匹配；无匹配且仅一个客户端时兜底发它；否则跳过。
-    /// 返回是否已投入某客户端的发送队列（false = 无客户端/无匹配/通道已断，
-    /// 肯定没投出去）。true 仅表示入队成功，不保证对端最终收到。当前调用点均忽略
-    /// 该返回；保留以备需要区分「肯定失败」的场景（撤销上屏曾据此回滚历史，现改为
-    /// 读取即复位计数、不再依赖投递结果）。
+    /// 返回是否已入队（false = 肯定没投出去；true 不保证对端最终收到）。当前调用点均忽略返回值。
     pub fn push_commit_to_active(&self, data: &[u8]) -> bool {
         let active = self.active_token.load(Ordering::Relaxed);
         let mut clients = self.clients.lock().unwrap();
@@ -488,12 +451,8 @@ impl PushServer {
     /// 注意：此方法使用 CMD_ACTIVATION_STATUS_PUSH 命令码（0x020C），
     /// 与 CMD_STATUS_UPDATE（0x0202）不同。C++ 端对两者有不同处理路径。
     pub fn push_activation_status(&self, chinese_mode: bool) {
-        // ⚠️ 这两个字面量**刻意不接 `[ui.labels]`**：本方法既拿不到 Config，当前也
-        // 没有任何调用点——生产路径是协调器那个同名方法（`push_config.rs`），它推的是
-        // `build_status` 算好的 `icon_label`，用户配置在那条路上生效。
-        //
-        // 若哪天要启用本方法，label 必须改成由调用方传入：否则用户把英文态配成 "En"
-        // 后，握手瞬间会先闪一下 "英" 再被正式推送改掉。
+        // 字面量刻意不接 `[ui.labels]`：本方法当前没有调用点，生产路径是协调器同名方法
+        // （`push_config.rs`）。若要启用本方法，label 必须改由调用方传入。
         let label = if chinese_mode { "中" } else { "英" };
         let resp = wind_ipc::codec::encode_activation_status_push(
             chinese_mode,
@@ -589,19 +548,9 @@ fn run_push_pipe_server(
 
         debug!("Push client connected to push pipe");
 
-        // 握手（读 8 字节 token）**必须离开 accept 循环**。
-        //
-        // 读 token 是无超时阻塞调用，而它执行期间管道名下**没有任何监听实例**——
-        // 此刻敲门的客户端拿到的是 ERROR_FILE_NOT_FOUND，白扣一次重试机会。
-        // DLL 侧 `_StartAsyncReader` 只试 3 次就 `return FALSE` 永久放弃，且
-        // **重连逻辑活在它没能创建的 async reader 线程里**，于是一次失手 = 终身失联，
-        // 之后服务重启多少次它都感知不到（IPCClient.cpp:1940-2021）。
-        // 开机/服务重启时 20+ 个宿主 DLL 在数十毫秒内齐冲这条管道，输掉的那个
-        // 就此停在无 push 状态——实测 SearchHost 中招后 HostRender 再不激活，
-        // 开始菜单候选窗永久压在菜单后方（2026-07-21 定位）。
-        //
-        // 交给独立线程后：accept 循环立刻回到 CreateNamedPipe，监听实例常驻；
-        // 慢客户端最多拖住自己那一个线程，拖不住别人的接纳。
+        // 握手（读 8 字节 token）必须离开 accept 循环：阻塞读期间管道名下没有监听实例，
+        // 此刻连接的客户端拿到 ERROR_FILE_NOT_FOUND；DLL `_StartAsyncReader` 只试 3 次就永久放弃
+        // （重连逻辑在它没能创建的线程里）。开机时众多宿主齐冲这条管道，输掉的会终身失联。
         let clients_c = clients.clone();
         let hook_c = connected_hook.clone();
         let ready_c = ready.clone();
@@ -621,8 +570,7 @@ fn run_push_pipe_server(
 
 /// 单个 push 客户端的完整生命周期：握手 → 注册 → 触发 connected_hook → writer loop。
 ///
-/// 全程跑在自己的线程上——accept 循环把连接交出来后立刻回去建下一个监听实例，
-/// 故本函数里的阻塞调用不会拖住任何其他客户端的接纳（见调用点长注释）。
+/// 全程跑在自己的线程上，阻塞调用不会拖住其他客户端的接纳（见调用点注释）。
 #[cfg(windows)]
 fn serve_push_client(
     pipe: PipeHandle,
@@ -668,13 +616,8 @@ fn serve_push_client(
     let (tx, rx) = push_channel();
     register_client(&clients, &ready, token, tx);
 
-    // 注册完成后回调（发送经 tx 入队，下面的 writer loop 写出，顺序安全）。
-    // 用途：host-render 白名单宿主（transient DocMgr，如 SearchHost）服务重启重连时
-    // 既不发 focus_gained 也不重发 IME_ACTIVATED，无任何 activation push 会到达 →
-    // DLL 永不重新 setup。由 coordinator 在此回调中定向补推握手帧。
-    //
-    // hook 尚未注册时**不能静默跳过**：客户端已带 hooked=false 在表中，
-    // set_client_connected_hook 会补跑（见该方法与 PushClient::hooked）。
+    // 注册完成后回调（经 tx 入队，顺序安全）：coordinator 借它给 host-render 白名单宿主
+    // 定向补推握手帧。hook 尚未注册时客户端已带 hooked=false 在表中，由注册时补跑。
     {
         let guard = connected_hook.lock().unwrap();
         match guard.as_ref() {

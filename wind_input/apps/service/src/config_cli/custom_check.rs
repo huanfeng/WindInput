@@ -1,21 +1,11 @@
 //! `wind_input config check --custom <data_custom 目录>`：定制层体检。
 //!
-//! 读者是**第三方定制者**，不是本仓开发者：措辞里不出现「L2.5」「段级降级」「注册表」
-//! 这类内部词，每条结论都写成「哪个文件的哪个键 / 会发生什么 / 该怎么改」。
+//! 读者是第三方定制者，不是本仓开发者：措辞里不出现「L2.5」「段级降级」「注册表」这类内部词，
+//! 每条结论都写成「哪个文件的哪个键 / 会发生什么 / 该怎么改」。定制层的失败几乎全是静默的，
+//! 这个命令把终端用户的反馈提前到打包之前。
 //!
-//! # 为什么这个命令值得存在
-//!
-//! 定制层的失败几乎全是**静默**的：清单少一个字母、配置里一个键写错类型、hide 掉的方案
-//! 还被融合模式引用着——程序照常启动，日志里至多一行 WARN，而定制者手上那台开发机往往
-//! 恰好看不出差别。故障最后是由**终端用户**报上来的，且报的是「打不出字」这种离根因很远
-//! 的现象。这个命令把那一轮反馈提前到打包之前。
-//!
-//! # 纯函数与层
-//!
-//! [`check_layer`] 不读环境变量、**不读用户层 `%APPDATA%`**、不碰 RPC：它体检的是
-//! 「这个定制包发出去之后会怎样」，定制者本机的个人设置不该影响结论（否则同一个包在
-//! 两台机器上体检出两种结果）。data 层与当前版本号都由调用方显式传入，测试因此不必
-//! 动任何进程级状态。
+//! [`check_layer`] 不读环境变量、不读用户层 `%APPDATA%`、不碰 RPC：它体检的是定制包发出去之后
+//! 会怎样，定制者本机的个人设置不该影响结论。data 层与当前版本号都由调用方显式传入。
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -132,8 +122,7 @@ impl Report {
 /// 体检一个定制层目录。
 ///
 /// - `custom_dir`：待检查的 `data_custom/` 目录（可以还没安装，指向打包目录即可）。
-/// - `data_dir`：出厂 `data/` 目录。`None` 时凡是需要出厂数据作对照的检查一律**跳过并
-///   声明**（不猜、不用残缺对照下结论，同 `preset_for_pruning` 取不到 preset 就不清理）。
+/// - `data_dir`：出厂 `data/` 目录。`None` 时需要出厂数据作对照的检查一律跳过并声明，不用残缺对照下结论。
 /// - `app_version`：当前主程序版本，用于与清单的 `base_version` 比对。
 pub(super) fn check_layer(custom_dir: &Path, data_dir: Option<&Path>, app_version: &str) -> Report {
     let mut rep = Report::default();
@@ -367,8 +356,7 @@ fn check_manifest_unknown_fields(raw: &toml::Value, rep: &mut Report) {
 
 /// `base_version` 与当前主程序版本的差距。
 ///
-/// 判据取**前两段**（主.次）：补丁号差异是常态，每次小版本更新都告警一次只会让人把整个
-/// 命令的输出当噪音略过；主/次版本变了才是「配置键可能已经改名或删掉了，值得复核一遍」。
+/// 判据取前两段（主.次）：补丁号差异是常态，每次都告警只会让人把输出当噪音。
 fn check_base_version(base_version: &str, app_version: &str, rep: &mut Report) {
     let base = base_version.trim();
     if base.is_empty() {
@@ -417,11 +405,8 @@ fn major_minor(v: &str) -> Option<(u32, u32)> {
 // ② 定制层的 config.toml
 // ---------------------------------------------------------------------------
 
-/// 定制层里**不该声明**的键：它们会被一次性物化进终端用户的 `%APPDATA%` 并打死版本标记，
-/// 此后定制包再改这些绑定，对**存量用户永远不生效，且没有任何日志**。
-///
-/// 这不是 data_custom 引入的（出厂 `data/config.toml` 的 `trigger_keys` 早就是这个形状），
-/// 但对第三方完全不可发现——只能在这里报出来。
+/// 定制层里不该声明的键：它们会被一次性物化进终端用户的 `%APPDATA%` 并打死版本标记，此后
+/// 定制包再改这些绑定，对存量用户永远不生效且没有日志。对第三方不可发现，只能在这里报出来。
 const MATERIALIZED_KEYS: &[&str] = &[
     "keys.key_actions",
     "input.temp_pinyin.trigger_keys",
@@ -550,10 +535,8 @@ fn check_custom_config(custom: &toml::Value, data_dir: Option<&Path>, rep: &mut 
         }
     }
 
-    // ★ 第二道判据在**第一道之后**跑，并把第一道已经点过名的键排除掉。
-    // 「已点过名」直接从 `rep` 里取（本文件、error 级、带键名的那些），而不是各处
-    // 手动往一个集合里塞——手动维护的那种一定会在下一处新增检查时漏掉，实测就漏过
-    // `collect_leaves` 报的「段被写成标量」，于是同一个键报了两遍。
+    // 第二道判据在第一道之后跑，排除第一道已点过名的键。「已点过名」直接从 `rep` 里取，
+    // 别改成手动维护的集合：新增检查时必漏，同一个键就会报两遍。
     let named_before: BTreeSet<String> = rep
         .findings
         .iter()
@@ -563,35 +546,16 @@ fn check_custom_config(custom: &toml::Value, data_dir: Option<&Path>, rep: &mut 
     check_deserialization(factory.as_ref(), custom, &named_before, rep);
 }
 
-/// 第二道类型判据：把合并结果**真的反序列化一次**，接住注册表看不见的那些坏值。
+/// 第二道类型判据：把合并结果真的反序列化一次（即 `Config::load` 的 `try_into`），接住注册表
+/// 看不见的坏值：`Map` / `StructList` 表里的值（如自定义标点写成 `"," = "，"`，值须是数组，
+/// 运行时 `input.punct` 整段回落出厂默认），以及注册表表达不了的值域（`per_page = -1`）。
 ///
-/// # 为什么必须有它
-///
-/// `validate()` 对 `Map` / `StructList` 只做**一层形状判定**（是不是表 / 是不是数组），
-/// 而 `collect_leaves` 在这两类键上就地停住——于是表里的**值**再没有任何一处被检。
-/// 运行时 serde 会逐个值反序列化，一失败就是段级降级。最典型的失败场景：定制者写自定义
-/// 标点，用最自然的写法 `"," = "，"`（值其实必须是数组 `["，"]`）——注册表说没问题，
-/// 包发出去之后**每个用户、每次启动**的 `input.punct` 整段回落出厂默认。
-/// 这正是本命令存在的唯一理由，不能恰好漏掉。
-///
-/// 同理接住的还有注册表表达不了的**值域**：`per_page = -1` 是合法整数，但字段是 `usize`。
-///
-/// 判据与运行时完全一致，因为它**就是**运行时那条路径（`Config::load` 的 `try_into`）。
-///
-/// # 三条必要的免责
-///
-/// 1. **先拿 `L1⊕L2` 单独试一次作对照。** 出厂 `data/config.toml` 自己就反序列化不了时，
-///    合并结果当然也不行——那不是定制者的错，把它栽给定制层是最坏的一种误报。对照失败
-///    就跳过本项并声明。
-/// 2. **前一道判据已经点名过的键不重复报。** 前一道的措辞更好（写得出期望类型与合法
-///    值域、写得出「这是个配置段」），两者互补而不是叠加。
-/// 3. ⚠️ **本函数跑的是裸 `try_into`，没跑 `Config::load` 的那批 `migrate_*_value`**
-///    （它们是 wind-config 的私有函数）。其中两条会**就地改写已注册的键**：
-///    `migrate_index_labels_value` 把 `ui.candidate.index_labels` 从字符串改写成数组、
-///    `migrate_empty_code_behavior_value` 把非法枚举值改写成 `commit`。所以这两个键上
-///    「裸 try_into 失败、而实际 load 成功」是可能的。**但它们不会从这里漏成误报**：
-///    两者都是普通标量键，注册表那条检查（TypeMismatch / EnumOutOfRange）先一步点了名，
-///    免责 2 让本函数闭嘴。在 CLI 里复刻一份迁移名单才是真正的坑——那是第二个真相源。
+/// 三条免责：
+/// 1. 先拿 `L1⊕L2` 单独试一次作对照，出厂配置自己就反序列化不了时跳过并声明，不栽给定制层；
+/// 2. 前一道判据已点名的键不重复报（那边措辞更好）；
+/// 3. 这里没跑 `Config::load` 的 `migrate_*_value`（wind-config 私有）。其中会改写已注册键的两条
+///    （`index_labels`、`empty_code_behavior`）是普通标量键，注册表检查先一步点名，免责 2 兜住。
+///    别在 CLI 里复刻迁移名单，那是第二个真相源。
 fn check_deserialization(
     factory: Option<&toml::Value>,
     custom: &toml::Value,
@@ -655,10 +619,8 @@ fn check_deserialization(
 
 /// 从 toml 的反序列化错误串里抠出 `` in `点分路径` `` 的那个路径。
 ///
-/// 抠不出来就返回 `None`，调用方原样报整条错误——**绝不猜**：猜错的路径会把人带到无关
-/// 的键上，比不给路径更糟。
-/// ⚠️ `in` 前面的空白**可能是换行**（`expected usize\nin `ui.candidate.per_page``），
-/// 不能只认空格——只认空格的表现是长错误串上抽不出路径，于是去重失效、同一个键报两遍。
+/// 抠不出来就返回 `None`，调用方原样报整条错误，绝不猜。`in` 前面的空白可能是换行
+/// （`expected usize\nin `ui.candidate.per_page``），不能只认空格。
 fn extract_toml_error_path(msg: &str) -> Option<String> {
     let needle = "in `";
     let mut from = 0;
@@ -685,31 +647,15 @@ fn extract_toml_error_path(msg: &str) -> Option<String> {
 
 /// 把定制层的 config.toml 展开成待判定的配置项。
 ///
-/// ⚠️ **遇到注册表里登记过的键就地停住，不再往下钻**。`input.punct.custom_mappings`、
-/// `keys.key_actions` 这类表的子路径是**伪键**——整张表才是一个配置项，它的键名是定制者
-/// 的数据（标点符号、按键名）。下钻会把用户的映射表逐条报成「未知键」，把整个命令的输出
-/// 淹掉。本仓的 `prune_user_config` 正是在这里栽过。
-///
-/// 另一条停止判据：某个前缀底下**一个已登记的键都没有**（如整段 `[ui.oldsection]`），
-/// 就整段报一次，而不是把段里每一行各报一遍。
+/// 两条停止判据：① 键登记为不透明叶子（`input.punct.custom_mappings`、`keys.key_actions` 这类，
+/// 子路径是定制者的数据），下钻会把映射表逐条报成「未知键」；② 前缀底下一个已登记的键都没有
+/// （如整段 `[ui.oldsection]`），整段报一次。
 fn collect_leaves(prefix: &str, value: &toml::Value, out: &mut Vec<Leaf>, rep: &mut Report) {
     if !prefix.is_empty() {
-        // ★ 两道停止判据的真实关系是 **① ⟹ ②**（子集），不是等价：
-        //
-        // - ① 「这个键登记为**不透明叶子**」（Map / StructList）——它整体就是一个配置项，
-        //   里面是数据不是配置。
-        // - ② 「这个前缀底下一个已登记的键都没有」——① 的每个键都满足它，但②在①不成立
-        //   的地方也会触发（未登记的整段 `[ui.oldsection]`），故②的覆盖面更大。
-        //
-        // ⇒ **只有①无人单独钉住**（摘掉①，31 条用例全绿；摘掉②，2 条红）。合取断言帮不上：
-        // 分离恰恰发生在「①命中而②不命中」的键上，而那种键当前一个都不存在。真正钉住②的是
-        // `removed_section_is_reported_once`。
-        //
-        // ★ ①的判据**必须是 `Map | StructList`，不能是「登记过」**。①排在②前面，将来注册表
-        // 若同时登记 `ui.font` 与 `ui.font.family`，「登记过」会让①先赢、把整张表当叶子吞掉，
-        // 里面的 `family` 从此不再被校验——那正是错的那道。收窄成「不透明叶子」之后语义才与
-        // 上面那句话相符，排序在嵌套未来里也是对的。同 `config_schema::collect_leaf_keys`
-        // 的判据（那边也是只认 `Map(_)`）。
+        // ① ⟹ ②（① 是 ② 的子集），当前行为上 ① 被 ② 完全覆盖；② 由
+        // `removed_section_is_reported_once` 钉住。① 的判据必须是 `Map | StructList` 而非「登记过」：
+        // 将来若同时登记 `ui.font` 与 `ui.font.family`，「登记过」会把整张表当叶子吞掉、`family`
+        // 不再被校验（同 `config_schema::collect_leaf_keys` 只认 `Map(_)`）。
         if is_opaque_leaf(prefix) {
             out.push(Leaf {
                 key: prefix.to_string(),
@@ -724,8 +670,7 @@ fn collect_leaves(prefix: &str, value: &toml::Value, out: &mut Vec<Leaf>, rep: &
             });
             return;
         }
-        // 前缀底下有已登记的键 ⇒ 它是一个配置段，必须是表。写成标量的话，这一段（连同
-        // 用户对这一段的全部设置）会在加载时整段回落出厂默认。
+        // 前缀底下有已登记的键 ⇒ 它是配置段，必须是表，否则加载时整段回落出厂默认。
         if !value.is_table() {
             rep.error(
                 CONFIG_NAME,
@@ -758,12 +703,10 @@ fn collect_leaves(prefix: &str, value: &toml::Value, out: &mut Vec<Leaf>, rep: &
     }
 }
 
-/// 判据①：这个键登记为**不透明叶子**——整张表 / 整个数组就是一个配置项，里面是定制者的
-/// 数据（标点符号、按键名、方案条目），不是配置项。
+/// 判据①：这个键登记为不透明叶子，整张表 / 整个数组就是一个配置项，里面是定制者的数据。
 ///
-/// ⚠️ **判据必须是 `Map | StructList`，不能放宽成「登记过」**，见 `collect_leaves` 里那段
-/// 注释。`is_opaque_leaf_only_matches_opaque_types` 钉住这条收窄——它是①唯一钉得住的
-/// 性质（行为上①被②完全覆盖，摘掉①没有任何用例会红）。
+/// 判据必须是 `Map | StructList`，不能放宽成「登记过」（见 `collect_leaves`），由
+/// `is_opaque_leaf_only_matches_opaque_types` 钉住。
 fn is_opaque_leaf(prefix: &str) -> bool {
     matches!(
         field(prefix).map(|f| f.ty),
@@ -1112,20 +1055,10 @@ fn origin_of(key: &str, custom_cfg: Option<&toml::Value>, data_dir: Option<&Path
 // ④ 简繁数据
 // ---------------------------------------------------------------------------
 
-/// 简繁转换链是**按文件名跨层取**的，所以定制层只放一两本 `.octrie` 是正常且被支持的用法
-/// （没放的那几本自动用出厂的），这里**不报错**。
-///
-/// 真正会失效的是**名字对不上**。⚠️ 这里必须把两种「对不上」分开讲，它们的后果不同：
-///
-/// - **完全对不上**（`STPhrase` / `MyDict`）：转换链认的是固定的几个名字，链里不认识它
-///   ⇒ 在**任何**平台上都永远取不到，而程序照常用出厂那几本工作。
-/// - **只差大小写**（`stphrases` vs `STPhrases`）：加载侧 `resolve_overridable` 用
-///   `p.is_file()` 判定，`p` 是按 `opencc/STPhrases.octrie` 拼出来的——**在大小写不敏感的
-///   卷上它会被命中并加载**。本项目两个发行平台（Windows NTFS、macOS APFS 默认）都不敏感，
-///   所以「永远不会被加载」这句话对这一种是**假的**（只在 Linux 成立）。
-///
-/// 检测本身两种都抓得到（`list_file_names` 走 `read_dir` 拿磁盘真实文件名，`BTreeSet<String>`
-/// 精确比较），差别只在措辞——后者的说法是「现在能用，但你在赌文件系统的大小写不敏感」。
+/// 简繁转换链按文件名跨层取，定制层只放一两本 `.octrie` 是被支持的用法，不报错。真正会失效的是
+/// 名字对不上，两种后果不同、措辞要分开：完全对不上（`MyDict`）在任何平台都取不到；只差大小写
+/// （`stphrases`）在大小写不敏感的卷（Windows、macOS 默认）上会被 `resolve_overridable` 命中，
+/// 只在 Linux 取不到。
 fn check_opencc(custom_dir: &Path, data_dir: Option<&Path>, rep: &mut Report) {
     let dir = custom_dir.join("opencc");
     if !dir.is_dir() {
@@ -1232,10 +1165,8 @@ fn print_block(label: &str, text: &str) {
 fn read_toml(path: &Path) -> TomlRead {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
-        // ⚠️ **不能**把「读失败」一律当成「文件不存在」。最现实的一种：中文定制者用记事本
-        // 编辑 config.toml（注释里有中文），另存为 ANSI/GBK ⇒ 不是合法 UTF-8 ⇒ 整层配置
-        // 一条都不生效，而运行时只有一行 INFO。当成「没这个文件」就等于体检报全绿。
-        // 清单那条路径一直是分开处理的（见 `check_manifest`），这里曾漏了。
+        // 不能把读失败一律当成文件不存在：另存为 GBK 的 config.toml 不是合法 UTF-8，整层配置
+        // 不生效，当成「没这个文件」就等于体检报全绿（清单那条路径同理，见 `check_manifest`）。
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return TomlRead::Absent,
         Err(e) => return TomlRead::Unreadable(e),
     };
