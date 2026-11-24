@@ -3884,6 +3884,17 @@ pub struct ScopeRelaxConfig {
     /// 放宽放出来的候选的前缀标注（空=不标注），用于与正常候选区分。
     #[serde(default = "default_scope_relax_prefix")]
     pub prefix: String,
+    /// 智能档下**始终**把被滤掉的候选追加在列表末尾（不必先翻到底再按翻页键）。
+    ///
+    /// 给没有翻页键的触屏端用：那里 `page_end_key` 的出路不存在，唯一编码被常用字占着的
+    /// 生僻字就彻底打不出（实测 98 五笔导入后约 22% 的单字如此）。追加的候选与翻页放宽
+    /// 出来的同源——带 `is_scope_filtered`、沉底、不计入满码自动上屏、不参与词频重排。
+    ///
+    /// **PC 出厂关**：曾实现过「候选不足一页自动补充」，实测平白改变了智能档的既有观感，
+    /// 已删除；本项是为触屏端单独留的显式开关，只在智能档生效（常用字档要的就是稳定只出
+    /// 常用字，全部字符档本就不过滤），辅助码模式也不适用。
+    #[serde(default)]
+    pub always_append: bool,
 }
 
 impl Default for ScopeRelaxConfig {
@@ -3891,6 +3902,7 @@ impl Default for ScopeRelaxConfig {
         Self {
             page_end_key: true,
             prefix: default_scope_relax_prefix(),
+            always_append: false,
         }
     }
 }

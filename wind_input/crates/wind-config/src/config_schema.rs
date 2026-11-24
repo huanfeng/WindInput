@@ -434,6 +434,7 @@ static REGISTRY: &[ConfigField] = &[
     // 检索范围放宽（智能档增强，见 docs/design/smart-filter-scope-relax.md）
     f("input.scope_relax.page_end_key", Bool),
     f("input.scope_relax.prefix", Str),
+    f("input.scope_relax.always_append", Bool),
     f("input.correction.enabled", Bool),
     f("input.correction.marker", Str),
     f("input.correction.custom", StrList),

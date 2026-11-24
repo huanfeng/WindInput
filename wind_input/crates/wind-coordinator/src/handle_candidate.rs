@@ -2670,7 +2670,14 @@ impl Coordinator {
         // 不该被任何自动行为改动，**用户不主动按翻页键就什么都不变**。
         // 「不足一页」并未因此失去出路——只有一页时 `page_next` 同样翻不动，落到同一条
         // 放宽分支，一条路径覆盖两种场景。
-        if state.scope_relaxed {
+        //
+        // 例外：`input.scope_relax.always_append`（触屏端开）——没有翻页键就没有那条出路，
+        // 于是智能档下直接把被滤的追加在末尾。只管智能档（常用字档要的是稳定只出常用字），
+        // 辅助码模式不适用（放宽会绕过它按字形的筛选，与 `try_relax_scope_on_page_end` 同判）。
+        let always = self.rt().config.input.scope_relax.always_append
+            && mode == wind_candidate::FilterMode::Smart
+            && !matches!(state.active, Some(ModeKind::AuxCode));
+        if state.scope_relaxed || always {
             candidates.extend(outcome.filtered.into_iter().map(|mut c| {
                 c.is_scope_filtered = true;
                 c
