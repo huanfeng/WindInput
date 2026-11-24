@@ -5336,137 +5336,16 @@ mod auto_commit_min_len_tests {
 }
 
 #[cfg(test)]
-mod sole_non_emoji_tests {
-    //! 短语自动上屏的唯一性判据：emoji 扩展候选不得计入。失效是静默的（只是不再自动上屏），
-    //! 用户无从联系到 emoji 功能，故由测试钉住。
-    use super::sole_non_emoji;
-    use wind_candidate::Candidate;
-
-    fn cand(text: &str) -> Candidate {
-        Candidate {
-            text: text.into(),
-            is_phrase: true,
-            ..Default::default()
-        }
-    }
-
-    fn emoji(text: &str) -> Candidate {
-        Candidate {
-            text: text.into(),
-            is_emoji_suggestion: true,
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn single_real_candidate_is_sole() {
-        let v = [cand("好的")];
-        assert_eq!(sole_non_emoji(&v).map(|c| c.text.as_str()), Some("好的"));
-    }
-
-    /// 短语 + 追加的 emoji ⇒ 仍算「唯一」，自动上屏不受影响。
-    #[test]
-    fn appended_emoji_does_not_break_uniqueness() {
-        let v = [cand("好的"), emoji("👌")];
-        assert_eq!(sole_non_emoji(&v).map(|c| c.text.as_str()), Some("好的"));
-        // 多个 emoji 同样不影响（max_per_word 可配到 3）。
-        let v = [cand("好的"), emoji("👌"), emoji("🆗"), emoji("👍")];
-        assert_eq!(sole_non_emoji(&v).map(|c| c.text.as_str()), Some("好的"));
-    }
-
-    /// 两条真候选仍判非唯一 —— 排除 emoji 不等于放宽原判据。
-    #[test]
-    fn two_real_candidates_are_not_sole() {
-        let v = [cand("好的"), cand("好地"), emoji("👌")];
-        assert!(sole_non_emoji(&v).is_none());
-    }
-
-    /// 只有 emoji 没有宿主候选 ⇒ 无候选可上屏。实际构造不出来，但判据不该依赖这个前提。
-    #[test]
-    fn emoji_only_is_not_sole() {
-        let v = [emoji("👌")];
-        assert!(sole_non_emoji(&v).is_none());
-    }
-
-    #[test]
-    fn empty_is_not_sole() {
-        assert!(sole_non_emoji(&[]).is_none());
-    }
-}
+#[path = "handle_candidate_sole_non_emoji_tests.rs"]
+mod sole_non_emoji_tests;
 
 #[cfg(test)]
 #[path = "handle_candidate_plan_emoji_tests.rs"]
 mod plan_emoji_tests;
 
 #[cfg(test)]
-mod emoji_tail_tests {
-    //! `show_as = "tail"` 的落点：常用候选之后、生僻与放宽补充之前。
-    use super::emoji_tail_insert_at;
-    use wind_candidate::Candidate;
-
-    fn common(text: &str) -> Candidate {
-        Candidate {
-            text: text.into(),
-            is_common: true,
-            ..Default::default()
-        }
-    }
-    fn rare(text: &str) -> Candidate {
-        Candidate {
-            text: text.into(),
-            ..Default::default()
-        }
-    }
-    fn relaxed(text: &str) -> Candidate {
-        Candidate {
-            text: text.into(),
-            is_scope_filtered: true,
-            ..Default::default()
-        }
-    }
-
-    /// 智能档下孤儿码位的生僻字留在尾部，emoji 必须插在它们前面。
-    #[test]
-    fn lands_after_last_common_before_rare() {
-        let v = [common("开心"), common("开新"), rare("闓"), rare("鐦")];
-        assert_eq!(emoji_tail_insert_at(&v), 2);
-    }
-
-    /// 放宽补充段永远在 emoji 之后。
-    #[test]
-    fn never_crosses_relaxed_block() {
-        let v = [common("开心"), relaxed("闓")];
-        assert_eq!(emoji_tail_insert_at(&v), 1);
-        // 补充段里即便混着常用字（放宽时整批并回），也不算数。
-        let mut c = relaxed("开新");
-        c.is_common = true;
-        let v = [common("开心"), rare("闓"), c];
-        assert_eq!(emoji_tail_insert_at(&v), 1);
-    }
-
-    /// 没有任何常用候选：落到末尾，不抢首位。
-    #[test]
-    fn all_rare_appends_at_end_not_front() {
-        let v = [rare("闓"), rare("鐦")];
-        assert_eq!(emoji_tail_insert_at(&v), 2);
-        let v = [rare("闓"), relaxed("鐦")];
-        assert_eq!(emoji_tail_insert_at(&v), 1);
-    }
-
-    /// 短语 / 命令与常用字同级（与过滤器的「常用词类」判据一致）。
-    #[test]
-    fn phrase_counts_as_common() {
-        let mut p = rare("今天");
-        p.is_phrase = true;
-        let v = [common("开心"), p, rare("闓")];
-        assert_eq!(emoji_tail_insert_at(&v), 2);
-    }
-
-    #[test]
-    fn empty_list() {
-        assert_eq!(emoji_tail_insert_at(&[]), 0);
-    }
-}
+#[path = "handle_candidate_emoji_tail_tests.rs"]
+mod emoji_tail_tests;
 
 #[cfg(test)]
 #[path = "handle_candidate_finalize_candidates_tests.rs"]
@@ -5506,67 +5385,8 @@ mod dynamic_candidate_shadow_tests;
 mod english_placement_tests;
 
 #[cfg(test)]
-mod sentence_block_tests {
-    //! 整句 N-best 块的摆位：`sentence_count > 1` 时按名次连续摆到最前，其余不动。
-    use super::*;
-
-    fn c(text: &str, rank: u8) -> Candidate {
-        Candidate {
-            text: text.into(),
-            sentence_rank: rank,
-            is_sentence: rank > 0,
-            ..Default::default()
-        }
-    }
-
-    fn texts(v: &[Candidate]) -> Vec<&str> {
-        v.iter().map(|x| x.text.as_str()).collect()
-    }
-
-    /// 词频重排把整句块打散之后，摆位把它们按名次收拢到最前。
-    #[test]
-    fn scattered_sentences_are_gathered_to_the_front_in_rank_order() {
-        let mut v = vec![
-            c("有", 0),
-            c("有概论吗", 2),
-            c("游", 0),
-            c("有该论吗", 1),
-            c("又", 0),
-            c("有盖伦吗", 3),
-        ];
-        place_sentence_block(&mut v, 3);
-        assert_eq!(
-            texts(&v),
-            vec!["有该论吗", "有概论吗", "有盖伦吗", "有", "游", "又"]
-        );
-    }
-
-    /// 非整句候选的相对次序必须原样保留，摆位只搬整句那几条。
-    #[test]
-    fn non_sentence_order_is_untouched() {
-        let mut v = vec![c("乙", 0), c("整2", 2), c("甲", 0), c("整1", 1), c("丙", 0)];
-        place_sentence_block(&mut v, 2);
-        assert_eq!(&texts(&v)[2..], &["乙", "甲", "丙"]);
-    }
-
-    /// 出厂 `show == 1`：什么都不动。整句靠 weight 挣位置那一套逐位不变。
-    #[test]
-    fn show_one_is_a_no_op() {
-        let mut v = vec![c("有", 0), c("有该论吗", 1), c("有概论吗", 2)];
-        let before: Vec<String> = texts(&v).iter().map(|s| s.to_string()).collect();
-        place_sentence_block(&mut v, 1);
-        assert_eq!(texts(&v), before);
-    }
-
-    /// 块里只有一条带名次的整句 ⇒ 不摆：混输把拼音子引擎钉成 1/1，没有这道会把拼音整句拉到
-    /// 码表精确候选前面。
-    #[test]
-    fn a_single_ranked_sentence_is_not_a_block() {
-        let mut v = vec![c("工作", 0), c("啊啊我", 1)];
-        place_sentence_block(&mut v, 3);
-        assert_eq!(texts(&v), vec!["工作", "啊啊我"], "单条不该越过码表候选");
-    }
-}
+#[path = "handle_candidate_sentence_block_tests.rs"]
+mod sentence_block_tests;
 
 #[cfg(test)]
 #[path = "handle_candidate_sentence_cycle_tests.rs"]
@@ -5577,60 +5397,8 @@ mod sentence_cycle_tests;
 mod mouse_command_overlay_tests;
 
 #[cfg(test)]
-mod select_char_freq_code_tests {
-    use super::*;
-
-    fn py(code: &str, boundary: u64) -> Candidate {
-        Candidate {
-            text: "你好".into(),
-            code: code.into(),
-            boundary,
-            source: CandidateSource::Pinyin,
-            ..Default::default()
-        }
-    }
-
-    /// ni|hao：bit0 + bit2。
-    const NI_HAO: u64 = 0b101;
-
-    #[test]
-    fn picks_syllable_by_boundary() {
-        let c = py("nihao", NI_HAO);
-        assert_eq!(
-            Coordinator::select_char_freq_code(&c, 2, 0).as_deref(),
-            Some("ni")
-        );
-        assert_eq!(
-            Coordinator::select_char_freq_code(&c, 2, 1).as_deref(),
-            Some("hao")
-        );
-    }
-
-    /// 音节数与字数对不上（儿化等）/ 没有边界 / 非拼音来源：拿不到可靠编码，不记词频。
-    #[test]
-    fn unreliable_code_yields_none() {
-        let c = py("nihao", NI_HAO);
-        assert_eq!(
-            Coordinator::select_char_freq_code(&c, 3, 1),
-            None,
-            "音节数 ≠ 字数"
-        );
-        assert_eq!(
-            Coordinator::select_char_freq_code(&py("nihao", 0), 2, 1),
-            None,
-            "无边界不猜切分"
-        );
-        let ct = Candidate {
-            source: CandidateSource::CodeTable,
-            ..py("wqvb", 0b1)
-        };
-        assert_eq!(
-            Coordinator::select_char_freq_code(&ct, 2, 1),
-            None,
-            "码表不记"
-        );
-    }
-}
+#[path = "handle_candidate_select_char_freq_code_tests.rs"]
+mod select_char_freq_code_tests;
 
 #[cfg(test)]
 #[path = "handle_candidate_expand_stop_tests.rs"]
@@ -5680,85 +5448,8 @@ pub(crate) fn cut_position(
 }
 
 #[cfg(test)]
-mod mobile_limit_tests {
-    use crate::coordinator::Coordinator;
-    use wind_engine::engine::EngineType;
-
-    #[test]
-    fn mobile_pinyin_single_letter_is_capped_only_there() {
-        let lim = Coordinator::main_path_candidate_limit;
-        let py = Some(EngineType::Pinyin);
-        let mobile = Some(super::MOBILE_PINYIN_SINGLE_LIMIT);
-        assert_eq!(lim(py, "b", mobile), super::MOBILE_PINYIN_SINGLE_LIMIT);
-        assert_eq!(
-            lim(py, "b", None),
-            Coordinator::initial_candidate_limit_of(py, "b"),
-            "桌面不收紧"
-        );
-        assert_eq!(
-            lim(py, "bz", mobile),
-            Coordinator::initial_candidate_limit_of(py, "bz"),
-            "两字母起不收紧"
-        );
-        for other in [
-            EngineType::English,
-            EngineType::CodeTable,
-            EngineType::Mixed,
-        ] {
-            assert_eq!(
-                lim(Some(other), "t", mobile),
-                Coordinator::initial_candidate_limit_of(Some(other), "t"),
-                "{other:?} 不受影响（英文 t 曾因上限太小打不出 then）"
-            );
-        }
-    }
-
-    #[test]
-    fn cut_position_only_for_mobile_pinyin_with_cursor_inside() {
-        assert_eq!(
-            crate::handle_candidate::cut_position(true, "fangxiang", 4, true),
-            Some(4)
-        );
-        assert_eq!(
-            crate::handle_candidate::cut_position(true, "fangxiang", 9, true),
-            None,
-            "光标在末尾 = 整串"
-        );
-        assert_eq!(
-            crate::handle_candidate::cut_position(true, "fangxiang", 0, true),
-            None,
-            "光标在开头无前缀可查"
-        );
-        assert_eq!(
-            crate::handle_candidate::cut_position(false, "fangxiang", 4, true),
-            None,
-            "电脑端不改既有行为"
-        );
-        assert_eq!(
-            crate::handle_candidate::cut_position(true, "fangxiang", 4, false),
-            None,
-            "码表 / overlay 不进"
-        );
-        assert_eq!(
-            crate::handle_candidate::cut_position(true, "你好", 1, true),
-            None,
-            "非字符边界"
-        );
-    }
-
-    #[test]
-    fn tail_after_letters_skips_separators() {
-        use crate::handle_candidate::tail_after_letters;
-        assert_eq!(tail_after_letters("fang'xiang", 4), "xiang");
-        assert_eq!(
-            tail_after_letters("fang'xiang", 6),
-            "ang",
-            "光标在音节中间：余下半个音节"
-        );
-        assert_eq!(tail_after_letters("fang'xiang", 9), "");
-        assert_eq!(tail_after_letters("ni'hao'a", 2), "hao'a");
-    }
-}
+#[path = "handle_candidate_mobile_limit_tests.rs"]
+mod mobile_limit_tests;
 
 #[cfg(test)]
 mod pin_at_offered_tests {

@@ -6990,144 +6990,12 @@ mod global_default_guards {
 }
 
 #[cfg(test)]
-mod bound_action_chinese_only_tests {
-    use super::*;
-
-    /// [`BoundAction::only_in_chinese_mode`] 必须对每一个 A 类动词都表过态。
-    ///
-    /// 那个方法的 `Action(_)` 载荷是 `String`，编译期穷举不了，新动词会静默落进「两模式都吃」。
-    /// 预期表按 `DISPATCH_ACTIONS` 逐项列全，新增动词时这里会红。结果同时决定组合键是否带
-    /// `HOTKEY_POLICY_CHINESE_ONLY` 与分派端是否判 `chinese_mode`。
-    #[test]
-    fn chinese_only_covers_every_dispatch_action() {
-        // (动词, 是否只在中文态有意义)
-        let expected: &[(&str, bool)] = &[
-            // 中英/方案切换：恰恰要在非中文态按得动，否则切过去回不来。
-            ("toggle_mode", false),
-            ("switch_engine", false),
-            // 两模式下都该生效。
-            ("toggle_full_width", false),
-            ("toggle_toolbar", false),
-            ("open_settings", false),
-            ("open_dictionary", false),
-            ("take_screenshot", false),
-            // 只在中文态有意义。
-            ("toggle_punct", true),
-            ("toggle_s2t", true),
-            ("toggle_t2s", true),
-        ];
-        let mut listed: Vec<&str> = expected.iter().map(|(v, _)| *v).collect();
-        listed.sort_unstable();
-        let mut actual: Vec<&str> = BoundAction::DISPATCH_ACTIONS.to_vec();
-        actual.sort_unstable();
-        assert_eq!(
-            listed, actual,
-            "DISPATCH_ACTIONS 变了：请在本表里给新动词表态（只在中文态有意义吗）"
-        );
-        for (verb, only_chinese) in expected {
-            let parsed = BoundAction::parse(verb);
-            assert!(
-                matches!(parsed, BoundAction::Action(_)),
-                "{verb} 应解析成 A 类动作"
-            );
-            assert_eq!(
-                parsed.only_in_chinese_mode(),
-                *only_chinese,
-                "{verb} 的中文态判据与预期不符"
-            );
-        }
-    }
-
-    /// 进 overlay 的一族与字词范围恒为真；软键盘与切方案恒为假。
-    ///
-    /// 软键盘带 `CHINESE_ONLY` 的话英文态打不开，而面板画的「键位 → 符号」与中英态无关
-    /// （C++ 侧为此专设了 `IsSoftKeyboard()` 总闸）。
-    #[test]
-    fn chinese_only_matches_action_family() {
-        for verb in [
-            "temp_pinyin",
-            "temp_english",
-            "aux_code",
-            "rare_char",
-            "reverse",
-            "mix:quick_mix",
-            "special:fuhao",
-            "single_char",
-        ] {
-            assert!(
-                BoundAction::parse(verb).only_in_chinese_mode(),
-                "{verb} 只在中文输入中途有意义"
-            );
-        }
-        for verb in [
-            "softkeyboard",
-            "softkeyboard:num",
-            "toggle_schema:english",
-            "switch_schema:wubi",
-            "comment_state",
-            "none",
-        ] {
-            assert!(
-                !BoundAction::parse(verb).only_in_chinese_mode(),
-                "{verb} 不得限中文态"
-            );
-        }
-    }
-}
+#[path = "config_bound_action_chinese_only_tests.rs"]
+mod bound_action_chinese_only_tests;
 
 #[cfg(test)]
-mod comment_state_verb_tests {
-    use super::*;
-    use crate::comment_lib::CommentState;
-
-    #[test]
-    fn parses_comment_state_verbs() {
-        for v in [
-            "comment_state",
-            "comment_state:detail",
-            "comment_state:default",
-        ] {
-            assert!(BoundAction::parse(v).is_enabled(), "{v} 两张表都应认");
-            assert!(SessionAction::parse(v).is_enabled(), "{v} 两张表都应认");
-            assert_eq!(SessionAction::parse(v).to_string(), v);
-        }
-        assert_eq!(
-            BoundAction::parse("comment_state:detail"),
-            BoundAction::CommentState(CommentStateAction::Set(CommentState::Detail))
-        );
-        assert_eq!(
-            SessionAction::parse("comment_state"),
-            SessionAction::CommentState(CommentStateAction::Toggle)
-        );
-        // session 档只属于会话表。
-        assert_eq!(
-            BoundAction::parse("comment_state:session"),
-            BoundAction::None
-        );
-        assert!(!BoundAction::parse("comment_state:session").is_enabled());
-        assert_eq!(
-            SessionAction::parse("comment_state:session"),
-            SessionAction::CommentState(CommentStateAction::Session)
-        );
-        assert_eq!(
-            SessionAction::parse("comment_state:session").to_string(),
-            "comment_state:session"
-        );
-        // 写错的载荷不静默降级。
-        assert_eq!(BoundAction::parse("comment_state:yes"), BoundAction::None);
-        assert_eq!(
-            SessionAction::parse("comment_state:yes"),
-            SessionAction::None
-        );
-    }
-
-    #[test]
-    fn only_session_payload_requires_candidates() {
-        assert!(SessionAction::parse("comment_state:session").requires_candidates());
-        assert!(!SessionAction::parse("comment_state").requires_candidates());
-        assert!(!SessionAction::parse("comment_state:detail").requires_candidates());
-    }
-}
+#[path = "config_comment_state_verb_tests.rs"]
+mod comment_state_verb_tests;
 
 #[cfg(test)]
 #[path = "config_dota2_alias_tests.rs"]
@@ -9462,64 +9330,8 @@ impl Config {
 mod tests;
 
 #[cfg(test)]
-mod email_config_tests {
-    use super::*;
-
-    /// 预置后缀与学习数据必须同域：两边都存 `@` 之后的部分，否则去重对不上，
-    /// 同一后缀在候选里出现两次。
-    #[test]
-    fn preset_suffixes_carry_no_at_sign() {
-        let c = EmailConfig::default();
-        assert!(!c.suffixes.is_empty(), "出厂应带预置后缀");
-        for s in &c.suffixes {
-            assert!(!s.contains('@'), "预置后缀存 @ 之后的部分，{s:?} 不该带 @");
-            assert!(s.contains('.'), "后缀应是域名形态，{s:?} 不像");
-        }
-    }
-
-    /// 预置表不得有重复项——重复项会在候选里变成两条一模一样的邮箱。
-    #[test]
-    fn preset_suffixes_are_unique() {
-        let c = EmailConfig::default();
-        let mut seen = std::collections::HashSet::new();
-        for s in &c.suffixes {
-            assert!(seen.insert(s.as_str()), "预置后缀重复：{s}");
-        }
-    }
-
-    /// 国内常用在前：冷启动（还没有任何学习数据）时排序完全由这份顺序决定。
-    #[test]
-    fn domestic_suffixes_come_first() {
-        let c = EmailConfig::default();
-        let pos = |needle: &str| c.suffixes.iter().position(|s| s == needle);
-        let qq = pos("qq.com").expect("应含 qq.com");
-        let gmail = pos("gmail.com").expect("应含 gmail.com");
-        assert!(qq < gmail, "国内常用后缀应排在国际之前");
-    }
-
-    /// 用户清空后缀表 = 真的空表（AGENTS.md「出厂预置的落点必须是用户能清空的载体」）。
-    /// `suffixes` 是数组字段，上层整体覆盖，不会像 map 那样被深合并把出厂值合回来。
-    /// 空表时邮箱模式仍可用，只是没有预置候选。
-    #[test]
-    fn empty_suffix_list_survives_deserialization() {
-        let c: EmailConfig = toml::from_str("enabled = true\nsuffixes = []\n").unwrap();
-        assert!(c.enabled);
-        assert!(c.suffixes.is_empty(), "用户清空后不该被出厂值合回来");
-    }
-
-    /// 缺字段时逐个落到默认值（老配置文件升级上来不会炸）。
-    #[test]
-    fn missing_fields_fall_back_to_defaults() {
-        let c: EmailConfig = toml::from_str("").unwrap();
-        assert!(!c.enabled);
-        assert_eq!(c.suffixes, default_email_suffixes());
-
-        let u: UrlConfig = toml::from_str("enabled = true\n").unwrap();
-        assert!(u.enabled);
-        assert!(!u.history_enabled, "老配置没有 history_enabled ⇒ 关闭");
-        assert_eq!(u.history_max, 200);
-    }
-}
+#[path = "config_email_config_tests.rs"]
+mod email_config_tests;
 
 #[cfg(test)]
 #[path = "config_status_position_tests.rs"]

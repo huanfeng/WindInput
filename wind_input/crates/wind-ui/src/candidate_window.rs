@@ -4461,72 +4461,8 @@ mod truncate_text_tests {
 
 /// 最大最小公平分配（water-filling）——纯算术，不依赖文本后端，故不 gate 平台。
 #[cfg(test)]
-mod water_fill_tests {
-    use super::CandidateScene;
-
-    /// 总额够用：人人原样满足，不做无谓截断。
-    #[test]
-    fn everyone_fits_when_total_is_enough() {
-        let got = CandidateScene::water_fill(&[100.0, 200.0, 50.0], 1000.0, 0.0);
-        assert_eq!(got, vec![100.0, 200.0, 50.0]);
-    }
-
-    /// 核心性质：短需求原样保留，把没用完的份额让给长需求，而不是一刀切均分。
-    ///
-    /// 均分会给长的 600/3=200，water-filling 给到 400——这正是「1 条长整句 + 8 个短词」
-    /// 这个最常见场景里两者的观感差别。
-    #[test]
-    fn spare_share_flows_to_the_long_one() {
-        let got = CandidateScene::water_fill(&[100.0, 100.0, 1000.0], 600.0, 0.0);
-        assert_eq!(got, vec![100.0, 100.0, 400.0]);
-        assert_eq!(got.iter().sum::<f32>(), 600.0);
-    }
-
-    /// 顺序无关：同一组需求换个排列，各自拿到的份额不变（内部按需求升序处理，结果按原序返回）。
-    #[test]
-    fn allocation_is_order_independent() {
-        let a = CandidateScene::water_fill(&[1000.0, 100.0, 100.0], 600.0, 0.0);
-        assert_eq!(a, vec![400.0, 100.0, 100.0]);
-    }
-
-    /// 不溢出保证：只要 total ≥ 0 且不触发 floor，`Σ result ≤ total` 与项数无关。
-    /// 这正是贪心（先到先得 + 下限）给不了的性质——那种做法下第一项吃光预算，
-    /// 后面每项仍各自加上「固定开销 + 文字下限」，累加必然突破上限。
-    #[test]
-    fn sum_never_exceeds_total_regardless_of_count() {
-        for n in 1..=20usize {
-            let demands: Vec<f32> = (0..n).map(|i| (i as f32 + 1.0) * 500.0).collect();
-            let total = 1000.0;
-            let got = CandidateScene::water_fill(&demands, total, 0.0);
-            let sum: f32 = got.iter().sum();
-            assert!(sum <= total + 0.01, "n={n} 时 Σ={sum} 超出 total={total}");
-        }
-    }
-
-    /// 全员都超份额：平分总额。
-    #[test]
-    fn all_oversized_split_evenly() {
-        let got = CandidateScene::water_fill(&[900.0, 900.0, 900.0], 300.0, 0.0);
-        assert_eq!(got, vec![100.0, 100.0, 100.0]);
-    }
-
-    /// floor 是「无解时的保底」：固定开销已超预算（total ≤ 0）时每项仍拿到 floor，
-    /// 总和因此可能超出 total——这是刻意取舍，宁可溢出被裁，也不少显示候选
-    /// （选中键位与候选列表绑定，少一个会让用户按 8 选到错的词）。
-    #[test]
-    fn floor_guarantees_minimum_even_when_insolvent() {
-        let got = CandidateScene::water_fill(&[900.0, 900.0], 0.0, 20.0);
-        assert_eq!(got, vec![20.0, 20.0]);
-        let got = CandidateScene::water_fill(&[900.0, 900.0], -500.0, 20.0);
-        assert_eq!(got, vec![20.0, 20.0]);
-    }
-
-    /// 空输入不 panic（无候选时的退化情形）。
-    #[test]
-    fn empty_demands_yield_empty_result() {
-        assert!(CandidateScene::water_fill(&[], 100.0, 0.0).is_empty());
-    }
-}
+#[path = "candidate_window_water_fill_tests.rs"]
+mod water_fill_tests;
 
 /// `[ui.font]` → [`FontPlan`] 的折叠规则。平台无关（不碰窗口/COM），故随 Linux CI 跑。
 #[cfg(test)]
@@ -4930,86 +4866,8 @@ mod tip_hold_tests;
 
 // 直立态逐格切叶子时，分段颜色跟着格走（设计 text-span-colors.md §7.1）。
 #[cfg(test)]
-mod upright_color_run_tests {
-    use super::*;
-    use crate::text::dwrite::ColorRun;
-
-    fn window(upright: bool) -> CandidateWindow {
-        let (tx, _rx) = std::sync::mpsc::channel();
-        let mut w = CandidateWindow::new(CandidateWindowConfig::default(), tx).unwrap();
-        w.set_orientation(false, upright, upright);
-        w
-    }
-
-    const RED: [u8; 4] = [255, 0, 0, 255];
-    const BLUE: [u8; 4] = [0, 0, 255, 255];
-
-    /// 「a你b」：红 `a你`（0..4）、蓝 `b`（4..5）。
-    fn runs() -> Vec<ColorRun> {
-        vec![
-            ColorRun {
-                start: 0,
-                end: 4,
-                rgba: RED,
-            },
-            ColorRun {
-                start: 4,
-                end: 5,
-                rgba: BLUE,
-            },
-        ]
-    }
-
-    fn build(w: &CandidateWindow) -> View {
-        let runs = runs();
-        w.scene_input(false)
-            .upright_text("a你b", None, |seg, _, off| {
-                View::leaf(seg, [0, 0, 0, 255]).color_runs(ColorRun::slice(
-                    &runs,
-                    off,
-                    off + seg.len(),
-                ))
-            })
-    }
-
-    /// 不切格：偏移为 0，一个叶子拿全部区间，原样。
-    #[test]
-    fn unsplit_leaf_keeps_all_runs() {
-        let v = build(&window(false));
-        assert_eq!(v.text.as_deref(), Some("a你b"));
-        assert_eq!(v.color_runs, runs());
-    }
-
-    /// 直立态逐格切：每格拿到自己范围内的那段、平移到格内偏移。
-    #[test]
-    fn upright_cells_get_their_own_slice() {
-        let v = build(&window(true));
-        // 每格是扶正包裹层（旋转节点）里的一个叶子。
-        let cells: Vec<(&str, &[ColorRun])> = v
-            .children
-            .iter()
-            .map(|c| {
-                let leaf = &c.children[0];
-                (leaf.text.as_deref().unwrap(), leaf.color_runs.as_slice())
-            })
-            .collect();
-        let one = |end, rgba| {
-            vec![ColorRun {
-                start: 0,
-                end,
-                rgba,
-            }]
-        };
-        assert_eq!(
-            cells,
-            vec![
-                ("a", one(1, RED).as_slice()),
-                ("你", one(3, RED).as_slice()),
-                ("b", one(1, BLUE).as_slice()),
-            ]
-        );
-    }
-}
+#[path = "candidate_window_upright_color_run_tests.rs"]
+mod upright_color_run_tests;
 
 // 注释的分段颜色：按主题与候选状态求色，接到注释叶子的 color_runs（设计 text-span-colors.md §6）。
 #[cfg(test)]

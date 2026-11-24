@@ -3346,88 +3346,8 @@ mod command_source_tests {
 }
 
 #[cfg(test)]
-mod toolbar_push_dedup_tests {
-    use crate::coordinator::{Coordinator, ToolbarPush};
-    use wind_ui_types::ToolbarState;
-
-    fn state(label: &str) -> ToolbarPush {
-        ToolbarPush::Shown(Box::new(ToolbarState {
-            chinese_mode: true,
-            icon_label: label.to_string(),
-            caps_lock: false,
-            full_width: false,
-            chinese_punct: true,
-            s2t_enabled: false,
-            t2s_enabled: false,
-            s2t_shown: false,
-            soft_keyboard_on: false,
-            input_blocked: false,
-        }))
-    }
-
-    /// 去重的两个方向都要成立：挡住重复、放行变化。
-    ///
-    /// 只测「挡住重复」会让一个恒返回 false 的实现也绿——那种缺陷的表现是工具栏
-    /// 彻底不更新，比重复推送严重得多。
-    #[test]
-    fn dedups_repeats_but_lets_changes_through() {
-        let c = Coordinator::new_headless(wind_config::Config::default(), None);
-        // 构造过程本身会推一次工具栏，缓存已非空——先归零，否则测的是构造顺序而非去重。
-        c.reset_toolbar_push_dedup();
-
-        assert!(c.take_toolbar_push_if_changed(state("五")), "首次必须下发");
-        assert!(
-            !c.take_toolbar_push_if_changed(state("五")),
-            "内容相同应被挡下——焦点抖动时这条会被连推数次"
-        );
-        assert!(
-            c.take_toolbar_push_if_changed(state("英")),
-            "label 变了必须下发"
-        );
-    }
-
-    /// `Hidden` 与 `Shown` 必须是两个可区分的值。
-    ///
-    /// 若只缓存 `Option<ToolbarState>`、用 None 兼表「没推过」和「推过 Hide」，首帧的 Hide 会被
-    /// 误判成重复而跳过，工具栏就再也藏不掉。这里把两种状态的交替钉死。
-    #[test]
-    fn hidden_and_shown_are_distinguishable() {
-        let c = Coordinator::new_headless(wind_config::Config::default(), None);
-        c.reset_toolbar_push_dedup(); // 同上：构造已推过一次
-
-        assert!(
-            c.take_toolbar_push_if_changed(ToolbarPush::Hidden),
-            "首帧 Hide 必须下发"
-        );
-        assert!(
-            !c.take_toolbar_push_if_changed(ToolbarPush::Hidden),
-            "重复 Hide 挡下"
-        );
-        assert!(
-            c.take_toolbar_push_if_changed(state("五")),
-            "Hide→Show 必须下发"
-        );
-        assert!(
-            c.take_toolbar_push_if_changed(ToolbarPush::Hidden),
-            "Show→Hide 必须下发，否则工具栏藏不掉"
-        );
-    }
-
-    /// 配置热重载后必须重推：显隐策略（`ui.toolbar.visible`、全屏策略）不在 `ToolbarState` 里，
-    /// 光比内容会把该重推的那一次判成「没变」。
-    #[test]
-    fn reset_forces_next_push() {
-        let c = Coordinator::new_headless(wind_config::Config::default(), None);
-        c.reset_toolbar_push_dedup();
-        assert!(c.take_toolbar_push_if_changed(state("五")));
-        assert!(!c.take_toolbar_push_if_changed(state("五")));
-        c.reset_toolbar_push_dedup();
-        assert!(
-            c.take_toolbar_push_if_changed(state("五")),
-            "reset 之后同样的内容也必须下发一次"
-        );
-    }
-}
+#[path = "handle_menu_toolbar_push_dedup_tests.rs"]
+mod toolbar_push_dedup_tests;
 
 #[cfg(test)]
 #[path = "handle_menu_fullscreen_veto_tests.rs"]
@@ -3612,77 +3532,8 @@ mod candidate_double_click_tests {
 }
 
 #[cfg(test)]
-mod english_veto_tests {
-    //! 「英文状态隐藏工具栏」（`ui.toolbar.hide_in_english`）。
-
-    use crate::coordinator::Coordinator;
-    use wind_config::Config;
-    use wind_ui_types::UiCommand;
-
-    fn coord(
-        hide_in_english: bool,
-        chinese: bool,
-    ) -> (
-        std::sync::Arc<Coordinator>,
-        std::sync::mpsc::Receiver<UiCommand>,
-    ) {
-        let mut cfg = Config::default();
-        cfg.ui.toolbar.hide_in_english = hide_in_english;
-        let (c, rx) = Coordinator::new_headless_with_ui(cfg, None);
-        {
-            let mut s = c.state.lock().unwrap_or_else(|e| e.into_inner());
-            s.ime_active = true;
-            s.has_edit_context = true;
-            s.toolbar_visible = true;
-            s.chinese_mode = chinese;
-        }
-        c.reset_toolbar_push_dedup();
-        (c, rx)
-    }
-
-    fn last_toolbar(rx: &std::sync::mpsc::Receiver<UiCommand>) -> Option<bool> {
-        let mut last = None;
-        while let Ok(cmd) = rx.try_recv() {
-            match cmd {
-                UiCommand::UpdateToolbar(_) => last = Some(true),
-                UiCommand::HideToolbar => last = Some(false),
-                _ => {}
-            }
-        }
-        last
-    }
-
-    #[test]
-    fn english_mode_hides_toolbar_when_enabled() {
-        let (c, rx) = coord(true, false);
-        c.notify_toolbar();
-        assert_eq!(last_toolbar(&rx), Some(false), "英文态应隐藏工具栏");
-        assert!(
-            !c.toolbar_wants_display(),
-            "英文态下全屏复查闸应关：工具栏不显示，前台全不全屏无人关心"
-        );
-    }
-
-    #[test]
-    fn switching_back_to_chinese_shows_toolbar_again() {
-        let (c, rx) = coord(true, false);
-        c.notify_toolbar();
-        c.state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .chinese_mode = true;
-        c.notify_toolbar();
-        assert_eq!(last_toolbar(&rx), Some(true), "切回中文应恢复工具栏");
-        assert!(c.toolbar_wants_display());
-    }
-
-    #[test]
-    fn english_mode_keeps_toolbar_when_disabled() {
-        let (c, rx) = coord(false, false);
-        c.notify_toolbar();
-        assert_eq!(last_toolbar(&rx), Some(true), "出厂关闭：英文态照常显示");
-    }
-}
+#[path = "handle_menu_english_veto_tests.rs"]
+mod english_veto_tests;
 
 #[cfg(test)]
 mod menu_close_tests {

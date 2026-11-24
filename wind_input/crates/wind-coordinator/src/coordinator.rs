@@ -9978,75 +9978,8 @@ fn sentence_debug_tag(c: &Candidate) -> Option<String> {
 }
 
 #[cfg(test)]
-mod sentence_debug_tag_tests {
-    //! 整句标记是验证 S2（用户词进整句词图）的主要抓手：整句只出一条、赢者通吃，
-    //! 光看候选文本分不清「用户词赢了」与「系统词本来就长这样」。
-
-    use super::*;
-
-    fn cand(f: impl FnOnce(&mut Candidate)) -> Candidate {
-        let mut c = Candidate {
-            text: "有盖伦吗".into(),
-            ..Default::default()
-        };
-        f(&mut c);
-        c
-    }
-
-    #[test]
-    fn non_sentence_has_no_tag() {
-        assert_eq!(sentence_debug_tag(&cand(|_| {})), None);
-        // 只有 is_synthesized 而没有 is_sentence 不构成整句（理论上不该出现，
-        // 但标记判据必须以 is_sentence 为准，不能靠另两个反推）。
-        assert_eq!(sentence_debug_tag(&cand(|c| c.is_synthesized = true)), None);
-    }
-
-    #[test]
-    fn synthesized_and_dictionary_sentences_are_distinguishable() {
-        // 引擎新拼出来的：词库里没有「有盖伦吗」这个词条。
-        assert_eq!(
-            sentence_debug_tag(&cand(|c| {
-                c.is_sentence = true;
-                c.is_synthesized = true;
-            }))
-            .as_deref(),
-            Some("整句(合成)")
-        );
-        // 同文合并：词库本就有这个词，被补标了整句身份。
-        assert_eq!(
-            sentence_debug_tag(&cand(|c| c.is_sentence = true)).as_deref(),
-            Some("整句(词典)")
-        );
-    }
-
-    #[test]
-    fn demotion_is_visible() {
-        assert_eq!(
-            sentence_debug_tag(&cand(|c| {
-                c.is_sentence = true;
-                c.is_synthesized = true;
-                c.is_sentence_demoted = true;
-            }))
-            .as_deref(),
-            Some("整句(合成·已降位)"),
-            "降位是排序决策、不清 is_sentence，调试时必须看得见"
-        );
-    }
-
-    #[test]
-    fn nbest_rank_shows_only_for_alternatives() {
-        let tag = |rank: u8| {
-            sentence_debug_tag(&cand(|c| {
-                c.is_sentence = true;
-                c.is_synthesized = true;
-                c.sentence_rank = rank;
-            }))
-        };
-        // 名次 1 = 最优解，与出厂单条整句同一标记。
-        assert_eq!(tag(1).as_deref(), Some("整句(合成)"));
-        assert_eq!(tag(3).as_deref(), Some("整句#3(合成)"));
-    }
-}
+#[path = "coordinator_sentence_debug_tag_tests.rs"]
+mod sentence_debug_tag_tests;
 
 #[cfg(test)]
 #[path = "coordinator_mode_comment_e2e_tests.rs"]
@@ -10326,132 +10259,15 @@ mod comment_dict_merge_tests;
 mod hover_reset_tests;
 
 #[cfg(test)]
-mod caret_for_ui_tests {
-    //! 「用于 UI 定位的光标坐标」闸门（[`Coordinator::resolve_caret_for_ui`]）。
-    //!
-    //! 候选窗与状态气泡共用本函数；测试同时钉住判据与回退（无效坐标不能让气泡飞到主屏左上角）。
-    use super::*;
-
-    fn coord() -> Arc<Coordinator> {
-        Coordinator::new_headless(Config::default(), None)
-    }
-
-    /// 负坐标是合法的：主屏左上角才是虚拟桌面原点，左侧/上方的副屏整块为负。
-    #[test]
-    fn negative_coords_are_valid() {
-        assert!(Coordinator::caret_is_valid(-1200, 500, 20), "左侧副屏");
-        assert!(Coordinator::caret_is_valid(300, -600, 20), "上方副屏");
-    }
-
-    #[test]
-    fn sentinel_and_degenerate_inputs_are_invalid() {
-        assert!(
-            !Coordinator::caret_is_valid(0, 0, 20),
-            "(0,0) 是宿主「没有坐标」的哨兵，不能当成主屏左上角来用"
-        );
-        assert!(
-            !Coordinator::caret_is_valid(500, 500, 0),
-            "height=0 = 宿主尚未 reflow，整组坐标不可信"
-        );
-        assert!(!Coordinator::caret_is_valid(40000, 500, 20), "越界脏数据");
-        assert!(
-            !Coordinator::caret_is_valid(i32::MIN, 500, 20),
-            "未初始化极值必须安全判无效，不得在 abs() 溢出"
-        );
-    }
-
-    /// 无效坐标必须回退到最近一次有效坐标，且该坐标可以在副屏（负值）。
-    #[test]
-    fn invalid_falls_back_to_last_valid_on_secondary_monitor() {
-        let c = coord();
-        assert_eq!(
-            c.resolve_caret_for_ui(-1500, 400, 20),
-            (-1500, 400, 20, true),
-            "前置条件——副屏坐标应被认为有效并记为最近有效值"
-        );
-        assert_eq!(
-            c.resolve_caret_for_ui(0, 0, 20),
-            (-1500, 400, 20, true),
-            "(0,0) 必须回退到副屏那条，而不是留在主屏原点"
-        );
-    }
-
-    /// 尚无任何历史有效坐标时如实报 `valid=false`，由调用方决定临时显示 / 待重定位。
-    #[test]
-    fn no_history_reports_invalid() {
-        let c = coord();
-        assert_eq!(c.resolve_caret_for_ui(0, 0, 20), (0, 0, 20, false));
-    }
-}
+#[path = "coordinator_caret_for_ui_tests.rs"]
+mod caret_for_ui_tests;
 
 /// `[ui.labels]` → 图标主字的产地测试。
 ///
 /// 断言只覆盖 `mode_icon_label` 这个单点；语言栏图标、工具栏、状态气泡都从它取值，不必逐面重复。
 #[cfg(test)]
-mod mode_icon_label_tests {
-    use crate::coordinator::Coordinator;
-    use std::sync::Arc;
-    use wind_config::Config;
-
-    fn coord_with(english: &str, caps: &str) -> Arc<Coordinator> {
-        let mut cfg = Config::default();
-        cfg.ui.labels.english = english.to_string();
-        cfg.ui.labels.caps_lock = caps.to_string();
-        Coordinator::new_headless(cfg, None)
-    }
-
-    /// 配了就用配的。
-    #[test]
-    fn configured_labels_take_effect() {
-        let c = coord_with("En", "Cp");
-        assert_eq!(c.mode_icon_label(false, false), "En", "英文半角");
-        assert_eq!(c.mode_icon_label(false, true), "Cp", "大写锁定");
-        assert_eq!(
-            c.mode_icon_label(true, true),
-            "Cp",
-            "中文 + 大写锁定：大写锁定优先（对齐 effective_chinese）"
-        );
-    }
-
-    /// 留空回落内置默认，不是回落空：空标签会让语言栏图标画出一个没有主字的空白方块。
-    #[test]
-    fn empty_falls_back_to_builtin() {
-        let c = coord_with("", "");
-        assert_eq!(c.mode_icon_label(false, false), "英");
-        assert_eq!(c.mode_icon_label(false, true), "A");
-    }
-
-    /// 出厂配置必须与改造前的字面量一致：老用户升级后不该看到任何变化。
-    #[test]
-    fn default_config_preserves_legacy_labels() {
-        let c = Coordinator::new_headless(Config::default(), None);
-        assert_eq!(c.mode_icon_label(false, false), "英");
-        assert_eq!(c.mode_icon_label(false, true), "A");
-    }
-
-    /// 反向对照：英文标签不得渗进中文态。缺了这条，「所有分支都返回 english_label」的错误实现能让
-    /// 上面的断言全绿。无方案数据时中文态回落「中」，不需要 fixture 就能钉死。
-    #[test]
-    fn english_label_does_not_leak_into_chinese() {
-        let c = coord_with("En", "Cp");
-        assert_eq!(
-            c.mode_icon_label(true, false),
-            "中",
-            "中文态取方案侧 icon_label，与 [ui.labels] 无关"
-        );
-    }
-
-    /// 超长配置在这一层就被截断。
-    ///
-    /// 这是 C++ 侧 `_inputTypeLabel` 缓冲的第一道防线（第二道是那边的 `_TRUNCATE`），挂了意味着
-    /// 超长标签能一路走到 `wcsncpy_s`。
-    #[test]
-    fn overlong_label_truncated_before_leaving_coordinator() {
-        let c = coord_with("English", "CapsLock");
-        assert_eq!(c.mode_icon_label(false, false), "En");
-        assert_eq!(c.mode_icon_label(false, true), "Ca");
-    }
-}
+#[path = "coordinator_mode_icon_label_tests.rs"]
+mod mode_icon_label_tests;
 
 #[cfg(test)]
 #[path = "coordinator_toolbar_items_tests.rs"]
@@ -10524,82 +10340,8 @@ mod exit_flush_tests {
 }
 
 #[cfg(test)]
-mod syllable_separator_app_tests {
-    //! 应用级 `syllable_separator`：断言落在按键出口（组合串），不是判据返回值。
-    use super::*;
-    use wind_config::app_compat::{AppCompat, AppCompatRule, SyllableSeparator};
-
-    fn data_dir() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../build_dev/data")
-    }
-
-    fn composition_after_typing(c: &Coordinator) -> String {
-        let mut last = KeyAction::Consumed;
-        for ch in "xiaopeng".chars() {
-            last = c.handle_key_event_policed(&KeyEventData {
-                key_code: (ch.to_ascii_uppercase() as u32) & 0xFF,
-                scan_code: 0,
-                modifiers: 0,
-                event_type: EVENT_KEY_DOWN,
-                toggles: 0,
-                event_seq: 0,
-                prev_char: 0,
-                seq_char: 0,
-            });
-        }
-        match last {
-            KeyAction::UpdateComposition { text, .. } => text,
-            other => panic!("期望组合区更新，实得 {other:?}"),
-        }
-    }
-
-    fn focus(c: &Coordinator, pid: u32, name: &str) {
-        c.pid_names.lock().unwrap().insert(pid, name.into());
-        c.active_compat.lock().unwrap().pid = pid;
-        c.refresh_active_compat_lookups();
-    }
-
-    #[test]
-    fn app_rule_overrides_global_separator() {
-        if !data_dir().join("schemas/pinyin.schema.toml").exists() {
-            eprintln!("skip: 无 build_dev/data");
-            return;
-        }
-        let mut cfg = Config::default();
-        cfg.schema.available = vec!["wubi86".into(), "pinyin".into()];
-        cfg.schema.active = "pinyin".into();
-        cfg.input.default.chinese_mode = true;
-        let c = Coordinator::new_headless(cfg, Some(&data_dir()));
-        c.test_set_app_compat(AppCompat::from_rules(vec![AppCompatRule {
-            process: "ue.exe".into(),
-            syllable_separator: Some(SyllableSeparator::None),
-            ..Default::default()
-        }]));
-
-        focus(&c, 7, "ue.exe");
-        assert_eq!(
-            composition_after_typing(&c),
-            "xiaopeng",
-            "配了 none 的应用无分隔符"
-        );
-
-        c.handle_key_event_policed(&KeyEventData {
-            key_code: 0x1B,
-            scan_code: 0,
-            modifiers: 0,
-            event_type: EVENT_KEY_DOWN,
-            toggles: 0,
-            event_seq: 0,
-            prev_char: 0,
-            seq_char: 0,
-        });
-        focus(&c, 8, "other.exe");
-        assert!(
-            composition_after_typing(&c).contains('\''),
-            "未配规则的应用跟随全局默认 '"
-        );
-    }
-}
+#[path = "coordinator_syllable_separator_app_tests.rs"]
+mod syllable_separator_app_tests;
 
 /// [`Coordinator::resolve_index_label`] 的裁决本体（主题槽位由调用方给）：设置端预览按
 /// 被预览主题的槽位取，与实时候选窗同一条规则。
