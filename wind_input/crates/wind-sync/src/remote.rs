@@ -19,10 +19,13 @@ pub fn init_remote(b: &dyn Backend, pass: &str, kdf: KdfParams) -> Result<Dek, S
         return Err(SyncError::AlreadyInitialized);
     }
     let dek = Dek::generate();
-    b.put(
-        &manifest::meta_key(),
-        &Meta::new(&dek, pass, kdf)?.to_json(),
-    )?;
+    let meta = Meta::new(&dek, pass, kdf)?.to_json();
+    b.put(&manifest::meta_key(), &meta)?;
+    // 并发首次初始化：后写覆盖先写。回读核对，输了就按「已初始化」处理，让用户改用口令加入。
+    // 同步引擎要求 meta 已存在才会上传任何 blob/清单，所以输家此前没有留下数据。
+    if b.get(&manifest::meta_key())?.as_deref() != Some(meta.as_slice()) {
+        return Err(SyncError::AlreadyInitialized);
+    }
     Ok(dek)
 }
 
@@ -77,6 +80,9 @@ pub fn reset_remote(
     let meta = Meta::new(dek, pass, kdf)?.to_json();
     for o in b.list(&format!("{}/", manifest::ROOT))? {
         // meta 最后写：中途失败时远端仍是「已清空但未初始化」，重试即可
+        if !manifest::safe_key(&o.key) {
+            continue;
+        }
         b.delete(&o.key)?;
     }
     b.put(&manifest::meta_key(), &meta)?;
@@ -114,7 +120,7 @@ pub fn gc_blobs(
     let mut removed = Vec::new();
     for o in b.list(&manifest::blobs_prefix())? {
         let old = o.modified.is_some_and(|t| t + min_age_secs <= now);
-        if old && !referenced.contains(&o.key) {
+        if old && manifest::safe_key(&o.key) && !referenced.contains(&o.key) {
             b.delete(&o.key)?;
             removed.push(o.key);
         }

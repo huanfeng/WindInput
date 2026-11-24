@@ -63,15 +63,21 @@ fn decode(s: &str) -> String {
 fn href_to_key(href: &str, base_path: &str) -> Option<String> {
     let p = decode(url_path(href.trim()));
     let p = p.trim_matches('/');
-    if base_path.is_empty() {
-        return Some(p.to_string());
-    }
-    if p == base_path {
+    let key = if base_path.is_empty() {
+        p.to_string()
+    } else if p == base_path {
         return Some(String::new());
+    } else {
+        p.strip_prefix(base_path)
+            .and_then(|r| r.strip_prefix('/'))?
+            .to_string()
+    };
+    // 服务端给的 href 不可信：空段、`.`、`..` 会让后续 delete/get 逃出同步根。
+    if !key.is_empty() && !crate::manifest::safe_key(&key) {
+        eprintln!("[wind-sync] 忽略不安全的 WebDAV href: {href:?}");
+        return None;
     }
-    p.strip_prefix(base_path)
-        .and_then(|r| r.strip_prefix('/'))
-        .map(str::to_string)
+    Some(key)
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -378,6 +384,17 @@ mod tests {
         assert_eq!(href_to_key("/other/c", "dav"), None);
         assert_eq!(href_to_key("/davx/c", "dav"), None);
         assert_eq!(href_to_key("/c", ""), Some("c".into()));
+        for bad in [
+            "/dav/a/../b",
+            "/dav/a/%2e%2e/b",
+            "/dav/a//b",
+            "/dav/./b",
+            "/dav/a/..",
+            "/dav/%2E",
+        ] {
+            assert_eq!(href_to_key(bad, "dav"), None, "{bad}");
+        }
+        assert_eq!(href_to_key("/a/../b", ""), None);
     }
 
     #[test]

@@ -136,11 +136,21 @@ fn merge_dict(base: Option<&str>, local: &str, remote: &str) -> Merged {
     let bm = b.as_ref().map(|d| rows(&d.body)).unwrap_or(empty);
     let bm = &bm.1;
 
+    let mut conflicts = Vec::new();
     let header: &Vec<&str> = match &b {
         None => &l.header,
         Some(bd) if l.header == bd.header => &r.header,
         _ => &l.header,
     };
+    // 头部双方都改且不同：取本地，但要报告，不能静默丢掉远端的头部修改。
+    let base_header = b.as_ref().map(|d| &d.header);
+    if l.header != r.header && base_header != Some(&r.header) && base_header != Some(&l.header) {
+        conflicts.push(Conflict {
+            key: "(词库头部)".into(),
+            kept: l.header.join("\n"),
+            dropped: r.header.join("\n"),
+        });
+    }
 
     let mut body: Vec<String> = Vec::new();
     for k in lo.iter().chain(ro.iter().filter(|k| !lm.contains_key(*k))) {
@@ -175,7 +185,7 @@ fn merge_dict(base: Option<&str>, local: &str, remote: &str) -> Merged {
     }
     Merged {
         content: text.into_bytes(),
-        conflicts: vec![],
+        conflicts,
     }
 }
 
@@ -306,6 +316,26 @@ mod tests {
             .content,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn dict_header_edited_on_both_sides_is_reported() {
+        let b = dict(&["a\t啊\t1"]);
+        let l = b.replace("name: u", "name: local");
+        let r = b.replace("name: u", "name: remote");
+        let out = merge(
+            "x.dict.yaml",
+            Some(b.as_bytes()),
+            l.as_bytes(),
+            r.as_bytes(),
+        )
+        .unwrap();
+        assert!(
+            String::from_utf8(out.content)
+                .unwrap()
+                .contains("name: local")
+        );
+        assert_eq!(out.conflicts.len(), 1, "头部双改要记入冲突");
     }
 
     #[test]

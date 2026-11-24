@@ -24,6 +24,17 @@ pub fn manifest_key(dev: &str, gen_: u64) -> String {
     format!("{ROOT}/devices/{dev}/manifest.{gen_}")
 }
 
+/// 远端键是否安全：非空、无空段、无 `.`/`..` 段、无反斜杠与控制字符。
+/// 后端列出的键不可信（恶意或出错的服务端），删除/读取前要校验。
+pub fn safe_key(key: &str) -> bool {
+    !key.is_empty()
+        && !key.contains('\\')
+        && !key.chars().any(char::is_control)
+        && key
+            .split('/')
+            .all(|seg| !seg.is_empty() && seg != "." && seg != "..")
+}
+
 /// 设备号只允许字母数字与 `-_`：它会拼进远端键。
 pub fn valid_device_id(s: &str) -> bool {
     !s.is_empty()

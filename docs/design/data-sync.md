@@ -154,6 +154,8 @@ blobs/<id>                     密文：文件内容，id = HMAC(DEK, 明文 SHA
 | `config.toml`、`compat.toml`、`dicts.toml` 等 TOML | 三方合并到键级；同键冲突取 lamport 较大者，另一值写入冲突副本。 |
 | 主题、方案文件及其他 | 不合并：取 lamport 较大者，另一版保存为 `<name>.conflict-<设备名>-<日期>.<ext>`，设置端提示。 |
 
+**说明**：TOML 内容级合并后重新序列化，**会丢失注释与排版**（仅当一方已包含另一方全部修改时才保留原字节）；yaml 头部双方都改且不同时取本地并计入冲突提示。
+
 **同步范围（一期）**：`config.toml`、`compat.toml`、`schemas/`、`themes/`、`data/` 下的
 `phrases.dict.yaml`、`quick_format.toml`、`common_chars.yaml`、`charsets/`、`<schema>/user.dict.yaml`、
 `<schema>/shadow.dict.yaml`、`<schema>/dicts/`、`<schema>/dicts.toml`。

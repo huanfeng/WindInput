@@ -19,6 +19,41 @@ use std::collections::{BTreeMap, BTreeSet};
 /// blob 回收的最小年龄（设计 §4）。
 pub const GC_MIN_AGE_SECS: u64 = 7 * 86400;
 
+/// 大批量删除护栏：本轮删除数超过此值且过已同步文件数的一半时中止。
+pub const MASS_DELETE_MIN: usize = 20;
+/// 已存在 blob 的修改时间早于此（秒）则重传刷新。
+const BLOB_REFRESH_SECS: u64 = 86400;
+/// 条目继承的 `absorbed` 上限（超出丢最旧）。
+const ABSORBED_CAP: usize = 64;
+
+/// 把冲突副本落到一个不覆盖他人内容的名字：同名已存在且内容不同则追加 `-2`、`-3`…
+fn unique_copy_name(
+    local: &dyn LocalStore,
+    taken: &BTreeSet<String>,
+    path: &str,
+    device: &str,
+    date: &str,
+    bytes: &[u8],
+) -> Result<String, SyncError> {
+    for n in 1u32.. {
+        let tag = if n == 1 {
+            date.to_string()
+        } else {
+            format!("{date}-{n}")
+        };
+        let name = merge::conflict_copy_name(path, device, &tag);
+        if taken.contains(&name) {
+            continue;
+        }
+        match local.read(&name).map_err(le)? {
+            None => return Ok(name),
+            Some(c) if c == bytes => return Ok(name), // 崩溃重跑：已写过同样的副本
+            Some(_) => {}
+        }
+    }
+    unreachable!()
+}
+
 #[derive(Debug, Clone)]
 pub struct SyncCtx {
     pub scope: ScopeFlags,
@@ -28,6 +63,8 @@ pub struct SyncCtx {
     pub force: bool,
     /// 同步成功后顺带回收 blob（失败只记警告）。
     pub gc: bool,
+    /// 用户已确认放行大批量删除（见 `SyncError::mass_deletion`）。
+    pub allow_mass_delete: bool,
 }
 
 impl SyncCtx {
@@ -37,6 +74,7 @@ impl SyncCtx {
             now,
             force: false,
             gc: false,
+            allow_mass_delete: false,
         }
     }
 }
@@ -63,6 +101,28 @@ pub struct SyncReport {
     pub warnings: Vec<String>,
     pub manifest_gen: Option<u64>,
     pub gc_removed: usize,
+}
+
+/// 本机新发布的条目继承旧条目已吸收的版本（连同旧版本自身），使链式更新后
+/// 旧的并发版本仍被识别为已吸收。
+fn inherit_absorbed(entry: &mut Entry, old: Option<&Entry>) {
+    let Some(old) = old else { return };
+    let mut all: Vec<String> = old.absorbed.clone();
+    if !old.deleted {
+        all.push(old.hash.clone());
+    }
+    all.append(&mut entry.absorbed);
+    let mut seen = BTreeSet::new();
+    // 去重保留最后出现的位置，再丢最旧的
+    let mut out: Vec<String> = Vec::new();
+    for h in all.into_iter().rev() {
+        if h != entry.hash && seen.insert(h.clone()) {
+            out.push(h);
+        }
+    }
+    out.truncate(ABSORBED_CAP);
+    out.reverse();
+    entry.absorbed = out;
 }
 
 fn le(e: LocalError) -> SyncError {
@@ -208,6 +268,17 @@ fn run(
         in_scope: &in_scope,
     });
 
+    if !ctx.allow_mass_delete {
+        let deletes = plan
+            .iter()
+            .filter(|(_, a)| matches!(a, Action::PublishDelete))
+            .count();
+        let total = state.files.values().filter(|e| !e.deleted).count();
+        if deletes > MASS_DELETE_MIN && deletes * 2 > total {
+            return Err(SyncError::mass_deletion(deletes, total));
+        }
+    }
+
     let base_of = |p: &str| {
         state
             .files
@@ -226,6 +297,7 @@ fn run(
     let mut outs: Vec<Out> = Vec::new();
     // 范围外的冲突副本：只写本地，不进状态与清单
     let mut untracked: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut used_copies: BTreeSet<String> = BTreeSet::new();
 
     for (path, action) in plan {
         let base = base_of(&path);
@@ -434,8 +506,15 @@ fn run(
                     });
                 }
                 for (e, bytes) in copies {
-                    let copy =
-                        merge::conflict_copy_name(&path, &e.device, &merge::date_string(ctx.now));
+                    let copy = unique_copy_name(
+                        local,
+                        &used_copies,
+                        &path,
+                        &e.device,
+                        &merge::date_string(ctx.now),
+                        bytes,
+                    )?;
+                    used_copies.insert(copy.clone());
                     let tracked = in_scope(&copy);
                     if tracked {
                         lamport += 1;
@@ -466,7 +545,15 @@ fn run(
             let Some(remote_bytes) = fetch_blob(backend, dek, &r.hash, &mut rep.warnings)? else {
                 continue;
             };
-            let copy = merge::conflict_copy_name(&path, &r.device, &merge::date_string(ctx.now));
+            let copy = unique_copy_name(
+                local,
+                &used_copies,
+                &path,
+                &r.device,
+                &merge::date_string(ctx.now),
+                &remote_bytes,
+            )?;
+            used_copies.insert(copy.clone());
             lamport += 1;
             // 本地版本胜出，重新以更高 lamport 发布
             let mut entry = mk(&hashes[&path], base, lamport);
@@ -533,15 +620,17 @@ fn run(
         }
     }
     if !blobs.is_empty() {
-        let existing: BTreeSet<String> = backend
+        // 已存在但很旧（或时间未知）的 blob 也重传一次刷新时间：它可能无人引用、即将被回收。
+        let fresh: BTreeSet<String> = backend
             .list(&manifest::blobs_prefix())?
             .into_iter()
+            .filter(|o| o.modified.is_some_and(|t| t + BLOB_REFRESH_SECS > ctx.now))
             .map(|o| o.key)
             .collect();
         for (hash, bytes) in blobs {
             let id = crypto::blob_id(dek, hash);
             let key = manifest::blob_key(&id);
-            if !existing.contains(&key) {
+            if !fresh.contains(&key) {
                 backend.put(&key, &crypto::seal(dek, ObjKind::Blob, &id, bytes))?;
             }
         }
@@ -549,7 +638,10 @@ fn run(
 
     // 6. 写新清单（内容无变化则跳过）
     let mut files = state.files.clone();
-    for o in outs {
+    for mut o in outs {
+        if o.entry.device == me {
+            inherit_absorbed(&mut o.entry, state.files.get(&o.path));
+        }
         files.insert(o.path, o.entry);
     }
     let digest = content_hash(&serde_json::to_vec(&files).expect("条目可序列化"));
