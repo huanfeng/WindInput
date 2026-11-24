@@ -36,3 +36,6 @@ tempfile = "3"
 
 [lints]
 workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+tracing = { workspace = true }

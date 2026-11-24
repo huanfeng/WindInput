@@ -1,4 +1,5 @@
-//! 日志写 stderr，由 core 重定向并轮转到 `sync.log`。
+//! 桌面：日志写 stderr，由 core 重定向并轮转到 `sync.log`。
+//! Android：在输入法进程内运行，stderr 无人接收，改走 `tracing`（宿主已接到 logcat）。
 //! 只记系统事件与错误，不记凭据、口令、密钥与文件内容。
 
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -31,9 +32,16 @@ pub fn stamp(unix: u64) -> String {
     )
 }
 
+#[cfg(not(target_os = "android"))]
 macro_rules! log {
     ($($a:tt)*) => {
         eprintln!("{} UTC [sync] {}", $crate::log::stamp($crate::log::now_unix()), format_args!($($a)*))
+    };
+}
+#[cfg(target_os = "android")]
+macro_rules! log {
+    ($($a:tt)*) => {
+        tracing::info!(target: "sync", "{}", format_args!($($a)*))
     };
 }
 pub(crate) use log;
