@@ -31,3 +31,39 @@ fn compat_bad_requests_come_back_as_errors() {
     );
     assert!(c.web_data_rpc("compat.bogus", &json!({})).is_err());
 }
+
+/// 外部改了文件后的重载入口都在分派表里：`compat.reload`（不能被 `compat.*` 通配吞成未知方法）、
+/// `schema.reloadFiles`、`theme.reloadFiles`。规则表重载的实际效果在 coordinator 的
+/// `reload_compat_and_refresh_*` 测试里验。
+#[test]
+fn reload_entries_are_routed() {
+    let c = Coordinator::new_headless(Config::default(), None);
+    assert_eq!(
+        c.web_data_rpc("compat.reload", &json!({})).unwrap(),
+        json!({"ok": true})
+    );
+    let r = c
+        .web_data_rpc("schema.reloadFiles", &json!({"ids": ["nope"]}))
+        .unwrap();
+    assert_eq!(r["reloaded"], json!(["nope"]));
+    let r = c.web_data_rpc("schema.reloadFiles", &json!({})).unwrap();
+    assert_eq!(r["ok"], true);
+    let r = c
+        .web_data_rpc("theme.reloadFiles", &json!({"ids": ["not-current"]}))
+        .unwrap();
+    assert_eq!(r["reloaded"], json!(["not-current"]));
+    assert_eq!(r["applied"], false, "非当前主题不重新下发");
+}
+
+#[test]
+fn reload_entries_reject_bad_ids() {
+    let c = Coordinator::new_headless(Config::default(), None);
+    for m in ["schema.reloadFiles", "theme.reloadFiles"] {
+        assert!(c.web_data_rpc(m, &json!({"ids": "x"})).is_err(), "{m}");
+        assert!(c.web_data_rpc(m, &json!({"ids": [1]})).is_err(), "{m}");
+    }
+    assert!(
+        c.web_data_rpc("theme.reloadFiles", &json!({"ids": ["../x"]}))
+            .is_err()
+    );
+}

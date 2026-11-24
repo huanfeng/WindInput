@@ -281,7 +281,9 @@ fn schema_config_write_id<'a>(method: &str, params: &'a Value) -> Option<Option<
             "id"
         }
         "userDicts.setEnabled" | "userdata.purgeSchema" => "schemaId",
-        "scheme.importPackage" | "scheme.importText" | "backup.restore" => return Some(None),
+        "scheme.importPackage" | "scheme.importText" | "backup.restore" | "schema.reloadFiles" => {
+            return Some(None);
+        }
         _ => return None,
     };
     Some(params.get(key).and_then(Value::as_str))
@@ -616,7 +618,9 @@ mod tests {
             match method {
                 "dict.stats" => Ok(json!([])),
                 "compat.list" | "compat.schema" | "compat.export" => Ok(json!({ "ok": true })),
-                "compat.upsert" | "compat.import" | "compat.reset" => Ok(json!({ "ok": true })),
+                "compat.upsert" | "compat.import" | "compat.reset" | "compat.reload" => {
+                    Ok(json!({ "ok": true }))
+                }
                 "compat.broken" => anyhow::bail!("写入失败"),
                 "schema.setDictEnabled"
                 | "schema.saveConfig"
@@ -1130,14 +1134,19 @@ mod tests {
     #[test]
     fn compat_write_method_emits_compat_changed_and_forwards_the_result() {
         let (st, rx) = state_with_events();
-        for m in ["compat.upsert", "compat.reset", "compat.import"] {
+        for m in [
+            "compat.upsert",
+            "compat.reset",
+            "compat.import",
+            "compat.reload",
+        ] {
             let resp = dispatch(&st, req(m, json!({})));
             assert!(resp.error.is_none(), "{m}");
             assert_eq!(resp.result.unwrap()["ok"], json!(true), "结果要原样透传");
         }
         assert_eq!(
             drain_events(&rx),
-            vec!["compat.changed"; 3],
+            vec!["compat.changed"; 4],
             "每次写入各广播一次"
         );
     }
@@ -1223,6 +1232,7 @@ mod tests {
             ("scheme.importPackage", Some(None)),
             ("scheme.importText", Some(None)),
             ("backup.restore", Some(None)),
+            ("schema.reloadFiles", Some(None)),
             ("schema.getConfig", None),
             ("scheme.previewImport", None),
         ] {

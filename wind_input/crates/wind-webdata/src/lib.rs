@@ -278,6 +278,23 @@ const BULK_WRITE_METHODS: &[&str] = &[
     "schema.delete",
 ];
 
+/// 可选的 `ids` 字符串数组：缺省 / `null` 为 `None`，类型不对报错。
+fn optional_ids(p: &Value) -> anyhow::Result<Option<Vec<String>>> {
+    match p.get("ids") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Array(a)) => a
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| anyhow::anyhow!("ids 须为字符串数组"))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()
+            .map(Some),
+        Some(_) => anyhow::bail!("ids 须为字符串数组"),
+    }
+}
+
 fn usize_param(p: &Value, key: &str, default: usize) -> usize {
     p.get(key)
         .and_then(|v| v.as_u64())
@@ -697,6 +714,14 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
         "quick.add" => h.web_quick_add(params),
         "quick.setText" => h.web_quick_set_text(params),
         "quick.delete" => h.web_quick_delete(params),
+        // ── 外部改了文件内容之后让 core 重读（数据同步、手改；core 不监听文件）──
+        // compat.toml 重载规则表并刷新前台应用的缓存；成功广播由 dispatch 的 compat.* 统一发。
+        "compat.reload" => {
+            h.reload_compat();
+            Ok(json!({ "ok": true }))
+        }
+        "schema.reloadFiles" => h.web_schema_reload_files(params),
+        "theme.reloadFiles" => h.web_theme_reload_files(params),
         // ── compat.*：应用兼容规则的分层管理（逻辑全在 wind_config::compat_admin）──
         m if m.starts_with("compat.") => h.web_compat_rpc(m, params),
         // ── softkeyboard.*：软键盘编辑器（逻辑在 wind_softkeyboard::admin）──
@@ -4055,6 +4080,47 @@ pub trait WebDataRpc: WebDataHost {
         let toml =
             std::fs::read_to_string(&path).map_err(|e| anyhow::anyhow!("读取主题失败：{e}"))?;
         Ok(json!({ "slug": slug, "toml": toml }))
+    }
+
+    /// `schema.reloadFiles {ids?}`：方案文件（`schemas/`、override、词库）被外部改了之后，
+    /// 失效这些方案的引擎与解析缓存，下次使用按新内容重建；缺省 `ids` = 全部已安装方案。
+    /// 与 `schema.invalidate` 同一条路（先失效、再重建跨方案派生集合）。
+    fn web_schema_reload_files(&self, params: &Value) -> anyhow::Result<Value> {
+        let ids = match optional_ids(params)? {
+            Some(ids) => ids,
+            None => self.engine_mgr().installed_schemas(),
+        };
+        for id in &ids {
+            self.engine_mgr().invalidate_schema(id);
+        }
+        self.refresh_schema_derived_config();
+        Ok(json!({ "ok": true, "reloaded": ids }))
+    }
+
+    /// `theme.reloadFiles {ids?}`：主题文件被外部改了之后，丢掉这些主题的预览图缓存；
+    /// 当前生效主题在其中（或缺省 `ids`）时重读并下发。
+    fn web_theme_reload_files(&self, params: &Value) -> anyhow::Result<Value> {
+        let current = self.current_theme_name();
+        let (ids, all) = match optional_ids(params)? {
+            Some(ids) => {
+                if let Some(bad) = ids.iter().find(|i| !wind_theme::is_plain_slug(i)) {
+                    anyhow::bail!("非法主题 id: {bad}");
+                }
+                (ids, false)
+            }
+            None => (
+                self.list_themes_full().into_iter().map(|t| t.0).collect(),
+                true,
+            ),
+        };
+        for id in &ids {
+            theme_render::forget_theme(id);
+        }
+        let repush = all || ids.contains(&current);
+        if repush {
+            self.push_theme(&current, self.current_theme_is_dark());
+        }
+        Ok(json!({ "ok": true, "reloaded": ids, "applied": repush }))
     }
 
     fn web_theme_delete(&self, params: &Value) -> anyhow::Result<Value> {
