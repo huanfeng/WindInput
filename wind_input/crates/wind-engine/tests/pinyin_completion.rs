@@ -1,16 +1,13 @@
 //! 残码前缀补全的上浮约束回归测试
 //!
-//! 背景：残码存在时（`meiy` 的 `y`），前缀补全候选故意不标 `is_prefix`，使其上浮到
-//! 精确子串单字之前——否则「没有」会被数百个单字「没/每/美/…」压到十几页之后。
+//! 残码存在时（`meiy` 的 `y`），前缀补全候选不标 `is_prefix`、上浮到精确子串单字之前，
+//! 否则「没有」会被数百个单字压到十几页之后。但上浮须按「补全距离 + 置信度」约束
+//! （`COMPLETION_UNCONDITIONAL_FLOAT_SYLLABLES` / `COMPLETION_FAR_WEIGHT_FLOOR`），否则双拼
+//! 奇数键必有残码，候选 2~5 位会被冷僻长词占满并逐键跳动。依据见
+//! docs/architecture/candidate-sorting-rules.md §4.2。
 //!
-//! 但该特权原本无条件给全部 30 条补全。双拼每 2 键 1 音节 → 奇数键必有残码，
-//! 长输入下候选 2~5 位会被冷僻长词占满，并随每次按键在两种形态间反复跳动。
-//! 现按「补全距离 + 置信度」约束（见 `COMPLETION_UNCONDITIONAL_FLOAT_SYLLABLES` /
-//! `COMPLETION_FAR_WEIGHT_FLOOR`；⚠️ 不是 `COMPLETION_NEAR_SYLLABLES`，那个只管
-//! **用户词**长词上浮，两者一度共用一个常量并因此串味）。
-//!
-//! 下列样本全部来自实测。**距离不能单独作判据**——`zhongguorenm`→「中国人民解放军」
-//! 距离 +4 却是合理项，而同为 +4 的「…物权法」是噪音，判别力全在 weight。
+//! 距离不能单独作判据：`zhongguorenm`→「中国人民解放军」距离 +4 却合理，同为 +4 的
+//! 「…物权法」是噪音，判别力在 weight。
 //!
 //! 词典缺失时自动跳过。
 
@@ -34,15 +31,9 @@ fn manager(dir: &std::path::Path) -> EngineManager {
     let mut cfg = Config::default();
     cfg.schema.available = vec!["pinyin".to_string(), "shuangpin".to_string()];
     cfg.schema.active = "pinyin".to_string();
-    // ⚠️ **必须显式设回 2 / 3**，不能吃出厂默认（现为 4 / 5）。
-    //
-    // 本文件测的是补全候选的**上浮与降级**（`COMPLETION_UNCONDITIONAL_FLOAT_SYLLABLES`、
-    // `COMPLETION_FAR_WEIGHT_FLOOR`、权重折扣），全部以「候选已被召回」为前提。而
-    // `min_syllables` 管的是召回：`started < min` 时上限收紧到 `started`。出厂值升到 4
-    // 之后，本文件的样本（`beijingd`/`nih`/`zhonghuar` 都是 2~3 音节）在召回层就空了，
-    // 断言会以「候选缺失」失败，而要验的上浮逻辑一次都没执行到。
-    //
-    // 召回门槛的出厂行为由 `wind-coordinator` 的 `pinyin_completion_recall_gate` 守。
+    // 必须显式设回 2 / 3，不能吃出厂默认（4 / 5）：本文件测上浮与降级，前提是候选已被召回，
+    // 而出厂 `min_syllables` 会让 2~3 音节样本在召回层就空掉，断言以「候选缺失」失败、
+    // 被测逻辑一次都没执行。召回门槛的出厂行为由 `pinyin_completion_recall_gate` 守。
     cfg.schema.pinyin.completion.min_syllables = 2;
     cfg.schema.pinyin.completion.max_extra_syllables = 3;
     EngineManager::new(&cfg, Some(dir))
@@ -70,19 +61,13 @@ fn test_useful_completions_still_float() {
         ("nih", "你好", "距离+1 w=5328"),
         ("nihaom", "你好吗", "距离+1 w=166，低词频但近距离须豁免"),
         ("zhongguor", "中国人", "距离+1 w=21385"),
-        // ⚠️ 这两条的注释原为「阈值取 1 会被误杀」，**已被实测推翻**：
-        // `COMPLETION_UNCONDITIONAL_FLOAT_SYLLABLES` 收到 1 后它们只是改走
-        // `COMPLETION_FAR_WEIGHT_FLOOR`(100) 那条路，而 2010/1609 远高于门槛，照样上浮
-        // （实测位次 3 / 1）。真正被这次收紧挡掉的是 w=18 的「中华人民」——
-        // 见 `low_freq_far_completion_does_not_outrank_sentence`。
+        // 这两条在距离 2，走 `COMPLETION_FAR_WEIGHT_FLOOR`(100) 放行；收紧无条件上浮距离
+        // 挡掉的是 w=18 的「中华人民」，见 `low_freq_far_completion_does_not_outrank_sentence`。
         ("beijingd", "北京大学", "距离+2 w=2010，靠 FLOOR 放行"),
         ("jisuanjik", "计算机科学", "距离+2 w=1609，靠 FLOOR 放行"),
-        // ⚠️ `zhonghuar`→「中华人民共和国」曾在此列，现已移出：它的**音节** extra 是 4
-        // （输入 3 音节、词 7 音节），超出 `schema.pinyin.completion.max_extra_syllables`
-        // 的出厂值 3，默认不再产出。这是用户拍板的取舍 —— extra=4 与真机抱怨的
-        // `nih`→「你会怎么做」(extra=3) 在音节维度上同形，weight 也分不开
-        // （13330 vs 3113），只能靠这个旋钮按口味取。
-        // 把 max_extra 调到 4 即恢复，由 `far_completion_returns_when_max_extra_raised` 守卫。
+        // `zhonghuar`→「中华人民共和国」不在此列：音节 extra=4 超出 `max_extra_syllables`
+        // 出厂值 3，默认不产出（与 `nih`→「你会怎么做」同形，weight 分不开，只能靠旋钮取舍）。
+        // 调到 4 即恢复，由 `far_completion_returns_when_max_extra_raised` 守。
         (
             "zhongguorenm",
             "中国人民解放军",
@@ -103,10 +88,7 @@ fn test_useful_completions_still_float() {
 }
 
 /// 两个旋钮确实在起作用：`max_extra_syllables` 调大即恢复远距离补全，调小即收紧。
-///
-/// 以 `zhonghuar`→「中华人民共和国」（输入 3 音节、词 7 音节、extra=4）为标尺：
-/// 出厂值 3 时不产出，调到 4 立刻回来。缺了这条，「出厂 3」这个决定就没有守卫 ——
-/// 日后有人把过滤写死、旋钮变成摆设也不会有测试变红。
+/// 以 `zhonghuar`→「中华人民共和国」（extra=4）为标尺；缺了这条，过滤被写死、旋钮变摆设也不会红。
 #[test]
 fn far_completion_returns_when_max_extra_raised() {
     let Some(dir) = data_dir() else {
@@ -118,9 +100,8 @@ fn far_completion_returns_when_max_extra_raised() {
         let mut cfg = Config::default();
         cfg.schema.available = vec!["pinyin".to_string()];
         cfg.schema.active = "pinyin".to_string();
-        // `zhonghuar` = zhong hua + 残码 r ⇒ started = 3。出厂 `min_syllables` 已是 4，
-        // 会先把上限收紧到 started 本身，`max_extra` 根本不参与运算——本用例要单独观察
-        // `max_extra` 的作用，故必须把 min 降到不挡路的取值。
+        // `zhonghuar` 的 started = 3，出厂 `min_syllables` 会先把上限收紧到 started，
+        // `max_extra` 不参与运算；要单独观察 `max_extra` 须把 min 降到不挡路。
         cfg.schema.pinyin.completion.min_syllables = 2;
         cfg.schema.pinyin.completion.max_extra_syllables = max_extra;
         EngineManager::new(&cfg, Some(&dir))
@@ -165,17 +146,10 @@ fn test_far_lowfreq_completions_are_demoted() {
 
 /// 补全折扣：同一上浮层内，未输入音节更多的候选须让位于更短的候选。
 ///
-/// 用户报告的原始现象：打 `nih` 时首屏是「你会 → 你会发现 → 你好」，
-/// 三、四字长词排在两字常用词之前。根因是 `is_promoted_completion` 是**布尔层级**，
-/// 上浮的补全在层内**只比裸词频**，extra=1 与 extra=3 同等对待：
-/// 「你会发现」(w=13330, extra=3) 因此压过「你好」(w=5328, extra=1)。
+/// 上浮层内若只比裸词频，`nih` 下「你会发现」(w=13330, extra=3) 会压过「你好」(w=5328, extra=1)；
+/// `COMPLETION_WEIGHT_DISCOUNT`（0.5^extra）折后 你好 2664 > 你会发现 1666。
 ///
-/// 修法＝`COMPLETION_WEIGHT_DISCOUNT`（0.5^extra），对齐 librime `kCompletionPenalty`
-/// 与 fcitx5 `overLengthCost`。折后 你好 2664 > 你会发现 1666。
-///
-/// ⚠️ 断言用**相对位置**而非绝对位次：首选「你会」(w=22262) 赢「你好」纯粹是词库词频
-/// 使然（unigram 无上下文，分不开「你会」这类句式碎片），不在本机制职责内 ——
-/// 把它写进断言会让这条测试实际在守卫一个它治不了的东西。
+/// 断言用相对位置：首选「你会」(w=22262) 赢「你好」是词库词频使然，不在本机制职责内。
 #[test]
 fn completion_discount_demotes_words_with_more_unentered_syllables() {
     let Some(dir) = data_dir() else {
@@ -208,18 +182,11 @@ fn completion_discount_demotes_words_with_more_unentered_syllables() {
     }
 }
 
-/// step 6.5b：整句须让位于「恰好用完残码的补全」，且**只让给它**。
+/// step 6.5b：整句须让位于「恰好用完残码的补全」，且只让给它。
 ///
-/// 现象：打 `nihaom` 时首选恒是整句「你好」——它把用户已按下的 `m` 丢掉了。实测该规律
-/// 与音节数无关（2/3/4/6 音节一律如此），根因是当时整句的 `SENTENCE_WEIGHT_BASE`(3e7，已退役)
-/// 无条件置顶，补全只有真实词频（个位数 ~ 1e4），差 4~7 个数量级。
-///
-/// 判据复刻 librime `has_exact_match_phrase`（`gear/script_translator.cc:387`：存在覆盖
-/// 完整输入的精确词条时不生成整句）：**补全词音节数 == 已完成音节数 + 1**。
-///
-/// ⚠️ 反例与正例同等重要：`beijingdaxuex` 的「北京大学校长」是 6 音节 ≠ 4+1，**不该**触发
-/// 让位 —— 它 w=4，一旦放进来就会顶掉「北京大学」。缺了这半边断言，把判据放宽成
-/// 「extra ≤ 2」之类的一刀切也照样绿。
+/// 判据复刻 librime `has_exact_match_phrase`：补全词音节数 == 已完成音节数 + 1。
+/// 反例同等重要：`beijingdaxuex` 的「北京大学校长」6 音节 ≠ 4+1、w=4，不该触发让位；
+/// 缺了这半边，把判据放宽成「extra ≤ 2」也照样绿。
 #[test]
 fn sentence_yields_to_completion_that_exhausts_trailing_partial() {
     let Some(dir) = data_dir() else {
@@ -233,16 +200,9 @@ fn sentence_yields_to_completion_that_exhausts_trailing_partial() {
             .clone()
     };
 
-    // 正例：补全恰好用完残码（音节数 == completed + 1）⇒ 整句让位。
-    //
-    // ⚠️ `nihaom`→你好吗 与 `zhongguor`→中国人 **已从本列表移出**，不是因为坏了，而是
-    // step 2c（残码整句）落地后它们不再经过本机制：Viterbi 直接把残码补成那个字，产出的
-    // 整句**就是**「你好吗」/「中国人」本身（`is_prefix=0`、`code` 含残码），既不是补全、
-    // 也就无所谓让位（实测 `is_sentence_demoted=0`）。它们改由
-    // `test_trailing_partial_completes_into_sentence` 覆盖。
-    //
-    // 6.5b 仍然必要且在此被守着：留下的两条是**Viterbi 选出的字与词库补全不一致**的情形
-    // ——`zhongguorenm` 整句是「中国人吗」而补全是「中国人民」，此时才需要让位。
+    // 正例：补全恰好用完残码（音节数 == completed + 1）⇒ 整句让位。只剩 Viterbi 选出的字
+    // 与词库补全不一致的情形（`zhongguorenm` 整句「中国人吗」vs 补全「中国人民」）；
+    // 残码整句恰好就是正解的输入由 `test_trailing_partial_completes_into_sentence` 覆盖。
     for (input, want, note) in [
         ("zhongguorenm", "中国人民", "4 == 3+1，整句「中国人吗」让位"),
         (
@@ -254,13 +214,8 @@ fn sentence_yields_to_completion_that_exhausts_trailing_partial() {
         assert_eq!(top(input), want, "{input}：{note}");
     }
 
-    // 反例：补全没用完残码就结束（音节数 > completed + 1）⇒ **不得**触发让位。
-    // 「北京大学校长」bei|jing|da|xue|xiao|zhang = 6 ≠ 4+1，且 w=4 属冷僻预测词。
-    //
-    // ⚠️ 断言的是「校长没夺走首位」，不是「首选恰为北京大学」：step 2c 落地后残码 `x`
-    // 会被补成一个字（实测「北京大学下」），它 consumed 满、按比较链 ⓪ 本就该在
-    // 只消费 12/13 键的「北京大学」之前 —— 与 `buzhidaok`→「不知道看」同形态。
-    // 写死具体文本会让这条反例实际在守一个它不负责的东西。
+    // 反例：补全音节数 > completed + 1 ⇒ 不得触发让位。「北京大学校长」6 ≠ 4+1，w=4。
+    // 只断言「校长没夺走首位」：残码 `x` 会被 step 2c 补成整句，首选不一定是「北京大学」。
     assert_ne!(
         top("beijingdaxuex"),
         "北京大学校长",
@@ -272,16 +227,11 @@ fn sentence_yields_to_completion_that_exhausts_trailing_partial() {
     assert_eq!(top("nihaoma"), "你好吗", "无残码：整句不受影响");
 }
 
-/// 距离 ≥2 的补全必须过 `COMPLETION_FAR_WEIGHT_FLOOR`：低频长词不得靠「近距离豁免」登顶。
+/// 距离 ≥2 的补全必须过 `COMPLETION_FAR_WEIGHT_FLOOR`：低频长词不得靠近距离豁免登顶。
 ///
-/// 现场（用户报「候选长度来回跳动」）：逐字符打「中华人民共和国」时，`zhonghuar` 的首选
-/// 曾是 **w=18 的「中华人民」**，把整句「中华」压在后面；再多打两个字母又跳回 3 音节。
-/// 根因是 `COMPLETION_UNCONDITIONAL_FLOAT_SYLLABLES` 当时取 2，使**距离 2 整档**白白豁免
-/// 了 FLOOR —— 有残码时冷僻长词靠豁免登顶、无残码时整句 3e7 登顶，两套依据逐键切换。
-///
-/// ⚠️ 同时守着「收紧没有误伤高频远距离补全」：`beijingd`→北京大学(w=2010, 距离 2)、
-/// `jisuanjik`→计算机科学(w=1609, 距离 2) 改走 FLOOR 那条路，仍须留在首屏 —— 这正是旧注释
-/// 断言「取 1 会直接干掉这类极常见场景」的两个例子，实测它们只是换了条路进来。
+/// `zhonghuar` 下 w=18 的「中华人民」不得压过整句，否则逐字符输入时首选长度来回跳动。
+/// 同时守着收紧没误伤高频远距离补全：`beijingd`→北京大学(w=2010)、`jisuanjik`→计算机科学
+/// (w=1609) 走 FLOOR 那条路，仍须留在首屏。
 #[test]
 fn low_freq_far_completion_does_not_outrank_sentence() {
     let Some(dir) = data_dir() else {
@@ -292,17 +242,9 @@ fn low_freq_far_completion_does_not_outrank_sentence() {
 
     let cands = mgr.convert_with("pinyin", "zhonghuar", 6).candidates;
     let texts = || cands.iter().map(|c| &c.text).collect::<Vec<_>>();
-    // 首选必须是**某条整句**，但**不断言是哪一条**。
-    //
-    // `zhonghuar` 下有两条：step 2c 的残码整句「中华人」(消费 9 键) 与 step 2 的整句
-    // 「中华」(消费 8 键)。谁在前由协调器比较链 ⓪ `consumed_length` 决定，而**引擎级
-    // 排序根本不看 consumed** —— 本断言一度写死「中华人」并注明「按比较链 ⓪ 本就该在
-    // 「中华」之前」，那是把协调器的判据安到了引擎头上：这里实际比的是 weight。
-    // 整句 weight 改几何平均后，单词整句「中华」反超两词整句「中华人」，本断言即红，
-    // 而同一批输入的**协调器级 survey 零差异**（⓪ 照常把「中华人」排在首位）。
-    //
-    // 本用例真正要守的是**下面那条**——w=0 的「种花人」与 w=18 的「中华人民」都不得
-    // 靠上浮夺走首位，那与首选具体是哪条整句无关。
+    // 首选必须是某条整句，但不断言是哪一条：「中华人」(消费 9 键) 与「中华」(消费 8 键)
+    // 的先后由协调器比较链 ⓪ `consumed_length` 决定，引擎级排序不看 consumed。
+    // 本用例要守的是下面那条：w=0 的「种花人」与 w=18 的「中华人民」都不得靠上浮夺走首位。
     assert!(
         cands[0].is_sentence,
         "zhonghuar 首选应是整句（「中华人」或「中华」皆可），实际: {:?}",
@@ -326,12 +268,8 @@ fn low_freq_far_completion_does_not_outrank_sentence() {
 
 /// step 6.5b 的置信度门槛：冷僻补全不得把整句顶掉，整句权重更不得被压成负数。
 ///
-/// `zhonghuar` 下「种花人」(`zhonghuaren`) 音节数 3 == completed 2 + 1，**满足 6.5b 的音节
-/// 判据**，但它 w=0。缺了 `SENTENCE_YIELD_WEIGHT_FLOOR` 时实测：首选变成「种花人」，
-/// 整句「中华」被降到 **w=-1**。
-///
-/// librime 不需要这道门槛（整句与词条同轴，w=0 自然排不上去）；我们的整句拿 3e7 跨轴、
-/// 让位只能做成二值开关，所以必须自己补回这条线。
+/// `zhonghuar` 下「种花人」音节数 3 == completed 2 + 1，满足 6.5b 的音节判据，但 w=0。
+/// 让位是二值开关，没有 `SENTENCE_YIELD_WEIGHT_FLOOR` 时首选会变成「种花人」、整句被压到负权重。
 #[test]
 fn sentence_does_not_yield_to_low_confidence_completion() {
     let Some(dir) = data_dir() else {
@@ -390,10 +328,7 @@ fn test_shuangpin_parity_does_not_thrash() {
 }
 
 /// step 2c：尾部残码作为「待定音节」入图，由 Viterbi 补出最优单字。
-///
-/// 用户报的核心问题：`buzhidaok` 在主流输入法给「不知道看」，而我们此前整句止步于
-/// 「不知道」、末尾 `k` 无人认领 —— 且「不知道看」**在 147 条候选里根本不存在**，
-/// 是生成层缺失而非排序问题（排序改到天上也排不出不存在的候选）。
+/// `buzhidaok` 应得「不知道看」；没有这一步时该候选根本不存在，排序救不了。
 #[test]
 fn test_trailing_partial_completes_into_sentence() {
     let Some(dir) = data_dir() else {
@@ -402,10 +337,8 @@ fn test_trailing_partial_completes_into_sentence() {
     };
     let mgr = manager(&dir);
 
-    // 后三条从 `sentence_yields_to_completion_that_exhausts_trailing_partial` 移入：
-    // 它们此前靠 6.5b「整句让位于补全」间接达成，现在由 step 2c 直接产出。
-    // ⚠️「人」「吗」都是**实词/非虚词表成员**，而被它们取代的「让」「们」在虚词表里——
-    // 这三条同时守着 `score_node_partial_final`（残码位不给虚词优待），去掉那个函数即变红。
+    // 后三条靠 step 2c 直接产出。「人」「吗」不在虚词表、被取代的「让」「们」在：
+    // 同时守着 `score_node_partial_final`（残码位不给虚词优待），去掉它即变红。
     for (input, want) in [
         ("buzhidaok", "不知道看"),
         ("jisuanjik", "计算机看"),
@@ -429,12 +362,10 @@ fn test_trailing_partial_completes_into_sentence() {
     }
 }
 
-/// 残码补全**不得把已完成的音节重新切开**。
+/// 残码补全不得把已完成的音节重新切开。
 ///
-/// 这条锁住 step 2c 与 `add_abbrev_nodes` 的分工：二者都是「补音节图给不出的节点」、
-/// 代码形状几乎一样，但简拼节点会把整串按声母重切。实测放开简拼闸门让残码入图，
-/// `buzhidaok` 产出的是「不直达欧卡」、`nihaom` 是「你黑暗欧美」—— `bu zhi dao` 被
-/// 拆回 b/u/zh/i/d/a/o 去凑简拼了。若哪天有人把两条路径合并，本测试当场变红。
+/// 锁住 step 2c 与 `add_abbrev_nodes` 的分工：两者代码形状相近，但简拼节点会按声母重切，
+/// 让残码走简拼会得到「不直达欧卡」「你黑暗欧美」。两条路径若被合并，本测试即红。
 #[test]
 fn test_partial_completion_preserves_completed_syllables() {
     let Some(dir) = data_dir() else {
@@ -470,11 +401,8 @@ fn test_partial_completion_preserves_completed_syllables() {
     }
 }
 
-/// step 2c 的门槛：`syllables.len() >= 2`。
-///
-/// 1 音节 + 残码（`nim`）不走本路径——那种输入的正解是词库补全（你们/你没），
-/// 残码整句「你吗」只会挤掉它。同 fcitx5 `partialLongWordLimit` 的精神：
-/// 短输入不做激进的部分匹配。
+/// step 2c 的门槛：`syllables.len() >= 2`。1 音节 + 残码（`nim`）的正解是词库补全
+/// （你们/你没），残码整句「你吗」只会挤掉它；同 fcitx5 `partialLongWordLimit`。
 #[test]
 fn test_partial_completion_skips_single_syllable_input() {
     let Some(dir) = data_dir() else {
@@ -495,17 +423,11 @@ fn test_partial_completion_skips_single_syllable_input() {
     );
 }
 
-/// 残码整句必须产出、带整句身份、且**消费整串**。
+/// 残码整句必须产出、带整句身份、且消费整串。
 ///
-/// 三条输入覆盖 step 2c 的两个分支：`buzhidaok`/`zhonghuar` 走新建候选，`nihaom` 走同文
-/// 合并（残码整句「你好吗」恰好等于词库里已有的前缀补全）—— 合并分支漏标 `is_sentence`
-/// 不会编译报错，只会让它在排序里退化成普通补全。
-///
-/// `consumed_length == 输入长度` 是残码整句区别于 step 2 整句的关键：后者在 `buzhidaok`
-/// 下只消费 8/9 键。协调器比较链 ⓪ 靠这个值把「不知道看」排在「不知道」之前。
-///
-/// （曾另有一条 `is_sentence_unanchored` 断言，用于守「摘掉 freq_rerank 顶部锚定」。
-///  整句锚定已整体移除、该字段随之回收。）
+/// `buzhidaok`/`zhonghuar` 走新建候选，`nihaom` 走同文合并（残码整句「你好吗」等于已有的
+/// 前缀补全）；合并分支漏标 `is_sentence` 不会编译报错，只会让它退化成普通补全。
+/// `consumed_length == 输入长度` 是它区别于 step 2 整句的关键，协调器比较链 ⓪ 靠它排序。
 #[test]
 fn partial_sentence_is_marked_sentence_and_consumes_all() {
     let Some(dir) = data_dir() else {
@@ -535,12 +457,8 @@ fn partial_sentence_is_marked_sentence_and_consumes_all() {
 
 /// `weight <= 0` 的词条不得获得「距离 1 无条件上浮」的特权。
 ///
-/// w≤0 是词库对**存疑 / 非标准条目**的标记（`lattice.rs::score_node` 早就对它罚 -10），
-/// 而无条件上浮那条原本没有任何权重下限 —— 于是最不可靠的词反而被提到最显眼处：
-/// `zhonghuar` 的「种花人」(w=0、距离恰好 1) 排到第 2，压过 w=18 的「中华人民」
-/// （后者距离 2、要过 `COMPLETION_FAR_WEIGHT_FLOOR` 而没过）。
-///
-/// librime 用 `log(w > 0 ? w : DBL_EPSILON)` 在结构上避免了这类条目参与竞争。
+/// w≤0 是词库对存疑条目的标记（`lattice.rs::score_node` 对它罚分）；否则 `zhonghuar` 的
+/// 「种花人」(w=0、距离 1) 会排到第 2。librime 用 `log(w > 0 ? w : DBL_EPSILON)` 结构上避免了这点。
 #[test]
 fn zero_weight_completion_does_not_get_unconditional_float() {
     let Some(dir) = data_dir() else {

@@ -1,38 +1,22 @@
-//! 用户/临时词的 `boundary == 0` **不等于「音节数算不出」**，两条产出通道都不得据此
-//! 把它当「无信息」处置。
+//! 用户/临时词的 `boundary == 0` 不等于「音节数算不出」，两条产出通道都不得据此把它当
+//! 「无信息」处置。
 //!
-//! ## 背景
+//! 手输码用户词（`dict import`、只填码不填音节、旧版数据）恒 `boundary = 0`，但码本身是合法
+//! 全拼串，DAG 现切即得音节数。召回门、step4 显示序档位、`should_promote_user_completion`、
+//! step 6.7 全拼降级支路的档位回填都须走 `effective_boundary`，否则同一个词带不带边界字段
+//! 就决定了它能不能被看见。
 //!
-//! 手输码用户词（`dict import`、GUI 里只填码不填音节、旧版数据）恒 `boundary = 0`，
-//! 但它的码本身就是合法全拼串，DAG 现切即得音节数。`3f0e34d1` 为此在**召回门**与
-//! step4 显示序档位两处统一改走 `effective_boundary`，却漏了另外两处：
+//! ## 「距词尾太远所以不上浮」只能在 step 6.7 支路上验
 //!
-//! | 位置 | 漏掉的后果 |
-//! |---|---|
-//! | `should_promote_user_completion`（step 6 用户词上浮判据） | 手输码词一律退化到 `started >= 3` 门槛，与召回门不同口径 |
-//! | step 6.7 全拼降级支路的档位回填 | `boundary==0 → continue` ⇒ `extra` 恒 0、且**从不上浮** |
-//!
-//! 于是「同一个词有没有带边界字段」决定了它能不能被看见 —— 这正是
-//! `should_promote_user_completion` 文档里要消除的那个「召回了却沉在必被截断的位置」
-//! 的中间态。
-//!
-//! ## ⚠️ 「距词尾太远所以不上浮」只能在 step 6.7 支路上验
-//!
-//! step 6.3 的 `retain` 用 `syllable_cap = started + max_extra` 裁掉所有 `is_prefix`
-//! 候选，而 `word_syls <= started + max_extra` 与判据里的 `remaining <= max_extra`
-//! **是同一个不等式** —— 主路径上能活到判据后面的候选必然满足它，收紧 `max_extra`
-//! 只会让候选在召回层就没了，断言空过。
-//!
-//! 本文件首版在主路径上写了这样一条对照，实测：把 `should_promote_user_completion`
-//! 整个改成 `return true`，本文件连同 `engine_manager` / `pinyin_user_word_boundary`
-//! 里的同类对照**共 40 个用例全绿**。故下侧对照改挂在 6.7 支路 —— 那条路的用户词
-//! 刻意不受 `completion_syllable_cap` 约束（见 `recall_full_pinyin` 里的取舍说明）。
+//! step 6.3 的 `retain` 用 `syllable_cap = started + max_extra` 裁掉 `is_prefix` 候选，与判据里的
+//! `remaining <= max_extra` 是同一个不等式，主路径上的下侧对照必然空过（判据改成 `return true`
+//! 也全绿）。故下侧对照挂在 6.7 支路，那条路的用户词刻意不受 `completion_syllable_cap` 约束
+//! （见 `recall_full_pinyin` 里的取舍说明）。
 //!
 //! ## 夹具的要害
 //!
-//! 每组两条用户词**同码、同权重、只差 boundary**（文本加「甲/乙」区分，否则 step 6 的
-//! 同文合并会把两条并成一条、对照就不存在了）。判据是**两条必须表现一致**，
-//! 而不是某条落在某个具体位次 —— 后者会随夹具规模漂移。
+//! 每组两条用户词同码、同权重、只差 boundary（文本加「甲/乙」区分，否则 step 6 的同文合并会把
+//! 两条并成一条）。判据是两条必须表现一致，而不是某条落在某个具体位次（会随夹具规模漂移）。
 //!
 //! 自带 wdat 夹具 + `data/schemas/shuangpin`（版本控制内），不依赖 `build_dev/data`。
 
@@ -118,9 +102,8 @@ fn engine(tag: &str, max_extra: u32, shuangpin: bool) -> PinyinEngine {
 
 /// 一条候选上被本文件关注的几项。
 ///
-/// ⚠️ **`pos` 刻意不参与相等比较**（见手写的 `PartialEq`）：两条对照词同码同权重，
-/// 它们的相对先后由插入序决定而非任何判据，拿它断言等于把「稳定排序的实现细节」
-/// 钉进护栏。留着字段只为失败信息里能一眼看出各自落在哪。
+/// `pos` 不参与比较（见 [`cmp_key`]）：两条对照词同码同权重，相对先后由插入序决定，
+/// 拿它断言等于钉住稳定排序的实现细节。留着只为失败信息里能看出各自落在哪。
 #[derive(Debug)]
 struct Seen {
     /// 只出现在 `Debug` 输出里（失败信息），没有任何断言读它 —— `derive(Debug)`
@@ -131,9 +114,8 @@ struct Seen {
     promoted: bool,
 }
 
-/// 参与比较的投影。写成函数而不是给 `Seen` 手写 `PartialEq`：后者在两者只差 `pos`
-/// 时会打印出「看着不一样却判等」的两行，读的人先得愣一下才想起 `pos` 被忽略了。
-/// 这样断言比的是什么一目了然，`pos` 留在附带的 `{a:?} {b:?}` 里当线索。
+/// 参与比较的投影。写成函数而非给 `Seen` 手写 `PartialEq`，断言比的是什么一目了然，
+/// `pos` 留在附带的 `{a:?} {b:?}` 里当线索。
 fn cmp_key(s: &Seen) -> (u8, bool) {
     (s.extra, s.promoted)
 }
@@ -171,8 +153,8 @@ fn both(e: &PinyinEngine, input: &str) -> (Seen, Seen) {
 
 /// 主路径 step 6：手输码用户词的上浮判据必须与带边界的同码词一致。
 ///
-/// `qingf` = qing + 残码 f ⇒ started 2，词 5 音节 ⇒ 距词尾 3 ≤ max_extra 5 ⇒ 应上浮。
-/// 修复前无边界那条落进 `started >= 3` 退化门槛（2 < 3）⇒ 不上浮、位次落后。
+/// `qingf` = qing + 残码 f ⇒ started 2，词 5 音节 ⇒ 距词尾 3 ≤ max_extra 5 ⇒ 应上浮；
+/// 无边界那条若退化到 `started >= 3` 门槛就不上浮。
 #[test]
 fn main_path_no_boundary_word_promotes_like_bounded_one() {
     let e = engine("main", 5, false);
@@ -190,13 +172,10 @@ fn main_path_no_boundary_word_promotes_like_bounded_one() {
     assert_eq!(b.extra, 3, "5 音节词在 started=2 的输入下 extra 须为 3");
 }
 
-/// **下侧对照**：距词尾超出 `max_extra` 时两条都不上浮。
+/// 下侧对照：距词尾超出 `max_extra` 时两条都不上浮。全仓唯一能让这个命题可观测的位置
+/// （理由见文件头），少了它，判据改成 `return true` 也能全绿。
 ///
-/// 这是全仓唯一能让这个命题**可观测**的位置（理由见文件头），故走 6.7 支路。
-/// 少了它，把判据改成 `return true` 也能让本文件其余用例全绿。
-///
-/// `max_extra = 1`、`qingfengs` = qing|feng + 残码 s ⇒ started 3，
-/// 词 5 音节 ⇒ 距词尾 2 > 1 ⇒ 不上浮。
+/// `max_extra = 1`、`qingfengs` = qing|feng + 残码 s ⇒ started 3，词 5 音节 ⇒ 距词尾 2 > 1。
 #[test]
 fn fallback_branch_far_word_promotes_for_neither() {
     let e = engine("fb_far", 1, true);
@@ -216,9 +195,8 @@ fn fallback_branch_far_word_promotes_for_neither() {
 
 /// step 6.7 全拼降级支路：同样不得因 `boundary == 0` 跳过档位回填与上浮判据。
 ///
-/// 双拼方案下打全拼 `qingfengs`，这条支路是该用户词的**唯一产出通道**
-/// （主路径把击键当双拼读，切出的音节串完全不同）。
-/// 修复前无边界那条 `extra` 恒 0（与真值 2 不符）且 `promoted=false`。
+/// 双拼方案下打全拼 `qingfengs`，这条支路是该用户词的唯一产出通道（主路径把击键当双拼读）。
+/// 无边界那条若被跳过，`extra` 恒 0（真值 2）且 `promoted=false`。
 #[test]
 fn fallback_branch_no_boundary_word_gets_tier_and_promotion() {
     let e = engine("fb", 5, true);
@@ -237,15 +215,11 @@ fn fallback_branch_no_boundary_word_gets_tier_and_promotion() {
     assert_eq!(b.extra, 2, "5 音节词在 started=3 的输入下 extra 须为 2");
 }
 
-/// step 6 **同文合并分支**：用户词与系统词库同文时，用户权重能否生效同样不看 boundary。
+/// step 6 同文合并分支：用户词与系统词库同文时，用户权重能否生效同样不看 boundary。
 ///
-/// 这是 step 6 里与「新增」分支并列的另一半，判据同源但代码另写一段
-/// （`existing.weight = promotion_cap.map_or(...)` 那支）。首版护栏只覆盖了新增分支，
-/// 把合并分支的判据换成裸 `boundary` 做变异，全部用例照样绿。
-///
-/// 合并分支控制的**不是** `is_promoted_completion` 而是**用户权重生不生效**：
-/// 判据为真 ⇒ `weight` 取 `max(系统, 用户)` 再受 `promotion_cap` 封顶；
-/// 为假 ⇒ 保留系统权重、用户配的权重白配。故断言钉在 `weight` 上。
+/// 与「新增」分支判据同源但代码另写一段（`existing.weight = promotion_cap.map_or(...)`）。
+/// 合并分支控制的是用户权重生不生效：判据为真 ⇒ `max(系统, 用户)` 再受 `promotion_cap` 封顶；
+/// 为假 ⇒ 用户配的权重白配。故断言钉在 `weight` 上。
 #[test]
 fn merge_branch_user_weight_applies_without_boundary() {
     const SYS_WEIGHT: i32 = 1;

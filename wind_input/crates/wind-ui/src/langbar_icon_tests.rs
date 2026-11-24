@@ -29,8 +29,7 @@ fn output_length_matches_every_declared_size() {
 
 /// 主字尺寸不得随角标有无变化。
 ///
-/// 真机回归：早期版本按 has_badge 分了两档字号（有角标 78%、无角标满格），
-/// 而英文态恰好没有标点角标，于是每次中英切换字号都肉眼可见地跳一下。
+/// 英文态恰好没有标点角标，按 has_badge 分档字号会让每次中英切换字号都跳一下。
 ///
 /// 只在 Windows 上跑：其它平台文本后端是 mock，画不出主字。
 #[cfg(windows)]
@@ -63,10 +62,8 @@ fn glyph_size_does_not_change_with_badge() {
     );
 }
 
-/// 中文标点与英文标点必须画出**不同**的像素，否则角标形同虚设。
-///
-/// 这条是整个功能的存在意义所在：曾经的实现里 `_bChinesePunct` 一路传到了 DLL、
-/// 也参与了重绘判据，唯独没进绘制——图标每次都重画，画出来的东西却一模一样。
+/// 中文标点与英文标点必须画出不同的像素，否则角标形同虚设：标点状态须真的进入绘制，
+/// 而不只是参与重绘判据。
 #[test]
 fn chinese_and_english_badges_differ() {
     let r = IconRenderer::new(BadgeStyle::Corner).expect("renderer");
@@ -79,8 +76,8 @@ fn chinese_and_english_badges_differ() {
 
 /// 只装一条规则的渲染器，用于把某一条的表现单独拎出来验。
 ///
-/// 出厂表有三条，直接用它验单条行为会把"另外两条恰好没命中"当成隐含前提——
-/// 出厂表一改，断言的前提就没了，而测试本身看不出哪里错。
+/// 出厂表有三条，直接用它验单条行为会把「另外两条恰好没命中」当成隐含前提，
+/// 出厂表一改前提就没了。
 fn with_rule(rule: BadgeRule) -> IconRenderer {
     let mut r = IconRenderer::new(BadgeStyle::Corner).expect("renderer");
     r.rules = vec![rule];
@@ -138,8 +135,8 @@ fn corner_badge_lands_in_bottom_right_quadrant() {
 
 /// 四个角落各自落在自己的象限里，且不越界到对角。
 ///
-/// 四个角共用一套判据、靠坐标折叠区分（见 `draw_corner_triangle`），折错的产物
-/// 仍是个三角、只是位置或朝向不同——这种差异在 16px 的任务栏上几乎看不出来。
+/// 四个角共用一套判据、靠坐标折叠区分（见 `draw_corner_triangle`），折错的产物仍是个三角、
+/// 只是位置或朝向不同，在 16px 任务栏上几乎看不出来。
 #[test]
 fn every_corner_lands_in_its_own_quadrant() {
     let n = 32usize;
@@ -175,10 +172,8 @@ fn every_corner_lands_in_its_own_quadrant() {
     }
 }
 
-/// 全角规则出厂画在**右上角**象限。
-///
-/// 这条同时钉住出厂那份分工：全角与标点是正交的两件事，出厂分处两角，挤在同一角
-/// 就得为四种搭配各设计一种编码，而 16px 上放不下那么多可辨的差异。
+/// 全角规则出厂画在右上角象限。同时钉住出厂分工：全角与标点是正交的两件事，挤在同一角
+/// 就要为四种搭配各设计一种编码，16px 上放不下。
 #[test]
 fn full_width_mark_lands_in_top_right_quadrant() {
     let r = IconRenderer::new(BadgeStyle::Corner).expect("renderer");
@@ -207,10 +202,8 @@ fn full_width_mark_lands_in_top_right_quadrant() {
     );
 }
 
-/// 半角在右上角**一点痕迹都不能留**。
-///
-/// 半角是常态：给它也画个标记，图标上就常驻一个永不变化的点——既没告诉用户任何事，
-/// 又占掉 16×16 里本就稀缺的一角。这条防的是将来有人"顺手给半角也加一条规则"。
+/// 半角在右上角一点痕迹都不能留：半角是常态，给它画标记只会常驻一个不传达信息的点，
+/// 又占掉本就稀缺的一角。
 #[test]
 fn half_width_leaves_no_top_right_mark() {
     let r = with_rule(BadgeRule::solid(
@@ -262,11 +255,8 @@ fn width_mark_and_punct_badge_are_independent() {
     }
 }
 
-/// 同一个角落同时命中多条时，**只画最靠前的那一条**。
-///
-/// 位置成为规则属性之后这是可达状态（如把全角也挪到右下），而 16px 上叠两个三角
-/// 只会糊成一片。判据取「两条并存的结果 == 只留第一条的结果」：若第二条也画了，
-/// 或者顺序反过来赢，逐字节都对不上。
+/// 同一个角落同时命中多条时，只画最靠前的那一条（16px 上叠两个三角只会糊成一片）。
+/// 判据取「两条并存的结果 == 只留第一条的结果」，第二条也画了或顺序反了都对不上。
 #[test]
 fn only_the_first_rule_wins_in_a_shared_corner() {
     let both = IconSpec {
@@ -307,10 +297,8 @@ fn only_the_first_rule_wins_in_a_shared_corner() {
     assert_ne!(punct_first, full_first, "两条规则本就该画出不同的东西");
 }
 
-/// 角标不透明度只作用于**角标**，主字不受影响。
-///
-/// 透明度的用途是"别把字吃掉"（右下有笔画的「五」「双」会被实心色块切掉一角），
-/// 一旦它漏到主字上，整个图标会随之发灰——那是 `dimmed` 的语义，两者必须分开。
+/// 角标不透明度只作用于角标，主字不受影响。透明度的用途是别把字吃掉；漏到主字上整个图标
+/// 会发灰，那是 `dimmed` 的语义，两者必须分开。
 #[test]
 fn badge_alpha_only_affects_the_badge() {
     let mut r = IconRenderer::new(BadgeStyle::Corner).expect("renderer");
@@ -338,16 +326,11 @@ fn badge_alpha_only_affects_the_badge() {
     }
 }
 
-/// 半透明角标必须真的"半遮"：角标覆盖处底下的主字笔画不能被挖掉。
+/// 半透明角标必须真的「半遮」：角标覆盖处底下的主字笔画不能被挖掉，否则挖空与透明同时用，
+/// 调低不透明度看起来毫无效果。判据取同一处像素在半透明档下比全不透明档更接近主字。
 ///
-/// 这是第一版的实际缺陷——挖空与透明同时用，主字先被切掉一圈，角标底下根本没有
-/// 笔画可透，于是调低不透明度看起来毫无效果。判据取"同一处像素在半透明档下比
-/// 全不透明档**更接近主字**"：不挖空时该处是 主字⊕角标 的混合，挖空时只有角标。
-///
-/// ⚠️ **判据依赖主字真有墨迹，故 gate 到 Windows**（同 `text/dwrite.rs` 里三处
-/// `cfg(all(test, windows))` 的理由）。Linux 的文本后端是空操作 mock（`draw` 直接
-/// 返回 `Ok(())`，见 `text/dwrite.rs` 的非 Windows/非 macOS 分支），那里主字恒全
-/// 透明——"被挖掉的笔画"无从谈起，`translucent_denser` 恒为 0，断言必然不成立。
+/// 判据依赖主字真有墨迹，故 gate 到 Windows：Linux 的文本后端是空操作 mock（见
+/// `text/dwrite.rs`），主字恒全透明，断言必然不成立。
 #[cfg(windows)]
 #[test]
 fn translucent_badge_lets_the_glyph_show_through() {
@@ -384,9 +367,8 @@ fn translucent_badge_lets_the_glyph_show_through() {
 
 /// 右上角标的**直角确实在右上角**，斜边朝图标中心。
 ///
-/// 上面那条象限测试只验证"右上象限有新像素"，方块、圆点、甚至画反了的三角都能通过。
-/// 这里沿顶行取两点：贴着右边界的那点在直角顶点上必有墨；沿同一行往左走出斜边之外
-/// 的那点必须与半角时**逐字节相同**（即标记没画到那儿去）。
+/// 象限测试只验证「右上象限有新像素」，方块、圆点、画反的三角都能通过。这里沿顶行取两点：
+/// 贴右边界那点在直角顶点上必有墨；往左走出斜边之外的那点必须与半角时逐字节相同。
 #[test]
 fn top_right_triangle_has_its_right_angle_at_top_right() {
     // 显式给倍率 1.0 而不是借出厂那条：下面「斜边之外」的取样点按 leg 算，
@@ -426,8 +408,7 @@ fn top_right_triangle_has_its_right_angle_at_top_right() {
 
 /// 出厂三条规则的颜色两两不同。
 ///
-/// 同色会让人以为两者有关联——"蓝的那个怎么又跑到右上角去了"。它们表达的是互不
-/// 相干的状态，而位置是用户可改的，**颜色是唯一还能承载"不相干"的通道**。
+/// 它们表达互不相干的状态，而位置是用户可改的，颜色是唯一还能承载「不相干」的通道。
 #[test]
 fn default_rules_use_three_distinct_colors() {
     let rules = IconRenderer::default_rules();
@@ -447,8 +428,7 @@ fn default_rules_use_three_distinct_colors() {
 
 /// 颜色配成 `auto`（渲染侧的 `None`）时，角标退化为主字色。
 ///
-/// 这是配置里 `color_light = "auto"` 的落点，也是色值解析失败的降级目标——
-/// 降级后整张图只该有主字那一种色相。
+/// 这是 `color_light = "auto"` 的落点，也是色值解析失败的降级目标：整张图只该有主字那一种色相。
 #[test]
 fn auto_color_falls_back_to_the_glyph_color() {
     let mut r = IconRenderer::new(BadgeStyle::Corner).expect("renderer");
@@ -490,12 +470,9 @@ fn auto_color_falls_back_to_the_glyph_color() {
 
 /// 条目倍率归零 = 这一条彻底不画，必须与状态未命中时逐字节相同。
 ///
-/// 防的是一种很容易漏的半截短路：形状本身按 leg=0 画不出来，可挖空版的尺寸是
-/// `leg + gap`，仍有 gap 那么大——于是主字被挖掉一块、却没有任何东西补上去，
-/// 看起来像字缺了一角，而"不画"本该什么都不发生。
+/// 防半截短路：形状按 leg=0 画不出来，但挖空版尺寸是 `leg + gap`，主字仍会被挖掉一块。
 ///
-/// `badge_alpha = 1.0` 是**必需的**：挖空只在不透明档发生（见 `badge_alpha`），
-/// 用默认的 0.88 跑这条，clear 恒为空，短路漏没漏都测不出来。
+/// `badge_alpha = 1.0` 是必需的：挖空只在不透明档发生，用默认的 0.88 跑这条测不出短路。
 #[test]
 fn rule_scale_zero_carves_nothing() {
     let mut r = with_rule(BadgeRule::solid(
@@ -519,9 +496,8 @@ fn rule_scale_zero_carves_nothing() {
 
 /// 条目自带的不透明度覆盖全局值。
 ///
-/// 这是 `alpha_light/dark` 的落点：色相相同、只有不透明度不同的两条规则，
-/// 画出来必须不一样；而**不写**不透明度的那条要与全局值画出的结果逐字节相同——
-/// 后半条防的是「覆盖字段忘了回落，于是没写就当成 0（全透明）」。
+/// 这是 `alpha_light/dark` 的落点：色相相同、只有不透明度不同的两条规则画出来必须不一样；
+/// 不写不透明度的那条要与全局值画出的结果逐字节相同（防覆盖字段没回落、被当成 0）。
 #[test]
 fn per_rule_alpha_overrides_the_global_default() {
     let spec_cn = spec(PunctBadge::Chinese);
@@ -555,9 +531,8 @@ fn per_rule_alpha_overrides_the_global_default() {
 
 /// 挖空档位**逐层**生效：同一张图里可以一条实心挖空、另一条半遮不挖。
 ///
-/// 条目能各自指定不透明度之后，这条判据就必须从全局降到层上。若还照旧用全局值判，
-/// 症状是「把某一条调到 FF，它周围的主字没被挖开」——而挖空正是它与主字分离的
-/// 全部手段，看起来就是那一条糊在字上。
+/// 条目能各自指定不透明度后，挖空判据须从全局降到层上；否则调到 FF 的那条周围主字没被挖开，
+/// 看起来糊在字上。
 #[cfg(windows)]
 #[test]
 fn carving_is_decided_per_layer() {
@@ -636,8 +611,7 @@ fn badge_scale_changes_badge_size() {
 
 /// 条目倍率与全局倍率**相乘**，两级各自有效。
 ///
-/// 第三条断言钉住的是「相乘」本身：若哪天有人把条目倍率改成覆盖全局，
-/// 同一乘积的两条路径就会画出不同的东西。
+/// 第三条断言钉住「相乘」本身：条目倍率若改成覆盖全局，同一乘积的两条路径会画出不同的东西。
 #[test]
 fn rule_scale_multiplies_the_global_scale() {
     let spec_cn = spec(PunctBadge::Chinese);
@@ -685,15 +659,11 @@ fn dimmed_only_lowers_alpha() {
 
 /// 暗色主题下图标画成浅色，亮色主题下画成深色。
 ///
-/// 只检查**有覆盖**的像素：多色合成只在 alpha>0 处写颜色，全透明像素的 RGB 留 0。
-/// 这对 32bpp alpha 图标无影响（系统按 alpha 取舍，RGB 被忽略），
-/// 但断言若不加这道过滤就会把"透明处没填前景色"误报成主题失效。
+/// 只检查有覆盖的像素：多色合成只在 alpha>0 处写颜色，全透明像素的 RGB 留 0（32bpp alpha
+/// 图标下系统忽略它）。必须清空规则表：角标有自己的颜色，本断言测的是主字那条单色通路。
 ///
-/// **必须清空规则表**：角标有自己的颜色，本断言测的是主字那条单色通路。
-///
-/// ⚠️ `#[cfg(windows)]` 与同 mod 其余渲染类断言同理：`render_glyph_mask` 走
-/// DirectWrite，非 Windows 上是 stub，画出来整张透明——最后那道 `inked > 0`
-/// 守卫会如实报「断言等于没跑」。CI 的 check job 在 Linux 上跑 test，会撞到。
+/// 仅 Windows：`render_glyph_mask` 走 DirectWrite，非 Windows 上是 stub、整张透明，
+/// 末尾的 `inked > 0` 守卫会报断言等于没跑。
 #[cfg(windows)]
 #[test]
 fn theme_flips_foreground_channels() {
@@ -717,8 +687,7 @@ fn theme_flips_foreground_channels() {
 
 /// 亮暗配了不同的色时，两个主题下角标像素确实不同。
 ///
-/// 这是「亮暗独立配色」这个自由度的存在性证明：渲染本就按明暗两档各出一张位图，
-/// 若取色时忘了看 `dark_theme`，两档会画出一模一样的角标而没有任何报错。
+/// 「亮暗独立配色」的存在性证明：取色时若忘了看 `dark_theme`，两档会画出一样的角标而不报错。
 #[test]
 fn per_theme_colors_are_honored() {
     let mut r = IconRenderer::new(BadgeStyle::Corner).expect("renderer");
@@ -748,9 +717,7 @@ fn per_theme_colors_are_honored() {
 
 /// 亮暗配成同一个色时，角标在两个主题下逐像素相同（出厂三条就是这个形态）。
 ///
-/// 与上一条互为反向：那条管「配了不同色要真的不同」，这条管「配了同色不许自己
-/// 跟着主题漂」。少了这一侧，有人把角标顺手接上主字前景色也不会被发现，而选色时
-/// "在浅底与深底上都够醒目"这个前提就被悄悄换掉了。
+/// 与上一条互为反向：配了同色不许跟着主题漂。少了这一侧，角标被顺手接上主字前景色也不会被发现。
 #[test]
 fn same_color_in_both_themes_is_theme_independent() {
     let r = IconRenderer::new(BadgeStyle::Corner).expect("renderer");
@@ -774,11 +741,10 @@ fn same_color_in_both_themes_is_theme_independent() {
 
 /// 主字墨迹必须落在图标正中。
 ///
-/// 回归的是「按行盒居中」那版：行盒高含 lineGap 且只加在下方，CJK 字面在 em 框里
-/// 又偏上，两者叠加使字整体偏上——加了最外圈边框后一眼可见。
+/// 行盒高含 lineGap 且只加在下方、CJK 字面在 em 框里又偏上，按行盒居中会让字整体偏上。
 ///
-/// 容差 0.75px：GDI 兼容渲染把基线吸附到整像素，可达位置本就是 1px 一档，
-/// 加上包围盒按整像素量的半像素误差，0.5 已是物理下限。再紧就是在测噪声。
+/// 容差 0.75px：GDI 兼容渲染把基线吸附到整像素，加上包围盒按整像素量的半像素误差，
+/// 0.5 已是物理下限。
 #[cfg(windows)]
 #[test]
 fn glyph_ink_is_centered() {
@@ -805,8 +771,7 @@ fn glyph_ink_is_centered() {
 
 /// 字重与留白的分档判据本身。
 ///
-/// 最后一条是这条测试存在的主要理由：判据**不能**写成 `is_ascii`。全角「Ｅｎ」
-/// 不是 ASCII 却是字母，用 ASCII 判据会把它错分到汉字档、白缩一截。
+/// 最后一条是这条测试存在的主要理由：判据不能写成 `is_ascii`，全角「Ｅｎ」是字母却不是 ASCII。
 #[test]
 fn cjk_detection_splits_latin_from_han() {
     assert!(IconRenderer::has_cjk("英"));
@@ -819,13 +784,10 @@ fn cjk_detection_splits_latin_from_han() {
     );
 }
 
-/// 字重补偿的判据：**只给真的被缩小了的拉丁标签**。
+/// 字重补偿的判据：只给真的被缩小了的拉丁标签。
 ///
-/// 首版按"是不是字母"分档，于是单字符 `"A"` 也被加粗——它行盒不到 8px、根本不进
-/// 回缩，字号仍是满格的，加粗后比改动前突兀，真机实测被否。
-///
-/// ★ 前两条与后两条**必须同时成立**才说明判据对：只测 `"En"` 要加粗，一个"凡字母
-/// 都加粗"的实现照样全绿，而那正是被否掉的那一版。
+/// 单字符 `"A"` 不进回缩、字号满格，加粗反而突兀。前两条与后两条必须同时成立：只测 `"En"`
+/// 要加粗，一个「凡字母都加粗」的实现照样全绿。
 #[test]
 fn weight_compensation_only_for_shrunk_latin() {
     let w = |label: &str, base: f32, target: f32| IconRenderer::label_weight(label, base, target);
@@ -853,11 +815,10 @@ fn weight_compensation_only_for_shrunk_latin() {
     );
 }
 
-/// 装得下的标签不得被回缩。真机回归。
+/// 装得下的标签不得被回缩。
 ///
-/// 判据取墨迹**跨度**而不是逐像素相等：`render_glyph_mask` 末尾有居中校正循环，
-/// 会按墨迹重心迭代微调位置，逐像素比对等于在测那个循环的收敛细节。跨度只受
-/// 字号影响、不受位移影响，正好对上"有没有被缩小"这个问题。
+/// 判据取墨迹跨度而不是逐像素相等：`render_glyph_mask` 末尾按墨迹重心迭代微调位置，
+/// 跨度只受字号影响、不受位移影响。
 #[cfg(windows)]
 #[test]
 fn labels_that_fit_are_not_shrunk() {
@@ -888,9 +849,8 @@ fn labels_that_fit_are_not_shrunk() {
                 .with_weight(IconRenderer::FONT_WEIGHT);
             let base_w = r.text.measure(label, &style).width;
 
-            // 墨迹跨度必然 ≤ 行盒宽（advance 含边距）；被回缩过则会明显小一圈。
-            // 阈值放在 0.7 是留给"墨迹本就窄于 advance"的量，字号真被缩过时
-            // （最小档 0.4~0.5 倍）跨度掉得远比这多。
+            // 墨迹跨度必然 ≤ 行盒宽；0.7 留给「墨迹本就窄于 advance」的量，
+            // 真被回缩时（0.4~0.5 倍）跨度掉得远比这多。
             assert!(
                 span as f32 >= base_w * 0.7,
                 "「{label}」在 {size}px 下墨迹只跨 {span}px，基线行盒 {base_w:.1}px：被回缩了"
@@ -899,13 +859,9 @@ fn labels_that_fit_are_not_shrunk() {
     }
 }
 
-/// 拉丁标签不得被**白缩**。真机回归。
-///
-/// `"En"` 在 16px 下行盒 15.65，本就差不多装得下。早先可用宽度不分档、一律按
-/// 汉字那档取（`s - FONT_SIZE_INSET` = 14），把它缩到 11px 上下，真机反馈
-/// 「E 有些细」——小字号叠加为汉字定的 Light 字重。
-///
-/// 判据取**墨迹跨度**而不是字号：字号只是手段，用户看到的是墨迹占了多少地方。
+/// 拉丁标签不得被白缩：`"En"` 在 16px 下行盒 15.65，本就差不多装得下，可用宽度若按汉字档
+/// （`s - FONT_SIZE_INSET`）取，会被缩到 11px 上下、叠加 Light 字重显得发细。
+/// 判据取墨迹跨度而不是字号：用户看到的是墨迹占了多少地方。
 #[cfg(windows)]
 #[test]
 fn latin_label_is_not_shrunk_needlessly() {
@@ -928,17 +884,12 @@ fn latin_label_is_not_shrunk_needlessly() {
     );
 }
 
-/// 两字符标签必须**完整**落在画布内。
+/// 两字符标签必须完整落在画布内（`[ui.labels]` 允许配成 `En`；字号写死时 `x0` 被钳成
+/// 左对齐，右半个字母画到画布外）。
 ///
-/// `[ui.labels]` 允许把英文态配成 `En`。字号写死 `size - 2` 时 `"En"` 宽约 15px、
-/// 画布 16px，`x0` 的 `.max(0.0)` 会把它钳成左对齐，右半个字母直接画到画布外——
-/// 用户看到的是 `E` 加半个 `n`。回归的就是那一档。
-///
-/// 判据取「最外一圈像素无墨迹」而不是比较宽度数值：**行盒宽不等于墨迹宽**，
-/// 拿 measure 的结果断言等于在测度量约定，量真实输出才是在测用户看到的东西。
-///
-/// 三个标签各代表一类宽度：`En` 半角（临界）、`Ｅｎ`/`符号` 全角（最宽的合法输入，
-/// 必然触发回缩）。少了全角那两个，一个"只在半角时缩"的实现也能全绿。
+/// 判据取「最外一圈像素无墨迹」：行盒宽不等于墨迹宽，量真实输出才是在测用户看到的东西。
+/// `En` 半角（临界）、`Ｅｎ`/`符号` 全角（必然触发回缩）各代表一类宽度；少了全角，
+/// 「只在半角时缩」的实现也能全绿。
 #[cfg(windows)]
 #[test]
 fn two_char_label_fits_canvas() {
@@ -967,11 +918,8 @@ fn two_char_label_fits_canvas() {
 
 /// 关掉总开关后必须与「本来就没有角标」逐字节相同。
 ///
-/// 这是「不显示」这一档的全部承诺：不是画一个更小的角标，而是一点痕迹都不留。
-/// 若哪天挖空蒙版忘了跟着短路，主字上会留下一圈没人填的凹口——那种缺陷肉眼
-/// 只会觉得「字有点怪」，很难联想到是关掉的那条路径没走干净。
-///
-/// ⚠ 关掉的是**总开关**而非清空规则表：规则表还在，这条才真的在验短路。
+/// 「不显示」不是画更小的角标，而是一点痕迹都不留；挖空蒙版若忘了跟着短路，主字上会留一圈凹口。
+/// 关掉的是总开关而非清空规则表：规则表还在，这条才真的在验短路。
 #[test]
 fn style_none_leaves_no_trace() {
     let off = IconRenderer::new(BadgeStyle::None).expect("renderer");
@@ -990,9 +938,8 @@ fn style_none_leaves_no_trace() {
 
 /// 三个落盘 id 都必须唯一且可往返——它们写进 `config.toml`，活得比进程久。
 ///
-/// 未知 id 的处置**按类型不同**，这条同时钉住那个差别：总开关与角落有合理默认值，
-/// 回落即可（配置是手写的，写错一个字母不该让图标消失）；而状态没有默认值，
-/// 只能返回 `None` 让调用方丢掉整条规则——回落到任意一个状态都是替用户瞎猜。
+/// 未知 id 的处置按类型不同：总开关与角落有合理默认值，回落即可（手写配置写错一个字母
+/// 不该让图标消失）；状态没有默认值，只能返回 `None` 让调用方丢掉整条规则。
 #[test]
 fn badge_ids_roundtrip() {
     let mut seen = std::collections::HashSet::new();
@@ -1093,8 +1040,8 @@ fn frame_is_ignored_when_demo_off() {
 
 /// 手动预览工具：把四个角落渲染成对比图，供肉眼比选后再决定默认配到哪一角。
 ///
-/// 部署一次要 UAC 提权并重启输入法，逐个试成本太高；而这些参数（位置、配色、
-/// 间隙、字重）恰恰只能靠看。默认 `#[ignore]`，不进常规测试。
+/// 部署要 UAC 提权并重启输入法，逐个试成本太高，而位置、配色、间隙、字重只能靠看。
+/// 默认 `#[ignore]`，不进常规测试。
 ///
 /// ```text
 /// cargo test -p wind-ui --lib dump_preview -- --ignored --nocapture

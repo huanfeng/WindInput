@@ -2,33 +2,28 @@
 //!
 //! 见 `docs/design/pinyin-entry-boundary-contract.md`。
 //!
-//! **自带 wdat 夹具，不依赖 build_dev/data**（同 `pinyin_abbrev_index.rs`）：依赖真实词库的
-//! 测试在 `build_dev/data` 缺失时会**静默跳过**（判据：耗时 0.00s），而本文件锁的是导入
-//! 闸口的准入判据，不能容忍这种静默失效。
+//! 自带 wdat 夹具，不依赖 build_dev/data（同 `pinyin_abbrev_index.rs`）：依赖真实词库的
+//! 测试在数据缺失时会静默跳过，而本文件锁的是导入闸口的准入判据，不能容忍这种失效。
 //!
-//! ⚠️ **样本必须是歧义切分码**。用 `cainiaoyizhan` 这类 `maximum_match` 恰好猜对的串，
-//! 测试会永远绿着却什么也没验证（同 `pinyin-code-domains.md` 记的假绿模式）。
-//! 本文件的样本全部满足「同一个码有多条切分路径」，且 [`fixture_really_is_ambiguous`]
-//! 专门锁住这个前提本身。
+//! 样本必须是歧义切分码：`maximum_match` 恰好猜对的串会让测试永远假绿。
+//! [`fixture_really_is_ambiguous`] 专门锁住这个前提。
 
 use wind_dict::cached::CachedDict;
 use wind_dict::datformat::WdatWriter;
 use wind_engine::pinyin::{Config as PyConfig, PinyinEngine};
 use wind_engine::{BoundaryResolution, Engine};
 
-/// 造一份最小 wdat。**单字条目是必需的**——`CharPinyinIndex` 遍历标准音节收集单字候选，
-/// 读音验证与判据①都建立在它之上；没有单字条目的字会被判为「无读音」。
+/// 造一份最小 wdat。单字条目是必需的：`CharPinyinIndex` 靠它收集单字候选，
+/// 读音验证与判据①都建立在它之上。
 ///
 /// 夹具里几组关键事实：
-/// - `xian` 同时是 2 音节码（xi|an → 西安）与 1 音节码（xian → 先）：**字数约束的主场**。
-/// - `nanan` 有 `nan|an` 与 `na|nan` 两条 2 音节路径：**靠读音表消歧**。
-/// - `angan` 有 `an|gan` 与 `ang|an` 两条，且**两条都能通过读音验证**：**Ambiguous 的样本**。
-///   为此给「安」虚构了第二读音 ang、给「甘」虚构了第二读音 an——夹具是自造的，这里
-///   要锁的是多解分支的行为，不是汉语事实。
-/// - 「重」的代表读音是 zhong（权重更高），但 `chongqing` 仍应切出 chong|qing：
-///   **有 code 时多音字不构成问题**。
-/// - `xiai`→「喜爱」带真值 boundary，且**故意不给「喜」「爱」单字读音**——这样层 4 必然
-///   算不出来，返回 `Exact` 就证明确实走的是层 2 点查。
+/// - `xian` 同时是 2 音节码（西安）与 1 音节码（先）：字数约束的主场。
+/// - `nanan` 有 `nan|an` 与 `na|nan` 两条 2 音节路径：靠读音表消歧。
+/// - `angan` 有 `an|gan` 与 `ang|an` 两条且都能通过读音验证：Ambiguous 的样本。
+///   为此给「安」虚构了读音 ang、给「甘」虚构了读音 an，锁的是多解分支行为而非汉语事实。
+/// - 「重」代表读音是 zhong，但 `chongqing` 仍应切出 chong|qing：有 code 时多音字不构成问题。
+/// - `xiai`→「喜爱」带真值 boundary 且故意不给单字读音：层 4 必然算不出，
+///   返回 `Exact` 就证明走的是层 2 点查。
 fn fixture(tag: &str) -> CachedDict {
     let dir = std::env::temp_dir().join(format!("wind_boundary_resolve_{tag}"));
     let _ = std::fs::remove_dir_all(&dir);
@@ -47,8 +42,8 @@ fn fixture(tag: &str) -> CachedDict {
         "gan".into(),
         vec![("甘".into(), 5000, 0, 0b1), ("柑".into(), 9000, 1, 0b1)],
     );
-    // 两组字对，分别钐住多解时的两种结局（见各自的测试）：
-    // 「安甘」代表读音 an+gan 拼出来恰好是 angan ⇒ 层 3 能收收尾。
+    // 两组字对分别钉住多解时的两种结局：
+    // 「安甘」代表读音 an+gan 拼出恰好是 angan ⇒ 层 3 能收尾；
     // 「昂柑」代表读音 ang+gan 拼出 anggan ≠ angan ⇒ 层 3 也救不了。
     w.add_with_boundary(
         "ang".into(),
@@ -72,8 +67,7 @@ fn fixture(tag: &str) -> CachedDict {
     // `xian` 一码两切分：单字「先」(xian) 与词「西安」共用；此处只放单字。
     w.add_with_boundary("xian".into(), vec![("先".into(), 900_000, 0, 0b1)]);
     // ── ü 拼写归一的素材（`xv`→`xu`、`nue`→`nve`）──
-    // 词典侧**只有正字法形态**，这正是要点：手输的 `xv` 若不归一，层 2 点查与层 4
-    // 建图都落空 ⇒ 判 Unresolvable，用户加了词却打不出。
+    // 词典侧只有正字法形态：手输的 `xv` 若不归一，层 2 与层 4 都落空 ⇒ Unresolvable。
     w.add_with_boundary("xu".into(), vec![("需".into(), 5000, 0, 0b1)]);
     w.add_with_boundary("yao".into(), vec![("要".into(), 6000, 0, 0b1)]);
     w.add_with_boundary("nve".into(), vec![("虐".into(), 5000, 0, 0b1)]);
@@ -91,10 +85,8 @@ fn engine(tag: &str) -> PinyinEngine {
     PinyinEngine::new(PyConfig::default(), fixture(tag))
 }
 
-/// ★★ **前提自证**：`angan` 必须真有两条都能通过读音验证的路径，否则下面的
-/// `resolves_ambiguous_by_reading_weight` 会因为「压根没有多解」而假绿。
-///
-/// 判据取 `Ambiguous` 这个**变体本身**——它只可能由「读音验证后仍 >1 条」产生。
+/// 前提自证：`angan` 必须真有两条都能通过读音验证的路径，否则
+/// `resolves_ambiguous_by_reading_weight` 会因没有多解而假绿。判据取 `Ambiguous` 变体本身。
 #[test]
 fn fixture_really_is_ambiguous() {
     let e = engine("amb_precondition");
@@ -108,8 +100,7 @@ fn fixture_really_is_ambiguous() {
 }
 
 /// 字数约束把切分从「猜」降为「解方程」：同一个 `xian`，2 字词与 1 字词各得唯一解。
-///
-/// 这正是 `maximum_match` 做不到的——它只看 code，`xi|an` 与 `xian` 覆盖字符数都是 4。
+/// `maximum_match` 只看 code，做不到这一点。
 #[test]
 fn char_count_constraint_resolves_xian() {
     let e = engine("xian");
@@ -122,7 +113,7 @@ fn char_count_constraint_resolves_xian() {
     // 「先」1 字 ⇒ 必须 1 音节 ⇒ xian 整串
     assert_eq!(
         e.resolve_boundary("xian", "先"),
-        // ⚠️ 夹具里「先」带真值 boundary ⇒ **层 2 就命中**，走不到层 4。
+        // 夹具里「先」带真值 boundary ⇒ **层 2 就命中**，走不到层 4。
         // 这不是缺陷：真实词典里单字词条同样带边界，层 2 本就该优先。
         BoundaryResolution::Exact(0b1),
         "xian"
@@ -130,9 +121,7 @@ fn char_count_constraint_resolves_xian() {
 }
 
 /// 三音节：`xian|ning`（2 音节）被字数约束直接排除，只剩 `xi|an|ning`。
-///
-/// 这是 `abbrev_of_code` 在 `boundary == 0` 时踩过的原案：DAG 猜成 xian|ning ⇒ 简拼
-/// 算出 `xn`，用户打 `xan` 召不回、打 `xn` 反而错误命中。
+/// 猜成 xian|ning 会让简拼算出 `xn`，打 `xan` 召不回。
 #[test]
 fn char_count_constraint_resolves_three_syllables() {
     let e = engine("xianning");
@@ -153,10 +142,8 @@ fn reading_table_disambiguates_nanan() {
     );
 }
 
-/// ★ **有 code 时多音字不构成问题**：「重」的代表读音是 zhong，但 code 已经把读音写定了。
-///
-/// 从字生成码的那条路（`generate_word_pinyin`）在这里会给出 zhongqing；而本方法从码出发，
-/// 根本不需要知道「重」是多音字。这是两个方向互补的核心论据（设计文档 §3.3）。
+/// 有 code 时多音字不构成问题：「重」代表读音是 zhong，但 code 已写定读音。
+/// 这是与从字生成码（`generate_word_pinyin`）互补的核心论据（设计文档 §3.3）。
 #[test]
 fn code_pins_the_reading_for_polyphones() {
     let e = engine("chongqing");
@@ -166,13 +153,8 @@ fn code_pins_the_reading_for_polyphones() {
     );
 }
 
-/// ★★ **层 3 在层 4 多解时接手**，把结果从 `Ambiguous` 拉回 `Derived`。
-///
-/// `angan` 有 `an|gan` 与 `ang|an` 两条路径且都通过读音验证 ⇒ 层 4 只能报多解。此时层 3
-/// 出场：`generate_word_pinyin("安甘")` 词典查不到该词，兜底逐字代表读音得 `an gan`，
-/// flat 后**恰好等于** code ⇒ 其切分是确定的，采信为 `Derived`。
-///
-/// 这条正是「层 4 先跑、多解才请层 3」这个层序的价值所在——它没有降低精度。
+/// 层 3 在层 4 多解时接手，把结果从 `Ambiguous` 拉回 `Derived`：`angan` 两条路径都通过
+/// 读音验证，而「安甘」逐字代表读音 flat 后恰好等于 code，切分确定。
 #[test]
 fn layer_three_rescues_layer_four_ambiguity() {
     let e = engine("angan");
@@ -182,10 +164,8 @@ fn layer_three_rescues_layer_four_ambiguity() {
     );
 }
 
-/// 层 3 也救不了时才落到 `Ambiguous`，此时按「各字读音下标之和」择优。
-///
-/// 「昂柑」的代表读音拼出 `ang gan` → flat `anggan` ≠ `angan` ⇒ 层 3 不命中。
-/// 于是比代价：`an|gan`（昂读 an[1] + 柑读 gan[0] = 1）胜过 `ang|an`（昂读 ang[0] + 柑读 an[2] = 2）。
+/// 层 3 也救不了时才落到 `Ambiguous`，按各字读音下标之和择优：「昂柑」拼出 `anggan` ≠ `angan`，
+/// `an|gan`（an[1] + gan[0] = 1）胜过 `ang|an`（ang[0] + an[2] = 2）。
 #[test]
 fn resolves_ambiguous_by_reading_weight() {
     let e = engine("angan_amb");
@@ -196,10 +176,8 @@ fn resolves_ambiguous_by_reading_weight() {
     );
 }
 
-/// 层 2（词典点查真值）优先于求解，且**确实是层 2 在起作用**。
-///
-/// 判据可靠性来自夹具：「喜」「爱」没有单字读音 ⇒ 判据①标记 `no_reading` ⇒ 层 4 必然
-/// 给出 `NoReading` 而非 `Exact`。因此拿到 `Exact` 只可能是层 2 给的。
+/// 层 2（词典点查真值）优先于求解。「喜」「爱」无单字读音 ⇒ 层 4 只会给 `NoReading`，
+/// 拿到 `Exact` 只可能是层 2 给的。
 #[test]
 fn dictionary_truth_wins_and_is_actually_layer_two() {
     let e = engine("xiai");
@@ -207,9 +185,8 @@ fn dictionary_truth_wins_and_is_actually_layer_two() {
         e.resolve_boundary("xiai", "喜爱"),
         BoundaryResolution::Exact(0b101),
     );
-    // 反向对照：同样的字、换一个词典里没有的码 ⇒ 层 2 落空，只剩层 4 的求解结果。
-    // ⚠️ 这里断的是**变体不同**（`NoReading` ≠ `Exact`），层 2 是否起作用的判据在此，
-    // 与「无读音该不该拒收」无关——后者见 `non_han_text_is_kept_with_solved_boundary`。
+    // 反向对照：换一个词典里没有的码 ⇒ 层 2 落空。这里断的是变体不同（`NoReading` ≠ `Exact`），
+    // 无读音该不该拒收见 `non_han_text_is_kept_with_solved_boundary`。
     assert_eq!(
         e.resolve_boundary("xiaiai", "喜爱爱"),
         BoundaryResolution::NoReading(0b10101),
@@ -234,14 +211,9 @@ fn illegal_code_is_unresolvable() {
     );
 }
 
-/// ★★ 判据①不满足 → `NoReading`（**入库**），绝不是 `Unresolvable`。
-///
-/// 这条曾断言拒收。改变来自 issue #97：用户在设置页加了 `zuo ←`（拼音码 → 符号候选，
-/// 加词路径有意放行），导出后再导入却被判非法丢弃——同一条词条，加词放行、导出放行、
-/// 导入拒收。符号在拼音词典里当然没有单字读音，可 `zuo` 是正经音节、`←` 恰好一个字符，
-/// 边界 `0b1` 是确定的，根本不需要读音来定。
-///
-/// ⚠️ 拦截「拿错文件」的力量**不在这条**，在判据②（见 `illegal_code_is_unresolvable`）。
+/// 判据①不满足 → `NoReading`（入库），不是 `Unresolvable`。符号在拼音词典里没有单字读音，
+/// 但 `zuo ←` 的边界 `0b1` 是确定的；拒收会让加词放行、导出放行、导入却拒收。
+/// 拦截「拿错文件」靠判据②（见 `illegal_code_is_unresolvable`）。
 #[test]
 fn non_han_text_is_kept_with_solved_boundary() {
     let e = engine("nonhan");
@@ -254,10 +226,8 @@ fn non_han_text_is_kept_with_solved_boundary() {
     assert!(!r.lacks_boundary(), "它有边界，不是 NoInfo 那一档");
 }
 
-/// ★★ 码超 64 字节 → `NoInfo`（**合法但无边界**），绝不是 `Unresolvable`。
-///
-/// bitmask 装不下更长的码，既定语义是整体降级为 0（同 `wdict::split_spaced_code`）。
-/// 把它判成非法会拒掉合法的超长词条。
+/// 码超 64 字节 → `NoInfo`（合法但无边界），不是 `Unresolvable`：bitmask 装不下时
+/// 整体降级为 0（同 `wdict::split_spaced_code`），判成非法会拒掉合法的超长词条。
 #[test]
 fn overlong_code_is_no_info_not_illegal() {
     let e = engine("overlong");
@@ -269,9 +239,7 @@ fn overlong_code_is_no_info_not_illegal() {
     assert!(r.lacks_boundary());
 }
 
-/// 非拼音方案（trait 默认实现）→ `NoInfo`。
-///
-/// ⚠️ 码表词组码本就没有音节语义，`boundary = 0` 是**正确语义**而非缺陷。默认实现若改成
+/// 非拼音方案（trait 默认实现）→ `NoInfo`。码表词组码没有音节语义，默认实现若改成
 /// `Unresolvable`，码表词库导入会被整体拒收。
 #[test]
 fn non_pinyin_engine_defaults_to_no_info() {
@@ -302,7 +270,7 @@ fn resolution_accessors() {
         (Exact(0b101), 0b101, true),
         (Derived(0b11), 0b11, true),
         (Ambiguous(0b1), 0b1, true),
-        // ★ 带边界且入库：漏掉 `boundary()` 里的这一支，符号词条会以 boundary=0 落库，
+        // 带边界且入库：漏掉 `boundary()` 里的这一支，符号词条会以 boundary=0 落库，
         // 简拼索引对它们静默失效——比直接拒收更难查。
         (NoReading(0b1), 0b1, true),
         (NoInfo, 0, true),
@@ -313,13 +281,8 @@ fn resolution_accessors() {
     }
 }
 
-/// issue #97 的**端到端形状**：单音节码 + 单符号，正是导出/导入往返里被拒的那一条。
-///
-/// ★ 单独立一条而不是并进上面那个多字用例：`zuo ←` 走的是与 `nana 那a` 不同的路径——
-/// 单音节码在 `join_code_by_boundary` 里导出成**无空格**串（`boundary == 1` 与
-/// `boundary == 0` 同形），导入端 `split_spaced_code` 拿到 0、必须重解。多音节词条
-/// 导出带空格、走「层 1 采信作者真值」，压根碰不到求解链。**用户观察到的「2 字及以上
-/// 正常」就是这么来的**，两条路必须各测各的。
+/// 单音节码 + 单符号的导出/导入往返。单立一条：单音节码导出成无空格串（`boundary == 1`
+/// 与 0 同形），导入端必须重解；多音节词条带空格走层 1，碰不到求解链，两条路须各测各的。
 #[test]
 fn single_syllable_symbol_entry_survives_reimport() {
     let e = engine("symbol");
@@ -328,13 +291,9 @@ fn single_syllable_symbol_entry_survives_reimport() {
     assert!(r.accepted(), "★ #97：导出得出来，就必须导得回去");
 }
 
-/// ü 拼写归一（`xv` → `xu`、`nue` → `nve`）：手输的两种写法必须给出**同一个**结果。
-///
-/// ★ 断言写成「两种写法互等」而不是「`xv` 得到某个具体 boundary」：这样归一化若被
-/// 改坏成别的映射，用例照样红——而写死具体值只锁住了一个点。
-///
-/// ⚠️ 这条守的是**入库侧**。查询侧（`convert` 把击键归一）在 `pinyin::tests` 里另有
-/// 用例，两侧缺一不可：只归一查询侧，词以 `xv` 落库、查询查 `xu`，加得进打不出。
+/// ü 拼写归一（`xv` → `xu`、`nue` → `nve`）：两种写法必须给出同一结果。断言写成互等而非
+/// 写死 boundary，归一化改坏成别的映射也会红。
+/// 这条守入库侧；查询侧在 `pinyin::tests` 另有用例，只归一一侧会加得进打不出。
 #[test]
 fn umlaut_spellings_resolve_same_as_orthographic_form() {
     let e = engine("umlaut");
@@ -350,12 +309,9 @@ fn umlaut_spellings_resolve_same_as_orthographic_form() {
     }
 }
 
-/// 反向守卫：`nv`/`lv` 已是正字法形态，归一化不得动它们。
-/// 若误加「n/l 后 v→u」那一臂，`nv` 会被改写成 `nu`、「女」直接入不了库。
-///
-/// ★ 判据取**层 2 点查**（夹具里「女」只挂在 `nv` 下）。先前写成
-/// 「`nv` 与 `nu` 不同解」是个没有区分力的断言：两者都是合法音节，对单字词
-/// 层 4 一律给 `Derived(0b1)`，归不归一化都相等——那条用例无论代码对错都会红。
+/// 反向守卫：`nv`/`lv` 已是正字法形态，归一化不得动它们，否则「女」入不了库。
+/// 判据取层 2 点查（「女」只挂在 `nv` 下）；比「`nv` 与 `nu` 不同解」有区分力，
+/// 单字词层 4 一律给 `Derived(0b1)`。
 #[test]
 fn umlaut_normalization_leaves_nl_v_alone() {
     let e = engine("umlaut_nl");

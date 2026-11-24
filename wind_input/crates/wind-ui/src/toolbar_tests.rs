@@ -55,9 +55,8 @@ fn corner_backs_off_from_work_area_edges() {
 
 /// 副屏在主屏**左侧**时工作区坐标为负，落点必须跟着为负。
 ///
-/// 这正是不能在此处 `max(0)` 的理由：钳到 0 会把工具栏推回主屏，表现为「切到左边那块屏
-/// 工具栏没跟过去」。越界回收由 `render` 里的 `clamp_to_work_area` 负责——它按落点
-/// 反查显示器，不预设桌面原点在 (0,0)。
+/// 所以此处不能 `max(0)`：钳到 0 会把工具栏推回主屏。越界回收由 `render` 里的
+/// `clamp_to_work_area` 负责，它按落点反查显示器，不预设桌面原点在 (0,0)。
 #[test]
 fn corner_allows_negative_coords_on_left_side_monitor() {
     // 左侧副屏：虚拟桌面 x ∈ [-1920, 0)，工作区右下 (0, 1080)。
@@ -66,13 +65,11 @@ fn corner_allows_negative_coords_on_left_side_monitor() {
     assert_eq!(y, 1038);
 }
 
-/// 落点是**尺寸的函数**——同一块屏上横条与纵条的右下角必然落在不同位置。
+/// 落点是尺寸的函数：同一块屏上横条与纵条的右下角必然落在不同位置。
 ///
-/// 这条测试把「算落点时尺寸必须已是真值」钉死。窗口以 `create(160, 40)` 的占位尺寸
-/// 起步，`set_vertical` 在隐藏期间不重排，故首次 `render` 之前 `window.size()` 两种
-/// 朝向的真值都不是。启动序列恰好在那个窗口里恢复位置，用占位尺寸算/钳的结果就是
-/// 重启后凭空左移——量级见末尾断言。修法是 `set_anchor`/`set_corner` 隐藏期间只登记
-/// 意图，落点与钳制统一由 `render` 用刚 `resize` 出的尺寸计算。
+/// 窗口以 `create(160, 40)` 的占位尺寸起步，`set_vertical` 在隐藏期间不重排，首次 `render`
+/// 之前 `window.size()` 不是真值；用它算/钳落点会让重启后凭空左移。故 `set_anchor`/`set_corner`
+/// 隐藏期间只登记意图，落点与钳制统一由 `render` 用刚 `resize` 出的尺寸计算。
 #[test]
 fn corner_depends_on_bar_orientation() {
     // 1920×1080 屏、底部 40px 任务栏 → 工作区右下 (1920, 1040)。
@@ -90,8 +87,8 @@ fn corner_depends_on_bar_orientation() {
 
 /// 四级优先级：`PendingCorner` > `Anchor` > `LastPos` > `PrimaryCorner`。
 ///
-/// ★ 第一级压过记忆锚点是**有意的**：协调器跟随焦点换屏时下发目标屏工作区，
-/// 若让 `Anchor` 赢，工具栏会被上一块屏的记忆位置顶回去 = 跟不动屏。
+/// 第一级压过记忆锚点是有意的：协调器跟随焦点换屏时下发目标屏工作区，若让 `Anchor` 赢，
+/// 工具栏会被上一块屏的记忆位置顶回去。
 #[test]
 fn placement_priority_puts_pending_corner_above_remembered_anchor() {
     assert_eq!(
@@ -121,8 +118,6 @@ fn placement_priority_puts_pending_corner_above_remembered_anchor() {
 ///
 /// 与软键盘 `probe_point_follows_work_area_when_nothing_is_remembered` 同一个不变量：
 /// `ensure_scale` 与 `render` 必须认定同一块屏，否则按 A 屏 DPI 排出的尺寸落到 B 屏。
-/// 工具栏这边靠第一级 `PendingCorner` 覆盖了"该屏无记忆位置"，所以没像软键盘那样
-/// 真的漏掉一级——但这条测试是防它长回来的。
 #[test]
 fn probe_point_stays_on_the_target_screen_at_every_level() {
     // 左侧副屏：工作区 (−1920, 0, 0, 1040)，坐标为负。
@@ -149,14 +144,11 @@ fn probe_point_stays_on_the_target_screen_at_every_level() {
     );
 }
 
-/// ★ 横纵切换时**右下角纹丝不动**——这正是改锚点要解决的那个症状。
+/// 横纵切换时右下角纹丝不动。
 ///
-/// 用户报的现象是「有横竖两种状态，现在切换时的位移就很不好」。根因是此前存的是
-/// 左上角：`bar_layout` 让纵条与横条互为转置（132×30 ↔ 30×132），左上角固定意味着
-/// 条向下长出 102px、向右缩回 102px；贴着屏幕右下角摆放（**出厂默认位置**）时那 102px
-/// 直接顶出工作区，再被 `clamp_to_work_area` 拉回来，于是每切一次挪一次。
-///
-/// 本条把不变量钉死：同一锚点下，两个朝向算出的落点 + 各自尺寸 = 同一个右下角。
+/// `bar_layout` 让纵条与横条互为转置（132×30 ↔ 30×132）；若固定左上角，贴屏幕右下角摆放
+/// （出厂默认位置）时多出的长度会顶出工作区、再被 `clamp_to_work_area` 拉回，每切一次挪一次。
+/// 不变量：同一锚点下，两个朝向算出的落点 + 各自尺寸 = 同一个右下角。
 #[test]
 fn anchor_keeps_bottom_right_fixed_across_orientation() {
     // 用户把工具栏摆在这里（窗口右下角）。
@@ -184,8 +176,7 @@ fn anchor_keeps_bottom_right_fixed_across_orientation() {
 
 /// 增删工具栏格子（`ui.toolbar.items`）同样不得挪动位置。
 ///
-/// 与换向是同一个不变量的另一面：`bar_layout` 的条长 = `grip + cell * n`，
-/// 格数一变条长就变。设置页里勾掉一格就让整条工具栏平移，是同一个 bug 的另一副面孔。
+/// 与换向是同一个不变量的另一面：`bar_layout` 的条长 = `grip + cell * n`，格数一变条长就变。
 #[test]
 fn anchor_keeps_bottom_right_fixed_across_cell_count() {
     const RIGHT: i32 = 1908;
@@ -227,12 +218,10 @@ fn vertical_reuses_same_theme_dimensions() {
     assert_eq!(v.h, GRIP + CELL * N as f32, "纵条总高 = 拖动柄 + 各格");
 }
 
-/// 兜底外框圆角在两个朝向下必须相等——它描述的是**条的厚度**，与条有多长无关。
+/// 兜底外框圆角在两个朝向下必须相等：它描述的是条的厚度，与条有多长无关。
 ///
-/// 曾经这里写的是 `h * 0.30`：横条下 `h` 是厚度（30dp→9dp，正确），纵条下 `h` 却成了
-/// 整条长度（192dp→57.6dp），再被 `push_round_rect` 的 `min(w*0.5)` 钳成 15dp 满胶囊。
-/// 症状是「纵排圆角明显比横排大」，且格数越多越必然触顶。同一个转置问题在按钮高亮
-/// 圆角那里（`hw.min(hh)`）修对了、外框这里漏了——故此处按朝向对拍钉死。
+/// 按 `h` 取比例时，纵条下 `h` 是整条长度，圆角会被 `push_round_rect` 钳成满胶囊、
+/// 格数越多越必然触顶。按钮高亮圆角那里用 `hw.min(hh)`，外框须同样按朝向取厚度。
 #[test]
 fn border_radius_is_orientation_invariant() {
     let h = bar_layout(false, THICK, GRIP, CELL, N);
@@ -276,9 +265,8 @@ fn layout_tracks_cell_count() {
 
 /// n=1（`items` 只留一格）与 n=0 的排布。
 ///
-/// 两者本次才**从不可达变成可达**（`ui.toolbar.items` 之前，格数恒在 4~5）。n=0 已由
-/// `expand_cells` 的兜底挡住，仍钉一条：`bar_layout` 全程无除法，这里断言的是"就算
-/// 哪天兜底被绕过也不会 panic / 不会算出负尺寸"。
+/// `ui.toolbar.items` 让两者可达。n=0 已由 `expand_cells` 的兜底挡住，仍钉一条：`bar_layout`
+/// 全程无除法，就算兜底被绕过也不会 panic、不会算出负尺寸。
 #[test]
 fn layout_handles_one_and_zero_cells() {
     let one = bar_layout(false, THICK, GRIP, CELL, 1);
@@ -351,11 +339,10 @@ fn default_layout_expands_to_every_item() {
     }
 }
 
-/// ★ 防回归：简繁格**恒在**，开关态只体现在格内的字与高亮上。
+/// 简繁格恒在，开关态只体现在格内的字与高亮上。
 ///
-/// 这一格曾与「简繁当前开着」合取，于是关掉之后它自己消失，而它正是简繁的唯一
-/// 鼠标入口——开关把自己藏了，工具栏上再也开不回来。显隐归 `ui.toolbar.items`
-/// 一处管，这条钉的就是「运行时不许再插一脚」。
+/// 它是简繁的唯一鼠标入口，若与「简繁当前开着」合取，关掉后自己消失就再也开不回来。
+/// 显隐归 `ui.toolbar.items` 一处管，运行时不许再插一脚。
 #[test]
 fn s2t_cell_stays_when_conversion_is_off() {
     let layout = [ToolbarItem::S2t];
@@ -367,11 +354,10 @@ fn s2t_cell_stays_when_conversion_is_off() {
     }
 }
 
-/// ★ 同 [`s2t_cell_stays_when_conversion_is_off`]，钉住繁简格的同一条不变量。
+/// 同 [`s2t_cell_stays_when_conversion_is_off`]，钉住繁简格的同一条不变量。
 ///
-/// 另外钉住**格里画什么**：本格恒显「简」、开合只由高亮表达，与上面那格的
-/// 「关简 / 开繁」轮换**不同构**。若哪天有人图对称把它改成轮换，两格都关时会
-/// 一起显「简」，用户分不出哪格是哪格——那正是当初选恒显的理由。
+/// 另外钉住格里画什么：本格恒显「简」、开合只由高亮表达，与上面那格的「关简 / 开繁」轮换
+/// 不同构。若图对称改成轮换，两格都关时会一起显「简」，用户分不出哪格是哪格。
 #[test]
 fn t2s_cell_stays_and_never_swaps_its_glyph() {
     let layout = [ToolbarItem::T2s];
@@ -395,9 +381,8 @@ fn expand_follows_configured_order_and_subset() {
 
 /// 空展开必须回落全量条，而不是渲染出一条只剩拖动柄的空窄条。
 ///
-/// ⚠️ **触发这条的路径变过**：原先是「`items` 只留 `s2t` 而简繁没开」——那层合取
-/// 已删，如今内置项全部无条件产格，只有空 layout 还能走到。兜底照留：闸门要装在
-/// 产出最终结果的那一环，而不是靠上游当下恰好不会送空进来。
+/// 如今内置项全部无条件产格，只有空 layout 还能走到。兜底照留：闸门要装在产出最终结果的
+/// 那一环，而不是靠上游恰好不送空进来。
 #[test]
 fn empty_expansion_falls_back_instead_of_rendering_nothing() {
     let cells = expand_cells(&[], &tb_state(false));
@@ -416,13 +401,10 @@ fn empty_expansion_falls_back_instead_of_rendering_nothing() {
 
 /// 每张工具栏图标都必须**真的能光栅化出可见形状**。
 ///
-/// ★ 这条守的是一个**全程无声**的失效：`rasterize_svg_str_tinted` 解析失败返回
-/// `None`，`draw_svg_icon` 见 `None` 就直接 return——SVG 写错（路径语法、viewBox
-/// 缺失、把形状画到画布外）的表现是**格子空白**，没有日志、没有 panic，编译与其余
-/// 测试全绿。而工具栏格空白与「这一格没配」长得一模一样。
+/// 守一个全程无声的失效：`rasterize_svg_str_tinted` 解析失败返回 `None`，`draw_svg_icon`
+/// 见 `None` 直接 return，SVG 写错的表现只是格子空白，没有日志、没有 panic。
 ///
-/// 按 `FONT_PX * 0.80` 的实际渲染尺寸测（12px），而不是挑一个宽松的大尺寸：细节
-/// 太密的图标在真实尺寸下可能糊成一片，这里顺带把「12px 上还剩多少墨」钉住——
+/// 按 `FONT_PX * 0.80` 的实际渲染尺寸（12px）测，顺带钉住「12px 上还剩多少墨」：
 /// 低于阈值多半是形状太细或跑到画布外了。
 #[test]
 fn every_toolbar_icon_rasterizes_to_visible_ink() {

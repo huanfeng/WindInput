@@ -16,9 +16,8 @@ fn cand(text: &str) -> CandidateItem {
 
 /// 造一个多页候选窗。`embedded` = 内联编码（`candidate_inline`），false 即独立编码栏。
 ///
-/// `rotated`（蒙文竖排）与 `vertical` 互斥、不能同时为真（见 `set_orientation` 的断言），
-/// 故这里传 `rotated=true` 时 `vertical` 一律置 false —— 两者在布局里殊途同归，
-/// 都让 `list_vertical` 成立。
+/// `rotated`（蒙文竖排）与 `vertical` 互斥（见 `set_orientation` 的断言），故 `rotated=true`
+/// 时 `vertical` 一律置 false；两者都让 `list_vertical` 成立。
 fn win(vertical: bool, rotated: bool, embedded: bool, on: bool, preedit: &str) -> CandidateWindow {
     let (tx, _rx) = std::sync::mpsc::channel();
     let mut w = CandidateWindow::new(CandidateWindowConfig::default(), tx).unwrap();
@@ -56,10 +55,8 @@ fn texts(v: &View) -> Vec<String> {
 
 /// 主题写的翻页字符要真的画到树上。
 ///
-/// `arrow_char` 那条纯函数测试挡不住这个 —— 把装配处的 `prev_txt`/`next_txt` 改回字面量
-/// `"‹"`/`"›"`，它照样全绿。而「字段一路解析得好好的、渲染层不消费」正是本次修的 bug
-/// 本体，测试若也绕开消费点，等于把同一个坑再踩一遍。故这条从 `set_theme` 出发，
-/// 一直断言到布局后的树上。
+/// `arrow_char` 那条纯函数测试挡不住装配处把 `prev_txt`/`next_txt` 写成字面量，
+/// 故这条从 `set_theme` 出发，一直断言到布局后的树上。
 #[test]
 fn theme_arrow_chars_reach_the_view_tree() {
     let mut w = win(false, false, false, false, "");
@@ -84,10 +81,9 @@ fn theme_arrow_chars_reach_the_view_tree() {
 
 /// 主题给 footer_bar 配的禁用态文字色，要真的画到禁用那一侧的箭头上。
 ///
-/// 判据取「首页时上一页与下一页**不同色**」这种相对量：绝对色值要跟着回退链（未配时
-/// 回退全局 text_hint）走, 写死就成了另一份需要同步的副本。resolve 那侧另有一条
-/// footer_bar_disabled_state_survives_resolve 钉住「patch 建得出来」, 这条钉住「渲染
-/// 真的读它」—— 两段都断过一次。
+/// 判据取「首页时上一页与下一页不同色」这种相对量：绝对色值要跟着回退链（未配时回退全局
+/// text_hint）走，写死就成了另一份副本。`footer_bar_disabled_state_survives_resolve` 钉
+/// 「patch 建得出来」，这条钉「渲染真的读它」。
 #[test]
 fn theme_disabled_arrow_color_reaches_the_view_tree() {
     let leaf_colors = |ch_prev: &str, ch_next: &str, disabled: Option<[u8; 4]>| {
@@ -136,8 +132,8 @@ fn collect_colors(v: &View, out: &mut Vec<(String, [u8; 4])>) {
 
 /// 多字翻页符号要把按钮（连同命中区）撑宽，而不是盖到页码上或被裁掉。
 ///
-/// 宽度基线 `arrow_w` 是按一个字算的，schema 却不限 prev_char 的长度。判据用相对量
-/// （多字宽 > 单字宽），与本组头注要求一致 —— 三个平台的文本后端量出的绝对宽度各不相同。
+/// 宽度基线 `arrow_w` 按一个字算，schema 却不限 prev_char 的长度。判据用相对量
+/// （多字宽 > 单字宽）：三个平台的文本后端量出的绝对宽度各不相同。
 #[test]
 fn multi_char_arrow_widens_the_hit_box() {
     let hit_w = |ch: &str| {
@@ -159,9 +155,7 @@ fn multi_char_arrow_widens_the_hit_box() {
 
 /// 多字箭头下，同一行的编码预算要跟着收窄 —— 否则超长编码把翻页栏顶出窗口右缘。
 ///
-/// 命中盒那条测试盖不住这个：按钮撑宽了、预算却按单字算，两者不一致恰恰是「箭头宽度
-/// 公式写了两份」的后果。判据沿用同组既有那条（翻页栏右缘须落在窗口内），因为那正是
-/// 预算算漏时真实会坏掉的地方；`pager_row_w` 的注释也明写着这条因果。
+/// 按钮撑宽了、预算却按单字算，就是「箭头宽度公式写了两份」的后果，命中盒那条测试盖不住。
 #[test]
 fn multi_char_arrow_shrinks_the_preedit_budget() {
     let themed = |ch: &str, preedit: &str| {
@@ -184,9 +178,8 @@ fn multi_char_arrow_shrinks_the_preedit_budget() {
     let cap = w.screen_safety_max_width_px() as f32;
     let root = laid(&w, false);
     let (win_w, _) = root.measured_size();
-    // 判据必须是安全上限而不是「翻页栏落在 win_w 内」：预算算漏时整行照样排得下,
-    // 只是 win_w 自己跟着涨 —— 那个不等式恒真, 测了等于没测。真正坏掉的地方是渲染入口
-    // 那道 content_w.min(safety_max_w), 它是**裁切**语义, 超出部分在右缘直接被切掉。
+    // 判据必须是安全上限而不是「翻页栏落在 win_w 内」：预算算漏时 win_w 跟着涨，那个不等式恒真。
+    // 真正坏掉的是渲染入口 `content_w.min(safety_max_w)` 的裁切，超出部分在右缘被切掉。
     assert!(
         win_w <= cap + 0.5,
         "多字箭头下整窗仍不得越过安全上限（{win_w} vs {cap}）—— 越界即预算按单字算漏了"
@@ -231,24 +224,15 @@ fn first_cand(root: &View) -> Rect {
     hit(root, 0).expect("首条候选须参与命中")
 }
 
-/// 造一段**确实已被宽度上限夹住**的超长编码：从 200 组 `a'` 起翻倍，直到「再翻一倍
-/// 也不再变宽」为止，返回夹住的那一档。`mk` 是被测那一档的构造器 —— 必须与随后写
-/// 前置断言时用的是同一个，否则夹住的是另一棵树。
+/// 造一段确实已被宽度上限夹住的超长编码：从 200 组 `a'` 起翻倍，直到再翻一倍也不再变宽，
+/// 返回夹住的那一档。`mk` 必须与随后写前置断言用的是同一个构造器，否则夹住的是另一棵树。
 ///
-/// ⚠️ **重复次数不能写死。** 本组头注说「断言一律是相对量，与文本后端量出多宽无关」，
-///    可「超长编码须已被宽度上限夹住」这条**前置**恰恰是绝对量 —— 它成不成立取决于
-///    一个字有多宽，而三个平台的后端各不相同（Windows: DirectWrite；macOS: CoreText；
-///    Linux: 等宽 mock，见 `text/dwrite.rs` 末尾）。实测同样 200 组 `a'`：Windows 下
-///    已顶到 3000 的上限，macOS 下只有 2713.45，于是这三条**只在 macOS CI 上红**，
-///    Windows 与 Linux(mock) 全绿 —— 本机怎么跑都发现不了。
-///    判据要跟着字宽走，而不是把次数往上调一档、等下一个后端再把它顶穿。
+/// 重复次数不能写死：「已被夹住」是绝对量，取决于字宽，而三个平台的文本后端各不相同
+/// （Windows DirectWrite、macOS CoreText、Linux 等宽 mock），写死的次数会只在某个平台的 CI 上红。
 ///
-/// ★ `> floor` 那半条判据不能省。「加长一倍不再变宽」在**两端**都成立：
-///   一端是这里要的「顶到宽度上限」，另一端是「短得连窗口最小宽度都没撑满」——
-///   实测 mock 后端下 2 组 `a'` 与 4 组同为 116.4，正是后者。少了这半条，探测会在
-///   第一档就「收敛」并交回一段根本没被夹住的短编码，于是三条测试里那些
-///   「不得越过上限」的不等式**全部恒真** —— 绿得毫无意义，正是本组头注反复警告的
-///   那种写法。用空编码那档的树宽当 floor，两个平台期差着两个数量级，分得很开。
+/// `> floor` 那半条判据不能省：「加长一倍不再变宽」在短到没撑满窗口最小宽度时同样成立，
+/// 少了它探测会在第一档就收敛，交回没被夹住的短编码，后面的上限不等式全部恒真。
+/// floor 取空编码那档的树宽。
 fn clamped_preedit(mk: impl Fn(&str) -> CandidateWindow) -> String {
     let floor = laid(&mk(""), false).measured_size().0;
     let mut n = 200usize;
@@ -264,11 +248,7 @@ fn clamped_preedit(mk: impl Fn(&str) -> CandidateWindow) -> String {
     panic!("加到 {n} 组 `a'` 仍未被宽度上限夹住 —— 上限逻辑或文本测量变了，先查那边");
 }
 
-/// ★ 本次修复的核心判据：竖排下**两种编码形态的表现必须一致**。
-///
-/// 修复前内联编码那档完全不理会开关（翻页栏照旧独占底部一行），用户看到的就是
-/// 「同一个开关，换个编码显示方式就失灵」。
-///
+/// 核心判据：竖排下两种编码形态（内联 / 独立编码栏）对并入开关的表现必须一致。
 /// 前置断言不可省：若独立编码栏那档本身就没省下这一行，后面两个相等就成了恒等式。
 #[test]
 fn inline_preedit_joins_pager_like_top_bar() {
@@ -307,11 +287,10 @@ fn inlined_pager_sits_above_first_candidate() {
     );
 }
 
-/// ★ 开关关闭时翻页栏**不得消失**，仍是候选区下方的独立一行。
+/// 开关关闭时翻页栏不得消失，仍是候选区下方的独立一行。
 ///
-/// 这条钉的是实现里的一个真实陷阱：并入分支若写成 `pager.take().filter(开关)`，
-/// 开关关闭时翻页栏会被取出来直接丢掉，末尾装配段再也拿不到它 —— 症状是「关掉开关翻页栏
-/// 就没了」，而开着的时候一切正常，最容易漏测的那一半。
+/// 并入分支若写成 `pager.take().filter(开关)`，关闭时翻页栏被取出后直接丢掉，末尾装配段
+/// 再也拿不到它；开着时一切正常，最容易漏测。
 #[test]
 fn switch_off_keeps_pager_below_candidates() {
     let w = win(true, false, true, false, "nihao");
@@ -334,7 +313,7 @@ fn horizontal_inline_is_untouched_by_switch() {
     assert_eq!(off, on, "横排内联编码下开关不得改变布局");
 }
 
-/// ⚠️ 旋转态（蒙文竖排）刻意排除在外：内联编码在旋转包裹层**内部**，翻页栏跟进去会连
+/// 旋转态（蒙文竖排）刻意排除在外：内联编码在旋转包裹层**内部**，翻页栏跟进去会连
 /// 箭头带页码一起转 90°。那一档维持底部独立行（它挂在 root 上，屏幕上仍是横的一条）。
 #[test]
 fn rotated_inline_keeps_bottom_pager() {
@@ -368,8 +347,8 @@ fn inlined_pager_follows_preedit_to_bottom_on_swap() {
 
 /// 造一个**独立编码栏**（`candidate_top`）的窗口，可带模式徽标。
 ///
-/// 与 `win()` 的区别只有两条：`embedded = false`，以及 `mode_label` 可非空。
-/// 单列一个助手而不给 `win()` 再加参数——这两条测的是 band 那条落点，与内联那族无关。
+/// 与 `win()` 的区别只有 `embedded = false` 与 `mode_label` 可非空；单列助手是因为这两条
+/// 测的是 band 那条落点，与内联那族无关。
 fn bar_win(label: &str, on: bool, preedit: &str) -> CandidateWindow {
     let (tx, _rx) = std::sync::mpsc::channel();
     let mut w = CandidateWindow::new(CandidateWindowConfig::default(), tx).unwrap();
@@ -450,18 +429,12 @@ fn divider_node_controls_the_preedit_separator() {
     assert_eq!(line_of(&laid(&w, false), col), None, "enabled=false 不画");
 }
 
-/// ★ F-17：**独立**编码栏那条落点同样要为并入的翻页栏留出宽度。
+/// 独立编码栏那条落点同样要为并入的翻页栏留出宽度。
 ///
-/// 这是 55032bc0 给内联那条补的同一笔账的另一半，当时漏了。band 排的是
-/// `[编码][spacer][徽标][翻页栏]`，而 `preedit_bar_text_budget_px` 只扣了窗口内边距与
-/// 自身内边距，后两个成员一个都没进预算。
-///
-/// ⚠️ 症状**不是**「窗口探出屏幕」：渲染入口那道 `content_w.min(safety_max_w)` 是**裁切**
-/// 语义、不回头改 `root`，所以窗口出不去，超出的部分在右缘直接被切掉且没有省略号——
-/// 翻页栏看不见或只剩半截箭头。也正因如此 `width_budget_tests` 那组抓不到它（它断的是
-/// 钳制**之后**的窗口宽，恒满足）。判据必须量 `laid()` 的**树宽**、与安全上限比。
-///
-/// 实测（scale=1，200 组 `a'`，上限 3000）：修复前树宽 3091.6，修复后 2994.4。
+/// band 排的是 `[编码][spacer][徽标][翻页栏]`，`preedit_bar_text_budget_px` 须把后两个成员也扣掉。
+/// 症状不是窗口探出屏幕：渲染入口 `content_w.min(safety_max_w)` 是裁切语义，超出部分在右缘
+/// 被切掉且没有省略号。`width_budget_tests` 断的是钳制之后的窗口宽，抓不到；判据必须量
+/// `laid()` 的树宽、与安全上限比。
 #[test]
 fn long_preedit_in_own_bar_reserves_room_for_inlined_pager() {
     let long = clamped_preedit(|p| bar_win("", true, p));
@@ -498,10 +471,8 @@ fn long_preedit_in_own_bar_reserves_room_for_inlined_pager() {
     );
 }
 
-/// ★ F-17 的另一半：模式徽标同样占着 band 的右端，同样得进预算。
-///
-/// 与上一条分开是因为两者**各自独立**地漏掉了——实测（同参数）只带徽标不开翻页栏时
-/// 树宽 3046.4，仍越上限 46.4；只有两项都扣掉，四种组合才全部落回上限内。
+/// 另一半：模式徽标同样占着 band 的右端，同样得进预算。两者各自独立地会漏，
+/// 只带徽标不开翻页栏也会越上限，故分开测。
 #[test]
 fn long_preedit_in_own_bar_reserves_room_for_mode_chip() {
     let long = clamped_preedit(|p| bar_win("临时英文", false, p));
@@ -525,13 +496,11 @@ fn long_preedit_in_own_bar_reserves_room_for_mode_chip() {
     );
 }
 
-/// ★ 超长编码不得把这一行撑出宽度上限：编码的文字预算要先扣掉翻页栏占的那一截。
+/// 超长编码不得把这一行撑出宽度上限：编码的文字预算要先扣掉翻页栏占的那一截
+/// （并入后内联编码不再独占整行预算）。
 ///
-/// 竖排下内联编码原本独占整行预算（与候选互不竞争），并入之后这个前提不再成立。
-///
-/// ⚠️ 参照物必须是**屏幕安全上限**，不能拿 `measured_size()` 当窗口宽去比翻页栏右缘 ——
-/// 树是自底向上量的，翻页栏当然落在自己撑出来的那个宽度里，那样写恒真（本条最初就是
-/// 这么写的，变异检验里「预算不扣翻页栏」一改，七条测试全绿，才发现它什么都没测）。
+/// 参照物必须是屏幕安全上限，不能拿 `measured_size()` 当窗口宽：树自底向上量，翻页栏
+/// 必然落在自己撑出来的宽度里，那样写恒真。
 #[test]
 fn long_preedit_does_not_push_row_past_width_budget() {
     let long = clamped_preedit(|p| win(true, false, true, false, p));

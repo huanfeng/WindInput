@@ -1,13 +1,8 @@
 //! 用户词音节边界的跨层贯通测试（store → DictLayer → engine → Candidate）。
 //!
-//! 边界从用户词表（redb 24B value）出发，要穿过 `record_to_candidate` → `convert`
-//! 才能到达候选，中途任何一处重建 `Candidate` 都会把它丢掉——丢了不报错，只会让
-//! 依赖边界的判据静默退化。
-//!
-//! **这条链曾经就是断的**：`store_layer.rs` 的 `record_to_candidate` 用
-//! `..Default::default()` 收尾，`r.boundary` 从未被带上，用户词候选 boundary 恒 0。
-//! 影响面不止一处——双拼边界校验（任一侧 0 即放行 ⇒ 用户词一律不校验）、
-//! 长词上浮判据、自动造词沿用边界，全部静默走「无边界」分支。
+//! 边界从用户词表（redb 24B value）出发，要穿过 `record_to_candidate` → `convert` 才能到达
+//! 候选，中途任何一处重建 `Candidate`（如 `..Default::default()` 收尾）都会把它丢掉。丢了不报错，
+//! 只会让双拼边界校验、长词上浮判据、自动造词沿用边界静默走「无边界」分支。
 //! 见 docs/design/pinyin-code-domains.md §3 L2。
 //!
 //! 词典缺失时自动跳过。
@@ -40,10 +35,9 @@ fn manager(dir: &Path, tag: &str, words: &[(&str, &str, i32, u64)]) -> EngineMan
     let mut cfg = Config::default();
     cfg.schema.available = vec!["pinyin".to_string()];
     cfg.schema.active = "pinyin".to_string();
-    // ⚠️ **必须显式设回 2 / 3**，不能吃出厂默认（现为 4 / 5）。本文件的样本
-    // （`dabo`/`qingfengs` 等）只有 2~3 个音节，出厂门槛下超音节候选在召回层就没了，
-    // 而本文件要验的是 boundary 能否抵达候选、长词上浮判据是否吃到它——都以候选在场
-    // 为前提。召回门槛的出厂行为由 `pinyin_completion_recall_gate` 守。
+    // 必须显式设回 2 / 3，不能吃出厂默认（4 / 5）：本文件的 2~3 音节样本在出厂门槛下
+    // 召回层就没了，而要验的 boundary 抵达与长词上浮都以候选在场为前提。
+    // 召回门槛的出厂行为由 `pinyin_completion_recall_gate` 守。
     cfg.schema.pinyin.completion.min_syllables = 2;
     cfg.schema.pinyin.completion.max_extra_syllables = 3;
     EngineManager::with_store_override(&cfg, Some(dir), Some(store), Some(root.join("ov")))
@@ -100,15 +94,10 @@ fn user_word_boundary_reaches_candidate() {
     );
 }
 
-/// **简拼须按真值边界投影声母，不得用 `maximum_match` 现猜**。
+/// 简拼须按真值边界投影声母，不得用 `maximum_match` 现猜。
 ///
-/// 「西安宁」真值切分 `xi|an|ning` ⇒ 简拼 `xan`。而 `maximum_match` 会把
-/// `xianning` 切成 `xian|ning` ⇒ 猜出 `xn`。重猜的后果是**既漏又错**：
-/// 真简拼 `xan` 打不出来，假简拼 `xn` 反而命中。
-///
-/// ⚠️ **本用例必须用歧义切分码**。仓库原有的两个简拼测试用
-/// `cainiaoyizhan` / `lanshoubing`——`maximum_match` 恰好猜对，测不出这个缺陷，
-/// 是「测试样本集体避开失效分支」的典型。
+/// 「西安宁」真值 `xi|an|ning` ⇒ 简拼 `xan`；`maximum_match` 切成 `xian|ning` ⇒ 猜出 `xn`，
+/// 既漏又错。本用例必须用歧义切分码，`maximum_match` 恰好猜对的样本测不出这个缺陷。
 #[test]
 fn user_word_abbrev_uses_true_boundary_not_maximum_match() {
     let Some(dir) = data_dir() else {
@@ -144,15 +133,11 @@ fn user_word_abbrev_uses_true_boundary_not_maximum_match() {
     assert!(hit(&without, "xianning"));
 }
 
-/// **简拼候选保留全拼码**，好让词频与全拼输入共用同一个计数。
+/// 简拼候选保留全拼码，让词频与全拼输入共用同一个计数（记账走候选的 `code`）；
+/// 覆盖成简拼串会让同一个词在 `xan` 与 `xianning` 下各记各的。
 ///
-/// 词频记账走 `cand_code`（取候选的 `code`）。此前简拼分支把 code 覆盖成简拼串本身，
-/// 于是同一个词在简拼 `xan` 与全拼 `xianning` 下走两个互不相认的计数——用简拼练熟的
-/// 词切回全拼一点不认，反之亦然。
-///
-/// 同时锁住 `consumed_length`：它的判据是 `query.starts_with(&c.code)`，简拼下
-/// `xan` 不以 `xianning` 开头 ⇒ 落 else 分支取 `query.len()`，仍是「消费整串」。
-/// 这一条容易想当然地认为「code 变长了消费也会变长」，故显式断言。
+/// 同时锁住 `consumed_length`：判据是 `query.starts_with(&c.code)`，简拼下不成立 ⇒ 取
+/// `query.len()`，仍是消费整串。别以为 code 变长消费也会变长。
 #[test]
 fn user_word_abbrev_keeps_full_pinyin_code() {
     let Some(dir) = data_dir() else {
@@ -190,12 +175,10 @@ fn user_word_abbrev_keeps_full_pinyin_code() {
     assert_eq!(c2.code, c.code, "简拼与全拼下的 code 必须一致");
 }
 
-/// **双拼下简拼要认原始击键**，不能拿双拼转换后的全拼去判。
+/// 双拼下简拼要认原始击键，不能拿双拼转换后的全拼去判。
 ///
-/// 简拼的定义是「每字母取一个音节的声母」，只跟敲下的字母有关、与双拼编码方案无关。
-/// 而 `convert` 里 `input` 会被双拼转换结果覆盖、`query` 由它派生：双拼下打 `xan` 得到的
-/// 是「某音节 + partial 声母」，拿它判简拼永远匹配不到用户实际敲的 `xan`——用户词
-/// 「西安宁」的简拼在双拼下因此完全不可达（真机报的现象）。
+/// 简拼只跟敲下的字母有关、与双拼方案无关；而 `convert` 里 `input` 会被双拼转换结果覆盖，
+/// 拿它判简拼永远匹配不到用户实际敲的 `xan`，用户词的简拼在双拼下完全不可达。
 #[test]
 fn shuangpin_abbrev_uses_raw_keystrokes() {
     let Some(dir) = data_dir() else {
@@ -227,17 +210,12 @@ fn shuangpin_abbrev_uses_raw_keystrokes() {
     );
 }
 
-/// **双拼下的混合简拼**（`xanning` = x + an + ning → 西安宁）不得被边界校验误杀。
+/// 双拼下的混合简拼（`xanning` = x + an + ning → 西安宁）不得被边界校验误杀
+/// （`pinyin-mixed-abbrev.md` §5 约束 1）。
 ///
-/// 这是混合简拼最容易翻车的一处（设计文档 `pinyin-mixed-abbrev.md` §5 约束 1）：
-/// 候选的 code 是词的全拼码 `xianning`，而当次击键是 `xanning` —— 两者**根本不同域**，
-/// 双拼真值边界比较必然不符。排序前那道 `boundary_compatible` 过滤靠 `is_abbrev` 豁免
-/// 放行；混合候选一旦漏标这个位，双拼下就会被整批误杀。
-///
-/// 历史同款：wdat v5 给简拼候选填上真实 boundary 后，原本「任一侧为 0 即放行」的隐式
-/// 豁免失效，双拼下简拼整批消失（`ae2df59` 改为显式豁免）。
-///
-/// 用歧义切分码：「西安宁」真值 `xi|an|ning`，而 `maximum_match` 会切成 `xian|ning`。
+/// 候选 code 是全拼码 `xianning`、击键是 `xanning`，不同域，双拼真值边界比较必然不符；
+/// 排序前的 `boundary_compatible` 过滤靠 `is_abbrev` 显式豁免，漏标就整批误杀。
+/// 用歧义切分码：`maximum_match` 会把 `xianning` 切成 `xian|ning`。
 #[test]
 fn shuangpin_mixed_abbrev_survives_boundary_check() {
     let Some(dir) = data_dir() else {
@@ -275,23 +253,11 @@ fn shuangpin_mixed_abbrev_survives_boundary_check() {
     );
 }
 
-/// **用户长词打 2 个音节即可上浮**，且这一行为**不取决于词条填没填 boundary**。
+/// 用户长词打 2 个音节即可上浮，且不取决于词条填没填 boundary。
 ///
 /// 「大菠萝哥」4 音节、`max_extra = 3`，输入 `dabo`（started 2、距词尾 2 ≤ 3）→ 上浮。
-///
-/// ## 本用例的语义变过一次
-///
-/// 原名 `..._only_with_boundary`，断言的是「有边界上浮 / 无边界**找不到**」：无边界那条
-/// 当时只能退回 `started >= 3`，于是被首音节一大批同音子短语整层压住、30 名外。
-///
-/// 那个差异**是漏网口而非规格**：手输码用户词恒 `boundary = 0`，而它的码
-/// （`daboluoge`）本身就是合法全拼串、DAG 现切即得 4 音节。召回门早已按现切的音节数
-/// 把它放进来了，上浮判据却拿裸 `boundary` 当「无信息」处置 —— 同一个词填不填边界
-/// 字段决定了它能不能被看见。判据改走 `effective_boundary` 后两条路合一，本用例
-/// 随之反向：**两侧必须一致**。
-///
-/// 「打 2 音节就上浮」这件事本身没变，仍由下面第一条断言守着；
-/// 判据没被改成恒真，由末尾 `max_extra = 1` 的下侧对照守着。
+/// 手输码用户词恒 `boundary = 0`，但码本身是合法全拼、DAG 现切即得音节数；判据走
+/// `effective_boundary`，两侧必须一致。判据没被改成恒真由末尾 `max_extra = 1` 的对照守着。
 #[test]
 fn user_long_word_promotes_at_two_syllables_regardless_of_boundary() {
     let Some(dir) = data_dir() else {
@@ -326,9 +292,8 @@ fn user_long_word_promotes_at_two_syllables_regardless_of_boundary() {
         "无边界：3 音节同样上浮"
     );
 
-    // ⚠️ 本用例守的是「**一致性**」，不是「判据没被改成恒真」——后者在主路径上
-    // 测不了：step 6.3 的 `syllable_cap = started + max_extra` 与判据的
-    // `remaining <= max_extra` 是同一个不等式，收紧 `max_extra` 只会让词在召回层
-    // 就没了（实测判据改 `return true`，本文件全绿）。该命题挂在 6.7 支路，见
+    // 本用例守的是一致性，不是「判据没被改成恒真」：主路径上 step 6.3 的
+    // `syllable_cap = started + max_extra` 与判据的 `remaining <= max_extra` 是同一个不等式，
+    // 收紧 `max_extra` 只会让词在召回层就没了。该命题挂在 6.7 支路，见
     // `pinyin_user_word_no_boundary_tier.rs::fallback_branch_far_word_promotes_for_neither`。
 }

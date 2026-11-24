@@ -126,10 +126,9 @@ fn preview_matches_import_counts() {
     assert_eq!((ic.added, ic.updated, ic.unchanged), (1, 2, 0));
 }
 
-/// 超长文本（> `USER_WORD_TEXT_MAX_CHARS`）一律拒绝——覆盖显式给码/设置页手动加词这
-/// 两条不经过 `check_derivable_word`（wind-coordinator）的路径，兜住此前无上限的空档
-/// （用户实测提交过 7500 字词条）。恰好等于上限的文本应正常写入，被拒绝的词不落库
-/// （校验须在 `enc_key`/写事务之前，不留部分写入痕迹）。
+/// 超长文本（> `USER_WORD_TEXT_MAX_CHARS`）一律拒绝，覆盖显式给码/设置页手动加词这两条
+/// 不经过 `check_derivable_word`（wind-coordinator）的路径。恰好等于上限的文本应正常写入；
+/// 校验须在 `enc_key`/写事务之前，被拒绝的词不留部分写入痕迹。
 #[test]
 fn add_user_word_rejects_text_over_max_chars() {
     let p = tmp("wind_uw_text_max_len.redb");
@@ -179,21 +178,12 @@ fn add_user_word_rejects_code_over_max_chars() {
     );
 }
 
-/// **同码词条按导入文件的先后出**（t80 的验收标准）。
+/// 同码词条按导入文件的先后出。
 ///
-/// 三条词刻意按「甲 乙 丙」导入，而它们的 text 字典序恰好相反（丙 U+4E19 < 乙 U+4E59
-/// < 甲 U+7532）—— 于是「按 order」与「按 text 字典序」两种结果可区分。缺陷期
-/// `natural_order` 恒 0、redb 又按 key 字典序返回，拿到的就是「丙 乙 甲」。
-///
-/// ⚠️ 光断言顺序不够：order 全为 0 时 `sort_by_key` 是稳定排序，会原样吐回 search 的
-/// 次序，看着也可能"对"。故必须同时断言 order **严格递增且 ≥ 1**。
-///
-/// 反向验证（2026-09-14 实跑）：删掉 `import_user_words` 里的
-/// `next_order = next_order.saturating_add(1)` —— 所有新词拿同一个号 —— 本测试与
-/// `word_order_survives_export_clear_import` 一起变红。
-///
-/// ⚠️ 只把 `next_order` 的**初值**改成 0 是**无效变异**：`saturating_add` 照样让它
-/// 递增成 0,1,2，顺序断言仍然通过，红的只是上面那句「order ≥ 1」。实测过，别照这条改。
+/// 三条词按「甲 乙 丙」导入，text 字典序恰好相反（丙 < 乙 < 甲），「按 order」与「按 text」
+/// 两种结果可区分。光断言顺序不够：order 全为 0 时稳定排序会原样吐回 search 的次序，
+/// 故须同时断言 order 严格递增且 ≥ 1。删掉 `import_user_words` 里 `next_order` 的自增即红；
+/// 只把它的初值改成 0 是无效变异（仍递增成 0,1,2，只红「≥ 1」那句）。
 #[test]
 fn import_assigns_order_following_row_sequence() {
     let p = tmp("wind_uw_order_import.redb");
@@ -219,12 +209,8 @@ fn import_assigns_order_following_row_sequence() {
 
 /// 「导出 → 清空 → 再导入」一圈之后词序不变。
 ///
-/// 这是 t80 楼主的真实用法（迁词库 / 备份还原）。导出若按 key 字典序吐出，一次往返
-/// 就把原有词序洗成字典序 —— 与缺陷期表现一模一样，且**更隐蔽**，因为库里明明存着
-/// 正确的 order。
-///
-/// 反向验证（2026-09-14 实跑）：删掉 `collect_user_word_rows` 里那句按 order 的排序，
-/// 本测试即变红，另外三条不受影响。
+/// 迁词库 / 备份还原的真实用法。导出若按 key 字典序吐出，一次往返就把词序洗成字典序，
+/// 且库里明明存着正确的 order，更隐蔽。守 `collect_user_word_rows` 里按 order 的排序。
 #[test]
 fn word_order_survives_export_clear_import() {
     let p = tmp("wind_uw_order_roundtrip.redb");
@@ -247,12 +233,8 @@ fn word_order_survives_export_clear_import() {
 
 /// 再次导入同一批词**不得**把它们挪到队尾。
 ///
-/// 用户重复导入（或备份还原叠加导入）是常态。若更新路径也发新号，每导一次全库词序
-/// 就被翻搅一次，且新号总比老号大 —— 表现为「越导越乱」。
-///
-/// 反向验证（2026-09-14 实跑）：把更新分支的 `enc_val_ordered(nw, nc, ca, nb, o)` 的
-/// `o` 换成 `next_order`（即更新也发新号），**只有本测试**变红 —— 另外三条都覆盖不到
-/// 这个维度，故这一条不可省。
+/// 重复导入是常态；若更新路径也发新号，每导一次全库词序就被翻搅一次。
+/// 只有本测试覆盖这个维度（更新分支 `enc_val_ordered` 的 `o` 换成 `next_order` 即红）。
 #[test]
 fn reimport_keeps_existing_order() {
     let p = tmp("wind_uw_order_reimport.redb");
@@ -289,14 +271,9 @@ fn reimport_keeps_existing_order() {
 
 /// 晋升临时词**不得**抹掉该词条在用户词表里的入库序号。
 ///
-/// `promote_temp_word` 住在 `temp_words.rs` 里，但它写的是 `USER_WORDS` —— 按文件名去数
-/// 用户词的写入点必漏这一处（该函数的注释早写着这条警告，上一次栽的是简拼索引）。
-/// 漏了它的后果不是「不生效」而是**越用越乱**：导入词条 order=10，被用户用熟晋升一次
-/// 就被 24B 的 `enc_val` 写成 order=0，升序下 0 < 10，该词跳到这个 code 下所有词之前，
-/// 且要「用过一阵子」才显形。
-///
-/// 反向验证（2026-09-14 实跑）：把 `promote_temp_word` 的写入换回
-/// `enc_val(nw, nc, nca, nb)`，本测试即变红。
+/// `promote_temp_word` 住在 `temp_words.rs` 里，但写的是 `USER_WORDS`，按文件名去数用户词
+/// 写入点必漏这一处。若用 24B 的 `enc_val` 写回，order=10 的导入词晋升后变 0，升序下跳到
+/// 该 code 所有词之前，且要用过一阵子才显形。
 #[test]
 fn promote_temp_word_keeps_user_word_order() {
     let p = tmp("wind_uw_order_promote.redb");
@@ -329,13 +306,9 @@ fn promote_temp_word_keeps_user_word_order() {
 
 /// 简拼召回的记录必须带**真实** order，否则表现为「全码对、简拼不对」。
 ///
-/// 缩写索引自己不定序，但它交出的记录经 `StoreUserLayer::search_abbrev` →
-/// `record_to_candidate` → `sort_trunc`，而 `sort_trunc` 用的正是 `better()`，
-/// `natural_order` 就在那条排序链上。硬编码 0 会让同一批词走全码时顺序正确、
-/// 走简拼时退回 text 字典序。
-///
-/// 反向验证（2026-09-14 实跑）：把 `abbrev_index::search` 里的 `order: o` 改回
-/// `order: 0`，本测试即变红。
+/// 缩写索引自己不定序，但它交出的记录经 `StoreUserLayer::search_abbrev` → `record_to_candidate`
+/// → `sort_trunc`（用 `better()`，含 `natural_order`）排序。`abbrev_index::search` 若硬编码
+/// `order: 0`，同一批词走全码顺序正确、走简拼退回 text 字典序。
 #[test]
 fn abbrev_search_carries_real_order() {
     let p = tmp("wind_uw_order_abbrev.redb");
@@ -357,14 +330,10 @@ fn abbrev_search_carries_real_order() {
     );
 }
 
-/// **向后兼容契约**：v2 的 24B 记录（无 order）读出 order=0，且不 panic。
+/// 向后兼容契约：v2 的 24B 记录（无 order）读出 order=0，且不 panic。
 ///
-/// 与 `dec_val_reads_v1_16byte_records` 同理 —— 长度守卫必须分三档，直接切
-/// `b[24..28]` 会在 v1/v2 记录上越界。
-///
-/// 反向验证（2026-09-14 实跑）：去掉 `dec_val_ordered` 里 order 那档长度分支，
-/// 本测试与 `dec_val_reads_v1_16byte_records` 一起变红（后者也红是对的：`dec_val`
-/// 现在是 `dec_val_ordered` 的薄壳，两者共用同一条解码路径）。
+/// 与 `dec_val_reads_v1_16byte_records` 同理，长度守卫必须分三档，直接切 `b[24..28]` 会在
+/// v1/v2 记录上越界。`dec_val` 是 `dec_val_ordered` 的薄壳，两条用例共用同一条解码路径。
 #[test]
 fn dec_val_ordered_reads_v1_and_v2_records() {
     let mut v1 = [0u8; 16];
@@ -395,14 +364,11 @@ fn dec_val_ordered_reads_v1_and_v2_records() {
     assert_eq!(dec_val_ordered(&[0u8; 15]), None);
 }
 
-/// **备份还原不得丢音节边界**（本次改动的验收标准）。
+/// 备份还原不得丢音节边界。
 ///
-/// `backup.rs` 的还原路径是 `clear_user_words` + `import_user_words_wdict`。清空后
-/// 全是新键，而 wdict 此前是扁平四列文本、边界无处安放 ⇒ **一轮备份还原把 boundary
-/// 全部清零**（实测：写入 `[5,21]` → 还原后 `[0,0]`）。现 code 列改写带空格的音节码。
-///
-/// 反向验证：把 `collect_user_word_rows` 的 `join_code_by_boundary` 换回 `r.code`，
-/// 本测试即变红。
+/// 还原路径是 `clear_user_words` + `import_user_words_wdict`，清空后全是新键，边界只能靠 wdict
+/// 的 code 列（带空格的音节码）携带。`collect_user_word_rows` 的 `join_code_by_boundary`
+/// 若换回 `r.code`，一轮备份还原会把 boundary 全部清零。
 #[test]
 fn boundary_survives_export_clear_import() {
     let p = tmp("wind_uw_boundary_backup.redb");
@@ -488,9 +454,8 @@ fn import_fills_missing_boundary_and_preview_agrees() {
     let _ = std::fs::remove_file(&p);
 }
 
-/// **向后兼容契约**（数据安全）：value 从 v1 的 16B 扩到 24B（追加 boundary u64）。
-/// 旧库里全是 16B 记录，新代码必须能读——且**不可直接切 `b[16..24]`**，那会在旧记录上
-/// 越界 panic，必须按长度分支。这是惰性升级免 migration 的前提。
+/// 向后兼容契约（数据安全）：value 从 v1 的 16B 扩到 24B（追加 boundary u64）。
+/// 旧库里全是 16B 记录，不可直接切 `b[16..24]`，必须按长度分支，这是惰性升级免 migration 的前提。
 #[test]
 fn dec_val_reads_v1_16byte_records() {
     // 手工拼一条 v1（16B）记录，模拟旧库数据。
@@ -600,15 +565,11 @@ fn export_import_user_words_roundtrip() {
     let _ = std::fs::remove_file(&path2);
 }
 
-/// ★★ 显式 `WordIo::boundary` 优先于 code 里的空格，且**单音节边界必须能存活**。
+/// 显式 `WordIo::boundary` 优先于 code 里的空格，且单音节边界必须能存活。
 ///
-/// 空格载体表达不了单音节：`join_code_by_boundary("xian", 0b1)` 产出无空格的
-/// `xian`，`split_spaced_code` 读回来是 0。导入闸口求解出的单字词边界若走 code
-/// 传递会**静默退化为 0，而调用方以为补上了**。本条锁住那条旁路。
-///
-/// P2 起用户词落文本：单个汉字的单音节由文本解析推断（一个汉字只对应一个音节），所以不给
-/// 显式边界的单字词同样是 0b1；非汉字单字符（emoji）的单音节文本表达不了，退化为 0——
-/// 这是对照组，证明推断只认汉字。
+/// 空格载体表达不了单音节（`join_code_by_boundary("xian", 0b1)` 读回来是 0），导入闸口
+/// 求解出的单字词边界若走 code 传递会静默退化为 0。用户词落文本后，单个汉字的单音节由
+/// 文本推断，不给显式边界也是 0b1；非汉字单字符（emoji）退化为 0，是对照组。
 #[test]
 fn explicit_boundary_survives_where_spaces_cannot() {
     let path = tmp("wind_uw_explicit_b.redb");

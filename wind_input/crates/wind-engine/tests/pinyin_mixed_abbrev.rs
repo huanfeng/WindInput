@@ -2,12 +2,12 @@
 //!
 //! 设计文档 `docs/design/pinyin-mixed-abbrev.md`。
 //!
-//! **自带 wdat 夹具，不依赖 `build_dev/data`**：简拼索引只有 mmap 词典才有（内存词典返回
-//! 空），而依赖真实词库的测试在该目录缺失时会**静默跳过、计数照常绿**（判据只有耗时）。
-//! 走 `CachedDict::load_at` 的 wdat-only 模式，与 `pinyin_abbrev_index.rs` 同款。
+//! 自带 wdat 夹具，不依赖 `build_dev/data`：简拼索引只有 mmap 词典才有（内存词典返回空），
+//! 而依赖真实词库的测试在该目录缺失时会静默跳过。走 `CachedDict::load_at` 的 wdat-only 模式，
+//! 与 `pinyin_abbrev_index.rs` 同款。
 //!
-//! ⚠️ 夹具刻意全部采用**歧义切分码**：`maximum_match` 恰好猜对的样本（`cainiaoyizhan`
-//! 那类）测不出任何东西，简拼路径的历史缺陷全部藏在「真值切分 ≠ 最大匹配」的缝里。
+//! 夹具刻意全部采用歧义切分码：`maximum_match` 恰好猜对的样本测不出任何东西，
+//! 简拼路径的缺陷都藏在「真值切分 ≠ 最大匹配」的缝里。
 
 use wind_dict::cached::CachedDict;
 use wind_dict::datformat::WdatWriter;
@@ -22,12 +22,11 @@ use wind_engine::pinyin::{Config as PyConfig, PinyinEngine};
 /// |---|---|---|---|---|
 /// | `nihao`    | 你好   | ni\|hao       | 同左（无歧义）  | nh |
 /// | `nanhai`   | 南海   | nan\|hai      | 同左            | nh |
-/// | `xianning` | 西安宁 | xi\|an\|ning  | **xian\|ning**  | xan |
+/// | `xianning` | 西安宁 | xi\|an\|ning  | xian\|ning      | xan |
 /// | `xianning` | 先拧   | xian\|ning    | 同左            | xn |
 ///
-/// 「你好」与「南海」共用简拼键 `nh` —— 混合简拼比纯简拼多出的那点信息量，全靠这一对
-/// 才能被观测到（`nhao` 应只留你好）。
-/// 「西安宁」与「先拧」共用**扁平码** `xianning` 而切分不同 —— 音节数过滤的支点。
+/// 「你好」与「南海」共用简拼键 `nh`：混合简拼比纯简拼多出的信息量靠这一对观测（`nhao` 应只留你好）。
+/// 「西安宁」与「先拧」共用扁平码 `xianning` 而切分不同：音节数过滤的支点。
 fn fixture(tag: &str) -> CachedDict {
     let dir = std::env::temp_dir().join(format!("wind_mixed_abbrev_{tag}"));
     let _ = std::fs::remove_dir_all(&dir);
@@ -37,17 +36,9 @@ fn fixture(tag: &str) -> CachedDict {
     let mut w = WdatWriter::new();
     // (text, weight, order, boundary)  boundary = 各音节起始字节位
     //
-    // ⚠️ **权重一律取 `cn_dicts` 里的真实值**，不要随手编。
-    //
-    // 节点打分是 `ln(weight / DICT_TOTAL)`，而 step 2b 的质量闸门
-    // `MIXED_SENTENCE_MIN_LOGP_PER_CHAR`(-8.0) 是在**真实词库的权重分布**上标定的
-    // （见其文档：`bzdhaobuhao`→不知道好不好 每字 -3.90）。编造的权重会让夹具落在闸门的
-    // 另一侧，测出的是另一个世界的行为。
-    //
-    // 历史：这批权重原本是编的（不知道 7000 / 哈 4000 / 你好 9000），当时 `score_node` 对
-    // **无 unigram** 的引擎走 `weight / 100_000` 的线性回退，与真实路径的对数量纲根本不在
-    // 同一数轴上，夹具因此「碰巧」落在闸门通过侧。2026-08-08 unigram 并回 dict、量纲统一后
-    // 这批编造值立即被闸门挡下 —— 那不是回归，是夹具一直在验证一条生产走不到的路径。
+    // 权重一律取 `cn_dicts` 里的真实值，不要随手编：节点打分是 `ln(weight / DICT_TOTAL)`，
+    // step 2b 的质量闸门 `MIXED_SENTENCE_MIN_LOGP_PER_CHAR` 是在真实权重分布上标定的，
+    // 编造的权重会让夹具落在闸门另一侧，测的就是生产走不到的路径。
     w.add_with_boundary("nihao".into(), vec![("你好".into(), 5328, 0, 0b101)]);
     w.add_with_boundary("nanhai".into(), vec![("南海".into(), 991, 0, 0b1001)]);
     w.add_with_boundary("nihaoma".into(), vec![("你好吗".into(), 166, 0, 0b100101)]);
@@ -57,8 +48,8 @@ fn fixture(tag: &str) -> CachedDict {
         vec![("不知道".into(), 62492, 0, 0b100101)],
     );
     w.add_with_boundary("ha".into(), vec![("哈".into(), 16497, 0, 0b1)]);
-    // biao|zhang|da|hui —— 简拼 `bzdh`，**权重刻意远低于「不知道」**。
-    // 真机现场：打 `bzdhaobuhao` 时 `bzdh` 这个更长的切点把 `h` 抢走，首选成了「表彰大会」。
+    // biao|zhang|da|hui —— 简拼 `bzdh`，权重刻意远低于「不知道」：
+    // 打 `bzdhaobuhao` 时这个更长的切点不得把 `h` 抢走。
     // boundary = bit 0/4/9/11：biao(0..4) zhang(4..9) da(9..11) hui(11..14)
     w.add_with_boundary(
         "biaozhangdahui".into(),
@@ -109,10 +100,8 @@ fn full_texts(e: &PinyinEngine, input: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// **声母在前**：`nhao` = n(声母) + hao(全音节) → 你好。
-///
-/// 这是立项时的真机反馈本身。此前 `is_abbreviation` 对 `nhao` 判**真**、顺利进了简拼
-/// 分支，却在召回处落空——索引里只有整串简拼 `nh`，拿 `nhao` 去点查什么都没有。
+/// 声母在前：`nhao` = n(声母) + hao(全音节) → 你好。索引里只有整串简拼 `nh`，
+/// 拿 `nhao` 直接点查会落空，须按混合切分召回。
 #[test]
 fn initial_first_mixed_abbrev_hits() {
     let e = engine("initial_first");
@@ -120,11 +109,8 @@ fn initial_first_mixed_abbrev_hits() {
     assert!(t.contains(&"你好".to_string()), "nhao 应出「你好」: {t:?}");
 }
 
-/// **声母在中间**：`nihm` = ni + h + m → 你好吗。这是混合式第二类无可替代的形态。
-///
-/// 前缀补全在这里彻底帮不上忙：`nihm` 不是 `nihaoma` 的字符串前缀，`search_prefix`
-/// 一条都返回不了。而 `is_abbreviation("nihm")` 同样判假（`i` 不是任何音节首字母），
-/// 纯简拼分支也进不去 —— 改动前这串必然候选为空。
+/// 声母在中间：`nihm` = ni + h + m → 你好吗。这是混合式无可替代的形态：
+/// 它不是 `nihaoma` 的字符串前缀，前缀补全帮不上；`is_abbreviation` 也判假（`i` 不是音节首字母）。
 #[test]
 fn initial_in_the_middle_mixed_abbrev_hits() {
     let e = engine("middle");
@@ -135,15 +121,11 @@ fn initial_in_the_middle_mixed_abbrev_hits() {
     );
 }
 
-/// **末尾声母（`nih`）这一半，前缀补全早就兜住了 —— 文档 §2「候选为空」的描述不准确。**
+/// 末尾声母（`nih`）这一半由前缀补全兜住（`nih` ⊂ `nihao`），与简拼判据无关：
+/// 关掉 `enable_abbrev` 照样出「你好」。
 ///
-/// 凡「全拼在前、声母收尾」的混合式，必然是某个全拼码的字符串前缀（`nih` ⊂ `nihao`），
-/// 于是 step4 的 `search_prefix` 直接命中，与简拼判据判不判真无关。实测：把
-/// `enable_abbrev` 关掉，`nih` 照样出「你好」。
-///
-/// 记在这里是为了防止后人拿 `nih` 当混合简拼的验收用例 —— 那是一条**恒绿**的断言，
-/// 改动前后都成立，什么也证明不了。真正只有混合式能做到的是 `nhao`（声母在前）与
-/// `nihm`（声母在中间）两类。
+/// 别拿 `nih` 当混合简拼的验收用例，那是恒绿的断言；真正只有混合式能做到的是
+/// `nhao`（声母在前）与 `nihm`（声母在中间）。
 #[test]
 fn trailing_initial_form_is_already_covered_by_prefix_completion() {
     let cfg = PyConfig {
@@ -160,13 +142,10 @@ fn trailing_initial_form_is_already_covered_by_prefix_completion() {
     assert!(c.is_prefix, "证据：这条候选是前缀补全层，不是简拼层: {c:?}");
 }
 
-/// **混合比纯简拼多出的信息量必须真的用上**：`nhao` 的**整串**候选只留你好，不带出南海。
+/// 混合比纯简拼多出的信息量必须真的用上：`nhao` 的整串候选只留你好，不带出南海。
 ///
-/// 前缀回退会让「南海」以部分候选（`is_partial`，只消费 `nh`）排在整串候选之后，那是
-/// 微软式逐级补全，不算混入；这里只查整串消费的候选。
-///
-/// 对照组是同一夹具下的 `nh`——它必须两个都出。少了这个对照，上面那条断言就可能是
-/// 「夹具里压根没有南海」的假绿，而不是「过滤器真的挡住了它」。
+/// 前缀回退让「南海」以部分候选（只消费 `nh`）排在后面，不算混入；这里只查整串消费的候选。
+/// 对照组 `nh` 必须两个都出，否则上面的断言可能是「夹具里没有南海」的假绿。
 #[test]
 fn mixed_abbrev_filters_by_syllable_not_just_initial() {
     let e = engine("filter");
@@ -185,15 +164,11 @@ fn mixed_abbrev_filters_by_syllable_not_just_initial() {
     );
 }
 
-/// **音节数过滤在混合形态下仍成立**（文档 §5 约束 3，口径改为「段数」）。
+/// 音节数过滤在混合形态下仍成立（文档 §5 约束 3，口径为「段数」）。
 ///
-/// `xanning` = x(声母) + an + ning，3 段。扁平码 `xianning` 下挂着两个切分不同的词，
-/// 回查主表会把它们一并捞出来：
+/// `xanning` = x + an + ning，3 段。扁平码 `xianning` 回查主表会一并捞出：
 /// - 「西安宁」xi\|an\|ning —— 3 音节，符合
-/// - 「先拧」  xian\|ning  —— 2 音节，**权重高 166 倍**，不挡就直接占首位
-///
-/// 这也是本文件坚持用歧义切分码的理由：若拿 `maximum_match` 恰好猜对的码来测，
-/// 真值与猜测重合，过滤器有没有生效根本看不出来。
+/// - 「先拧」  xian\|ning  —— 2 音节，权重高 166 倍，不挡就直接占首位
 #[test]
 fn mixed_abbrev_rejects_wrong_syllable_count() {
     let e = engine("count");
@@ -209,10 +184,8 @@ fn mixed_abbrev_rejects_wrong_syllable_count() {
     );
 }
 
-/// 混合简拼候选与纯简拼**同层**（`is_abbrev`），且不借用别的层级键（文档 §5 约束 2）。
-///
-/// 层级是硬闸门：两类同质候选分属两层，靠后那层怎么调词频都翻不过来。历史现场是
-/// 系统词简拼借 `is_prefix=true` 沉底、用户词简拼用 `is_abbrev=true`（`ae2df59` 已统一）。
+/// 混合简拼候选与纯简拼同层（`is_abbrev`），且不借用别的层级键（文档 §5 约束 2）。
+/// 层级是硬闸门：两类同质候选分属两层，靠后那层怎么调词频都翻不过来。
 #[test]
 fn mixed_abbrev_shares_the_plain_abbrev_layer() {
     let e = engine("layer");
@@ -258,11 +231,10 @@ fn mixed_abbrev_candidate_carries_full_code_and_boundary() {
     assert_eq!(c.consumed_length, 4, "nhao 四键全部消费");
 }
 
-/// **正常全拼输入零影响**：`nihao` 不因混合路径多出任何 is_abbrev 候选。
+/// 正常全拼输入零影响：`nihao` 不因混合路径多出任何 is_abbrev 候选。
 ///
-/// `nihao` 本身是有合法混合解释的（ni + h + ao），挡住它的是 step 5b 的 `mixed_covered`
-/// 短路——整串已被音节完整覆盖就不进混合路径。这条断言守的就是那个短路：它一旦失效，
-/// 绝大多数击键都会白跑一趟索引，且可能静默混入噪音候选。
+/// `nihao` 本身有合法混合解释（ni + h + ao），挡住它的是 step 5b 的 `mixed_covered` 短路；
+/// 短路失效会让绝大多数击键白跑一趟索引，并可能混入噪音候选。
 #[test]
 fn full_pinyin_input_is_untouched() {
     let e = engine("nomix");
@@ -303,8 +275,8 @@ fn disabling_abbrev_also_disables_mixed() {
 /// 索引本身的行为见 `pinyin_store_abbrev_index.rs`，此处只关心混合式判据。
 ///
 /// 用户词「大菠萝哥」da|bo|luo|ge，混合式 `dbluoge` = d + b + luo + ge。
-/// 注意 `is_abbreviation("dbluoge")` 判**假**（`u` 不是任何音节的首字母），
-/// 故这条路径只可能由混合判据放行 —— 它同时验证了 step6 的入口条件确实取了「或」。
+/// `is_abbreviation("dbluoge")` 判假（`u` 不是音节首字母），故只可能由混合判据放行，
+/// 同时验证 step6 的入口条件取的是「或」。
 #[test]
 fn user_word_mixed_abbrev_hits() {
     let dir = std::env::temp_dir().join("wind_mixed_abbrev_user");
@@ -350,14 +322,10 @@ fn user_word_mixed_abbrev_hits() {
     );
 }
 
-/// **preedit 按混合切分显示**：`nhao` → `n'hao`，不是原样 `nhao`，更不是 `ni'hao`。
+/// preedit 按混合切分显示：`nhao` → `n'hao`，不是原样 `nhao`，更不是 `ni'hao`。
 ///
-/// 真机反馈（2026-07-30 实施当天）：候选对了但预编辑区没有分隔显示。根因是「跟随首选
-/// 候选」那一支的条件 `top.code == completed` —— 简拼/混合的 code 是词的全拼码，与击键
-/// 不同域，而 `nhao` 一个完整音节都切不出、`completed` 是空串，两边永远对不上。
-///
-/// ⚠️ 断言必须同时钉住「有分隔符」和「与击键同长」两件事。只断言含 `'` 的话，
-/// 显示成 `ni'hao` 也能过——那才是更糟的错：用户敲 4 键看到 5 个字母，退格立刻错位。
+/// 简拼/混合候选的 code 是全拼码，与击键不同域，不能走「跟随首选候选」那一支。
+/// 断言须同时钉住「有分隔符」和「与击键同长」：显示成 `ni'hao` 会让退格立刻错位。
 #[test]
 fn preedit_shows_mixed_segmentation_in_keystroke_domain() {
     let e = engine("preedit_mixed");
@@ -372,9 +340,7 @@ fn preedit_shows_mixed_segmentation_in_keystroke_domain() {
     );
 }
 
-/// **纯简拼同样要分段显示**：`nh` → `n'h`（用户报的「简拼的状态也是如此」）。
-///
-/// 与混合式共用一套渲染：两者的候选都带全拼码 + 真值 boundary，切法完全相同。
+/// 纯简拼同样要分段显示：`nh` → `n'h`。与混合式共用一套渲染（候选都带全拼码 + 真值 boundary）。
 #[test]
 fn preedit_shows_plain_abbrev_segmentation() {
     let e = engine("preedit_plain");
@@ -407,11 +373,8 @@ fn preedit_of_full_pinyin_unchanged() {
     );
 }
 
-/// **简拼族前缀回退**：`bzdha` 整串没有词，须退到 `bzd` 出「不知道」并只消费 3 键。
-///
-/// 真机现场（连打 `bzdnihaobuhao`）：输到 `bzdha` **整串空码**。`bzd` 明明能出「不知道」，
-/// 但简拼族的召回一直是「全串或无」—— 索引按完整简拼串点查、混合模式要求覆盖整串。
-/// 全拼下有 step3 子短语与 step4 前缀补全兜着，简拼下此前没有任何对应机制。
+/// 简拼族前缀回退：`bzdha` 整串没有词，须退到 `bzd` 出「不知道」并只消费 3 键。
+/// 全拼下有 step3 子短语与 step4 前缀补全兜着，简拼族的召回本是「全串或无」，靠这条回退补齐。
 #[test]
 fn abbrev_falls_back_to_longest_matching_prefix() {
     let e = engine("prefix_fallback");
@@ -433,15 +396,11 @@ fn abbrev_falls_back_to_longest_matching_prefix() {
     assert!(c.is_abbrev && c.is_partial, "部分简拼须沉在完整匹配之后");
 }
 
-/// ★★ **多个切点的候选共存，同层按词频竞争 —— 不做「最长匹配」硬排除。**
+/// 多个切点的候选共存，同层按词频竞争，不做「最长匹配」硬排除。
 ///
-/// 真机现场：打 `bzdhaobuhao`（想要「不知道」+「好不好」）首候选是**「表彰大会」**。
-/// `bzdh` 恰好是它的简拼（biao·zhang·da·hui），首版「一有产出即停」就把 `h` 判给了它，
-/// 更短的 `bzd`（→「不知道」，真实词库里**词频高 672 倍**）一条都进不来，
-/// 剩下的 `aobuhao` 成了垃圾。
-///
-/// 把「切点长短」做成布尔式硬排除 = **惩罚 ∞**，而它只是**来源差异**、不是结构质量差异，
-/// 只配走 weight（同款教训见模糊拼音 `is_fuzzy` 从层级键改惩罚的那一轮）。
+/// `bzdhaobuhao` 下 `bzdh` 恰是「表彰大会」的简拼；若一有产出即停，更短的 `bzd`
+/// （「不知道」，真实词频高 672 倍）就进不来。切点长短只是来源差异，只配走 weight，
+/// 做成布尔硬排除等于惩罚无穷大。
 #[test]
 fn competing_cuts_coexist_and_are_ranked_by_frequency() {
     let e = engine("cut_competition");
@@ -471,8 +430,8 @@ fn competing_cuts_coexist_and_are_ranked_by_frequency() {
 
 /// 参与竞争的切点数有上限（`MAX_FALLBACK_CUTS`）—— 过短的切点不入场。
 ///
-/// 若一路试到 `bz`，真实词库里「标准/帮助/保证」会凭 ~5 万的词频挤进前几位，
-/// 而它们只解释了 11 键里的 2 键。取「最长 + 次长」两个切点即可覆盖真实的竞争场景。
+/// 若试到 `bz`，「标准/帮助/保证」会凭高词频挤进前几位，却只解释了 11 键里的 2 键。
+/// 取「最长 + 次长」两个切点即可覆盖真实的竞争场景。
 #[test]
 fn fallback_does_not_descend_to_very_short_cuts() {
     let e = engine("cut_limit");
@@ -526,14 +485,11 @@ fn prefix_fallback_works_for_long_continuous_stroke() {
     assert_eq!(c.consumed_length, 3);
 }
 
-/// **长串不得被回退门槛挡在门外**（真机第三轮回归）。
+/// 长串不得被回退门槛挡在门外。
 ///
-/// `bzdnihaobuh` 最少需要 `[b][z][d][ni][hao][bu][h]` **七段**，超过 `MAX_SEGMENTS=6`
-/// ⇒ 整串混合模式为空；`is_abbreviation` 又因 `i` 判假。若门槛问的是「整串本身是不是一条
-/// 合法的简拼/混合模式」，这串就两头都不沾 ⇒ 回退不启动 ⇒ **连打到第 11 键彻底空码**。
-///
-/// 门槛该问的是「这串里**有成不了音节的部分**吗」（`!mixed_covered`）——逐前缀的严格判定
-/// 在 `recall_abbrev_prefix` 内部各自进行，门槛只负责挡掉纯全拼。
+/// `bzdnihaobuh` 最少需七段，超过 `MAX_SEGMENTS=6` ⇒ 整串混合模式为空，`is_abbreviation` 又判假。
+/// 门槛该问的是「这串里有成不了音节的部分吗」（`!mixed_covered`），逐前缀的严格判定在
+/// `recall_abbrev_prefix` 内部进行；否则连打到第 11 键会彻底空码。
 #[test]
 fn long_stroke_is_not_blocked_by_fallback_gate() {
     let e = engine("long_gate");
@@ -557,10 +513,8 @@ fn long_stroke_is_not_blocked_by_fallback_gate() {
     assert_eq!(c.consumed_length, 3, "仍只消费 bzd 三键");
 }
 
-/// 部分匹配时**余下的击键要自己再切一遍**，不能整段甩到尾巴上。
-///
-/// `bzdnihaob` 选中「不知道」(消费 `bzd`) 后尾巴是 `nihaob`，其中 `ni`/`hao` 是完整音节、
-/// `b` 是残码。整段追加会显示成 `b'z'd'nihaob` —— 该切的地方没切。
+/// 部分匹配时余下的击键要自己再切一遍，不能整段甩到尾巴上：`bzdnihaob` 选中「不知道」后
+/// 尾巴 `nihaob` 应切成 ni/hao/b，而不是显示成 `b'z'd'nihaob`。
 #[test]
 fn partial_preedit_segments_the_remainder_too() {
     let e = engine("tail_seg");
@@ -574,15 +528,11 @@ fn partial_preedit_segments_the_remainder_too() {
     );
 }
 
-/// **纯全拼输入绝不进前缀回退**（回退门槛的红线）。
+/// 纯全拼输入绝不进前缀回退（回退门槛的红线）。
 ///
-/// `nihao` 是完整音节序列：`is_abbreviation` 判假（`i` 不是音节首字母）、`mixed_covered`
-/// 短路又让混合模式为空 —— 简拼族对它「一无所获」。若回退只按「简拼族没命中」放行，
-/// 它就会被拖进降级：退到 `niha` 后混合模式 `[ni][ha]` 之类会凭空捞出 `is_abbrev` 候选，
-/// 破坏候选的层级次序（真实词库下 `meiyou` 因此多出「没有」的简拼副本，
-/// `engine_manager::test_pinyin_trailing_partial_prefix_floats_above_exact` 当场变红）。
-///
-/// 门槛必须是「**整串本身**像简拼族形态」——「简拼族没命中」不等于「该做简拼降级」。
+/// `nihao` 下简拼族一无所获，若回退只按「简拼族没命中」放行，它会被拖进降级、凭空捞出
+/// `is_abbrev` 候选，破坏层级次序（`engine_manager::test_pinyin_trailing_partial_prefix_floats_above_exact`
+/// 会红）。门槛必须是「整串本身像简拼族形态」。
 #[test]
 fn full_pinyin_never_enters_prefix_fallback() {
     let e = engine("no_fallback_fp");
@@ -602,9 +552,8 @@ fn full_pinyin_never_enters_prefix_fallback() {
 
 /// 部分匹配时 preedit 把余下击键作残码尾段。
 ///
-/// 用 `bzdnih`：夹具里 `nih` 那段拼不出任何整句（`ni`+`h` 的 `h` 是残码），故首选仍是
-/// 部分简拼候选「不知道」，走的是 `render_keystroke_preedit` 那一支。
-/// （`bzdha` 已被 step 2b 的混合整句接管，见 `mixed_sentence_*` 用例。）
+/// 用 `bzdnih`：`ni`+`h` 的 `h` 是残码、拼不出整句，故首选仍是部分简拼候选「不知道」，
+/// 走 `render_keystroke_preedit` 那一支（`bzdha` 由 step 2b 混合整句接管，见 `mixed_sentence_*`）。
 #[test]
 fn preedit_shows_trailing_remainder_on_partial_abbrev() {
     let e = engine("preedit_partial");
@@ -619,11 +568,8 @@ fn preedit_shows_trailing_remainder_on_partial_abbrev() {
     );
 }
 
-/// ★★ **混合整句**：`bzdha` = `bzd`(简拼→不知道) + `ha`(全拼→哈) 由 Viterbi 拼成一句。
-///
-/// 这是「智能组句」本身 —— 用户一次上屏即可，无需先选「不知道」再选「哈」。
-/// 简拼节点与全拼节点在同一张词图里竞争（`LatticeNode` 是字节跨度、Viterbi 按字节推进），
-/// 故这条路径不需要改解码器，只需让简拼跨度进得了图。
+/// 混合整句：`bzdha` = `bzd`(简拼→不知道) + `ha`(全拼→哈) 由 Viterbi 拼成一句。
+/// 简拼节点与全拼节点在同一张词图里竞争（`LatticeNode` 是字节跨度），解码器无需改动。
 #[test]
 fn mixed_sentence_combines_abbrev_and_full_pinyin() {
     let e = engine("mixed_sentence");
@@ -646,11 +592,8 @@ fn mixed_sentence_combines_abbrev_and_full_pinyin() {
     assert_eq!(top.consumed_length, 5, "整句消费全部击键");
 }
 
-/// 混合整句**不因质量闸门误伤正常解**。
-///
-/// 闸门（`MIXED_SENTENCE_MIN_LOGP_PER_CHAR`）挡的是「路径平均每字 log_prob 过低」的拼凑
-/// 整句。取值定在零代价点：真实词库的受控对比里，它与不设闸门的整句命中率完全相同
-/// （12.10%），只挡掉最离谱的那批。这条断言守住「正常的混合整句照常出」这一侧。
+/// 混合整句不因质量闸门误伤正常解。闸门（`MIXED_SENTENCE_MIN_LOGP_PER_CHAR`）只挡路径平均
+/// 每字 log_prob 过低的拼凑整句；这条守「正常的混合整句照常出」这一侧。
 #[test]
 fn mixed_sentence_survives_quality_gate() {
     let e = engine("gate");
@@ -666,12 +609,10 @@ fn mixed_sentence_survives_quality_gate() {
     );
 }
 
-/// **单节点路径不包装成整句**（词频记账的红线）。
+/// 单节点路径不包装成整句（词频记账的红线）。
 ///
-/// `dblg` 只解出「夺不了冠」一个词——那本质就是一条简拼候选。包装成整句会让它的 `code`
-/// 变成击键串 `dblg`，而简拼候选的 `code` 是全拼码 `duobuliaoguan`：同一个词的词频就此
-/// 记到两个互不相认的键上，用简拼练熟的词切回全拼一点不认。这正是 wdat v5 改「索引存码」
-/// 时修掉的坑，不能从整句这条新路径上重新引进来。
+/// `dblg` 只解出「夺不了冠」一个词；包装成整句会让 `code` 变成击键串 `dblg`，而简拼候选的
+/// `code` 是全拼码，同一个词的词频就记到两个互不相认的键上。
 #[test]
 fn single_node_path_is_not_wrapped_as_sentence() {
     let e = engine("single_node");
@@ -707,8 +648,8 @@ fn disabling_abbrev_also_disables_mixed_sentence() {
 
 /// 混合整句的 preedit 同样与击键同域：`bzdha` → `b'z'd'ha`（简拼段每字母一位）。
 ///
-/// 走不到常规整句那一支是因为 `completed` 对这类输入恒为空串——`bzdha` 从位置 0 就切不出
-/// 完整音节，而那一支的条件是 `top.code == completed && !completed.is_empty()`。
+/// 常规整句那一支要求 `top.code == completed && !completed.is_empty()`，而 `bzdha` 从位置 0
+/// 就切不出完整音节、`completed` 恒为空串，所以要单独渲染。
 #[test]
 fn mixed_sentence_preedit_is_in_keystroke_domain() {
     let e = engine("mixed_sentence_preedit");

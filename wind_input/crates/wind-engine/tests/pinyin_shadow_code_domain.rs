@@ -1,17 +1,15 @@
-//! **归一码可行性验证**：为「拼音候选置顶」选定 shadow key 的编码域之前，先用真实
-//! 引擎把可能的 key 碰撞逐条打出来。
+//! 归一码可行性验证：为「拼音候选置顶」选定 shadow key 的编码域，先用真实引擎把可能的
+//! key 碰撞逐条打出来。
 //!
-//! 背景：shadow 规则的存储键是 `"{schema}\0{code}"`，而 `EngineManager::data_schema_id`
-//! 已把全拼/双拼折叠成同一个 `schema`（常量 `"pinyin"`）。于是 `code` 取哪个域，直接
-//! 决定两种方案的规则是共享、隔离，还是**互相串扰**。三种情况的分界不能靠推理，因为
-//! 双拼下同一次输入会同时走两条不同码域的召回路径（见 `sp_abbrev_and_full_coexist`）。
+//! shadow 规则的存储键是 `"{schema}\0{code}"`，而 `EngineManager::data_schema_id` 已把全拼/双拼
+//! 折叠成同一个 `schema`（`"pinyin"`），`code` 取哪个域直接决定两种方案的规则是共享、隔离还是
+//! 互相串扰。双拼下同一次输入会同时走两条不同码域的召回路径（见 `sp_abbrev_and_full_coexist`），
+//! 分界不能靠推理。
 //!
-//! 本文件只断言**引擎既有行为**，不依赖任何尚未实现的接口——它是选型的证据，实现落地
-//! 后继续作为回归锁：任何一条翻红都意味着归一方案的前提被改动了。
+//! 本文件只断言引擎既有行为，作为归一方案前提的回归锁：任何一条翻红都意味着前提变了。
 //!
-//! **自带 wdat 夹具，不依赖 `build_dev/data`**：简拼索引只有 mmap 词典才有（内存词典
-//! 返回空），而依赖真实词库的测试在该目录缺失时会**静默跳过、计数照常绿**。同款做法见
-//! `pinyin_mixed_abbrev.rs` / `pinyin_abbrev_index.rs`。
+//! 自带 wdat 夹具，不依赖 `build_dev/data`：简拼索引只有 mmap 词典才有，而依赖真实词库的
+//! 测试在该目录缺失时会静默跳过。同款做法见 `pinyin_mixed_abbrev.rs` / `pinyin_abbrev_index.rs`。
 
 use wind_dict::cached::CachedDict;
 use wind_dict::datformat::WdatWriter;
@@ -23,15 +21,13 @@ use wind_engine::pinyin::{Config as PyConfig, PinyinEngine};
 ///
 /// | 码 | 词 | 切分 | 简拼 | 作用 |
 /// |---|---|---|---|---|
-/// | `nihao` | 你好 | ni\|hao | `nh` | 小鹤 `nh` 的**简拼**解释 |
-/// | `nang`  | 囊   | nang    | —    | 小鹤 `nh` 的**全拼**解释（h=ang） |
+/// | `nihao` | 你好 | ni\|hao | `nh` | 小鹤 `nh` 的简拼解释 |
+/// | `nang`  | 囊   | nang    | —    | 小鹤 `nh` 的全拼解释（h=ang） |
 /// | `hao`   | 好   | hao     | —    | 小鹤 `hc` 的全拼解释（c=ao），基线用例 |
 /// | `xian`  | 先   | xian    | —    | 手动分隔符对照：`xian` 有、`xi'an` 无 |
 /// | `xian`  | 西安 | xi\|an  | —    | 手动分隔符对照：两串都有 |
 ///
-/// 权重不参与任何质量闸门：本文件全部用例都是 1~2 音节的直接查询，Viterbi 整句
-/// （`syllables.len() >= 2` 才启动）在这些输入上要么不跑、要么产出被词典整词压过，
-/// 故这里的权重只影响排序，不影响「某词在不在候选里」这一唯一被断言的事实。
+/// 权重不参与任何质量闸门：用例都是 1~2 音节的直接查询，只断言「某词在不在候选里」。
 fn fixture(tag: &str) -> CachedDict {
     let dir = std::env::temp_dir().join(format!("wind_shadow_code_domain_{tag}"));
     let _ = std::fs::remove_dir_all(&dir);
@@ -85,11 +81,8 @@ fn shadow_code(e: &PinyinEngine, input: &str) -> String {
 
 // ───────────────────────── 基线：归一化想达成的效果 ─────────────────────────
 
-/// 双拼击键 `hc` 与全拼 `hao` 指向同一个词——这是「把双拼击键归一成全拼码」的**前提**：
-/// 两侧候选集一致时，共享一条 shadow 规则才是用户预期的「同一个编码」。
-///
-/// 现状下这两串是两个互不相干的 shadow key（读写两端都用 `state.input_buffer`，即击键域），
-/// 所以双拼用户置顶的词在全拼下不生效，反之亦然。
+/// 双拼击键 `hc` 与全拼 `hao` 指向同一个词：两侧候选集一致，是「把双拼击键归一成全拼码」、
+/// 共享一条 shadow 规则的前提。
 #[test]
 fn sp_keystroke_and_full_pinyin_agree_on_candidates() {
     let sp = sp_engine("baseline_sp");
@@ -107,18 +100,12 @@ fn sp_keystroke_and_full_pinyin_agree_on_candidates() {
 
 // ───────────────────────── C2：双拼简拼串扰（关键冲突） ─────────────────────────
 
-/// **核心证据**：双拼下同一次击键会同时产出两条不同码域的候选。
+/// 核心证据：双拼下同一次击键会同时产出两条不同码域的候选。
 ///
-/// 小鹤 `nh` 被双拼转换成全拼 `nang`（h=ang）→ 出「囊」；与此同时 `abbr_query` 取的是
-/// **原始击键** `nh`（`pinyin/mod.rs` 的 `let abbr_query = raw_input;`），走 wdat 简拼
-/// 索引 → 出「你好」。
-///
-/// 后果：若把双拼的 shadow key 归一成 `full_pinyin`（`nang`），则**全拼用户在 `nang` 下
-/// 置顶的词，会在双拼用户敲 `nh` 想打「你好」时被顶到首位**——一次可见的误伤。
-///
-/// 反向则无害：把 key 取作击键 `nh` 时，「囊」的规则也记在 `nh` 下，而全拼打 `nh` 时
-/// 「囊」不在候选里，`apply_shadow` 找不到匹配即静默忽略（见 `wind-candidate` 的
-/// `missing_pin_word_is_ignored`）。故**简拼形态的击键必须保留击键域**。
+/// 小鹤 `nh` 转成全拼 `nang` 出「囊」，同时 `abbr_query` 取原始击键 `nh` 走简拼索引出「你好」。
+/// 若把双拼 shadow key 归一成 `nang`，全拼用户在 `nang` 下置顶的词会在双拼打 `nh` 时被顶到首位。
+/// 反向则无害：全拼打 `nh` 时「囊」不在候选里，`apply_shadow` 静默忽略（见 `wind-candidate`
+/// 的 `missing_pin_word_is_ignored`）。故简拼形态的击键必须保留击键域。
 #[test]
 fn sp_abbrev_and_full_coexist_in_one_keystroke() {
     let e = sp_engine("coexist");
@@ -133,11 +120,8 @@ fn sp_abbrev_and_full_coexist_in_one_keystroke() {
     );
 }
 
-/// C2 的对照组：全拼下 `nang` **只有**全拼解释，没有简拼那一支。
-///
-/// 没有这一条，上一个测试证明不了「两个 key 的候选集不同」——只能证明双拼候选多。
-/// 两条合起来才是完整判据：`nang` 在全拼侧与双拼侧指向**不同的候选集合**，
-/// 因此它不能作为两者共享的 shadow key。
+/// C2 的对照组：全拼下 `nang` 只有全拼解释。与上一条合起来才证明 `nang` 在全拼侧与双拼侧
+/// 指向不同的候选集合，不能作为两者共享的 shadow key。
 #[test]
 fn full_pinyin_nang_has_no_abbrev_branch() {
     let e = full_engine("nang_control");
@@ -154,12 +138,8 @@ fn full_pinyin_nang_has_no_abbrev_branch() {
 
 // ───────────────────────── C1：手动分隔符不可剥除 ─────────────────────────
 
-/// 全拼 `xi'an` 与 `xian` 是**两个不同的输入**：`'` 是硬边界，音节不得跨越，故
-/// `xi'an` 出不了单音节的「先」。
-///
-/// 这就否掉了「归一时统一剥掉 `'`」的写法——那会把两个候选集不同的输入合并到同一个
-/// shadow key 上，构成对**全拼存量行为**的变更。规避手段：全拼路径的归一码取
-/// `input_buffer` **原样**（恒等变换），只有双拼路径才做击键→全拼的转换。
+/// 全拼 `xi'an` 与 `xian` 是两个不同的输入：`'` 是硬边界，`xi'an` 出不了单音节的「先」。
+/// 所以归一时不能统一剥掉 `'`；全拼路径的归一码取 `input_buffer` 原样，只有双拼路径做击键→全拼转换。
 #[test]
 fn manual_separator_is_a_distinct_key() {
     let e = full_engine("separator");
@@ -181,17 +161,12 @@ fn manual_separator_is_a_distinct_key() {
 
 // ───────────────────────── 归一码取值：上述冲突分析的落地形态 ─────────────────────────
 
-/// `ConvertResult::shadow_code` 的**完整取值表**。上面四条测的是「冲突客观存在」，
-/// 这一条测的是「归一逻辑按冲突分析做了正确的取舍」——两者缺一不可：只有前者会让
-/// 归一逻辑完全没有覆盖，只有后者则无从判断这些取舍为何是对的。
-///
-/// 判别力自证（改坏任一条都会翻红，不是恒真断言）：
-/// - 把判据换成 `!stroke_is_plain_abbrev`（形态判据）→ **第 1 条红**（`hc` 退成空串），
-///   这正是 2026-08-11 实测抓到的：双拼两键里韵母键的字母多半也是合法声母，
-///   `is_abbreviation` 对双拼常态普遍判真，用它当判据会让归一整体失效；
-/// - 加上 `!abbrev_full_hit` → **第 2 条红**（`nh` 退成空串）。那个写法能杜绝串扰，但让
-///   key 随词库内容摇摆，已按稳定性优先否掉，理由见引擎侧注释；
-/// - 去掉 `mixed_covered` → `oy` 那类含无效键对的串会吐出半翻译的脏串，第 3 条红；
+/// `ConvertResult::shadow_code` 的完整取值表：上面几条证明冲突客观存在，这条钉住归一逻辑
+/// 按冲突分析做了取舍。判别力自证（改坏任一条都会翻红）：
+/// - 判据换成 `!stroke_is_plain_abbrev`（形态判据）→ 第 1 条红：双拼两键里韵母键的字母多半
+///   也是合法声母，`is_abbreviation` 普遍判真，归一整体失效；
+/// - 加上 `!abbrev_full_hit` → 第 2 条红：能杜绝串扰但让 key 随词库内容摇摆，已按稳定性优先否掉；
+/// - 去掉 `mixed_covered` → 第 3 条红：`oy` 那类含无效键对的串会吐出半翻译的脏串；
 /// - 让全拼也走归一 → 第 4/5 条红。
 #[test]
 fn shadow_code_normalization_table() {

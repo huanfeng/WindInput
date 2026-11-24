@@ -1,12 +1,8 @@
-//! 改**首字母**的模糊组（`n↔l` / `f↔h` / `r↔l`）在简拼召回里的覆盖。
+//! 改首字母的模糊组（`n↔l` / `f↔h` / `r↔l`）在简拼召回里的覆盖。
 //!
-//! 与 `sh↔s` / `zh↔z` / `ch↔c` 的区别是全部要害所在：那三组模糊前后**首字母相同**
-//! （都是 s/z/c），而简拼索引的键就是各音节首字母拼起来的串 —— 于是它们天然走得通，
-//! 这三组却在**召回侧**就断了：用户打 `nqc`，索引里的「篮球场」挂在 `lqc` 下，
-//! `search_abbrev` 根本捞不到，后面的逐段校验一次都不会被调到。
-//!
-//! 所以 `Initial` 段与 `Syllable` 段是**同一个缺口的两面**，必须一起修：
-//! 召回侧枚举键的首字母变体，校验侧放宽 `Initial` 段的比较。
+//! 与 `sh↔s` 等组不同，这三组模糊前后首字母不同，而简拼索引键就是首字母串：打 `nqc`
+//! 时挂在 `lqc` 下的「篮球场」在召回侧就捞不到。所以召回侧要枚举键的首字母变体，
+//! 校验侧要放宽 `Initial` 段的比较，两处缺一不可。
 //!
 //! 自带 wdat 夹具，理由同 `pinyin_mixed_abbrev.rs`（简拼索引只有 mmap 词典才有）。
 
@@ -38,24 +34,21 @@ fn fixture(tag: &str) -> CachedDict {
     );
     // fang(0..4) bian(4..8) mian(8..12) → bit 0/4/8
     //
-    // ⚠️ 刻意**不用**「方案」(fa)：`fa` 的模糊对应键 `ha` 本身是个合法音节（哈），
-    // 整串被音节覆盖 ⇒ `is_abbreviation` 判假、`mixed_covered` 为真，两条简拼路都不进。
-    // 那测的是「这串算不算简拼」，与本文件要测的召回无关。
+    // 刻意不用「方案」(fa)：`fa` 的模糊键 `ha` 本身是合法音节，整串被音节覆盖后
+    // 不算简拼，测不到召回。
     w.add_with_boundary(
         "fangbianmian".into(),
         vec![("方便面".into(), 3140, 0, 0b100010001)],
     );
     // ri(0..2) chu(2..5) → bit 0/2
     w.add_with_boundary("richu".into(), vec![("日出".into(), 2380, 0, 0b101)]);
-    // nan(0..3) qu(3..5) cai(5..8) → bit 0/3/5。挂在**精确键** `nqc` 下，权重刻意低于
-    // 「篮球场」(1191)：支点是「不打折时模糊解反而更高」，一旦纯简拼的模糊命中不吃
-    // fuzzy_penalized，它就会把这条精确命中压下去。
+    // nan(0..3) qu(3..5) cai(5..8) → bit 0/3/5。挂在精确键 `nqc` 下、权重低于「篮球场」(1191)：
+    // 纯简拼的模糊命中若不吃 fuzzy_penalized，就会把这条精确命中压下去。
     w.add_with_boundary("nanqucai".into(), vec![("南区菜".into(), 800, 0, 0b101001)]);
     // ni(0..2) hao(2..5) → bit 0/2
     w.add_with_boundary("nihao".into(), vec![("你好".into(), 5328, 0, 0b101)]);
-    // ni(0..2) fa(2..4) a(4..5) → bit 0/2/4，简拼键 `nfa`。
-    // 取自真实词库的实例：输入 `nhao` 开 f_h 时，键 `nha` 的变体含 `nfa` ⇒ 这条被召回，
-    // 全靠 `Initial` 段校验把它挡掉。它是本文件唯一的**负向**护栏（见那条测试）。
+    // ni(0..2) fa(2..4) a(4..5) → bit 0/2/4，简拼键 `nfa`。输入 `nhao` 开 f_h 时会被召回，
+    // 全靠 `Initial` 段校验挡掉；本文件唯一的负向护栏用它。
     w.add_with_boundary("nifaa".into(), vec![("你发啊".into(), 1, 0, 0b10101)]);
     w.add_abbrev("nfa".into(), vec![("nifaa".into(), 1)]);
     w.add_abbrev("lqc".into(), vec![("lanqiuchang".into(), 1191)]);
@@ -153,14 +146,9 @@ fn mixed_abbrev_hits_through_initial_fuzzy() {
             )
         });
 
-    // **罚一遍, 不是两遍。** 混合路径的处数只取逐段校验那一份:
-    //   [Syllable("nan")] vs lan → fuzzy_variants_scored 给 1 处
-    //   [Initial('q')] vs qiu、[Initial('c')] vs chang → 精确, 各 0 处
-    // ⇒ edits=1 ⇒ 1191 × 0.5 = 595.5 → 596。
-    //
-    // 键处数(nqc→lqc 也是 1)**不再叠加** —— 叠了就是 edits=2 ⇒ 1191 × 0.25 = 298。
-    // 这条断言是「混合路径误用带处数的 abbrev_recall_keys」的唯一探测器:
-    // 那种用错既不报错也不影响召回，只是候选悄悄沉了一档。
+    // 罚一遍不是两遍：混合路径的处数只取逐段校验那份（`Syllable("nan")` vs lan 计 1 处，
+    // 两个 `Initial` 段精确计 0）⇒ 1191 × 0.5 → 596。若再叠加键处数就成 298——
+    // 混合路径误用带处数的 `abbrev_recall_keys` 只会让候选悄悄沉一档，这条是唯一探测器。
     assert!(c.is_fuzzy, "混合路径的模糊命中须标 is_fuzzy");
     assert_eq!(c.weight, 596, "须只罚一遍(校验侧 1 处), 不得叠加键处数");
 }
@@ -224,9 +212,8 @@ fn exact_key_still_hits_with_fuzzy_on() {
 #[test]
 fn initial_alternatives_matches_pairwise_equal() {
     let letters: Vec<char> = "abcdefghijklmnopqrstuvwxyz".chars().collect();
-    // ⚠️ 下面把组数**写死**成 6（`2^6` 种标志位组合）。加第 7 个 `INITIAL_GROUPS` 条目后
-    // 本测试仍会全绿、而新组零覆盖 —— 先断言组数，改了就红，提醒把 64 与下面的
-    // `FuzzyConfig` 字面量一起补。
+    // 组数写死成 6（`2^6` 种组合）：新增 `INITIAL_GROUPS` 条目时先在这里红，
+    // 提醒把 64 与下面的 `FuzzyConfig` 字面量一起补，否则新组零覆盖。
     assert_eq!(
         fuzzy::INITIAL_GROUP_COUNT,
         6,
@@ -259,13 +246,9 @@ fn initial_alternatives_matches_pairwise_equal() {
 
 /// 纯简拼路径的模糊命中必须吃 `fuzzy_penalized` 折扣并标 `is_fuzzy`。
 ///
-/// **`is_abbrev` 沉底救不了这个**：那只把简拼整层压到全拼之后，**层内仍按 weight 降序**。
-/// 折扣是层内唯一区分「精确键命中」与「变体键命中」的机制 —— 去掉它，`lqc` 下权重更高的
-/// 词会把唯一那条 `nqc` 精确词直接挤下去，而真实词库里热键的头部权重远高于冷门键，
-/// 这是必然发生而非可能发生。
-///
-/// 同一个不变量在**混合**路径由 `pinyin_abbrev_recall.rs` 的
-/// `fuzzy_mixed_abbrev_is_penalized_and_marked` 守着，纯简拼这条当初漏了。
+/// `is_abbrev` 沉底只把简拼整层压到全拼之后，层内仍按 weight 降序；折扣是层内唯一区分
+/// 精确键与变体键命中的机制，去掉它，`lqc` 下的高权重词会把 `nqc` 精确词挤下去。
+/// 混合路径的同一不变量见 `pinyin_abbrev_recall.rs` 的 `fuzzy_mixed_abbrev_is_penalized_and_marked`。
 #[test]
 fn plain_abbrev_fuzzy_is_penalized_and_ordered_after_exact() {
     let e = nl("plain_penalty");
@@ -300,14 +283,12 @@ fn plain_abbrev_fuzzy_is_penalized_and_ordered_after_exact() {
     );
 }
 
-/// `fuzzy_abbrev_keys` 的四条不变量。五个召回点现在都依赖构造侧给的这份处数，
-/// 口径一旦漂移，罚分就会在不同路径上各算各的。
+/// `fuzzy_abbrev_keys` 的四条不变量，各召回点的罚分都依赖这份处数口径：
 ///
-/// - **等长**：`eb.count_ones() == key.len()` 那道音节数过滤、以及逐位比较都以此为前提；
-/// - **原键在首位且处数 0**：纯简拼两处按枚举顺序 `push_unique`，精确键先进才能把同 text
-///   的模糊条目去重掉；
-/// - **处数 == 逐位差**：与校验侧 `Initial` 段计 1 处同口径；
-/// - **无重复键**：`l` 的等价集 `{l,n,r}` 与 `n` 的 `{n,l}` 有交集，笛卡尔积容易撞出重复。
+/// - 等长：音节数过滤与逐位比较的前提；
+/// - 原键在首位且处数 0：精确键先进才能把同 text 的模糊条目去重掉；
+/// - 处数 == 逐位差：与校验侧 `Initial` 段计 1 处同口径；
+/// - 无重复键：`l` 的等价集 `{l,n,r}` 与 `n` 的 `{n,l}` 有交集，笛卡尔积易撞重复。
 #[test]
 fn fuzzy_abbrev_keys_invariants() {
     let cfg = FuzzyConfig {
@@ -344,10 +325,8 @@ fn fuzzy_abbrev_keys_invariants() {
 
 /// `MAX_ABBREV_KEY_VARIANTS` 那张变体数表必须**可执行**。
 ///
-/// 该 doc 的算例写错过一版：「4 位全落在 n/l/f/h/r 上且都开组才 16 个变体，仍在限内」——
-/// `2^4 = 16` 只对**2 选位**（n/f/h/r）成立，而 `l` 同属 `n↔l` 与 `r↔l` 两组、是 3 选位，
-/// `llll` 实际 `3^4 = 81`。按错的上界做判断，会以为全 `l` 的键也在覆盖内，
-/// 而它恰恰是唯一落在覆盖外的形状。把表钉成断言，下次再写错就红。
+/// `l` 同属 `n↔l` 与 `r↔l` 两组、是 3 选位（`llll` 有 `3^4 = 81` 个变体），
+/// 其余字母是 2 选位；全 `l` 的键是唯一落在覆盖外的形状，按表钉成断言防算错。
 #[test]
 fn fuzzy_abbrev_keys_variant_counts_match_doc() {
     let all = FuzzyConfig {
@@ -384,10 +363,8 @@ fn fuzzy_abbrev_keys_variant_counts_match_doc() {
 
 /// 超长键不得 panic，也不得去铺天量变体。
 ///
-/// `product()` 在 debug 下对 `3^41`（41 个 `l` + n_l/r_l）直接
-/// 「attempt to multiply with overflow」panic；release 下乘法 wrapping 后
-/// `total` 可能绕回小值、通过上限检查，于是真去铺 `3^41` 个变体 —— 那比 panic 更糟。
-/// 现在边乘边 `checked_mul`，溢出与超限同样降级为只查原键。
+/// 变体数连乘须用 `checked_mul`：debug 下溢出会 panic，release 下 wrapping 可能绕回小值
+/// 通过上限检查、真去铺天量变体。溢出与超限同样降级为只查原键。
 #[test]
 fn fuzzy_abbrev_keys_survives_overflow_length() {
     let cfg = FuzzyConfig {
@@ -419,12 +396,8 @@ fn fuzzy_abbrev_keys_survives_overflow_length() {
 
 /// **负向护栏**：召回侧放宽后，`Initial` 段校验是唯一还在挡错误候选的那道。
 ///
-/// 此前本文件 8 条行为测试全是「应该出现 X」，把 `seg_matches_fuzzy` 的 `Initial` 分支
-/// 改成无条件 `Some(1)`（即放弃该判据）**两个测试文件 38 项全绿** —— 判据没有任何护栏。
-///
-/// 实例取自真实词库：输入 `nhao`、开 `f_h`，模式的键 `nha` 变体含 `nfa`，
-/// 于是「你发啊」(`ni|fa|a`) 被 `search_abbrev` 召回；它能不能进候选，全看 `Initial`
-/// 段校验肯不肯放行。放弃该判据后它就出现在「你好」旁边。
+/// 实例：输入 `nhao`、开 `f_h`，键 `nha` 的变体含 `nfa`，「你发啊」被召回；
+/// 若 `seg_matches_fuzzy` 的 `Initial` 分支无条件放行，它就出现在「你好」旁边。
 #[test]
 fn initial_seg_check_rejects_unrelated_word() {
     let e = engine_with(
