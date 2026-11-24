@@ -1,20 +1,16 @@
-//! 失效一个方案，必须连带失效**把它当成员的混输方案**。
+//! 失效一个方案，必须连带失效把它当成员的混输方案。
 //!
-//! 从 `engines` 表里摘掉一条，换不动已经建好的引擎手里那个 `Arc`——混输在 `build_engine`
-//! 时就把成员子引擎接了过去，此后与表里登记的是谁再无关系。不扇出的后果有两重：
+//! 从 `engines` 表里摘掉一条，换不动已建好的引擎手里那个 `Arc`：混输在 `build_engine` 时就接走了
+//! 成员子引擎。不扇出的后果有两重：
 //!
-//! - **功能**：改了成员方案的配置，混输里仍在服务旧子引擎，表现为「关了没反应，顺手改别的
-//!   设置又好了」（`set_dict_enabled_live` 的文档注释里记着同一个真机症状）。
-//! - **内存**：旧英文引擎被混输吊着不放，`shared_english_engine` 下次又建一份，进程里回到
-//!   两份 12.7 MB（靶机 18 万条英文词时的实测值），共享英文引擎省下的原样吐回去。
+//! - 功能：改了成员方案的配置，混输里仍是旧子引擎，表现为「关了没反应，顺手改别的设置又好了」。
+//! - 内存：旧英文引擎被混输吊着，`shared_english_engine` 下次又建一份，共享英文引擎省下的原样吐回去。
 //!
-//! 修之前这个扇出只写在 `set_dict_enabled_live` 一处，`write_schema_override` /
-//! `delete_schema_override` / `rebuild_all_caches` 三条路全漏着。
+//! `write_schema_override` / `delete_schema_override` / `rebuild_all_caches` / `set_dict_enabled_live`
+//! 都要扇出。判据落在 `is_loaded`（公共 API）而不是指针相等或 `Arc::strong_count`：要问的是
+//! 「下次用混输时会不会重建」，`engines` 表里还在不在就是那个判据。
 //!
-//! 判据落在 `is_loaded`（公共 API）而不是指针相等或 `Arc::strong_count`：要问的是「下次用
-//! 混输时会不会重建」，而 `engines` 表里还在不在**就是**那个判据。
-//!
-//! ⚠️ 词库缺失时静默跳过（同 `english_engine_is_shared.rs` 的约定）。
+//! 词库缺失时静默跳过（同 `english_engine_is_shared.rs` 的约定）。
 
 use std::path::PathBuf;
 use wind_config::Config;
@@ -68,10 +64,9 @@ fn write_override(mgr: &EngineManager, id: &str) {
         .expect("写 override 应成功");
 }
 
-/// ★ 改**英文方案**的配置 ⇒ 混输必须一起失效。
+/// 改英文方案的配置 ⇒ 混输必须一起失效。
 ///
-/// 反向验证（变异）：删掉 `invalidate_schema` 里的扇出循环，本用例立刻红
-/// （`english=false mixed=true`——英文换了新的，混输还捧着旧的）。
+/// 变异验证：删掉 `invalidate_schema` 里的扇出循环即红（`english=false mixed=true`）。
 #[test]
 fn invalidating_english_also_invalidates_the_mixed_schema_that_borrows_it() {
     let Some((mgr, _ov)) = manager("english") else {
@@ -90,14 +85,11 @@ fn invalidating_english_also_invalidates_the_mixed_schema_that_borrows_it() {
     );
 }
 
-/// ★ 改**成员方案**（混输的 primary 码表）的配置 ⇒ 混输同样必须失效。
+/// 改成员方案（混输的 primary 码表）的配置 ⇒ 混输同样必须失效。
 ///
-/// 与上一条不是同一条判据：english 走 `loaded_mixed_dependents` 里「一律返回」的快路，
-/// 成员方案走的是读方案文件比对 `primary_schema` / `secondary_schema` 那条。删掉任一条
-/// 都只会红一个用例。
-///
-/// 注意混输里那份码表是**内联构造的副本**、从不入 `engines` 表（所以 `is_loaded(MEMBER)`
-/// 一直是 false），正因为如此才更需要扇出——没有任何别的途径能换掉它。
+/// 与上一条判据不同：english 走 `loaded_mixed_dependents` 里「一律返回」的快路，成员方案走读方案文件
+/// 比对 `primary_schema` / `secondary_schema` 那条，删掉任一条都只会红一个用例。混输里那份码表是
+/// 内联构造的副本、从不入 `engines` 表（`is_loaded(MEMBER)` 一直是 false），只能靠扇出换掉。
 #[test]
 fn invalidating_a_member_schema_also_invalidates_the_mixed_schema() {
     let Some((mgr, _ov)) = manager("member") else {
@@ -113,10 +105,10 @@ fn invalidating_a_member_schema_also_invalidates_the_mixed_schema() {
     );
 }
 
-/// ★ 锐利性对照：失效一个**与混输无关**的方案，混输不许被牵连。
+/// 锐利性对照：失效一个与混输无关的方案，混输不许被牵连。
 ///
-/// 没有这一条，把扇出写成「一律失效所有已加载的混输」也能让上面两条全绿——那会让任何一次
-/// 无关的配置改动都白白重建混输（秒级、用户可感知）。
+/// 没有这一条，把扇出写成「一律失效所有已加载的混输」也能让上面两条全绿，那会让任何无关的配置
+/// 改动都白白重建混输（秒级、用户可感知）。
 #[test]
 fn invalidating_an_unrelated_schema_leaves_the_mixed_schema_alone() {
     let Some((mgr, _ov)) = manager("unrelated") else {
@@ -133,13 +125,11 @@ fn invalidating_an_unrelated_schema_leaves_the_mixed_schema_alone() {
     );
 }
 
-/// ★ `enable_english` **关着**时改英文方案的配置，混输不许被牵连。
+/// `enable_english` 关着时改英文方案的配置，混输不许被牵连。
 ///
-/// `loaded_mixed_dependents` 对 english 一律返回全部混输（它原是给「转发」设计的）。扇出拿它
-/// 做摘除时若不看开关，开关关着——混输手里根本没有英文子引擎——也会每保存一次英文 override
-/// 就把所有混输白白重建一遍（秒级）。上面那条锐利性对照用的是无关方案 id，守不住 english 这支。
-///
-/// 反向验证（变异）：删掉 `invalidate_schema` 里的 `english_unused_by_mixed` 判断，本用例红。
+/// `loaded_mixed_dependents` 对 english 一律返回全部混输；扇出若不看开关，混输手里根本没有英文
+/// 子引擎时也会每保存一次英文 override 就重建所有混输。上一条用的是无关方案 id，守不住 english 这支。
+/// 变异验证：删掉 `invalidate_schema` 里的 `english_unused_by_mixed` 判断即红。
 #[test]
 fn invalidating_english_leaves_mixed_alone_when_english_merge_is_off() {
     let Some((mgr, _ov)) = manager_with("english_off", false) else {

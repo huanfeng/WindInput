@@ -1,15 +1,10 @@
 //! 混合简拼的两条召回断裂：截断配额缺失、段校验不走模糊音。
 //!
-//! **自带 wdat 夹具，不依赖 `build_dev/data`** —— 理由同 `pinyin_mixed_abbrev.rs`：
-//! 简拼索引只有 mmap 词典才有，而依赖真实词库的测试在该目录缺失时会静默跳过、计数照常绿。
+//! 自带 wdat 夹具，不依赖 `build_dev/data`，理由同 `pinyin_mixed_abbrev.rs`：简拼索引只有 mmap
+//! 词典才有，而依赖真实词库的测试在目录缺失时会静默跳过。
 //!
-//! 两条断裂的真机表现都是「同一个词，多打或少打一个字母、或者开个模糊音，就没了」：
-//!
-//! | 输入 | 模糊音 | 真实词库下的位次（limit=300） |
-//! |---|---|---|
-//! | `shengrikl` | 关 | 第 121 位，活 |
-//! | `shengrikl` | 开 | 第 337 位，**被截** |
-//! | `senrikl`   | 任意 | **未产生** |
+//! 两条断裂的表现都是「同一个词，多打或少打一个字母、或者开个模糊音，就没了」：开模糊音后
+//! `shengrikl` 的「生日快乐」被挤出截断上限；`senrikl` 根本不产生。
 
 use wind_dict::cached::CachedDict;
 use wind_dict::datformat::WdatWriter;
@@ -56,7 +51,7 @@ fn fixture(tag: &str) -> CachedDict {
             .map(|(i, c)| ((*c).into(), 9000 - i as i32 * 100, i as u32, 0b1))
             .collect(),
     );
-    // 与「生日快乐」**同一个声母投影键 `srkl`** 的精确解：sen|ri|kuai|le，权重刻意低一截。
+    // 与「生日快乐」同一个声母投影键 `srkl` 的精确解：sen|ri|kuai|le，权重刻意低一截。
     // 支点在于「不打折时模糊那条反而更高」：1806 > 1000，一旦模糊命中不吃 fuzzy_penalized
     // 折扣，它就会把这条精确命中压下去 —— 那正是要守住的不变量。
     // sen(0..3) ri(3..5) kuai(5..9) le(9..11) → bit 0/3/5/9
@@ -96,11 +91,8 @@ fn texts(e: &PinyinEngine, input: &str, limit: usize) -> Vec<String> {
 
 // ── Stage 1：截断保底配额 ──────────────────────────────────────────────
 
-/// 简拼候选**恒在最末位**（`cmp_match_layers` 里 `is_abbrev` 是最沉的层），
-/// 一旦同层之外的候选数超过 `max_candidates`，它就整批消失。
-///
-/// 真机复现路径是模糊音：`shengrikl` 的候选总数从 121（关）涨到 337（开），
-/// 而「生日快乐」恒是最后一条，于是越过协调器的 limit=300 被 `truncate` 丢弃。
+/// 简拼候选恒在最末位（`cmp_match_layers` 里 `is_abbrev` 是最沉的层），同层之外的候选数一超过
+/// `max_candidates` 就整批消失（如开模糊音后 `shengrikl` 候选总数越过协调器的 limit=300）。
 /// 这里用 20 个 `hao` 同音字 + 小 limit 造出同一个形状，不依赖模糊音也不依赖真实词库。
 #[test]
 fn abbrev_candidate_survives_truncation() {
@@ -112,14 +104,14 @@ fn abbrev_candidate_survives_truncation() {
     );
 }
 
-/// 配额**只补不挤空**：没有简拼候选可补时，截断行为与改动前逐条一致。
+/// 配额只补不挤空：没有简拼候选可补时，截断行为与裸截断逐条一致。
 ///
-/// ⚠️ **limit 的取值是本用例的全部要害**，两侧各有一个会让它退化成假护栏的早退分支：
+/// limit 的取值是要害，两侧各有一个会让它退化成假护栏的早退分支：
 /// - `limit < ABBREV_QUOTA_DIVISOR`(10) ⇒ `quota == 0` ⇒ 第二个早退，测到的是短路；
 /// - `limit >= 候选总数`（夹具里 `hao` 恰好 20 条）⇒ `cands.len() <= max` ⇒ 第一个早退。
 ///
-/// 只有 `10 <= limit < 20` 能真正走进腾位逻辑。取 10：`quota = 1`、总数 20 > 10，
-/// 于是 `kept == 0`、`extra` 为空 —— 正是「该补的没有，于是一条都不许挤」那条路径。
+/// 只有 `10 <= limit < 20` 能走进腾位逻辑。取 10：`quota = 1`、总数 20 > 10，于是 `kept == 0`、
+/// `extra` 为空，正是「该补的没有，于是一条都不许挤」那条路径。
 #[test]
 fn quota_does_not_displace_when_no_abbrev_candidate() {
     let e = engine("trunc_noop");
@@ -163,7 +155,7 @@ fn mixed_abbrev_matches_through_fuzzy_syllable() {
     );
 }
 
-/// 不开模糊音时 `senrikl` **不该**命中——模糊匹配只在用户明确开启时放宽。
+/// 不开模糊音时 `senrikl` 不该命中：模糊匹配只在用户明确开启时放宽。
 #[test]
 fn fuzzy_off_keeps_mixed_abbrev_strict() {
     let e = engine("fuzzy_off");
@@ -195,9 +187,8 @@ fn exact_mixed_abbrev_still_hits() {
 
 /// 模糊命中的简拼候选须吃 `fuzzy_penalized` 折扣并标 `is_fuzzy`。
 ///
-/// 「模糊命中恒低精确命中一档」是全仓不变量（`FUZZY_WEIGHT_SCALE` 那段论证，
-/// 词图侧另有同轴的 `FUZZY_SYLLABLE_LOG_PENALTY`）。混合简拼的段校验是后开的一条
-/// 召回通路，**不是这条不变量的例外** —— 否则同一个投影键下，一条权重更高的模糊命中
+/// 「模糊命中恒低精确命中一档」是全仓不变量（`FUZZY_WEIGHT_SCALE`，词图侧另有同轴的
+/// `FUZZY_SYLLABLE_LOG_PENALTY`），混合简拼的段校验不是例外，否则同一投影键下权重更高的模糊命中
 /// 会盖过精确命中。
 #[test]
 fn fuzzy_mixed_abbrev_is_penalized_and_marked() {
@@ -233,7 +224,7 @@ fn fuzzy_mixed_abbrev_is_penalized_and_marked() {
     );
 }
 
-/// 精确路径不受本次改动影响：`shengrikl` 命中「生日快乐」时权重原样、不标 fuzzy。
+/// 精确路径不受影响：`shengrikl` 命中「生日快乐」时权重原样、不标 fuzzy。
 #[test]
 fn exact_mixed_abbrev_keeps_raw_weight() {
     let e = fuzzy_engine("exact_weight");
@@ -247,11 +238,10 @@ fn exact_mixed_abbrev_keeps_raw_weight() {
     assert_eq!(c.weight, 1806, "精确命中权重须原样");
 }
 
-/// step 6.2 **简拼族前缀回退**路径同样要走模糊段校验。
+/// step 6.2 简拼族前缀回退路径同样要走模糊段校验。
 ///
-/// 那条路是另一组调用点（`recall_abbrev_prefix`，与 step 5b 的系统词库路径各走各的），
-/// 只测 step 5b 会让它改回精确比较也不报警。它还是最值得盯的一处：候选自带**击键域**的
-/// `consumed_length`，而模糊命中让击键与词典音节对不齐。
+/// 那条路是另一组调用点（`recall_abbrev_prefix`，与 step 5b 各走各的），只测 step 5b 会让它改回
+/// 精确比较也不报警。它的候选自带击键域的 `consumed_length`，模糊命中让击键与词典音节对不齐。
 #[test]
 fn fuzzy_mixed_abbrev_hits_via_prefix_fallback() {
     let e = fuzzy_engine("prefix_fb");
@@ -276,12 +266,11 @@ fn fuzzy_mixed_abbrev_hits_via_prefix_fallback() {
     );
 }
 
-/// 调用方声明不重排时，配额必须**整个让路**，等价于裸 `truncate`。
+/// 调用方声明不重排时，配额必须整个让路，等价于裸 `truncate`。
 ///
-/// 补位把简拼候选放在尾部并腾位挤掉等量的既有候选，这在会重排的调用方那里是「进得来」，
-/// 在不重排的调用方那里就是**净损失** —— 挤掉的名额不会回来。生僻字模式是现场：
-/// 它刻意不排序，而引擎按常用度排序 ⇒ 尾部正是它要的生僻字；补进来的简拼词又会被
-/// 「只出单字」删光。详见 `ConvertOptions::no_abbrev_quota`。
+/// 补位把简拼候选放在尾部并腾位挤掉等量的既有候选；对不重排的调用方这是净损失。生僻字模式即是：
+/// 它刻意不排序，尾部正是它要的生僻字，补进来的简拼词又会被「只出单字」删光。
+/// 详见 `ConvertOptions::no_abbrev_quota`。
 #[test]
 fn no_abbrev_quota_is_equivalent_to_plain_truncate() {
     let e = engine("no_quota");
@@ -311,8 +300,8 @@ fn no_abbrev_quota_is_equivalent_to_plain_truncate() {
             .collect::<Vec<_>>()
     );
 
-    // 要害断言：**也不得腾位**。关掉配额的结果须与「不截断时取前 N 条」逐条相同 ——
-    // 只验「没补进来」会漏掉「补了又挤掉别的」这种更糟的形态。
+    // 要害断言：也不得腾位。关掉配额的结果须与「不截断时取前 N 条」逐条相同；只验「没补进来」
+    // 会漏掉「补了又挤掉别的」这种更糟的形态。
     let full = e.convert("haopl", 100).expect("convert 成功");
     let expect: Vec<&String> = full.candidates.iter().take(10).map(|c| &c.text).collect();
     let actual: Vec<&String> = without.candidates.iter().map(|c| &c.text).collect();

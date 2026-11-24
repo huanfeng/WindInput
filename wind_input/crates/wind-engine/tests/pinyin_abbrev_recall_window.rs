@@ -1,21 +1,12 @@
-//! 简拼召回的两道**窗口**：索引取码上限，与前缀回退里系统层/用户层的配额分配。
+//! 简拼召回的两道窗口：索引取码上限，与前缀回退里系统层/用户层的配额分配。
 //!
-//! 两条都不是排序问题——它们在**召回层**就把词丢了，所以候选窗开到 300 也捞不回来，
-//! 调频同样够不着（位次重排只能重排已经进了列表的候选）。
+//! 两条都不是排序问题：它们在召回层就把词丢了，候选窗开到 300 也捞不回来，调频同样够不着
+//! （位次重排只能重排已经进了列表的候选）。纯简拼与混合简拼查的是同一张 `AbbrevSection`，
+//! 窗口必须一致，「打得更省事的写法反而查得更少」就是判据错位。取码上限的依据见
+//! `docs/architecture/candidate-sorting-rules.md` 的 `ABBREV_INDEX_LIMIT` 条。
 //!
-//! **修复前**的真机快照（`build_dev/data` 真实词库，`wind_repl`，limit=300）：
-//!
-//! | 输入 | 解释 | 「拜城县」的位次 |
-//! |---|---|---|
-//! | `baicx` | 混合简拼，取码上限 64 | 第 77 位，**活** |
-//! | `bcx`   | 纯简拼，取码上限 **10** | **未产生**（键 `bcx` 下 48 条，它 w=1 排第 48） |
-//! | `bcxrmzf` | 前缀回退，切点 `bcx` | **未产生**（6 席被系统高频词占满） |
-//!
-//! 「打得更省事的写法反而查得更少」是判据错位的信号：两条路径查的是同一张
-//! `AbbrevSection`，窗口大小却差 6.4 倍。修复后同一份词库下 `bcx` 的「拜城县」在第 46 位。
-//!
-//! 自带 wdat 夹具，不依赖 `build_dev/data`（理由同 `pinyin_mixed_abbrev.rs`：
-//! 简拼索引只有 mmap 词典才有，依赖真实词库的测试在该目录缺失时会静默跳过、计数照常绿）。
+//! 自带 wdat 夹具，不依赖 `build_dev/data`（理由同 `pinyin_mixed_abbrev.rs`：简拼索引只有 mmap
+//! 词典才有，依赖真实词库的测试在该目录缺失时会静默跳过）。
 
 use std::sync::Arc;
 use wind_dict::cached::CachedDict;
@@ -26,8 +17,8 @@ use wind_store::Store;
 
 /// 简拼键 `bcx` 下的 12 条 3 音节词，权重按真实 `cn_dicts` 量级递减。
 ///
-/// 12 > 旧的取码上限 10，且目标词「拜城县」刻意排在**最后一位**（w=1，真实词库里
-/// 它就是 48/48）——这正是「按权重取前 N 个码」会切掉的位置。
+/// 12 条多于旧的取码上限 10，且目标词「拜城县」刻意排在最后一位（w=1，真实词库里也垫底），
+/// 正是「按权重取前 N 个码」会切掉的位置。
 const BCX_ENTRIES: &[(&str, &str, i32, u64)] = &[
     // 码, 词, 权重, boundary（bit i = 位置 i 是音节起点）
     ("buchuxian", "不出现", 517, 0b100101), // bu|chu|xian   → 0,2,5
@@ -70,7 +61,7 @@ fn sys_dict_with(tag: &str, picked: &[(&str, &str, i32, u64)]) -> CachedDict {
             vec![((*text).into(), *weight, 0, *boundary)],
         );
     }
-    // AbbrevSection 存的是**全拼码**（v5），按权重降序供 `search_abbrev` 截断。
+    // AbbrevSection 存的是全拼码（v5），按权重降序供 `search_abbrev` 截断。
     w.add_abbrev(
         "bcx".into(),
         picked
@@ -114,10 +105,7 @@ fn texts(e: &PinyinEngine, input: &str, max: usize) -> Vec<String> {
 
 /// Stage 1：纯简拼的取码窗口必须容得下整个键。
 ///
-/// 旧值 10 的理由是「纯简拼键即答案，取前 10 就是最终候选」——该前提只在**键下词条
-/// 少于 10** 时成立。真实词库里 `bcx` 有 48 条，取 10 等于宣布「这个键下只有最热门的
-/// 10 个词存在」，且因为截断在召回层，**调频也救不回来**：位次重排只能重排已经进了
-/// 列表的候选。
+/// 「纯简拼键即答案，取前 N 就是最终候选」只在键下词条少于 N 时成立；截断在召回层，调频也救不回来。
 #[test]
 fn plain_abbrev_recall_window_covers_the_whole_key() {
     let e = engine("plain_window", BCX_ENTRIES.len());
@@ -152,16 +140,16 @@ fn mixed_and_plain_abbrev_share_one_recall_window() {
 
 /// Stage 2：前缀回退里，用户词不与系统词抢同一份配额。
 ///
-/// `bcxrmzf` 想要的是「拜城县」+ 后续分段。切点 `bcx` 上系统层有 6 条高权重词，
-/// 恰好占满 `MAX_FALLBACK_PER_CUT`；用户自己造的「拜城县」排在 ③④ 步、共享同一份
-/// 配额 ⇒ 静默出局。用户的观感是「短的打得出、长的就没了」，而这恰恰是他**最需要**
-/// 分段上屏的场景（一次输入长串连续部分上屏，是自动造词唯一走得通的路径）。
+/// `bcxrmzf` 想要的是「拜城县」+ 后续分段。系统层 ①② 与用户层 ③④ 各记各的配额基准
+/// （`abbrev_fallback.per_cut_*`）；共用一份时系统高频词占满席位，用户词在长输入下静默出局，
+/// 而那正是最需要分段上屏、自动造词的场景。
 #[test]
 fn prefix_fallback_gives_store_layer_its_own_quota() {
     let s = store("fallback_quota");
     s.add_user_word("pinyin", "baichengxian", "拜城县", 1200, 0b100001001)
         .unwrap();
-    // 系统层给满 6 条（正好是单切点配额），用户词若与它们共享配额就必被挤掉。
+    // 系统层 6 条（旧的单切点配额值）。出厂 `per_cut_long` 已是 50，这里已占不满配额，
+    // 用户词即使与系统层共享配额也进得来。
     let e = engine_with_store("fallback_quota", 6, s);
 
     let long = texts(&e, "bcxrmzf", 300);
@@ -178,13 +166,7 @@ fn prefix_fallback_gives_store_layer_its_own_quota() {
     );
 }
 
-/// 同文合并：系统库**已有**的词（真实词库里「拜城县」w=1），用户学过之后简拼下也要认
-/// 用户的权重，并带上来源标记。
-///
-/// 旧行为：简拼的用户层召回（整串 step 6.1 与前缀回退 ③④）遇到同文系统候选就
-/// `continue`，用户那条的权重与标记整条丢掉 —— 学过的「拜城县」在 `bcx` 下仍是第 46 位
-/// （真实词库），与没学过一模一样。全拼那条（step 6）早就改成了「同文合并、weight 取
-/// max」（`自激` 那一轮），简拼这两处漏了。
+/// 按文本找候选，返回 `(位次, 候选)`。
 fn cand<'a>(
     r: &'a [wind_candidate::Candidate],
     text: &str,
@@ -192,6 +174,9 @@ fn cand<'a>(
     r.iter().enumerate().find(|(_, c)| c.text == text)
 }
 
+/// 同文合并：系统库已有的词（真实词库里「拜城县」w=1），用户学过之后简拼下也要认用户的权重，
+/// 并带上来源标记。简拼的用户层召回（整串 step 6.1 与前缀回退 ③④）遇到同文系统候选不能直接跳过，
+/// 要与全拼（step 6）一样同文合并、weight 取 max。
 #[test]
 fn learned_word_already_in_system_dict_is_lifted_in_plain_abbrev() {
     let s = store("merge_plain");
@@ -224,12 +209,8 @@ fn learned_word_already_in_system_dict_is_lifted_in_mixed_abbrev() {
     assert!(c.meta.is_temp_dict);
 }
 
-/// 前缀回退（`bcxrmzf` 的分段候选）同理。系统层只放两条，让「拜城县」先由系统层 ① 推进
-/// 切点 `bcx` 的配额，用户层 ③④ 再命中它时**走的是合并分支**。
-///
-/// ⚠️ 不能沿用 12 条的 `BCX_ENTRIES`：「拜城县」w=1 排第 12，进不了 ① 的 6 席配额
-/// （`MAX_FALLBACK_PER_CUT`），③④ 找不到同文、走的是新推入分支——那样测的是「新推入补
-/// 来源标记」，合并分支从未被执行（审查查出）。
+/// 前缀回退（`bcxrmzf` 的分段候选）同理。系统层只放两条，让「拜城县」先由系统层 ① 推进切点
+/// `bcx` 的配额，用户层 ③④ 再命中它时走的是合并分支，而不是新推入分支。
 #[test]
 fn learned_word_already_in_system_dict_is_lifted_in_prefix_fallback() {
     let s = store("merge_fallback");
@@ -245,9 +226,9 @@ fn learned_word_already_in_system_dict_is_lifted_in_prefix_fallback() {
     assert!(c.meta.is_temp_dict);
 }
 
-/// 同一个词同时在用户层与临时层：合并后两个来源标记**都**要在，右键删除才会两张表都删。
+/// 同一个词同时在用户层与临时层：合并后两个来源标记都要在，右键删除才会两张表都删。
 ///
-/// `merge_search` 已把两层同文合成一条、两个标记都为真；合并函数曾写成 if/else、只置一个。
+/// `merge_search` 已把两层同文合成一条、两个标记都为真；合并函数不能写成 if/else 只置一个。
 #[test]
 fn merge_keeps_both_store_origins() {
     let s = store("merge_both");
@@ -266,7 +247,7 @@ fn merge_keeps_both_store_origins() {
     );
 }
 
-/// 合并只**提权不降权**（同 step 6）：用户权重低于系统时保留系统值。
+/// 合并只提权不降权（同 step 6）：用户权重低于系统时保留系统值。
 #[test]
 fn merge_never_lowers_system_weight() {
     let s = store("merge_lower");

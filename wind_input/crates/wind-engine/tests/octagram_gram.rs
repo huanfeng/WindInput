@@ -1,4 +1,4 @@
-//! `OctagramGrammar` 对**真实 `.gram`** 的行为验证。
+//! `OctagramGrammar` 对真实 `.gram` 的行为验证。
 //!
 //! 编码（CJK 压 2 字节）与 darts-clone 的位运算全是「错了也能跑、只是查不到」的那种代码，
 //! 单测里的合成数据证明不了什么，必须拿真模型对已知搭配核对。
@@ -13,7 +13,7 @@
 //!   https://github.com/lotem/rime-octagram-data/raw/hans/zh-hans-t-essay-bgc.gram
 //! ```
 //!
-//! ⚠️ 该数据是 **LGPL-3.0**，故意不入库（`build_dev/` 已在 .gitignore）。
+//! 该数据是 LGPL-3.0，故意不入库（`build_dev/` 已在 .gitignore）。
 //! 分发方案见 `docs/design/language-model-integration.md` §5。
 
 use std::path::PathBuf;
@@ -36,10 +36,7 @@ fn gram_path() -> Option<PathBuf> {
     p.exists().then_some(p)
 }
 
-/// 取模型；不存在时返回 None 并**明确说明为何跳过**。
-///
-/// ⚠️ 「数据缺失 → 静默跳过 → 计数照绿」在本仓栽过（见 pinyin_eval 同款处理），
-/// 所以这里一律打印醒目提示，别让人以为跑过了。
+/// 取模型；不存在时返回 None 并打印醒目的跳过说明，别让人以为跑过了（静默跳过会让计数照绿）。
 fn open(weight: f64) -> Option<OctagramGrammar> {
     let Some(path) = gram_path() else {
         eprintln!(
@@ -59,7 +56,7 @@ fn open(weight: f64) -> Option<OctagramGrammar> {
 #[test]
 fn loads_real_gram_and_reports_units() {
     let Some(g) = open(0.0) else { return };
-    // 实测 2,599,424 个 unit（= 文件尾部字节数 / 4）
+    // 2,599,424 个 unit（= 文件尾部字节数 / 4）
     assert!(
         g.unit_count() > 1_000_000,
         "unit 数异常: {}",
@@ -67,13 +64,12 @@ fn loads_real_gram_and_reports_units() {
     );
 }
 
-/// 命中时的零点，与 `OctagramConfig::default().baseline` 一致（实测 ln 中位数）。
+/// 命中时的零点，与 `OctagramConfig::default().baseline` 一致（ln 中位数）。
 const BASELINE: f64 = 8.34;
 
-/// ★ 核心：真实高频搭配必须查得到，且分值与独立实现逐位吻合。
+/// 真实高频搭配必须查得到，且分值与独立实现逐位吻合。
 ///
-/// `weight = 1` 时 `query = ln(频次) − baseline`，于是可以从 query
-/// 反推出 `ln(频次)`，与 Python 侧对账。
+/// `weight = 1` 时 `query = ln(频次) − baseline`，可从 query 反推 `ln(频次)` 与 Python 侧对账。
 #[test]
 fn known_collocations_match_independent_impl() {
     let Some(g) = open(1.0) else { return };
@@ -94,12 +90,10 @@ fn known_collocations_match_independent_impl() {
     );
 }
 
-/// ★★ **未命中必须严格劣于任何命中**（`−weight × baseline`）。
+/// 未命中必须严格劣于任何命中（`−weight × baseline`）。
 ///
-/// 这条守的是 P3 标定时踩过的坑：有一版让未命中返回 0（「中性」），
-/// 结果**完全没有搭配记录的碎片反而赢过有记录的正确词组**——
+/// 让未命中返回 0（「中性」）会让没有搭配记录的碎片赢过有记录的正确词组：
 /// 「建议修改」输给「见一修改」、「他的意思就是」输给「他的一死就是」。
-/// 一旦有人再把它改成中性，本测试立刻变红。
 #[test]
 fn miss_is_strictly_worse_than_any_hit() {
     let Some(g) = open(1.0) else { return };
@@ -123,8 +117,7 @@ fn high_frequency_scores_positive() {
     assert!(hit > g.query("鬻", "麤", false), "命中必须优于未命中");
 }
 
-/// ★ `weight = 0` 是标定的安全起点：必须**逐位**等于「没挂模型」。
-/// 这条守的是 P3 接线后仍能一键退回基线的能力。
+/// `weight = 0` 必须逐位等于「没挂模型」，保证能一键退回基线。
 #[test]
 fn zero_weight_is_exactly_neutral() {
     let Some(g) = open(0.0) else { return };
@@ -136,8 +129,8 @@ fn zero_weight_is_exactly_neutral() {
 
 /// 句首（context 为空）没有上下文可用，等同未命中。
 ///
-/// ⚠️ 这不只是边界情况：引擎侧目前**没有 `preceding_text`**（拿不到光标前已上屏
-/// 的文本，见设计文档 §4.4），所以每句话的第一个词恒走这条路径。
+/// 这不只是边界情况：引擎侧没有 `preceding_text`（拿不到光标前已上屏的文本，见设计文档 §4.4），
+/// 每句话的第一个词恒走这条路径。
 #[test]
 fn empty_context_falls_back_to_miss() {
     let Some(g) = open(1.0) else { return };

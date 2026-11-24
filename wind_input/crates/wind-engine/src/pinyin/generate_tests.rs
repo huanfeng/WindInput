@@ -15,7 +15,7 @@ fn gen_py(entries: &[(&str, &str, i32)], word: &str) -> Option<String> {
     gen_py_spaced(entries, word).map(|s| s.replace(' ', ""))
 }
 
-/// 引擎的原始产出：**带空格的音节码**。空格即边界，是本模块的真相源。
+/// 引擎的原始产出：带空格的音节码。空格即边界，是本模块的真相源。
 fn gen_py_spaced(entries: &[(&str, &str, i32)], word: &str) -> Option<String> {
     let dict = dict_from(entries);
     let idx = CharPinyinIndex::build(&dict);
@@ -28,12 +28,10 @@ fn gen_py_stored(entries: &[(&str, &str, i32)], word: &str) -> Option<(String, u
     gen_py_spaced(entries, word).map(|s| wind_store::wdict::split_spaced_code(&s))
 }
 
-/// 同权重的多个读音按 [`STANDARD_SYLLABLES`] 的次序排（旧实现「稳定排序 + 按音节表遍历
-/// 的首次出现序」的语义），与词条写进词典的先后无关。
+/// 同权重的多个读音按 [`STANDARD_SYLLABLES`] 的次序排，与词条写进词典的先后无关。
 ///
-/// ⚠️ 样本形状是试出来的：只有两个同权重读音、或全部同权重时，第二遍排序的输入本就有序，
-/// 排序键漏掉音节 id 也照样绿（实测）。这里给「长」40 个读音、两档权重交错，排序必须
-/// 真的搬动元素，同档内的次序才只能靠音节 id 定。
+/// 样本给「长」40 个读音、两档权重交错，排序必须真的搬动元素；只有两个或全部同权重的读音时
+/// 排序输入本就有序，排序键漏掉音节 id 也照样绿。
 #[test]
 fn equal_weight_readings_follow_syllable_table_order() {
     let pos = |s: &str| STANDARD_SYLLABLES.iter().position(|x| *x == s).unwrap();
@@ -44,7 +42,7 @@ fn equal_weight_readings_follow_syllable_table_order() {
         .copied()
         .collect();
     let weight = |i: usize| if i.is_multiple_of(2) { 100 } else { 500 };
-    // 故意按音节表**倒序**写进词典；另配两个字作陪。
+    // 故意按音节表倒序写进词典；另配两个字作陪。
     let mut entries: Vec<(&str, &str, i32)> = syls
         .iter()
         .enumerate()
@@ -78,11 +76,9 @@ fn equal_weight_readings_follow_syllable_table_order() {
     assert_eq!(idx.representative('长'), Some(want[0]));
 }
 
-/// 造词须同时产出音节边界——用户自造词的边界从此有来源，不再是「空洞」。
-/// 三条产码路径（整词消歧 / 子词切分 / 逐字兜底）都要带边界。
+/// 造词须同时产出音节边界；三条产码路径（整词消歧 / 子词切分 / 逐字兜底）都要带边界。
 ///
-/// 断言直接落在**带空格的产出**上：空格表示让切分肉眼可读，也免去了「bitmask 与 code
-/// 各存一份、可以不一致」的老毛病（`d4084b8` 踩过）。
+/// 断言落在带空格的产出上：空格即边界，不会出现 bitmask 与 code 各存一份而不一致。
 #[test]
 fn generate_word_pinyin_carries_boundary() {
     let entries = &[
@@ -119,15 +115,12 @@ fn generate_word_pinyin_carries_boundary() {
         gen_py_stored(entries, "你重"),
         Some(("nizhong".into(), 0b101))
     );
-    // ⚠️ 单音节的 `0b1` 不经文本往返（见 wdict::single_syllable_boundary_is_lossy_by_design）。
+    // 单音节的 `0b1` 不经文本往返（见 wdict::single_syllable_boundary_is_lossy_by_design）。
     // 单音节无切分歧义，且 0 在消费端一律是「放行」，不会误杀。
     assert_eq!(gen_py_stored(entries, "你"), Some(("ni".into(), 0)));
 }
 
 /// 子词切分路径：段自身是多音节整词时，段内边界须并入全局，不能把整段当一个音节。
-///
-/// 空格表示下这是纯拼接（`push_segment` 按空格展开）；此前是 bitmask 左移 `base`，
-/// 漏平移就会把长词的段内边界丢掉。
 #[test]
 fn subword_segmentation_preserves_inner_boundary() {
     let entries = &[
@@ -147,8 +140,8 @@ fn subword_segmentation_preserves_inner_boundary() {
     );
 }
 
-/// 超长词（拼接 >64 字节）：bitmask 装不下，落库时整体降级为 0；但**带空格的产出
-/// 本身不受限**——这正是空格表示相对 bitmask 的增量，边界在传输/导出层面得以保全。
+/// 超长词（拼接 >64 字节）：bitmask 装不下，落库时整体降级为 0；但带空格的产出本身不受限，
+/// 边界在传输/导出层面得以保全。
 #[test]
 fn overlong_word_keeps_spaces_though_mask_degrades() {
     let entries = &[("zhuang", "装", 100)];

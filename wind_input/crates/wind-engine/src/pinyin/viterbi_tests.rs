@@ -1,8 +1,7 @@
 use super::*;
 
-/// 锁定 nodes[end_pos] 的索引约定（C1 差一回归）。
-/// 输入 "nihao"（5 字节），节点在 char_end=5 结束。若 decode 误读
-/// nodes[end_pos-1]，则永远取不到结束于 5 的节点，words 为空。
+/// 锁定 nodes[end_pos] 的索引约定：输入 "nihao"（5 字节）的节点在 char_end=5 结束，
+/// decode 若误读 nodes[end_pos-1] 就取不到它，words 为空。
 #[test]
 fn test_decode_index_convention() {
     let input_len = 5usize; // "nihao"
@@ -72,12 +71,10 @@ fn node(start: usize, end: usize, word: &str, log_prob: f64) -> WordNode {
     }
 }
 
-/// ★★ **beam 的存在意义**：让「前缀较差、但搭配更好」的路径能够胜出。
+/// beam 的存在意义：让「前缀较差、但搭配更好」的路径能够胜出。
 ///
-/// 单状态 DP 下 `dp[2]` 只留分高的「甲」，「乙」当场被丢弃，此后无论上下文分
-/// 怎么打都**不可能**再选出「乙丙」。这条测试守的就是那个差异——
-/// 它同时也证明了多状态回溯（按 `(prev_pos, prev_word)` 找前驱）是对的，
-/// 因为选出「乙丙」要求回溯准确落到非最优的那条前缀线上。
+/// 单状态 DP 下 `dp[2]` 只留分高的「甲」，此后无论上下文分怎么打都选不出「乙丙」。
+/// 选出「乙丙」还要求回溯（按 `(prev_pos, prev_word)` 找前驱）准确落到非最优的前缀线上。
 #[test]
 fn beam_lets_a_weaker_prefix_win_on_context() {
     let input_len = 4usize;
@@ -112,7 +109,7 @@ fn beam_lets_a_weaker_prefix_win_on_context() {
 /// 每个位置的保留线数不超过 [`BEAM_WIDTH`]。
 ///
 /// 用 grammar 的调用次数间接观测：位置 2 上放 `BEAM_WIDTH + 3` 个不同末词，
-/// 扩展 `2..4` 那条边时，只会从**保留下来的**那几条各调一次。
+/// 扩展 `2..4` 那条边时只会从保留下来的那几条各调一次。
 #[test]
 fn beam_width_caps_expansion() {
     let input_len = 4usize;
@@ -137,8 +134,7 @@ fn beam_width_caps_expansion() {
     );
 }
 
-/// 同分时保留**先到的**一条，与改造前单槽 `total > dp[end]` 的 tie-break 一致。
-/// 这条一旦破掉，无模型时的整句结果就会相对基线漂移。
+/// 同分时保留先到的一条（与单路径 DP「严格大于才覆盖」一致）；破掉会让无模型时的整句结果漂移。
 #[test]
 fn equal_scores_keep_the_earliest() {
     let input_len = 2usize;
@@ -149,10 +145,10 @@ fn equal_scores_keep_the_earliest() {
     assert_eq!(r.words, vec!["先".to_string()]);
 }
 
-/// K=1 的 K-best 必须与单路径 DP **逐位相同** —— 这是整个 N-best 改造的零回归依据。
+/// K=1 的 K-best 必须与单路径 DP 逐位相同，这是 N-best 零回归的依据。
 ///
-/// 同分那条尤其要看住：`push_topk` 取「第一个严格小于」的位置插入，等价于旧版的
-/// 「严格大于才覆盖」。写成 `<=` 就会让后到的同分项顶掉先到的，整句结果相对基线漂移。
+/// 同分那条尤其要看住：`push_topk` 取「第一个严格小于」的位置插入；写成 `<=` 会让后到的
+/// 同分项顶掉先到的。
 #[test]
 fn k_of_one_matches_single_path_dp() {
     let input_len = 4usize;
@@ -171,10 +167,10 @@ fn k_of_one_matches_single_path_dp() {
     assert_eq!(single.words, vec!["先".to_string(), "来".to_string()]);
 }
 
-/// K>1 时次优解要出得来，且**按分数降序**。
+/// K>1 时次优解要出得来，且按分数降序。
 ///
-/// 次优整句的典型形态正是「某一段换了个词」，所以转移时必须对前驱的**每一条**都试 ——
-/// 只接前驱最优线的话，`dp[end]` 里堆的全是同一条前缀的延伸，K 条里看不到真正的第二解。
+/// 次优整句的典型形态是「某一段换了个词」，所以转移时必须对前驱的每一条都试；只接前驱最优线，
+/// K 条里就看不到真正的第二解。
 #[test]
 fn nbest_returns_ranked_alternatives() {
     let input_len = 4usize;
@@ -196,10 +192,10 @@ fn nbest_returns_ranked_alternatives() {
     );
 }
 
-/// 每条解的 `boundary` 要跟着**自己那条路径**走，不能都取最优解的。
+/// 每条解的 `boundary` 要跟着自己那条路径走，不能都取最优解的。
 ///
-/// 下游拿它回填 `Candidate::boundary`，双拼校验与自动造词都依赖它；
-/// 串了就是「选了第 2 条整句，学进词库的却是第 1 条的切分」。
+/// 下游拿它回填 `Candidate::boundary`，双拼校验与自动造词都依赖它；串了就是「选了第 2 条整句，
+/// 学进词库的却是第 1 条的切分」。
 #[test]
 fn each_alternative_carries_its_own_boundary() {
     let input_len = 4usize;
@@ -218,11 +214,10 @@ fn each_alternative_carries_its_own_boundary() {
     assert_eq!(r[1].boundary, 0b1, "一段: 只有位 0");
 }
 
-/// **整串走不通的解，分数必须是 `-inf`**，哪怕 `words` 有内容。
+/// 整串走不通的解，分数必须是 `-inf`，哪怕 `words` 有内容。
 ///
-/// 这条看着反直觉，却是单路径版本一直以来的行为，而且承担着**压制部分解**的功能：
-/// 放出真实分数后，只解释了前半截的解会以正常权重去和完整解竞争。
-/// 真机现场是 `bzdhaobuhao` 下「不知道哈」抢走首选、压过词频高 672 倍的「不知道」。
+/// 这承担着压制部分解的功能：放出真实分数后，只解释了前半截的解会以正常权重和完整解竞争
+/// （如 `bzdhaobuhao` 下「不知道哈」压过词频高得多的「不知道」）。
 #[test]
 fn partial_reach_paths_report_neg_infinity() {
     let input_len = 6usize;
@@ -239,7 +234,7 @@ fn partial_reach_paths_report_neg_infinity() {
         f64::NEG_INFINITY,
         "部分解不得带正常分数出去竞争"
     );
-    // 单路径版本同样如此 —— 两侧必须一致。
+    // 单路径版本同样如此，两侧必须一致。
     assert_eq!(
         ViterbiDecoder::decode_dp(&nodes, input_len).log_prob,
         f64::NEG_INFINITY
@@ -261,13 +256,11 @@ impl Grammar for Recorder {
     }
 }
 
-/// **P1 的核心验收**：挂恒 0 的 `NullGrammar` 与完全不挂，结果必须**逐位相同**。
+/// 挂恒 0 的 `NullGrammar` 与完全不挂，结果必须逐位相同。
 ///
-/// 这条守的是 `grammar.rs` 里「为什么 `NullGrammar` 必须返回 0.0」那段论证：
-/// 若它返回 librime 那样的 `kPenalty`，整句分会平白多出 `词数 × 常数`，
-/// 词数不同的路径之间的比较随之改变——本测试会立刻变红。
-/// 挂上语法模型后 `log_prob` 含转移分，`lexical_log_prob` 仍只是路径上节点分之和
-/// ——按词频标定的闸门（混合整句的每字分）读的是它。
+/// 守的是 `grammar.rs` 里「为什么 `NullGrammar` 必须返回 0.0」：若返回 librime 那样的
+/// `kPenalty`，整句分会多出 `词数 × 常数`，词数不同的路径之间的比较随之改变。
+/// 挂上模型后 `log_prob` 含转移分，`lexical_log_prob` 仍只是节点分之和（混合整句的每字分闸门读它）。
 #[test]
 fn lexical_log_prob_excludes_grammar_scores() {
     struct Penalize;
@@ -301,9 +294,7 @@ fn null_grammar_does_not_change_result() {
 }
 
 /// context 按「回看两个词」构造，`is_rear` 只在落到整句末尾时为真。
-///
-/// 没有这条，P1 就只证明了「没接模型时没坏」，没证明「接上去的通路是通的」——
-/// 两件事都得验。
+/// 与上一条互补：上一条证明不接模型时没坏，这条证明接上去的通路是通的。
 #[test]
 fn grammar_receives_context_and_rear_flag() {
     let (nodes, input_len) = two_segment_lattice();
@@ -327,7 +318,7 @@ fn grammar_receives_context_and_rear_flag() {
     );
 }
 
-/// 规范码随路径透传：每条解拼的是**自己那条路径**上的节点，DP（含 K-best）与 beam 同形；
+/// 规范码随路径透传：每条解拼的是自己那条路径上的节点，DP（含 K-best）与 beam 同形；
 /// 全精确的解 `pieces` 为 `None`、`learn_code` 为 `None`。
 ///
 /// 输入 `zongguo`（z=zh 打法）：路径甲 = 「中」(zong→zhong, 模糊) + 「国」(guo, 精确)，

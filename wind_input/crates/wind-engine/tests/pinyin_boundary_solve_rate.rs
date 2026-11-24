@@ -1,24 +1,15 @@
-//! 求解率实测：**层 4 单独决策时**的成功率与正确率。
+//! 求解率评测：层 4 单独决策时的成功率与正确率。
 //!
-//! 设计文档 `docs/design/pinyin-entry-boundary-contract.md` §9 第 2 项——
-//! 「拿实测求解率决定 §5 的默认选项与文案」，这是整套契约里唯一需要真实数据的决策。
+//! 对应 `docs/design/pinyin-entry-boundary-contract.md` §9 第 2 项：拿求解率决定 §5 的默认选项与文案。
 //!
-//! # ★ 为什么必须绕开层 2，否则测出来的数字毫无意义
+//! 必须绕开层 2：`Engine::resolve_boundary` 的层 2 是词典点查，样本取自词典，每条都能查到自己，
+//! 测的就不是「用户导入一批生词时能不能解出边界」。本文件直接调 [`generate::boundary_by_char_count`]
+//! （层 4）+ 多解时的 [`generate::generate_word_pinyin`]（层 3），复刻 `resolve_boundary` 去掉层 2
+//! 的部分。这个替身是精确的：层 4 只用单字读音索引与音节 trie，从不查这个词本身，喂词典里的词与
+//! 喂生词等价。
 //!
-//! 直接跑 `Engine::resolve_boundary` 会得到接近 100% 的漂亮结果，因为层 2 是**词典点查**，
-//! 而样本取自词典 ⇒ 每条都能查到自己。那测的是「词典能不能查到自己」，不是我们要问的
-//! 「用户导入一批**生词**时能不能解出边界」。
-//!
-//! 本文件因此直接调 [`generate::boundary_by_char_count`]（层 4）+ 多解时的
-//! [`generate::generate_word_pinyin`]（层 3），复刻 `resolve_boundary` 去掉层 2 的部分。
-//! ★ 这个替身是**精确**的而非近似：层 4 只用单字读音索引与音节 trie，**从不查这个词本身**，
-//! 所以拿词典里的词喂它，与喂一个生词完全等价。
-//!
-//! # ★★ 正确率比成功率重要
-//!
-//! 「解出来但解错了」比「解不出来」危险得多：后者会被拒收并告知用户，前者静默入库，
-//! 之后简拼索引、双拼校验全按错误切分工作，且**用户永远收不到任何信号**。
-//! 所以本文件把「补齐正确率」单独列出，它才是「导入并由程序补充」该不该做默认项的判据。
+//! 正确率比成功率重要：解错的会静默入库，之后简拼索引、双拼校验全按错误切分工作，用户收不到信号；
+//! 解不出的会被拒收并告知用户。所以「补齐正确率」单独列出，它是「导入并由程序补充」该不该做默认项的判据。
 //!
 //! # 跑法
 //!
@@ -35,16 +26,13 @@ use wind_dict::cached::CachedDict;
 use wind_engine::pinyin::generate::{self, CharPinyinIndex};
 use wind_engine::pinyin::syllable::SyllableTrie;
 
-/// 定位方案实际使用的**合并词典** `rime_frost.merged.wdat`。
+/// 定位方案实际使用的合并词典 `rime_frost.merged.wdat`。
 ///
-/// ★★ 必须用合并产物，不能用 `cn_dicts/base.dict.wdat`。踩过一次：base 只有词、**没有单字**，
-/// 而 [`CharPinyinIndex`] 靠遍历标准音节收集单字读音 ⇒ 索引全空 ⇒ 判据①（每字都要有读音）
-/// 全部失败 ⇒ 实测报出 **100% Unresolvable**。那不是实现的结论，是夹具喂错了词典。
-/// 单字在 `cn_dicts/8105`、`cn_dicts/41448`，由 `rime_frost.dict.yaml` 的 `import_tables`
-/// 合并进来；生产环境 `resolve_boundary` 拿到的正是这份合并 dict，故用它才等价于线上。
+/// 必须用合并产物，不能用 `cn_dicts/base.dict.wdat`：base 只有词、没有单字（单字在 `cn_dicts/8105`、
+/// `cn_dicts/41448`，经 `rime_frost.dict.yaml` 的 `import_tables` 合并进来），[`CharPinyinIndex`]
+/// 会全空，报出 100% Unresolvable。生产环境 `resolve_boundary` 拿到的正是合并 dict。
 ///
-/// ⛔ **有意不设「找不到就退回 base」的兜底**：那会静默产出一组毫无意义的数字，
-/// 而这正是本仓「词库测试假绿」的经典形态。找不到就直接失败。
+/// 有意不设「找不到就退回 base」的兜底：那会静默产出一组毫无意义的数字。找不到就直接失败。
 fn merged_wdat() -> PathBuf {
     let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
     // 缓存按内容命名：`rime_frost.merged-<fp>.wdat`，多份时取最新的
@@ -79,7 +67,7 @@ fn merged_wdat() -> PathBuf {
     );
 }
 
-/// 求解结果 + **是哪一层给出的**——分层计数要靠它，否则得把层 4 重跑一遍。
+/// 求解结果 + 是哪一层给出的（分层计数要靠它，否则得把层 4 重跑一遍）。
 #[derive(Clone, Copy)]
 enum Outcome {
     /// 层 4 直接唯一解。
@@ -95,7 +83,7 @@ enum Outcome {
     Unresolvable,
 }
 
-/// 复刻 `PinyinEngine::resolve_boundary` 的**层 4 → 层 3** 部分（不含层 2 词典点查）。
+/// 复刻 `PinyinEngine::resolve_boundary` 的层 4 → 层 3 部分（不含层 2 词典点查）。
 fn resolve_without_layer_two(
     dict: &CachedDict,
     idx: &CharPinyinIndex,
@@ -155,7 +143,7 @@ impl Tally {
             + self.unresolvable
     }
     /// 「导入并由程序补充」实际能覆盖的面：层 4 唯一解 + 层 3 救回 + 读音验证缺席档。
-    /// ⚠️ 不含 Ambiguous——那一档按契约不落库为确定值。
+    /// 不含 Ambiguous：那一档按契约不落库为确定值。
     fn filled(&self) -> usize {
         self.unique_ok
             + self.unique_wrong
@@ -180,16 +168,14 @@ fn pct(n: usize, d: usize) -> f64 {
 #[test]
 #[ignore = "eval：需本机已生成的 rime_frost.merged.wdat，手动跑 -- --ignored --nocapture"]
 fn measure_layer_four_solve_rate() {
-    // ⚠️ 缺数据当场 panic（见 [`merged_wdat`]），绝不静默跳过：本仓「词库测试静默跳过、
-    // 计数照绿」已经骗过人一次，而 eval 是被显式调用的，跳过等于白跑一轮还留个绿。
+    // 缺数据当场 panic（见 [`merged_wdat`]），不静默跳过：eval 是被显式调用的，跳过等于白跑一轮还留个绿。
     let wdat = merged_wdat();
     let reader = wind_dict::reader_pool::open_wdat(&wdat).expect("挂载合并词典失败");
     let dict = CachedDict::Mmap(reader);
     let idx = CharPinyinIndex::build(&dict);
     let trie = SyllableTrie::new();
 
-    // ★ 前置断言：索引里必须真有单字读音。没有这条，喂错词典时实测会安静地报出
-    // 「100% 无解」——一个看起来像结论、实则是夹具故障的数字。
+    // 前置断言：索引里必须真有单字读音，否则喂错词典时会安静地报出「100% 无解」。
     assert!(
         !dict.search("ai").is_empty() && !dict.search("hao").is_empty(),
         "词典 {} 查不到单音节单字条目，CharPinyinIndex 会是空的，实测结果无意义",
@@ -282,8 +268,7 @@ fn measure_layer_four_solve_rate() {
                     m
                 }
             };
-            // ★ 只收「真会被写进库」的错解：Ambiguous 一档按契约不落库为确定值，
-            // 把它算进「补错」会高估危害面。
+            // 只收真会被写进库的错解：Ambiguous 一档按契约不落库为确定值，算进「补错」会高估危害面。
             let written = matches!(
                 outcome,
                 Outcome::Unique(_) | Outcome::Rescued(_) | Outcome::NoReading(_)

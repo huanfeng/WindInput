@@ -1,27 +1,17 @@
-//! 混输的拼音子引擎**共用** `[schema.pinyin.completion]`，两个旋钮必须照样生效。
-//!
-//! ## 为什么单独测
+//! 混输的拼音子引擎共用 `[schema.pinyin.completion]`，两个旋钮必须照样生效。
 //!
 //! 混输的拼音次引擎由 `manager.rs` 的 `PinyinConfig` 构造，`completion_min_syllables` /
-//! `completion_max_extra_syllables` 直接取自全局 `pg.completion`，**与纯拼音方案同一份**。
-//! 同一段里 `enable_abbrev`、`enable_partial_final`、`allow_full_pinyin` 三项则按
-//! `mix_pinyin.is_none()` 给混输单独分流 —— 补全这两项刻意没分流，是共用的。
+//! `completion_max_extra_syllables` 直接取自全局 `pg.completion`，与纯拼音方案同一份；同一段里
+//! `enable_abbrev`、`enable_partial_final`、`allow_full_pinyin` 则按 `mix_pinyin.is_none()` 分流。
+//! 本文件守的是共用配置的第二个消费者：日后给混输也分流这两项，或改动 `completion_syllable_cap`
+//! 的调用点，会在这里显形。
 //!
-//! 于是出厂值从 2/3 提到 4/5 时，混输下的拼音候选面**同样被改变**，而此前所有相关用例
-//! 都只走纯拼音或双拼，一条都没覆盖混输。这不是「混输有 bug」，是「共用配置的第二个
-//! 消费者没有守门测试」—— 日后若有人给混输也分流这两项（像 `enable_partial_final`
-//! 那样），或改动 `completion_syllable_cap` 的调用点，本文件负责让改动显形。
+//! 必须用真实词库：`CodetableDict::merge_single` 把 `boundary` 硬编码为 0，而召回门槛
+//! （`search_prefix_with_boundary_syllable_capped`）按 `boundary.count_ones()` 数音节，内存词典
+//! 的词条门槛不成立，会假绿。
 //!
-//! ## ⚠️ 必须用真实词库，不能用内存词典
-//!
-//! `CodetableDict::merge_single` 把 `boundary` 硬编码为 0，而召回门槛
-//! （`search_prefix_with_boundary_syllable_capped`）正是按 `boundary.count_ones()` 数音节的
-//! —— 内存词典构造的词条一律无边界信息，门槛对它们不成立，用例会以假绿通过。
-//!
-//! ## 样本
-//!
-//! `zaim` = zai + 残码 m ⇒ `started = 2`。真实词库下拼音侧有 2 音节的「在吗」「再买」与
-//! 3 音节的「在美国」「在没有」，恰好跨门槛，与 `pinyin_completion_recall_gate` 同一组样本。
+//! 样本 `zaim` = zai + 残码 m ⇒ `started = 2`。拼音侧有 2 音节的「在吗」「再买」与 3 音节的
+//! 「在美国」「在没有」，恰好跨门槛，与 `pinyin_completion_recall_gate` 同一组样本。
 
 use std::path::PathBuf;
 use wind_config::Config;
@@ -98,7 +88,7 @@ fn mixed_pinyin_completion_returns_when_gate_relaxed() {
 /// 音节数档位（`completion_extra_syllables`）在混输的拼音候选上同样被标注。
 ///
 /// 档位错了不会让候选消失，只会让它与对齐候选同档 —— 静默的排序退化，故直接断言字段值。
-/// 注：档位的**施加**在协调器（`cmp_completion_extra`），引擎侧只负责标注。
+/// 注：档位的施加在协调器（`cmp_completion_extra`），引擎侧只负责标注。
 #[test]
 fn mixed_pinyin_tags_completion_extra_syllables() {
     let Some(dir) = data_dir() else {

@@ -14,8 +14,7 @@ fn keys(input: &str) -> Vec<String> {
     k
 }
 
-/// 声母在前：`nhao` 的主解释是 [n][hao]，投影键退化为纯简拼 `nh`。
-/// **`nh` 正是 AbbrevSection 里已有的键**——整个方案成立与否就在这一行。
+/// 声母在前：`nhao` 的主解释是 [n][hao]，投影键退化为纯简拼 `nh`——正是 AbbrevSection 里已有的键。
 #[test]
 fn initial_first_projects_to_plain_abbrev_key() {
     let pats = mixed_patterns("nhao", &trie());
@@ -51,11 +50,8 @@ fn pure_initial_form_is_excluded() {
     assert!(keys("dblg").is_empty());
 }
 
-/// **完整全拼串照样有混合解释**（`nihao` = ni + h + ao），本模块不负责挡它 ——
-/// 挡它的是引擎 step 5b 的 `mixed_covered` 短路。
-///
-/// 这条断言把职责分工钉死：短路不是性能优化，而是正确性依赖。哪天它被改掉，
-/// 常见全拼输入就会静默多出一批 is_abbrev 层的噪音候选，且毫无痕迹。
+/// 完整全拼串照样有混合解释（`nihao` = ni + h + ao），本模块不负责挡它，挡它的是引擎 step 5b
+/// 的 `mixed_covered` 短路。那个短路是正确性依赖：去掉它，常见全拼输入会静默多出一批 is_abbrev 噪音候选。
 #[test]
 fn full_pinyin_still_has_mixed_readings_caller_must_short_circuit() {
     assert!(
@@ -127,11 +123,10 @@ fn pattern_count_is_bounded() {
     }
 }
 
-/// **新增一个维度不得挤掉旧解释**。
+/// 新增一个维度不得挤掉旧解释。
 ///
-/// `Retroflex` 边排在 `Initial` 边之前，同一位置上新分支先展开，深层位置会把
-/// `MAX_PATTERNS` 的额度提前用光。`chengshizhong` 实测曾因此丢掉三条改动前就有的
-/// 解释 —— 那不是「截断」而是「换掉」，用户感知为「某些老写法忽然打不出词了」。
+/// `Retroflex` 边排在 `Initial` 边之前，同一位置上新分支先展开，深层位置会把 `MAX_PATTERNS`
+/// 的额度提前用光，`chengshizhong` 这类串会丢掉老写法的解释（用户感知为老写法打不出词）。
 #[test]
 fn retroflex_edges_do_not_evict_pre_existing_interpretations() {
     let k = keys("chengshizhong");
@@ -226,7 +221,7 @@ fn boundary_split_agrees_with_abbrev_projection() {
     assert_eq!(syllables_from_boundary("xian", 0b1), Some(vec!["xian"]));
 }
 
-/// 无边界信息 = 判据不存在 → 不参与混合简拼（**不是**放行）。
+/// 无边界信息 = 判据不存在 → 不参与混合简拼（不是放行）。
 #[test]
 fn missing_boundary_yields_no_syllables() {
     assert_eq!(syllables_from_boundary("nihao", 0), None);

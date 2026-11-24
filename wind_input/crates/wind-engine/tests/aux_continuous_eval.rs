@@ -1,4 +1,4 @@
-//! 连续辅助码（`ConvertOptions::aux_continuous`）评测。**不是门禁**，是测量工具；设计见
+//! 连续辅助码（`ConvertOptions::aux_continuous`）评测。不是门禁，是测量工具；设计见
 //! `docs/design/aux-code-continuous.md` §6、§9 与附录「P2 评测」。
 //!
 //! 语料两份：A = `grammar_sentence_eval.rs` 的整句（筛法同 `shuangpin_raw_parity`），B =

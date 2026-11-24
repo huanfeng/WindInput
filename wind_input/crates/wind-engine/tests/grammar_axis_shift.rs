@@ -1,23 +1,9 @@
-//! 量化 **grammar 对整句分数轴的平移**，以及它对跨轴阈值的冲击。
+//! 量化 grammar 对整句分数轴（`log_prob / 字数`）的平移，以及它对跨轴阈值的冲击。
 //!
-//! ## 为什么要有这个探针
-//!
-//! `6a5fb75e` 修的残码整句闸门，根因是「整句分数被 grammar 平移，而被比较的另一轴
-//! （补全词频）不受影响」。那次的结论里有一句要命的话：
-//!
-//! > 跨轴比较的病根一直在，只是 grammar 关闭时没暴露。
-//!
-//! 排查发现同类比较还有一处：`MIXED_SENTENCE_MIN_LOGP_PER_CHAR = -8.0`（混输降级
-//! 通道的两个调用点）。它拿 `log_prob / 字数` 与一个**在 grammar 关闭时标定**的固定
-//! 常量比——注释里白纸黑字写着「真正的区分需要上下文概率（尚无 bigram，缺语料）」。
-//!
-//! 那个阈值当年的标定依据是：
-//! - 该挡掉的：`nhaoma` → 「你会熬吗」每字 −11.01
-//! - 该放行的：用户真会打的组合落在 **−3.7 ~ −4.8**
-//! - 且注释自承「正确与错误的分布在 **−5 ~ −6.5 大幅重叠**」
-//!
-//! 若 grammar 把整句轴下移 ~1.5/字，那批 −3.7~−4.8 会滑到 −5.2~−6.3，**裕度被吃掉
-//! 大半、且滑进了自承的重叠区**。本探针就是来量这件事的。
+//! 背景：`MIXED_SENTENCE_MIN_LOGP_PER_CHAR = -8.0` 是只有词频时标定的下界，拿整句每字分与固定常量比；
+//! grammar 会把整句轴整体平移。现在闸门读的是不含转移分的 `lexical_log_prob`，本探针量的仍是
+//! 含转移分的整句分，用于评估同类跨轴比较的风险。结论见 `docs/architecture/candidate-sorting-rules.md`
+//! 与 `docs/design/language-model-integration.md` 的「12.1 混合整句质量闸门改看节点分」。
 //!
 //! ```text
 //! WIND_GRAM_MODEL=wanxiang-lts-zh-hans.gram \
@@ -29,18 +15,15 @@ use std::path::{Path, PathBuf};
 use wind_config::Config;
 use wind_engine::EngineManager;
 
-/// 与 `MIXED_SENTENCE_MIN_LOGP_PER_CHAR` 同值。**刻意复制而非引用**：
-/// 它是 crate 私有常量，而这里要的正是「阈值与实测分布的关系」——
-/// 若哪天有人改了那个常量却没跑本探针，两边脱节本身就是要被发现的事。
+/// 与 `MIXED_SENTENCE_MIN_LOGP_PER_CHAR` 同值。刻意复制而非引用（那是 crate 私有常量）：
+/// 改了那个常量却没跑本探针时，两边脱节本身就是要被发现的事。
 const THRESHOLD: f64 = -8.0;
 
-/// ★ 样本必须**同时覆盖命中与未命中**两类，否则等于什么都没测。
+/// 样本必须同时覆盖搭配命中与未命中两类。
 ///
-/// 打分是 `weight × (ln(频次) − baseline)`，baseline = 8.34，而万象常见搭配的
-/// ln 频次在 15~18 —— 于是命中的整句分数**上升**、未命中的**下降**。方向相反。
-///
-/// `MIXED_SENTENCE_MIN_LOGP_PER_CHAR` 是**下界**阈值，威胁只来自下降方向。
-/// 只喂常见句子（全命中、全上升）会得出「毫无风险」的假结论。
+/// 打分是 `weight × (ln(频次) − baseline)`，baseline = 8.34，而万象常见搭配的 ln 频次在 15~18，
+/// 于是命中的整句分上升、未命中的下降。阈值是下界，威胁只来自下降方向；只喂常见句子会得出
+/// 「毫无风险」的假结论。
 const CASES: &[&str] = &[
     "bzdhaobuhao",
     "wmyiqizou",
@@ -62,9 +45,8 @@ const CASES: &[&str] = &[
     "kanwandianyingyihou",
     "womenzaiyiqigongzuo",
     "zhejianshiqingbunan",
-    // ── 以下为「搭配罕见 / 组合生硬」的样本：期望它们在 grammar 下**下降** ──
-    // 这些是真实用户偶尔会打、但词与词之间没有常见搭配关系的串。
-    // 阈值 -8.0 的威胁正来自这一类：它们本就贴近下界，再被扣分就可能跌破。
+    // ── 以下为「搭配罕见 / 组合生硬」的样本：期望它们在 grammar 下下降 ──
+    // 真实用户偶尔会打、但词与词之间没有常见搭配关系的串，本就贴近下界。
     "maowanchengyanjiu",
     "pingguoshoujidiannao",
     "lansewenzitupian",
@@ -102,8 +84,7 @@ fn mgr(dir: &Path, weight: f64) -> EngineManager {
 /// `exp(log_prob/n + ln(DICT_TOTAL))` 的 clamp 结果，可以反解：
 /// `log_prob/n = ln(weight) − ln(DICT_TOTAL)`。
 ///
-/// ⚠️ weight 被 clamp 到 `[1, i32::MAX]`，触底/触顶时反解无意义，故一并返回原始 weight
-/// 供调用方判断。
+/// weight 被 clamp 到 `[1, i32::MAX]`，触底/触顶时反解无意义，故一并返回原始 weight 供调用方判断。
 fn sentence_logp_per_char(m: &EngineManager, input: &str) -> Option<(String, i32, f64)> {
     let r = m.convert_with("pinyin", input, 10);
     // 整句候选的特征：文本字数 >= 2 且消费了全部输入。这里取首个多字候选作近似——

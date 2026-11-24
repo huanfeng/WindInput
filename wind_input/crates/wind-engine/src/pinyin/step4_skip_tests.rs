@@ -1,11 +1,11 @@
-//! 看板 A3-14：整音节输入跳过 step 4 词库前缀补全（[`super::prefix_completion_is_exact_only`]）。
+//! 整音节输入跳过 step 4 词库前缀补全（[`super::prefix_completion_is_exact_only`]）。
 //!
 //! 两类守卫：
-//! - **对拍**：同一输入在「跳过」与「照旧扫描」（`test_hooks::set_never_skip_step4`）
-//!   两条路径下 `ConvertResult` 逐字段一致（比 `Debug` 输出）。合成词库版无依赖、随
-//!   CI 跑；真实词库版依赖 `build_dev/data`，`#[ignore]`（先例同 `tests/pinyin_eval.rs`）。
-//! - **计数护栏**：step 4 实际发起的词库前缀扫描次数（确定性，不看墙钟）。整音节短输入
-//!   必须是 0，残码 / 调低门槛时必须是 1 —— 放宽或收紧跳过条件都会被它抓到。
+//! - 对拍：同一输入在「跳过」与「照旧扫描」（`test_hooks::set_never_skip_step4`）两条路径下
+//!   `ConvertResult` 逐字段一致（比 `Debug` 输出）。合成词库版随 CI 跑；真实词库版依赖
+//!   `build_dev/data`，`#[ignore]`。
+//! - 计数护栏：step 4 实际发起的词库前缀扫描次数（确定性，不看墙钟）。整音节短输入必须是 0，
+//!   残码 / 调低门槛时必须是 1，放宽或收紧跳过条件都会被它抓到。
 
 use super::shuangpin::{Layout, ShuangpinConverter};
 use super::test_hooks::{set_never_skip_step4, take_step4_prefix_scans};
@@ -86,7 +86,7 @@ fn yaml_engine(tag: &str, cfg: Config, entries: &[(&str, &str, i32)]) -> PinyinE
     PinyinEngine::new(cfg, CachedDict::Memory(dict))
 }
 
-/// 合成夹具：单字、精确词、多音节补全、**切分比 DAG 更粗**的词（`xian|ren` 对 `xi'an`）、
+/// 合成夹具：单字、精确词、多音节补全、切分比 DAG 更粗的词（`xian|ren` 对 `xi'an`）、
 /// 同码多义（`xian` = 先 / 西安）、w≤0 条目。
 const ENTRIES: &[(&str, &str, i32)] = &[
     ("你", "ni", 900),

@@ -1,16 +1,15 @@
 //! 混输「拼音候选须消费整串」过滤（`schema.mix.pinyin_partial_candidates{,_overflow}`）。
 //!
-//! 真机诉求：五笔拼音混输打 `gedw`（五笔精确码「青春」）时，候选第 2 条起全是 `ge` 的同音
-//! 单字——真实词库下有 **219 条**，每条只解释 4 键中的 2 键（`code=ge`、`consumed_length=2`）。
-//! 主流混输实现均不出这类候选。
+//! 五笔拼音混输打 `gedw`（五笔精确码「青春」）时，不滤的话候选第 2 条起全是 `ge` 的同音单字，
+//! 每条只解释 4 键中的 2 键（`code=ge`、`consumed_length=2`）。
 //!
 //! 本文件用最小内存词典复刻整条链路，钉住四件事：
-//! - 默认丢弃残码候选，**但开关一开就回来**（反向对照，防「过滤恒生效」的假绿）；
-//! - **前缀补全不受牵连**（`wanl` → 「完了」，code=`wanle`、消费整串）——判据切在「解释完整
-//!   度」而非「候选类型」上，这是本过滤能成立的全部理由，按类型禁用会把正在输入的串打死；
-//! - 超码长走**另一个**开关，默认保留（长拼音的分步上屏要留着）；
-//! - 滤掉拼音候选后 `has_pinyin` 转假，满码上屏的拼音守护随之松开——这是**有意的连带**，
-//!   在此锁死取值，避免日后被当成回归「修」回去。
+//! - 默认丢弃残码候选，但开关一开就回来（反向对照，防「过滤恒生效」的假绿）；
+//! - 前缀补全不受牵连（`wanl` → 「完了」，code=`wanle`、消费整串）：判据切在「解释完整度」而非
+//!   「候选类型」上，按类型禁用会把正在输入的串打死；
+//! - 超码长走另一个开关，默认保留（长拼音的分步上屏要留着）；
+//! - 滤掉拼音候选后 `has_pinyin` 转假，满码上屏的拼音守护随之松开——这是有意的连带，锁死取值
+//!   免得被当成回归「修」回去。
 
 use std::sync::Arc;
 use wind_dict::cached::CachedDict;
@@ -21,7 +20,7 @@ use wind_engine::mixed::{MixConfig, MixedEngine};
 use wind_engine::pinyin::Config as PinyinConfig;
 use wind_engine::{Engine, PinyinEngine};
 
-/// 五笔侧：`gedw` 是精确全码「青春」（真机同款）；再放一条无关词占位。
+/// 五笔侧：`gedw` 是精确全码「青春」；再放一条无关词占位。
 fn wubi_engine() -> Box<dyn Engine> {
     let mut d = CodetableDict::empty();
     d.merge_single("gedw".into(), "青春".into(), 1683, 0);
@@ -99,7 +98,7 @@ fn partial_pinyin_dropped_by_default() {
     );
 }
 
-/// 反向对照：开关一开，残码候选原样回来。**没有这条，上一条测的可能只是词典没数据。**
+/// 反向对照：开关一开，残码候选原样回来。没有这条，上一条测的可能只是词典没数据。
 #[test]
 fn partial_pinyin_kept_when_enabled() {
     let t = texts(&mixed(true, true), "gedw");
@@ -109,9 +108,8 @@ fn partial_pinyin_kept_when_enabled() {
     );
 }
 
-/// ★ 红线：**正在输入中的拼音不得被牵连**。`wanl` 的「完了」是前缀补全
-/// （code=`wanle` 比输入更长 ⇒ 消费整串），与残码候选方向相反。
-/// 这条一旦红，说明判据被写成了「按候选类型禁用」，那会让用户打到一半就没候选。
+/// 红线：正在输入中的拼音不得被牵连。`wanl` 的「完了」是前缀补全（code=`wanle` 比输入更长 ⇒
+/// 消费整串）。这条红说明判据被写成了「按候选类型禁用」，用户打到一半就没候选。
 #[test]
 fn prefix_completion_survives_the_filter() {
     let t = texts(&mixed(false, true), "wanl");
@@ -121,7 +119,7 @@ fn prefix_completion_survives_the_filter() {
     );
 }
 
-/// 超码长（`nihaom` 6 键 > 五笔 4 码）走**另一个**开关，默认保留：长拼音的分步上屏。
+/// 超码长（`nihaom` 6 键 > 五笔 4 码）走另一个开关，默认保留：长拼音的分步上屏。
 #[test]
 fn overflow_keeps_partial_candidates_by_default() {
     let t = texts(&mixed(false, true), "nihaom");
@@ -131,8 +129,8 @@ fn overflow_keeps_partial_candidates_by_default() {
     );
 }
 
-/// 两档开关确实独立：把超码长那档关掉，`nihaom` 的「你好」随之消失，
-/// 而**码长内的那档保持 false 不变**——证明两处各读各的字段，没有串线。
+/// 两档开关确实独立：把超码长那档关掉，`nihaom` 的「你好」随之消失，而码长内的那档保持 false
+/// 不变，证明两处各读各的字段。
 #[test]
 fn overflow_filter_is_a_separate_switch() {
     let t = texts(&mixed(false, false), "nihaom");
@@ -144,13 +142,10 @@ fn overflow_filter_is_a_separate_switch() {
     assert!(!texts(&mixed(false, false), "gedw").contains(&"个".to_string()));
 }
 
-/// 真实词库端到端验收（用户诉求的落点）：内存词典测得了判据，测不了「洪水有多大」。
+/// 真实词库端到端验收：内存词典测得了判据，测不了残码候选的量。
 ///
-/// 真机数据：`gedw` 共 226 条候选，其中 **219 条**是 `code=ge`、`consumed_length=2` 的残码
-/// 同音字，把混合简拼词「各单位」（`ge dan wei`，词库权重 259）压到**第 221 位**——
-/// 生产 `per_page=5` 即第 45 页，用户视角等于不存在。过滤后它回到前几位。
-///
-/// ⚠️ 缺 `build_dev/data` 时本用例静默跳过（全仓惯例）。判据是耗时与下方 eprintln。
+/// 不滤时 `gedw` 的两百多条残码同音字会把混合简拼词「各单位」（`ge dan wei`）压到第 200 多位，
+/// 用户视角等于不存在；过滤后它回到前几位。缺 `build_dev/data` 时静默跳过。
 #[test]
 fn real_dict_gedw_surfaces_the_mixed_abbrev_word() {
     use std::path::PathBuf;
@@ -231,11 +226,10 @@ fn filtered_pinyin_no_longer_feeds_the_commit_guard() {
     );
 }
 
-/// ★ 次方案为**双拼**时，「消费整串」要按**击键数**判。
+/// 次方案为双拼时，「消费整串」要按击键数判。
 ///
-/// 双拼候选的 `consumed_length` 已回映射到击键域（`nihc` 的「你好」= 4），而引擎曾拿转换后
-/// 的全拼长度（`nihao` = 5）当基准，把双拼的整串候选全部当成半截丢光——混输（次方案双拼、
-/// 出厂 `pinyin_partial_candidates = false`）下 `nihc` 一条拼音候选都不剩（`9cc246d3` 修）。
+/// 双拼候选的 `consumed_length` 已回映射到击键域（`nihc` 的「你好」= 4），拿转换后的全拼长度
+/// （`nihao` = 5）当基准会把双拼的整串候选全部当成半截丢光。
 #[test]
 fn shuangpin_secondary_keeps_full_buffer_candidates() {
     use wind_engine::pinyin::shuangpin::{Layout, ShuangpinConverter};

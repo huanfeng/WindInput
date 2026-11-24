@@ -1,11 +1,10 @@
-//! 混输「满码 + 尾部残码拼音」诊断用例（真机现象：五笔拼音混输打 `nunl`）。
+//! 混输「满码 + 尾部残码拼音」（五笔拼音混输打 `nunl`）。
 //!
-//! 现象三连：4 码本该「无匹配即清空」，却出了拼音候选「嫩」；空格上屏后缓冲残留一个 `l`；
-//! 编码栏显示 `nunl` 而非 `nun'l`。三者出自同一个事实——**`nun` 是标准音节表中的合法音节**
-//! （`syllable.rs` 末尾为双拼转换真值补入的稀有音节之一），故 `nunl` 被 DAG 切成
-//! 「完成音节 nun + 尾部残码 l」，走的是全拼精确匹配路径，与简拼开关无关。
+//! `nun` 是标准音节表里的合法音节（`syllable.rs` 末尾为双拼转换补入的稀有音节），故 `nunl` 被 DAG
+//! 切成「完成音节 nun + 尾部残码 l」，走全拼精确匹配路径，与简拼开关无关。由此会出拼音候选「嫩」、
+//! 4 码不清空、编码栏该显示 `nun'l`。
 //!
-//! 本文件用最小内存词典复刻整条链路，锁住修复前后的两侧行为：
+//! 本文件用最小内存词典复刻整条链路，锁住：
 //! - 编码栏：`preedit_pinyin`（高亮跟随用的拆分形态）在单音节 + 残码时也须给出 `nun'l`；
 //! - 清空：两道拼音守护同受 `auto_commit_block_on_pinyin` 支配，开则守住、关则清空。
 
@@ -36,7 +35,7 @@ fn wubi_engine() -> Box<dyn Engine> {
 }
 
 /// 拼音侧：复刻 `cn_dicts/41448.dict.yaml` 的那一条 `嫩 nun 0`（大字集异读注音）。
-/// **简拼显式关闭**，锁住「本现象与简拼无关」。
+/// 简拼显式关闭，锁住「本现象与简拼无关」。
 fn pinyin_engine() -> PinyinEngine {
     let mut d = CodetableDict::empty();
     d.merge_single("nun".into(), "嫩".into(), 1, 0);
@@ -80,14 +79,12 @@ fn pinyin_alone_splits_nunl_and_consumes_only_three() {
     );
 }
 
-/// 事实 ②：混输下满 4 码**不清空**。两道守护各自独立成立，任一都足够拦住清空：
-/// (a) `has_pinyin` —— 拼音此刻确有候选「嫩」；
-/// (b) `pinyin_may_continue` —— `nunl` = 完整音节 nun + 合法音节前缀 l（la/le/li…）。
+/// 事实 ②：混输下满 4 码不清空。两道守护各自独立成立，任一都足够拦住清空：
+/// (a) `has_pinyin`：拼音此刻确有候选「嫩」；
+/// (b) `pinyin_may_continue`：`nunl` = 完整音节 nun + 合法音节前缀 l（la/le/li…）。
 ///
-/// ⚠️ **(a) 的前提在 2026-08-14 起需要显式打开**：`pinyin_partial_candidates` 默认 `false`
-/// 后，「嫩」（`consumed_length=3`，只解释 4 码中的 3 码）在默认配置下**不再进候选列表**
-/// ——那正是本文件开头记的用户诉求，现由该开关根治，见
-/// `mixed_partial_pinyin_filter.rs`。故这里显式开着它，才测得到守护 (a) 本身。
+/// (a) 的前提要显式打开 `pinyin_partial_candidates`：默认 `false` 下「嫩」（只解释 4 码中的 3 码）
+/// 不进候选列表（见 `mixed_partial_pinyin_filter.rs`）。
 #[test]
 fn mixed_does_not_clear_on_full_code_with_trailing_partial() {
     let e = MixedEngine::new(
@@ -109,10 +106,8 @@ fn mixed_does_not_clear_on_full_code_with_trailing_partial() {
     assert!(!r.should_clear, "有拼音候选 → 满码清空被否决");
 }
 
-/// 出厂配置（`pinyin_partial_candidates = false`）下的对照：「嫩」不再出现，
-/// 但清空仍被守护 (b) `pinyin_may_continue` 独立拦住 —— 用户接着打 `nunlu`… 不会被吞。
-///
-/// 这条与上一条构成单一变量对照：**同一个输入、同一份词库，只有开关不同**。
+/// 出厂配置（`pinyin_partial_candidates = false`）下的对照：「嫩」不出现，但清空仍被守护 (b)
+/// `pinyin_may_continue` 独立拦住，用户接着打 `nunlu`… 不会被吞。与上一条只差这个开关。
 #[test]
 fn default_config_drops_the_partial_nen_candidate() {
     let e = MixedEngine::new(
@@ -134,10 +129,9 @@ fn default_config_drops_the_partial_nen_candidate() {
     );
 }
 
-/// 事实 ②的(b)单独成立：**即使把「嫩 nun」从词库里删掉**（拼音此刻无候选），
-/// `pinyin_may_continue` 仍判「还没打完」→ 照样不清空。
-/// ⇒ 只清理词库那一条异读注音**不足以**让 `nunl` 清空；也正因如此，放开清空时两道守护
-/// 必须一起受 `auto_commit_block_on_pinyin` 支配（见 `guard_off_clears_nunl`）。
+/// 事实 ② 的 (b) 单独成立：即使把「嫩 nun」从词库里删掉，`pinyin_may_continue` 仍判「还没打完」，
+/// 照样不清空。所以放开清空时两道守护必须一起受 `auto_commit_block_on_pinyin` 支配
+/// （见 `guard_off_clears_nunl`）。
 #[test]
 fn clear_still_vetoed_even_without_the_nun_entry() {
     let mut d = CodetableDict::empty();
@@ -172,13 +166,12 @@ fn clear_still_vetoed_even_without_the_nun_entry() {
     );
 }
 
-/// 事实 ③（修复 A）：编码栏的两个口径分工。
+/// 事实 ③：编码栏的两个口径分工。
 ///
-/// `preedit_display` 是「无高亮上下文时的默认形态」，保持保守（≥2 完成音节才拆），否则
-/// 纯五笔码也会被拆得莫名其妙；`preedit_pinyin` 是「拼音拆分形态」，经协调器
-/// `preedit_split_body` 供高亮跟随——高亮到拼音候选「嫩」时显示 `nun'l`，高亮回五笔候选
-/// 时仍是 `nunl`。修复前它与 `preedit_display` 共用「≥2 音节」判据，单音节 + 残码时为空，
-/// 于是候选按 `nun|l` 算、编码栏却按整串显示，上屏残留的 `l` 显得毫无由来。
+/// `preedit_display` 是无高亮上下文时的默认形态，保持保守（≥2 完成音节才拆），否则纯五笔码也会被拆；
+/// `preedit_pinyin` 是拼音拆分形态，经协调器 `preedit_split_body` 供高亮跟随：高亮到「嫩」时显示
+/// `nun'l`，高亮回五笔候选时仍是 `nunl`。它若也用「≥2 音节」判据，单音节 + 残码时为空，候选按
+/// `nun|l` 算、编码栏却按整串显示。
 #[test]
 fn mixed_exposes_split_form_for_single_syllable_with_partial() {
     let e = MixedEngine::new(
@@ -209,8 +202,7 @@ fn mixed_exposes_split_form_for_single_syllable_with_partial() {
     assert_eq!(r2.preedit_pinyin, "", "单音节无残码：拆分串==原串，不填");
 }
 
-/// 修复 B：关掉「有拼音候选时否决上屏」后，`nunl` 满 4 码无匹配即清空。
-/// 用真 `PinyinEngine`（非 fake）走完整链路，锁住用户的实际诉求。
+/// 关掉「有拼音候选时否决上屏」后，`nunl` 满 4 码无匹配即清空。用真 `PinyinEngine` 走完整链路。
 #[test]
 fn guard_off_clears_nunl() {
     let e = MixedEngine::new(

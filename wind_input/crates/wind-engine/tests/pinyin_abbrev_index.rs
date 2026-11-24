@@ -1,20 +1,19 @@
 //! 简拼二级索引（wdat v5：AbbrevSection 存全拼码而非词）的装配语义。
 //!
-//! **自带 wdat 夹具，不依赖 build_dev/data**：简拼表只有 mmap 词典才有（内存词典返回空），
-//! 而依赖真实词库的测试在 `build_dev/data` 缺失时会**静默跳过**（判据：耗时 0.00s）——
-//! 本文件锁的是一个极隐蔽的缺陷，不能容忍这种静默失效。夹具走 `CachedDict::load_at`
-//! 的 wdat-only 模式（yaml 不存在、同名 wdat 存在时直接 mmap）。
+//! 自带 wdat 夹具，不依赖 build_dev/data：简拼表只有 mmap 词典才有（内存词典返回空），而依赖真实
+//! 词库的测试在目录缺失时会静默跳过。夹具走 `CachedDict::load_at` 的 wdat-only 模式（yaml 不存在、
+//! 同名 wdat 存在时直接 mmap）。
 
 use wind_dict::cached::CachedDict;
 use wind_dict::datformat::WdatWriter;
 use wind_engine::Engine;
 use wind_engine::pinyin::{Config as PyConfig, PinyinEngine};
 
-/// 造一份最小 wdat：全拼主表 + 简拼索引（索引存**码**）。
+/// 造一份最小 wdat：全拼主表 + 简拼索引（索引存码）。
 ///
 /// 关键夹具事实：`xian` 这一个扁平码下同时挂着
-/// - 「西安」boundary=0b101（xi|an，**2 音节**）
-/// - 「先」  boundary=0b1  （xian，**1 音节**）
+/// - 「西安」boundary=0b101（xi|an，2 音节）
+/// - 「先」  boundary=0b1  （xian，1 音节）
 ///
 /// 简拼 `xa` 指向的是前者的码。扁平码丢了音节切分，回查主表会把后者一并捞出来。
 fn fixture(tag: &str) -> CachedDict {
@@ -54,10 +53,7 @@ fn engine(dict: CachedDict) -> PinyinEngine {
     PinyinEngine::new(PyConfig::default(), dict)
 }
 
-/// 简拼候选须带**全拼码与边界**——这正是索引改存主键换来的。
-///
-/// 此前 AbbrevSection 直接存词，候选只能把 code 设成简拼串 `xa`，于是同一个词在简拼与
-/// 全拼下走两个互不相认的词频计数（词频记账取候选的 code）；boundary 也只能硬编码 0。
+/// 简拼候选须带全拼码与边界：同一个词在简拼与全拼下才共用一个词频计数（词频记账取候选的 code）。
 #[test]
 fn abbrev_candidate_carries_full_code_and_boundary() {
     let e = engine(fixture("code"));
@@ -72,14 +68,11 @@ fn abbrev_candidate_carries_full_code_and_boundary() {
     assert_eq!(c.boundary, 0b101, "边界随主表条目一并拿到，不再是 0");
 }
 
-/// **同码但音节数不符的词必须挡掉**。
+/// 同码但音节数不符的词必须挡掉。
 ///
-/// 扁平码有损：`xian` 既是「西安」的 xi|an（2 音节），也是「先」的 xian（1 音节）。
-/// 索引里 `xa` 指向的是前者的码，回查主表却会把后者一并捞出来——实测真实词库下
-/// `xa` 出「先/线/弦/现/县」一串单字。这是「存词」改「存码」引入的新失效模式，
-/// 存词时不会发生，故必须显式过滤：简拼字母数 == 音节数。
-///
-/// 注意「先」的权重（900000）远高于「西安」（6000），不过滤的话它会排在最前面。
+/// 扁平码有损：`xian` 既是「西安」的 xi|an，也是「先」的 xian。索引里 `xa` 指向前者的码，回查主表
+/// 会把后者一并捞出来（真实词库下 `xa` 会出「先/线/弦/现/县」一串单字），故须过滤：简拼字母数 == 音节数。
+/// 「先」的权重（900000）远高于「西安」（6000），不过滤的话它会排在最前面。
 #[test]
 fn abbrev_rejects_same_code_with_wrong_syllable_count() {
     let e = engine(fixture("filter"));
@@ -119,12 +112,10 @@ fn full_pinyin_still_returns_same_code_single_syllable_word() {
     assert!(t.contains(&"西安".to_string()), "也应出「西安」: {t:?}");
 }
 
-/// `syllable_boundary_of` 是**点查取真值，不做推断** —— 这是它与
-/// `generate_word_pinyin` 的分水岭。
+/// `syllable_boundary_of` 是点查取真值，不做推断，这是它与 `generate_word_pinyin` 的分水岭。
 ///
-/// 夹具里 `xian` 一个码下挂着两个切分不同的词（西安 xi|an、先 xian），只有按
-/// `(code, text)` 精确定位才能给对答案；从词反推读音的那条路做不到这件事。
-/// 词频列表靠它显示音节格式——词频表只有 `(code, text)`，自己不存 boundary。
+/// 夹具里 `xian` 一个码下挂着两个切分不同的词，只有按 `(code, text)` 精确定位才能给对答案。
+/// 词频列表靠它显示音节格式（词频表只有 `(code, text)`，自己不存 boundary）。
 #[test]
 fn boundary_lookup_is_exact_not_inferred() {
     let e = engine(fixture("blookup"));
@@ -141,14 +132,11 @@ fn boundary_lookup_is_exact_not_inferred() {
     assert_eq!(e.syllable_boundary_of("meiyouzhege", "西安"), 0);
 }
 
-/// **系统词简拼与用户词简拼必须同层**，否则用户词被整层压住、调频也翻不过来。
+/// 系统词简拼与用户词简拼必须同层，否则用户词被整层压住、调频也翻不过来。
 ///
-/// `cmp_match_layers` 的第一键就是 `is_abbrev`（`false < true`，标记者沉底）。此前
-/// step5 的系统词简拼借 `is_prefix=true` 沉底、step6 的用户词简拼用 `is_abbrev=true`
-/// ——分属两个层级，于是 `dblg` 下用户词「大菠萝哥」永远排在系统词「夺不了冠」之后，
-/// 层级是硬闸门，怎么调频都翻不过来。
-///
-/// 本测试只断言**同层**（都标 `is_abbrev`），不断言谁在前——那由权重与词频决定。
+/// `cmp_match_layers` 的第一键就是 `is_abbrev`（`false < true`，标记者沉底），层级是硬闸门。
+/// 若系统词简拼借 `is_prefix` 沉底、用户词简拼标 `is_abbrev`，`dblg` 下用户词「大菠萝哥」就永远
+/// 排在系统词「夺不了冠」之后。只断言同层（都标 `is_abbrev`），先后由权重与词频决定。
 #[test]
 fn system_and_user_abbrev_share_one_layer() {
     let dir = std::env::temp_dir().join("wind_abbrev_layer");
