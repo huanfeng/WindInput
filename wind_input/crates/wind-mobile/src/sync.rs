@@ -294,7 +294,8 @@ impl MobileSync {
         };
         let r = self.send_command(op, args)?;
         let joined = match op {
-            Op::SetPassphrase => r["mode"] == "join",
+            // 换了密钥的改口令也待确认；已确认时确认身份是空操作
+            Op::SetPassphrase => r["mode"] != "init",
             Op::ImportKey => true,
             _ => false,
         };

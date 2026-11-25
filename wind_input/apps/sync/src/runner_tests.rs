@@ -328,3 +328,60 @@ fn claiming_another_id_retires_the_previous_one() {
     round(&mut b, &rxb);
     assert!(mem.keys(&manifest::device_dir_prefix("lap")).is_empty());
 }
+
+fn assert_needs_identity(r: &mut Runner) {
+    assert!(r.status().needs_identity, "{:?}", r.status());
+    let e = r.command(Op::SyncNow, &Value::Null).unwrap_err();
+    assert!(e.contains("请先确认本机身份"), "{e}");
+}
+
+/// 新设备凭旧口令改口令：密钥换成远端的，按加入处理，须先确认身份。
+#[test]
+fn changing_passphrase_from_a_new_device_still_needs_identity() {
+    let d = tempfile::tempdir().unwrap();
+    let mem = initialized_remote();
+    let (mut r, _rx) = runner_with(d.path(), Box::new(MemFactory(mem)), None, "pc");
+    let rep = r
+        .command(
+            Op::SetPassphrase,
+            &json!({"passphrase": "q", "old_passphrase": "p"}),
+        )
+        .unwrap();
+    assert_eq!(rep["mode"], "change");
+    assert_needs_identity(&mut r);
+}
+
+/// 未确认身份时重输同一口令（走改口令）不会顺带确认身份。
+#[test]
+fn reentering_passphrase_while_unconfirmed_keeps_needing_identity() {
+    let d = tempfile::tempdir().unwrap();
+    let mem = initialized_remote();
+    let (mut r, _rx) = runner_with(d.path(), Box::new(MemFactory(mem)), None, "pc");
+    r.command(Op::SetPassphrase, &json!({"passphrase": "p"}))
+        .unwrap();
+    let rep = r
+        .command(Op::SetPassphrase, &json!({"passphrase": "p"}))
+        .unwrap();
+    assert_eq!(rep["mode"], "change");
+    assert_needs_identity(&mut r);
+}
+
+/// 已确认的设备改口令后仍是已确认。
+#[test]
+fn confirmed_device_changing_passphrase_stays_confirmed() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, _rx) = runner_with(
+        d.path(),
+        Box::new(MemFactory(MemBackend::new())),
+        None,
+        "pc",
+    );
+    r.command(Op::SetPassphrase, &json!({"passphrase": "p"}))
+        .unwrap();
+    let rep = r
+        .command(Op::SetPassphrase, &json!({"passphrase": "p2"}))
+        .unwrap();
+    assert_eq!(rep["mode"], "change");
+    assert!(!r.status().needs_identity);
+    r.command(Op::SyncNow, &Value::Null).unwrap();
+}

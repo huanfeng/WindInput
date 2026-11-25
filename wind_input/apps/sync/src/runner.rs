@@ -888,9 +888,8 @@ impl Runner {
     }
 
     /// DEK 变了说明换了同步库：旧的清单基线对新远端没有意义，重建（沿用设备号，回到单机组）。
-    /// `confirmed` 为本机身份是否就此确定（初始化、改口令是；加入已有远端否）；
-    /// 密钥没变（重新导入同一把）则保持原有身份。
-    fn adopt_dek(&mut self, dek: &Dek, confirmed: bool) -> Result<(), String> {
+    /// 密钥变了：只有初始化（`init`）直接确认身份，其余一律按加入处理、待确认；密钥没变则保持原有身份。
+    fn adopt_dek(&mut self, dek: &Dek, init: bool) -> Result<(), String> {
         let b64 = dek.to_base64();
         let changed = self.secrets.dek.as_deref() != Some(b64.as_str());
         self.secrets.dek = Some(b64);
@@ -899,10 +898,8 @@ impl Runner {
             let device = self.state.device.clone();
             self.state = SyncState::new(device.clone());
             self.state.group = device;
-            self.state.identity_confirmed = confirmed;
+            self.state.identity_confirmed = init;
             self.info_written = None;
-        } else if confirmed {
-            self.state.identity_confirmed = true;
         }
         self.after_user_fix();
         self.publish_info(false);
@@ -937,7 +934,7 @@ impl Runner {
                 }
             }
         };
-        self.adopt_dek(&dek, mode != "join")?;
+        self.adopt_dek(&dek, mode == "init")?;
         log!("口令设置完成（{mode}）");
         Ok(json!({ "ok": true, "mode": mode }))
     }
