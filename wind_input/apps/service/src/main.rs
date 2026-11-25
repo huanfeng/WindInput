@@ -399,6 +399,7 @@ fn main() {
     );
     let extensions_for_rpc = extensions.clone();
     let extensions_for_exit = extensions.clone();
+    let extensions_for_sync = extensions.clone();
     // 数据同步：设置启用且同步进程已安装时拉起 `wind_input_sync`（见 sync.rs）。
     let sync_host = sync::SyncHost::start();
     let sync_for_exit = sync_host.clone();
@@ -450,6 +451,12 @@ fn main() {
                         move |v| sink.broadcast("sync.statusChanged", v)
                     }),
                     Box::new(move |method, params| {
+                        // 暂停 / 恢复扩展只对同步进程开放（不经 ctrl 管道的公开 RPC）。
+                        if let Some(r) =
+                            extensions_for_sync_request(&extensions_for_sync, method, params)
+                        {
+                            return r;
+                        }
                         let resp = wind_rpc::dispatch(
                             &state,
                             wind_ipc::rpc::Request {
@@ -616,6 +623,32 @@ impl wind_rpc::CoreRpc for RpcCore {
     fn fonts(&self) -> Vec<(String, String)> {
         self.coord.list_font_families()
     }
+}
+
+/// 同步进程请求里的 `extensions.suspend` / `extensions.resume`；其余方法返回 None。
+fn extensions_for_sync_request(
+    ext: &extensions::Extensions,
+    method: &str,
+    params: &serde_json::Value,
+) -> Option<Result<serde_json::Value, String>> {
+    if method != "extensions.suspend" && method != "extensions.resume" {
+        return None;
+    }
+    let ids: Vec<String> = params
+        .get("ids")
+        .and_then(serde_json::Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    if method == "extensions.suspend" {
+        ext.suspend(&ids);
+    } else {
+        ext.resume(&ids);
+    }
+    Some(Ok(serde_json::json!({})))
 }
 
 /// 以分离子进程重新启动自身（用于"重启服务"）。

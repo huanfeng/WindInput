@@ -72,9 +72,16 @@ fn rig_with(pre: Option<SyncSettings>, timeout: Duration) -> Rig {
         {
             let executed = executed.clone();
             Box::new(move |m, p| {
-                let tag = match p.get("path").and_then(Value::as_str) {
-                    Some(path) => format!("{m} {path}"),
-                    None => m.to_string(),
+                let ids = p.get("ids").and_then(Value::as_array).map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                });
+                let tag = match (p.get("path").and_then(Value::as_str), ids) {
+                    (Some(path), _) => format!("{m} {path}"),
+                    (None, Some(ids)) => format!("{m} {ids}"),
+                    (None, None) => m.to_string(),
                 };
                 lock(&executed).push(tag);
                 Ok(json!({ "ran": m }))
@@ -282,6 +289,55 @@ fn failed_begin_is_not_tracked() {
         .track_edit(1, "data.beginEdit", &json!({"path": "a"}), false);
     r.host.release_held(None);
     assert_eq!(end_count(&r, "a"), 0);
+}
+
+fn ext_request(r: &mut Rig, id: u64, method: &str, ids: &[&str]) {
+    r.stub.send(FromSync::Request {
+        id,
+        method: method.into(),
+        params: json!({ "ids": ids }),
+    });
+    assert!(matches!(r.stub.next(), ToSync::Reply { error: None, .. }));
+}
+
+fn count(r: &Rig, tag: &str) -> usize {
+    lock(&r.executed).iter().filter(|m| *m == tag).count()
+}
+
+#[test]
+fn extension_suspend_and_resume_are_whitelisted() {
+    assert!(REQUEST_WHITELIST.contains(&"extensions.suspend"));
+    assert!(REQUEST_WHITELIST.contains(&"extensions.resume"));
+}
+
+/// 同步进程在暂停扩展期间被强杀：core 代为恢复，否则扩展一直停着。
+#[test]
+fn extensions_suspended_by_a_dead_sync_process_are_resumed_by_core() {
+    let mut r = rig();
+    let _hello = r.stub.next();
+    ext_request(&mut r, 1, "extensions.suspend", &["a", "b"]);
+    ext_request(&mut r, 2, "extensions.resume", &["a"]);
+    let executed = r.executed.clone();
+    drop(r.stub);
+    wait_for(|| lock(&executed).contains(&"extensions.resume b".to_string()));
+    // 已正常恢复的不重复恢复
+    assert!(!lock(&executed).contains(&"extensions.resume a,b".to_string()));
+    assert_eq!(
+        lock(&executed)
+            .iter()
+            .filter(|m| m.as_str() == "extensions.resume a")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn stopping_the_host_resumes_suspended_extensions() {
+    let mut r = rig();
+    let _hello = r.stub.next();
+    ext_request(&mut r, 1, "extensions.suspend", &["a"]);
+    r.host.stop();
+    assert_eq!(count(&r, "extensions.resume a"), 1);
 }
 
 #[test]

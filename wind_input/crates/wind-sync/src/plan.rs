@@ -135,6 +135,7 @@ mod tests {
             lamport,
             device: dev.into(),
             absorbed: vec![],
+            exec: false,
         }
     }
     fn man(dev: &str, files: &[(&str, Entry)]) -> Manifest {

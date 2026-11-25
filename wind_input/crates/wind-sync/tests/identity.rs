@@ -227,6 +227,7 @@ fn join_theirs_ignores_out_of_scope_remote_entries() {
         lamport: 9999,
         device: "evil".into(),
         absorbed: vec![],
+        exec: false,
     };
     let mut files = std::collections::BTreeMap::new();
     files.insert("groups/home/data/../dicts.toml".to_string(), ent("aa"));

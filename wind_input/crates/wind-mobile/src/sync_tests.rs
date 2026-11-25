@@ -229,3 +229,21 @@ fn sync_if_due_confirms_identity_first() {
     sync.shutdown();
     let _ = std::fs::remove_dir_all(user);
 }
+
+/// 手机没有软键盘文件重载路径与扩展：这几个请求是成功的空操作（同步写入扩展 / 软键盘文件时会发）。
+#[test]
+fn desktop_only_reload_requests_are_noops_on_mobile() {
+    let (core, user) = core("noop");
+    let link = InProcLink {
+        core,
+        shared: Arc::new(Shared::default()),
+    };
+    for m in [
+        "softkeyboard.reload",
+        "extensions.suspend",
+        "extensions.resume",
+    ] {
+        assert!(link.request(m, json!({ "ids": ["k"] })).is_ok(), "{m}");
+    }
+    let _ = std::fs::remove_dir_all(user);
+}

@@ -115,6 +115,10 @@ impl CoreLink for InProcLink {
             }
             // 手机没有按应用的兼容规则表，可同步的 compat.toml 也不会被读取：成功的空操作。
             "compat.reload" => Ok(json!({ "ok": true })),
+            // 手机没有软键盘文件重载路径，也没有扩展可暂停：同上，成功的空操作。
+            "softkeyboard.reload" | "extensions.suspend" | "extensions.resume" => {
+                Ok(json!({ "ok": true }))
+            }
             "schema.reloadFiles" => {
                 let ids = external_files::reload_schema_files(c, ids_param(&params)?);
                 Ok(json!({ "ok": true, "reloaded": ids }))

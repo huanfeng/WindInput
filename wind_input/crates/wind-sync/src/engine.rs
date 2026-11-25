@@ -373,6 +373,7 @@ fn run(
         lamport,
         device: me.clone(),
         absorbed: Vec::new(),
+        exec: false,
     };
     let mut outs: Vec<Out> = Vec::new();
     // 范围外的冲突副本：只写本地，不进状态与清单
@@ -671,6 +672,13 @@ fn run(
         }
     }
 
+    // 本机版本发布时带上本机的可执行位
+    for o in outs.iter_mut() {
+        if o.upload.is_some() && o.entry.device == me && !o.entry.deleted {
+            o.entry.exec = local.is_exec(&o.path).map_err(le)?;
+        }
+    }
+
     // 4. 写本地（一批写入、一批删除）
     let mut writes: Vec<(String, Vec<u8>)> = outs
         .iter()
@@ -687,6 +695,16 @@ fn run(
     }
     if !dels.is_empty() {
         local.delete(&dels).map_err(le)?;
+    }
+    // 远端条目带可执行位的补上（被重写过的本机条目也要补，原子写入会丢位）
+    let execs: Vec<String> = outs
+        .iter()
+        .filter(|o| o.entry.exec && !o.entry.deleted && !o.delete)
+        .filter(|o| o.write.is_some() || o.entry.device != me)
+        .map(|o| o.path.clone())
+        .collect();
+    if !execs.is_empty() {
+        local.set_exec(&execs).map_err(le)?;
     }
 
     // 5. 传 blob（先于清单）

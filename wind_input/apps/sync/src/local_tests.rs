@@ -380,3 +380,99 @@ fn temp_names_are_unique_per_write() {
         "foreign"
     );
 }
+
+fn ext_calls(core: &FakeCore) -> Vec<(String, Value)> {
+    core.calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(m, _)| m.starts_with("extensions."))
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn extension_writes_are_bracketed_by_suspend_and_resume() {
+    let (_d, core, mut l, _) = rig();
+    l.write_batch(&[
+        ("extensions/keysound/keysound.exe".into(), b"MZ".to_vec()),
+        ("extensions/keysound/extension.toml".into(), b"x".to_vec()),
+        ("extensions/other/run".into(), b"y".to_vec()),
+        ("config.toml".into(), b"a=1\n".to_vec()),
+    ])
+    .unwrap();
+    let ids = json!({ "ids": ["keysound", "other"] });
+    assert_eq!(
+        ext_calls(&core),
+        vec![
+            ("extensions.suspend".to_string(), ids.clone()),
+            ("extensions.resume".to_string(), ids)
+        ]
+    );
+    // 先暂停、写完才恢复
+    let all = core.methods();
+    let pos = |m: &str| all.iter().position(|x| x == m).unwrap();
+    assert!(pos("extensions.suspend") < pos("config.reload"));
+    assert!(pos("config.reload") <= pos("extensions.resume"));
+}
+
+#[test]
+fn extension_resume_is_sent_even_when_write_fails() {
+    let (d, core, mut l, _) = rig();
+    // 目标路径是目录：写入失败
+    std::fs::create_dir_all(d.path().join("extensions/keysound/keysound.exe")).unwrap();
+    let r = l.write_batch(&[("extensions/keysound/keysound.exe".into(), b"MZ".to_vec())]);
+    assert!(r.is_err());
+    let ids = json!({ "ids": ["keysound"] });
+    assert_eq!(
+        ext_calls(&core),
+        vec![
+            ("extensions.suspend".to_string(), ids.clone()),
+            ("extensions.resume".to_string(), ids)
+        ]
+    );
+}
+
+#[test]
+fn extension_delete_is_also_bracketed() {
+    let (d, core, mut l, _) = rig();
+    put(d.path(), "extensions/keysound/old.dll", "x");
+    l.delete(&["extensions/keysound/old.dll".into()]).unwrap();
+    assert_eq!(ext_calls(&core).len(), 2);
+}
+
+#[test]
+fn no_extension_paths_means_no_suspend() {
+    let (_d, core, mut l, _) = rig();
+    l.write_batch(&[("config.toml".into(), b"a=1\n".to_vec())])
+        .unwrap();
+    assert!(ext_calls(&core).is_empty());
+}
+
+#[test]
+fn refused_suspend_aborts_the_batch_without_writing() {
+    let (d, core, mut l, _) = rig();
+    core.fail_on("extensions.suspend");
+    let r = l.write_batch(&[("extensions/keysound/keysound.exe".into(), b"MZ".to_vec())]);
+    assert!(r.is_err());
+    assert!(!d.path().join("extensions/keysound/keysound.exe").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_bit_is_set_and_read_back_on_unix() {
+    use std::os::unix::fs::PermissionsExt;
+    let (d, _c, mut l, _) = rig();
+    l.write_batch(&[("extensions/k/run".into(), b"#!/bin/sh\n".to_vec())])
+        .unwrap();
+    assert!(!l.is_exec("extensions/k/run").unwrap());
+    l.set_exec(&["extensions/k/run".into()]).unwrap();
+    let mode = std::fs::metadata(d.path().join("extensions/k/run"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_ne!(mode & 0o100, 0);
+    // 其余位保留
+    assert_eq!(mode & 0o044, 0o044);
+    assert!(l.is_exec("extensions/k/run").unwrap());
+}

@@ -70,6 +70,9 @@ pub struct Entry {
     /// 不再被当作并发修改。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub absorbed: Vec<String>,
+    /// 可执行位（扩展本体等）。仅位变化、内容不变时不会触发同步（已知限制）。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub exec: bool,
 }
 
 impl Entry {
@@ -144,6 +147,7 @@ mod tests {
                 lamport: 3,
                 device: "d1".into(),
                 absorbed: vec![],
+                exec: false,
             },
         );
         Manifest {

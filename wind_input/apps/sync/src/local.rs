@@ -60,6 +60,12 @@ fn safe_rel(path: &str) -> bool {
             .all(|s| !s.is_empty() && s != "." && s != "..")
 }
 
+fn split3(p: &str) -> Option<(&str, &str, &str)> {
+    let (a, rest) = p.split_once('/')?;
+    let (b, c) = rest.split_once('/')?;
+    (!b.is_empty()).then_some((a, b, c))
+}
+
 /// `data/` 下由 core 的外部编辑会话管理的文本文件。返回 `data.beginEdit` 要的路径（相对数据目录）。
 fn edit_target(path: &str) -> Option<&str> {
     let rest = path.strip_prefix("data/")?;
@@ -277,7 +283,47 @@ impl FsLocal {
             .unwrap_or_default())
     }
 
+    /// 本批涉及的扩展 id（`extensions/<id>/…`）。
+    fn touched_extensions(writes: &[(String, Vec<u8>)], deletes: &[String]) -> Vec<String> {
+        let mut ids = BTreeSet::new();
+        for p in writes.iter().map(|(p, _)| p).chain(deletes.iter()) {
+            if let Some(("extensions", id, _)) = split3(p) {
+                ids.insert(id.to_string());
+            }
+        }
+        ids.into_iter().collect()
+    }
+
+    /// 运行中的扩展 exe 在 Windows 上无法覆盖：涉及扩展文件的批次先让 core 暂停它们，
+    /// 写完（无论成败）再恢复。
     fn apply(
+        &mut self,
+        writes: &[(String, Vec<u8>)],
+        deletes: &[String],
+    ) -> Result<(), LocalError> {
+        let ids = Self::touched_extensions(writes, deletes);
+        if ids.is_empty() {
+            return self.apply_inner(writes, deletes);
+        }
+        let params = json!({ "ids": ids });
+        if let Err(e) = self.req("extensions.suspend", params.clone()) {
+            // 超时的请求 core 可能仍会处理：补一次恢复
+            if e == crate::link::TIMEOUT_MSG {
+                let _ = self.req("extensions.resume", params);
+            }
+            return Err(LocalError(format!("核心拒绝暂停扩展: {e}")));
+        }
+        let r = self.apply_inner(writes, deletes);
+        let resumed = self
+            .req("extensions.resume", params.clone())
+            .or_else(|_| self.req("extensions.resume", params));
+        if let Err(e) = resumed {
+            log!("extensions.resume 失败: {e}");
+        }
+        r
+    }
+
+    fn apply_inner(
         &mut self,
         writes: &[(String, Vec<u8>)],
         deletes: &[String],
@@ -487,6 +533,35 @@ impl LocalStore for FsLocal {
 
     fn delete(&mut self, paths: &[String]) -> Result<(), LocalError> {
         self.apply(&[], paths)
+    }
+
+    #[cfg(unix)]
+    fn is_exec(&self, path: &str) -> Result<bool, LocalError> {
+        use std::os::unix::fs::PermissionsExt;
+        if !safe_rel(path) {
+            return Err(LocalError(format!("拒绝读取不安全的路径: {path}")));
+        }
+        Ok(std::fs::metadata(self.abs(path))
+            .map(|m| m.is_file() && m.permissions().mode() & 0o100 != 0)
+            .unwrap_or(false))
+    }
+
+    #[cfg(unix)]
+    fn set_exec(&mut self, paths: &[String]) -> Result<(), LocalError> {
+        use std::os::unix::fs::PermissionsExt;
+        for p in paths {
+            if !safe_rel(p) {
+                return Err(LocalError(format!("拒绝写入不安全的路径: {p}")));
+            }
+            let abs = self.abs(p);
+            let mode = std::fs::metadata(&abs)
+                .map_err(|e| LocalError(format!("读取 {p} 权限失败: {e}")))?
+                .permissions()
+                .mode();
+            std::fs::set_permissions(&abs, std::fs::Permissions::from_mode(mode | 0o100))
+                .map_err(|e| LocalError(format!("设置 {p} 可执行位失败: {e}")))?;
+        }
+        Ok(())
     }
 }
 

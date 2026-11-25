@@ -13,6 +13,14 @@ pub trait LocalStore {
     /// 一批写入作为一次编辑会话（真实实现在此前后 beginEdit/endEdit 并合并重载）。
     fn write_batch(&mut self, files: &[(String, Vec<u8>)]) -> Result<(), LocalError>;
     fn delete(&mut self, paths: &[String]) -> Result<(), LocalError>;
+    /// 文件是否带可执行位（Windows 恒为 false）。
+    fn is_exec(&self, _path: &str) -> Result<bool, LocalError> {
+        Ok(false)
+    }
+    /// 给这些文件加上可执行位（保留其余权限位；Windows 忽略）。
+    fn set_exec(&mut self, _paths: &[String]) -> Result<(), LocalError> {
+        Ok(())
+    }
 }
 
 /// 内存实现（测试与 S4 之前的联调）。
@@ -21,6 +29,8 @@ pub struct MemLocal {
     pub files: BTreeMap<String, Vec<u8>>,
     /// 累计 write_batch 调用次数（断言「一批写入合并成一次」）。
     pub batches: usize,
+    /// 带可执行位的路径。
+    pub exec: std::collections::BTreeSet<String>,
 }
 
 impl MemLocal {
@@ -54,7 +64,15 @@ impl LocalStore for MemLocal {
     fn delete(&mut self, paths: &[String]) -> Result<(), LocalError> {
         for p in paths {
             self.files.remove(p);
+            self.exec.remove(p);
         }
+        Ok(())
+    }
+    fn is_exec(&self, path: &str) -> Result<bool, LocalError> {
+        Ok(self.exec.contains(path))
+    }
+    fn set_exec(&mut self, paths: &[String]) -> Result<(), LocalError> {
+        self.exec.extend(paths.iter().cloned());
         Ok(())
     }
 }
@@ -97,5 +115,18 @@ impl LocalStore for NsLocal<'_> {
             .map(|p| to_local(p, &self.ns).ok_or_else(|| unmapped(p)))
             .collect::<Result<Vec<_>, _>>()?;
         self.inner.delete(&mapped)
+    }
+    fn is_exec(&self, path: &str) -> Result<bool, LocalError> {
+        match to_local(path, &self.ns) {
+            Some(l) => self.inner.is_exec(&l),
+            None => Ok(false),
+        }
+    }
+    fn set_exec(&mut self, paths: &[String]) -> Result<(), LocalError> {
+        let mapped = paths
+            .iter()
+            .map(|p| to_local(p, &self.ns).ok_or_else(|| unmapped(p)))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.inner.set_exec(&mapped)
     }
 }

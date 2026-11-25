@@ -10,6 +10,7 @@
 //!
 //! 日志只记启停、崩溃、扩展状态变化，不记事件内容。
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::process::{ChildStdin, ChildStdout, Command};
 use std::sync::{Arc, Mutex};
@@ -60,6 +61,10 @@ struct State {
     host: Option<Host>,
     /// 宿主进程的监护（期望态、退避、熔断）；`host` 是进程在跑时的管道侧状态。
     sup: Supervisor,
+    /// 最近一次应用的配置：暂停 / 恢复时据此重算期望集。
+    cfg: ExtensionsConfig,
+    /// 被同步临时暂停的扩展（文件正在被替换）：不在期望集里。
+    suspended: BTreeSet<String>,
 }
 
 struct Host {
@@ -96,6 +101,8 @@ impl Extensions {
                 want: Vec::new(),
                 host: None,
                 sup,
+                cfg: ExtensionsConfig::default(),
+                suspended: BTreeSet::new(),
             }),
             status: Arc::new(Mutex::new(Vec::new())),
         });
@@ -146,17 +153,51 @@ impl Extensions {
 
     /// 配置变化（含启动时的初值）。授权有变时通知协调器（放锁之后）。
     pub fn apply_config(&self, cfg: &ExtensionsConfig) {
-        if self.apply_config_locked(cfg) {
+        lock(&self.state).cfg = cfg.clone();
+        self.reapply();
+    }
+
+    /// 暂停这些扩展（同步要替换它们的文件）：移出期望集，宿主随之停掉它们。
+    pub fn suspend(&self, ids: &[String]) {
+        lock(&self.state).suspended.extend(ids.iter().cloned());
+        self.reapply();
+    }
+
+    /// 恢复被暂停的扩展，按当前配置重配。
+    pub fn resume(&self, ids: &[String]) {
+        {
+            let mut st = lock(&self.state);
+            for id in ids {
+                st.suspended.remove(id);
+            }
+        }
+        self.reapply();
+    }
+
+    /// 当前期望集里的扩展 id（测试用）。
+    #[cfg(test)]
+    fn want_ids(&self) -> Vec<String> {
+        lock(&self.state)
+            .want
+            .iter()
+            .map(|g| g.id.clone())
+            .collect()
+    }
+
+    fn reapply(&self) {
+        if self.apply_config_locked() {
             (self.on_hook_changed)();
         }
     }
 
-    /// 返回授权是否变了。
-    fn apply_config_locked(&self, cfg: &ExtensionsConfig) -> bool {
+    /// 按已存的配置与暂停集重算期望集。返回授权是否变了。
+    fn apply_config_locked(&self) -> bool {
+        let mut st = lock(&self.state);
+        let cfg = &st.cfg;
         let want: Vec<ExtensionGrant> = if cfg.enabled {
             cfg.list
                 .iter()
-                .filter(|e| e.enabled)
+                .filter(|e| e.enabled && !st.suspended.contains(&e.id))
                 .map(|e| ExtensionGrant {
                     id: e.id.clone(),
                     granted: e.granted.clone(),
@@ -166,7 +207,6 @@ impl Extensions {
         } else {
             Vec::new()
         };
-        let mut st = lock(&self.state);
         if want == st.want {
             return false;
         }
@@ -400,6 +440,49 @@ fn spawn_writer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wind_config::ExtensionEntry;
+
+    fn entry(id: &str) -> ExtensionEntry {
+        ExtensionEntry {
+            id: id.into(),
+            enabled: true,
+            granted: vec!["key.detail".into()],
+            options: Default::default(),
+        }
+    }
+
+    fn started(ids: &[&str]) -> Arc<Extensions> {
+        let ext = Extensions::start(Arc::new(Tap::new()), Box::new(|| {}), Box::new(|| {}));
+        ext.apply_config(&ExtensionsConfig {
+            enabled: true,
+            list: ids.iter().map(|i| entry(i)).collect(),
+        });
+        ext
+    }
+
+    #[test]
+    fn suspended_extensions_leave_the_want_set_until_resumed() {
+        let ext = started(&["a", "b"]);
+        assert_eq!(ext.want_ids(), ["a", "b"]);
+        ext.suspend(&["a".to_string()]);
+        assert_eq!(ext.want_ids(), ["b"]);
+        ext.resume(&["a".to_string()]);
+        assert_eq!(ext.want_ids(), ["a", "b"]);
+    }
+
+    #[test]
+    fn config_change_while_suspended_keeps_it_out() {
+        let ext = started(&["a"]);
+        ext.suspend(&["a".to_string()]);
+        assert!(ext.want_ids().is_empty());
+        ext.apply_config(&ExtensionsConfig {
+            enabled: true,
+            list: vec![entry("a"), entry("c")],
+        });
+        assert_eq!(ext.want_ids(), ["c"]);
+        ext.resume(&["a".to_string()]);
+        assert_eq!(ext.want_ids(), ["a", "c"]);
+    }
 
     #[test]
     fn inventory_lists_manifests_errors_and_status() {

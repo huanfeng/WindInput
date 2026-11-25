@@ -45,6 +45,9 @@ pub const REQUEST_WHITELIST: &[&str] = &[
     "schema.reloadFiles",
     "theme.reloadFiles",
     "softkeyboard.reload",
+    // 替换运行中的扩展文件前后：暂停 / 恢复这些扩展
+    "extensions.suspend",
+    "extensions.resume",
 ];
 
 /// 同步进程文件名随变体带后缀（`wind_input_sync_dev.exe`），理由同扩展宿主：
@@ -134,6 +137,9 @@ pub struct SyncHost {
     /// 经同步进程成功 `data.beginEdit`、尚未 `data.endEdit` 的 (进程代次, 路径)。
     /// 同步进程退出（含被强杀）时据此代为结束，否则 core 会一直暂停该文件的写回。
     held_edits: Mutex<BTreeSet<(u64, String)>>,
+    /// 经同步进程成功 `extensions.suspend`、尚未 `extensions.resume` 的 (进程代次, 扩展 id)；
+    /// 同步进程退出时代为恢复，否则扩展会一直停着。
+    held_suspends: Mutex<BTreeSet<(u64, String)>>,
 }
 
 impl SyncHost {
@@ -193,6 +199,7 @@ impl SyncHost {
             hooks: OnceLock::new(),
             command_timeout,
             held_edits: Mutex::new(BTreeSet::new()),
+            held_suspends: Mutex::new(BTreeSet::new()),
         };
         host.reconcile(&mut lock(&host.inner), Instant::now(), false);
         host
@@ -217,6 +224,28 @@ impl SyncHost {
             let _ = w.join();
         }
         self.release_held(None);
+    }
+
+    /// 记录 / 移除经同步链路暂停的扩展。
+    fn track_suspend(&self, epoch: u64, method: &str, params: &Value, ok: bool) {
+        if !ok {
+            return;
+        }
+        let Some(ids) = params.get("ids").and_then(Value::as_array) else {
+            return;
+        };
+        let mut held = lock(&self.held_suspends);
+        for id in ids.iter().filter_map(Value::as_str) {
+            match method {
+                "extensions.suspend" => {
+                    held.insert((epoch, id.to_string()));
+                }
+                "extensions.resume" => {
+                    held.remove(&(epoch, id.to_string()));
+                }
+                _ => {}
+            }
+        }
     }
 
     /// 记录 / 移除经同步链路开的编辑会话。`ok` 为请求是否成功执行。
@@ -257,6 +286,25 @@ impl SyncHost {
             warn!("同步进程退出时仍有编辑会话未结束，代为结束: {p}");
             if let Err(e) = self.run_request("data.endEdit", &json!({ "path": p })) {
                 warn!("代为结束编辑会话 {p} 失败: {e}");
+            }
+        }
+        let ids: Vec<String> = {
+            let mut held = lock(&self.held_suspends);
+            let take: Vec<(u64, String)> = held
+                .iter()
+                .filter(|(e, _)| epoch.is_none_or(|x| x == *e))
+                .cloned()
+                .collect();
+            for k in &take {
+                held.remove(k);
+            }
+            let set: BTreeSet<String> = take.into_iter().map(|(_, id)| id).collect();
+            set.into_iter().collect()
+        };
+        if !ids.is_empty() {
+            warn!("同步进程退出时仍有扩展被暂停，代为恢复: {}", ids.join("、"));
+            if let Err(e) = self.run_request("extensions.resume", &json!({ "ids": ids })) {
+                warn!("代为恢复扩展失败: {e}");
             }
         }
     }
@@ -400,6 +448,7 @@ impl SyncHost {
             FromSync::Request { id, method, params } => {
                 let result = self.run_request(&method, &params);
                 self.track_edit(epoch, &method, &params, result.is_ok());
+                self.track_suspend(epoch, &method, &params, result.is_ok());
                 let inner = lock(&self.inner);
                 if let Some(l) = inner.link.as_ref().filter(|l| l.epoch == epoch) {
                     let _ = l.tx.send(ToSync::reply(id, result));
