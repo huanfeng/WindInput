@@ -799,3 +799,25 @@ fn old_is_not_restored_when_same_name_del_exists() {
     l.sweep_aside();
     assert!(!path.exists());
 }
+
+#[test]
+fn del_marker_outlives_locked_old_across_sweeps() {
+    let (d, _c, l, _) = rig();
+    let dir = d.path().join("extensions/k");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("k.exe");
+    // Linux 锁不住文件：用同名非空目录充当删不掉的 .old
+    let old = crate::fsutil::tmp_sibling(&path, OLD_SUFFIX);
+    std::fs::create_dir_all(old.join("x")).unwrap();
+    std::fs::write(old.join("x/y"), "陈旧").unwrap();
+    std::fs::write(crate::fsutil::tmp_sibling(&path, DEL_SUFFIX), "删").unwrap();
+    l.sweep_aside();
+    l.sweep_aside();
+    assert!(!path.exists());
+    let dels = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().ends_with(DEL_SUFFIX))
+        .count();
+    assert_eq!(dels, 1, "同名 .old 还在时 .del 要留着");
+}

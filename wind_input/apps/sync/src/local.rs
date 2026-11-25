@@ -315,7 +315,8 @@ impl FsLocal {
     }
 
     /// 整理 `extensions/` 下的让路文件：`.del` 删掉；`.old` 的目标缺失（两次改名之间崩溃、
-    /// 落位与还原都失败）则把最新的一个改回原名，目标在则删掉。仍被占用的删不掉，留待下次。
+    /// 落位与还原都失败）则把最新的一个改回原名，目标在则删掉。仍被占用的删不掉，留待下次；
+    /// 同名 `.old` 还在时 `.del` 留作删除标记，免得下次把 `.old` 还原。
     fn sweep_aside(&self) {
         fn walk(dir: &Path) {
             let Ok(rd) = std::fs::read_dir(dir) else {
@@ -323,16 +324,15 @@ impl FsLocal {
             };
             // 原文件名 → [(修改时间, 让路文件)]
             let mut olds: HashMap<String, Vec<(std::time::SystemTime, PathBuf)>> = HashMap::new();
-            // 本目录里被删除让路过的原文件名：同名 .old 不再还原
-            let mut deleted: BTreeSet<String> = BTreeSet::new();
+            // 本目录里被删除让路过的原文件名 → .del 文件：同名 .old 不再还原
+            let mut deleted: HashMap<String, Vec<PathBuf>> = HashMap::new();
             for e in rd.flatten() {
                 let Ok(ft) = e.file_type() else { continue };
                 let name = e.file_name().to_string_lossy().into_owned();
                 if ft.is_dir() {
                     walk(&e.path());
                 } else if let Some(orig) = aside_target(&name, DEL_SUFFIX) {
-                    deleted.insert(orig.to_string());
-                    let _ = std::fs::remove_file(e.path());
+                    deleted.entry(orig.to_string()).or_default().push(e.path());
                 } else if let Some(orig) = aside_target(&name, OLD_SUFFIX) {
                     let t = e
                         .metadata()
@@ -347,7 +347,7 @@ impl FsLocal {
                 let target = dir.join(&orig);
                 v.sort_by(|a, b| b.0.cmp(&a.0));
                 // 已知局限（仅 Windows）：用户手动删掉的扩展文件若留有被占用的 .old，会被还原
-                if std::fs::symlink_metadata(&target).is_err() && !deleted.contains(&orig) {
+                if std::fs::symlink_metadata(&target).is_err() && !deleted.contains_key(&orig) {
                     let (_, newest) = v.remove(0);
                     match std::fs::rename(&newest, &target) {
                         Ok(()) => log!("还原让路的扩展文件 {}", target.display()),
@@ -356,6 +356,14 @@ impl FsLocal {
                 }
                 for (_, p) in v {
                     let _ = std::fs::remove_file(p);
+                }
+            }
+            for (orig, dels) in deleted {
+                let old_left = aside_siblings(&dir.join(&orig), OLD_SUFFIX);
+                if old_left.is_empty() {
+                    for p in dels {
+                        let _ = std::fs::remove_file(p);
+                    }
                 }
             }
         }
