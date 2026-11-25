@@ -7,12 +7,8 @@
 #include <cstdarg>
 #include <string>
 
-// 宿主给不出真实行高时，候选窗锚点默认往下让开的高度（**逻辑**像素，用前须按宿主视角
-// 的 DPI 换算）。两处在用：`TextService.cpp` 的焦点/已知光标高度兜底，以及
-// `CaretEditSession.cpp` 二级降级给 h=0 的组合矩形补高度。
-//
-// ⚠ 放在这里而不是各自 cpp 里：它曾是 TextService.cpp 的 `static const`，跨 TU 不可见，
-// 于是第二个用处只能抄一个同值的字面量——两处对同一个默认值各留一份，改一处另一处静默漂移。
+// 宿主给不出真实行高时，候选窗锚点默认往下让开的高度（逻辑像素，用前须按宿主视角的 DPI
+// 换算）。`TextService.cpp` 与 `CaretEditSession.cpp` 共用，放在公共头里以免两处各抄一份字面量。
 #define WIND_DEFAULT_CARET_HEIGHT 20
 
 // ============================================================================
@@ -37,17 +33,15 @@ namespace WindLog {
         return static_cast<CFileLogger::LogLevel>(level);
     }
 
-    // 该级别是否会真正产生输出（文件/DebugString，或 INFO 及以上进环形缓冲）。
-    // 用于在调用点为「收集实参本身就很贵」的日志加前置闸门：日志宏能延后格式化，
-    // 但挡不住实参位置的函数调用——那是 C++ 求值顺序保证要先做的事。
+    // 该级别是否可能产生输出。INFO 及以上恒答 true（可能进环形缓冲，不看 dump_hotkey）。
+    // 用于给「收集实参本身就很贵」的日志加前置闸门：宏能延后格式化，挡不住实参求值。
     inline bool IsEnabled(int level) {
         auto fileLevel = _ToFileLevel(level);
         return fileLevel <= CFileLogger::LogLevel::Info
             || CFileLogger::Instance().IsEnabled(fileLevel);
     }
 
-    // 高精度耗时测量。GetTickCount 分辨率约 15.6ms——用它测个位数毫秒的热点，
-    // 得到的只有 0 或 15 两种值（一个节拍量子），无法区分「很快」与「有点慢」。
+    // 高精度耗时测量。GetTickCount 分辨率约 15.6ms，测不了个位数毫秒的热点。
     inline LONGLONG PerfNow() {
         LARGE_INTEGER c;
         QueryPerformanceCounter(&c);
@@ -66,10 +60,7 @@ namespace WindLog {
         auto fileLevel = _ToFileLevel(level);
 
         // Quick exit: skip TRACE/DEBUG for ring buffer to avoid per-keystroke overhead
-        //
-        // 环形缓冲默认**不记录**（dump_hotkey 开关，见 FileLogger.h）：它唯一的出口
-        // Ctrl+Shift+F12 默认关着，不问开关就等于给每条 INFO 日志白付一次
-        // 512 字符拷贝 + 临界区，而这发生在 TSF 输入线程上。
+        // 环形缓冲受 dump_hotkey 门控（见 FileLogger.h），关着时别在输入线程上白拷贝。
         bool ringWorthy = logger.IsDumpHotkeyEnabled() && (fileLevel <= CFileLogger::LogLevel::Info);
         if (!ringWorthy && !logger.IsEnabled(fileLevel))
             return;
@@ -153,8 +144,7 @@ struct WindHostProcessInfo
     std::wstring processPath;
     std::wstring processName;
     std::wstring windowClass;
-    // 窗口标题**只留长度**（InternalGetWindowText 取，上限 255）：标题是用户数据（网页标题、
-    // 文件名），诊断日志只需要知道有没有、多长，原文不进内存结构也就不会进日志。
+    // 窗口标题只留长度（InternalGetWindowText 取，上限 255）：标题是用户数据，原文不进日志。
     int windowTitleLen = 0;
     std::wstring packageFamilyName;
 };
@@ -190,23 +180,20 @@ extern const GUID c_guidDisplayAttributeConverted;
 // WIND_APP_NAME 须与 Rust 侧 wind-config::variant::app_dir_name() 及安装器清单
 // [app] id 逐字一致（三处同名，无编译期约束）。
 //
-// ⛔ 本键**下面的值名**同样是跨语言约定，改一侧不编译失败也不测试失败：
+// 本键下的值名同样是跨语言约定，改一侧不会编译失败也不会测试失败：
 //   InstallDir        ← 三个部署方写、本 DLL 与 core 读
-//   Dota2CompatAlias  ← core 的 wind-coordinator::tsf_profile_name::ALIAS_VALUE 写、
-//                        Register.cpp 的 kAliasValueName 读。写错的表现是「升级后
-//                        用户的兼容别名被冲回真名」，只在重装时才暴露。
-//   InstallerRunning       ← 安装器写、IPCClient.cpp 读。安装期间不让本 DLL 拉起服务。
-//                            ⚠️ 值**必须**恒为 "1"：旧版读端用 WCHAR[8] 定长缓冲，
-//                            值一长就读成 ERROR_MORE_DATA、把「标记存在」看成「不存在」。
-//   InstallerRunningOwner  ← 同上一对写读。格式 "<pid>|<进程创建时间 FILETIME>"，
-//                            让读端能判断立标记的那个进程是否还活着 —— 没有它时，
-//                            一次中途失败的安装会把标记永久留下，表现为输入法整个
-//                            不工作且无提示（issue #120）。判定规则见 InstallerGuard.h。
+//   Dota2CompatAlias  ← wind-coordinator::tsf_profile_name::ALIAS_VALUE 写、Register.cpp 的
+//                        kAliasValueName 读。写错则重装时用户的兼容别名被冲回真名。
+//   InstallerRunning       ← 安装器写、IPCClient.cpp 读，安装期间不让本 DLL 拉起服务。
+//                            值必须恒为 "1"：旧版读端用 WCHAR[8] 定长缓冲，值长了会读成
+//                            ERROR_MORE_DATA、把「标记存在」看成「不存在」。
+//   InstallerRunningOwner  ← 同上一对写读。格式 "<pid>|<进程创建时间 FILETIME>"，让读端判断
+//                            立标记的进程是否还活着，中途失败的安装不会把标记永久留下。
+//                            判定规则见 InstallerGuard.h。
 //
-// ⚠️ WIND_APP_REGKEY 下的 InstallDir 是**本 DLL 唯一可靠的安装目录来源**：
-// 本 DLL 被部署到系统目录（System32\IME\<app>\，见 docs 与安装器 system_subdir）后，
-// GetModuleFileName 取到的是系统副本路径，**推不出安装目录**。三个部署方
-// （wind-installer / scripts\dev.ps1 / wind-portable）在注册 COM 前都必须写该值。
+// InstallDir 是本 DLL 唯一可靠的安装目录来源：DLL 部署到 System32\IME\<app>\ 后
+// GetModuleFileName 推不出安装目录。三个部署方（wind-installer / scripts\dev.ps1 /
+// wind-portable）在注册 COM 前都必须写该值。
 #ifdef WIND_DEV_VARIANT
 #define WIND_APP_NAME           L"WindInputDev"
 #define WIND_SERVICE_EXE        L"wind_input_dev.exe"
@@ -222,11 +209,9 @@ extern const GUID c_guidDisplayAttributeConverted;
 // 命名管道名称 (与 Rust core 通信)
 // 注意：不使用 LOCAL\ 前缀，AppContainer 进程可能无法访问带目录前缀的管道。
 //
-// per-user 隔离：命名管道名字空间是**机器级**的，故在**扁平后缀**位置追加当前
-// 用户 SID（`..._S-1-5-...`，不引入 `\` 路径段以免 AppContainer 打不开），
-// 与 Rust wind-bridge::pipe_scope 用同一 OS API（ConvertSidToStringSidW）算出同名，
-// 两端才在同名管道上会合。含 SID 故须运行时求值：由函数返回（进程内惰性缓存一次），
-// 宏转发以保持所有调用点不变。
+// per-user 隔离：管道名字空间是机器级的，故在扁平后缀追加当前用户 SID（`..._S-1-5-...`，
+// 不引入 `\` 路径段），与 Rust wind-bridge::pipe_scope 用同一 API（ConvertSidToStringSidW）
+// 算出同名。含 SID 须运行时求值，函数内惰性缓存，宏转发以保持调用点不变。
 const wchar_t* WindPipeName();
 const wchar_t* WindPushPipeName();
 #define PIPE_NAME               WindPipeName()
@@ -234,21 +219,13 @@ const wchar_t* WindPushPipeName();
 
 // 语言栏图标共享内存名（服务端预渲染图标位图 → 本 DLL 的 GetIcon 取用）。
 //
-// ⚠️ **跨仓命名契约，无编译期约束**：必须与 Rust 侧
-// `wind_ipc::protocol::icon_shm_name()` 的结果逐字一致。不一致的表现是
-// OpenFileMappingW 恒失败、图标永远停在「加载中」（三个灰点），没有任何报错。
-// 改名必须两端同步。
+// 跨仓命名契约，无编译期约束：必须与 Rust 侧 `wind_ipc::protocol::icon_shm_name()` 逐字一致，
+// 否则 OpenFileMappingW 恒失败、图标永远停在「加载中」且无报错。
+// 不含 SID：`Local\` 前缀已提供会话级隔离，与 host-render 的 SHM 同策略（wind-bridge 的 shm_name_for）。
 //
-// 与管道名不同，这里**不含 SID**：`Local\` 前缀已提供终端服务会话级隔离，
-// 与 host-render 的 SHM 同策略（见 wind-bridge 的 shm_name_for）。
-// 故可编译期常量，无需运行时求值。
-// ★ 名字里的 `_v1` 是 ICON_SHM_VERSION，**必须跟着它一起改**。命名 section 的名字
-// 一旦存在，尺寸也被钉死：还有进程持着映射时，以更大的 view 去映射会返回
-// ACCESS_DENIED（指向权限，完全不指向真正的原因）。开发期把 SHM 提到 128 KiB 时就是
-// 这样卡住的，而持有者名单里有 explorer.exe 与 SearchHost.exe，腾干净约等于注销一次。
-// 版本进名字后新旧两代各用各的内核对象，互不阻塞。
-// 漏改的后果：打不开 → 图标永远停在「加载中」，日志里没有错误。
-// IconShmReader.cpp 有一条 static_assert 会在 ICON_SHM_VERSION 变动时编译失败。
+// 名字里的 `_v1` 是 ICON_SHM_VERSION，必须跟着改：命名 section 存在期间尺寸被钉死，仍有进程
+// （explorer.exe、SearchHost.exe 等）持着映射时以更大的 view 映射会返回 ACCESS_DENIED。
+// 版本进名字后新旧两代各用各的内核对象。IconShmReader.cpp 的 static_assert 守这一点。
 #ifdef WIND_DEV_VARIANT
 #define WIND_ICON_SHM_NAME      L"Local\\WindInput_IconShm_v1_dev"
 #else
@@ -269,10 +246,8 @@ BOOL WindQueryWindowProcessInfo(HWND hwnd, WindHostProcessInfo* info);
 void WindLogHostProcessInfo(int level, const wchar_t* prefix, const WindHostProcessInfo& info);
 void WindLogForegroundProcessInfo(int level, const wchar_t* prefix);
 
-// 采集并记录「当前进程」信息。与 WindLogForegroundProcessInfo 同款前置闸门——
-// 采集本身（OpenProcess + 令牌 + 映像路径）远贵于一条日志，级别关闭时一个 syscall 都不该做。
-// 调用点原本是「裸 WindQueryCurrentProcessInfo + WindLogHostProcessInfo」两步，
-// 闸门只挡得住后一步，前一步照跑。用本函数替换那个两步写法。
+// 采集并记录「当前进程」信息，带级别前置闸门：采集（OpenProcess + 令牌 + 映像路径）远贵于
+// 一条日志。别写成裸 WindQueryCurrentProcessInfo + WindLogHostProcessInfo 两步，那样采集照跑。
 void WindLogCurrentProcessInfo(int level, const wchar_t* prefix);
 
 // COM 工具函数

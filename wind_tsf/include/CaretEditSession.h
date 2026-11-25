@@ -4,41 +4,27 @@
 
 class CTextService;
 
-// 异步取坐标的用途。**回调的作废判据随用途而不同**，这是它必须存在的唯一理由：
-//   Composition —— 组合期间取坐标，排队期间用户可能已上屏 ⇒ 判据是「组合还在不在」；
-//   Focus       —— 焦点刚到达时取坐标，此时**根本没有组合** ⇒ 只能用焦点会话号判归属。
-// 曾把两者压成同一条 `_pComposition == nullptr` 判据，结果焦点路径的回调 100% 被丢弃，
-// 而日志上一切正常（请求受理成功、edit session 也跑完了），是个彻底静默的失效。
+// 异步取坐标的用途。它存在是因为回调的作废判据随用途而不同：
+//   Composition —— 排队期间用户可能已上屏，判据是「组合还在不在」；
+//   Focus       —— 焦点刚到达时没有组合，只能用焦点会话号判归属。
+// 两者不能合并成 `_pComposition == nullptr` 一条判据：焦点路径的回调会被全部静默丢弃。
 enum class CaretProbeKind
 {
     Composition,
     Focus,
-    // 组合刚启动即发起的**试探**：结果不走正式 caret_update，而是发 CMD_CARET_PROBE。
-    // 目的是回答一个至今没有实测数据的问题——异步请求排在宿主当前 edit session 之后执行，
-    // 那么它拿到的究竟是 reflow **前**还是**后**的坐标？
-    // 走 probe 通道意味着 wait 档一律忽略、fast 档才读，因此本探测**不改变任何现有行为**。
-    // 作废判据同 Composition（靠 _pComposition 判活）。
+    // 组合刚启动即发起的试探：结果发 CMD_CARET_PROBE 而非 caret_update，用来观察排在宿主
+    // edit session 之后的异步请求拿到的是 reflow 前还是后的坐标。wait 档忽略 probe，故不改变
+    // 现有行为。作废判据同 Composition。
     FirstShowProbe,
-    // CARET_RETRY 定时器到期后的那一次取坐标——即「**重试窗口已经过完**」。
-    //
-    // 它与 Composition 的**唯一**区别是对退化矩形的处置：普通 probe 见到 h<=0 一律丢弃
-    // （宿主还在排版，等下一帧就是了），而走到这里意味着已经等过一整个重试窗口，宿主给的
-    // 还是那个退化矩形——那就不是「还没算完」，是它在答「本 context 没有插入点可报」。
-    // 此时采信其位置并上报 CARET_SRC_TSF_DEFAULT_POS（见 BinaryProtocol.h 该常量的注释）。
-    //
-    // ⚠ 必须与 Composition 分开，不能让定时器沿用默认 kind：OnLayoutChange 驱动的那些
-    // probe 与定时器这一次混在同一个 kind 上就无从区分，于是「一见退化就当默认位置」——
-    // 实测存在只退化 30ms 随后变成 (473,189,478,217) 的混合场景，本定时器正好救得回来，
-    // 提前采信只会凭空多出一次闪跳。
-    //
-    // 作废判据同 Composition（靠 _pComposition 判活）。
+    // CARET_RETRY 定时器到期后的那一次取坐标，即重试窗口已过完。与 Composition 的唯一区别是
+    // 退化矩形（h<=0）不再丢弃：等满窗口仍退化，说明宿主在答「没有插入点可报」，采信并上报
+    // CARET_SRC_TSF_DEFAULT_POS（见 BinaryProtocol.h）。
+    // 不能让定时器沿用 Composition：OnLayoutChange 驱动的 probe 也会短暂见到退化矩形，混在一起
+    // 就会提前采信、多一次闪跳。作废判据同 Composition。
     RetryDeadline,
 };
 
-// 异步取坐标的回调结果。
-//
-// **刻意用结构体而非平铺参数**：这里已有两个 RECT 和三个 BOOL，平铺后调用点就是一串没有
-// 名字的 TRUE/FALSE，且每加一个字段都要改动所有调用点的实参顺序——顺序错了还不报错。
+// 异步取坐标的回调结果。用结构体而非平铺参数：多个 RECT/BOOL 平铺后实参顺序错了编译器不报错。
 struct AsyncCaretResult
 {
     RECT caretRect;
@@ -101,19 +87,13 @@ public:
 
     // 异步取坐标：用 TF_ES_ASYNCDONTCARE 请求锁，结果经 pOwner->OnAsyncCaretRectReady 回调返回。
     //
-    // 上面两个同步入口用的 TF_ES_SYNC 只在**按键处理期间**可以期待成功——这是 MSDN 对该标志的
-    // 明文限制（"should only be used in documented situations (such as keystroke handling)"）。
-    // 在 WM_TIMER、OnLayoutChange 这类非按键上下文里，宿主可以合法地拒绝同步锁并返回
-    // TS_E_SYNCHRONOUS（Word 实测 15/15 全拒），此时必须走异步：宿主会把请求排队，等文档可用
-    // 时再回调 DoEditSession，而不是当场失败。
+    // TF_ES_SYNC 只在按键处理期间可期待成功；WM_TIMER、OnLayoutChange 等上下文里宿主可合法
+    // 返回 TS_E_SYNCHRONOUS（Word 恒拒），须走异步排队。见 docs/architecture/
+    // caret-position-host-compat-notes.md 的「DLL 侧取坐标的 edit session」。
     //
-    // 返回 TRUE 表示请求已被受理（可能已同步执行完，也可能排队等待回调），FALSE 表示发起失败。
-    //
-    // ⚠ `hrSession == S_OK` 意味着 manager 选择**内联执行**（记事本实测），此时 DoEditSession
-    // 连同 OnAsyncCaretRectReady 回调已经在本函数返回**之前**跑完了。焦点路径依赖这一点：
-    // 内联档下坐标能赶在同一次 OnSetFocus 的 SendFocusGained 之前就位。
-    //
-    // kind / sessionTag 见 CaretProbeKind 与 AsyncCaretResult。
+    // 返回 TRUE 表示请求已受理（可能已内联执行完，也可能排队），FALSE 表示发起失败。
+    // hrSession == S_OK 时回调已在本函数返回前跑完；焦点路径依赖这一点让坐标赶在
+    // SendFocusGained 之前就位。kind / sessionTag 见 CaretProbeKind 与 AsyncCaretResult。
     static BOOL RequestCaretRectAsync(ITfContext* pContext, TfClientId tfClientId,
                                        ITfComposition* pComposition, LONG compStartOffset,
                                        CTextService* pOwner,

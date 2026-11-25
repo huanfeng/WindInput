@@ -124,3 +124,18 @@
 4. **改动 `OnSetFocus` 里任一守卫的命中条件时，必须同步检查其它守卫的预判**。收口分支会
    预判 XamlIsland 守卫是否将命中来决定发不发 `focus_lost`——两个决策各自都对，组合起来
    却可能让服务端只收到半边失焦。
+
+## 5. 可编辑性判据：`ITfContext::GetStatus`
+
+纯判据在 `wind_tsf/include/EditableContextPolicy.h`（`ContextIsEditable`），取数与发 IPC 在
+`TextService.cpp` 的 `_DocMgrHasEditableContext`。
+
+- 成功时只认动态标志 `TF_SD_READONLY`。`TS_SS_TRANSITORY` 不能单独判可编辑性：Chrome 与 JetBrains
+  都会把它挂在能打字的 context 上。
+- `TF_E_EMPTYCONTEXT`（`0x80040509`）判不可编辑：Chromium 系在焦点不在可编辑元素上时照常建
+  DocMgr/context 但不挂 text store（`TEXT_INPUT_TYPE_NONE`），`GetStatus` 恒返回它。指纹见于
+  Win10 Edge（点网页空白处）与 Win11 CEF 宿主（Illustrator 的 CEPHtmlEngine，同一 context 上
+  `RequestEditSession` 也返回它）。此前它被当成未知失败判成可编辑，每次点空白处都照发
+  `focus_gained`，服务端 `has_edit_context` 回不到假。
+- 其余失败码判可编辑。代价不对称：判宽了工具栏多显示一会儿；判窄了工具栏不显示，且本焦点会话内
+  不自愈（`no_edit_ctx` 分支清掉 `_needsFocusRecovery`，要等下一次 `OnSetFocus` / `OnSetThreadFocus`）。

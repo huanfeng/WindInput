@@ -6,23 +6,19 @@
 
 // Log path macros for debug variant coexistence
 //
-// 变体隔离**只做在目录一层**：dev 与正式版的数据目录本就分开
-// （`WindInputDev` / `WindInput`），目录内的文件名再带 `_dev` 是重复隔离，
-// 只会让两版本的排查步骤（找哪个文件、写哪个配置）无谓地不一致。
-// 故文件名与配置名两版本一律同名，切换变体时排查命令原样可用。
+// 变体隔离只做在目录一层（`WindInputDev` / `WindInput`），文件名与配置名两版本同名，
+// 切换变体时排查命令原样可用。
 #ifdef WIND_DEV_VARIANT
 #define WIND_LOG_DIR_NAME       L"WindInputDev"
 #else
 #define WIND_LOG_DIR_NAME       L"WindInput"
 #endif
-// 日志文件名前缀。实际文件是 `<前缀>.<宿主名>.<pid>.log`（轮转产物再加 `.old`）——
+// 日志文件名前缀。实际文件是 `<前缀>.<宿主名>.<pid>.log`（轮转产物再加 `.old`），
 // 每进程一个，见 CFileLogger::_BuildPaths。core 侧清理旧日志时按这个前缀匹配。
 #define WIND_LOG_FILE_PREFIX    L"wind_tsf"
-// TSF 日志的**专属子目录**（`logs\tsf_log\`）。日志按进程拆开后，文件数是
-// 「用过的宿主 × pid」量级，跟 core 的 wind_input.log 混在一层会把主日志淹掉。
+// TSF 日志的专属子目录（`logs\tsf_log\`）：按进程拆开后文件很多，别淹没 core 的主日志。
 #define WIND_LOG_SUBDIR_NAME    L"tsf_log"
-// 配置文件仍留在 `logs\` 下，**不跟着进子目录**：它是用户手工创建的日志总开关，
-// 路径散见于各 AGENTS.md 与排查步骤；跟着搬会让存量用户的开关静默失效。
+// 配置文件留在 `logs\` 下、不进子目录：它是用户手工创建的总开关，搬走会让存量开关静默失效。
 #define WIND_LOG_CONFIG_NAME    L"tsf_log_config"
 
 // ============================================================================
@@ -39,34 +35,21 @@
 //   level=debug
 //   dump_hotkey=0
 //
-// ★ <日志根> 有两种，判据见 _BuildPaths：
+// <日志根> 有两种，判据见 _BuildPaths，与 Rust 侧 `Config::log_dir()` 逐字对齐：
 //   便携部署（安装根下有 portable_mode 标记）→ <安装根>\localdata\logs
 //   其余                                    → %LOCALAPPDATA%\<WIND_LOG_DIR_NAME>\logs
-// 两条与 Rust 侧 `Config::log_dir()` 逐字对齐。便携版**绝不可**写 %LOCALAPPDATA%——
-// 那会让「拔盘走人不留痕」落空，而日志里带着宿主进程名。
+// 便携版绝不可写 %LOCALAPPDATA%：日志带宿主进程名，会破坏「拔盘不留痕」。
 //
-// Multi-process safety: 每进程一个日志文件，本进程独占 → 无需任何跨进程同步
-// Thread safety:  进程**内**仍需同步（_fileLock）——至少两个线程会写日志：TSF 输入线程
-//                 与 CIPCClient 的异步读线程。见 _fileLock 的注释。
-// Auto-rotation: 5MB max, rotates to <前缀>.<宿主名>.<pid>.old.log
+// 每进程一个日志文件，无需跨进程同步；进程内仍要 _fileLock（TSF 输入线程与 CIPCClient
+// 异步读线程都写日志）。5MB 轮转到 <前缀>.<宿主名>.<pid>.old.log。
 //
-// 外部改动日志文件是**受支持**的（每秒自检一次，见 _ResyncFile）：
-//   删除文件或整个 tsf_log 目录 → 一秒内自动重建，不必重启宿主
-//   清空文件（截断到 0）        → 直接从头续写，不留空洞；排查时可随时截断
+// 支持外部改动日志文件（每秒自检，见 _ResyncFile）：删除文件或 tsf_log 目录一秒内自动重建；
+// 截断到 0 则从头续写。
 //
-// Ring Buffer + Ctrl+Shift+F12 导出：**默认整体关闭**，由配置项 dump_hotkey 打开。
-//
-//   dump_hotkey=1        # 环形缓冲开始记录，且 Ctrl+Shift+F12 被 TSF 吃下用于导出
-//
-// ⛔ 默认关是硬要求，不是省开销的优化。这个热键的拦截位于 OnTestKeyDown / OnKeyDown
-//    的**所有闸门之前**（早于 IsKeyboardDisabled、密码框抑制、只读上下文），所以只要
-//    本输入法处于激活态，Ctrl+Shift+F12 就永远到不了宿主——而它是 VS / JetBrains 等
-//    宿主的常用快捷键，且我们的处理还会往焦点处插入一行提示文本。默认开等于向所有用户
-//    收取一个他们既不知道也用不上的按键。取证时让用户临时写一行配置即可。
-//
-// ⚠ 关掉后 CFileLogger::ReloadConfig 也就失去了唯一调用点（那也挂在这个热键上）。这不是
-//    遗漏：配置文件本就是取证时手工创建的，建它的那次把 mode / level / dump_hotkey 一起
-//    写好，之后再改才需要重读。
+// 环形缓冲与 Ctrl+Shift+F12 导出由 dump_hotkey=1 打开，默认关是硬要求：该热键的拦截早于
+// OnTestKeyDown / OnKeyDown 的所有闸门，开着时 Ctrl+Shift+F12 永远到不了宿主（VS / JetBrains
+// 常用），还会往焦点处插入提示文本。CFileLogger::ReloadConfig 唯一调用点也挂在这个热键上，
+// 关掉后即无重读入口；配置文件本就在取证时一次写好。
 // ============================================================================
 
 class CFileLogger
@@ -100,7 +83,7 @@ public:
     void Shutdown();
 
     // Write a log entry (thread-safe, multi-process safe)
-    // Also always writes to the in-memory ring buffer.
+    // Also writes to the in-memory ring buffer when dump_hotkey is on.
     void Write(LogLevel level, const wchar_t* message);
 
     // Fast-path check: is logging enabled at this level?
@@ -109,11 +92,8 @@ public:
         return _mode != LogMode::None && level != LogLevel::Off && level <= _level;
     }
 
-    // 环形缓冲与 Ctrl+Shift+F12 导出的**同一个**总开关（配置项 dump_hotkey，默认关）。
-    //
-    // ★ 缓冲与导出必须共用一个开关：缓冲是导出的唯一数据源，导出是缓冲的唯一出口。
-    // 只关一半，剩下的那半要么白记（每条 INFO 日志都进临界区拷 256 字符，且发生在
-    // TSF 输入线程上），要么按下去永远是空的。
+    // 环形缓冲与 Ctrl+Shift+F12 导出的同一个总开关（配置项 dump_hotkey，默认关）。
+    // 两者必须共用：缓冲是导出的唯一数据源，只开一半要么在输入线程上白记，要么导出永远为空。
     bool IsDumpHotkeyEnabled() const { return _dumpHotkey; }
 
     // Write directly to ring buffer (bypasses mode/level checks)
@@ -128,10 +108,7 @@ public:
     void SetLevel(LogLevel level) { _level = level; }
     void SetMode(LogMode mode) { _mode = mode; }
 
-    // 重新读取配置文件（mode/level）。
-    //
-    // 提供这个入口是因为 DLL 在宿主进程内常驻、构造函数只跑一次：没有它，改完
-    // 日志配置必须完全退出宿主才生效，而取证时这是最高频的操作。
+    // 重新读取配置文件（mode/level）。DLL 在宿主内常驻，没有它改配置要退出宿主才生效。
     // 唯一调用点是 Ctrl+Shift+F12（见 KeyEventSink::OnKeyDown）。
     void ReloadConfig() { _ReadConfig(); }
 
@@ -150,7 +127,7 @@ private:
 
     // 写文件。持 _fileLock，真正的实现在 _WriteToFileLocked。
     void _WriteToFile(const char* utf8Line, int utf8Len);
-    // 写文件的实现体。**调用方须持 _fileLock**（下面三个同）。
+    // 写文件的实现体。调用方须持 _fileLock（下面三个同）。
     void _WriteToFileLocked(const char* utf8Line, int utf8Len);
 
     // Write to OutputDebugStringW（不碰 _hFile/_written，无需持锁）
@@ -173,28 +150,17 @@ private:
     bool    _initialized;
     // 环形缓冲 + Ctrl+Shift+F12 导出总开关。见 IsDumpHotkeyEnabled。
     bool    _dumpHotkey;
-    // 常开的追加句柄。此前是「每行 CreateFile/WriteFile/CloseHandle 各一次 + 抢一把
-    // 跨进程互斥锁」，而这一切都发生在 **TSF 输入线程**上，实测 230μs/行（现在 3.6μs，
-    // 成分表见 FileLogger.cpp 的 _WriteToFile）。大头是每行开关文件被 Defender 逐次扫描，
-    // 不是那把锁；锁只是把这段临界区跨进程串行化，让多宿主同时写时雪上加霜。
+    // 常开的追加句柄。别改回每行开关文件：那在 TSF 输入线程上每行要多两个数量级耗时
+    // （主要是 Defender 逐次扫描），成分见 FileLogger.cpp 的 _WriteToFile。
     HANDLE  _hFile;
     // 文件段的进程内锁，保护 _hFile / _written / _lastCheckTick 三者。
-    //
-    // ★ 「每进程一个文件」消掉的是**跨进程**同步，不是跨线程的：至少两个线程会走
-    // Write() —— TSF 输入线程（每次按键）与 CIPCClient::_AsyncReaderThread（每收一条
-    // 推送就 _LogDebug）。此前那把命名互斥量同时兼着这两个职责，删它时只论证了跨进程
-    // 那半边，跨线程这半边就此裸奔：_ResyncFile/_RotateNow 会 CloseHandle(_hFile)，
-    // 而另一个线程可能正停在 WriteFile(_hFile, ...) 上——Windows 的句柄值会被激进复用，
-    // 最坏情形是日志字节写进另一个刚被打开的内核对象。
-    //
-    // 与 _ringLock 分开：环形缓冲恒开（mode=none 也写），不该被文件 I/O 挡住。
-    // 无竞争的 EnterCriticalSection 是 20-50ns 量级，对照现在 3.6μs/行可以忽略。
+    // TSF 输入线程与 CIPCClient::_AsyncReaderThread 都会走 Write()；_ResyncFile/_RotateNow 会
+    // CloseHandle(_hFile)，无锁时另一线程的 WriteFile 可能写进句柄值被复用的别的内核对象。
+    // 与 _ringLock 分开：环形缓冲不受 mode 控制（mode=none 也写），不该被文件 I/O 挡住。
     CRITICAL_SECTION _fileLock;
-    // 已写入字节数，用于轮转判定。**精确而非估算**：本进程独占该文件，没有别人往里写。
-    // 此前每行都要 GetFileAttributesExW 查一次真实大小，现在一次系统调用都不需要。
+    // 已写入字节数，用于轮转判定。本进程独占该文件，故是精确值，无需每行查文件大小。
     DWORD   _written;
-    // 上次与磁盘对表的时刻（GetTickCount）。见 _ResyncFile —— 外部删除/清空只能主动
-    // 发现，而按**时间**节流的好处是自愈延迟与日志频率无关：安静的宿主同样一秒内接回来。
+    // 上次与磁盘对表的时刻（GetTickCount），见 _ResyncFile。按时间节流，自愈延迟与日志频率无关。
     DWORD   _lastCheckTick;
     DWORD   _pid;
     // `...\logs`：配置文件所在目录（日志文件已下沉到 _fileDir）

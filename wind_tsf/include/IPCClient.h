@@ -11,10 +11,8 @@
 namespace IPCConfig
 {
     // Timeout settings (milliseconds)
-    // 这些超时是"防止把宿主进程卡死"的保险丝，不是正常延迟预算。系统繁忙
-    // （CPU 被抢占）时正常按键也可能偶发数百毫秒，超时过短会把"偶发慢"误判为
-    // "服务挂死"而断连。取较宽松的值：真卡死时用户感知是顿一下，可接受；
-    // 正常的慢查询不会误断 IPC。
+    // 这些超时是防止卡死宿主的保险丝，不是延迟预算。系统繁忙时正常按键也可能偶发数百毫秒，
+    // 取宽松值以免把偶发慢误判为服务挂死而断连；代价是真卡死时用户感知顿一下。
     constexpr DWORD CONNECT_TIMEOUT_MS = 500;      // Connection timeout
     constexpr DWORD WRITE_TIMEOUT_MS = 300;        // Write operation timeout
     constexpr DWORD READ_TIMEOUT_MS = 1500;        // Read operation timeout
@@ -47,7 +45,7 @@ struct HostRenderSetupInfo
     std::wstring eventName;
 };
 
-// Response from Go Service (simplified for binary protocol)
+// Response from the service (simplified for binary protocol)
 struct ServiceResponse
 {
     ResponseType type = ResponseType::Error;
@@ -80,7 +78,7 @@ struct ServiceResponse
     // For StatusUpdate
     uint32_t statusFlags = 0;
 
-    // Icon label for taskbar display (from Go service, e.g., "中", "英", "A", "拼", "五")
+    // Icon label for taskbar display (from the service, e.g., "中", "英", "A", "拼", "五")
     std::wstring iconLabel;
 
     // For SyncHotkeys / StatusUpdate
@@ -150,7 +148,7 @@ public:
     // Check if service is available (considers circuit breaker)
     BOOL IsServiceAvailable();
 
-    // Send key event to Go Service (binary protocol)
+    // Send key event to the service (binary protocol)
     // Uses state machine snapshot for modifiers/toggles
     // prevChar: character before caret from ITfTextEditSink cache (0 if unavailable)
     // seqChar: last char of the IME's own input sequence (InputSequenceChar.h, 0 if unknown)
@@ -162,7 +160,7 @@ public:
     // Returns TRUE if request was sent successfully
     BOOL SendCommitRequest(const uint8_t* payload, uint32_t payloadSize);
 
-    // Send caret position update to Go Service
+    // Send caret position update to the service
     // source: CARET_SRC_*，标明这组坐标来自哪个通道。消费端据此决定能否当权威坐标、
     //         能否与组合起点做距离比较（GUI 回退值与组合起点本就不同源，比较无意义）。
     // compRect*：整个组合 range 的包围矩形，四值全 0 = 本帧未取到（服务端据此忽略）。
@@ -173,7 +171,7 @@ public:
                          int compRectRight = 0, int compRectBottom = 0);
 
     // Send caret-pending handshake: composition just started, real caret coming after app reflow.
-    // Tells Go to extend its first-show fallback timeout so it doesn't fall back to pre-key cursor.
+    // Tells the service to extend its first-show fallback timeout so it doesn't fall back to pre-key cursor.
     BOOL SendCaretPending();
 
     // Send a first-show caret probe: one pre-reflow sample taken inside an OnLayoutChange
@@ -183,7 +181,7 @@ public:
                         int source = CARET_SRC_UNKNOWN);
 
     // Send selection changed notification (from ITfTextEditSink::OnEndEdit)
-    // Async: notifies Go that the caret moved outside of composition (e.g., mouse click)
+    // Async: notifies the service that the caret moved outside of composition (e.g., mouse click)
     BOOL SendSelectionChanged(uint16_t prevChar = 0);
 
     // Send focus lost notification.
@@ -198,20 +196,15 @@ public:
     // disabled/reason: input diagnostics HUD state for the newly focused control (Task 7).
     // reason: 0 None / 1 CompartmentDisabled / 2 InputScopePassword / 3 NumericPassword.
     //
-    // ⚠ `disabled` 恒为**线程级** GUID_COMPARTMENT_KEYBOARD_DISABLED（_pThreadMgr 上那个），
-    // 语义＝「系统禁用输入法，DLL 已在 OnTestKeyDown 全放行」。**不要**往这里传 context 级的
-    // 密码框判定（_focusIsPassword）：core 会据此认定「键已放行、抑制 moot」而跳过强制英文，
-    // 而网页密码框恰恰只置 context 级、键并没被放行 → 密码框里照打中文（2026-07-27 修）。
-    // 密码框信号一律走 inputScopeMask 的 IS_PASSWORD 位。
+    // `disabled` 恒为线程级 GUID_COMPARTMENT_KEYBOARD_DISABLED，语义是「系统禁用输入法，DLL 已在
+    // OnTestKeyDown 全放行」。不要传 context 级的密码框判定（_focusIsPassword）：core 会据此跳过
+    // 强制英文，而网页密码框的键并没被放行，会照打中文。密码框信号走 inputScopeMask 的 IS_PASSWORD 位。
     //
-    // caretSource: CARET_SRC_*，标明 caretX/Y 出自回退链的哪一级。焦点气泡（服务端
-    // ui.status.show_on_focus）直接锚在这组坐标上，而 OnSetFocus 里的同步 edit session
-    // 必被宿主拒绝、回退值是跨窗口的 Win32 光标——消费端只能靠这个字段分辨可信度。
+    // caretSource: CARET_SRC_*，标明 caretX/Y 出自回退链的哪一级。OnSetFocus 里同步 edit session
+    // 必被拒绝、回退值是跨窗口的 Win32 光标，焦点气泡只能靠它分辨可信度。
     //
-    // windowClass: 焦点所在**顶层窗口**的类名（可为 nullptr / 空 = 未知）。服务端据此把
-    // explorer.exe 的过渡型窗口（任务栏 / Alt+Tab 切换器）与停留型窗口（桌面 / 文件管理器）
-    // 分开——它们进程名相同，per-app 规则仅凭进程名分不开。空值在服务端一律回落到既有
-    // 行为（照常重算初始模式），不会让用户配的 initial_mode 静默失效。
+    // windowClass: 焦点所在顶层窗口的类名（nullptr / 空 = 未知）。服务端据此区分 explorer.exe 的
+    // 过渡型窗口（任务栏 / Alt+Tab）与停留型窗口（桌面 / 文件管理器）；空值回落到照常重算初始模式。
     //
     // windowTitle: 同一个顶层窗口的标题（可为 nullptr / 空）。调用方只在 core 推开了
     // CONFIG_KEY_COMPAT_TITLE_MATCH 时才取并传入（见 WindowTitlePolicy.h）；用户数据，日志只记长度。
@@ -253,15 +246,15 @@ public:
     BOOL SendHostRenderRequest(ServiceResponse& response);
 
     // Send mode change notification (async, for local mode toggle)
-    // This notifies Go that TSF has locally toggled the mode
+    // This notifies the service that TSF has locally toggled the mode
     BOOL SendModeNotify(bool chineseMode, bool clearInput);
 
     // Send toggle mode request (sync, from UI click)
-    // Go service will toggle mode and return StatusUpdate response (full state + iconLabel)
+    // The service will toggle mode and return StatusUpdate response (full state + iconLabel)
     BOOL SendToggleMode(ServiceResponse& response);
 
-    // System mode switch (Ctrl+Space): sync request to Go with target mode
-    // Go will check CommitOnSwitch and return commitText if needed
+    // System mode switch (Ctrl+Space): sync request to the service with target mode
+    // The service will check CommitOnSwitch and return commitText if needed
     // source 只进服务端日志：让「宿主写 compartment」与「按键兜底」在服务端日志里可分辨。
     // ctrlHeld 是判据不是日志：服务端的 ignore_host_ime_switch 靠它放行 Ctrl+Space
     // （系统热键与宿主切中英走同一条 compartment 通路，不交代就分不出）。
@@ -297,23 +290,22 @@ public:
     BOOL ReceiveBatchResponse(std::vector<ServiceResponse>& responses, int expectedCount);
 
     // ========================================================================
-    // Async Reader Thread (for receiving Go's proactive state pushes)
+    // Async Reader Thread (for receiving the service's proactive state pushes)
     // ========================================================================
 
     // Callback type for state push notifications
     using StatePushCallback = std::function<void(const ServiceResponse&)>;
 
     // Callback type for activation status push notifications (CMD_ACTIVATION_STATUS_PUSH).
-    // 触发时机：Go 端 HandleIMEActivated / HandleFocusGained 完成后通过 push pipe 推送的
-    // 完整 activation 状态回包（含 hotkeys + hostRenderAvail + iconLabel）。
-    // 回调在 AsyncReader 线程上调用，TextService 据此 Post 到 TSF 线程做 _SyncStateFromResponse
-    // + _EnsureHostRenderSetup（等价于原同步 ReceiveResponse → _DoFullStateSync 路径）。
+    // 服务端处理完 IME_ACTIVATED / FOCUS_GAINED 后经 push pipe 推送的完整 activation 状态
+    // （含 hotkeys + hostRenderAvail + iconLabel）。回调在 AsyncReader 线程上调用，TextService
+    // 据此 Post 到 TSF 线程做 _SyncStateFromResponse + _EnsureHostRenderSetup。
     using ActivationPushCallback = std::function<void(const ServiceResponse&)>;
 
-    // Callback type for commit text from Go (mouse click on candidate)
+    // Callback type for commit text from the service (mouse click on candidate)
     using CommitTextCallback = std::function<void(const std::wstring&)>;
 
-    // Callback type for clear composition from Go (mode toggle via menu)
+    // Callback type for clear composition from the service (mode toggle via menu)
     using ClearCompositionCallback = std::function<void()>;
 
     // Callback type for replace-backward push from service (undo commit):
@@ -324,26 +316,25 @@ public:
     // 上屏 text 后向左移 moveLeft 格，并记一层待跳出深度。
     using PairCommitCallback = std::function<void(const std::wstring&, uint32_t)>;
 
-    // Callback type for update composition from Go (mouse click partial confirm)
+    // Callback type for update composition from the service (mouse click partial confirm)
     using UpdateCompositionCallback = std::function<void(const std::wstring& text, int caretPos)>;
 
-    // Callback type for config sync from Go (generic key/value push)
+    // Callback type for config sync from the service (generic key/value push)
     using SyncConfigCallback = std::function<void(const std::string& key, const std::vector<uint8_t>& value)>;
 
-    // Callback type for service-ready notification (Go service connected push pipe)
+    // Callback type for service-ready notification (the service connected push pipe)
     using ServiceReadyCallback = std::function<void()>;
 
     // Callback type for icon-refresh push (CMD_REFRESH_ICON), no payload.
-    // 「共享内存里的位图换了，但状态没变」时由服务端发来。实现必须只做 PostMessage 跳到
-    // TSF 线程再发 OnUpdate——本回调在 AsyncReader 线程上调用，那里碰 COM 是未定义行为。
+    // 位图换了而状态没变时由服务端发来。回调在 AsyncReader 线程上，实现只能 PostMessage 到
+    // TSF 线程再发 OnUpdate，不得在此碰 COM。
     using RefreshIconCallback = std::function<void()>;
 
     // Callback type for mode-only push (CMD_MODE_PUSH).
     // 携带 chineseMode + fullWidth + chinesePunct，用于 FocusGained 竞态窗口优化。
     // 回调在 AsyncReader 线程上调用；实现必须用 InterlockedExchange 写
     // _bChineseMode/_bFullWidth/_bChinesePunct，不得调用 _SyncStateFromResponse（会清热键）。
-    // 带 chinesePunct：TSF 侧的标点透传判据要按当下标点态二选一，而 CMD_MODE_PUSH 正是
-    // 消除焦点切换后首次按键竞态的那条快路径——漏了它，切完焦点的第一个标点会用旧态判。
+    // 须带 chinesePunct：标点透传判据依赖它，漏了则切完焦点的第一个标点会按旧态判。
     using ModePushCallback =
         std::function<void(bool chineseMode, bool fullWidth, bool chinesePunct)>;
 
@@ -351,24 +342,23 @@ public:
     // 在 TSF 侧（前台应用进程）调用 ShellExecuteW，解决 Service 进程无前台权限问题。
     // 回调在 AsyncReader 线程上调用，ShellExecuteW 线程安全，可直接调用。
     //
-    // dir = 子进程的工作目录，空串表示不指定。**空串意味着继承本进程（前台宿主
-    // 应用）的当前目录**，那个值不可控且会被文件对话框改掉，所以服务端总会算好
-    // 一个确定目录发过来；这里为空只出现在对接旧版服务时。
+    // dir = 子进程的工作目录。空串会继承宿主进程的当前目录（不可控），故服务端总会发一个
+    // 确定目录；为空只出现在对接旧版服务时。
     // verb = ShellExecute 动词（open/runas/edit/print/explore/properties），空串 = open。
     // show = 初始窗口状态（normal/min/max/hidden），空串 = normal。
     // verb/show 的取值已由服务端按白名单校验，收到的一定合法或为空。
     using ShellExecCallback = std::function<void(const std::wstring& target, const std::wstring& params, const std::wstring& dir, const std::wstring& verb, const std::wstring& show)>;
 
-    // Set callback for receiving state push from Go
+    // Set callback for receiving state push from the service
     void SetStatePushCallback(StatePushCallback callback);
 
-    // Set callback for receiving activation status push from Go
+    // Set callback for receiving activation status push from the service
     void SetActivationPushCallback(ActivationPushCallback callback);
 
-    // Set callback for receiving commit text from Go (mouse click on candidate)
+    // Set callback for receiving commit text from the service (mouse click on candidate)
     void SetCommitTextCallback(CommitTextCallback callback);
 
-    // Set callback for receiving clear composition from Go (mode toggle via menu)
+    // Set callback for receiving clear composition from the service (mode toggle via menu)
     void SetClearCompositionCallback(ClearCompositionCallback callback);
 
     // Set callback for receiving replace-backward push from service (undo commit)
@@ -377,13 +367,13 @@ public:
     // Set callback for receiving pair-commit push from service (直通 ime.pair)
     void SetPairCommitCallback(PairCommitCallback callback);
 
-    // Set callback for receiving update composition from Go (mouse click partial confirm)
+    // Set callback for receiving update composition from the service (mouse click partial confirm)
     void SetUpdateCompositionCallback(UpdateCompositionCallback callback);
 
-    // Set callback for receiving config sync from Go (generic key/value push)
+    // Set callback for receiving config sync from the service (generic key/value push)
     void SetSyncConfigCallback(SyncConfigCallback callback);
 
-    // Set callback for service-ready notification (Go service connected push pipe)
+    // Set callback for service-ready notification (the service connected push pipe)
     void SetServiceReadyCallback(ServiceReadyCallback callback);
 
     // Set callback for mode-only push (CMD_MODE_PUSH, FocusGained 竞态优化)
@@ -415,7 +405,7 @@ public:
     void ResetCircuitBreaker();
 
     // State sync tracking: TRUE when a new connection is established and
-    // full state sync with Go service hasn't happened yet.
+    // full state sync with the service hasn't happened yet.
     BOOL NeedsStateSync() const { return _needsStateSync; }
     void ClearNeedsSyncFlag() { _needsStateSync = FALSE; }
 
@@ -458,12 +448,11 @@ private:
 
     // Per-instance token: (uint64_t)PID << 32 | per-process-counter (uint32)
     // Used to correlate push pipe connection with request/response commands.
-    // 64-bit form preserves the full PID — Windows 10/11 PIDs routinely exceed
-    // 65535, so truncating to 16 bits would cause cross-process collisions.
+    // 64-bit form keeps the full PID (PIDs exceed 65535; truncating collides across processes).
     uint64_t _clientToken;
     static std::atomic<uint32_t> s_instanceCounter;
 
-    // Start the Go service if not running
+    // Start the the service if not running
     BOOL _StartService();
 
     // Send binary message (header + payload)
@@ -494,9 +483,8 @@ private:
 
     /// 安装器闸门：`HKLM\Software\<app>\InstallerRunning` 是否**当前有效**地要求不启动服务。
     ///
-    /// 与单看那个值的区别在于「有效」二字：立标记的安装器进程若异常死亡，标记会永久
-    /// 残留，表现为输入法整个不工作且无任何提示（issue #120）。故本函数还要校验
-    /// `InstallerRunningOwner` 记下的那个进程是否仍在。判定规则见 InstallerGuard.h。
+    /// 还校验 `InstallerRunningOwner` 记下的进程是否仍在，以免安装器异常死亡后标记永久生效。
+    /// 判定规则见 InstallerGuard.h。
     static bool _InstallerGuardBlocks();
 
     // Logging helpers

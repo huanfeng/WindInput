@@ -66,8 +66,8 @@ public:
     // Update both mode and Caps Lock state
     void UpdateState(BOOL bChineseMode, BOOL bCapsLock);
 
-    // Update full status (called when receiving status_update from Go service)
-    // iconLabel: display text from Go service (e.g., "中", "英", "A", "拼", "五")
+    // Update full status (called when receiving status_update from the service)
+    // iconLabel: display text from the service (e.g., "中", "英", "A", "拼", "五")
     void UpdateFullStatus(BOOL bChineseMode, BOOL bFullWidth, BOOL bChinesePunct, BOOL bToolbarVisible, BOOL bCapsLock, const wchar_t* iconLabel = nullptr);
 
     // Thread-safe update from async thread (posts message to UI thread)
@@ -105,15 +105,13 @@ public:
     void ScheduleFocusRecoveryRetry();
 
     // Thread-safe activation status from async reader thread.
-    // 触发时机：Go 收到异步化后的 CmdIMEActivated / CmdFocusGained 完成 handler 后通过
-    // push pipe 推送的 CMD_ACTIVATION_STATUS_PUSH。TSF 线程上调用 TextService 的
-    // ApplyActivationStatusResponse, 等价于原同步 ReceiveResponse 路径的
-    // _SyncStateFromResponse + _EnsureHostRenderSetup。
+    // 触发：服务端处理完 CmdIMEActivated / CmdFocusGained 后经 push pipe 推送
+    // CMD_ACTIVATION_STATUS_PUSH。TSF 线程上调用 TextService::ApplyActivationStatusResponse
+    // （_SyncStateFromResponse + _EnsureHostRenderSetup）。
     void PostActivationStatus(const ServiceResponse& response);
 
     // Thread-safe icon-refresh request from async reader thread (CMD_REFRESH_ICON)。
-    // 只发 OnUpdate(TF_LBI_ICON) 让系统重取图标，不碰任何状态字段——服务端换的是
-    // 共享内存里的位图，DLL 这边没有任何东西需要跟着变。
+    // 只发 OnUpdate(TF_LBI_ICON) 让系统重取图标，不碰状态字段：服务端换的是共享内存里的位图。
     void PostRefreshIcon();
 
     // Thread-safe「标题采集开关刚由关变开」通知（async reader 线程调用）。TSF 线程上让
@@ -160,7 +158,7 @@ private:
         BOOL bChinesePunct;
         BOOL bToolbarVisible;
         BOOL bCapsLock;
-        wchar_t iconLabel[8];  // Icon label from Go service (e.g., "中", "英", "拼")
+        wchar_t iconLabel[8];  // Icon label from the service (e.g., "中", "英", "拼")
     };
 
     // Data for commit text message
@@ -214,14 +212,12 @@ private:
     // 模式主字。中文态取方案的 icon_label（"中"/"拼"/"五"/"双"），非中文态取
     // [ui.labels]（默认 "英"/"A"，用户可配，最多 2 个字符）。
     //
-    // ⚠️ 容量不是"2 个字符 = 2 个 wchar + NUL = 3"那么算的：Rust 侧的上限是 2 个
-    // **Unicode 标量值**，而一个标量值在 UTF-16 里可能占 2 个 wchar（surrogate pair，
-    // 如 emoji）。最坏情况 2 char = 4 wchar + NUL = 5，原来的 [4] 装不下。
-    // 取 8 与 STATUS_UPDATE_DATA::iconLabel 对齐，两个缓冲同进同出。
+    // 容量按 Unicode 标量值算：2 个标量值最坏占 4 个 wchar（代理对）+ NUL。
+    // 取 8 与 StatusUpdateData::iconLabel 对齐。
     wchar_t _inputTypeLabel[8];
 
     // 服务端预渲染图标的读端。取不到时 GetIcon 显示加载中图标（LoadingIcon.h），
-    // 故本对象不可用**不是**错误状态（服务未启动时就是这样）。
+    // 故本对象不可用不是错误状态（服务未启动时就是这样）。
     CIconShmReader _iconShm;
 
     // GUID for this language bar item

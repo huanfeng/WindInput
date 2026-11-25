@@ -6,20 +6,20 @@
 #include <string>
 #include <vector>
 
-class CIPCClient; // forward decl: host window routes mouse events back to Go via SendAsync
+class CIPCClient; // forward decl: host window routes mouse events back to the service via SendAsync
 
 // HostWindow manages a candidate window created via CreateWindowInBand inside the host process.
 // This allows the candidate window to appear above high-Band windows (e.g. Start Menu).
-// The window is rendered by Go via shared memory; this class handles display + mouse routing.
+// The window is rendered by the service via shared memory; this class handles display + mouse routing.
 class CHostWindow
 {
 public:
     CHostWindow();
     ~CHostWindow();
 
-    // Initialize with shared memory and event names from Go service.
+    // Initialize with shared memory and event names from the service.
     // Creates the Band window and starts the render thread. ipcClient (may be null) is
-    // used to route mouse click/hover back to Go (CMD_CANDIDATE_SELECT / CMD_CANDIDATE_HOVER).
+    // used to route mouse click/hover back to the service (CMD_CANDIDATE_SELECT / CMD_CANDIDATE_HOVER).
     // kind selects the window role: only HOST_WINDOW_CANDIDATE enables mouse interaction;
     // tooltip/status are pure display. ownerOverride (may be NULL) forces the band window's
     // owner — the candidate's hwnd is passed for tooltip/status so they sit above the
@@ -41,10 +41,8 @@ public:
     // Returns TRUE if the host window is active and rendering.
     BOOL IsActive() const { return _active; }
 
-    // 本 band 窗口**实际所在**的 band（CreateWindowInBand 之后由 GetWindowBand 复核所得）。
-    // 0 = 尚未建窗。与 GetHostBand() 不是一回事：那个是"宿主处于哪个 band"的探测结果，
-    // 用来决定往哪建；这个是"我们最后建成的窗口落在哪"。诊断快照上报的是后者——
-    // 排查时要看的是既成事实，不是当初的意图。
+    // 本窗口实际所在的 band（建窗后由 GetWindowBand 复核），0 = 尚未建窗。GetHostBand() 是
+    // 决定往哪建的探测结果，这个是建成后的事实；诊断快照上报的是这个。
     DWORD GetCurrentBand() const { return _currentBand; }
 
     // Recreate the display window at a new Band (called from TSF thread on focus change).
@@ -108,7 +106,7 @@ private:
     void _OnMouseMove(int clientX, int clientY);
     void _OnMouseLeave();
     void _OnMouseWheel(int delta);
-    // Send a hover notification (index + screen anchor) to Go; index<0 = left area.
+    // Send a hover notification (index + screen anchor) to the service; index<0 = left area.
     void _SendHover(int index);
     // Snapshot the embedded rect table for a freshly rendered frame (render thread).
     void _UpdateHitRects(const FrameSnapshot& frame);
@@ -161,20 +159,20 @@ private:
     CreateWindowInBand_t _pfnCreateWindowInBand;
     GetWindowBand_t      _pfnGetWindowBand;
 
-    // Window role. Only HOST_WINDOW_CANDIDATE routes mouse events to Go; tooltip/status
+    // Window role. Only HOST_WINDOW_CANDIDATE routes mouse events to the service; tooltip/status
     // are pure-display band windows (their occlusion fix is z-order, not interaction).
     HostWindowKind _windowKind;
     // This window's host-render instance ID (bridge clientID). The render thread renders a
     // frame only when SharedRenderHeader.targetInstanceId == _instanceId; otherwise it hides.
     // Lets multiple TextService instances in one process share the global SHM without all
-    // mirroring each other's frames (fixes "two candidate layers, only one hides").
+    // mirroring each other's frames.
     uint32_t _instanceId;
     // Forced band-window owner (NULL = derive from foreground). Non-candidate windows are
     // owned by the candidate hwnd so they stay above it in z-order.
     HWND _ownerOverride;
 
     // ── Mouse routing state ─────────────────────────────────────────────────
-    CIPCClient* _pIPCClient; // weak ref (owned by TextService); routes mouse events to Go
+    CIPCClient* _pIPCClient; // weak ref (owned by TextService); routes mouse events to the service
 
     // Latest frame's hit geometry + screen placement. Written by the render thread in
     // _UpdateHitRects, read by the UI thread in _WndProc; guarded by _rectLock.
@@ -193,14 +191,10 @@ private:
     BOOL _trackingMouse;  // WM_MOUSELEAVE tracking armed (UI thread only)
     int  _pressedHit;     // hit under the left-button press; INT_MIN = none (UI thread only)
 
-    // Synthetic-move filter (UI thread only). When the candidate window repaints or
-    // follows the caret under a physically-stationary cursor, Windows still posts
-    // WM_MOUSEMOVE (with new client coords because the window moved). We compare the
-    // SCREEN cursor position, which only changes on real movement — so typing with the
-    // cursor parked over a candidate no longer flickers the highlight/tooltip. (The local
-    // window achieves the same via ResetMouseTracking + "ignore first move after content
-    // change", but geometry-based content detection is unreliable when re-showing identical
-    // candidates; the screen-position test is robust regardless of window/content changes.)
+    // Synthetic-move filter (UI thread only). When the window repaints or follows the caret
+    // under a stationary cursor, Windows still posts WM_MOUSEMOVE with new client coords.
+    // Comparing the SCREEN cursor position filters these, so typing with the cursor parked
+    // over a candidate doesn't flicker the highlight/tooltip.
     int  _lastScreenX;   // last processed move cursor screen X
     int  _lastScreenY;   // last processed move cursor screen Y
     BOOL _hasScreenPos;  // _lastScreenX/Y hold a valid previous position
