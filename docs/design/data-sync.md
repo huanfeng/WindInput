@@ -99,7 +99,7 @@
 
 ## 4. 远端格式
 
-根为用户给定的 URL/前缀下的 `windinput-sync/v1/`：
+根为用户给定的 URL/前缀下的 `windinput-sync/v2/`：
 
 ```
 meta.json                      明文：格式版本（2）、同步密钥校验值（不含密钥本身）
@@ -125,6 +125,7 @@ blobs/<id>                     密文：文件内容，id = HMAC(files 子密钥
   用来在粘贴时核对「密钥对不对」。（思源同做法；没有口令封装，所以也没有 KDF 与盐。）
 - 新设备加入：粘贴同步密钥，校验通过后存入本机机密存储，再进入身份确认（见 `sync-device-groups.md` §4.5）。
 - **丢失后无法恢复**：没有恢复密钥，也没有口令可找回。所有设备都丢了密钥时只能重置远端（清空后生成新密钥，以本机为准重新上传），其他设备用新密钥重新加入。
+  重置前应先暂停其他设备的同步：它们若还在用旧密钥写入，残留的旧密钥对象会挡住回收，直到被移除。
 - 每个对象独立随机 nonce，XChaCha20-Poly1305，附加数据绑定对象类型与 id，防止对象被调换。
 - 旧的口令格式 `meta.json`（含 `kdf_alg`）不再识别，报「远端同步库格式不受支持，请重置远端」。
 
@@ -174,7 +175,7 @@ blobs/<id>                     密文：文件内容，id = HMAC(files 子密钥
 
 `ureq`（同步 HTTP + rustls，与 core 的同步线程模型一致，不引入 tokio；版本与设置端对齐）、
 `rusty-s3`（不带 IO 的 S3 SigV4 签名，配 ureq 用）、WebDAV 自己实现（PROPFIND/GET/PUT/DELETE/MKCOL，量很小）、
-`chacha20poly1305`、`argon2`、`sha2`、`hmac`、`notify`、Windows `windows` crate 的 DPAPI、macOS `security-framework`。
+`chacha20poly1305`、`sha2`、`hmac`、`notify`、Windows `windows` crate 的 DPAPI、macOS `security-framework`。
 
 ## 10. 分阶段
 
