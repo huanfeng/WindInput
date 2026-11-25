@@ -116,11 +116,8 @@ pub fn join_group(
                 deletes.push(l);
             }
         }
-        if !writes.is_empty() {
-            local.write_batch(&writes).map_err(le)?;
-        }
-        if !deletes.is_empty() {
-            local.delete(&deletes).map_err(le)?;
+        if !writes.is_empty() || !deletes.is_empty() {
+            local.apply(&writes, &[], &deletes).map_err(le)?;
         }
         rep.written = writes.into_iter().map(|(p, _)| p).collect();
         rep.deleted = deletes;

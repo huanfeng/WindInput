@@ -21,6 +21,8 @@ pub const GC_MIN_AGE_SECS: u64 = 7 * 86400;
 
 /// 大批量删除护栏：本轮删除数超过此值且过已同步文件数的一半时中止。
 pub const MASS_DELETE_MIN: usize = 20;
+/// 单文件体积上限（字节）：超过的不读入、不上传，本轮记一条警告。
+pub const MAX_FILE_BYTES: u64 = 64 << 20;
 /// 已存在 blob 的修改时间早于此（秒）则重传刷新。
 const BLOB_REFRESH_SECS: u64 = 86400;
 /// 待传 blob 数不超过它时逐个 stat 判存在，超过则一次 list。
@@ -265,15 +267,29 @@ fn run(
     let in_scope = |p: &str| scope::in_scope_remote(p, &ctx.ns);
     let mut contents: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     let mut hashes: BTreeMap<String, String> = BTreeMap::new();
+    // 超大文件本轮整条跳过（不读、不传、不删、不被远端覆盖），状态条目原样保留
+    let mut oversized: BTreeSet<String> = BTreeSet::new();
+    let too_big = |n: u64| n > MAX_FILE_BYTES;
     for p in local.list().map_err(le)? {
         if !in_scope(&p) {
             continue;
         }
-        if let Some(b) = local.read(&p).map_err(le)? {
+        let big = local.size(&p).map_err(le)?.is_some_and(too_big);
+        let b = if big {
+            None
+        } else {
+            local.read(&p).map_err(le)?
+        };
+        if big || b.as_ref().is_some_and(|b| too_big(b.len() as u64)) {
+            let shown = scope::to_local(&p, &ctx.ns).unwrap_or_else(|| p.clone());
+            rep.warnings.push(format!("文件过大未同步：{shown}"));
+            oversized.insert(p);
+        } else if let Some(b) = b {
             hashes.insert(p.clone(), content_hash(&b));
             contents.insert(p, b);
         }
     }
+    let plan_scope = |p: &str| in_scope(p) && !oversized.contains(p);
 
     // 2. 拉各设备最新清单（按 gen 缓存）
     let mut by_dev: BTreeMap<String, Vec<u64>> = BTreeMap::new();
@@ -345,7 +361,7 @@ fn run(
         local: &hashes,
         state: &state.files,
         remotes: &refs,
-        in_scope: &in_scope,
+        in_scope: &plan_scope,
     });
 
     if !ctx.allow_mass_delete {
@@ -679,7 +695,7 @@ fn run(
         }
     }
 
-    // 4. 写本地（一批写入、一批删除）
+    // 4. 写本地：写入与删除合成一次 apply；新写入文件的可执行位随写入落位
     let mut writes: Vec<(String, Vec<u8>)> = outs
         .iter()
         .filter_map(|o| o.write.clone().map(|w| (o.path.clone(), w)))
@@ -690,17 +706,21 @@ fn run(
         .filter(|o| o.delete)
         .map(|o| o.path.clone())
         .collect();
-    if !writes.is_empty() {
-        local.write_batch(&writes).map_err(le)?;
+    let wants_exec = |o: &&Out| o.entry.exec && !o.entry.deleted && !o.delete;
+    let write_execs: Vec<String> = outs
+        .iter()
+        .filter(wants_exec)
+        .filter(|o| o.write.is_some())
+        .map(|o| o.path.clone())
+        .collect();
+    if !writes.is_empty() || !dels.is_empty() {
+        local.apply(&writes, &write_execs, &dels).map_err(le)?;
     }
-    if !dels.is_empty() {
-        local.delete(&dels).map_err(le)?;
-    }
-    // 远端条目带可执行位的补上（被重写过的本机条目也要补，原子写入会丢位）
+    // 内容未变、只是远端条目带可执行位的补上
     let execs: Vec<String> = outs
         .iter()
-        .filter(|o| o.entry.exec && !o.entry.deleted && !o.delete)
-        .filter(|o| o.write.is_some() || o.entry.device != me)
+        .filter(wants_exec)
+        .filter(|o| o.write.is_none() && o.entry.device != me)
         .map(|o| o.path.clone())
         .collect();
     if !execs.is_empty() {
@@ -761,6 +781,8 @@ fn run(
         }
         files.insert(o.path, o.entry);
     }
+    // 已变为排除的旧路径直接出清单（不发删除标记，别的设备上的文件不受影响）
+    files.retain(|p, _| in_scope(p));
     let digest = content_hash(&serde_json::to_vec(&files).expect("条目可序列化"));
     let mut gen_ = state.gen_;
     let mut new_nonce = state.last_nonce.clone();

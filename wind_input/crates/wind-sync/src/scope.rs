@@ -96,6 +96,7 @@ pub fn classify(local: &str) -> Class {
     if kind(local) == Kind::Setting {
         return Class::Setting;
     }
+    // 扩展整目录同步：扩展在自身 `extensions/<id>/` 下写的运行期文件也会被同步（已知行为）
     match segs.as_slice() {
         ["schemas", ..] | ["themes", ..] | ["extensions", ..] | ["system.softkeyboard.toml"] => {
             Class::Resource

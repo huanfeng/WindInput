@@ -13,6 +13,20 @@ pub trait LocalStore {
     /// 一批写入作为一次编辑会话（真实实现在此前后 beginEdit/endEdit 并合并重载）。
     fn write_batch(&mut self, files: &[(String, Vec<u8>)]) -> Result<(), LocalError>;
     fn delete(&mut self, paths: &[String]) -> Result<(), LocalError>;
+    /// 一轮的写入与删除合成一次调用（真实实现据此一轮只暂停/恢复扩展一次）；
+    /// `exec` 是写入中要带可执行位的路径，真实实现在落位前设好。
+    fn apply(
+        &mut self,
+        writes: &[(String, Vec<u8>)],
+        exec: &[String],
+        deletes: &[String],
+    ) -> Result<(), LocalError> {
+        apply_in_steps(self, writes, exec, deletes)
+    }
+    /// 文件字节数（None = 不存在或不知道）：引擎据此跳过超大文件而不读入。
+    fn size(&self, _path: &str) -> Result<Option<u64>, LocalError> {
+        Ok(None)
+    }
     /// 文件是否带可执行位（Windows 恒为 false）。
     fn is_exec(&self, _path: &str) -> Result<bool, LocalError> {
         Ok(false)
@@ -23,12 +37,33 @@ pub trait LocalStore {
     }
 }
 
+/// `apply` 的默认拆法：写入、补可执行位、删除依次各调一次。
+fn apply_in_steps<S: LocalStore + ?Sized>(
+    s: &mut S,
+    writes: &[(String, Vec<u8>)],
+    exec: &[String],
+    deletes: &[String],
+) -> Result<(), LocalError> {
+    if !writes.is_empty() {
+        s.write_batch(writes)?;
+    }
+    if !exec.is_empty() {
+        s.set_exec(exec)?;
+    }
+    if !deletes.is_empty() {
+        s.delete(deletes)?;
+    }
+    Ok(())
+}
+
 /// 内存实现（测试与 S4 之前的联调）。
 #[derive(Debug, Clone, Default)]
 pub struct MemLocal {
     pub files: BTreeMap<String, Vec<u8>>,
     /// 累计 write_batch 调用次数（断言「一批写入合并成一次」）。
     pub batches: usize,
+    /// 累计 apply 调用次数（断言「一轮只一次」）。
+    pub applies: usize,
     /// 带可执行位的路径。
     pub exec: std::collections::BTreeSet<String>,
 }
@@ -68,6 +103,15 @@ impl LocalStore for MemLocal {
         }
         Ok(())
     }
+    fn apply(
+        &mut self,
+        writes: &[(String, Vec<u8>)],
+        exec: &[String],
+        deletes: &[String],
+    ) -> Result<(), LocalError> {
+        self.applies += 1;
+        apply_in_steps(self, writes, exec, deletes)
+    }
     fn is_exec(&self, path: &str) -> Result<bool, LocalError> {
         Ok(self.exec.contains(path))
     }
@@ -85,6 +129,15 @@ pub struct NsLocal<'a> {
 
 fn unmapped(p: &str) -> LocalError {
     LocalError(format!("路径不属于本机命名空间: {p}"))
+}
+
+impl NsLocal<'_> {
+    fn map(&self, p: &str) -> Result<String, LocalError> {
+        to_local(p, &self.ns).ok_or_else(|| unmapped(p))
+    }
+    fn map_all(&self, paths: &[String]) -> Result<Vec<String>, LocalError> {
+        paths.iter().map(|p| self.map(p)).collect()
+    }
 }
 
 impl LocalStore for NsLocal<'_> {
@@ -115,6 +168,26 @@ impl LocalStore for NsLocal<'_> {
             .map(|p| to_local(p, &self.ns).ok_or_else(|| unmapped(p)))
             .collect::<Result<Vec<_>, _>>()?;
         self.inner.delete(&mapped)
+    }
+    fn apply(
+        &mut self,
+        writes: &[(String, Vec<u8>)],
+        exec: &[String],
+        deletes: &[String],
+    ) -> Result<(), LocalError> {
+        let writes = writes
+            .iter()
+            .map(|(p, b)| Ok((self.map(p)?, b.clone())))
+            .collect::<Result<Vec<_>, LocalError>>()?;
+        let exec = self.map_all(exec)?;
+        let deletes = self.map_all(deletes)?;
+        self.inner.apply(&writes, &exec, &deletes)
+    }
+    fn size(&self, path: &str) -> Result<Option<u64>, LocalError> {
+        match to_local(path, &self.ns) {
+            Some(l) => self.inner.size(&l),
+            None => Ok(None),
+        }
     }
     fn is_exec(&self, path: &str) -> Result<bool, LocalError> {
         match to_local(path, &self.ns) {
