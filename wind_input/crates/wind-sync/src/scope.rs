@@ -56,36 +56,74 @@ impl DeviceClass {
     }
 }
 
-/// 平台相关文件：配置、兼容规则、主题。其余（词库、短语、方案）各类别共用。
-fn platform_specific(local: &str) -> bool {
-    matches!(
-        local.split('/').next(),
-        Some("config.toml" | "compat.toml" | "themes")
-    )
+/// 文件在远端的归属：数据各设备共享，主题按设备类别，设置按设备组。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Shared,
+    PerClass,
+    Setting,
 }
 
-/// 本机路径 → 远端逻辑路径：平台相关文件带类别前缀，共用文件原样。
-pub fn to_remote(local: &str, class: DeviceClass) -> String {
-    if platform_specific(local) {
-        format!("{}/{local}", class.as_str())
-    } else {
-        local.to_string()
+pub fn kind(local: &str) -> Kind {
+    let segs: Vec<&str> = local.split('/').collect();
+    match segs.as_slice() {
+        ["config.toml"] | ["compat.toml"] => Kind::Setting,
+        ["data", schema, "dicts.toml"] if *schema != "charsets" => Kind::Setting,
+        ["themes", ..] => Kind::PerClass,
+        _ => Kind::Shared,
     }
 }
 
-/// 远端逻辑路径 → 本机路径。别的类别的平台相关条目、没有前缀的平台相关条目返回 `None`（忽略）。
-pub fn to_local(remote: &str, class: DeviceClass) -> Option<String> {
-    if let Some((head, rest)) = remote.split_once('/')
-        && let Some(c) = DeviceClass::parse(head)
-    {
-        return (c == class && platform_specific(rest)).then(|| rest.to_string());
-    }
-    (!platform_specific(remote)).then(|| remote.to_string())
+/// 本机所在的远端命名空间：类别（主题）与设备组（设置）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Namespace {
+    pub class: DeviceClass,
+    pub group: String,
 }
 
-/// 远端逻辑路径是否属于本机类别且在同步范围内。
-pub fn in_scope_remote(remote: &str, f: &ScopeFlags, class: DeviceClass) -> bool {
-    to_local(remote, class).is_some_and(|l| in_scope(&l, f))
+impl Namespace {
+    pub fn new(class: DeviceClass, group: impl Into<String>) -> Self {
+        Namespace {
+            class,
+            group: group.into(),
+        }
+    }
+}
+
+/// 本机路径 → 远端逻辑路径：设置带 `groups/<组>/`，主题带类别前缀，数据原样。
+pub fn to_remote(local: &str, ns: &Namespace) -> String {
+    match kind(local) {
+        Kind::Setting => format!("groups/{}/{local}", ns.group),
+        Kind::PerClass => format!("{}/{local}", ns.class.as_str()),
+        Kind::Shared => local.to_string(),
+    }
+}
+
+/// 远端逻辑路径 → 本机路径。别组的设置、别类别的主题、带前缀的数据、无前缀的设置/主题返回 `None`。
+pub fn to_local(remote: &str, ns: &Namespace) -> Option<String> {
+    if let Some((head, rest)) = remote.split_once('/') {
+        if head == "groups" {
+            let (group, local) = rest.split_once('/')?;
+            return (group == ns.group && kind(local) == Kind::Setting).then(|| local.to_string());
+        }
+        if let Some(c) = DeviceClass::parse(head) {
+            return (c == ns.class && kind(rest) == Kind::PerClass).then(|| rest.to_string());
+        }
+    }
+    (kind(remote) == Kind::Shared).then(|| remote.to_string())
+}
+
+/// 远端逻辑路径是否属于本机命名空间且在同步范围内。
+pub fn in_scope_remote(remote: &str, f: &ScopeFlags, ns: &Namespace) -> bool {
+    to_local(remote, ns).is_some_and(|l| in_scope(&l, f))
+}
+
+/// 远端逻辑路径是否是该组的设置文件。
+pub fn is_group_setting(remote: &str, group: &str) -> bool {
+    remote
+        .strip_prefix("groups/")
+        .and_then(|r| r.split_once('/'))
+        .is_some_and(|(g, local)| g == group && kind(local) == Kind::Setting)
 }
 
 /// `path` 为用户目录下以 `/` 分隔的相对路径。
@@ -135,36 +173,63 @@ mod tests {
 
     const A: ScopeFlags = ScopeFlags::ALL;
 
+    fn ns(class: &str, group: &str) -> Namespace {
+        Namespace::new(DeviceClass::parse(class).unwrap(), group)
+    }
+
     #[test]
-    fn remote_mapping_namespaces_platform_files() {
-        use DeviceClass::*;
-        assert_eq!(to_remote("config.toml", Mobile), "mobile/config.toml");
+    fn remote_mapping_namespaces_by_kind() {
+        let home = ns("desktop", "home");
+        assert_eq!(to_remote("config.toml", &home), "groups/home/config.toml");
         assert_eq!(
-            to_remote("themes/a/t.toml", Desktop),
+            to_remote("data/wubi86/dicts.toml", &home),
+            "groups/home/data/wubi86/dicts.toml"
+        );
+        assert_eq!(
+            to_remote("themes/a/t.toml", &home),
             "desktop/themes/a/t.toml"
         );
-        assert_eq!(to_remote("compat.toml", Desktop), "desktop/compat.toml");
         assert_eq!(
-            to_remote("data/phrases.dict.yaml", Mobile),
-            "data/phrases.dict.yaml"
+            to_remote("data/wubi86/user.dict.yaml", &home),
+            "data/wubi86/user.dict.yaml"
         );
         assert_eq!(
-            to_remote("schemas/a.schema.yaml", Mobile),
-            "schemas/a.schema.yaml"
+            to_remote("data/charsets/dicts.toml", &home),
+            "data/charsets/dicts.toml"
         );
         assert_eq!(
-            to_local("mobile/config.toml", Mobile).as_deref(),
+            to_local("groups/home/config.toml", &home).as_deref(),
             Some("config.toml")
         );
-        assert_eq!(to_local("desktop/config.toml", Mobile), None);
-        assert_eq!(to_local("config.toml", Mobile), None, "无前缀的旧条目忽略");
-        assert_eq!(to_local("themes/a", Desktop), None);
-        assert_eq!(to_local("data/x", Mobile).as_deref(), Some("data/x"));
-        assert_eq!(to_local("mobile/data/x", Mobile), None, "共用文件不带前缀");
-        assert!(in_scope_remote("desktop/config.toml", &A, Desktop));
-        assert!(!in_scope_remote("mobile/config.toml", &A, Desktop));
-        assert!(!in_scope_remote("../config.toml", &A, Desktop));
-        assert!(!in_scope_remote("desktop/../config.toml", &A, Desktop));
+        assert_eq!(to_local("groups/office/config.toml", &home), None);
+        assert_eq!(
+            to_local("groups/home/data/wubi86/user.dict.yaml", &home),
+            None,
+            "数据不允许带组前缀"
+        );
+        assert_eq!(to_local("config.toml", &home), None, "无前缀的设置忽略");
+        assert_eq!(
+            to_local("desktop/themes/a", &home).as_deref(),
+            Some("themes/a")
+        );
+        assert_eq!(to_local("mobile/themes/a", &home), None);
+        assert_eq!(to_local("desktop/data/x", &home), None, "数据不带类别前缀");
+        assert_eq!(to_local("data/x", &home).as_deref(), Some("data/x"));
+        assert!(in_scope_remote("groups/home/config.toml", &A, &home));
+        assert!(!in_scope_remote("groups/office/config.toml", &A, &home));
+        assert!(!in_scope_remote("../config.toml", &A, &home));
+        assert!(!in_scope_remote("groups/home/../config.toml", &A, &home));
+    }
+
+    #[test]
+    fn group_setting_detection() {
+        assert!(is_group_setting("groups/home/config.toml", "home"));
+        assert!(!is_group_setting("groups/home/config.toml", "office"));
+        assert!(!is_group_setting(
+            "groups/home/data/x/user.dict.yaml",
+            "home"
+        ));
+        assert!(!is_group_setting("config.toml", "home"));
     }
 
     #[test]

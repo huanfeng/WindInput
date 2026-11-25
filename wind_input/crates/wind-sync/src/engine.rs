@@ -7,12 +7,12 @@
 use crate::backend::{Backend, ObjMeta};
 use crate::crypto::{self, Dek, FilesKey, ObjKind, content_hash};
 use crate::error::SyncError;
-use crate::local::{ClassLocal, LocalError, LocalStore};
+use crate::local::{LocalError, LocalStore, NsLocal};
 use crate::manifest::{self, Entry, Manifest};
 use crate::merge::{self, Conflict};
 use crate::plan::{Action, PlanInput, decide};
 use crate::remote;
-use crate::scope::{self, DeviceClass, ScopeFlags, to_local};
+use crate::scope::{self, Namespace, ScopeFlags, to_local};
 use crate::state::SyncState;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -59,8 +59,8 @@ fn unique_copy_name(
 #[derive(Debug, Clone)]
 pub struct SyncCtx {
     pub scope: ScopeFlags,
-    /// 本机设备类别：平台相关文件在远端的命名空间（`<类别>/config.toml` 等）。
-    pub class: DeviceClass,
+    /// 本机命名空间：设置按设备组（`groups/<组>/…`），主题按类别（`<类别>/themes/…`）。
+    pub ns: Namespace,
     /// 当前 unix 秒（由调用方给，便于测试）。
     pub now: u64,
     /// 立即同步：忽略退避等待（停止态仍不绕过）。
@@ -72,10 +72,10 @@ pub struct SyncCtx {
 }
 
 impl SyncCtx {
-    pub fn new(scope: ScopeFlags, now: u64) -> Self {
+    pub fn new(scope: ScopeFlags, now: u64, ns: Namespace) -> Self {
         SyncCtx {
             scope,
-            class: DeviceClass::Desktop,
+            ns,
             now,
             force: false,
             gc: false,
@@ -151,14 +151,14 @@ pub fn sync_once(
         });
     }
     // 引擎全程用远端逻辑路径；读写本机时由适配器映射回本机路径。
-    let mut mapped = ClassLocal {
+    let mut mapped = NsLocal {
         inner: local,
-        class: ctx.class,
+        ns: ctx.ns.clone(),
     };
     match run(backend, &mut mapped, state, dek, ctx) {
         Ok(r) => {
             state.retry.record_success();
-            Ok(localize_report(r, ctx.class))
+            Ok(localize_report(r, &ctx.ns))
         }
         Err(e) => {
             state.retry.record_failure(&e, ctx.now);
@@ -168,10 +168,10 @@ pub fn sync_once(
 }
 
 /// 报告里的路径换回本机路径（调用方展示、定位冲突副本用）。
-fn localize_report(mut r: SyncReport, class: DeviceClass) -> SyncReport {
+fn localize_report(mut r: SyncReport, ns: &Namespace) -> SyncReport {
     let map = |v: &mut Vec<String>| {
         for p in v.iter_mut() {
-            if let Some(l) = to_local(p, class) {
+            if let Some(l) = to_local(p, ns) {
                 *p = l;
             }
         }
@@ -182,10 +182,10 @@ fn localize_report(mut r: SyncReport, class: DeviceClass) -> SyncReport {
     map(&mut r.deleted_local);
     map(&mut r.deleted_remote);
     for c in &mut r.conflicts {
-        if let Some(l) = to_local(&c.path, class) {
+        if let Some(l) = to_local(&c.path, ns) {
             c.path = l;
         }
-        if let Some(l) = c.copy.as_deref().and_then(|p| to_local(p, class)) {
+        if let Some(l) = c.copy.as_deref().and_then(|p| to_local(p, ns)) {
             c.copy = Some(l);
         }
     }
@@ -242,7 +242,7 @@ fn run(
     }
 
     // 1. 扫描本地
-    let in_scope = |p: &str| scope::in_scope_remote(p, &ctx.scope, ctx.class);
+    let in_scope = |p: &str| scope::in_scope_remote(p, &ctx.scope, &ctx.ns);
     let mut contents: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     let mut hashes: BTreeMap<String, String> = BTreeMap::new();
     for p in local.list().map_err(le)? {

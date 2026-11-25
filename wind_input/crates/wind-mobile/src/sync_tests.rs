@@ -7,6 +7,10 @@ use wind_sync::engine::{SyncCtx, sync_once};
 use wind_sync::{MemBackend, MemLocal, ScopeFlags, SyncState, remote};
 use wind_sync_host::testing::MemFactory;
 
+fn test_ns() -> wind_sync::scope::Namespace {
+    wind_sync::scope::Namespace::new(wind_sync::DeviceClass::Desktop, "g")
+}
+
 const WAIT: Duration = Duration::from_secs(15);
 const T0: u64 = 1_795_478_400;
 const UD: &str = "data/pinyin/user.dict.yaml";
@@ -98,7 +102,7 @@ impl Desktop {
         }
     }
     fn sync(&mut self, remote: &MemBackend) {
-        let mut ctx = SyncCtx::new(ScopeFlags::ALL, T0);
+        let mut ctx = SyncCtx::new(ScopeFlags::ALL, T0, test_ns());
         ctx.force = true;
         sync_once(remote, &mut self.local, &mut self.state, &self.dek, &ctx).unwrap();
     }

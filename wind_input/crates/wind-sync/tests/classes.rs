@@ -1,14 +1,25 @@
-//! 平台类别命名空间：桌面与手机共用同一远端。
+//! 类别与组命名空间：桌面与手机共用同一远端，设置按组、主题按类别。
 
 use wind_sync::backend::MemBackend;
 use wind_sync::crypto::{Dek, KdfParams};
 use wind_sync::engine::{SyncCtx, SyncReport, sync_once};
 use wind_sync::local::MemLocal;
 use wind_sync::remote;
-use wind_sync::scope::{DeviceClass, ScopeFlags};
+use wind_sync::scope::{DeviceClass, Namespace, ScopeFlags};
 use wind_sync::state::SyncState;
 
 const T0: u64 = 1_795_478_400;
+
+/// 桌面、手机各自一组。
+fn ns(class: DeviceClass) -> Namespace {
+    Namespace::new(
+        class,
+        match class {
+            DeviceClass::Desktop => "pcs",
+            DeviceClass::Mobile => "phones",
+        },
+    )
+}
 
 struct Dev {
     class: DeviceClass,
@@ -27,8 +38,7 @@ impl Dev {
         }
     }
     fn ok(&mut self, b: &MemBackend) -> SyncReport {
-        let mut ctx = SyncCtx::new(ScopeFlags::ALL, T0);
-        ctx.class = self.class;
+        let mut ctx = SyncCtx::new(ScopeFlags::ALL, T0, ns(self.class));
         ctx.force = true;
         sync_once(b, &mut self.local, &mut self.state, &self.dek, &ctx).expect("同步应成功")
     }
@@ -83,7 +93,7 @@ fn dicts_and_schemas_cross_classes() {
 }
 
 #[test]
-fn remote_paths_carry_the_class_prefix() {
+fn remote_paths_carry_group_and_class_prefix() {
     use DeviceClass::*;
     let (b, dek) = setup();
     let mut ph = Dev::new("ph1", Mobile, &dek);
@@ -95,7 +105,7 @@ fn remote_paths_carry_the_class_prefix() {
     assert!(r.uploaded.contains(&"config.toml".to_string()));
     assert_eq!(ph.state.files.len(), 3);
     for k in [
-        "mobile/config.toml",
+        "groups/phones/config.toml",
         "mobile/themes/t/theme.json",
         "data/phrases.dict.yaml",
     ] {
@@ -139,8 +149,7 @@ fn mass_delete_guard_counts_mapped_paths() {
     }
     ph.ok(&b);
     ph.local.files.clear();
-    let mut ctx = SyncCtx::new(ScopeFlags::ALL, T0);
-    ctx.class = Mobile;
+    let mut ctx = SyncCtx::new(ScopeFlags::ALL, T0, ns(Mobile));
     ctx.force = true;
     let e = sync_once(&b, &mut ph.local, &mut ph.state, &ph.dek, &ctx).unwrap_err();
     assert!(e.is_mass_deletion(), "{e}");

@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use wind_sync::crypto::{Dek, KdfParams, Meta, content_hash};
 use wind_sync::devices::{DeviceInfo, list_devices, put_device_info, remove_device};
-use wind_sync::scope::{DeviceClass, ScopeFlags, in_scope, to_remote};
+use wind_sync::scope::{DeviceClass, Namespace, ScopeFlags, in_scope, to_remote};
 use wind_sync::state::backoff_secs;
 use wind_sync::{Backend, SyncCtx, SyncError, SyncReport, SyncState, manifest, remote, sync_once};
 use wind_sync_ipc::{Backend as Target, FromSync, Op, Scope, Status, SyncSettings, ToSync};
@@ -239,6 +239,11 @@ fn info_stale(written: Option<&DeviceInfo>, want: &DeviceInfo, daily: bool) -> b
 }
 
 impl Runner {
+    fn ns(&self) -> Namespace {
+        // 设备组暂用设备号，后续改为取自同步状态。
+        Namespace::new(self.cfg.class, self.state.device.clone())
+    }
+
     pub fn new(mut cfg: Config, tx: Sender<Input>) -> Runner {
         let (secrets, secret_error) = match Secrets::load(&*cfg.secrets) {
             Ok(s) => (s, None),
@@ -480,7 +485,7 @@ impl Runner {
         let synced = self
             .state
             .files
-            .get(&to_remote(rel, self.cfg.class))
+            .get(&to_remote(rel, &self.ns()))
             .and_then(|e| e.value())
             .unwrap_or_default();
         if synced == hash {
@@ -512,8 +517,7 @@ impl Runner {
         self.report();
         let now = now_unix();
         let scope = flags_of(&self.settings.scope);
-        let mut ctx = SyncCtx::new(scope, now);
-        ctx.class = self.cfg.class;
+        let mut ctx = SyncCtx::new(scope, now, self.ns());
         ctx.force = force;
         ctx.gc = true;
         ctx.allow_mass_delete = allow_mass;

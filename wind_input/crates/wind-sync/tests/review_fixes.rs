@@ -10,6 +10,10 @@ use wind_sync::remote;
 use wind_sync::scope::ScopeFlags;
 use wind_sync::state::SyncState;
 
+fn test_ns() -> wind_sync::scope::Namespace {
+    wind_sync::scope::Namespace::new(wind_sync::DeviceClass::Desktop, "g")
+}
+
 const T0: u64 = 1_795_478_400; // 2026-11-24
 
 struct Dev {
@@ -30,7 +34,7 @@ impl Dev {
         sync_once(b, &mut self.local, &mut self.state, &self.dek, ctx)
     }
     fn sync(&mut self, b: &MemBackend) -> Result<SyncReport, SyncError> {
-        let mut ctx = SyncCtx::new(ScopeFlags::ALL, T0);
+        let mut ctx = SyncCtx::new(ScopeFlags::ALL, T0, test_ns());
         ctx.force = true;
         self.sync_with(b, &ctx)
     }
@@ -73,7 +77,7 @@ fn mass_deletion_is_halted_until_confirmed() {
 
     // 用户确认：解除停止态并放行
     d[0].state.retry.clear_halt();
-    let mut ctx = SyncCtx::new(ScopeFlags::ALL, T0);
+    let mut ctx = SyncCtx::new(ScopeFlags::ALL, T0, test_ns());
     ctx.force = true;
     ctx.allow_mass_delete = true;
     let r = d[0].sync_with(&b, &ctx).unwrap();
@@ -112,7 +116,7 @@ fn local_list_failure_is_an_error_not_empty() {
     let (b, mut d) = setup(1);
     d[0].local.set("themes/a.json", "x");
     d[0].ok(&b);
-    let mut ctx = SyncCtx::new(ScopeFlags::ALL, T0);
+    let mut ctx = SyncCtx::new(ScopeFlags::ALL, T0, test_ns());
     ctx.force = true;
     let dek = d[0].dek.clone();
     let r = sync_once(&b, &mut FailList, &mut d[0].state, &dek, &ctx);

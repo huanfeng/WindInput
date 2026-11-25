@@ -10,6 +10,10 @@ use wind_sync::remote;
 use wind_sync::scope::ScopeFlags;
 use wind_sync::state::SyncState;
 
+fn test_ns() -> wind_sync::scope::Namespace {
+    wind_sync::scope::Namespace::new(wind_sync::DeviceClass::Desktop, "g")
+}
+
 const T0: u64 = 1_795_478_400; // 2026-11-24
 
 struct Dev {
@@ -27,7 +31,7 @@ impl Dev {
         }
     }
     fn sync(&mut self, b: &MemBackend) -> Result<SyncReport, SyncError> {
-        let mut ctx = SyncCtx::new(ScopeFlags::ALL, T0);
+        let mut ctx = SyncCtx::new(ScopeFlags::ALL, T0, test_ns());
         ctx.force = true;
         sync_once(b, &mut self.local, &mut self.state, &self.dek, &ctx)
     }
@@ -398,6 +402,7 @@ fn scope_filter_limits_what_syncs() {
             ..ScopeFlags::ALL
         },
         T0,
+        test_ns(),
     );
     ctx.force = true;
     let dev = &mut d[0];
@@ -415,7 +420,7 @@ fn retry_backoff_and_halt_through_sync_once() {
     let (b, mut d) = setup(1);
     d[0].local.set("config.toml", "a = 1\n");
     b.fail_all(Some(BackendError::Transient("net".into())));
-    let ctx = SyncCtx::new(ScopeFlags::ALL, 1000);
+    let ctx = SyncCtx::new(ScopeFlags::ALL, 1000, test_ns());
     let dev = &mut d[0];
     assert!(sync_once(&b, &mut dev.local, &mut dev.state, &dev.dek, &ctx).is_err());
     assert_eq!(dev.state.retry.next_at, 1030);
@@ -426,7 +431,7 @@ fn retry_backoff_and_halt_through_sync_once() {
         &mut dev.local,
         &mut dev.state,
         &dev.dek,
-        &SyncCtx::new(ScopeFlags::ALL, 1010),
+        &SyncCtx::new(ScopeFlags::ALL, 1010, test_ns()),
     )
     .unwrap();
     assert!(r.skipped);
@@ -435,7 +440,7 @@ fn retry_backoff_and_halt_through_sync_once() {
         &mut dev.local,
         &mut dev.state,
         &dev.dek,
-        &SyncCtx::new(ScopeFlags::ALL, 1031),
+        &SyncCtx::new(ScopeFlags::ALL, 1031, test_ns()),
     )
     .unwrap();
     assert!(!r.skipped && r.uploaded.len() == 1);
@@ -448,12 +453,12 @@ fn retry_backoff_and_halt_through_sync_once() {
             &mut dev.local,
             &mut dev.state,
             &dev.dek,
-            &SyncCtx::new(ScopeFlags::ALL, 2000)
+            &SyncCtx::new(ScopeFlags::ALL, 2000, test_ns())
         )
         .is_err()
     );
     b.fail_all(None);
-    let mut f = SyncCtx::new(ScopeFlags::ALL, 9999);
+    let mut f = SyncCtx::new(ScopeFlags::ALL, 9999, test_ns());
     f.force = true;
     assert!(matches!(
         sync_once(&b, &mut dev.local, &mut dev.state, &dev.dek, &f),
