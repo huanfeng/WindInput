@@ -238,10 +238,14 @@ fn info_stale(written: Option<&DeviceInfo>, want: &DeviceInfo, daily: bool) -> b
     !same || (daily && w.last_seen / DAY_SECS != want.last_seen / DAY_SECS)
 }
 
+/// 过渡用的设备组：同类别设备共享设置，后续改为取自同步状态。
+const INTERIM_GROUP: &str = "default";
+
 impl Runner {
     fn ns(&self) -> Namespace {
-        // 设备组暂用设备号，后续改为取自同步状态。
-        Namespace::new(self.cfg.class, self.state.device.clone())
+        // 按类别分组，保持改动前「桌面与手机设置互不相见」的行为。
+        let group = format!("{INTERIM_GROUP}-{}", self.cfg.class.as_str());
+        Namespace::new(self.cfg.class, group)
     }
 
     pub fn new(mut cfg: Config, tx: Sender<Input>) -> Runner {

@@ -467,9 +467,9 @@ fn change_passphrase_and_reset_remote() {
     a.cmd(Op::ResetRemote, json!({"confirm": true, "passphrase": "z"}))
         .unwrap();
     // 重置后立即写回本机设备信息，清单要等下一轮
-    assert_eq!(remote.keys("windinput-sync/v1/devices/").len(), 1);
+    assert_eq!(remote.keys("windinput-sync/v2/devices/").len(), 1);
     assert_eq!(a.sync().phase, "idle");
-    assert_eq!(remote.keys("windinput-sync/v1/devices/").len(), 2);
+    assert_eq!(remote.keys("windinput-sync/v2/devices/").len(), 2);
     // 另一台用新口令重新加入（旧 DEK 沿用，已持有的也仍匹配）
     assert_eq!(
         b.cmd(Op::SetPassphrase, json!({"passphrase": "z"}))
