@@ -1352,7 +1352,7 @@ pub struct Coordinator {
     ///
     /// 功能关闭时恒为 `None` 且数据文件根本不打开，未启用的用户零开销。
     pub(crate) emoji_dict: std::sync::RwLock<Option<EmojiTables>>,
-    /// 上次生效的 emoji 加载参数 `(enabled, categories, 开着的附加模块 id)`，
+    /// 上次生效的 emoji 加载参数 `(enabled, categories, 开着的附加模块 id, 各源文件指纹)`，
     /// `sync_emoji_dict` 的去重依据。
     ///
     /// 只记影响加载结果的几项；`show_as` / `max_per_word` 是查询期参数，写进来会让每次
@@ -4283,8 +4283,8 @@ impl Coordinator {
     /// 同步 emoji 扩展表（`[input.emoji]`）。调用点=启动、`reload_user_config`，与
     /// [`Self::sync_comment_dicts`] 同一套「声明式变更」写法：变了才重载。
     ///
-    /// 变更判据只取 `(enabled, categories)`：`show_as` / `max_per_word` 是查询期参数，写进判据会让
-    /// 每次 reload 都重解析词表、重建缓存。
+    /// 变更判据取 `(enabled, categories, 模块, 源文件指纹)`：`show_as` / `max_per_word` 是查询期参数，
+    /// 写进判据会让每次 reload 都重解析词表、重建缓存。
     ///
     /// 三种结局分开处置：功能关（记录，置 None）、加载成功（记录）、加载失败（不记录）。失败不记录
     /// 让下次 sync 重试，用户补跑 `gen-data` 后不必改配置就能生效。
@@ -4320,10 +4320,17 @@ impl Coordinator {
                 );
             }
         }
+        // 源文件指纹：同步落地等只改内容、不改配置时也要重建
+        let files = if enabled {
+            Self::emoji_sources_fp(categories, &modules)
+        } else {
+            Vec::new()
+        };
         let spec: EmojiSpec = (
             enabled,
             categories,
             modules.iter().map(|m| m.id.clone()).collect(),
+            files,
         );
         {
             let cur = self.emoji_spec.lock().unwrap_or_else(|e| e.into_inner());
@@ -4355,6 +4362,27 @@ impl Coordinator {
         if ok {
             *self.emoji_spec.lock().unwrap_or_else(|e| e.into_inner()) = Some(spec);
         }
+    }
+
+    /// 本次会加载的各 emoji 源文件的 `(相对路径, 修改时间+大小)`（缺失为 None）。
+    fn emoji_sources_fp(
+        categories: bool,
+        modules: &[wind_config::EmojiModuleEntry],
+    ) -> Vec<(String, Option<(std::time::SystemTime, u64)>)> {
+        let data_dir = Config::data_dir();
+        let mut rels = vec!["emoji/emoji_word.txt".to_string()];
+        if categories {
+            rels.push("emoji/emoji_category.txt".to_string());
+        }
+        rels.extend(modules.iter().map(|m| m.file.clone()));
+        rels.into_iter()
+            .map(|rel| {
+                let fp = Config::resolve_data_file(data_dir.as_deref(), &rel)
+                    .and_then(|p| std::fs::metadata(p).ok())
+                    .and_then(|m| Some((m.modified().ok()?, m.len())));
+                (rel, fp)
+            })
+            .collect()
     }
 
     /// 实际加载 emoji 表：解析路径 → （繁简归一）→ 建/复用 `.wemj` 缓存 → mmap。
@@ -9994,8 +10022,13 @@ mod input_diag_tests;
 // 注释词库：配置里的挂载表 × 词库自带 comment 列的自动派生项
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// `sync_emoji_dict` 的变更判据：`(enabled, categories, 开着的附加模块 id)`。
-pub(crate) type EmojiSpec = (bool, bool, Vec<String>);
+/// `sync_emoji_dict` 的变更判据：`(enabled, categories, 开着的附加模块 id, 各源文件指纹)`。
+pub(crate) type EmojiSpec = (
+    bool,
+    bool,
+    Vec<String>,
+    Vec<(String, Option<(std::time::SystemTime, u64)>)>,
+);
 
 /// 已挂载的 emoji 表，按查询合并顺序（见 `Coordinator::load_emoji_dict`）。
 pub(crate) struct EmojiTables(pub(crate) Vec<std::sync::Arc<wind_dict::emojidict::EmojiReader>>);

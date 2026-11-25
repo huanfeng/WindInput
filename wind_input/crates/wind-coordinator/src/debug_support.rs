@@ -450,6 +450,15 @@ impl Coordinator {
         self.sync_emoji_dict();
     }
 
+    /// 诊断：当前已挂载 emoji 表对 `text` 的查询结果（各表按序拼接）。
+    pub fn debug_emoji_lookup(&self, text: &str) -> Option<String> {
+        self.emoji_dict
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(|t| t.lookup(text))
+    }
+
     /// 诊断：桌面构造器 `new` 在 `build` 之后的非 UI 装载与启动预热线程的主体，同步跑完。
     ///
     /// 供本机复现内存（`tests/typing_memory_repro.rs`）把 headless 协调器拉到与桌面相同的
