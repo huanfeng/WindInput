@@ -31,6 +31,10 @@ use wind_sync_ipc::{
 const TICK: Duration = Duration::from_millis(200);
 const STOP_GRACE: Duration = Duration::from_secs(3);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+/// 已启用但同步进程尚未连上时，命令最多等这么久再报「未运行」。
+const LINK_WAIT: Duration = Duration::from_secs(5);
+/// 等链路时的轮询间隔。
+const LINK_POLL: Duration = Duration::from_millis(20);
 /// 检查「期望态是否该变」（exe 装上 / 被删）的间隔。
 const RECONCILE_EVERY: Duration = Duration::from_secs(5);
 const LOG_MAX: u64 = 1024 * 1024;
@@ -222,6 +226,8 @@ pub struct SyncHost {
     /// 测试注入的时钟；生产用 `Instant::now`。
     clock: OnceLock<Clock>,
     command_timeout: Duration,
+    /// 测试注入的等链路时长；生产用 `LINK_WAIT`。
+    link_wait: OnceLock<Duration>,
     /// 经同步进程成功 `data.beginEdit`、尚未 `data.endEdit` 的 (进程代次, 路径)。
     /// 同步进程退出（含被强杀）时据此代为结束，否则 core 会一直暂停该文件的写回。
     held_edits: Mutex<BTreeSet<(u64, String)>>,
@@ -292,6 +298,7 @@ impl SyncHost {
             enabled_hook: OnceLock::new(),
             clock: OnceLock::new(),
             command_timeout,
+            link_wait: OnceLock::new(),
             held_edits: Mutex::new(BTreeSet::new()),
             held_suspends: Mutex::new(BTreeSet::new()),
         });
@@ -990,8 +997,32 @@ impl SyncHost {
         Ok(())
     }
 
+    /// 进程应在运行（已启用、已安装、未熔断）但链路未建立时短轮询等它连上；返回是否已连上。
+    /// 刚启用就发命令（向导里紧接 setSettings 的 set_secret）靠这里不报「未运行」。
+    fn wait_for_link(&self) -> bool {
+        let deadline = Instant::now() + self.link_wait.get().copied().unwrap_or(LINK_WAIT);
+        loop {
+            {
+                let inner = lock(&self.inner);
+                if inner.link.is_some() {
+                    return true;
+                }
+                if !inner.settings.enabled || !(self.installed)() || inner.sup.is_tripped() {
+                    return false;
+                }
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(LINK_POLL);
+        }
+    }
+
     /// 转发命令并同步等回执。不记 `args`（可能含口令）。
     fn command(&self, op: Op, args: Value) -> Result<Value, String> {
+        if !self.wait_for_link() {
+            return Err("同步进程未运行".into());
+        }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel();
         // 先登记再发送：回执可能比发送调用返回得还早。

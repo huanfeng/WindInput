@@ -89,6 +89,19 @@ fn rig_with(pre: Option<SyncSettings>, timeout: Duration) -> Rig {
         let notices = notices.clone();
         host.set_notify(Box::new(move |n| lock(&notices).push(n)));
     }
+    let stub = attach_stub(&host);
+    Rig {
+        host,
+        stub,
+        events,
+        executed,
+        notices,
+        dir,
+    }
+}
+
+/// 把桩接到 host 上，相当于监护器拉起了同步进程。
+fn attach_stub(host: &Arc<SyncHost>) -> Stub {
     let (child_stdin_r, child_stdin_w): (PipeReader, PipeWriter) = pipe().unwrap();
     let (child_stdout_r, child_stdout_w) = pipe().unwrap();
     let (tx, from_core) = mpsc::channel();
@@ -101,16 +114,9 @@ fn rig_with(pre: Option<SyncSettings>, timeout: Duration) -> Rig {
         }
     });
     host.attach(&mut lock(&host.inner), child_stdin_w, child_stdout_r);
-    Rig {
-        host,
-        stub: Stub {
-            from_core,
-            to_core: child_stdout_w,
-        },
-        events,
-        executed,
-        notices,
-        dir,
+    Stub {
+        from_core,
+        to_core: child_stdout_w,
     }
 }
 
@@ -428,6 +434,58 @@ fn command_errors_without_process_or_with_bad_op() {
     assert!(e.to_string().contains("未运行"));
     assert!(host.rpc("sync.command", &json!({ "op": "nope" })).is_err());
     assert!(host.rpc("sync.command", &json!({})).is_err());
+}
+
+#[test]
+fn command_right_after_enabling_waits_for_the_link() {
+    let dir = tempfile::tempdir().unwrap();
+    save_settings(&dir.path().join("state/sync/settings.toml"), &webdav(true)).unwrap();
+    let host = host_in(dir.path(), true, COMMAND_TIMEOUT);
+    let h2 = host.clone();
+    let call = std::thread::spawn(move || {
+        h2.rpc(
+            "sync.command",
+            &json!({ "op": "set_secret", "args": { "password": "p" } }),
+        )
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!call.is_finished(), "进程应在运行但链路未建立：命令应等待");
+    let mut stub = attach_stub(&host);
+    assert!(matches!(stub.next(), ToSync::Hello { .. }));
+    let ToSync::Command { id, op, .. } = stub.next() else {
+        panic!("连上后应补发命令")
+    };
+    assert_eq!(op, Op::SetSecret);
+    stub.send(FromSync::command_reply(id, Ok(json!({ "ok": true }))));
+    assert_eq!(call.join().unwrap().unwrap(), json!({ "ok": true }));
+}
+
+#[test]
+fn command_waiting_for_the_link_times_out_with_the_old_error() {
+    let dir = tempfile::tempdir().unwrap();
+    save_settings(&dir.path().join("state/sync/settings.toml"), &webdav(true)).unwrap();
+    let host = host_in(dir.path(), true, COMMAND_TIMEOUT);
+    let _ = host.link_wait.set(Duration::from_millis(200));
+    let t = Instant::now();
+    let e = host
+        .rpc("sync.command", &json!({ "op": "sync_now" }))
+        .unwrap_err();
+    assert!(e.to_string().contains("未运行"));
+    assert!(t.elapsed() >= Duration::from_millis(200), "应等满再报错");
+    assert!(lock(&host.pending).is_empty());
+}
+
+#[test]
+fn command_when_disabled_fails_without_waiting() {
+    let dir = tempfile::tempdir().unwrap();
+    save_settings(&dir.path().join("state/sync/settings.toml"), &webdav(false)).unwrap();
+    let host = host_in(dir.path(), true, COMMAND_TIMEOUT);
+    let t = Instant::now();
+    let e = host
+        .rpc("sync.command", &json!({ "op": "sync_now" }))
+        .unwrap_err();
+    assert!(e.to_string().contains("未运行"));
+    assert!(t.elapsed() < Duration::from_secs(1), "未启用应立即报错");
 }
 
 #[test]
