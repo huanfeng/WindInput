@@ -52,6 +52,15 @@ fn whitespace_around_parts_is_tolerated() {
     assert!(sel.matches_key("ui.toolbar.visible"));
 }
 
+/// 同步页整页可被定制版隐藏，`sync` 必须是已知 feature id。
+#[test]
+fn sync_is_a_known_feature() {
+    assert_eq!(
+        SettingsSelector::parse("feature:sync").unwrap(),
+        SettingsSelector::Feature("sync".into())
+    );
+}
+
 #[test]
 fn known_feature_parses() {
     for id in SETTINGS_FEATURES {

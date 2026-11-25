@@ -47,6 +47,8 @@
 /// - `dark_mode`：底栏的浅色 / 深色切换。
 /// - `accent`：底栏的主题色下拉。
 /// - `subnav`：设置窗中间那一栏二级导航（各页的分块目录），所有页都不显示。
+/// - `sync`：「同步」整页（侧栏入口、页内全部卡片与搜索条目）。托盘菜单的「立即同步」属于
+///   core，不受它影响。
 pub const SETTINGS_FEATURES: &[&str] = &[
     "wizard",
     "theme_transfer",
@@ -63,6 +65,7 @@ pub const SETTINGS_FEATURES: &[&str] = &[
     "dark_mode",
     "accent",
     "subnav",
+    "sync",
 ];
 
 /// 一条解析过的 `[settings] hide` 选择器。
