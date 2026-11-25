@@ -705,11 +705,10 @@ impl MobileCore {
 
     /// 首单元的几种读法（展开页左栏画它）：同一串字母的不同切分、模糊音兄弟、只取声母。
     /// 没得选 / 非全拼 / 无编码 → 空。不改编码，只影响候选。
+    ///
+    /// 九宫格下是左栏逐段选拼音：列的是已锁定部分之后那一段的读法，点一条锁定一段
+    /// （[`Self::set_leading_reading`]），退格先撤最后锁的那段。
     pub fn leading_readings(&self) -> Vec<LeadingReading> {
-        // 九宫格的逐段读法尚未接入：数字串按全拼切会给出错的读法，先不给
-        if self.coord.keypad_active() {
-            return Vec::new();
-        }
         self.coord.leading_readings()
     }
 

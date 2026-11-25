@@ -3123,6 +3123,17 @@ impl EngineManager {
         (!spelled.is_empty() && spelled.chars().all(|c| c.is_ascii_lowercase())).then_some(spelled)
     }
 
+    /// 九宫格左栏逐段选拼音：键串 `unit` 开头那一段的读法（见 [`Engine::keypad_readings`]）。
+    /// 九宫格未生效 → 空。
+    pub fn keypad_readings(&self, unit: &str) -> Vec<String> {
+        let Some(map) = self.active_keypad() else {
+            return Vec::new();
+        };
+        self.active_engine()
+            .map(|e| e.keypad_readings(unit, &map))
+            .unwrap_or_default()
+    }
+
     /// 指定方案能否用九宫格输入（宿主据此在键盘列表里给不给「九宫格」那一格）。
     ///
     /// 读方案文件判断，不加载引擎：全拼恒可；双拼限纯字母布局（同 [`Engine::keypad_supported`]）；

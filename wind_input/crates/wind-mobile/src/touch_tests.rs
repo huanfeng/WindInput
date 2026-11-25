@@ -941,3 +941,127 @@ fn keypad_step_picked_phrase_is_recalled_whole() {
     assert_eq!(items[0], "真正意义主要原因", "{items:?}");
     assert!(items.len() > 1, "仍给分步候选：{items:?}");
 }
+
+fn lock(m: &MobileCore, label: &str) -> KeyOutcome {
+    let r = m.leading_readings();
+    let x = r
+        .iter()
+        .find(|x| x.label == label)
+        .unwrap_or_else(|| panic!("{label} 不在左栏 {r:?}"));
+    m.set_leading_reading(&x.head, x.orig_len)
+        .expect("读法有效")
+}
+
+fn labels(m: &MobileCore) -> Vec<String> {
+    m.leading_readings().into_iter().map(|r| r.label).collect()
+}
+
+/// 九宫格左栏逐段选拼音：列首选用的读法在前；锁一段后候选按它重算、左栏换成下一段。
+#[test]
+fn keypad_left_column_locks_segment_by_segment() {
+    let Some((m, _rx)) = core("kp_lock", "pinyin", no_assoc) else {
+        return;
+    };
+    let _ = m.set_keypad(true);
+    keypad(&m, "64426");
+    let first = labels(&m);
+    assert_eq!(first[0], "ni", "{first:?}");
+    assert!(
+        first.contains(&"mi".to_string()) && first.contains(&"m".to_string()),
+        "{first:?}"
+    );
+
+    let out = lock(&m, "mi");
+    assert_eq!(composition(&out).as_deref(), Some("mi'gao"));
+    let items = m.candidates(0, 10).items;
+    assert!(
+        items.iter().all(|t| !t.starts_with('你')),
+        "锁了 mi 不该再有「你」：{items:?}"
+    );
+    let next = labels(&m);
+    assert!(
+        next.contains(&"hao".to_string()) && !next.contains(&"mi".to_string()),
+        "{next:?}"
+    );
+
+    let out = lock(&m, "hao");
+    assert_eq!(composition(&out).as_deref(), Some("mi'hao"));
+    assert!(labels(&m).is_empty(), "全锁完了左栏没得选");
+}
+
+/// 锁定后续打的键接在后面、锁定保留；退格从末尾删，删到锁定段时逐段撤锁。
+#[test]
+fn keypad_lock_survives_typing_and_backspace_unlocks_from_end() {
+    let Some((m, _rx)) = core("kp_lock2", "pinyin", no_assoc) else {
+        return;
+    };
+    let _ = m.set_keypad(true);
+    keypad(&m, "64");
+    lock(&m, "mi");
+    let out = keypad(&m, "426");
+    assert!(
+        composition(&out).unwrap_or_default().starts_with("mi'"),
+        "{out:?}"
+    );
+    m.press(PressKey::Backspace, KeySource::Touch);
+    m.press(PressKey::Backspace, KeySource::Touch);
+    let out = m.press(PressKey::Backspace, KeySource::Touch);
+    assert_eq!(
+        composition(&out).as_deref(),
+        Some("mi"),
+        "删完锁定后的键：{out:?}"
+    );
+    let out = m.press(PressKey::Backspace, KeySource::Touch);
+    assert_eq!(
+        composition(&out).as_deref(),
+        Some("ni"),
+        "撤锁不删键：{out:?}"
+    );
+    assert!(m.coord.is_composing());
+}
+
+/// 选词切走缓冲前部后锁定失效，即便剩下的键碰巧与锁定的键相同。
+#[test]
+fn keypad_lock_dropped_after_partial_commit() {
+    let Some((m, _rx)) = core("kp_lock3", "pinyin", no_assoc) else {
+        return;
+    };
+    let _ = m.set_keypad(true);
+    keypad(&m, "99999999");
+    lock(&m, "z");
+    let items = m.candidates(0, 10).items;
+    let i = items
+        .iter()
+        .position(|t| t.chars().count() == 4)
+        .expect("有四字词");
+    m.select_candidate(i);
+    assert!(m.coord.is_composing());
+    let first = labels(&m);
+    assert!(first.len() > 1, "剩下的键重新列读法：{first:?}");
+}
+
+/// 锁定读法后选的词与直接按数字选的同一个词共用一份词频（候选码还原成数字）。
+#[test]
+fn keypad_locked_pick_shares_frequency_with_digits() {
+    let Some((m, _rx)) = core("kp_lock4", "pinyin", |c| {
+        no_assoc(c);
+        c.schema.pinyin.frequency.enabled = true;
+    }) else {
+        return;
+    };
+    let _ = m.set_keypad(true);
+    keypad(&m, "64");
+    let before = m.candidates(0, 10).items;
+    let pos = before.iter().position(|t| t == "米").expect("米");
+    assert!(pos > 0);
+    lock(&m, "mi");
+    let items = m.candidates(0, 10).items;
+    m.select_candidate(items.iter().position(|t| t == "米").expect("米"));
+    m.select_candidate(0);
+    let _ = m.set_keypad(false);
+    let _ = m.set_keypad(true);
+    keypad(&m, "64");
+    let after = m.candidates(0, 10).items;
+    let now = after.iter().position(|t| t == "米").expect("米");
+    assert!(now < pos, "{before:?} → {after:?}");
+}

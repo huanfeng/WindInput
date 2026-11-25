@@ -88,6 +88,14 @@ impl KeypadMap {
         letter.is_ascii_lowercase() && self.mask(key) & (1 << (letter - b'a')) != 0
     }
 
+    /// 字母所在的编码键（`n` → `6`）；本身就是编码键或不在任何键上 → 原样 / `None`。
+    pub fn key_of(&self, c: u8) -> Option<u8> {
+        if !c.is_ascii_lowercase() {
+            return (self.mask(c) != 0).then_some(c);
+        }
+        (b'0'..=b'9').find(|&k| self.admits(k, c))
+    }
+
     /// 是否是本键盘的编码字符（含分词键）。
     pub fn is_code_char(&self, c: char) -> bool {
         c.is_ascii() && (c as u8 == SEPARATOR || self.mask(c as u8) != 0)
@@ -146,6 +154,25 @@ struct Keys<'a> {
 }
 
 impl<'a> Keys<'a> {
+    /// 前 `k` 个击键的规范码（候选的 `code`，词频按它记账）：锁定字母还原成所在的键、去掉分词键。
+    /// 左栏锁定读法后查询里是 `ni'426`，记成 `64426`，与直接按数字选的同一个词共用一份词频。
+    fn digit_code(&self, k: usize, map: &KeypadMap) -> String {
+        self.clean[..k]
+            .iter()
+            .map(|&c| map.key_of(c).unwrap_or(c) as char)
+            .collect()
+    }
+
+    /// 前 `n` 个键能否整体当简拼读（每键一个声母）：分词键无妨（每键本就自成音节），锁定的
+    /// 字母只能是单个声母——锁成多字母音节（左栏点了 `ma`）的两个键不能再拆成 m、a。
+    fn abbrev_compatible(&self, n: usize) -> bool {
+        (1..n).all(|i| {
+            !(self.clean[i - 1].is_ascii_lowercase()
+                && self.clean[i].is_ascii_lowercase()
+                && !self.forced[i])
+        })
+    }
+
     fn parse(raw: &'a str, map: &KeypadMap) -> Option<Self> {
         let b = raw.as_bytes();
         let mut clean = Vec::with_capacity(b.len());
@@ -401,6 +428,47 @@ impl PinyinEngine {
             .is_none_or(|c| shuangpin_layout_is_letter_only(c.layout()))
     }
 
+    /// 九宫格左栏逐段选拼音的读法：落在 `unit` 开头那几个键上的完整音节，加上首键当声母的
+    /// 单字母（`64` → ni / mi / mo / o / n / m）。只做全拼：双拼的拼音与击键不一一对应。
+    ///
+    /// 顺序：音节按该音节最常用单字的权重降序（长短不论，`yi` 排在 `zhi` 前），单字母声母殿后。
+    pub fn keypad_readings(&self, unit: &str, map: &KeypadMap) -> Vec<String> {
+        if self.shuangpin.is_some() {
+            return Vec::new();
+        }
+        let keys = unit.as_bytes();
+        let Some(&first) = keys.first() else {
+            return Vec::new();
+        };
+        let fits = |syl: &str| {
+            syl.len() <= keys.len() && syl.bytes().zip(keys).all(|(l, &k)| map.admits(k, l))
+        };
+        let mut syllables: Vec<(String, i32)> = STANDARD_SYLLABLES
+            .iter()
+            .filter(|s| fits(s))
+            .map(|s| {
+                let w = self
+                    .dict
+                    .search_with_boundary(s)
+                    .into_iter()
+                    .filter(|h| h.text.chars().count() == 1)
+                    .map(|h| h.weight)
+                    .max()
+                    .unwrap_or(i32::MIN);
+                (s.to_string(), w)
+            })
+            .collect();
+        syllables.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        let mut out: Vec<String> = syllables.into_iter().map(|(s, _)| s).collect();
+        for l in map.letters(first) {
+            let s = (l as char).to_string();
+            if ABBREV_LETTERS.contains(&l) && !out.contains(&s) {
+                out.push(s);
+            }
+        }
+        out
+    }
+
     /// 歧义键盘输入的转换（全拼）。见模块文档。
     pub(crate) fn convert_keypad(
         &self,
@@ -455,7 +523,7 @@ impl PinyinEngine {
                 cands.push(Candidate {
                     text: result.words.concat(),
                     pinyin: split_pinyin(&code, mask),
-                    code: keys.raw.to_string(),
+                    code: keys.digit_code(keys.len(), map),
                     weight: super::sentence_weight(result.log_prob, result.words.len()),
                     source: CandidateSource::Pinyin,
                     is_sentence: true,
@@ -493,7 +561,7 @@ impl PinyinEngine {
             words.push(Candidate {
                 text: nd.text.clone(),
                 pinyin: split_pinyin(&nd.code, nd.mask),
-                code: keys.raw[..consumed].to_string(),
+                code: keys.digit_code(nd.end, map),
                 weight: nd.weight,
                 source: CandidateSource::Pinyin,
                 is_prefix: nd.completed_tail,
@@ -596,8 +664,7 @@ impl PinyinEngine {
         if !self.config.enable_abbrev
             || !(2..=ABBREV_MAX_KEYS).contains(&n)
             || n > keys.len()
-            || keys.raw_start[n] != n
-            || keys.clean[..n].iter().any(u8::is_ascii_lowercase)
+            || !keys.abbrev_compatible(n)
         {
             return;
         }
@@ -634,7 +701,7 @@ impl PinyinEngine {
                     found.push(Candidate {
                         pinyin: split_pinyin(&code, eb),
                         text: h.text,
-                        code: keys.raw[..consumed].to_string(),
+                        code: keys.digit_code(n, map),
                         weight: h.weight,
                         source: CandidateSource::Pinyin,
                         is_abbrev: true,
@@ -687,8 +754,7 @@ impl PinyinEngine {
 
         if !self.config.enable_abbrev
             || !(2..=USER_ABBREV_MAX_KEYS).contains(&n)
-            || keys.raw.len() != n
-            || keys.clean.iter().any(u8::is_ascii_lowercase)
+            || !keys.abbrev_compatible(n)
         {
             return;
         }
@@ -722,7 +788,7 @@ impl PinyinEngine {
                 found.push(Candidate {
                     pinyin: split_pinyin(&c.code, eb),
                     text: c.text,
-                    code: keys.raw.to_string(),
+                    code: keys.digit_code(n, map),
                     weight: c.weight,
                     source: CandidateSource::Pinyin,
                     is_abbrev: true,
@@ -771,7 +837,7 @@ impl PinyinEngine {
                 found.push(Candidate {
                     pinyin: hit.code.clone(),
                     text: hit.text,
-                    code: keys.raw[..consumed].to_string(),
+                    code: keys.digit_code(1, map),
                     weight: hit.weight,
                     source: CandidateSource::Pinyin,
                     is_prefix: true,

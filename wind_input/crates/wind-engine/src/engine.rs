@@ -495,6 +495,12 @@ pub trait Engine: Send + Sync {
         None
     }
 
+    /// 九宫格左栏逐段选拼音：键串 `unit`（`2`-`9`，不含分词键）开头那一段的候选读法——
+    /// 落在这些键上的完整音节与只取声母的单字母，常用的在前。不支持 → 空。
+    fn keypad_readings(&self, _unit: &str, _map: &crate::pinyin::t9::KeypadMap) -> Vec<String> {
+        Vec::new()
+    }
+
     /// 本引擎能否按九宫格（[`ConvertOptions::keypad`]）解码。拼音引擎实现（全拼恒可，双拼限
     /// 纯字母布局）；其余默认不能。
     fn keypad_supported(&self) -> bool {

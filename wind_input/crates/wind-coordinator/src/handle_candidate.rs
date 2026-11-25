@@ -2272,10 +2272,11 @@ impl Coordinator {
         limit: usize,
     ) -> (usize, InputOutcome) {
         // 手机端「首单元读法」：选了非默认读法时，按改写后的查询串问引擎（见 `leading_reading`）。
+        let keypad = self.keypad_active();
         if let Some(applied) = state
             .leading
             .clone()
-            .filter(|a| a.buffer == state.input_buffer)
+            .filter(|a| a.covers(&state.input_buffer, state.committed_segs.len(), keypad))
         {
             return self.build_candidates_with_leading(state, limit, &applied);
         }

@@ -26,6 +26,25 @@ pub struct Applied {
     pub head: String,
     /// 它在**原始缓冲**里占几个字节（`fang`→`fan` 时是 4，不是 3）
     pub orig_len: usize,
+    /// 记录时已分步上屏的段数。九宫格靠它认出「缓冲前部被选词切走了」：剩下的键可能碰巧与
+    /// 锁定的键相同（`99999999` 选掉前四键），只比缓冲认不出来。
+    pub segs: usize,
+}
+
+impl Applied {
+    /// 这份选择对缓冲 `buffer` 还有没有效。
+    ///
+    /// 全键盘：缓冲一变就失效。九宫格：锁定的那一段（前 `orig_len` 字节）没变就仍有效——锁定后
+    /// 接着按键、删掉锁定之后的键，锁定都保留；分步上屏切走了缓冲前部才失效。
+    pub(crate) fn covers(&self, buffer: &str, segs: usize, keypad: bool) -> bool {
+        if !keypad {
+            return self.buffer == buffer;
+        }
+        self.segs == segs
+            && self.orig_len > 0
+            && buffer.get(..self.orig_len).is_some()
+            && buffer.get(..self.orig_len) == self.buffer.get(..self.orig_len)
+    }
 }
 
 /// 一条读法
@@ -173,11 +192,138 @@ pub(crate) fn unmap_consumed(
     (orig_len + consumed.saturating_sub(head_len + 1)).min(orig_total)
 }
 
+/// 九宫格：缓冲里第 `k` 个编码键（不数分词键）的字节位；`k` ≥ 键数 → 缓冲长度。
+///
+/// 前 `k` 个键之后紧跟的分词键并入前面（返回的是下一个键的位置）。
+pub(crate) fn key_offset(buffer: &str, k: usize) -> usize {
+    let mut seen = 0;
+    for (i, b) in buffer.bytes().enumerate() {
+        if b == b'\'' {
+            continue;
+        }
+        if seen == k {
+            return i;
+        }
+        seen += 1;
+    }
+    buffer.len()
+}
+
+/// 九宫格：引擎在改写后的查询串上给的 `consumed_length` 换算回原始缓冲。锁定的字母与键
+/// 一一对应，只有分词键的位置不同，所以按「吃掉了几个编码键」换算。0 = 整串，原样返回。
+pub(crate) fn unmap_keypad_consumed(consumed: usize, query: &str, buffer: &str) -> usize {
+    if consumed == 0 {
+        return 0;
+    }
+    let keys = query.as_bytes()[..consumed.min(query.len())]
+        .iter()
+        .filter(|&&b| b != b'\'')
+        .count();
+    key_offset(buffer, keys)
+}
+
+/// 锁定读法 `head`（`ni'hao`）里的编码键数（字母数）
+fn locked_keys(head: &str) -> usize {
+    head.bytes().filter(|&b| b != b'\'').count()
+}
+
 impl Coordinator {
+    /// 九宫格左栏逐段选拼音：已锁定部分之后那一段的读法 `(label, head, orig_len)`。
+    ///
+    /// 与全键盘的「首单元读法」共用一套（改写查询串、不动缓冲），差别是锁定可以**逐段累加**：
+    /// 点 `ni` 后 `head = ni`；再点 `hao` 后 `head = ni'hao`、`orig_len` 覆盖 5 个键。
+    /// 当前首选用的那个读法排第一。
+    fn keypad_leading(
+        &self,
+        buffer: &str,
+        applied: Option<&Applied>,
+    ) -> Vec<(String, String, usize)> {
+        let (head, locked) = match applied {
+            Some(a) => (a.head.as_str(), a.orig_len.min(buffer.len())),
+            None => ("", 0),
+        };
+        let after = &buffer[locked..];
+        let start = locked + (after.len() - after.trim_start_matches('\'').len());
+        let unit = buffer[start..].split('\'').next().unwrap_or("");
+        if unit.is_empty() {
+            return Vec::new();
+        }
+        let mut readings = self.engine_mgr.keypad_readings(unit);
+        // 首选用的读法：九宫格预编辑里字母与键一一对应，跳过已锁定的键数，取到下一个隔音符
+        let query = match applied {
+            Some(a) => rewrite_query(buffer, &a.head, a.orig_len),
+            None => buffer.to_string(),
+        };
+        let done = buffer[..start].bytes().filter(|&b| b != b'\'').count();
+        let preedit = self.engine_mgr.convert(&query, 1).preedit_display;
+        let mut letters = 0;
+        let mut current = String::new();
+        for c in preedit.chars() {
+            if c == '\'' {
+                if letters > done {
+                    break;
+                }
+                continue;
+            }
+            if letters >= done {
+                current.push(c);
+            }
+            letters += 1;
+        }
+        if let Some(i) = readings.iter().position(|r| *r == current) {
+            let r = readings.remove(i);
+            readings.insert(0, r);
+        }
+        readings
+            .into_iter()
+            .map(|syl| {
+                let new_head = if head.is_empty() {
+                    syl.clone()
+                } else {
+                    format!("{head}'{syl}")
+                };
+                let orig_len = key_offset(buffer, done + syl.len());
+                (syl, new_head, orig_len)
+            })
+            .collect()
+    }
+
+    /// 九宫格退格：有锁定读法时先撤掉最后锁的那一段（不删键）。没有锁定 → `None`。
+    pub(crate) fn pop_keypad_lock(&self, state: &mut State) -> Option<KeyAction> {
+        if !self.keypad_active() {
+            return None;
+        }
+        let applied = state
+            .leading
+            .clone()
+            .filter(|a| a.covers(&state.input_buffer, state.committed_segs.len(), true))?;
+        // 锁定之后还有键：先删键（走普通退格），删到锁定部分才撤锁
+        if state.input_buffer[applied.orig_len..]
+            .bytes()
+            .any(|b| b != b'\'')
+        {
+            return None;
+        }
+        state.leading = applied.head.rsplit_once('\'').map(|(rest, _)| Applied {
+            buffer: state.input_buffer.clone(),
+            head: rest.to_string(),
+            orig_len: key_offset(&state.input_buffer, locked_keys(rest)),
+            segs: state.committed_segs.len(),
+        });
+        self.update_candidates(state);
+        let text = state.preedit.clone();
+        let caret_pos = self.composition_caret(state);
+        self.notify_ui_update(state);
+        Some(KeyAction::UpdateComposition { caret_pos, text })
+    }
+
     /// 首单元的全部读法 `(label, head, orig_len)`，全拼与双拼各走各的；没得选 / 不是拼音 → 空。
-    fn leading_all(&self, buffer: &str) -> Vec<(String, String, usize)> {
+    fn leading_all(&self, buffer: &str, applied: Option<&Applied>) -> Vec<(String, String, usize)> {
         if buffer.is_empty() || !self.engine_mgr.is_pinyin() {
             return Vec::new();
+        }
+        if self.keypad_active() {
+            return self.keypad_leading(buffer, applied);
         }
         if self.engine_mgr.is_shuangpin() {
             // 双拼：首单元是第一个击键对。拆分串在双拼下是击键切分，不是拼音，不能拿来查音节表
@@ -216,24 +362,30 @@ impl Coordinator {
 
     /// 首单元的读法列表（展开页左栏画它）；没得选 / 不是拼音 → 空
     pub fn leading_readings(&self) -> Vec<LeadingReading> {
-        let (buffer, applied) = {
+        let (buffer, applied, segs) = {
             let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if st.active.is_some() {
                 return Vec::new();
             }
-            (st.input_buffer.clone(), st.leading.clone())
+            (
+                st.input_buffer.clone(),
+                st.leading.clone(),
+                st.committed_segs.len(),
+            )
         };
-        let current = applied
-            .filter(|a| a.buffer == buffer)
-            .map(|a| (a.head, a.orig_len));
-        self.leading_all(&buffer)
+        // 九宫格列的是下一段（还没选），没有「当前生效」的那条
+        let keypad = self.keypad_active();
+        let applied = applied.filter(|a| a.covers(&buffer, segs, keypad));
+        let current = applied.as_ref().map(|a| (a.head.clone(), a.orig_len));
+        self.leading_all(&buffer, applied.as_ref())
             .into_iter()
             .enumerate()
             .map(|(i, (label, head, orig_len))| LeadingReading {
-                selected: match &current {
-                    Some((h, l)) => *h == head && *l == orig_len,
-                    None => i == 0,
-                },
+                selected: !keypad
+                    && match &current {
+                        Some((h, l)) => *h == head && *l == orig_len,
+                        None => i == 0,
+                    },
                 label,
                 head,
                 orig_len,
@@ -249,10 +401,12 @@ impl Coordinator {
             .iter()
             .position(|r| r.head == head && r.orig_len == orig_len)?;
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.leading = (idx != 0).then(|| Applied {
+        // 九宫格的列表是下一段的读法，点哪条都是锁定；全键盘的第一条是默认读法，点它 = 清除
+        state.leading = (idx != 0 || self.keypad_active()).then(|| Applied {
             buffer: state.input_buffer.clone(),
             head: head.to_string(),
             orig_len,
+            segs: state.committed_segs.len(),
         });
         self.update_candidates(&mut state);
         let text = state.preedit.clone();
@@ -274,22 +428,32 @@ impl Coordinator {
     ) -> (usize, InputOutcome) {
         let full = state.input_buffer.clone();
         let full_cased = state.input_buffer_cased.clone();
-        state.input_buffer = rewrite_query(&full, &applied.head, applied.orig_len);
+        let query = rewrite_query(&full, &applied.head, applied.orig_len);
+        state.input_buffer = query.clone();
         state.input_buffer_cased.clear();
         let result = self.build_candidates(state, limit);
         state.input_buffer = full;
         state.input_buffer_cased = full_cased;
         let total = state.input_buffer.len();
+        let keypad = self.keypad_active();
         for c in &mut state.candidates {
-            c.consumed_length = unmap_consumed(
-                c.consumed_length,
-                applied.head.len(),
-                applied.orig_len,
-                total,
-            );
+            c.consumed_length = if keypad {
+                unmap_keypad_consumed(c.consumed_length, &query, &state.input_buffer)
+            } else {
+                unmap_consumed(
+                    c.consumed_length,
+                    applied.head.len(),
+                    applied.orig_len,
+                    total,
+                )
+            };
             // 候选自带的切分与辅码位置是按改写后的查询算的（`fan'gxiang`），不能拿来显示
             c.meta.preedit_split = None;
             c.meta.aux_keys = None;
+        }
+        // 九宫格的编码栏要显示锁定后的读法（`mi'hao`），就用改写查询算出的那份，不覆盖
+        if keypad {
+            return result;
         }
         let body = self
             .engine_mgr

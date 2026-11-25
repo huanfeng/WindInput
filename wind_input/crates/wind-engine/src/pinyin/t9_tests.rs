@@ -115,8 +115,18 @@ fn separator_forbids_crossing_syllables() {
     let c = find(&r, "西安");
     assert_eq!(c.consumed_length, 5);
     let xi = find(&r, "西");
-    assert_eq!(xi.code, "94'");
+    assert_eq!(xi.consumed_length, 3, "消费长度含紧随的分词键");
+    // 候选码是规范码（只有键、不含分词键），词频按它记账
+    assert_eq!(xi.code, "94");
     assert!(xi.is_partial);
+}
+
+/// 锁定的字母在候选码里还原成所在的键：左栏锁了 `ni` 后选的词与直接按数字选的同码。
+#[test]
+fn locked_letters_canonicalize_to_keys_in_code() {
+    let eng = engine("canon", &base_words());
+    let r = t9(&eng, "ni'426");
+    assert_eq!(find(&r, "你好").code, "64426");
 }
 
 /// 已锁定的字母只代表自己：`ni` 锁定后不再出 mi 开头的词。

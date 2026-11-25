@@ -4991,6 +4991,10 @@ impl Engine for PinyinEngine {
     fn keypad_supported(&self) -> bool {
         PinyinEngine::keypad_supported(self)
     }
+
+    fn keypad_readings(&self, unit: &str, map: &t9::KeypadMap) -> Vec<String> {
+        PinyinEngine::keypad_readings(self, unit, map)
+    }
 }
 
 #[cfg(test)]

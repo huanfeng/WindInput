@@ -1736,6 +1736,10 @@ impl MessageHandler for Coordinator {
                 // 段回退优先于光标（不看光标位置，对齐 Go handleBackspace 的分支顺序）。
                 if let Some(act) = self.collapse_expanded_group(&mut state) {
                     act
+                } else if let Some(act) = self.pop_keypad_lock(&mut state) {
+                    // 九宫格左栏锁定过读法：先撤最后锁的那一段。锁定一定晚于已上屏的段
+                    // （缓冲一变锁定就失效），所以排在段回退之前。
+                    act
                 } else if !state.committed_segs.is_empty() {
                     self.pop_committed_seg(&mut state)
                 } else if !state.input_buffer.is_empty() {

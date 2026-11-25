@@ -92,3 +92,34 @@ fn shuangpin_zero_initial_has_no_initial_reading() {
     let sib = vec![("an".to_string(), "aj".to_string())];
     assert_eq!(sp_readings_of("ang", "ahxx", 2, &sib).len(), 2);
 }
+
+#[test]
+fn key_offset_skips_separators() {
+    assert_eq!(key_offset("64426", 2), 2);
+    assert_eq!(key_offset("94'26", 2), 3, "紧随的分词键并入前面");
+    assert_eq!(key_offset("64426", 5), 5);
+    assert_eq!(key_offset("64426", 9), 5);
+}
+
+#[test]
+fn keypad_consumed_maps_by_key_count() {
+    // 查询 ni'hao'99 上吃掉 ni'（3 字节）= 2 个键 → 原缓冲 6442699 的第 2 字节
+    assert_eq!(unmap_keypad_consumed(3, "ni'hao'99", "6442699"), 2);
+    assert_eq!(unmap_keypad_consumed(6, "ni'hao'99", "6442699"), 5);
+    assert_eq!(unmap_keypad_consumed(0, "ni'hao'99", "6442699"), 0);
+    assert_eq!(unmap_keypad_consumed(9, "ni'hao'99", "6442699"), 7);
+}
+
+#[test]
+fn keypad_lock_covers_while_locked_region_unchanged() {
+    let a = Applied {
+        buffer: "64".into(),
+        head: "mi".into(),
+        orig_len: 2,
+        segs: 0,
+    };
+    assert!(a.covers("64426", 0, true), "续打保留");
+    assert!(!a.covers("6", 0, true), "删进锁定区失效");
+    assert!(!a.covers("64426", 1, true), "分步上屏后失效");
+    assert!(!a.covers("64426", 0, false), "全键盘仍要求缓冲不变");
+}
