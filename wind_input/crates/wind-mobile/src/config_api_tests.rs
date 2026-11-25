@@ -19,14 +19,18 @@ fn ids(v: &[&str]) -> Vec<String> {
 #[test]
 fn enabled_schemas_rules() {
     let installed = ids(&["english", "pinyin", "shuangpin", "wubi86"]);
-    assert_eq!(enabled_from(&installed, None), installed, "没选过：全部");
     assert_eq!(
-        enabled_from(&installed, Some(&ids(&["wubi86", "pinyin", "gone"]))),
+        enabled_from(&installed, None, &[]),
+        installed,
+        "没选过：全部"
+    );
+    assert_eq!(
+        enabled_from(&installed, Some(&ids(&["wubi86", "pinyin", "gone"])), &[]),
         ids(&["pinyin", "wubi86", "english"]),
         "交集（没装的丢掉）、英文补上"
     );
     assert_eq!(
-        enabled_from(&installed, Some(&ids(&["english"]))),
+        enabled_from(&installed, Some(&ids(&["english"])), &[]),
         installed,
         "一个中文方案都没留：退回全部"
     );
@@ -34,8 +38,25 @@ fn enabled_schemas_rules() {
     // 这里只验纯函数：用户层若真写了它，也照交集办（不含英文时补上）
     let with_mix = ids(&["english", "wubi86", "wubi86_pinyin"]);
     assert!(
-        enabled_from(&with_mix, Some(&ids(&["wubi86", "wubi86_pinyin"])))
+        enabled_from(&with_mix, Some(&ids(&["wubi86", "wubi86_pinyin"])), &[])
             .contains(&"english".to_string())
+    );
+}
+
+/// 辅助码来源类方案（role = "aux"，如笔画）装了但默认不启用；用户在设置里打开过就照办
+#[test]
+fn aux_role_schemas_are_off_until_chosen() {
+    let installed = ids(&["english", "pinyin", "stroke", "wubi86"]);
+    let off = ids(&["stroke"]);
+    assert_eq!(
+        enabled_from(&installed, None, &off),
+        ids(&["english", "pinyin", "wubi86"]),
+        "没选过：除辅助码方案外的全部"
+    );
+    assert_eq!(
+        enabled_from(&installed, Some(&ids(&["pinyin", "stroke"])), &off),
+        ids(&["pinyin", "stroke", "english"]),
+        "用户显式启用了就照办"
     );
 }
 

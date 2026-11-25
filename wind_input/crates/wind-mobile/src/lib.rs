@@ -463,6 +463,7 @@ impl MobileCore {
             installed.push(fallback_schema.to_string());
         }
         config_api::set_fallback_schema(fallback_schema);
+        config_api::set_default_off_schemas(scan_aux_role_schemas(data_dir));
         config_api::set_installed_schemas(installed.clone());
         // 启用的 = 装了的 ∩ 用户在设置里选的（没选过 = 全部），见 `config_api::apply_enabled_schemas`；
         // 重载时覆盖钩子按同一规则重算
@@ -959,6 +960,7 @@ impl MobileCore {
         if !fallback.is_empty() && !ids.contains(&fallback) {
             ids.push(fallback);
         }
+        config_api::set_default_off_schemas(scan_aux_role_schemas(&self.data_dir));
         config_api::set_installed_schemas(ids);
     }
 
@@ -1559,6 +1561,36 @@ fn scan_installed_schemas(data_dir: &Path) -> Vec<String> {
     ids.sort();
     ids.dedup();
     ids
+}
+
+/// 已装方案里 `[schema] role = "aux"` 的（辅助码来源类，如笔画）：默认不启用。
+/// 同 id 以靠前的层为准（同 [`scan_installed_schemas`] 的层序）；读不出的文件当普通方案。
+fn scan_aux_role_schemas(data_dir: &Path) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for base in Config::resource_layers_with(Some(data_dir)) {
+        let Ok(entries) = std::fs::read_dir(base.join("schemas")) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let Some(id) = name.strip_suffix(".schema.toml") else {
+                continue;
+            };
+            if !seen.insert(id.to_owned()) {
+                continue;
+            }
+            let role = std::fs::read_to_string(e.path())
+                .ok()
+                .and_then(|t| toml::from_str::<toml::Value>(&t).ok())
+                .and_then(|v| v.get("schema")?.get("role")?.as_str().map(str::to_owned));
+            if role.as_deref() == Some("aux") {
+                out.push(id.to_owned());
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 /// 喂键。不喂合成 caret：`new_session` 通道没有桌面的首显闸门，候选帧不依赖光标坐标。

@@ -178,6 +178,22 @@ fn to_toml(cfg: &Config) -> String {
 /// 覆盖钩子是函数指针、捕获不了变量，故放进程级。
 static INSTALLED: RwLock<Vec<String>> = RwLock::new(Vec::new());
 
+/// 装了但默认不启用的方案：辅助码来源类（`[schema] role = "aux"`，如笔画）。它们随包是为了给
+/// 拼音、双拼当字形码来源，不该一装上就挤进每个人的键盘切换列表；用户在设置里打开了照常可用。
+static DEFAULT_OFF: RwLock<Vec<String>> = RwLock::new(Vec::new());
+
+/// 记下默认不启用的方案（与 [`set_installed_schemas`] 同时调）。
+pub fn set_default_off_schemas(ids: Vec<String>) {
+    *DEFAULT_OFF.write().unwrap_or_else(|e| e.into_inner()) = ids;
+}
+
+fn default_off_schemas() -> Vec<String> {
+    DEFAULT_OFF
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
 /// 英文方案 id：中英键切换的目标，恒启用。
 pub const ENGLISH_SCHEMA: &str = "english";
 
@@ -224,9 +240,13 @@ fn user_chosen_schemas() -> Option<Vec<String>> {
     )
 }
 
-/// 当前启用的方案：装了的 ∩ 用户选的（没选过 = 全部），英文恒在。
+/// 当前启用的方案：装了的 ∩ 用户选的（没选过 = 除辅助码来源类外的全部），英文恒在。
 pub fn enabled_schemas() -> Vec<String> {
-    enabled_from(&installed_schemas(), user_chosen_schemas().as_deref())
+    enabled_from(
+        &installed_schemas(),
+        user_chosen_schemas().as_deref(),
+        &default_off_schemas(),
+    )
 }
 
 /// 把可选方案设成 [`enabled_schemas`]；当前方案不在其中时换成第一个仍启用的中文方案。
@@ -244,16 +264,24 @@ pub fn apply_enabled_schemas(cfg: &mut Config) {
     cfg.schema.available = list;
 }
 
-/// 纯函数：装了的方案里，用户选了的（`None` = 全部），再补上英文；至少留一个中文方案，
-/// 用户一个中文方案都没留（手改配置）时退回全部。
-pub fn enabled_from(installed: &[String], chosen: Option<&[String]>) -> Vec<String> {
+/// 纯函数：装了的方案里，用户选了的（`None` = 除 [`default_off`] 外的全部），再补上英文；
+/// 至少留一个中文方案，用户一个中文方案都没留（手改配置）时退回全部。
+pub fn enabled_from(
+    installed: &[String],
+    chosen: Option<&[String]>,
+    default_off: &[String],
+) -> Vec<String> {
     let mut list: Vec<String> = match chosen {
         Some(c) => installed
             .iter()
             .filter(|s| c.contains(s))
             .cloned()
             .collect(),
-        None => installed.to_vec(),
+        None => installed
+            .iter()
+            .filter(|s| !default_off.contains(s))
+            .cloned()
+            .collect(),
     };
     if installed.iter().any(|s| s == ENGLISH_SCHEMA) && !list.iter().any(|s| s == ENGLISH_SCHEMA) {
         list.push(ENGLISH_SCHEMA.to_string());
@@ -275,7 +303,11 @@ pub fn set_schema_enabled(id: &str, on: bool) -> Result<(), String> {
         return Err("英文方案是中英键切换的目标，不能关闭".to_string());
     }
     let _w = write_guard();
-    let mut list = enabled_from(&installed, user_chosen_schemas().as_deref());
+    let mut list = enabled_from(
+        &installed,
+        user_chosen_schemas().as_deref(),
+        &default_off_schemas(),
+    );
     if on {
         if !list.iter().any(|s| s == id) {
             list.push(id.to_string());
