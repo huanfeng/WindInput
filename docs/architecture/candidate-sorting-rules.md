@@ -40,8 +40,8 @@
 | 2 | **`finalize_candidates`** | `handle_candidate.rs` | 词库值内嵌 `$CC/$AA/$SS` 展开（打 `is_command`/`is_group`，**不打 `is_phrase`**） |
 | 3 | **短语注入** | 同上，`phrases.lookup` + `lookup_prefix` | 全局短语进候选（打 `is_phrase`，见 §5） |
 | 4 | **空码补全收口** | 同上 | 精确模式无候选时补一条（`completion_hint`/`completion_pool`，统一判空取一条） |
-| 4.5 | **`mark_common`（常用字判定）** | `handle_candidate.rs` | 无条件填 `is_common`（**不看 `filter_mode`**）；混输拼音精确档拿它当提档准入，见 §6 ③ |
-| 5 | **`candidate_display_order` 排序** | 同上 | **无条件重排全部候选**（七级链，见 §6） |
+| 4.5 | **`mark_common`（常用字判定）** | `handle_candidate.rs` | 无条件填 `is_common`（**不看 `filter_mode`**）；混输拼音精确档拿它当提档准入，见 §6 `source_tier` |
+| 5 | **`candidate_display_order` 排序** | 同上 | **无条件重排全部候选**（比较链见 §6） |
 | 6 | **按 `text` 去重** | `retain(seen.insert)` | 保留排序后第一条 |
 | 7 | **`apply_filter`** | `handle_candidate.rs` | 检索范围过滤（常用字/GB18030）；**短语恒保留**（`is_common` 已由第 4.5 步填好）；含生僻字的**多字候选**另由 `input.rare_phrase` 决定（出厂整词放行，见 §9） |
 | 8 | **`apply_freq_rerank`** | 同上 | 开自动调频**且有词频记录**时重排（见 §7）——**首要键压过第 5 步** |
@@ -312,7 +312,7 @@
 **截断的拼音保底配额**（`truncate_with_pinyin_quota`，`convert` 与 overflow 共用）：码表在档 0/2、
 拼音在档 3 ⇒ 截断时码表恒在前，而五笔 2 码前缀的候选量常常吃满整个配额——实测 **52 个 2 码前缀的
 条目数 > 300**（最多 `kh` 663 条），其中 `pu`（495 条）正是「既是五笔 2 码、又是完整拼音音节」的
-交集。那种输入下拼音候选**一条都进不了列表**，协调器 §6 ③ 的拼音精确档就无从下手（提不了不在场的
+交集。那种输入下拼音候选**一条都进不了列表**，协调器 §6 `source_tier` 的拼音精确档就无从下手（提不了不在场的
 候选）。故截断时给拼音留 `max/PINYIN_QUOTA_DIVISOR` 席。
 
 ⚠️ **英文没有配额**：档 2/档 3 里的英文候选被码表洪水挤掉时无保底。见
@@ -372,95 +372,76 @@
 
 ## 6. 协调器 `candidate_display_order`（第 5 步，权威显示序）
 
-对**全部候选无条件重排**。`candidate_display_order` 本体是**七级**比较链（⓪~⑥）（`handle_candidate.rs`）：
+对**全部候选无条件重排**。比较链以 `wind_candidate::candidate_display_order`（`candidate.rs`）为准：
 
 ```
-⓪ by_consumed             **消费输入长度降序**（P0，首要键）
-                          对齐 librime：`DictEntryCollector = map<size_t, DictEntryIterator>` 以
-                          「消费的输入长度」为 key、`phrase_->rbegin()` 从最长遍历 ⇒ 消费更多者
-                          恒优先，**先于词频、先于任何层级**。`buzhidaok` 的「不知道看什么」靠它
-                          从第 136 位到首位（残码 k 终于被响应）。
-                          ⚠️ `consumed_length == 0` = 「未标注按整串算」（**码表候选恒为 0**），
-                             必须归一化成 input_len 再比，否则码表候选整体被甩到最后。
-                          ⚠️ **引擎侧刻意不用这个键**：那边 `truncate` 紧随排序，用它会让消费更少的
-                             候选（`xi'an` 的「西」、`nihao` 的「你」）被整批丢弃而非仅仅排后
-                             （实测红 10 条，含两条真回归）。根因是架构差异——librime 的
-                             `Translation` 惰性流式从不全局截断，我们是一次性产生 N 条 + 截断。
-① cmp_match_layers        is_abbrev 升 → **eff_prefix** 升 → is_partial 升
-                          （简拼层 = `is_abbrev || is_zero_weight_reading`：零权重读音的精确单字
-                            并入简拼层按 weight 让位，小鹤 `cw` 首选「成为」而非 𤭢。简拼层在
-                            前缀、子短语层之下，故它同时沉到这两层之后，不只是「与简拼词同层」；
-                            见 engine-candidate-pipeline.md §4.1）
-                          （`eff_prefix = is_prefix && !is_promoted_completion`，与引擎、
-                            `freq_rerank` 共用同一个函数，三处不得各写一份）
-                          ⚠️ 曾在协调器另写过一份「同构但忽略 `is_promoted_completion`」的副本，
-                             动机是该标志本为「让高价值补全活过引擎 truncate」而设、协调器不截断。
-                             **动机成立但代价被漏算**：层级键是布尔的 = 惩罚 ∞，于是引擎侧一切
-                             **用 weight 表达的让位**在协调器全部失效 —— step 6.5b 把整句压到
-                             「补全 weight - 1」让位给恰好用完残码的补全，到协调器却因补全停在
-                             `is_prefix` 层而被整句反超（`nihaom` 首选「你好吗」→「你好们」、
-                             `beijingd` →「背景的」）。已还原为直接调用 `cmp_match_layers`。
-                             当初的动机也已消失：`zhonghuar` 的「种花人」(w=0) 能登顶是因为当时
-                             无候选消费到第 9 字节，step 2c 残码整句落地后它自然被压下去。
-                          ⚠️ is_fuzzy **已不是层级键**（曾是首要键 = 惩罚 ∞，把「是」压到第 231 位），
-                             模糊音改走 weight 折扣 FUZZY_WEIGHT_SCALE=0.01；补全同理走 0.5^extra
-② cmp_exact_first         is_exact_code 降                          （同层内精确档优先）
-③ cmp_pinyin_exact_first  拼音精确档 降   （**仅混输**；is_pinyin_exact_tier，先于码表前缀补全）
-④ by_weight               weight 降       （base_sort=natural 时 ignore_weight 跳过本级）
-⑤ base_order              升              （词库档位，跨库隔离）
-⑥ natural_order           升              （每库局部出现序）
-   （原末级 `consumed_length 降` 已上升为首要键 ⓪ —— 它此前排在第 7 级，前六级早就分出
-     胜负，等于从不生效；`buzhidaok` 的残码被忽略正是这么来的）
+ 1  by_consumed            消费输入长度 降（首要键）
+ 2  is_draft               草稿沉底
+ 3  is_split_composed      逆切分候选沉底（草稿比它更沉）
+ 4  cmp_match_layers       全拼降级的低置信候选 → 简拼层 → eff_prefix → is_partial（均升）
+ 5  cmp_completion_extra   补全多预测的音节数 升（音节数对齐者优先）
+ 6  cmp_exact_first        is_exact_code 降（同层内精确档优先）
+ 7  from_disabled_dict     未启用词库的候选沉后
+ 8  source_tier            跨来源档位 升（仅混输；纯拼音 / 纯码表下为空操作）
+ 9  weight                 降（base_sort = natural 时跳过）
+10  base_order             升（词库档位，跨库隔离）
+11  natural_order          升（每库局部出现序）
 ```
 
-**③ 拼音精确档（混输专属）**：判据 `wind_candidate::is_pinyin_exact_tier(c, input_len)` =
-`source==Pinyin && is_common && !is_prefix && !is_partial && !is_abbrev && !is_fuzzy`
-**且消费整串**（`consumed_length == 0 || consumed_length >= input_len`，0=未标注按整串算）。
-于是三档顺序为「码表精确/精确码短语 → **拼音精确** → 码表前缀补全」。
+1～8 是**结构层级**，9 才是权重——「靠权重反超」只能在同层同档内发生（红线②）。2、3、7 各按一个布尔
+分两区，两条非标记候选之间恒 `Equal`，是合法全序且不改变既有次序。各分区键的位置依据见 §6.1。
 
-- ⚠️⚠️ **「消费整串」必须直接问 `consumed_length`，不能拿 `!is_partial` 代替**（首版即栽于此）：
-  真机打 `aaw`（本意 `aawt`→工作）首选变成拼音「啊啊」。它是 Viterbi 整句（词条 `啊啊 a a`），
-  `code` 取 `completed`="aa"、`consumed_length=2`，只解释了 3 键中的 2 键——**可 `is_partial`
-  是 false**：整句走 `insert(0)` 不经 `pinyin/mod.rs` 里算 `is_partial` 的 `push_hit` 闭包，
-  同文合并时还会主动 `existing.is_partial = false`。
-  ★ `is_partial` 的语义是「这不是子短语」，**不是**「消费了整串」，两者在残码场景下分叉。
-  ★ 该场景比 `xu` 更严苛：五笔 `aaw` **无精确全码**（候选全是前缀补全），没有
-  `is_exact_code=true` 的候选占着首位 ⇒ 拼音一旦被误提档就直接是首选。
-  回归测试 `mixed_aaw_partial_sentence_does_not_preempt_codetable`（断言首选是「工作」）。
+**本函数没有 `text` 末级。** 全同分的候选靠 `sort_by` 的稳定性维持引擎 / 注入序。凡需要「确定性取一条」
+的调用方（如空码补全池取首条）必须自己补 `.then_with(|| a.text.cmp(&b.text))`，否则 `lookup_prefix` /
+HashMap 的遍历序会让结果随重启变化。
 
-- **修的什么**：混输打 `xu`，码表精确「弱」是首选（`xu` 是二简码），但拼音「需」（`code==xu`、
-  该音节最高频字 6999）**实测排第 98 位**——被 124 条 `xu*` 码表前缀补全整体压住
-  （`per_page=5` ⇒ 第 20 页，与真机报告精确吻合）。根因是「精确 vs 前缀」这个维度混输此前
-  只承认码表那一半：码表精确 +1e7、码表前缀补全 +500K，拼音**不分精确与补全**统一 ÷100。
-  拼音侧的 `is_prefix`/`is_partial` 信息一直齐全，只是在 `normalize_pinyin` 被抹平。
-  （那批加成现已拆除，见 §4.3；本条记录的是问题当初的成因。）
-- **为何是层级键而非权重加成**：拼音词库最高权重是「的」**15,378,475**，任何「不先归一就加
-  boost」的写法都会让它越过码表精确档 1e7（打 `de` 首选变「的」）。层级键无量纲陷阱（红线②）。
-- **为何叠 `is_common`**：单音节同音字动辄上百条（`xu` 有 **329** 条，含权重 0 的生僻字）。
-  用检索范围而非固定条数上限把关，让「提多少条」跟着用户的 `filter_mode` 走。
-  ⚠️ 依赖第 4.5 步 `mark_common` 无条件跑过——该判定原先写在 `apply_filter` 内部、
-  `Gb18030` 时随 early-return 一起被跳过，沿用那个位置会让本档在 Gb18030 下**静默失效**。
-- ⚠️ **必须按引擎语境传 `mixed`，不可恒 true**：纯拼音下全体候选同为 `Pinyin` 来源，本键会退化成
-  「`is_common` 优先」，把含生僻字的多字词（`is_string_common` 要求整串每字都常用）硬降到全部
-  常用单字之后。回归测试 `pure_pinyin_xu_order_is_unaffected`。
-- ★ 这是「五笔优先」的一处**有意松动**：码表**精确**仍恒先于拼音（①②不变），只有码表**前缀
-  补全**让位。依据是短输入下二者置信度反相关——124 条补全全都要打满 4 码才精确，而拼音 `xu`
-  已是完整音节。
+**1 `by_consumed`**：对齐 librime——`DictEntryCollector` 以消费的输入长度为 key、从最长遍历，消费更多者
+先于词频、先于任何层级（`buzhidaok` 的「不知道看什么」靠它排到首位，残码 k 才被响应）。
 
-**关键点：**
-- ①②③是**结构层级**，④才是权重——所以「靠权重反超」只能在同层同档内发生（红线②）。
-- `cmp_exact_first` 置于 `cmp_match_layers` **之后**：精确优先只在同匹配层内生效，不跨层提拔
-  （`is_prefix=true` 的前缀短语仍留在下层）。
-- **⚠️ 本函数末级是 ⑥ `consumed_length`，没有 `text` 末级。** 主排序（第 5 步）对①~⑥全同分的候选
-  靠 `sort_by` 的**稳定性**维持引擎/注入序。**凡需要「确定性取一条」的调用方（如空码补全池取首条）
-  必须自己补 `.then_with(|| a.text.cmp(&b.text))`**——`lookup_prefix`/HashMap 遍历序不定，不补末级会
-  退化成「随机取一条」、重启可能不同（补全池已补，见第 4 步）。
+- `consumed_length == 0` 表示「未标注，按整串算」（码表候选恒为 0），比较前要归一化成 `input_len`，
+  否则码表候选整体被甩到最后。
+- 引擎侧刻意不用这个键：那边排序后紧跟 `truncate`，用它会把消费更少的候选（`xi'an` 的「西」、
+  `nihao` 的「你」）整批丢掉而非仅仅排后。librime 的 `Translation` 惰性流式从不全局截断，我们是一次性
+  产出 N 条再截断。
 
-### 6.1 后加的分区键与音节数对齐档
+**4 `cmp_match_layers`**：与引擎、`freq_rerank` 共用同一个函数，不得另写副本。
 
-上面的七级图是骨架，现行链（以 `wind_candidate::candidate_display_order` 为准）在其中插了几级：
-`by_consumed → is_draft → is_split_composed → cmp_match_layers → cmp_completion_extra →
-cmp_exact_first → from_disabled_dict → source_tier（仅混输）→ weight → base_order → natural_order`。
+- `eff_prefix = is_prefix && !is_promoted_completion`。别在协调器写忽略 `is_promoted_completion` 的版本：
+  布尔层级键等价于惩罚无穷大，会让引擎侧用 weight 表达的让位（step 6.5b 把整句压到「补全 weight - 1」）
+  全部失效，`nihaom` 首选会变成「你好们」。
+- 简拼层 = `is_abbrev || is_zero_weight_reading`：零权重读音的精确单字并入简拼层按 weight 让位
+  （小鹤 `cw` 首选「成为」而非 𤭢）。简拼层在前缀、子短语层之下，见 engine-candidate-pipeline.md §4.1。
+- `is_fuzzy` 不是层级键：模糊音走 weight 折扣 `FUZZY_WEIGHT_SCALE = 0.01`，补全同理走 `0.5^extra`。
+- 首键「全拼降级的低置信候选」的判据与位置依据见 §6.1。
+
+**6 `cmp_exact_first`** 置于层级键之后：精确优先只在同匹配层内生效，不跨层提拔（`is_prefix = true` 的
+前缀短语仍留在下层）。
+
+**8 `source_tier`（混输专属）**：跨来源先后的唯一真相源，档位表见函数文档，`freq_rerank::freq_tier` 也用它：
+
+| 档 | 内容 |
+|---|---|
+| 0 | 码表精确全码（`code == input`）、精确码短语、通配等长结果 |
+| 1 | 拼音精确档（`is_pinyin_exact_tier`）——先于码表前缀补全 |
+| 2 | 码表前缀补全 |
+| 3 | 前缀短语与其余来源 |
+| 4 | 拼音其余（前缀补全 / 子短语 / 简拼 / 模糊 / 生僻）与英文 |
+
+- 档 1 的判据 `is_pinyin_exact_tier(c, input_len)` = `source == Pinyin && is_common && !is_prefix &&
+  !is_partial && !is_abbrev && !is_fuzzy`，**且消费整串**（`consumed_length == 0 || >= input_len`）。
+  「消费整串」必须直接问 `consumed_length`，不能拿 `!is_partial` 代替：整句走 `insert(0)` 不经算
+  `is_partial` 的路径，同文合并还会把它清成 false。五笔 `aaw` 没有精确全码，只解释了两键的拼音整句
+  「啊啊」被误提档就直接成了首选。回归测试 `mixed_aaw_partial_sentence_does_not_preempt_codetable`。
+- 用档位而不用权重加成：拼音词库最高权重「的」约 1500 万，任何不先归一化就加 boost 的写法都会让它越过
+  码表精确档（打 `de` 首选变「的」）。
+- 叠 `is_common`：单音节同音字动辄上百条（`xu` 有 329 条，含权重 0 的生僻字），用检索范围把关，让提档
+  条数跟着用户的 `filter_mode` 走。依赖第 4.5 步 `mark_common` 无条件跑过，所以只能在协调器侧调用。
+- 必须按引擎语境传 `mixed`，不可恒 true：纯拼音下全体同源，档位会退化成「`is_common` 优先」，把含生僻字
+  的多字词降到全部常用单字之后。回归测试 `pure_pinyin_xu_order_is_unaffected`。
+- 档 1 是「五笔优先」的有意松动：码表**精确**仍恒先于拼音，只有码表**前缀补全**让位。短输入下两者置信度
+  反相关——`xu` 的 124 条码表补全都要打满 4 码才精确，而拼音 `xu` 已是完整音节。
+
+### 6.1 分区键与音节数对齐档的依据
 
 - **`by_consumed` 必须与 `cmp_match_layers` 成对、且在其前**。凡整体重排候选的地方两键要一起用。
   反例：`freq_rerank::rerank_positional` 曾只带层级键，而它只在本次输入有词频记录时才跑，于是
@@ -516,7 +497,7 @@ cmp_exact_first → from_disabled_dict → source_tier（仅混输）→ weight 
 | tier | 对象 | 判据 |
 |---|---|---|
 | **0** | 码表精确全码 **+ 精确码短语** | `source==CodeTable && code==input`；或 `is_phrase && is_exact_code` |
-| **1** | **拼音精确档** | `is_pinyin_exact_tier(c)`（与 §6 ③ **共用同一判据函数**） |
+| **1** | **拼音精确档** | `is_pinyin_exact_tier(c)`（与 §6 `source_tier` 档 1 **共用同一判据函数**） |
 | **2** | 码表前缀补全 | `!is_phrase && source==CodeTable && code!=input` |
 | **3** | **前缀短语** + 其余来源 | `is_phrase && !is_exact_code`；或 `_ =>`（主要是 `CandidateSource::None`） |
 | **4** | 拼音其余（前缀/子短语/简拼/模糊/生僻） / 英文 | `source==Pinyin/English` |
@@ -647,7 +628,7 @@ cmp_exact_first → from_disabled_dict → source_tier（仅混输）→ weight 
 ## 11. 不变量与红线清单（改排序前逐条自检）
 
 1. **完全匹配才提前，前缀匹配一律避让**——精确码短语（`lookup`）可入精确档；前缀短语（`lookup_prefix`）
-   一律降层/按权重。三套系统都按此口径。★ 混输的拼音精确档（§6 ③ / §7.3 tier 2）是这条口径的
+   一律降层/按权重。三套系统都按此口径。★ 混输的拼音精确档（§6 `source_tier` 档 1 / §7.3 tier 2）是这条口径的
    **贯彻而非例外**：它让「拼音完全匹配」也享受到此前只有码表才有的提前，代价是码表**前缀补全**
    （非完全匹配）让位。码表精确仍恒先于拼音。
 2. **跨来源比 `weight` 无意义**（红线①）——量纲不可比 + 巨大类别常量。别用权重表达「类别」，用显式标志
