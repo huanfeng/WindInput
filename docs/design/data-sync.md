@@ -12,7 +12,7 @@
 **原则**：
 
 1. 核心不联网。网络、加密、大块 IO 都在独立进程 `wind_input_sync` 里，core 的二进制不引入任何网络/加密依赖。
-2. 端到端加密。服务端只看到密文和不可读的对象名；口令不离开设备。
+2. 端到端加密。服务端只看到密文和不可读的对象名；同步密钥不离开设备。
 3. 增量、可重试、幂等。断网、中途被杀、多设备同时写都不丢数据、不损坏远端。
 4. 输入流程零影响。同步进程崩溃、卡死、慢，打字照常；core 只做拉起监护和少量重载入口。
 5. 不留系统残留。不写自启动、服务单元、计划任务，由 core 按需拉起（与扩展宿主一致）。
@@ -34,7 +34,7 @@
   宿主监护扩展又在 `apps/extension_host/src/lib.rs` 复制了一份（含 `pre_exec` 设 PDEATHSIG）。
   core 侧监护流程无测试。macOS 无 Job/PDEATHSIG，只靠 stdin EOF。
 - **RPC 与事件**：ctrl 管道与 events 管道的 SDDL 放行 Everyone/AppContainer（TSF 宿主需要），
-  Unix socket 也不校验对端。**同步进程持有口令与凭据，不能开任何具名端点**；与 core 通信沿用扩展的做法——继承匿名管道。
+  Unix socket 也不校验对端。**同步进程持有同步密钥与凭据，不能开任何具名端点**；与 core 通信沿用扩展的做法——继承匿名管道。
 - **数据层**（`docs/design/user-data-storage-redesign.md`）：
   - 文本真源白名单 `wind-store/src/user_words.rs` 的 `TextPath`/`classify_text_path`。
   - 运行时写入先进 `.wjl` 再后台写回文本；`data.beginEdit`/`data.endEdit` 外部编辑会话会先写回待处理操作、
@@ -73,7 +73,7 @@
 帧沿用 4 字节大端长度前缀 + JSON。
 
 - **core → sync**：`Hello{suffix, userdata_dir, state_dir, settings}`、`Settings{...}`（变更时）、
-  `Command{id, op: sync_now|test_connection|set_passphrase|import_key|export_key|reset_remote...}`、`Shutdown`。
+  `Command{id, op: sync_now|test_connection|create_key|import_key|export_key|reset_remote...}`、`Shutdown`。
 - **sync → core**：
   - `Status{phase, last_ok, last_error, pending, conflicts}`（core 缓存，供 `sync.status` 查询并在 events 广播 `sync.statusChanged`，不带任何内容或路径以外的数据）；
   - `Request{id, method, params}`，**白名单**：`data.beginEdit`、`data.endEdit`、`dict.reload`、`config.reload`、
@@ -91,7 +91,7 @@
   - Windows：DPAPI（当前用户）封装，系统 API，不加依赖。
   - macOS：DEK 与凭据存 Keychain，文件里只留条目名。
   - Linux：0600 文件，不接 libsecret（依赖 DBus，无图形会话常不可用）。
-  只在同步进程里读写；core 只转发设置端的**写入**，没有任何读取机密的 RPC（导出密钥见 §5，走 `sync.command`，结果只回给发起的设置端连接）。
+  只在同步进程里读写；core 只转发设置端的**写入**，没有任何读取机密的 RPC（查看同步密钥见 §5，走 `sync.command`，结果只回给发起的设置端连接）。
 - 依据：思源把 S3/WebDAV 凭据与仓库密钥明文存在配置里；rclone 只做可逆混淆；Joplin 后来才在 Win/mac 改用钥匙串、
   Linux 未跟进。本设计在 Win/mac 用系统保护、Linux 与它们持平。
 - 设置端 RPC：`sync.getSettings`（不含机密，只回 `has_password` 之类布尔）、`sync.setSettings`、`sync.setSecret`、
@@ -102,7 +102,7 @@
 根为用户给定的 URL/前缀下的 `windinput-sync/v1/`：
 
 ```
-meta.json                      明文：格式版本、KDF 参数、盐、口令封装的 DEK、密钥校验值
+meta.json                      明文：格式版本（2）、同步密钥校验值（不含密钥本身）
 devices/<dev>/manifest.<gen>   密文：该设备的清单，gen 单调递增；保留最近 2 代
 devices/<dev>/info             密文（devinfo 子密钥）：设备名册条目 {name, platform, app_version, caps, last_seen}
 blobs/<id>                     密文：文件内容，id = HMAC(files 子密钥, 明文 SHA-256) 的 base32
@@ -119,12 +119,14 @@ blobs/<id>                     密文：文件内容，id = HMAC(files 子密钥
 
 > DEK 不直接加密对象：按用途经 HKDF 派生子密钥（文件、设备信息、剪贴板、传输、局域网），见 `sync-messaging.md` §3.1。下文「用 DEK 加密」均指文件子密钥。
 
-- 首次启用：生成随机 32 字节 DEK。口令 + **随机盐** → Argon2id（盐与参数写入 meta.json）→ KEK，
-  用 XChaCha20-Poly1305 封装 DEK。不学思源用口令自身哈希当盐——那样同口令跨用户得到同一密钥。
-- **不设单独的恢复密钥**，改为「导出密钥」：设置端可显示/复制 DEK 的 base64 字符串（思源做法），用户自行备份。
+- **单一同步密钥**：DEK 就是用户看到的「同步密钥」，没有口令这一层。首台设备首次启用时生成随机 32 字节 DEK，
+  展示为 base32 小写无填充（52 字符），每 4 字符一组用 `-` 连接，如 `k7m2-x3pq-…`；粘贴时忽略大小写、空白与 `-`。
+  密钥只存本机机密存储与用户自己的备份里，**不上传**；远端 `meta.json` 只有格式版本（`format: 2`）与 HMAC 校验值，
+  用来在粘贴时核对「密钥对不对」。（思源同做法；没有口令封装，所以也没有 KDF 与盐。）
+- 新设备加入：粘贴同步密钥，校验通过后存入本机机密存储，再进入身份确认（见 `sync-device-groups.md` §4.5）。
+- **丢失后无法恢复**：没有恢复密钥，也没有口令可找回。所有设备都丢了密钥时只能重置远端（清空后生成新密钥，以本机为准重新上传），其他设备用新密钥重新加入。
 - 每个对象独立随机 nonce，XChaCha20-Poly1305，附加数据绑定对象类型与 id，防止对象被调换。
-- 新设备加入：输入口令，或直接粘贴导出的密钥字符串（校验 meta.json 里的密钥校验值），存入本机机密存储，之后不再需要口令。
-- 改口令只重新封装 DEK，不重加密数据；已导出的密钥字符串仍有效。忘记口令且没有导出密钥：只能重置远端（清空后以本机为准重新上传）。
+- 旧的口令格式 `meta.json`（含 `kdf_alg`）不再识别，报「远端同步库格式不受支持，请重置远端」。
 
 ## 6. core 要补的
 
@@ -149,7 +151,7 @@ blobs/<id>                     密文：文件内容，id = HMAC(files 子密钥
 5. **上传**：新 blob → 新清单（gen+1）。更新本地状态库。
 
 触发：本地文件变化去抖 10 秒；定时 `interval_min`；启动后 30 秒；设置端「立即同步」。
-失败：待传队列持久化在状态库，指数退避（30 秒起，上限 30 分钟）；认证失败、口令错误、远端格式不认识则停在错误态等用户处理，不重试。
+失败：待传队列持久化在状态库，指数退避（30 秒起，上限 30 分钟）；认证失败、同步密钥不对、远端格式不认识则停在错误态等用户处理，不重试。
 
 ## 8. 合并规则
 
@@ -179,11 +181,11 @@ blobs/<id>                     密文：文件内容，id = HMAC(files 子密钥
 | 阶段 | 内容 | 验收 |
 |---|---|---|
 | S0 | `wind-supervise` 抽库，扩展宿主两层迁移 | 现有 extension_host 测试全过；补 core 侧监护测试 |
-| S1 | `wind-sync`：加密、清单、裁决、三类合并、待传队列，内存后端 | 单测覆盖多设备并发、中途失败重放、冲突、改口令 |
+| S1 | `wind-sync`：加密、清单、裁决、三类合并、待传队列，内存后端 | 单测覆盖多设备并发、中途失败重放、冲突、重置远端换密钥 |
 | S2 | WebDAV、S3 后端 | 本机起 WebDAV（如 `dufs`/`rclone serve webdav`）与 MinIO 的集成测试；坚果云、R2 人工验 |
 | S3 | core：拉起监护、匿名管道协议、重载入口、`sync.*` 转发 | 用桩同步进程测协议；重载入口单测 |
 | S4 | `wind_input_sync` 外壳：监听、调度、机密存储 | Linux 本机两个用户目录对拍；Windows 靶机验 DPAPI |
-| S5 | 设置端「同步」页：后端、口令/导出与导入密钥、范围、状态、立即同步、冲突提示 | 设置端测试 + 靶机真机 |
+| S5 | 设置端「同步」页：后端、同步密钥（生成/查看/粘贴）、范围、状态、立即同步、冲突提示 | 设置端测试 + 靶机真机 |
 | S6 | 文档站；打包带上 `wind_input_sync`（Windows/Linux/mac） | 安装包内容检查 |
 
 Android 放在一期交付之后：`wind-mobile` 新开 `sync_once()` 接口 + WorkManager，复用 `wind-sync`。
@@ -194,6 +196,6 @@ Android 放在一期交付之后：`wind-mobile` 新开 `sync_once()` 接口 + W
 
 1. 同步设置与机密放设备本地、不进 config.toml（§3.3）。
 2. 机密：Windows DPAPI、macOS Keychain、Linux 0600 文件（§3.3）。
-3. 不设恢复密钥，提供导出/导入密钥；口令派生用随机盐 + Argon2id（§5）。
+3. 不设口令与恢复密钥，只有一个同步密钥（生成/查看/粘贴，§5）。
 4. 不可合并文件的冲突：自动取较新 + 保存冲突副本（§8）。
 5. Android 排在一期之后（§10）。
