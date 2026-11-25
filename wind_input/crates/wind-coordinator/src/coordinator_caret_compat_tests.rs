@@ -534,24 +534,41 @@ fn focus_tip_shows_again_for_different_host() {
     assert!(got_status_tip(&rx), "换宿主必须重新提示一次");
 }
 
-/// 气泡还挂着没弹出（等 TSF 坐标）时，docMgr 级失焦把挂起作废：去重记录不能留着，否则同宿主
-/// 紧接着的下一次 focus_gained 被当成「已提示过」跳过，气泡永远不出（Edge 切回时的表现）。
+/// Edge 切回时的抖动序列：获焦（非 TSF 坐标，挂起）→ DocChanged / NoEditCtx 连发 → 获焦（去重跳过）→
+/// TSF 坐标到达。docMgr 级失焦不得作废挂起，否则气泡永远补不出；补出之后再来的噪声
+/// 也不得把它收掉（毫秒级闪没）。
 #[test]
-fn focus_tip_retries_when_parked_tip_was_cancelled_before_showing() {
+fn focus_tip_survives_docmgr_jitter() {
+    use wind_bridge::handler::FocusLostReason::{DocChanged, NoEditCtx};
     let (c, rx) = coord_focus_tip(true, "follow_caret");
     set_caret(&c, 0, 0, wind_ipc::protocol::caret_source::UNKNOWN);
     c.show_focus_status_if_enabled(TOKEN_A);
-    assert!(!got_status_tip(&rx), "非 TSF 坐标：挂起，尚未弹出");
-
-    c.handle_focus_lost(TOKEN_A, wind_bridge::handler::FocusLostReason::DocChanged);
-    set_caret(
-        &c,
-        100,
-        200,
-        wind_ipc::protocol::caret_source::TSF_SELECTION,
-    );
+    c.handle_focus_lost(TOKEN_A, DocChanged);
+    c.handle_focus_lost(TOKEN_A, NoEditCtx);
     c.show_focus_status_if_enabled(TOKEN_A);
-    assert!(got_status_tip(&rx), "上次根本没弹出，同宿主再次获焦应重试");
+    assert!(!got_status_tip(&rx), "TSF 坐标未到，仍在挂起");
+
+    c.handle_caret_update(&CaretData {
+        x: 473,
+        y: 217,
+        height: 28,
+        composition_start_x: 0,
+        composition_start_y: 0,
+        source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+        composition_rect: None,
+    });
+    c.handle_focus_lost(TOKEN_A, DocChanged);
+    c.handle_focus_lost(TOKEN_A, NoEditCtx);
+    let cmds: Vec<_> = rx.try_iter().collect();
+    assert!(
+        cmds.iter()
+            .any(|c| matches!(c, UiCommand::ShowStatusTip { .. })),
+        "挂起应在 TSF 坐标到达时补显示"
+    );
+    assert!(
+        !cmds.iter().any(|c| matches!(c, UiCommand::HideStatusTip)),
+        "docMgr 级失焦不得收掉气泡"
+    );
 }
 
 /// 离开宿主（Thread 级失焦）后再回来，应当重新提示。

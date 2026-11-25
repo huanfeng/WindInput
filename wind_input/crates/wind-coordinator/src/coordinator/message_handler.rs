@@ -2947,7 +2947,21 @@ impl MessageHandler for Coordinator {
             // 「菜单开着」）。这里之后没有菜单命令要派发，不受 clear_tooltip_menu_flag 的截图时序
             // 约束，可以立即解除。UI 侧另有兜底（Tooltip::on_menu_dismissed），两处幂等叠加。
             self.clear_tooltip_menu_flag();
-            self.hide_tip(); // 失焦隐藏状态提示（常驻模式尤需）
+            // 失焦隐藏状态提示（常驻模式尤需）。docMgr 级噪声（Edge 切回时 DocChanged/NoEditCtx
+            // 毫秒级连发）不收临时气泡：否则刚弹出的焦点气泡立刻闪没，挂起的也被作废。
+            let docmgr_noise = matches!(
+                reason,
+                FocusLostReason::DocChanged | FocusLostReason::NoEditCtx
+            ) && !self
+                .rt()
+                .config
+                .ui
+                .status
+                .display_mode
+                .eq_ignore_ascii_case("always");
+            if !docmgr_noise {
+                self.hide_tip();
+            }
             self.terminate_auto_phrase("focus_lost"); // 换窗口 = 一段输入结束
         }
         // CtxLost 刻意不碰候选窗：输入态还在（Excel 抖动保护），候选窗应跟随输入态而非
