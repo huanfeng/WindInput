@@ -247,9 +247,12 @@ int main()
                  }());
         CHECK(ModeIndicator::dynamicIconName(V::Caps, std::string(33, 'a'), false)
                   .rfind("windinput-lbl-caps-h", 0) == 0);
-        std::ifstream in(std::string(WIND_REPO_DIR) + "/wind_input/crates/wind-ui/src/tray_icon.rs");
+        // 样例在 tray_icon.rs 的单测里，单测外移在同目录的 tray_icon_tests.rs，两份都读。
         std::stringstream ss;
-        ss << in.rdbuf();
+        for (const char* f : {"tray_icon.rs", "tray_icon_tests.rs"}) {
+            std::ifstream in(std::string(WIND_REPO_DIR) + "/wind_input/crates/wind-ui/src/" + f);
+            ss << in.rdbuf();
+        }
         const std::string rs = ss.str();
         for (const std::string& sample : {devPin, relPin, hashed}) {
             if (rs.find("\"" + sample + "\"") == std::string::npos) {

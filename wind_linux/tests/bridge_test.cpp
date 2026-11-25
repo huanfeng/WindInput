@@ -518,9 +518,12 @@ void TestEndpoints()
              std::string("/WindInput.1000_TB"));
     setenv("WIND_VARIANT", "DEV", 1);
     {
-        std::ifstream in(std::string(WIND_REPO_DIR) + "/wind_input/crates/wind-bridge/src/endpoint.rs");
+        // 样例在 endpoint.rs 的单测里，单测外移在同目录的 endpoint_tests.rs，两份都读。
         std::stringstream ss;
-        ss << in.rdbuf();
+        for (const char* f : {"endpoint.rs", "endpoint_tests.rs"}) {
+            std::ifstream in(std::string(WIND_REPO_DIR) + "/wind_input/crates/wind-bridge/src/" + f);
+            ss << in.rdbuf();
+        }
         const std::string rs = ss.str();
         CHECK(!rs.empty());
         for (const char* sample : {"\"/WindInputDev.4294967295_MN5\"", "\"/WindInput.1000\"",
