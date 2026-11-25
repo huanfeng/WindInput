@@ -28,6 +28,9 @@ pub type Echo = Arc<Mutex<HashMap<String, String>>>;
 
 pub const TMP_SUFFIX: &str = ".wind-sync.tmp";
 
+/// 扩展文件被替换 / 删除时先改名让路的旧文件后缀（点开头，不进同步范围）。
+pub const OLD_SUFFIX: &str = ".wind-sync.old";
+
 /// 可重试错误的前缀：本批没有写任何东西，稍后重跑一轮即可（不计入失败退避）。
 pub const RETRY_TAG: &str = "[稍后重试]";
 
@@ -58,6 +61,10 @@ fn safe_rel(path: &str) -> bool {
         && path
             .split('/')
             .all(|s| !s.is_empty() && s != "." && s != "..")
+}
+
+fn is_extension_file(rel: &str) -> bool {
+    rel.starts_with("extensions/")
 }
 
 fn split3(p: &str) -> Option<(&str, &str, &str)> {
@@ -250,7 +257,17 @@ impl FsLocal {
                 f.write_all(bytes)?;
                 f.sync_all()
             })
-            .and_then(|()| std::fs::rename(&tmp, &path));
+            .and_then(|()| {
+                // 运行中的扩展 exe / DLL 在 Windows 上不能被覆盖或删除，但可以改名：先让路再落位。
+                let aside = self.move_aside(rel);
+                let r = std::fs::rename(&tmp, &path);
+                if r.is_err()
+                    && let Some(a) = aside
+                {
+                    let _ = std::fs::rename(a, &path);
+                }
+                r
+            });
         if r.is_err() {
             let _ = std::fs::remove_file(&tmp);
         }
@@ -258,10 +275,47 @@ impl FsLocal {
     }
 
     fn remove(&self, rel: &str) -> io::Result<()> {
+        if is_extension_file(rel) {
+            return match std::fs::rename(
+                self.abs(rel),
+                crate::fsutil::tmp_sibling(&self.abs(rel), OLD_SUFFIX),
+            ) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+                _ => Ok(()),
+            };
+        }
         match std::fs::remove_file(self.abs(rel)) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
             _ => Ok(()),
         }
+    }
+
+    /// 扩展文件已存在时改名为同目录的 `.old` 兄弟；返回改名后的路径。其余文件不动。
+    fn move_aside(&self, rel: &str) -> Option<PathBuf> {
+        if !is_extension_file(rel) {
+            return None;
+        }
+        let path = self.abs(rel);
+        let old = crate::fsutil::tmp_sibling(&path, OLD_SUFFIX);
+        std::fs::rename(&path, &old).ok().map(|()| old)
+    }
+
+    /// 清理 `extensions/` 下让路留下的旧文件；仍被占用的删不掉，留待下次。
+    fn sweep_old(&self) {
+        fn walk(dir: &Path) {
+            let Ok(rd) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for e in rd.flatten() {
+                let Ok(ft) = e.file_type() else { continue };
+                if ft.is_dir() {
+                    walk(&e.path());
+                } else if e.file_name().to_string_lossy().ends_with(OLD_SUFFIX) {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
+        walk(&self.abs("extensions"));
     }
 
     fn req(&self, method: &str, params: Value) -> Result<Value, String> {
@@ -301,6 +355,7 @@ impl FsLocal {
         writes: &[(String, Vec<u8>)],
         deletes: &[String],
     ) -> Result<(), LocalError> {
+        self.sweep_old();
         let ids = Self::touched_extensions(writes, deletes);
         if ids.is_empty() {
             return self.apply_inner(writes, deletes);
@@ -320,6 +375,7 @@ impl FsLocal {
         if let Err(e) = resumed {
             log!("extensions.resume 失败: {e}");
         }
+        self.sweep_old();
         r
     }
 

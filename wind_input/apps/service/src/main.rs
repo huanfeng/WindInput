@@ -625,6 +625,21 @@ impl wind_rpc::CoreRpc for RpcCore {
     }
 }
 
+/// `{ "ids": ["a", ...] }` → 扩展 id 列表；缺失或类型不对即错（不当作空列表放过）。
+fn parse_ext_ids(params: &serde_json::Value) -> Result<Vec<String>, String> {
+    let arr = params
+        .get("ids")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("缺少参数 ids（字符串数组）")?;
+    arr.iter()
+        .map(|v| {
+            v.as_str()
+                .map(str::to_string)
+                .ok_or_else(|| "ids 须为字符串数组".to_string())
+        })
+        .collect()
+}
+
 /// 同步进程请求里的 `extensions.suspend` / `extensions.resume`；其余方法返回 None。
 fn extensions_for_sync_request(
     ext: &extensions::Extensions,
@@ -634,21 +649,14 @@ fn extensions_for_sync_request(
     if method != "extensions.suspend" && method != "extensions.resume" {
         return None;
     }
-    let ids: Vec<String> = params
-        .get("ids")
-        .and_then(serde_json::Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
-    if method == "extensions.suspend" {
-        ext.suspend(&ids);
-    } else {
-        ext.resume(&ids);
-    }
-    Some(Ok(serde_json::json!({})))
+    Some(parse_ext_ids(params).map(|ids| {
+        if method == "extensions.suspend" {
+            ext.suspend(&ids);
+        } else {
+            ext.resume(&ids);
+        }
+        serde_json::json!({})
+    }))
 }
 
 /// 以分离子进程重新启动自身（用于"重启服务"）。
@@ -1139,4 +1147,21 @@ fn set_dpi_awareness() {
 #[cfg(not(windows))]
 fn set_dpi_awareness() {
     // 非 Windows 平台无需设置
+}
+
+#[cfg(test)]
+mod ext_ids_tests {
+    use super::parse_ext_ids;
+    use serde_json::json;
+
+    #[test]
+    fn ids_must_be_a_string_array() {
+        assert_eq!(
+            parse_ext_ids(&json!({ "ids": ["a", "b"] })).unwrap(),
+            ["a", "b"]
+        );
+        assert!(parse_ext_ids(&json!({})).is_err());
+        assert!(parse_ext_ids(&json!({ "ids": "a" })).is_err());
+        assert!(parse_ext_ids(&json!({ "ids": ["a", 1] })).is_err());
+    }
 }

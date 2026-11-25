@@ -10,8 +10,7 @@ use wind_sync::state::SyncState;
 
 const T0: u64 = 1_795_478_400;
 
-fn run(b: &MemBackend, dek: &Dek, name: &str, local: &mut MemLocal, st: &mut SyncState) {
-    let _ = name;
+fn run(b: &MemBackend, dek: &Dek, local: &mut MemLocal, st: &mut SyncState) {
     let mut ctx = SyncCtx::new(T0, Namespace::new(DeviceClass::Desktop, "pcs"));
     ctx.force = true;
     sync_once(b, local, st, dek, &ctx).expect("同步应成功");
@@ -26,8 +25,8 @@ fn exec_flag_roundtrips() {
     la.set("extensions/k/run", "bin");
     la.set("extensions/k/extension.toml", "x");
     la.exec.insert("extensions/k/run".into());
-    run(&b, &dek, "a", &mut la, &mut sa);
-    run(&b, &dek, "b", &mut lb, &mut sb);
+    run(&b, &dek, &mut la, &mut sa);
+    run(&b, &dek, &mut lb, &mut sb);
     assert_eq!(lb.text("extensions/k/run").as_deref(), Some("bin"));
     assert!(lb.is_exec("extensions/k/run").unwrap());
     assert!(!lb.is_exec("extensions/k/extension.toml").unwrap());

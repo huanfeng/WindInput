@@ -419,8 +419,8 @@ fn extension_writes_are_bracketed_by_suspend_and_resume() {
 #[test]
 fn extension_resume_is_sent_even_when_write_fails() {
     let (d, core, mut l, _) = rig();
-    // 目标路径是目录：写入失败
-    std::fs::create_dir_all(d.path().join("extensions/keysound/keysound.exe")).unwrap();
+    // 父路径被一个普通文件占住：建目录失败
+    put(d.path(), "extensions/keysound", "x");
     let r = l.write_batch(&[("extensions/keysound/keysound.exe".into(), b"MZ".to_vec())]);
     assert!(r.is_err());
     let ids = json!({ "ids": ["keysound"] });
@@ -475,4 +475,77 @@ fn exec_bit_is_set_and_read_back_on_unix() {
     // 其余位保留
     assert_eq!(mode & 0o044, 0o044);
     assert!(l.is_exec("extensions/k/run").unwrap());
+}
+
+fn old_files(d: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![d.to_path_buf()];
+    while let Some(p) = stack.pop() {
+        for e in std::fs::read_dir(&p).into_iter().flatten().flatten() {
+            if e.path().is_dir() {
+                stack.push(e.path());
+            } else if e.file_name().to_string_lossy().ends_with(OLD_SUFFIX) {
+                out.push(e.path());
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn replacing_an_extension_file_moves_the_old_one_aside_until_next_apply() {
+    let (d, _c, mut l, _) = rig();
+    put(d.path(), "extensions/k/k.exe", "old");
+    // 让路后的旧文件在清理前还在：在 resume 之后、sweep 之前看不到，所以直接验证两步
+    let path = d.path().join("extensions/k/k.exe");
+    let aside = l.move_aside("extensions/k/k.exe").unwrap();
+    assert!(!path.exists());
+    assert_eq!(std::fs::read_to_string(&aside).unwrap(), "old");
+    assert!(
+        aside
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with('.')
+    );
+    // 旧文件不进同步范围
+    assert!(l.list().unwrap().is_empty());
+    assert!(l.conflict_files().is_empty());
+    // 写入落新内容；下一次 apply 清掉旧文件
+    l.write_batch(&[("extensions/k/k.exe".into(), b"new".to_vec())])
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+    assert!(old_files(d.path()).is_empty());
+}
+
+#[test]
+fn existing_extension_file_is_overwritten_via_rename_aside() {
+    let (d, _c, mut l, _) = rig();
+    put(d.path(), "extensions/k/k.exe", "old");
+    l.write_batch(&[("extensions/k/k.exe".into(), b"new".to_vec())])
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(d.path().join("extensions/k/k.exe")).unwrap(),
+        "new"
+    );
+    assert!(old_files(d.path()).is_empty());
+}
+
+#[test]
+fn extension_delete_renames_aside_instead_of_removing() {
+    let (d, _c, l, _) = rig();
+    put(d.path(), "extensions/k/k.exe", "old");
+    l.remove("extensions/k/k.exe").unwrap();
+    assert!(!d.path().join("extensions/k/k.exe").exists());
+    assert_eq!(old_files(d.path()).len(), 1);
+    l.sweep_old();
+    assert!(old_files(d.path()).is_empty());
+}
+
+#[test]
+fn non_extension_files_are_not_moved_aside() {
+    let (d, _c, l, _) = rig();
+    put(d.path(), "config.toml", "a");
+    assert!(l.move_aside("config.toml").is_none());
+    assert!(d.path().join("config.toml").exists());
 }
