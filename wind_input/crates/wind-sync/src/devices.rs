@@ -50,7 +50,11 @@ pub fn put_device_info(
     Ok(())
 }
 
-fn read_info(b: &dyn Backend, key: &DevInfoKey, dev: &str) -> Result<DeviceInfo, SyncError> {
+pub(crate) fn read_info(
+    b: &dyn Backend,
+    key: &DevInfoKey,
+    dev: &str,
+) -> Result<DeviceInfo, SyncError> {
     let raw = b
         .get(&manifest::device_info_key(dev))?
         .ok_or_else(|| SyncError::Local("该设备没有设备信息".into()))?;

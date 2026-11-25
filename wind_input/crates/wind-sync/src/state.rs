@@ -76,6 +76,19 @@ pub struct SyncState {
     /// 最近一次成功同步的 unix 秒（由同步进程维护，供状态展示）。
     #[serde(default)]
     pub last_ok: Option<u64>,
+    /// 所在设备组号；空表示尚未确定（调用方按默认处理）。
+    #[serde(default)]
+    pub group: String,
+    #[serde(default)]
+    pub group_name: String,
+    #[serde(default)]
+    pub group_name_at: u64,
+    /// 用户已确认设备号与组（首次启用向导走完）。
+    #[serde(default)]
+    pub identity_confirmed: bool,
+    /// 改号后待从远端删除的旧设备号。
+    #[serde(default)]
+    pub retired_ids: Vec<String>,
 }
 
 impl SyncState {
@@ -91,6 +104,11 @@ impl SyncState {
             pending: Vec::new(),
             retry: RetryState::default(),
             last_ok: None,
+            group: String::new(),
+            group_name: String::new(),
+            group_name_at: 0,
+            identity_confirmed: false,
+            retired_ids: Vec::new(),
         }
     }
 }

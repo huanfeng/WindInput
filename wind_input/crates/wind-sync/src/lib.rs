@@ -6,6 +6,7 @@
 //! - [`manifest`]：每设备清单与远端布局
 //! - [`plan`]：逐文件裁决；[`merge`]：三方合并；[`scope`]：同步范围
 //! - [`engine`]：一次同步的编排；[`remote`]：初始化/加入/改口令/回收
+//! - [`identity`]：加入/退出设备组、认领设备、改设备号
 //! - [`state`]：可序列化的本机状态与退避
 
 pub mod backend;
@@ -13,6 +14,7 @@ pub mod crypto;
 pub mod devices;
 pub mod engine;
 pub mod error;
+pub mod identity;
 pub mod ids;
 pub mod local;
 pub mod manifest;
