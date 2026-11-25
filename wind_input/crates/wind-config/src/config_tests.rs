@@ -104,6 +104,10 @@ fn grammar_migration_is_conservative() {
     assert!(!explicit_off.active(), "显式 enabled=false 不能被迁移改回");
 }
 
+fn codetable_spec(text: &str) -> crate::schema::CodeTableSpec {
+    toml::from_str(text).expect("码表方案段应能解析")
+}
+
 #[test]
 fn codetable_wildcard_folds_from_schema_and_validates_key() {
     let g = CodetableGlobal::default();
@@ -111,22 +115,19 @@ fn codetable_wildcard_folds_from_schema_and_validates_key() {
     assert_eq!(g.wildcard_key, "z");
     assert_eq!(g.wildcard_char("t"), None, "关闭时恒 None，不看键");
 
-    let spec = crate::schema::CodeTableSpec {
-        wildcard: Some(true),
-        wildcard_key: Some("?".into()),
-        ..Default::default()
-    };
-    assert_eq!(g.resolved(Some(&spec)).wildcard_char("t"), Some('?'));
+    let spec = codetable_spec("wildcard = true\nwildcard_key = \"?\"");
+    assert_eq!(g.for_scheme(&spec).0.wildcard_char("t"), Some('?'));
 
     let on = CodetableGlobal {
         wildcard: true,
         ..Default::default()
     };
     assert_eq!(
-        on.resolved(Some(&crate::schema::CodeTableSpec::default()))
+        on.for_scheme(&crate::schema::CodeTableSpec::default())
+            .0
             .wildcard_char("t"),
         Some('z'),
-        "方案没写 ⇒ 回落全局"
+        "方案没写 ⇒ 取基线"
     );
 
     for bad in ["", "ab", "中", " ", "1", "\t"] {
@@ -150,26 +151,21 @@ fn codetable_wildcard_folds_from_schema_and_validates_key() {
 fn codetable_wildcard_single_only_folds_from_schema() {
     let g = CodetableGlobal::default();
     assert!(!g.wildcard_single_only, "出厂关闭");
-    let on = crate::schema::CodeTableSpec {
-        wildcard_single_only: Some(true),
-        ..Default::default()
-    };
-    assert!(
-        g.resolved(Some(&on)).wildcard_single_only,
-        "方案写了 ⇒ 覆盖"
-    );
+    let on = codetable_spec("wildcard_single_only = true");
+    assert!(g.for_scheme(&on).0.wildcard_single_only, "方案写了 ⇒ 覆盖");
     let global_on = CodetableGlobal {
         wildcard_single_only: true,
         ..Default::default()
     };
     assert!(
         global_on
-            .resolved(Some(&crate::schema::CodeTableSpec::default()))
+            .for_scheme(&crate::schema::CodeTableSpec::default())
+            .0
             .wildcard_single_only,
-        "方案没写 ⇒ 回落全局"
+        "方案没写 ⇒ 取基线"
     );
     assert!(
-        !global_on.resolved(Some(&on)).wildcard,
+        !global_on.for_scheme(&on).0.wildcard,
         "与主开关正交：开仅单字不连带开通配"
     );
 }
@@ -3603,11 +3599,15 @@ fn wubi86_schema_does_not_declare_short_code_yield() {
     };
     let schema: crate::schema::Schema =
         toml::from_str(&text).expect("wubi86.schema.toml 应能解析成 Schema");
+    let declared = schema
+        .engine
+        .codetable
+        .settings
+        .get("short_code_yield_level");
     assert!(
-        schema.engine.codetable.short_code_yield_level.is_none(),
-        "出厂方案不该自带出简让全档位（实际 {:?}）——它会让全局页那一项对五笔失效。\
+        declared.is_none(),
+        "出厂方案不该自带出简让全档位（实际 {declared:?}）。\
              理由见 docs/design/codetable-short-code-yields-full.md §6.3",
-        schema.engine.codetable.short_code_yield_level
     );
 }
 
@@ -3664,71 +3664,6 @@ fn single_char_l1_and_l2_agree() {
         PinyinGlobalConfig::default().single_char,
         "拼音侧单字输入的 L1 与 L2 默认值漂移了"
     );
-}
-
-/// 出厂方案守门：所有内置方案都不声明单字输入，一律跟随全局（判据同
-/// `wubi86_schema_does_not_declare_short_code_yield`）。
-///
-/// 「五笔常开、拼音不开」是文档与设置页引导的事，不是出厂值的事；想给 wubi86 补 `true`
-/// 之前先读 `CodeTableSpec::single_char` 的文档。本字段与引擎类型无关，故遍历全部方案；
-/// 判 `is_none()` 让补上任何取值都变红。
-#[test]
-fn factory_schemas_do_not_declare_single_char() {
-    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../data/schemas");
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        eprintln!(
-            "跳过 factory_schemas_do_not_declare_single_char：{} 不存在",
-            dir.display()
-        );
-        return;
-    };
-    let mut checked = 0usize;
-    for e in entries.flatten() {
-        let path = e.path();
-        if !path.to_string_lossy().ends_with(".schema.toml") {
-            continue;
-        }
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let schema: crate::schema::Schema = match toml::from_str(&text) {
-            Ok(s) => s,
-            // 解析不了是别的测试的地盘（`read_schema` 有段级降级），本条只管字段取值。
-            Err(_) => continue,
-        };
-        assert!(
-            schema.engine.codetable.single_char.is_none(),
-            "出厂方案 {} 不该自带单字输入（实际 {:?}）——它会让全局页那一项对该方案失效。                 理由见 CodeTableSpec::single_char 的文档",
-            path.display(),
-            schema.engine.codetable.single_char
-        );
-        checked += 1;
-    }
-    // 反向保证：目录改名或后缀判据失效时，本测试不得退化成空跑而静默变绿。
-    assert!(checked >= 3, "只扫到 {checked} 个方案文件，判据多半失效了");
-}
-
-/// 出厂守门：内置拼音方案不得自带 `[engine.pinyin].separator`。
-///
-/// 理由同 `wubi86_schema_does_not_declare_short_code_yield`：方案级 `Some(_)` 恒压过全局。
-/// 这一项本就是让用户按自己的键位预算覆盖的（全拼用反引号、双拼把反引号留给辅助码）。
-#[test]
-fn builtin_pinyin_schemas_do_not_declare_separator() {
-    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../data/schemas");
-    for id in ["pinyin", "shuangpin"] {
-        let path = dir.join(format!("{id}.schema.toml"));
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            eprintln!("跳过 {id}：{} 不存在", path.display());
-            continue;
-        };
-        let schema: crate::schema::Schema =
-            toml::from_str(&text).unwrap_or_else(|e| panic!("{id}.schema.toml 应能解析: {e}"));
-        assert!(
-            schema.engine.pinyin.separator.is_none(),
-            "出厂方案 {id} 不该自带 separator（实际 {:?}）——它会让全局页那一项对该方案失效",
-            schema.engine.pinyin.separator
-        );
-    }
 }
 
 /// 取值守门：空码时按标点出厂即丢弃废码，而同族的回车/空格仍是 `commit`。

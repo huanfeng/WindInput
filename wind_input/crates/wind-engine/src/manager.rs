@@ -5012,7 +5012,9 @@ impl EngineManager {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone();
-            let eff = Self::codetable_baseline(Some(&schema), &global).resolved(Some(ct));
+            let eff = Self::codetable_baseline(Some(&schema), &global)
+                .for_scheme(ct)
+                .0;
             eff.wildcard
                 .then(|| wind_config::config::parse_wildcard_key(&eff.wildcard_key))
                 .flatten()
@@ -5199,12 +5201,10 @@ impl EngineManager {
         } else {
             schema_id.to_string()
         };
-        if let Some(patch) = self
-            .schema_def_cached(&resolve_id)
-            .and_then(|d| d.engine.codetable.auto_phrase.clone())
-        {
-            let (_, problems) = global.auto_phrase.for_scheme(&patch);
-            warn_scheme_problems(&resolve_id, "[engine.codetable.auto_phrase]", &problems);
+        if let Some(def) = self.schema_def_cached(&resolve_id) {
+            let (_, problems) =
+                Self::codetable_baseline(Some(&def), &global).for_scheme(&def.engine.codetable);
+            warn_scheme_problems(&resolve_id, "[engine.codetable]", &problems);
         }
         Self::resolve_codetable(
             &resolve_id,
@@ -5360,7 +5360,10 @@ impl EngineManager {
     ) -> wind_config::CodetableGlobal {
         let schema = Self::read_schema(schema_id, data_dir, override_dir);
         let base = Self::codetable_baseline(schema.as_ref(), global);
-        base.resolved(schema.as_ref().map(|s| &s.engine.codetable))
+        match &schema {
+            Some(s) => base.for_scheme(&s.engine.codetable).0,
+            None => base,
+        }
     }
 
     /// 折叠方案行为时用哪份基线：普通方案用全局 `schema.codetable`，overlay 方案用内置默认值。
@@ -5722,10 +5725,14 @@ impl EngineManager {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .clone();
-                toml::Value::try_from(
-                    Self::codetable_baseline(def, &global)
-                        .resolved(def.map(|d| &d.engine.codetable)),
-                )?
+                toml::Value::try_from(match def {
+                    Some(d) => {
+                        Self::codetable_baseline(Some(d), &global)
+                            .for_scheme(&d.engine.codetable)
+                            .0
+                    }
+                    None => Self::codetable_baseline(None, &global),
+                })?
             }
             SchemeKind::Pinyin => {
                 let base = self.pinyin_global();
@@ -7277,7 +7284,8 @@ impl EngineManager {
             // 与 resolve_codetable 是两个平行的折叠点，基线判据必须一致——
             // 一处改了另一处没改，会得到「引擎按 A 行为构建、协调器按 B 行为决策」。
             let eff = Self::codetable_baseline(Some(&schema), codetable_cfg)
-                .resolved(Some(&schema.engine.codetable));
+                .for_scheme(&schema.engine.codetable)
+                .0;
             let commit_opts = crate::codetable::CommitOptions {
                 auto_commit_at_full: eff.auto_commit_at_full,
                 auto_commit_min_len: eff.auto_commit_min_len,

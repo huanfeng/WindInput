@@ -1120,21 +1120,24 @@ fn primary_pinyin_wired_from_config() {
 
 #[test]
 fn codetable_inline_resolves_over_global() {
-    // 全局基线 + 方案 [engine.codetable] 行为逐字段折叠（Some 覆盖 / None 回落）。
+    // 基线 + 方案 [engine.codetable] 写了的项逐项折叠。
     let global = wind_config::CodetableGlobal {
         top_code_commit: false,
         z_key_repeat: false,
         ..Default::default()
     };
-    let ov = wind_config::schema::CodeTableSpec {
-        top_code_commit: Some(true),
-        ..Default::default()
-    };
-    let eff = global.resolved(Some(&ov));
-    assert!(eff.top_code_commit, "Some 字段应覆盖全局");
-    assert!(!eff.z_key_repeat, "None 字段应回落全局");
-    // 无方案行为（None）：整体回落全局。
-    assert!(!global.resolved(None).top_code_commit, "无覆盖时应回落全局");
+    let ov: wind_config::schema::CodeTableSpec = toml::from_str("top_code_commit = true").unwrap();
+    let (eff, problems) = global.for_scheme(&ov);
+    assert!(problems.is_empty(), "{problems:?}");
+    assert!(eff.top_code_commit, "写了的项覆盖基线");
+    assert!(!eff.z_key_repeat, "没写的项取基线");
+    assert!(
+        !global
+            .for_scheme(&wind_config::schema::CodeTableSpec::default())
+            .0
+            .top_code_commit,
+        "方案什么都没写时整体取基线"
+    );
 }
 
 /// Fix 1+2 端到端：方案 `.schema.toml` 内联 `[engine.codetable]` 行为无需 override 文件即生效，

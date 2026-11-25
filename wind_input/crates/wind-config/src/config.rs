@@ -1090,9 +1090,8 @@ pub struct PinyinGlobalConfig {
     /// 单字输入：开启后候选只出单字。出厂关。
     ///
     /// 与码表那份（[`CodetableGlobal::single_char`]）不共享取值：码表开单字是为定长盲打（满码唯一即
-    /// 上屏），拼音开了只是「不出词」，分开才能表达「五笔只出单字、拼音照常出词」。拼音没有方案级覆盖，
-    /// 要加先读 [`CodeTableSpec::single_char`] 的文档。运行时热键切换不写回本项
-    /// （临时态，见 `State::single_char_override`）。
+    /// 上屏），拼音开了只是「不出词」，分开才能表达「五笔只出单字、拼音照常出词」。运行时热键切换
+    /// 不写回本项（临时态，见 `State::single_char_override`）。
     #[serde(default)]
     pub single_char: bool,
     /// 拼音调频（衰减参数；全局唯一，按引擎分——见 docs/redesign/schema-config-layering.md §3.4）。
@@ -2188,146 +2187,21 @@ impl Default for CodetableGlobal {
 }
 
 impl CodetableGlobal {
-    /// 折叠方案 `[engine.codetable]` 的内联/override 行为到全局基线：各 `Some(_)` 字段覆盖，
-    /// `None` 回落全局。schema 内联与 `schema_overrides` 已在 `read_schema` 经 `merge_toml`
-    /// 合并成单个 `CodeTableSpec`，此处只做「方案 → 全局」一次折叠。见 schema-config-layering.md §4。
-    pub fn resolved(&self, ov: Option<&crate::schema::CodeTableSpec>) -> CodetableGlobal {
-        let mut out = self.clone();
-        let Some(o) = ov else {
-            return out;
-        };
-        if let Some(v) = o.top_code_commit {
-            out.top_code_commit = v;
+    /// 某个码表方案的生效设置：以 `self` 为基线，叠上方案 `[engine.codetable]` 里写的项。
+    /// 返回值同 [`PinyinGlobalConfig::for_scheme`]。
+    ///
+    /// 码元字符集 `input_chars` / `leading_chars` 是方案的具名字段（引擎也直接读），空串表示
+    /// 没写，非空才覆盖。
+    pub fn for_scheme(&self, spec: &crate::schema::CodeTableSpec) -> (Self, Vec<String>) {
+        let (mut out, problems) =
+            crate::scheme_fold::fold(self, &spec.settings, "schema.codetable", &[]);
+        if !spec.input_chars.is_empty() {
+            out.input_chars = spec.input_chars.clone();
         }
-        if let Some(v) = o.clear_on_empty_max {
-            out.clear_on_empty_max = v;
+        if !spec.leading_chars.is_empty() {
+            out.leading_chars = spec.leading_chars.clone();
         }
-        if let Some(v) = o.auto_commit_at_full {
-            out.auto_commit_at_full = v;
-        }
-        if let Some(v) = o.auto_commit_min_len {
-            out.auto_commit_min_len = v;
-        }
-        if let Some(v) = o.punct_commit {
-            out.punct_commit = v;
-        }
-        if let Some(v) = o.show_code_hint {
-            out.show_code_hint = v;
-        }
-        if let Some(v) = o.single_code_input {
-            out.single_code_input = v;
-        }
-        if let Some(v) = o.single_code_complete {
-            out.single_code_complete = v;
-        }
-        if let Some(v) = o.short_code_yield_level {
-            out.short_code_yield_level = v;
-        }
-        // 字词范围：方案表了态才覆盖。`Follow`（含「没写这一项」）交出 `None`，回落全局
-        // 方案没表态（`None`）就保留全局值。
-        if let Some(v) = o.single_char {
-            out.single_char = v;
-        }
-        if let Some(v) = o.z_key_repeat {
-            out.z_key_repeat = v;
-        }
-        // 码元字符集是 `String` 而非 `Option`，故「未设置」由空串表达（与上面那些
-        // tri-state 字段不同）。非空才覆盖——否则方案没写这项时会把全局基线抹成空串，
-        // 落到 `CodeCharSet::new` 又被回落成 `a-z`，全局配的字符集就被静默丢弃了。
-        if !o.input_chars.is_empty() {
-            out.input_chars = o.input_chars.clone();
-        }
-        if !o.leading_chars.is_empty() {
-            out.leading_chars = o.leading_chars.clone();
-        }
-        if let Some(v) = &o.z_key_action {
-            out.z_key_action = v.clone();
-        }
-        if let Some(v) = o.wildcard {
-            out.wildcard = v;
-        }
-        if let Some(v) = &o.wildcard_key {
-            out.wildcard_key = v.clone();
-        }
-        if let Some(v) = o.wildcard_single_only {
-            out.wildcard_single_only = v;
-        }
-        if let Some(v) = o.sentence_count {
-            out.sentence_count = v;
-        }
-        if let Some(v) = o.sentence_max_count {
-            out.sentence_max_count = v;
-        }
-        if let Some(v) = &o.sentence_cycle_key {
-            out.sentence_cycle_key = v.clone();
-        }
-        if let Some(v) = o.sentence_grammar_weight {
-            out.sentence_grammar_weight = v;
-        }
-        if let Some(patch) = &o.auto_phrase {
-            // 写错的项只丢那一项，告警在 `EngineManager::resolve_codetable_settings`。
-            out.auto_phrase = out.auto_phrase.for_scheme(patch).0;
-        }
-        // 调频段逐字段折叠，整段缺省 = 全部跟随基线。消费方是 `EngineManager::freq_settings`，
-        // 与上屏行为字段（`build_engine` 的 CommitOptions）不同路径；加字段时两条都要看。
-        if let Some(f) = &o.frequency {
-            if let Some(v) = f.enabled {
-                out.frequency.enabled = v;
-            }
-            if let Some(v) = f.record_always {
-                out.frequency.record_always = v;
-            }
-            if let Some(v) = &f.strategy {
-                out.frequency.strategy = v.clone();
-            }
-            if let Some(v) = &f.promote_prefix {
-                out.frequency.promote_prefix = v.clone();
-            }
-            if let Some(v) = f.half_life {
-                out.frequency.half_life = v;
-            }
-            if let Some(v) = f.protect_top_n {
-                out.frequency.protect_top_n = v;
-            }
-            if let Some(v) = f.protect_top_n_len1 {
-                out.frequency.protect_top_n_len1 = v;
-            }
-            if let Some(v) = f.protect_top_n_len2 {
-                out.frequency.protect_top_n_len2 = v;
-            }
-            if let Some(v) = f.protect_top_n_len3 {
-                out.frequency.protect_top_n_len3 = v;
-            }
-        }
-        // 英文混入子段：同 `frequency` 的逐字段稀疏折叠。消费方是 `EngineManager::english_merge_ctx`
-        // （按活跃方案取 resolved 值），不是 `build_engine` 的 CommitOptions。
-        if let Some(e) = &o.english_merge {
-            if let Some(v) = e.enable {
-                out.english_merge.enable = v;
-            }
-            if let Some(v) = e.min_length {
-                out.english_merge.min_length = v;
-            }
-            if let Some(v) = e.block_commit {
-                out.english_merge.block_commit = v;
-            }
-            if let Some(v) = e.complete_min_length {
-                out.english_merge.complete_min_length = v;
-            }
-            if let Some(v) = e.block_commit_on_word {
-                out.english_merge.block_commit_on_word = v;
-            }
-            if let Some(v) = e.exact_position {
-                out.english_merge.exact_position = v;
-            }
-            if let Some(v) = e.complete_position {
-                out.english_merge.complete_position = v;
-            }
-            if let Some(v) = e.max_count {
-                out.english_merge.max_count = v;
-            }
-        }
-        out
+        (out, problems)
     }
 
     /// 生效的通配键：关闭 ⇒ `None`；键非法 ⇒ 告警并视为关闭（spec §4）。
