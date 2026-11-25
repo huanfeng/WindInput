@@ -7,7 +7,6 @@ use wind_sync::engine::{SyncCtx, sync_once};
 use wind_sync::local::MemLocal;
 use wind_sync::manifest;
 use wind_sync::remote;
-use wind_sync::scope::ScopeFlags;
 use wind_sync::state::SyncState;
 
 fn test_ns() -> wind_sync::scope::Namespace {
@@ -76,7 +75,7 @@ fn removed_device_reappears_when_it_syncs_and_writes_info_again() {
     let mut local = MemLocal::new();
     let mut st = SyncState::new("dev-b");
     local.set("config.toml", "a = 1\n");
-    let mut ctx = SyncCtx::new(ScopeFlags::ALL, T0, test_ns());
+    let mut ctx = SyncCtx::new(T0, test_ns());
     ctx.force = true;
     sync_once(&b, &mut local, &mut st, &dek, &ctx).unwrap();
     put_device_info(&b, &dek.devinfo_key(), "dev-b", &info("b", T0)).unwrap();
@@ -99,7 +98,7 @@ fn device_with_manifest_but_no_info_is_listed_as_unreadable() {
     let mut local = MemLocal::new();
     let mut st = SyncState::new("dev-old");
     local.set("config.toml", "a = 1\n");
-    let mut ctx = SyncCtx::new(ScopeFlags::ALL, T0, test_ns());
+    let mut ctx = SyncCtx::new(T0, test_ns());
     ctx.force = true;
     sync_once(&b, &mut local, &mut st, &dek, &ctx).unwrap();
     let l = list_devices(&b, &dek.devinfo_key()).unwrap();
@@ -118,7 +117,7 @@ fn sync_and_gc_never_touch_info_objects() {
     let mut local = MemLocal::new();
     let mut st = SyncState::new("dev-a");
     local.set("config.toml", "a = 1\n");
-    let mut ctx = SyncCtx::new(ScopeFlags::ALL, T0 + 400 * 86400, test_ns());
+    let mut ctx = SyncCtx::new(T0 + 400 * 86400, test_ns());
     ctx.force = true;
     ctx.gc = true;
     sync_once(&b, &mut local, &mut st, &dek, &ctx).unwrap();

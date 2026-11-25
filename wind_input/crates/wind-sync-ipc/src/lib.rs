@@ -33,27 +33,6 @@ pub enum Backend {
     },
 }
 
-/// 同步范围四类开关，默认全开。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Scope {
-    pub config: bool,
-    pub schemas: bool,
-    pub themes: bool,
-    pub dicts: bool,
-}
-
-impl Default for Scope {
-    fn default() -> Self {
-        Scope {
-            config: true,
-            schemas: true,
-            themes: true,
-            dicts: true,
-        }
-    }
-}
-
 pub const DEFAULT_INTERVAL_MIN: u32 = 15;
 pub const MAX_INTERVAL_MIN: u32 = 24 * 60;
 /// 设备名的字符数上限。
@@ -70,7 +49,6 @@ pub struct SyncSettings {
     pub enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backend: Option<Backend>,
-    pub scope: Scope,
     #[serde(default = "default_interval")]
     pub interval_min: u32,
     /// 本机在设备名册里的名字；空则由同步进程取主机名。不随同步传播。
@@ -82,7 +60,6 @@ impl Default for SyncSettings {
         SyncSettings {
             enabled: false,
             backend: None,
-            scope: Scope::default(),
             interval_min: DEFAULT_INTERVAL_MIN,
             device_name: String::new(),
         }

@@ -12,7 +12,7 @@ use crate::manifest::{self, Entry, Manifest};
 use crate::merge::{self, Conflict};
 use crate::plan::{Action, PlanInput, decide};
 use crate::remote;
-use crate::scope::{self, Namespace, ScopeFlags, to_local, to_remote};
+use crate::scope::{self, Namespace, to_local, to_remote};
 use crate::state::SyncState;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -62,7 +62,6 @@ fn unique_copy_name(
 
 #[derive(Debug, Clone)]
 pub struct SyncCtx {
-    pub scope: ScopeFlags,
     /// 本机命名空间：设置按设备组（`groups/<组>/…`），主题按类别（`<类别>/themes/…`）。
     pub ns: Namespace,
     /// 当前 unix 秒（由调用方给，便于测试）。
@@ -76,9 +75,8 @@ pub struct SyncCtx {
 }
 
 impl SyncCtx {
-    pub fn new(scope: ScopeFlags, now: u64, ns: Namespace) -> Self {
+    pub fn new(now: u64, ns: Namespace) -> Self {
         SyncCtx {
-            scope,
             ns,
             now,
             force: false,
@@ -264,7 +262,7 @@ fn run(
     }
 
     // 1. 扫描本地
-    let in_scope = |p: &str| scope::in_scope_remote(p, &ctx.scope, &ctx.ns);
+    let in_scope = |p: &str| scope::in_scope_remote(p, &ctx.ns);
     let mut contents: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     let mut hashes: BTreeMap<String, String> = BTreeMap::new();
     for p in local.list().map_err(le)? {

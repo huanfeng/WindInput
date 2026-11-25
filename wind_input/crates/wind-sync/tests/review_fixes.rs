@@ -7,7 +7,6 @@ use wind_sync::error::SyncError;
 use wind_sync::local::{LocalError, LocalStore, MemLocal};
 use wind_sync::manifest;
 use wind_sync::remote;
-use wind_sync::scope::ScopeFlags;
 use wind_sync::state::SyncState;
 
 fn test_ns() -> wind_sync::scope::Namespace {
@@ -34,7 +33,7 @@ impl Dev {
         sync_once(b, &mut self.local, &mut self.state, &self.dek, ctx)
     }
     fn sync(&mut self, b: &MemBackend) -> Result<SyncReport, SyncError> {
-        let mut ctx = SyncCtx::new(ScopeFlags::ALL, T0, test_ns());
+        let mut ctx = SyncCtx::new(T0, test_ns());
         ctx.force = true;
         self.sync_with(b, &ctx)
     }
@@ -77,7 +76,7 @@ fn mass_deletion_is_halted_until_confirmed() {
 
     // 用户确认：解除停止态并放行
     d[0].state.retry.clear_halt();
-    let mut ctx = SyncCtx::new(ScopeFlags::ALL, T0, test_ns());
+    let mut ctx = SyncCtx::new(T0, test_ns());
     ctx.force = true;
     ctx.allow_mass_delete = true;
     let r = d[0].sync_with(&b, &ctx).unwrap();
@@ -116,7 +115,7 @@ fn local_list_failure_is_an_error_not_empty() {
     let (b, mut d) = setup(1);
     d[0].local.set("themes/a.json", "x");
     d[0].ok(&b);
-    let mut ctx = SyncCtx::new(ScopeFlags::ALL, T0, test_ns());
+    let mut ctx = SyncCtx::new(T0, test_ns());
     ctx.force = true;
     let dek = d[0].dek.clone();
     let r = sync_once(&b, &mut FailList, &mut d[0].state, &dek, &ctx);
@@ -340,11 +339,7 @@ fn absorbed_is_transitive_across_later_edits() {
     let r = d[1].ok(&b);
     assert!(r.conflicts.is_empty(), "{:?}", r.conflicts);
     assert_eq!(d[1].local.text("themes/x.json").unwrap(), "vE");
-    assert_eq!(
-        d[1].local.files.len(),
-        2,
-        "只有原文件和 C 当时生成的那份副本"
-    );
+    assert_eq!(d[1].local.files.len(), 1, "C 当时生成的副本只留在 C 本机");
 }
 
 // ───────── 8. 键校验 ─────────

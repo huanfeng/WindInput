@@ -6,7 +6,7 @@ use wind_sync::engine::{SyncCtx, SyncReport, sync_once};
 use wind_sync::error::SyncError;
 use wind_sync::local::MemLocal;
 use wind_sync::remote;
-use wind_sync::scope::{Namespace, ScopeFlags};
+use wind_sync::scope::Namespace;
 use wind_sync::state::SyncState;
 
 const T0: u64 = 1_795_478_400;
@@ -26,11 +26,7 @@ impl Dev {
         }
     }
     fn sync(&mut self, b: &MemBackend) -> Result<SyncReport, SyncError> {
-        let mut ctx = SyncCtx::new(
-            ScopeFlags::ALL,
-            T0,
-            Namespace::new(wind_sync::DeviceClass::Desktop, "g"),
-        );
+        let mut ctx = SyncCtx::new(T0, Namespace::new(wind_sync::DeviceClass::Desktop, "g"));
         ctx.force = true;
         sync_once(b, &mut self.local, &mut self.state, &self.dek, &ctx)
     }

@@ -83,7 +83,18 @@ fn empty_settings_use_defaults() {
     let d: SyncSettings = serde_json::from_value(json!({})).unwrap();
     assert_eq!(d, SyncSettings::default());
     assert_eq!(d.interval_min, 15);
-    assert!(d.scope.dicts);
+}
+
+#[test]
+fn old_settings_with_scope_key_still_load() {
+    let j: SyncSettings = serde_json::from_value(json!({
+        "enabled": true,
+        "scope": {"config": false, "schemas": true, "themes": true, "dicts": true}
+    }))
+    .unwrap();
+    assert!(j.enabled);
+    let t: SyncSettings = toml::from_str("enabled = true\n[scope]\nconfig = false\n").unwrap();
+    assert!(t.enabled);
 }
 
 #[test]

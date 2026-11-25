@@ -447,11 +447,7 @@ fn retired_id_reused_elsewhere_is_not_deleted() {
     let mut local = wind_sync::MemLocal::new();
     local.set("config.toml", "a = 1\n");
     local.set("schemas/x.schema.toml", "x = 1\n");
-    let mut ctx = SyncCtx::new(
-        ScopeFlags::ALL,
-        now_unix(),
-        Namespace::new(DeviceClass::Desktop, "pc"),
-    );
+    let mut ctx = SyncCtx::new(now_unix(), Namespace::new(DeviceClass::Desktop, "pc"));
     ctx.force = true;
     sync_once(&mem, &mut local, &mut other, &dek, &ctx).unwrap();
     assert_eq!(other.gen_, 2);

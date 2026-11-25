@@ -4,7 +4,7 @@ use wind_config::Config;
 use wind_coordinator::web_host::WebDataHost;
 use wind_coordinator::{Coordinator, InputProfile};
 use wind_sync::engine::{SyncCtx, sync_once};
-use wind_sync::{MemBackend, MemLocal, ScopeFlags, SyncState, remote};
+use wind_sync::{MemBackend, MemLocal, SyncState, remote};
 use wind_sync_host::testing::MemFactory;
 
 fn test_ns() -> wind_sync::scope::Namespace {
@@ -102,7 +102,7 @@ impl Desktop {
         }
     }
     fn sync(&mut self, remote: &MemBackend) {
-        let mut ctx = SyncCtx::new(ScopeFlags::ALL, T0, test_ns());
+        let mut ctx = SyncCtx::new(T0, test_ns());
         ctx.force = true;
         sync_once(remote, &mut self.local, &mut self.state, &self.dek, &ctx).unwrap();
     }

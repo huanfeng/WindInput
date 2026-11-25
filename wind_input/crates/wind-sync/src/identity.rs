@@ -9,7 +9,7 @@ use crate::error::SyncError;
 use crate::ids::valid_id;
 use crate::local::{LocalError, LocalStore};
 use crate::manifest::{self, Entry, Manifest};
-use crate::scope::{self, Kind, Namespace, ScopeFlags};
+use crate::scope::{self, Kind, Namespace};
 use crate::state::{RetiredId, SyncState};
 use std::collections::BTreeMap;
 
@@ -81,9 +81,7 @@ pub fn join_group(
     let mut g: BTreeMap<String, Entry> = BTreeMap::new();
     for m in latest_manifests(b, &key)? {
         for (p, e) in m.files {
-            if !scope::is_group_setting(&p, &ns.group)
-                || !scope::in_scope_remote(&p, &ScopeFlags::ALL, ns)
-            {
+            if !scope::is_group_setting(&p, &ns.group) || !scope::in_scope_remote(&p, ns) {
                 continue;
             }
             if g.get(&p).is_none_or(|cur| e.order() > cur.order()) {
@@ -111,7 +109,7 @@ pub fn join_group(
         }
         for l in local.list().map_err(le)? {
             if scope::kind(&l) == Kind::Setting
-                && scope::in_scope(&l, &ScopeFlags::ALL)
+                && scope::in_scope(&l)
                 && !g.get(&scope::to_remote(&l, ns)).is_some_and(|e| !e.deleted)
                 && !deletes.contains(&l)
             {

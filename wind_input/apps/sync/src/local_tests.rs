@@ -5,12 +5,7 @@ fn rig() -> (tempfile::TempDir, Arc<FakeCore>, FsLocal, Echo) {
     let d = tempfile::tempdir().unwrap();
     let core = Arc::new(FakeCore::default());
     let echo = Echo::default();
-    let l = FsLocal::new(
-        d.path().to_path_buf(),
-        ScopeFlags::ALL,
-        core.clone(),
-        echo.clone(),
-    );
+    let l = FsLocal::new(d.path().to_path_buf(), core.clone(), echo.clone());
     (d, core, l, echo)
 }
 
@@ -21,7 +16,7 @@ fn put(d: &Path, rel: &str, c: &str) {
 }
 
 #[test]
-fn list_only_in_scope_and_skips_hidden() {
+fn list_whole_user_dir_except_excluded_and_hidden() {
     let (d, _c, l, _) = rig();
     for (p, c) in [
         ("config.toml", "a"),
@@ -30,10 +25,11 @@ fn list_only_in_scope_and_skips_hidden() {
         ("schemas/pinyin.schema.toml", "s"),
         ("themes/t/theme.toml", "t"),
         ("data/pinyin/user.dict.yaml", "u"),
-        ("data/pinyin/temp.wjl", "no"),
+        ("data/pinyin/temp.dict.yaml", "no"),
         ("data/.backup/x.yaml", "no"),
         ("data/pinyin/.user.dict.yaml.wind-sync.tmp", "no"),
-        ("local/state/x", "no"),
+        ("emoji/a.txt", "e"),
+        ("config.conflict-a-2026-11-24.toml", "no"),
     ] {
         put(d.path(), p, c);
     }
@@ -43,21 +39,21 @@ fn list_only_in_scope_and_skips_hidden() {
             "compat.toml",
             "config.toml",
             "data/pinyin/user.dict.yaml",
+            "emoji/a.txt",
             "schemas/pinyin.schema.toml",
             "themes/t/theme.toml",
         ]
     );
     let mut off = FsLocal::new(
         d.path().to_path_buf(),
-        ScopeFlags {
-            dicts: false,
-            themes: false,
-            ..ScopeFlags::ALL
-        },
         Arc::new(FakeCore::default()),
         Echo::default(),
     );
-    assert_eq!(off.list().unwrap().len(), 3);
+    assert_eq!(off.list().unwrap().len(), 6);
+    assert!(
+        l.conflict_files()
+            .contains(&"config.conflict-a-2026-11-24.toml".to_string())
+    );
     assert!(off.read("../etc/passwd").is_err());
     assert_eq!(off.read("nope.toml").unwrap(), None);
     assert!(off.write_batch(&[("../x".into(), vec![])]).is_err());
@@ -235,12 +231,7 @@ fn content_folded_by_begin_edit_is_not_overwritten_and_next_round_sees_it() {
 
     // 下一轮：重新扫描读到折回后的内容，写入放行
     *core.on_call.lock().unwrap() = None;
-    let mut l2 = FsLocal::new(
-        d.path().to_path_buf(),
-        ScopeFlags::ALL,
-        core.clone(),
-        Echo::default(),
-    );
+    let mut l2 = FsLocal::new(d.path().to_path_buf(), core.clone(), Echo::default());
     assert_eq!(l2.read(UD).unwrap().unwrap(), b"folded");
     l2.write_batch(&[(UD.into(), b"merged".to_vec())]).unwrap();
     assert_eq!(

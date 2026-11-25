@@ -1,33 +1,6 @@
-//! 同步范围（设计 §8）：四类开关 + 包含/排除清单。
+//! 同步范围：用户目录默认全同步，由分类表排除本机项（数据/资源/设置/排除）。
 
 use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ScopeFlags {
-    /// config.toml、compat.toml
-    pub config: bool,
-    /// schemas/
-    pub schemas: bool,
-    /// themes/
-    pub themes: bool,
-    /// 词库与短语（data/ 下的文本词库、短语、字符集）
-    pub dicts: bool,
-}
-
-impl ScopeFlags {
-    pub const ALL: ScopeFlags = ScopeFlags {
-        config: true,
-        schemas: true,
-        themes: true,
-        dicts: true,
-    };
-}
-
-impl Default for ScopeFlags {
-    fn default() -> Self {
-        Self::ALL
-    }
-}
 
 /// 设备类别：决定平台相关文件（配置、主题、兼容）在远端的命名空间。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -67,10 +40,62 @@ pub enum Kind {
 pub fn kind(local: &str) -> Kind {
     let segs: Vec<&str> = local.split('/').collect();
     match segs.as_slice() {
-        ["config.toml"] | ["compat.toml"] => Kind::Setting,
+        ["config.toml"]
+        | ["compat.toml"]
+        | ["wind_setting.toml"]
+        | ["wind_setting_hide.toml"]
+        | ["schema_overrides", ..] => Kind::Setting,
         ["data", schema, "dicts.toml"] if *schema != "charsets" => Kind::Setting,
-        ["themes", ..] => Kind::PerClass,
+        ["themes", ..] | ["extensions", ..] => Kind::PerClass,
         _ => Kind::Shared,
+    }
+}
+
+/// 路径的分类：数据与资源默认同步，设置按组同步，排除项只留本机。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Class {
+    Data,
+    Resource,
+    Setting,
+    Excluded,
+}
+
+pub fn classify(local: &str) -> Class {
+    let segs: Vec<&str> = local.split('/').collect();
+    let last = segs.last().copied().unwrap_or("");
+    if segs.iter().any(|s| s.starts_with('.'))
+        || last.ends_with(".tmp")
+        || last.contains(".bak-")
+        || last.contains(".conflict-")
+        || last.ends_with(".sys_hash")
+    {
+        return Class::Excluded;
+    }
+    match segs.as_slice() {
+        ["meta.toml", ..] | ["screenshots", ..] | ["charsets", ..] => return Class::Excluded,
+        ["data", "stats", ..] => return Class::Excluded,
+        ["data", ..]
+            if matches!(
+                last,
+                "temp.dict.yaml"
+                    | "freq.table.yaml"
+                    | "assoc.table.yaml"
+                    | "draft.dict.yaml"
+                    | "completion.table.yaml"
+            ) =>
+        {
+            return Class::Excluded;
+        }
+        _ => {}
+    }
+    if kind(local) == Kind::Setting {
+        return Class::Setting;
+    }
+    match segs.as_slice() {
+        ["schemas", ..] | ["themes", ..] | ["extensions", ..] | ["system.softkeyboard.toml"] => {
+            Class::Resource
+        }
+        _ => Class::Data,
     }
 }
 
@@ -114,8 +139,8 @@ pub fn to_local(remote: &str, ns: &Namespace) -> Option<String> {
 }
 
 /// 远端逻辑路径是否属于本机命名空间且在同步范围内。
-pub fn in_scope_remote(remote: &str, f: &ScopeFlags, ns: &Namespace) -> bool {
-    to_local(remote, ns).is_some_and(|l| in_scope(&l, f))
+pub fn in_scope_remote(remote: &str, ns: &Namespace) -> bool {
+    to_local(remote, ns).is_some_and(|l| in_scope(&l))
 }
 
 /// 远端逻辑路径是否是该组的设置文件。
@@ -126,8 +151,8 @@ pub fn is_group_setting(remote: &str, group: &str) -> bool {
         .is_some_and(|(g, local)| g == group && kind(local) == Kind::Setting)
 }
 
-/// `path` 为用户目录下以 `/` 分隔的相对路径。
-pub fn in_scope(path: &str, f: &ScopeFlags) -> bool {
+/// `path` 为用户目录下以 `/` 分隔的相对路径；合法且不属于排除项才同步。
+pub fn in_scope(path: &str) -> bool {
     if path.is_empty()
         || path.starts_with('/')
         || path.contains('\\')
@@ -137,41 +162,12 @@ pub fn in_scope(path: &str, f: &ScopeFlags) -> bool {
     {
         return false;
     }
-    let segs: Vec<&str> = path.split('/').collect();
-    match segs.as_slice() {
-        ["config.toml"] | ["compat.toml"] => f.config,
-        ["schemas", ..] => f.schemas && !hidden(&segs),
-        ["themes", ..] => f.themes && !hidden(&segs),
-        ["data", rest @ ..] => f.dicts && data_in_scope(rest),
-        _ => false,
-    }
-}
-
-/// 隐藏文件与临时文件（同目录临时文件 + rename 的中间态）不同步。
-fn hidden(segs: &[&str]) -> bool {
-    segs.iter().any(|s| s.starts_with('.')) || segs.last().is_some_and(|s| s.ends_with(".tmp"))
-}
-
-fn data_in_scope(rest: &[&str]) -> bool {
-    if hidden(rest) {
-        return false; // 含 data/.backup/
-    }
-    match rest {
-        ["phrases.dict.yaml"] | ["quick_format.toml"] | ["common_chars.yaml"] => true,
-        ["charsets", _, ..] => true,
-        [schema, "user.dict.yaml"] | [schema, "shadow.dict.yaml"] | [schema, "dicts.toml"] => {
-            *schema != "charsets"
-        }
-        [schema, "dicts", _, ..] => *schema != "charsets",
-        _ => false,
-    }
+    classify(path) != Class::Excluded
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const A: ScopeFlags = ScopeFlags::ALL;
 
     fn ns(class: &str, group: &str) -> Namespace {
         Namespace::new(DeviceClass::parse(class).unwrap(), group)
@@ -215,10 +211,10 @@ mod tests {
         assert_eq!(to_local("mobile/themes/a", &home), None);
         assert_eq!(to_local("desktop/data/x", &home), None, "数据不带类别前缀");
         assert_eq!(to_local("data/x", &home).as_deref(), Some("data/x"));
-        assert!(in_scope_remote("groups/home/config.toml", &A, &home));
-        assert!(!in_scope_remote("groups/office/config.toml", &A, &home));
-        assert!(!in_scope_remote("../config.toml", &A, &home));
-        assert!(!in_scope_remote("groups/home/../config.toml", &A, &home));
+        assert!(in_scope_remote("groups/home/config.toml", &home));
+        assert!(!in_scope_remote("groups/office/config.toml", &home));
+        assert!(!in_scope_remote("../config.toml", &home));
+        assert!(!in_scope_remote("groups/home/../config.toml", &home));
     }
 
     #[test]
@@ -244,11 +240,12 @@ mod tests {
             "data/common_chars.yaml",
             "data/charsets/gbk.txt",
             "data/pinyin/user.dict.yaml",
-            "data/pinyin/shadow.dict.yaml",
             "data/pinyin/dicts.toml",
-            "data/pinyin/dicts/x.dict.yaml",
+            "emoji/a.txt",
+            "other.txt",
+            "wind_setting.toml",
         ] {
-            assert!(in_scope(p, &A), "{p}");
+            assert!(in_scope(p), "{p}");
         }
     }
 
@@ -258,74 +255,27 @@ mod tests {
             "meta.toml",
             "data/.backup/x.yaml",
             "data/phrases.sys_hash",
-            "local/state/x",
-            "data/pinyin/temp.wjl",
-            "data/pinyin/freq.redb",
-            "data/pinyin/assoc.db",
-            "data/pinyin/draft",
-            "data/pinyin/stats",
-            "data/pinyin/completion",
+            "data/pinyin/temp.dict.yaml",
+            "data/stats/a.toml",
             "schemas/.x.tmp",
             "themes/a.tmp",
+            "config.conflict-a-2026-11-24.toml",
             "../config.toml",
             "/config.toml",
             "data//phrases.dict.yaml",
-            "other.txt",
+            "a\\b",
         ] {
-            assert!(!in_scope(p, &A), "{p}");
+            assert!(!in_scope(p), "{p}");
         }
     }
 
     #[test]
-    fn flags_gate_each_class() {
-        let none = ScopeFlags {
-            config: false,
-            schemas: false,
-            themes: false,
-            dicts: false,
-        };
-        assert!(!in_scope("config.toml", &none));
-        assert!(in_scope(
-            "config.toml",
-            &ScopeFlags {
-                config: true,
-                ..none
-            }
-        ));
-        assert!(in_scope(
-            "themes/a",
-            &ScopeFlags {
-                themes: true,
-                ..none
-            }
-        ));
-        assert!(!in_scope(
-            "themes/a",
-            &ScopeFlags {
-                schemas: true,
-                ..none
-            }
-        ));
-        assert!(in_scope(
-            "schemas/a",
-            &ScopeFlags {
-                schemas: true,
-                ..none
-            }
-        ));
-        assert!(in_scope(
-            "data/phrases.dict.yaml",
-            &ScopeFlags {
-                dicts: true,
-                ..none
-            }
-        ));
-        assert!(!in_scope(
-            "data/phrases.dict.yaml",
-            &ScopeFlags {
-                config: true,
-                ..none
-            }
-        ));
+    fn kind_covers_settings_and_per_class() {
+        assert_eq!(kind("schema_overrides/x.toml"), Kind::Setting);
+        assert_eq!(kind("wind_setting.toml"), Kind::Setting);
+        assert_eq!(kind("wind_setting_hide.toml"), Kind::Setting);
+        assert_eq!(kind("extensions/k/a"), Kind::PerClass);
+        assert_eq!(kind("themes/a"), Kind::PerClass);
+        assert_eq!(kind("emoji/a.txt"), Kind::Shared);
     }
 }

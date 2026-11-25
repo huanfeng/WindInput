@@ -13,7 +13,6 @@ use wind_sync::engine::{SyncCtx, sync_once};
 use wind_sync::local::MemLocal;
 use wind_sync::net::{S3Backend, S3Config, WebDavBackend, WebDavConfig};
 use wind_sync::remote;
-use wind_sync::scope::ScopeFlags;
 use wind_sync::state::SyncState;
 
 fn test_ns() -> wind_sync::scope::Namespace {
@@ -117,7 +116,7 @@ fn sync_roundtrip(b: &dyn Backend) {
     let mut la = MemLocal::new();
     let mut lb = MemLocal::new();
     let (mut sa, mut sb) = (SyncState::new("devA"), SyncState::new("devB"));
-    let mut ctx = SyncCtx::new(ScopeFlags::ALL, 1_795_478_400, test_ns());
+    let mut ctx = SyncCtx::new(1_795_478_400, test_ns());
     ctx.force = true;
     la.set("config.toml", "a = 1\n");
     la.set("themes/中文 主题.json", "{}");

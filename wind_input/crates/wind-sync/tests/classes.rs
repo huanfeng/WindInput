@@ -5,7 +5,7 @@ use wind_sync::crypto::{Dek, KdfParams};
 use wind_sync::engine::{SyncCtx, SyncReport, sync_once};
 use wind_sync::local::MemLocal;
 use wind_sync::remote;
-use wind_sync::scope::{DeviceClass, Namespace, ScopeFlags};
+use wind_sync::scope::{DeviceClass, Namespace};
 use wind_sync::state::SyncState;
 
 const T0: u64 = 1_795_478_400;
@@ -38,7 +38,7 @@ impl Dev {
         }
     }
     fn ok(&mut self, b: &MemBackend) -> SyncReport {
-        let mut ctx = SyncCtx::new(ScopeFlags::ALL, T0, ns(self.class));
+        let mut ctx = SyncCtx::new(T0, ns(self.class));
         ctx.force = true;
         sync_once(b, &mut self.local, &mut self.state, &self.dek, &ctx).expect("同步应成功")
     }
@@ -149,7 +149,7 @@ fn mass_delete_guard_counts_mapped_paths() {
     }
     ph.ok(&b);
     ph.local.files.clear();
-    let mut ctx = SyncCtx::new(ScopeFlags::ALL, T0, ns(Mobile));
+    let mut ctx = SyncCtx::new(T0, ns(Mobile));
     ctx.force = true;
     let e = sync_once(&b, &mut ph.local, &mut ph.state, &ph.dek, &ctx).unwrap_err();
     assert!(e.is_mass_deletion(), "{e}");

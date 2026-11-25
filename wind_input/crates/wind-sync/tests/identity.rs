@@ -10,7 +10,7 @@ use wind_sync::identity::{
 use wind_sync::local::MemLocal;
 use wind_sync::manifest::{self, Entry, Manifest};
 use wind_sync::remote;
-use wind_sync::scope::{DeviceClass, Namespace, ScopeFlags};
+use wind_sync::scope::{DeviceClass, Namespace};
 use wind_sync::state::SyncState;
 
 const T0: u64 = 1_795_478_400;
@@ -34,7 +34,7 @@ impl Dev {
         }
     }
     fn sync(&mut self, b: &MemBackend) {
-        let mut ctx = SyncCtx::new(ScopeFlags::ALL, T0, self.ns.clone());
+        let mut ctx = SyncCtx::new(T0, self.ns.clone());
         ctx.force = true;
         ctx.allow_mass_delete = true;
         sync_once(b, &mut self.local, &mut self.state, &self.dek, &ctx).expect("同步应成功");

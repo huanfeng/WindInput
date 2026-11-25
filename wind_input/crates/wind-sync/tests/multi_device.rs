@@ -7,7 +7,6 @@ use wind_sync::error::SyncError;
 use wind_sync::local::MemLocal;
 use wind_sync::manifest;
 use wind_sync::remote;
-use wind_sync::scope::ScopeFlags;
 use wind_sync::state::SyncState;
 
 fn test_ns() -> wind_sync::scope::Namespace {
@@ -31,7 +30,7 @@ impl Dev {
         }
     }
     fn sync(&mut self, b: &MemBackend) -> Result<SyncReport, SyncError> {
-        let mut ctx = SyncCtx::new(ScopeFlags::ALL, T0, test_ns());
+        let mut ctx = SyncCtx::new(T0, test_ns());
         ctx.force = true;
         sync_once(b, &mut self.local, &mut self.state, &self.dek, &ctx)
     }
@@ -139,7 +138,7 @@ fn toml_key_conflict_is_reported() {
 }
 
 #[test]
-fn theme_conflict_makes_copy_and_propagates() {
+fn theme_conflict_makes_copy_that_stays_local() {
     let (b, mut d) = setup(2);
     d[0].local.set("themes/x.json", "v0");
     d[0].ok(&b);
@@ -160,10 +159,31 @@ fn theme_conflict_makes_copy_and_propagates() {
     assert_eq!(d[1].local.text(&copy).unwrap(), "from0");
     d[0].ok(&b);
     assert_eq!(d[0].local.text("themes/x.json").unwrap(), "from1");
-    assert_eq!(d[0].local.text(&copy).unwrap(), "from0");
+    assert!(d[0].local.text(&copy).is_none(), "冲突副本只留本机，不传播");
     // 稳定：再来一轮没有新动作
     let r = d[0].ok(&b);
     assert!(r.uploaded.is_empty() && r.downloaded.is_empty() && r.conflicts.is_empty());
+}
+
+#[test]
+fn conflict_copies_stay_local() {
+    let (b, mut d) = setup(2);
+    d[0].local.set("themes/a/t.toml", "v0");
+    d[0].ok(&b);
+    d[1].ok(&b);
+    d[0].local.set("themes/a/t.toml", "from0");
+    d[1].local.set("themes/a/t.toml", "from1");
+    d[0].ok(&b);
+    let r = d[1].ok(&b);
+    let copy = r.conflicts[0].copy.clone().unwrap();
+    assert!(d[1].local.text(&copy).is_some(), "副本在本机");
+    d[0].ok(&b);
+    d[1].ok(&b);
+    assert!(
+        d[0].local.files.keys().all(|k| !k.contains(".conflict-")),
+        "{:?}",
+        d[0].local.files.keys()
+    );
 }
 
 #[test]
@@ -389,30 +409,23 @@ fn swapped_objects_are_rejected() {
 }
 
 #[test]
-fn scope_filter_limits_what_syncs() {
+fn scope_filter_skips_local_only_entries() {
     let (b, mut d) = setup(2);
     d[0].local.set("config.toml", "a = 1\n");
     d[0].local.set("themes/t.json", "{}");
     d[0].local.set("meta.toml", "dir_id = 1");
     d[0].local.set("data/.backup/x", "x");
-    d[0].local.set("data/pinyin/freq.redb", "x");
-    let mut ctx = SyncCtx::new(
-        ScopeFlags {
-            themes: false,
-            ..ScopeFlags::ALL
-        },
-        T0,
-        test_ns(),
-    );
+    d[0].local.set("data/pinyin/freq.table.yaml", "x");
+    let mut ctx = SyncCtx::new(T0, test_ns());
     ctx.force = true;
     let dev = &mut d[0];
     sync_once(&b, &mut dev.local, &mut dev.state, &dev.dek, &ctx).unwrap();
     d[1].ok(&b);
     assert!(d[1].local.text("config.toml").is_some());
-    assert!(d[1].local.text("themes/t.json").is_none(), "主题开关关");
+    assert!(d[1].local.text("themes/t.json").is_some());
     assert!(d[1].local.text("meta.toml").is_none());
     assert!(d[1].local.text("data/.backup/x").is_none());
-    assert!(d[1].local.text("data/pinyin/freq.redb").is_none());
+    assert!(d[1].local.text("data/pinyin/freq.table.yaml").is_none());
 }
 
 #[test]
@@ -420,7 +433,7 @@ fn retry_backoff_and_halt_through_sync_once() {
     let (b, mut d) = setup(1);
     d[0].local.set("config.toml", "a = 1\n");
     b.fail_all(Some(BackendError::Transient("net".into())));
-    let ctx = SyncCtx::new(ScopeFlags::ALL, 1000, test_ns());
+    let ctx = SyncCtx::new(1000, test_ns());
     let dev = &mut d[0];
     assert!(sync_once(&b, &mut dev.local, &mut dev.state, &dev.dek, &ctx).is_err());
     assert_eq!(dev.state.retry.next_at, 1030);
@@ -431,7 +444,7 @@ fn retry_backoff_and_halt_through_sync_once() {
         &mut dev.local,
         &mut dev.state,
         &dev.dek,
-        &SyncCtx::new(ScopeFlags::ALL, 1010, test_ns()),
+        &SyncCtx::new(1010, test_ns()),
     )
     .unwrap();
     assert!(r.skipped);
@@ -440,7 +453,7 @@ fn retry_backoff_and_halt_through_sync_once() {
         &mut dev.local,
         &mut dev.state,
         &dev.dek,
-        &SyncCtx::new(ScopeFlags::ALL, 1031, test_ns()),
+        &SyncCtx::new(1031, test_ns()),
     )
     .unwrap();
     assert!(!r.skipped && r.uploaded.len() == 1);
@@ -453,12 +466,12 @@ fn retry_backoff_and_halt_through_sync_once() {
             &mut dev.local,
             &mut dev.state,
             &dev.dek,
-            &SyncCtx::new(ScopeFlags::ALL, 2000, test_ns())
+            &SyncCtx::new(2000, test_ns())
         )
         .is_err()
     );
     b.fail_all(None);
-    let mut f = SyncCtx::new(ScopeFlags::ALL, 9999, test_ns());
+    let mut f = SyncCtx::new(9999, test_ns());
     f.force = true;
     assert!(matches!(
         sync_once(&b, &mut dev.local, &mut dev.state, &dev.dek, &f),
@@ -597,7 +610,7 @@ fn three_devices_concurrent_theme_edits_make_two_copies() {
     assert_eq!(d[1].local.text("themes/x.json").unwrap(), "vB");
     assert_eq!(d[1].local.text(&copies[0]).unwrap(), "vA");
     assert_eq!(d[1].local.text(&copies[1]).unwrap(), "vC");
-    // 传播且收敛
+    // 收敛；副本只留在产生冲突的那台
     for _ in 0..2 {
         d[0].ok(&b);
         d[2].ok(&b);
@@ -605,10 +618,12 @@ fn three_devices_concurrent_theme_edits_make_two_copies() {
     }
     for dev in &d {
         assert_eq!(dev.local.text("themes/x.json").unwrap(), "vB");
-        assert_eq!(dev.local.text(&copies[0]).unwrap(), "vA");
-        assert_eq!(dev.local.text(&copies[1]).unwrap(), "vC");
-        assert_eq!(dev.local.files.len(), 3);
     }
+    assert_eq!(d[1].local.text(&copies[0]).unwrap(), "vA");
+    assert_eq!(d[1].local.text(&copies[1]).unwrap(), "vC");
+    assert_eq!(d[1].local.files.len(), 3);
+    assert_eq!(d[0].local.files.len(), 1);
+    assert_eq!(d[2].local.files.len(), 1);
 }
 
 #[test]
@@ -642,7 +657,7 @@ fn absorbed_old_entry_does_not_trigger_copy_again() {
     let r = d[1].ok(&b);
     assert!(r.conflicts.is_empty(), "{:?}", r.conflicts);
     assert_eq!(d[1].local.text("themes/x.json").unwrap(), "vC");
-    assert_eq!(d[1].local.files.len(), 2, "只有原文件和 C 生成的那一份副本");
+    assert_eq!(d[1].local.files.len(), 1, "C 的副本只留在 C 本机");
 }
 
 #[test]

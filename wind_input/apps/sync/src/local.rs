@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde_json::{Value, json};
 use wind_sync::crypto::content_hash;
-use wind_sync::scope::{ScopeFlags, in_scope};
+use wind_sync::scope::in_scope;
 use wind_sync::{LocalError, LocalStore};
 
 use crate::link::CoreLink;
@@ -41,7 +41,6 @@ pub fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 pub struct FsLocal {
     root: PathBuf,
-    scope: ScopeFlags,
     link: Arc<dyn CoreLink>,
     echo: Echo,
     /// 扫描时读到的内容 hash（None = 不存在）。写入前据此确认文件没被别处改过。
@@ -49,10 +48,6 @@ pub struct FsLocal {
     /// 置位后写入流程在各步之间收手（先释放已开的编辑会话）。
     cancel: Arc<AtomicBool>,
 }
-
-/// 用户目录里同步相关的顶层入口。
-const ROOT_FILES: [&str; 2] = ["config.toml", "compat.toml"];
-const ROOT_DIRS: [&str; 3] = ["schemas", "themes", "data"];
 
 /// 不含 `..`、绝对路径、反斜杠、空段：写入前的最后一道闸，冲突副本等范围外路径也要过它。
 fn safe_rel(path: &str) -> bool {
@@ -134,10 +129,9 @@ impl Reloads {
 }
 
 impl FsLocal {
-    pub fn new(root: PathBuf, scope: ScopeFlags, link: Arc<dyn CoreLink>, echo: Echo) -> FsLocal {
+    pub fn new(root: PathBuf, link: Arc<dyn CoreLink>, echo: Echo) -> FsLocal {
         FsLocal {
             root,
-            scope,
             link,
             echo,
             read_hashes: Mutex::new(HashMap::new()),
@@ -182,23 +176,23 @@ impl FsLocal {
         }
     }
 
+    /// 用户目录下全部文件（跳过以 `.` 开头的项）；是否同步由 `in_scope` 再判。
     fn all_files(&self) -> Vec<String> {
         let mut out = Vec::new();
-        // 根目录：config.toml / compat.toml，以及它们的冲突副本（`config.conflict-…toml`）
-        if let Ok(rd) = std::fs::read_dir(&self.root) {
-            for e in rd.flatten() {
-                let name = e.file_name().to_string_lossy().into_owned();
-                let ours = ROOT_FILES.iter().any(|f| {
-                    let stem = f.split('.').next().unwrap_or(f);
-                    name.starts_with(&format!("{stem}."))
-                });
-                if ours && e.file_type().is_ok_and(|t| t.is_file()) {
-                    out.push(name);
-                }
+        let Ok(rd) = std::fs::read_dir(&self.root) else {
+            return out;
+        };
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                continue;
             }
-        }
-        for d in ROOT_DIRS {
-            self.walk(&self.abs(d), d, &mut out);
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_dir() {
+                self.walk(&e.path(), &name, &mut out);
+            } else if ft.is_file() {
+                out.push(name);
+            }
         }
         out
     }
@@ -448,7 +442,7 @@ impl LocalStore for FsLocal {
         let mut v: Vec<String> = self
             .all_files()
             .into_iter()
-            .filter(|p| in_scope(p, &self.scope))
+            .filter(|p| in_scope(p))
             .collect();
         v.sort();
         Ok(v)

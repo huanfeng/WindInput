@@ -21,12 +21,12 @@ use wind_sync::devices::{
 };
 use wind_sync::identity::{self, Overwrite};
 use wind_sync::ids;
-use wind_sync::scope::{DeviceClass, Kind, Namespace, ScopeFlags, in_scope, kind, to_remote};
+use wind_sync::scope::{DeviceClass, Kind, Namespace, in_scope, kind, to_remote};
 use wind_sync::state::backoff_secs;
 use wind_sync::{
     Backend, LocalStore, SyncCtx, SyncError, SyncReport, SyncState, manifest, remote, sync_once,
 };
-use wind_sync_ipc::{Backend as Target, FromSync, Op, Scope, Status, SyncSettings, ToSync};
+use wind_sync_ipc::{Backend as Target, FromSync, Op, Status, SyncSettings, ToSync};
 
 use crate::backends::BackendFactory;
 use crate::backup;
@@ -36,7 +36,7 @@ use crate::local::{Echo, FsLocal, RETRY_TAG, lock};
 use crate::log::{log, now_unix};
 use crate::secrets::{SecretStore, Secrets};
 use crate::statefile;
-use crate::watch::{self, SharedScope};
+use crate::watch;
 
 /// 主循环的输入。
 #[derive(Debug)]
@@ -128,15 +128,6 @@ pub struct Config {
     pub on_demand: bool,
 }
 
-pub fn flags_of(s: &Scope) -> ScopeFlags {
-    ScopeFlags {
-        config: s.config,
-        schemas: s.schemas,
-        themes: s.themes,
-        dicts: s.dicts,
-    }
-}
-
 pub struct Runner {
     cfg: Config,
     settings: SyncSettings,
@@ -144,7 +135,6 @@ pub struct Runner {
     secret_error: Option<String>,
     state: SyncState,
     echo: Echo,
-    scope: SharedScope,
     factory: Arc<dyn BackendFactory>,
     tx: Sender<Input>,
     cancel: Arc<AtomicBool>,
@@ -359,9 +349,8 @@ impl Runner {
         let default_id = ids::default_device_id(&display_name(&cfg.settings), cfg.portable);
         let state = statefile::load(&cfg.state_dir, &default_id);
         let settings = cfg.settings.clone();
-        let scope = SharedScope::new(flags_of(&settings.scope));
         let watch = cfg.watch.then(|| {
-            watch::start(&cfg.userdata_dir, scope.clone(), tx.clone())
+            watch::start(&cfg.userdata_dir, tx.clone())
                 .map_err(|e| log!("{e}；仅靠定时同步"))
                 .ok()
         });
@@ -377,7 +366,6 @@ impl Runner {
             secret_error,
             state,
             echo: Arc::new(Mutex::new(Default::default())),
-            scope,
             factory,
             tx,
             cancel: Arc::new(AtomicBool::new(false)),
@@ -575,7 +563,6 @@ impl Runner {
         if s == self.settings {
             return;
         }
-        self.scope.set(flags_of(&s.scope));
         // 存储位置变了，已存的密码不能再发往新地址（防凭据被转发到别处）
         if backend_changed(self.settings.backend.as_ref(), s.backend.as_ref())
             && self.secrets.password.take().is_some()
@@ -609,7 +596,7 @@ impl Runner {
 
     /// 文件事件：与已同步内容或我们刚写的内容一致的（回声）忽略。
     fn on_fs(&mut self, rel: &str) {
-        if !self.runnable() || !in_scope(rel, &flags_of(&self.settings.scope)) {
+        if !self.runnable() || !in_scope(rel) {
             return;
         }
         let hash = std::fs::read(self.abs(rel))
@@ -653,8 +640,7 @@ impl Runner {
         self.syncing = true;
         self.report();
         let now = now_unix();
-        let scope = flags_of(&self.settings.scope);
-        let mut ctx = SyncCtx::new(scope, now, self.ns());
+        let mut ctx = SyncCtx::new(now, self.ns());
         ctx.force = force;
         ctx.gc = true;
         ctx.allow_mass_delete = allow_mass;
@@ -670,7 +656,6 @@ impl Runner {
         );
         let mut local = FsLocal::new(
             self.cfg.userdata_dir.clone(),
-            scope,
             self.cfg.link.clone(),
             self.echo.clone(),
         )
@@ -1125,11 +1110,10 @@ impl Runner {
         self.publish_info(false);
     }
 
-    /// 覆盖本机设置用的本地存储：不受同步范围开关限制（与 `join_group` 一致）。
+    /// 覆盖本机设置用的本地存储：与 `join_group` 一致。
     fn local_all(&self) -> FsLocal {
         FsLocal::new(
             self.cfg.userdata_dir.clone(),
-            ScopeFlags::ALL,
             self.cfg.link.clone(),
             self.echo.clone(),
         )
