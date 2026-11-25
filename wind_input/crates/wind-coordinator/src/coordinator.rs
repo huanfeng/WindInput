@@ -8737,7 +8737,11 @@ impl Coordinator {
                     .flatten()
             });
         }
-        self.rt().sentence_cycle_key
+        let p = self.engine_mgr.pinyin_settings();
+        let raw = p.sentence_cycle_key.trim();
+        (!raw.is_empty())
+            .then(|| keymap::session_key_name_to_vk(raw))
+            .flatten()
     }
 
     /// 当前方案的整句块露几条（`place_sentence_block` 用）。规则同 [
@@ -8750,7 +8754,7 @@ impl Coordinator {
                     .with_codetable_settings(|c| c.sentence_count),
             );
         }
-        usize::from(self.rt().config.schema.pinyin.sentence_count)
+        usize::from(self.engine_mgr.pinyin_settings().sentence_count)
     }
 
     /// 整句切换键（拼音 / 码表各一把，见 [`Self::active_sentence_cycle_key`]）：在整句池里滚动显示窗口。

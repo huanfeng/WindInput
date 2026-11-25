@@ -24,6 +24,7 @@ pub mod hotkey;
 pub mod patch;
 pub mod runtime_state;
 pub mod schema;
+mod scheme_fold;
 pub mod section_fallback;
 pub mod startup_trace;
 pub mod tolerant_de;

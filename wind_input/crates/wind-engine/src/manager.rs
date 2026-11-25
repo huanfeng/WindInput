@@ -483,6 +483,8 @@ pub struct EngineManager {
     /// 词库清单这类随词库目录变化的字段不要从这里取：缓存只随方案失效与配置重载清，
     /// 不随词库目录变化清。失效同 `aux_settings_cache`（整表清 + 代次）。
     schema_def_cache: Mutex<HashMap<String, Option<Arc<Schema>>>>,
+    /// 各拼音方案的生效设置（内置默认 ⊕ 方案 `[engine.pinyin]`），与 `schema_def_cache` 同生同灭。
+    pinyin_settings_cache: Mutex<HashMap<String, Arc<wind_config::config::PinyinGlobalConfig>>>,
     /// `schema_def_cache` 的失效代次（同 `aux_settings_gen`）。
     schema_def_gen: std::sync::atomic::AtomicU64,
     /// 词库统计结果（方案 id → (缓存键, 结果)），见 [`Self::dict_stats`]。键含各库摘要，
@@ -898,6 +900,7 @@ impl EngineManager {
             codetable_settings_gen: std::sync::atomic::AtomicU64::new(0),
             schema_type_cache: Mutex::new(HashMap::new()),
             schema_def_cache: Mutex::new(HashMap::new()),
+            pinyin_settings_cache: Mutex::new(HashMap::new()),
             schema_def_gen: std::sync::atomic::AtomicU64::new(0),
             dict_stats_cache: Mutex::new(HashMap::new()),
             dict_stats_gates: Mutex::new(HashMap::new()),
@@ -977,19 +980,7 @@ impl EngineManager {
     /// （`shuangpin.schema.toml` 的 `backtick = "aux_code"`），全局唯一的 `separator`
     /// 一改就会夺走双拼的辅助码触发键。
     pub fn pinyin_separator_mode_of(&self, schema_id: &str) -> String {
-        let global = self
-            .pinyin
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .separator
-            .clone();
-        if schema_id.is_empty() {
-            return global;
-        }
-        self.schema_def_cached(schema_id)
-            .and_then(|s| s.engine.pinyin.separator.clone())
-            .filter(|v| !v.is_empty())
-            .unwrap_or(global)
+        self.pinyin_settings_of(schema_id).separator.clone()
     }
 
     /// 当前活跃拼音方案是否为双拼（`engine.pinyin.scheme == "shuangpin"`）。
@@ -4484,12 +4475,7 @@ impl EngineManager {
                 })
             }
             EngineType::Pinyin => {
-                let p = self
-                    .pinyin
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .english_merge
-                    .clone();
+                let p = self.pinyin_settings_of(schema_id).english_merge.clone();
                 Some(crate::english_merge::Effective {
                     enable: p.enable,
                     min_length: p.min_length,
@@ -5221,16 +5207,12 @@ impl EngineManager {
 
     /// 拼音自动造词配置（[schema.pinyin.auto_learn]）。
     pub fn auto_learn_settings(&self) -> wind_config::config::AutoLearnConfig {
-        self.pinyin
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .auto_learn
-            .clone()
+        self.pinyin_settings().auto_learn.clone()
     }
 
     /// 拼音词频衰减参数（用户配置；0 表示使用 store 默认值）。
     pub fn pinyin_freq_profile(&self) -> wind_store::freq::FreqProfile {
-        let pf = self.pinyin.lock().unwrap_or_else(|e| e.into_inner());
+        let pf = self.pinyin_settings();
         let def = wind_store::freq::FreqProfile::default();
         wind_store::freq::FreqProfile {
             base_scale: if pf.frequency.base_scale > 0.0 {
@@ -5487,6 +5469,89 @@ impl EngineManager {
         s
     }
 
+    /// 指定拼音方案的生效设置：内置默认叠上方案 `[engine.pinyin]`（含 `schema_overrides`）里
+    /// 写的项。`schema_id` 为空或方案读不到时返回内置默认。
+    pub fn pinyin_settings_of(
+        &self,
+        schema_id: &str,
+    ) -> Arc<wind_config::config::PinyinGlobalConfig> {
+        if let Some(v) = self
+            .pinyin_settings_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(schema_id)
+        {
+            return Arc::clone(v);
+        }
+        let generation = self
+            .schema_def_gen
+            .load(std::sync::atomic::Ordering::Acquire);
+        let base = self.pinyin_global();
+        let settings = match self.schema_def_cached(schema_id) {
+            Some(def) if !schema_id.is_empty() => {
+                let (s, problems) = base.for_scheme(&def.engine.pinyin);
+                if !problems.is_empty() {
+                    warn!(
+                        "方案 {schema_id} 的 [engine.pinyin] 有 {} 项未生效：{}",
+                        problems.len(),
+                        problems.join("；")
+                    );
+                }
+                s
+            }
+            _ => base,
+        };
+        let settings = Arc::new(settings);
+        // 持 `schema_def_cache` 的锁比对代次：失效方清两张表时也持着它。
+        let _defs = self
+            .schema_def_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if self
+            .schema_def_gen
+            .load(std::sync::atomic::Ordering::Acquire)
+            == generation
+        {
+            self.pinyin_settings_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(schema_id.to_string(), Arc::clone(&settings));
+        }
+        settings
+    }
+
+    /// 此刻起作用的拼音方案：活跃方案是拼音就是它，是混输取它的拼音成员，否则取主拼音方案
+    /// （临时拼音的目标）。
+    pub fn pinyin_scheme_in_effect(&self) -> String {
+        let active = self.active_schema_id();
+        // 按方案定义判类型，不问引擎实例：方案还没加载完时也要答得对。
+        match self.schema_engine_type(&active).as_deref() {
+            Some("pinyin") => active,
+            Some("mixed") => self
+                .mixed_secondary_schema(&active)
+                .unwrap_or_else(|| self.primary_pinyin_or_default()),
+            _ => self.primary_pinyin_or_default(),
+        }
+    }
+
+    fn primary_pinyin_or_default(&self) -> String {
+        let p = self
+            .primary_pinyin
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if p.is_empty() {
+            "pinyin".to_string()
+        } else {
+            p
+        }
+    }
+
+    /// [`Self::pinyin_settings_of`] 取 [`Self::pinyin_scheme_in_effect`]。
+    pub fn pinyin_settings(&self) -> Arc<wind_config::config::PinyinGlobalConfig> {
+        self.pinyin_settings_of(&self.pinyin_scheme_in_effect())
+    }
+
     /// 方案定义（合并 override 后），走 `schema_def_cache`。只取方案级标量字段，见该字段文档。
     fn schema_def_cached(&self, schema_id: &str) -> Option<Arc<Schema>> {
         if let Some(v) = self
@@ -5527,6 +5592,10 @@ impl EngineManager {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         cache.clear();
+        self.pinyin_settings_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         self.schema_def_gen
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     }
@@ -5790,7 +5859,7 @@ impl EngineManager {
                 }
             }
             Some("pinyin") => {
-                let pf = self.pinyin.lock().unwrap_or_else(|e| e.into_inner());
+                let pf = self.pinyin_settings_of(&id);
                 // 拼音 strategy/protect 字段不参与（仅码表 used-first 排序用），取默认。
                 FreqSettings {
                     enabled: pf.frequency.enabled,
@@ -6671,7 +6740,15 @@ impl EngineManager {
                 }
             };
             // 从全局拼音配置构建引擎配置和模糊音。enabled 作总开关：未启用时所有模糊标志归零。
-            let pg = pinyin_cfg;
+            let (pg, problems) = pinyin_cfg.for_scheme(&schema.engine.pinyin);
+            if !problems.is_empty() {
+                warn!(
+                    "方案 {schema_id} 的 [engine.pinyin] 有 {} 项未生效：{}",
+                    problems.len(),
+                    problems.join("；")
+                );
+            }
+            let pg = &pg;
             // 双拼不启用换位纠错（规则是全拼字母层的），纠错置空。
             let shuangpin = schema
                 .engine
@@ -6727,13 +6804,13 @@ impl EngineManager {
             // `PinyinGrammar::active`），否则根本不读文件。模型名默认空串，免得只改 weight 就
             // 静默启用一个评测上是负收益的模型（docs/design/language-model-integration.md §8）。
             // 模型数据不随安装包分发，缺失时降级为关闭而非报错（同文档 §5）。
-            if pinyin_cfg.grammar.active() {
+            if pg.grammar.active() {
                 let gram_path = schemas
                     .join("pinyin")
                     .join("grammar")
-                    .join(&pinyin_cfg.grammar.model);
+                    .join(&pg.grammar.model);
                 let gcfg = crate::pinyin::octagram::OctagramConfig {
-                    weight: pinyin_cfg.grammar.weight,
+                    weight: pg.grammar.weight,
                     ..Default::default()
                 };
                 match crate::pinyin::octagram::OctagramGrammar::open(&gram_path, gcfg) {
@@ -6742,7 +6819,7 @@ impl EngineManager {
                             "Loaded grammar model {} ({} units, weight={})",
                             gram_path.display(),
                             g.unit_count(),
-                            pinyin_cfg.grammar.weight
+                            pg.grammar.weight
                         );
                         engine = engine.with_grammar(Arc::new(g));
                     }

@@ -470,6 +470,10 @@ pub struct PinyinSpec {
     /// `separator` 一改就会静默夺走它。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub separator: Option<String>,
+    /// 本方案的拼音设置：键名与 [`crate::config::PinyinGlobalConfig`] 的字段相同，没写的取
+    /// 内置默认。由 [`crate::config::PinyinGlobalConfig::for_scheme`] 折叠。
+    #[serde(flatten, default, skip_serializing_if = "toml::Table::is_empty")]
+    pub settings: toml::Table,
 }
 
 /// 双拼布局（[engine.pinyin.shuangpin]）
@@ -480,6 +484,9 @@ pub struct PinyinSpec {
 pub struct ShuangpinSpec {
     #[serde(default)]
     pub layout: String,
+    /// 双拼专有的设置（如 `allow_full_pinyin`），同 [`PinyinSpec::settings`]。
+    #[serde(flatten, default, skip_serializing_if = "toml::Table::is_empty")]
+    pub settings: toml::Table,
 }
 
 /// 混输引擎配置（[engine.mixed]）。**仅引擎固定参数**（方案构成 + 内部权重基线）；

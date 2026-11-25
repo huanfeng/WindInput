@@ -208,7 +208,7 @@ impl Coordinator {
             Some(EngineType::CodeTable) | Some(EngineType::Mixed) => {
                 self.engine_mgr.codetable_settings().single_char
             }
-            Some(EngineType::Pinyin) => self.rt().config.schema.pinyin.single_char,
+            Some(EngineType::Pinyin) => self.engine_mgr.pinyin_settings().single_char,
             // 上面那道 `matches!` 已把其余引擎挡掉，这里只是穷尽性所需。
             _ => false,
         }

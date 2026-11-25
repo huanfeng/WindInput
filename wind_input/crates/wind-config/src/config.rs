@@ -1082,6 +1082,26 @@ pub struct PinyinGlobalConfig {
     pub grammar: PinyinGrammar,
 }
 
+impl PinyinGlobalConfig {
+    /// 某个拼音方案的生效设置：以 `self` 为基线，叠上方案 `[engine.pinyin]` 里写的项。
+    /// 第二个返回值是被丢弃的项（键名 + 原因），供日志与设置页提示。
+    ///
+    /// 模糊音是拼音族共用的，辅助码有自己的 `[engine.aux_code]` 段，两者不在这里收。
+    pub fn for_scheme(&self, spec: &crate::schema::PinyinSpec) -> (Self, Vec<String>) {
+        let mut patch = spec.settings.clone();
+        if !spec.shuangpin.settings.is_empty() {
+            patch.insert(
+                "shuangpin".into(),
+                toml::Value::Table(spec.shuangpin.settings.clone()),
+            );
+        }
+        if let Some(sep) = spec.separator.as_deref().filter(|s| !s.is_empty()) {
+            patch.insert("separator".into(), toml::Value::String(sep.to_string()));
+        }
+        crate::scheme_fold::fold(self, &patch, "schema.pinyin", &["fuzzy", "aux_code"])
+    }
+}
+
 /// 辅助码的全局基线（`[schema.pinyin.aux_code]`）：拼音候选的字形二次筛选。
 ///
 /// 与方案段 `[engine.aux_code]`（[`crate::schema::AuxCodeSpec`]）的分工同码表那套
