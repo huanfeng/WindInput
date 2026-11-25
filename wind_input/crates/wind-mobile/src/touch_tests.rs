@@ -913,3 +913,31 @@ fn keypad_step_abbreviation_learns_selection() {
     let after = pos(&m);
     assert!(after < before, "选过一次应前移：{before} → {after}");
 }
+
+/// 分步选完自动造的长词（临时词），下次同样的按键整串召回为首选，不用再分步选。
+#[test]
+fn keypad_step_picked_phrase_is_recalled_whole() {
+    let Some((m, _rx)) = core("kp_phr", "pinyin", |c| {
+        no_assoc(c);
+        c.schema.pinyin.auto_learn.enabled = true;
+    }) else {
+        return;
+    };
+    let _ = m.set_keypad(true);
+    keypad(&m, "99999999");
+    let pick = |m: &MobileCore, w: &str| {
+        let items = m.candidates(0, 10).items;
+        let i = items
+            .iter()
+            .position(|t| t == w)
+            .unwrap_or_else(|| panic!("{w} 不在 {items:?}"));
+        m.select_candidate(i)
+    };
+    pick(&m, "真正意义");
+    let out = pick(&m, "主要原因");
+    assert!(out.ops.contains(&commit("真正意义主要原因")), "{out:?}");
+    keypad(&m, "99999999");
+    let items = m.candidates(0, 10).items;
+    assert_eq!(items[0], "真正意义主要原因", "{items:?}");
+    assert!(items.len() > 1, "仍给分步候选：{items:?}");
+}

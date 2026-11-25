@@ -38,6 +38,9 @@ const NODE_PENALTY: f64 = 3.0;
 /// 九宫格简拼最多几个键：每键 1–4 个声母，组合数按键数指数增长。
 const ABBREV_MAX_KEYS: usize = 4;
 
+/// 用户词简拼整串召回最多几个键（= 用户词最多几个字）。
+const USER_ABBREV_MAX_KEYS: usize = 16;
+
 /// 每个简拼串从索引取的全拼码条数（同一串的码按权重降序）。
 const ABBREV_CODES_PER_STROKE: usize = 4;
 
@@ -525,7 +528,11 @@ impl PinyinEngine {
             }
             // 没有吃满整串的候选（`99999999` 读不成音节）：从开头起按简拼分步选——前 2..=4 键的
             // 简拼词、首键的单字，选掉一段后剩下的键接着解。读得通的串不走这里，不多花时间。
-            if !cands.iter().any(|c| c.consumed_length == keys.raw.len()) {
+            let step = !cands.iter().any(|c| c.consumed_length == keys.raw.len());
+            // 用户造过的词（分步选完自动造的 `真正意义主要原因`）按简拼整串召回，放在分步候选
+            // 之前判出 `step`：有了用户词仍给分步候选，用户想换一种分法时还有得选。
+            self.add_keypad_user_abbrevs(&keys, map, max_candidates, &mut cands);
+            if step {
                 for l in (2..=ABBREV_MAX_KEYS.min(n.saturating_sub(1))).rev() {
                     self.add_keypad_abbrevs(&keys, map, l, max_candidates, &mut cands);
                 }
@@ -659,6 +666,81 @@ impl PinyinEngine {
                 i += 1;
             }
         }
+    }
+
+    /// 用户词 / 临时词的简拼整串召回：每个音节的首字母都落在对应的键上、音节数等于键数。
+    ///
+    /// 用户层的简拼索引只能按完整声母串精确查，8 个键的声母组合有几万种，逐个查不现实；
+    /// 改按首键的几个字母各做一次前缀查询，再逐条核对。用户词库规模有限，开销可控。
+    /// 系统词的简拼另走 [`Self::add_keypad_abbrevs`]（有独立索引，且限 4 键）。
+    fn add_keypad_user_abbrevs(
+        &self,
+        keys: &Keys,
+        map: &KeypadMap,
+        max_candidates: usize,
+        cands: &mut Vec<Candidate>,
+    ) {
+        let n = keys.len();
+        let Some(store) = self.store_layers.as_deref() else {
+            return;
+        };
+
+        if !self.config.enable_abbrev
+            || !(2..=USER_ABBREV_MAX_KEYS).contains(&n)
+            || keys.raw.len() != n
+            || keys.clean.iter().any(u8::is_ascii_lowercase)
+        {
+            return;
+        }
+        let mut seen: HashSet<String> = cands.iter().map(|c| c.text.clone()).collect();
+        let mut found: Vec<Candidate> = Vec::new();
+        for first in map.letters(keys.clean[0]) {
+            let prefix = (first as char).to_string();
+            // 不限条数（0）：临时词权重低，截断会先截掉它们。
+            let all = store.search_prefix(&prefix, 0);
+            for c in all {
+                if !is_sentence_store_word(&c) || c.text.chars().count() != n {
+                    continue;
+                }
+                let eb = super::effective_boundary(&c.code, c.boundary, &self.trie);
+                let initials: Vec<u8> = c
+                    .code
+                    .bytes()
+                    .enumerate()
+                    .filter(|(i, _)| *i < 64 && (eb >> i) & 1 == 1)
+                    .map(|(_, b)| b)
+                    .collect();
+                if initials.len() != n
+                    || initials
+                        .iter()
+                        .zip(&keys.clean)
+                        .any(|(&l, &k)| !map.admits(k, l))
+                    || !seen.insert(c.text.clone())
+                {
+                    continue;
+                }
+                found.push(Candidate {
+                    pinyin: split_pinyin(&c.code, eb),
+                    text: c.text,
+                    code: keys.raw.to_string(),
+                    weight: c.weight,
+                    source: CandidateSource::Pinyin,
+                    is_abbrev: true,
+                    boundary: keys.raw_mask(0, (1u64 << n) - 1),
+                    consumed_length: keys.raw.len(),
+                    meta: CandidateMeta {
+                        is_user_dict: c.meta.is_user_dict,
+                        is_temp_dict: c.meta.is_temp_dict,
+                        learn_code: Some((c.code, eb)),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                });
+            }
+        }
+        found.sort_by(|a, b| b.weight.cmp(&a.weight).then(a.text.cmp(&b.text)));
+        found.truncate(max_candidates);
+        cands.extend(found);
     }
 
     /// 首键当声母的单字（分步上屏的兜底）：整串读不通时至少能先选掉第一个字。
