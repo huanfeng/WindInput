@@ -286,10 +286,14 @@ impl FsLocal {
 
     fn remove(&self, rel: &str) -> io::Result<()> {
         if is_extension_file(rel) {
-            return match std::fs::rename(
-                self.abs(rel),
-                crate::fsutil::tmp_sibling(&self.abs(rel), DEL_SUFFIX),
-            ) {
+            let path = self.abs(rel);
+            // 同名的残留 .old 一并作废：否则目标删掉后会被 sweep 当成崩溃现场还原
+            for old in aside_siblings(&path, OLD_SUFFIX) {
+                if std::fs::remove_file(&old).is_err() {
+                    let _ = std::fs::rename(&old, crate::fsutil::tmp_sibling(&path, DEL_SUFFIX));
+                }
+            }
+            return match std::fs::rename(&path, crate::fsutil::tmp_sibling(&path, DEL_SUFFIX)) {
                 Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
                 _ => Ok(()),
             };
@@ -319,12 +323,15 @@ impl FsLocal {
             };
             // 原文件名 → [(修改时间, 让路文件)]
             let mut olds: HashMap<String, Vec<(std::time::SystemTime, PathBuf)>> = HashMap::new();
+            // 本目录里被删除让路过的原文件名：同名 .old 不再还原
+            let mut deleted: BTreeSet<String> = BTreeSet::new();
             for e in rd.flatten() {
                 let Ok(ft) = e.file_type() else { continue };
                 let name = e.file_name().to_string_lossy().into_owned();
                 if ft.is_dir() {
                     walk(&e.path());
-                } else if aside_target(&name, DEL_SUFFIX).is_some() {
+                } else if let Some(orig) = aside_target(&name, DEL_SUFFIX) {
+                    deleted.insert(orig.to_string());
                     let _ = std::fs::remove_file(e.path());
                 } else if let Some(orig) = aside_target(&name, OLD_SUFFIX) {
                     let t = e
@@ -339,7 +346,8 @@ impl FsLocal {
             for (orig, mut v) in olds {
                 let target = dir.join(&orig);
                 v.sort_by(|a, b| b.0.cmp(&a.0));
-                if std::fs::symlink_metadata(&target).is_err() {
+                // 已知局限（仅 Windows）：用户手动删掉的扩展文件若留有被占用的 .old，会被还原
+                if std::fs::symlink_metadata(&target).is_err() && !deleted.contains(&orig) {
                     let (_, newest) = v.remove(0);
                     match std::fs::rename(&newest, &target) {
                         Ok(()) => log!("还原让路的扩展文件 {}", target.display()),
@@ -698,6 +706,21 @@ fn aside_target<'a>(name: &'a str, suffix: &str) -> Option<&'a str> {
         && hex.len() == 12
         && hex.bytes().all(|b| b.is_ascii_hexdigit());
     ok.then_some(orig)
+}
+
+/// `path` 同目录下、以它为原名的让路文件。
+fn aside_siblings(path: &Path, suffix: &str) -> Vec<PathBuf> {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        return Vec::new();
+    };
+    let name = name.to_string_lossy();
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| aside_target(&e.file_name().to_string_lossy(), suffix) == Some(&*name))
+        .map(|e| e.path())
+        .collect()
 }
 
 /// 落位前把目标原有的权限拷给临时文件，`exec` 时再加 owner 可执行位（Unix；其余平台无事可做）。

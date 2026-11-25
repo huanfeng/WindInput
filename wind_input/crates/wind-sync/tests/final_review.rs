@@ -143,7 +143,7 @@ fn excluded_state_entries_are_dropped_without_delete_marker() {
             .files
             .contains_key("data/pinyin/temp.wjl")
     );
-    // 别组的设置条目不在本机状态里，也不受影响
+    // 范围内的本组设置条目照常保留
     assert!(sa.files.contains_key("groups/g/config.toml"));
     run(&b, &dek, &mut lb, &mut sb);
     assert_eq!(lb.text("data/pinyin/temp.wjl").as_deref(), Some("b 自己的"));

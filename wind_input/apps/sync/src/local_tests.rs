@@ -766,3 +766,36 @@ fn oversized_local_file_is_skipped_in_a_round() {
         vec!["文件过大未同步：emoji/big.txt".to_string()]
     );
 }
+
+#[test]
+fn deleting_target_voids_leftover_old_so_it_is_not_restored() {
+    let (d, _c, mut l, _) = rig();
+    let mut r = Remote::new();
+    put(d.path(), "extensions/k/k.exe", "当前");
+    r.round(&mut l);
+    // 前几轮没清掉的残留 .old（Windows 上被占用），目标仍在
+    let path = d.path().join("extensions/k/k.exe");
+    std::fs::write(crate::fsutil::tmp_sibling(&path, OLD_SUFFIX), "陈旧").unwrap();
+    // Linux 上锁不住文件，apply 开头的 sweep 会先清掉它：直接走删除这一步
+    l.remove("extensions/k/k.exe").unwrap();
+    assert!(old_files(d.path()).is_empty());
+    l.sweep_aside();
+    assert!(!path.exists());
+    let rep = r.round(&mut l);
+    assert_eq!(rep.deleted_remote, vec!["extensions/k/k.exe".to_string()]);
+    let rep = r.round(&mut l);
+    assert!(rep.uploaded.is_empty(), "{rep:?}");
+    assert!(!path.exists());
+}
+
+#[test]
+fn old_is_not_restored_when_same_name_del_exists() {
+    let (d, _c, l, _) = rig();
+    let dir = d.path().join("extensions/k");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("k.exe");
+    std::fs::write(crate::fsutil::tmp_sibling(&path, OLD_SUFFIX), "陈旧").unwrap();
+    std::fs::write(crate::fsutil::tmp_sibling(&path, DEL_SUFFIX), "删").unwrap();
+    l.sweep_aside();
+    assert!(!path.exists());
+}
