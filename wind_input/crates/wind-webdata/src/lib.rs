@@ -4677,7 +4677,7 @@ pub const READONLY_SIDECAR_FIELDS: &[&str] = &[
 ///
 /// - `layout`：与运行时同一裁决（`Orientation::from_layout_str`），只出 `horizontal`/`vertical`；
 /// - `fontFamily`：全局 `ui.font.family`，空（= 跟随主题）则取主题字体，再空为 `""`；
-/// - `auxEnabled` / `auxMaxPhraseLen` / `auxDirect`：全局 `schema.pinyin.aux_code`。
+/// - `auxEnabled` / `auxMaxPhraseLen` / `auxDirect` / `auxContinuous`：全局 `schema.pinyin.aux_code`。
 fn followed_behavior_of(cfg: &wind_config::Config, theme_font: Option<String>) -> Value {
     let font = if cfg.ui.font.family.is_empty() {
         theme_font.unwrap_or_default()
@@ -4692,6 +4692,7 @@ fn followed_behavior_of(cfg: &wind_config::Config, theme_font: Option<String>) -
         "auxEnabled": aux.enabled,
         "auxMaxPhraseLen": aux.max_phrase_len,
         "auxDirect": aux.direct,
+        "auxContinuous": aux.continuous,
     })
 }
 

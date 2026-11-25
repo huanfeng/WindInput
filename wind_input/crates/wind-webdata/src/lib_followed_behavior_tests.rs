@@ -9,6 +9,7 @@ fn followed_behavior_reads_global_values() {
     cfg.schema.pinyin.aux_code.enabled = true;
     cfg.schema.pinyin.aux_code.max_phrase_len = 3;
     cfg.schema.pinyin.aux_code.direct = true;
+    cfg.schema.pinyin.aux_code.continuous = false;
     let v = followed_behavior_of(&cfg, Some("主题字体".into()));
     assert_eq!(
         v,
@@ -19,6 +20,7 @@ fn followed_behavior_reads_global_values() {
             "auxEnabled": true,
             "auxMaxPhraseLen": 3,
             "auxDirect": true,
+            "auxContinuous": false,
         })
     );
 }

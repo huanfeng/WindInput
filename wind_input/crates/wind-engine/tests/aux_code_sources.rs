@@ -165,8 +165,8 @@ fn cached_settings_follow_override_writes_and_reload() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// 连续辅助码的内部项（不进设置页）：`continuous` 默认随 `direct`、`continuous = false` 是逃生口、
-/// `direct` 不生效时恒假；`preedit_separator` 合格值原样取、空串可用、不合格退回空格。
+/// 直接辅助码风格 `continuous`：默认连续、方案写 `false` 退回串尾、`direct` 不生效时恒假；
+/// 全局 `continuous = false` 时方案可写 `true` 覆盖；`preedit_separator` 合格值原样取、空串可用、不合格退回空格。
 #[test]
 fn continuous_and_preedit_separator_resolve() {
     let dir = std::env::temp_dir().join(format!("wind_aux_cont_{}", std::process::id()));
@@ -226,6 +226,22 @@ fn continuous_and_preedit_separator_resolve() {
     assert!(
         !m.aux_code_settings_of("qp_on").continuous,
         "全拼 direct 不生效，连续也不生效"
+    );
+    // 全局设成串尾：不写的方案跟随，写 true 的方案仍连续。
+    let mut tail_cfg = cfg.clone();
+    tail_cfg.schema.pinyin.aux_code.continuous = false;
+    let mt = EngineManager::with_store_override(&tail_cfg, Some(&dir), None, None::<PathBuf>);
+    let s = mt.aux_code_settings_of("sp_on");
+    assert!(s.direct && !s.continuous, "全局串尾：方案不写则跟随");
+    write(
+        "sp_cont_on",
+        "shuangpin",
+        "direct = true\ncontinuous = true\n",
+    );
+    let mt = EngineManager::with_store_override(&tail_cfg, Some(&dir), None, None::<PathBuf>);
+    assert!(
+        mt.aux_code_settings_of("sp_cont_on").continuous,
+        "方案写 true 压过全局串尾"
     );
     assert_eq!(m.aux_code_settings_of("sp_empty").preedit_separator(), "");
     assert_eq!(m.aux_code_settings_of("sp_dot").preedit_separator(), "·");

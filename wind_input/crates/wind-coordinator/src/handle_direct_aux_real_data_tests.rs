@@ -390,3 +390,29 @@ fn direct_aux_perf() {
         }
     }
 }
+
+/// 全局 `continuous = false`（设置页「风格」选串尾）与逃生口写覆盖文件等价：
+/// 单字 2 位辅码提前（手 + pl → 手\*），连续（出厂）下不提前。
+#[test]
+fn global_continuous_off_means_tail_style() {
+    if !has_data() {
+        return;
+    }
+    let mut cfg = Config::default();
+    cfg.schema.available = vec!["shuangpin".into()];
+    cfg.schema.active = "shuangpin".into();
+    cfg.input.default.chinese_mode = true;
+    cfg.schema.pinyin.aux_code.enabled = true;
+    cfg.schema.pinyin.aux_code.direct = true;
+    let cont = Coordinator::new_headless(cfg.clone(), Some(&data_dir()));
+    cfg.schema.pinyin.aux_code.continuous = false;
+    let tail = Coordinator::new_headless(cfg, Some(&data_dir()));
+    assert_eq!(
+        top5(&after(&tail, "uzpl")).first().map(String::as_str),
+        Some("手*")
+    );
+    assert_eq!(
+        top5(&after(&cont, "uzpl")).first().map(String::as_str),
+        Some("手")
+    );
+}

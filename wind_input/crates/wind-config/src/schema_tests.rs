@@ -214,7 +214,7 @@ fn non_custom_mappings_tables_still_deep_merge() {
     );
 }
 
-/// 连续辅助码的两个内部项（`continuous`、`preedit_separator`）：不写 = `None`，序列化时
+/// `continuous`（直接辅助码风格）与内部项 `preedit_separator`：不写 = `None`，序列化时
 /// 不冒出来（否则设置端 getConfig → saveConfig 的 diff 会把默认值写进 override）。
 #[test]
 fn aux_internal_keys_absent_are_none_and_not_serialized() {
@@ -243,8 +243,7 @@ fn aux_internal_keys_parse_and_roundtrip() {
     }
 }
 
-/// override 层只写内部项：与方案文件深合并，作者的 `files` / `direct` 保留；
-/// 全局折叠（`AuxCodeGlobal::resolved`）不受内部项影响。
+/// override 层只写 `continuous` / 分隔符：与方案文件深合并，作者的 `files` / `direct` 保留。
 #[test]
 fn aux_internal_keys_merge_from_override() {
     let mut base = toml::from_str::<toml::Value>(
@@ -267,5 +266,28 @@ fn aux_internal_keys_merge_from_override() {
         ..Default::default()
     }
     .resolved(Some(aux));
-    assert!(r.enabled && r.direct, "逃生口不改 direct 本身：{r:?}");
+    assert!(r.enabled && r.direct, "continuous 不改 direct 本身：{r:?}");
+    assert!(!r.continuous, "方案写 false 压过出厂 true：{r:?}");
+}
+
+/// 风格出厂连续；方案 tri-state 逐字段覆盖全局，`None` 回落全局。
+#[test]
+fn aux_continuous_global_default_and_override() {
+    use crate::config::AuxCodeGlobal;
+    assert!(AuxCodeGlobal::default().continuous, "出厂连续");
+    let on: crate::schema::AuxCodeSpec = toml::from_str("continuous = true\n").unwrap();
+    let off: crate::schema::AuxCodeSpec = toml::from_str("continuous = false\n").unwrap();
+    let none = crate::schema::AuxCodeSpec::default();
+    let tail = AuxCodeGlobal {
+        continuous: false,
+        ..Default::default()
+    };
+    assert!(!tail.resolved(Some(&none)).continuous, "不写 = 跟随全局");
+    assert!(tail.resolved(Some(&on)).continuous, "方案开压过全局关");
+    assert!(
+        !AuxCodeGlobal::default().resolved(Some(&off)).continuous,
+        "方案关压过全局开"
+    );
+    let g: AuxCodeGlobal = toml::from_str("direct = true\n").unwrap();
+    assert!(g.continuous, "全局段不写 continuous = 连续（serde 默认）");
 }

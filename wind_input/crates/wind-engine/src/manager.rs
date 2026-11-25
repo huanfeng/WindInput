@@ -278,8 +278,8 @@ pub struct AuxCodeSettings {
     /// 是双拼（`[engine] type = "pinyin"` + `[engine.pinyin] scheme = "shuangpin"`）。
     /// 全拼写了 `direct = true` 这里为 false 并告警一次（设计 §7）。
     pub direct: bool,
-    /// 直接辅助码走连续辅助码（击键图 + 辅码表）：`direct` 为真且方案没写内部逃生口
-    /// `[engine.aux_code] continuous = false`。
+    /// 直接辅助码走连续辅助码（击键图 + 辅码表）：`direct` 为真且 `continuous` 经方案 tri-state 折叠为真；
+    /// 否则退回只做串尾。
     pub continuous: bool,
     /// 编码栏辅码分隔符（方案内部项 `[engine.aux_code] preedit_separator`，已校验）；`None` =
     /// [`crate::engine::AUX_PREEDIT_SEPARATOR`]。取值见 [`Self::preedit_separator`]。
@@ -6142,7 +6142,7 @@ impl EngineManager {
             tracing::warn!("直接辅助码只支持双拼方案，方案 {schema_id} 的 direct = true 不生效");
         }
         let direct = direct && is_shuangpin;
-        let continuous = direct && spec.as_ref().and_then(|s| s.continuous) != Some(false);
+        let continuous = direct && resolved.continuous;
         let preedit_separator = spec
             .as_ref()
             .and_then(|s| s.preedit_separator.as_deref())

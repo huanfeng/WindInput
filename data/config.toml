@@ -368,6 +368,10 @@ max_phrase_len = 0
 #     enabled = true
 #     direct = true
 direct = false
+# 直接辅助码的风格（只在 direct 生效时起作用）：true = 连续——辅码可打在任一音节后，适合长句
+# （go + kqk → 「国情」；末字 1 位在串尾也提前）；false = 串尾——只在整串末尾敲 1～2 位，词组任一字命中，
+# 适合单次打词组（uidu + pl → 「释读」）。方案可用同名键覆盖。
+continuous = true
 
 # 拼音调频（衰减参数；三个数值 0 = 用词频 store 的内置默认）。
 [schema.pinyin.frequency]

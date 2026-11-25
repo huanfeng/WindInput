@@ -877,3 +877,14 @@ T5 修了一处缺陷：前缀快照缺失时的兜底解码只准入辅码命�
 4. 发版前必改：wind-setting `settings_manifest.toml:783` 的 `direct` 说明（例子 `uidu 再敲 p → 释读` 已失效）、
    `schema_manager.rs:5737`；文档站 `pinyin.mdx#aux-code-direct` 与 `schema.mdx:412`（清单见 T4 报告）。
 5. worktree 里的真实数据是整份拷贝的 `build_dev/data`；合入前在主仓复跑一次 `aux_continuous_e2e`。
+
+## 附录：风格选项（0.134）
+
+两种直接辅助码是不同的输入风格：连续适合长句，串尾（0.124–0.132 的行为）适合单次打词组
+（`uzpl` → 手、`uzbk` → 兽 要靠串尾的 2 位提前；连续下单字 2 位不提前）。原内部逃生口 `continuous` 转正为设置项：
+
+- 键：`schema.pinyin.aux_code.continuous`（Bool，出厂 `true`），与 `direct` 同构——全局基线 + 方案
+  `[engine.aux_code] continuous` tri-state 覆盖（`AuxCodeGlobal::resolved`）；`direct` 不生效时恒不起作用。
+- 设置页：辅助码页「直接辅助码」下一行「连续辅助码」（`enabled_when` 直接辅助码开）；关 = 串尾。
+- 兼容：方案里已写的 `continuous = false` 语义不变；默认不变，不进候选行为变更清单。
+- 前文各处的「内部逃生口」「不进设置页」均指本节之前的状态。

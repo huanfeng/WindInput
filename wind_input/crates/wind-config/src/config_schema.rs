@@ -342,9 +342,10 @@ static REGISTRY: &[ConfigField] = &[
     f("schema.pinyin.aux_code.enabled", Bool),
     f("schema.pinyin.aux_code.max_phrase_len", Int),
     // 直接辅助码（仅双拼，任一音节后 1～2 位自动当辅码）。出厂关；只在 enabled 也生效时起作用。
-    // 方案段另有两个内部项不登记在此（不进设置页、无全局键）：逃生口 `continuous` 与编码栏
-    // 分隔符 `preedit_separator`，见 `AuxCodeSpec`。
     f("schema.pinyin.aux_code.direct", Bool),
+    // 直接辅助码的风格：连续（长句，出厂）/ 串尾（单次打词组）。只在 direct 生效时起作用。
+    // 方案段另有一个内部项不登记在此（不进设置页、无全局键）：编码栏分隔符 `preedit_separator`，见 `AuxCodeSpec`。
+    f("schema.pinyin.aux_code.continuous", Bool),
     // 全局混输（融合策略）
     f("schema.mix.show_source_hint", Bool),
     f("schema.mix.enable_english", Bool),

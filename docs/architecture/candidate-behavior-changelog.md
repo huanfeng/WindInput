@@ -76,7 +76,7 @@
   模糊音、不接用户词；对偶声母本义读音提示（`hint_literal`）对辅码候选可能少一条
 - 触发条件：双拼 + `schema.pinyin.aux_code.enabled = true` + `direct = true`（全局或方案 `[engine.aux_code]`）+
   有辅码来源；方案来源的反查索引未就绪时本键整条走旧路径、派后台构建
-- 回退旧行为：方案 `[engine.aux_code] continuous = false`（内部项，不进设置页；回到 0.124 起的串尾直接辅助，
+- 回退旧行为：设置页关「连续辅助码」，或方案 `[engine.aux_code] continuous = false`（回到 0.124 起的串尾直接辅助，
   除「退格重打时生僻命中被当孤儿码位放行」那条缺陷修复外逐字节不变）；或 `direct = false` 关掉直接辅助
 - 钉住的测试：`wind-coordinator/src/handle_direct_aux.rs::tests`（`continuous_off_is_byte_identical`、
   `continuous_escape_hatch_restores_tail`、`continuous_mid_sentence_aux`、`tail_rules_in_continuous_are_last_char`、

@@ -1169,9 +1169,8 @@ impl PinyinGlobalConfig {
 ///
 /// 与方案段 `[engine.aux_code]`（[`crate::schema::AuxCodeSpec`]）的分工同码表那套
 /// （schema-config-layering.md §4）：那里放 `files`（方案属性），本段放行为基线，方案可用 tri-state
-/// `Option` 逐字段覆盖。全部字段出厂即类型默认值（`false` / `0`），故 `derive(Default)`：
-/// 出厂值必须是「什么都不发生」。
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+/// `Option` 逐字段覆盖。出厂值必须是「什么都不发生」（`continuous` 只在 `direct` 开后才起作用，故例外取 `true`）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AuxCodeGlobal {
     /// 总开关，出厂 `false`。辅助码会改变已有按键的语义（双拼下反引号从标点变成进入筛选），并把
     /// 数十万条码表读进内存，不该在用户没表态时发生。方案配了 `files` 只表示推荐，不构成开启意图，
@@ -1190,6 +1189,23 @@ pub struct AuxCodeGlobal {
     /// （`lim` 既可能是 li+m 也可能是简拼），见 `EngineManager::aux_code_settings_of`。
     #[serde(default)]
     pub direct: bool,
+    /// 直接辅助码的风格（仅 `direct` 生效时有意义）：`true` = 连续（辅码可打在任一音节后，适合长句），
+    /// `false` = 串尾（只在整串末尾敲 1～2 位，词组任一字命中，适合单次打词组）。出厂 `true`。
+    /// 见 `docs/design/aux-code-continuous.md` §5.4。
+    #[serde(default = "default_true")]
+    pub continuous: bool,
+}
+
+impl Default for AuxCodeGlobal {
+    /// 除 `continuous` 外全是「什么都不发生」的零值；`continuous` 只在 `direct` 开后才起作用，出厂取连续。
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_phrase_len: 0,
+            direct: false,
+            continuous: true,
+        }
+    }
 }
 
 impl AuxCodeGlobal {
@@ -1208,6 +1224,9 @@ impl AuxCodeGlobal {
         }
         if let Some(v) = o.direct {
             out.direct = v;
+        }
+        if let Some(v) = o.continuous {
+            out.continuous = v;
         }
         out
     }

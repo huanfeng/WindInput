@@ -248,9 +248,10 @@ pub struct AuxCodeSpec {
     /// `true` 不生效、日志告警一次。见 `docs/design/aux-code-direct.md` §7。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct: Option<bool>,
-    /// 内部逃生口（不进设置页、无全局键）：`Some(false)` 让直接辅助码退回只做串尾，不走
-    /// 连续辅助码（`docs/design/aux-code-continuous.md` §6）。`None` / `true` = 开着 `direct`
-    /// 的双拼走连续模式。连续模式稳定后删除。
+    /// 本方案直接辅助码的风格：`Some(true)` 连续（任一音节后可打辅码，适合长句），`Some(false)`
+    /// 串尾（只在整串末尾敲 1～2 位、词组任一字命中，适合单次打词组）。`None` = 回落全局
+    /// `[schema.pinyin.aux_code].continuous`（出厂 `true`）。只在 `direct` 生效时起作用。
+    /// 见 `docs/design/aux-code-continuous.md` §5.4。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuous: Option<bool>,
     /// 内部项（不进设置页、无全局键）：编码栏里辅码前插的分隔符，连续辅助码的辅码候选
