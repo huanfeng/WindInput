@@ -362,7 +362,7 @@ impl ShuangpinConverter {
     }
 
     /// 转换一对键为全拼音节候选列表（对齐 Go convertPair，逐分支同序）。
-    fn convert_pair(&self, key1: u8, key2: u8) -> Vec<String> {
+    pub(crate) fn convert_pair(&self, key1: u8, key2: u8) -> Vec<String> {
         self.convert_pair_inner(key1, key2, true)
     }
 

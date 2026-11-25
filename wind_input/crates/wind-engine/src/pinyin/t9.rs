@@ -4,6 +4,9 @@
 //! 读音、或实体键盘打的字母），`'` 是分词。一键对应一个字母，所以击键偏移与全拼字母偏移
 //! 一一对应：节点、音节边界、造词码都在全拼坐标里，词典按真实全拼码查。
 //!
+//! 双拼方案下击键两两配对，每对键取两组字母的笛卡尔积交给双拼配对规则（[`SylGraph::shuangpin`]），
+//! 此时击键偏移与全拼偏移不再一一对应：节点的起止、音节边界在击键坐标，造词码仍在全拼坐标。
+//!
 //! 只在 [`ConvertOptions::keypad`](crate::engine::ConvertOptions::keypad) 有值时进入，
 //! 电脑端恒为 `None`，不经过这里。
 
@@ -17,6 +20,7 @@ use super::lattice::{
     PARTIAL_FINAL_NODE_LIMIT, PARTIAL_FINAL_PENALTY, USER_NODE_BONUS, USER_NODE_LIMIT,
     USER_NODE_WEIGHT_CAP, is_sentence_store_word, score_node, score_node_partial_final,
 };
+use super::shuangpin::{Layout, ShuangpinConverter};
 use super::syllable::STANDARD_SYLLABLES;
 use super::viterbi::WordNode;
 use crate::engine::ConvertResult;
@@ -164,21 +168,39 @@ fn matches(map: &KeypadMap, keys: &[u8], letters: &[u8]) -> bool {
     keys.len() == letters.len() && keys.iter().zip(letters).all(|(&k, &l)| map.admits(k, l))
 }
 
+/// 标准音节表里的同名音节（`'static`，供音节图引用）；不在表内（模糊错音串等）为 `None`。
+fn intern(syl: &str) -> Option<&'static str> {
+    let all = syllables();
+    all.binary_search(&syl).ok().map(|i| all[i])
+}
+
+/// 双拼布局是否只用字母键。九宫格只有字母，布局里有 `;` 等符号键（微软、搜狗、紫光的
+/// `;` = ing）时打不全，九宫格下不支持。
+pub fn shuangpin_layout_is_letter_only(layout: &Layout) -> bool {
+    layout.code_char_set().is_none()
+}
+
 /// 击键上的音节图：每个起点出发的完整音节，以及尾部残缺音节的拼法。
 struct SylGraph {
     /// `edges[p]` = `(终点, 音节)`
     edges: Vec<Vec<(usize, &'static str)>>,
-    /// `tails[p]` = 从 `p` 到串尾只打了开头的完整音节（`[p, n)` 是它的真前缀）
+    /// `tails[p]` = 从 `p` 到串尾只打了开头的完整音节
     tails: Vec<Vec<&'static str>>,
+    /// `tail_prefixes[p]` = 尾部残缺音节已打出的全拼前缀（查末字用，已去重）
+    tail_prefixes: Vec<Vec<String>>,
+    /// 末字须是 `tails[p]` 里的音节（双拼：前缀 `s` 不能带出 `sh` 的字）
+    strict_tail: bool,
     /// 从 0 出发经完整音节可达
     reachable: Vec<bool>,
 }
 
 impl SylGraph {
-    fn build(keys: &Keys, map: &KeypadMap) -> Self {
+    /// 全拼：一键一个字母，按 414 个标准音节逐个比对键位。
+    fn full(keys: &Keys, map: &KeypadMap) -> Self {
         let n = keys.len();
         let mut edges = vec![Vec::new(); n + 1];
         let mut tails: Vec<Vec<&'static str>> = vec![Vec::new(); n + 1];
+        let mut tail_prefixes: Vec<Vec<String>> = vec![Vec::new(); n + 1];
         for p in 0..n {
             for &syl in syllables() {
                 let l = syl.len();
@@ -189,9 +211,72 @@ impl SylGraph {
                     }
                 } else if keys.open_span(p, n) && matches(map, &keys.clean[p..], &s[..n - p]) {
                     tails[p].push(syl);
+                    tail_prefixes[p].push(syl[..n - p].to_string());
                 }
             }
+            tail_prefixes[p].sort_unstable();
+            tail_prefixes[p].dedup();
         }
+        Self::finish(edges, tails, tail_prefixes, false)
+    }
+
+    /// 双拼：每段（`'` 之间）从头起两键一对，每对取两键字母的笛卡尔积，按布局配对规则得音节。
+    /// 输入末尾落单的键是残缺声母（只补全，不当完整音节）；段中落单的键（其后紧跟 `'`）
+    /// 不成边，图在那里断开。
+    fn shuangpin(keys: &Keys, map: &KeypadMap, conv: &ShuangpinConverter) -> Self {
+        let n = keys.len();
+        let mut edges: Vec<Vec<(usize, &'static str)>> = vec![Vec::new(); n + 1];
+        let mut tails: Vec<Vec<&'static str>> = vec![Vec::new(); n + 1];
+        let mut tail_prefixes: Vec<Vec<String>> = vec![Vec::new(); n + 1];
+        let mut p = 0;
+        while p < n {
+            let lone = p + 1 >= n || keys.forced[p + 1];
+            if lone {
+                if p + 1 >= n {
+                    for l1 in map.letters(keys.clean[p]) {
+                        let initial = conv
+                            .layout()
+                            .initial_of(l1)
+                            .map(str::to_string)
+                            .unwrap_or_else(|| (l1 as char).to_string());
+                        for &syl in syllables() {
+                            if has_initial(syl, &initial) && !tails[p].contains(&syl) {
+                                tails[p].push(syl);
+                            }
+                        }
+                        tail_prefixes[p].push(initial);
+                    }
+                    tail_prefixes[p].sort_unstable();
+                    tail_prefixes[p].dedup();
+                }
+                p += 1;
+                continue;
+            }
+            let mut out: Vec<(usize, &'static str)> = Vec::new();
+            for l1 in map.letters(keys.clean[p]) {
+                for l2 in map.letters(keys.clean[p + 1]) {
+                    for syl in conv.convert_pair(l1, l2) {
+                        if let Some(s) = intern(&syl)
+                            && !out.iter().any(|&(_, o)| o == s)
+                        {
+                            out.push((p + 2, s));
+                        }
+                    }
+                }
+            }
+            edges[p] = out;
+            p += 2;
+        }
+        Self::finish(edges, tails, tail_prefixes, true)
+    }
+
+    fn finish(
+        edges: Vec<Vec<(usize, &'static str)>>,
+        tails: Vec<Vec<&'static str>>,
+        tail_prefixes: Vec<Vec<String>>,
+        strict_tail: bool,
+    ) -> Self {
+        let n = edges.len() - 1;
         let mut reachable = vec![false; n + 1];
         reachable[0] = true;
         for p in 0..n {
@@ -204,9 +289,18 @@ impl SylGraph {
         Self {
             edges,
             tails,
+            tail_prefixes,
+            strict_tail,
             reachable,
         }
     }
+}
+
+/// 音节 `syl` 的声母恰是 `initial`（零声母时 `initial` 是首字母，如 `a` → a/ai/an…）。
+/// `s` / `c` / `z` 不含翘舌的 `sh` / `ch` / `zh`。
+fn has_initial(syl: &str, initial: &str) -> bool {
+    syl.starts_with(initial)
+        && !(matches!(initial, "s" | "c" | "z") && syl.as_bytes().get(1) == Some(&b'h'))
 }
 
 /// 一个词节点（全拼坐标）。
@@ -215,9 +309,11 @@ struct Node {
     start: usize,
     end: usize,
     text: String,
-    /// 词条的全拼码与音节掩码（相对码起点）
+    /// 词条的全拼码与音节掩码（全拼坐标，相对码起点）
     code: String,
     mask: u64,
+    /// 音节起点的击键掩码（击键坐标，相对 `start`）。全拼下等于 `mask`。
+    key_mask: u64,
     weight: i32,
     log_prob: f64,
     is_user: bool,
@@ -230,6 +326,7 @@ struct Combo {
     pos: usize,
     code: String,
     mask: u64,
+    key_mask: u64,
     syls: usize,
 }
 
@@ -250,6 +347,13 @@ fn split_pinyin(code: &str, mask: u64) -> String {
 }
 
 impl PinyinEngine {
+    /// 本方案能否用九宫格输入：全拼恒可；双拼只限纯字母布局（见 [`shuangpin_layout_is_letter_only`]）。
+    pub fn keypad_supported(&self) -> bool {
+        self.shuangpin
+            .as_ref()
+            .is_none_or(|c| shuangpin_layout_is_letter_only(c.layout()))
+    }
+
     /// 歧义键盘输入的转换（全拼）。见模块文档。
     pub(crate) fn convert_keypad(
         &self,
@@ -257,8 +361,7 @@ impl PinyinEngine {
         max_candidates: usize,
         map: &KeypadMap,
     ) -> ConvertResult {
-        if self.shuangpin.is_some() {
-            // 双拼九宫格尚未接入，返回空结果而不是按全拼误解码。
+        if !self.keypad_supported() {
             return ConvertResult::default();
         }
         let Some(keys) = Keys::parse(input, map) else {
@@ -268,7 +371,10 @@ impl PinyinEngine {
         if n == 0 {
             return ConvertResult::default();
         }
-        let graph = SylGraph::build(&keys, map);
+        let graph = match &self.shuangpin {
+            Some(conv) => SylGraph::shuangpin(&keys, map, conv),
+            None => SylGraph::full(&keys, map),
+        };
         let mut nodes = self.keypad_nodes(&keys, &graph, max_candidates.max(1));
         let blocked = self.blocked_words();
         if !blocked.is_empty() {
@@ -285,7 +391,7 @@ impl PinyinEngine {
                 start: nd.start,
                 end: nd.end,
                 word: nd.text.clone(),
-                syl_mask: nd.mask,
+                syl_mask: nd.key_mask,
                 log_prob: nd.log_prob - NODE_PENALTY,
                 canon: Some((nd.code.clone(), nd.mask)),
                 aux: 0,
@@ -345,7 +451,7 @@ impl PinyinEngine {
                 source: CandidateSource::Pinyin,
                 is_prefix: nd.completed_tail,
                 is_partial: nd.end < n,
-                boundary: keys.raw_mask(0, nd.mask),
+                boundary: keys.raw_mask(0, nd.key_mask),
                 consumed_length: consumed,
                 meta: CandidateMeta {
                     is_user_dict: nd.is_user,
@@ -419,6 +525,7 @@ impl PinyinEngine {
                 pos: p,
                 code: String::new(),
                 mask: 0,
+                key_mask: 0,
                 syls: 0,
             }];
             for _ in 0..max_syls {
@@ -433,6 +540,7 @@ impl PinyinEngine {
                             pos: q,
                             code: format!("{}{syl}", c.code),
                             mask: c.mask | bit_at(c.code.len()),
+                            key_mask: c.key_mask | bit_at(c.pos - p),
                             syls: c.syls + 1,
                         });
                     }
@@ -465,6 +573,7 @@ impl PinyinEngine {
                             text: hit.text,
                             code: c.code.clone(),
                             mask: c.mask,
+                            key_mask: c.key_mask,
                             weight: hit.weight,
                             is_user: false,
                             completed_tail: false,
@@ -483,6 +592,7 @@ impl PinyinEngine {
                             text: cand.text,
                             code: c.code.clone(),
                             mask: c.mask,
+                            key_mask: c.key_mask,
                             weight: cand.weight,
                             is_user: true,
                             completed_tail: false,
@@ -494,10 +604,7 @@ impl PinyinEngine {
             }
 
             // 尾部残缺音节的单字（整句的末字）：按已打的那几个字母前缀查。
-            let mut prefixes: Vec<&str> = graph.tails[p].iter().map(|syl| &syl[..n - p]).collect();
-            prefixes.sort_unstable();
-            prefixes.dedup();
-            for prefix in prefixes {
+            for prefix in &graph.tail_prefixes[p] {
                 for hit in self.dict.search_prefix_with_boundary_syllable_capped(
                     prefix,
                     PARTIAL_FINAL_NODE_LIMIT,
@@ -507,6 +614,9 @@ impl PinyinEngine {
                     if hit.text.chars().count() != 1 {
                         continue;
                     }
+                    if graph.strict_tail && !graph.tails[p].contains(&hit.code.as_str()) {
+                        continue;
+                    }
                     add(Node {
                         start: p,
                         end: n,
@@ -514,6 +624,7 @@ impl PinyinEngine {
                             - PARTIAL_FINAL_PENALTY,
                         text: hit.text,
                         mask: if hit.boundary == 0 { 1 } else { hit.boundary },
+                        key_mask: 1,
                         code: hit.code,
                         weight: hit.weight,
                         is_user: false,
@@ -542,6 +653,7 @@ impl PinyinEngine {
             return;
         }
         let mask = c.mask | bit_at(c.code.len());
+        let key_mask = c.key_mask | bit_at(c.pos);
         for &syl in &graph.tails[c.pos] {
             let code = format!("{}{syl}", c.code);
             for hit in self.dict.search_with_boundary(&code) {
@@ -555,6 +667,7 @@ impl PinyinEngine {
                     text: hit.text,
                     code: code.clone(),
                     mask,
+                    key_mask,
                     weight: hit.weight,
                     is_user: false,
                     completed_tail: true,
@@ -567,3 +680,7 @@ impl PinyinEngine {
 #[cfg(test)]
 #[path = "t9_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "t9_sp_tests.rs"]
+mod sp_tests;

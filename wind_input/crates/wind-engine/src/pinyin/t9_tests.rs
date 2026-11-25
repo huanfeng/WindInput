@@ -7,7 +7,7 @@ use wind_dict::cached::CachedDict;
 use wind_dict::codetable::CodetableDict;
 
 /// 词条 `(字, 空格分隔的拼音, 权重)` 写成 rime yaml 再载入，词条带真值音节边界。
-fn engine(tag: &str, entries: &[(&str, &str, i32)]) -> PinyinEngine {
+pub(super) fn engine(tag: &str, entries: &[(&str, &str, i32)]) -> PinyinEngine {
     use std::io::Write;
     let path = std::env::temp_dir().join(format!("wind_t9_{tag}_{}.dict.yaml", std::process::id()));
     {
@@ -22,7 +22,7 @@ fn engine(tag: &str, entries: &[(&str, &str, i32)]) -> PinyinEngine {
     PinyinEngine::new(Config::default(), CachedDict::Memory(dict))
 }
 
-fn base_words() -> Vec<(&'static str, &'static str, i32)> {
+pub(super) fn base_words() -> Vec<(&'static str, &'static str, i32)> {
     vec![
         ("你", "ni", 9000),
         ("尼", "ni", 800),
@@ -51,11 +51,11 @@ fn t9(eng: &PinyinEngine, keys: &str) -> ConvertResult {
     eng.convert_with_opts(keys, 100, opts).unwrap()
 }
 
-fn texts(r: &ConvertResult) -> Vec<&str> {
+pub(super) fn texts(r: &ConvertResult) -> Vec<&str> {
     r.candidates.iter().map(|c| c.text.as_str()).collect()
 }
 
-fn find<'a>(r: &'a ConvertResult, text: &str) -> &'a Candidate {
+pub(super) fn find<'a>(r: &'a ConvertResult, text: &str) -> &'a Candidate {
     r.candidates
         .iter()
         .find(|c| c.text == text)
