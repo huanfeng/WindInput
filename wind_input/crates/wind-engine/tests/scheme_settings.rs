@@ -275,7 +275,7 @@ fn alias_set_refuses_to_overwrite_unparsable_file() {
 #[test]
 fn non_alias_keys_are_not_intercepted() {
     let m = mgr("alias_none", "wubi86", &[]);
-    assert!(m.scheme_alias_get("schema.pinyin.fuzzy.enabled").is_none());
+    assert!(m.scheme_alias_get("input.fuzzy.enabled").is_none());
     assert!(
         m.scheme_alias_set("ui.candidate.per_page", toml::Value::Integer(5))
             .is_none()

@@ -61,7 +61,7 @@ fn type_keys(coord: &Coordinator, input: &str) {
 /// 开关打开时 `input` 的界面候选前 `top` 项含 `want`，模糊音关着时全列表不含。
 fn assert_fuzzy_recalls(input: &str, want: &str, top: usize, on: fn(&mut Config)) {
     let with = candidates_for(input, |cfg| {
-        cfg.schema.pinyin.fuzzy.enabled = true;
+        cfg.input.fuzzy.enabled = true;
         on(cfg);
     });
     let head = &with[..with.len().min(top)];
@@ -91,7 +91,7 @@ fn assert_top_preedit(input: &str, on: fn(&mut Config), fuzzy: (&str, &str), pla
             assert_eq!(preedit, want, "{label}时 {input} 首选「{top}」的编码栏");
         };
     let with = typed(input, |cfg| {
-        cfg.schema.pinyin.fuzzy.enabled = true;
+        cfg.input.fuzzy.enabled = true;
         on(cfg);
     });
     check("开模糊音", with, fuzzy);
@@ -99,11 +99,11 @@ fn assert_top_preedit(input: &str, on: fn(&mut Config), fuzzy: (&str, &str), pla
 }
 
 fn in_ing(cfg: &mut Config) {
-    cfg.schema.pinyin.fuzzy.in_ing = true;
+    cfg.input.fuzzy.in_ing = true;
 }
 
 fn an_ang(cfg: &mut Config) {
-    cfg.schema.pinyin.fuzzy.an_ang = true;
+    cfg.input.fuzzy.an_ang = true;
 }
 
 /// `pi|nan` 与 `pin|an` 等长，平安在后一条切分上。
@@ -126,7 +126,7 @@ fn an_ang_does_not_borrow_words_across_segmentations() {
         return;
     }
     let got = candidates_for("kandaoxian", |cfg| {
-        cfg.schema.pinyin.fuzzy.enabled = true;
+        cfg.input.fuzzy.enabled = true;
         an_ang(cfg);
     });
     let head = &got[..got.len().min(5)];
@@ -192,7 +192,7 @@ fn an_ang_xian_word_candidates_do_not_borrow_xiang() {
         return;
     }
     let got = candidates_for("xian", |cfg| {
-        cfg.schema.pinyin.fuzzy.enabled = true;
+        cfg.input.fuzzy.enabled = true;
         an_ang(cfg);
     });
     let head = &got[..got.len().min(30)];
@@ -259,8 +259,8 @@ fn in_ing_user_word_preedit_follows_typed_segmentation() {
             cfg.schema.available = vec!["pinyin".into()];
             cfg.schema.active = "pinyin".into();
             cfg.input.default.chinese_mode = true;
-            cfg.schema.pinyin.fuzzy.enabled = on;
-            cfg.schema.pinyin.fuzzy.in_ing = true;
+            cfg.input.fuzzy.enabled = on;
+            cfg.input.fuzzy.in_ing = true;
             // 关掉整句用用户词：否则「瓶安」先由词图的用户词模糊节点组成整句（边界由解码器
             // 回填），用户层词候选那一路（`search_store_fuzzy`）就测不到了。
             cfg.schema.pinyin.sentence_uses_user_words = false;

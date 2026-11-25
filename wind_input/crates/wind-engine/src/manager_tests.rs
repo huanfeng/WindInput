@@ -90,7 +90,7 @@ fn correction_rebuild_needed_only_for_engine_side_fields() {
 #[test]
 fn sync_correction_refreshes_hint_switch_and_flags_rebuild() {
     let mut cfg = Config::default();
-    cfg.schema.pinyin.fuzzy.enabled = true;
+    cfg.input.fuzzy.enabled = true;
     let m = EngineManager::new(&cfg, None);
     assert!(!m.pinyin_hint_active(), "出厂不显示提示");
     let mut on = cfg.clone();
@@ -188,7 +188,7 @@ fn pinyin_hint_on_truth_table() {
 #[test]
 fn template_flag_flips_switch_without_rebuild() {
     let mut cfg = Config::default();
-    cfg.schema.pinyin.fuzzy.enabled = true;
+    cfg.input.fuzzy.enabled = true;
     let m = EngineManager::new(&cfg, None);
     let built = m.engines_generation();
     assert!(!m.pinyin_hint_active());
@@ -198,7 +198,7 @@ fn template_flag_flips_switch_without_rebuild() {
     assert!(!m.pinyin_hint_active());
     assert_eq!(m.engines_generation(), built, "翻转不该清表重建");
 
-    cfg.schema.pinyin.fuzzy.enabled = false;
+    cfg.input.fuzzy.enabled = false;
     cfg.input.correction.hint.enabled = true;
     cfg.input.correction.hint.misread = false;
     m.reload_from_config(&cfg);

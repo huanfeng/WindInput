@@ -369,26 +369,6 @@ max_phrase_len = 0
 #     direct = true
 direct = false
 
-# 模糊音：enabled 是总开关，下面每项各自控制一组等价音（默认全关，逐项按需开启）。
-[schema.pinyin.fuzzy]
-enabled = false
-# 声母组
-zh_z = false
-ch_c = false
-sh_s = false
-n_l = false
-f_h = false
-r_l = false
-# 韵母组（前后鼻音）
-an_ang = false
-en_eng = false
-in_ing = false
-ian_iang = false
-uan_uang = false
-# 韵母组（un/eng 与 ong）
-un_ong = false
-eng_ong = false
-
 # 拼音调频（衰减参数；三个数值 0 = 用词频 store 的内置默认）。
 [schema.pinyin.frequency]
 enabled = true
@@ -839,6 +819,27 @@ correction = false
 scope = "first"
 # 提示带声调（「苹(píng)果」）；注释变量 ${correct_pinyin} 同样跟随。
 tone = false
+
+# 模糊音：全拼、双拼与混输里的拼音共用。enabled 是总开关，下面每项各自控制一组等价音
+# （默认全关，逐项按需开启）。旧键 schema.pinyin.fuzzy.* 仍可读写，等价于这里。
+[input.fuzzy]
+enabled = false
+# 声母组
+zh_z = false
+ch_c = false
+sh_s = false
+n_l = false
+f_h = false
+r_l = false
+# 韵母组（前后鼻音）
+an_ang = false
+en_eng = false
+in_ing = false
+ian_iang = false
+uan_uang = false
+# 韵母组（un/eng 与 ong）
+un_ong = false
+eng_ong = false
 
 # 联想：上屏之后按**刚上屏的内容**给候选，而不是按编码。
 #

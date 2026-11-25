@@ -722,6 +722,7 @@ impl CoordConfig {
     /// 的提示两档都照常弹（`config.set` 词条里写错键该当场看见，静默只会变成「没生效」）。
     fn set_inner(this: &CoordConfig, key: &str, value: &str, quiet: bool) -> anyhow::Result<()> {
         use wind_config::config_schema::{parse_str_value, validate};
+        let key = &*wind_config::config_schema::canonical_key(key);
         let v = parse_str_value(key, value).map_err(|e| anyhow::anyhow!("{e}"))?;
         validate(key, &v).map_err(|e| anyhow::anyhow!("{e}"))?;
         // 旧的类型级全局键是当前方案对应设置的别名：写进那个方案的设置，不进 config.toml。
@@ -782,6 +783,7 @@ impl CoordConfig {
 
 impl ConfigService for CoordConfig {
     fn get(&self, key: &str) -> anyhow::Result<String> {
+        let key = &*wind_config::config_schema::canonical_key(key);
         if let Some(v) = self.alias_value(key) {
             return v;
         }
@@ -798,6 +800,7 @@ impl ConfigService for CoordConfig {
 
     fn toggle(&self, key: &str) -> anyhow::Result<String> {
         use wind_config::config_schema::{FieldType, addressable_field};
+        let key = &*wind_config::config_schema::canonical_key(key);
         let fld = addressable_field(key).ok_or_else(|| anyhow::anyhow!("未登记的配置键: {key}"))?;
         // 取当前值即取写回的种子，故必须过降级闸。
         let cur = match self.alias_value(key) {

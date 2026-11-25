@@ -204,7 +204,7 @@ pub const LEGACY_TYPE_SECTIONS: [&str; 4] = ["codetable", "pinyin", "mix", "engl
 
 /// 从一层配置里摘掉类型级全局设置，返回摘下的内容（键为段名）。
 ///
-/// 模糊音（`schema.pinyin.fuzzy`）是拼音族共用的真全局项，留在原处。
+/// 模糊音旧键（`schema.pinyin.fuzzy`）若还在，留在原处由 [`Config::migrate_fuzzy_value`] 搬。
 pub fn take_legacy_type_settings(layer: &mut toml::Value) -> toml::Table {
     let mut out = toml::Table::new();
     let Some(toml::Value::Table(schema)) = layer.get_mut("schema") else {
@@ -1078,7 +1078,9 @@ pub struct PinyinGlobalConfig {
     /// 拼音分隔策略（"auto" 等）。原 input.pinyin_separator 收拢至此。
     #[serde(default = "default_pinyin_separator")]
     pub separator: String,
-    #[serde(default)]
+    /// 模糊音的运行时副本：它是拼音族共用的全局项，配置键在 `input.fuzzy`，这里不进配置文件，
+    /// 由 [`Config::pinyin_effective`] 填入、随本结构体带进引擎。
+    #[serde(skip)]
     pub fuzzy: PinyinFuzzy,
     /// 英文候选混入（[schema.pinyin.english_merge]）。见 [`PinyinEnglishMerge`]。
     ///
@@ -1156,7 +1158,11 @@ impl PinyinGlobalConfig {
         if let Some(sep) = spec.separator.as_deref().filter(|s| !s.is_empty()) {
             patch.insert("separator".into(), toml::Value::String(sep.to_string()));
         }
-        crate::scheme_fold::fold(self, &patch, "schema.pinyin", &["fuzzy", "aux_code"])
+        let (mut out, problems) =
+            crate::scheme_fold::fold(self, &patch, "schema.pinyin", &["fuzzy", "aux_code"]);
+        // `fuzzy` 不进序列化，折叠一趟会被重置，接回来。
+        out.fuzzy = self.fuzzy.clone();
+        (out, problems)
     }
 }
 
@@ -2839,7 +2845,7 @@ impl Default for PinyinEnglishMerge {
     }
 }
 
-/// 全局模糊音（[schema.pinyin.fuzzy]）。字段对齐引擎 FuzzyConfig。
+/// 全局模糊音（[input.fuzzy]）。字段对齐引擎 FuzzyConfig。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PinyinFuzzy {
     #[serde(default)]
@@ -3696,6 +3702,9 @@ impl Default for CaretPlacementConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InputConfig {
+    /// 模糊音（`[input.fuzzy]`）：全拼、双拼与混输里的拼音共用。
+    #[serde(default)]
+    pub fuzzy: PinyinFuzzy,
     #[serde(default = "default_filter_mode")]
     pub filter_mode: String,
     /// 含生僻字的词要不要吃 `filter_mode` 这一刀：`keep`（出厂，整词放行）/ `filter`（与单字同判）。
@@ -3900,6 +3909,7 @@ impl InputConfig {
 impl Default for InputConfig {
     fn default() -> Self {
         Self {
+            fuzzy: PinyinFuzzy::default(),
             filter_mode: "smart".to_string(),
             rare_phrase: default_rare_phrase(),
             commit_newline: default_commit_newline(),
@@ -4563,6 +4573,7 @@ impl Config {
     /// ——理由见 [`MobileConfig`]：合并后移动端设置页一保存，就把移动端的值写进了桌面基线。
     pub fn pinyin_effective(&self, overlay: ConfigOverlay) -> PinyinGlobalConfig {
         let mut p = self.schema.pinyin.clone();
+        p.fuzzy = self.input.fuzzy.clone();
         if overlay == ConfigOverlay::Mobile {
             p.grammar = PinyinGrammar {
                 enabled: self.mobile.grammar.enabled,
@@ -7839,6 +7850,35 @@ impl Config {
         Self::migrate_tooltip_sections_value(layer);
         Self::migrate_stale_factory_tooltip_sections_value(layer);
         Self::migrate_grammar_enabled_value(layer);
+        Self::migrate_fuzzy_value(layer);
+    }
+
+    /// 存量迁移（层内）：`[schema.pinyin.fuzzy]` 改名 `[input.fuzzy]`。本层已写了新键的项不覆盖。
+    fn migrate_fuzzy_value(layer: &mut toml::Value) {
+        let Some(old) = get_nested(layer, &["schema", "pinyin", "fuzzy"])
+            .and_then(toml::Value::as_table)
+            .cloned()
+        else {
+            return;
+        };
+        let toml::Value::Table(root) = layer else {
+            return;
+        };
+        remove_nested(root, &["schema", "pinyin", "fuzzy"]);
+        let input = root
+            .entry("input")
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        let Some(input) = input.as_table_mut() else {
+            return;
+        };
+        let new = input
+            .entry("fuzzy")
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        if let Some(new) = new.as_table_mut() {
+            for (k, v) in old {
+                new.entry(k).or_insert(v);
+            }
+        }
     }
 
     /// 存量迁移（层内）：本层手写了 `[schema.pinyin.grammar]` 的 `weight`（非 0）与 `model`（非空）、
@@ -8178,6 +8218,7 @@ impl Config {
         Self::migrate_stale_factory_tooltip_sections_value(&mut root);
         Self::migrate_comment_max_chars_value(&mut root);
         Self::migrate_grammar_enabled_value(&mut root);
+        Self::migrate_fuzzy_value(&mut root);
         let migrated = usize::from(root != before);
         // 退役键（[`RETIRED_KEYS`]）先清：它们与出厂默认无关，不能被 preset 取不到时的
         // 提前返回挡住——否则没装 data/config.toml 的环境永远清不掉。
@@ -9133,6 +9174,7 @@ impl Config {
         // 语法模型总开关：老用户只写了 weight + model 时，要在写新值之前补上 enabled = true，
         // 否则别的键的保存会把与出厂相同的 weight / model 剪掉，补 true 的依据就丢了。
         Self::migrate_grammar_enabled_value(&mut root);
+        Self::migrate_fuzzy_value(&mut root);
         // 供落盘后通知钩子用：下方 set_nested 会 move 掉 value。
         let value_for_hook = value.clone();
         // 注释分配的单格 / 单个模板：按名字寻址，不走静态注册表（见 `CommentDynKey`）。

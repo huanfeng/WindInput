@@ -72,8 +72,8 @@ fn cfg(active: &str) -> Config {
 }
 
 fn in_ing(mut c: Config) -> Config {
-    c.schema.pinyin.fuzzy.enabled = true;
-    c.schema.pinyin.fuzzy.in_ing = true;
+    c.input.fuzzy.enabled = true;
+    c.input.fuzzy.in_ing = true;
     c
 }
 

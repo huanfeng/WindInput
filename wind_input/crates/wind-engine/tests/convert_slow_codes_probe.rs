@@ -20,7 +20,7 @@ fn convert_latencies() {
     cfg.schema.available = vec!["pinyin".to_string()];
     cfg.schema.active = "pinyin".to_string();
     // Dev 实例生效的三项差异
-    let f = &mut cfg.schema.pinyin.fuzzy;
+    let f = &mut cfg.input.fuzzy;
     f.enabled = true;
     f.en_eng = true;
     f.in_ing = true;

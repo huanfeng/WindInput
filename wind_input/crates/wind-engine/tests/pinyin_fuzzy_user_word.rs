@@ -56,8 +56,8 @@ fn manager_s2(
     let mut cfg = Config::default();
     cfg.schema.available = vec!["pinyin".to_string()];
     cfg.schema.active = "pinyin".to_string();
-    cfg.schema.pinyin.fuzzy.enabled = fuzzy;
-    cfg.schema.pinyin.fuzzy.ch_c = fuzzy;
+    cfg.input.fuzzy.enabled = fuzzy;
+    cfg.input.fuzzy.ch_c = fuzzy;
     cfg.schema.pinyin.sentence_uses_user_words = s2;
     EngineManager::with_store_override(
         &cfg,

@@ -62,7 +62,7 @@ fn open_with(
     c.schema.available = vec!["fh".into()];
     c.schema.active = "fh".into();
     c.input.default.chinese_mode = true;
-    let fz = &mut c.schema.pinyin.fuzzy;
+    let fz = &mut c.input.fuzzy;
     fz.enabled = true;
     fz.in_ing = true;
     let h = &mut c.input.correction.hint;
@@ -313,7 +313,7 @@ fn zongguo(tag: &str, tone: bool) -> Vec<CandidateItem> {
     let f = fixture_with(tag, ZG);
     write_pinyin_map(&f);
     let (coord, rx) = open_with(&f, false, HintScope::First, |c| {
-        c.schema.pinyin.fuzzy.zh_z = true;
+        c.input.fuzzy.zh_z = true;
         c.input.correction.hint.tone = tone;
         assign_correct_pinyin(c);
     });
@@ -400,7 +400,7 @@ fn fuzzy_source_unchecked_hides_fuzzy_hint() {
 fn template_var_respects_sources() {
     let f = fixture_with("var_src", ZG);
     let (coord, rx) = open_with(&f, false, HintScope::First, |c| {
-        c.schema.pinyin.fuzzy.zh_z = true;
+        c.input.fuzzy.zh_z = true;
         let h = &mut c.input.correction.hint;
         h.fuzzy = false;
         h.misread = true;
@@ -420,7 +420,7 @@ fn template_var_ignores_master_switch() {
         "中国\tzhong guo\t3000\n中过\tzhong guo\t100\n",
     );
     let (coord, rx) = open_with(&f, false, HintScope::First, |c| {
-        c.schema.pinyin.fuzzy.zh_z = true;
+        c.input.fuzzy.zh_z = true;
         assign_correct_pinyin(c);
     });
     type_str(&coord, "zongguo");

@@ -305,6 +305,7 @@ fn set_items(state: &DispatchState, params: &Value) -> anyhow::Result<Value> {
             .get("key")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("invalid_params: item.key missing"))?;
+        let key = &*wind_config::config_schema::canonical_key(key);
         let value = it.get("value").cloned().unwrap_or(Value::Null);
         let toml_val = match json_to_toml(&value) {
             Ok(v) => v,
@@ -497,6 +498,7 @@ fn get_item(state: &DispatchState, params: &Value) -> anyhow::Result<Value> {
         .get("key")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("invalid_params: key missing"))?;
+    let key = &*wind_config::config_schema::canonical_key(key);
     if !wind_config::config_schema::is_known_key(key) {
         anyhow::bail!("invalid_config: 键 '{}' 未登记", key);
     }

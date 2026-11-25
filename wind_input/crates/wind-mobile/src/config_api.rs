@@ -519,6 +519,7 @@ pub fn set(key: &str, value: ConfigValue) -> Result<(), String> {
     if key.is_empty() {
         return Err("配置键为空".to_string());
     }
+    let key = &*config_schema::canonical_key(key);
     // 只认注册表里的键：清单写错键名时当场报错，而不是落盘一个引擎永远不读的值。
     if !config_schema::is_known_key(key) {
         return Err(format!("未登记的配置键：{key}"));

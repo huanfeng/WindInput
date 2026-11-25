@@ -3421,7 +3421,7 @@ fn full_pinyin_replaces_partial_duplicate_with_complete_one() {
     );
 }
 
-/// 模糊音：支路与双拼流吃同一套 `[schema.pinyin.fuzzy]` 设置——同一套配置在两条流下表现
+/// 模糊音：支路与双拼流吃同一套 `[input.fuzzy]` 设置——同一套配置在两条流下表现
 /// 不一致本身就是缺陷。惩罚由 `lookup_with_fuzzy` 的 `fuzzy_penalized` 施加。
 #[test]
 fn full_pinyin_honors_fuzzy_settings() {

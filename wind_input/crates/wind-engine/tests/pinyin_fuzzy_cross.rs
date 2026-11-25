@@ -44,9 +44,9 @@ fn candidates(input: &str, apply: impl FnOnce(&mut Config)) -> Option<Vec<String
 #[test]
 fn sh_s_plus_en_eng_recalls_shengxiao() {
     let Some(with_fuzzy) = candidates("senxiao", |cfg| {
-        cfg.schema.pinyin.fuzzy.enabled = true;
-        cfg.schema.pinyin.fuzzy.sh_s = true;
-        cfg.schema.pinyin.fuzzy.en_eng = true;
+        cfg.input.fuzzy.enabled = true;
+        cfg.input.fuzzy.sh_s = true;
+        cfg.input.fuzzy.en_eng = true;
     }) else {
         eprintln!("跳过：build_dev 拼音词库不存在");
         return;
@@ -70,9 +70,9 @@ fn sh_s_plus_en_eng_recalls_shengxiao() {
 #[test]
 fn sh_s_plus_an_ang_recalls_shanghai() {
     let Some(cands) = candidates("sanhai", |cfg| {
-        cfg.schema.pinyin.fuzzy.enabled = true;
-        cfg.schema.pinyin.fuzzy.sh_s = true;
-        cfg.schema.pinyin.fuzzy.an_ang = true;
+        cfg.input.fuzzy.enabled = true;
+        cfg.input.fuzzy.sh_s = true;
+        cfg.input.fuzzy.an_ang = true;
     }) else {
         eprintln!("跳过：build_dev 拼音词库不存在");
         return;

@@ -297,20 +297,20 @@ static REGISTRY: &[ConfigField] = &[
     f("schema.pinyin.english_merge.exact_position", Int),
     f("schema.pinyin.english_merge.complete_position", Int),
     f("schema.pinyin.english_merge.max_count", Int),
-    f("schema.pinyin.fuzzy.enabled", Bool),
-    f("schema.pinyin.fuzzy.zh_z", Bool),
-    f("schema.pinyin.fuzzy.ch_c", Bool),
-    f("schema.pinyin.fuzzy.sh_s", Bool),
-    f("schema.pinyin.fuzzy.n_l", Bool),
-    f("schema.pinyin.fuzzy.f_h", Bool),
-    f("schema.pinyin.fuzzy.r_l", Bool),
-    f("schema.pinyin.fuzzy.an_ang", Bool),
-    f("schema.pinyin.fuzzy.en_eng", Bool),
-    f("schema.pinyin.fuzzy.in_ing", Bool),
-    f("schema.pinyin.fuzzy.ian_iang", Bool),
-    f("schema.pinyin.fuzzy.uan_uang", Bool),
-    f("schema.pinyin.fuzzy.un_ong", Bool),
-    f("schema.pinyin.fuzzy.eng_ong", Bool),
+    f("input.fuzzy.enabled", Bool),
+    f("input.fuzzy.zh_z", Bool),
+    f("input.fuzzy.ch_c", Bool),
+    f("input.fuzzy.sh_s", Bool),
+    f("input.fuzzy.n_l", Bool),
+    f("input.fuzzy.f_h", Bool),
+    f("input.fuzzy.r_l", Bool),
+    f("input.fuzzy.an_ang", Bool),
+    f("input.fuzzy.en_eng", Bool),
+    f("input.fuzzy.in_ing", Bool),
+    f("input.fuzzy.ian_iang", Bool),
+    f("input.fuzzy.uan_uang", Bool),
+    f("input.fuzzy.un_ong", Bool),
+    f("input.fuzzy.eng_ong", Bool),
     f("schema.pinyin.frequency.enabled", Bool),
     f("schema.pinyin.frequency.record_always", Bool),
     f("schema.pinyin.frequency.half_life", Float),
@@ -916,6 +916,14 @@ pub fn is_known_key(key: &str) -> bool {
     field(key).is_some()
 }
 
+/// 改过名的键：旧名 → 现名。按键寻址的入口（命令栏、RPC、移动端）先过这一道，旧名照常可用。
+pub fn canonical_key(key: &str) -> std::borrow::Cow<'_, str> {
+    match key.strip_prefix("schema.pinyin.fuzzy.") {
+        Some(rest) => format!("input.fuzzy.{rest}").into(),
+        None => key.into(),
+    }
+}
+
 /// 旧的类型级全局键属于哪类方案。见 [`scheme_alias`]。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SchemeKind {
@@ -954,7 +962,7 @@ pub fn scheme_alias(key: &str) -> Option<SchemeAlias> {
         ("schema.mix.", SchemeKind::Mixed, "engine.mixed."),
         ("schema.english.", SchemeKind::English, "engine.english."),
     ];
-    if key.starts_with("schema.pinyin.fuzzy.") || !is_known_key(key) {
+    if !is_known_key(key) {
         return None;
     }
     MAP.iter().find_map(|(prefix, kind, section)| {

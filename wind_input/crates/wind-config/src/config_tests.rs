@@ -3314,14 +3314,14 @@ fn pinyin_global_config_defaults() {
     let c = Config::default();
     assert!(c.schema.pinyin.use_smart_compose);
     assert_eq!(c.schema.pinyin.separator, "auto");
-    assert!(!c.schema.pinyin.fuzzy.enabled);
-    assert!(!c.schema.pinyin.fuzzy.zh_z);
-    assert!(!c.schema.pinyin.fuzzy.un_ong, "un_ong 出厂关");
-    assert!(!c.schema.pinyin.fuzzy.eng_ong, "eng_ong 出厂关");
+    assert!(!c.input.fuzzy.enabled);
+    assert!(!c.input.fuzzy.zh_z);
+    assert!(!c.input.fuzzy.un_ong, "un_ong 出厂关");
+    assert!(!c.input.fuzzy.eng_ong, "eng_ong 出厂关");
     // 单写一项只开那一项，另一项保持出厂关。
-    let c = merged_with("[schema.pinyin.fuzzy]\nun_ong = true\n");
-    assert!(c.schema.pinyin.fuzzy.un_ong);
-    assert!(!c.schema.pinyin.fuzzy.eng_ong);
+    let c = merged_with("[input.fuzzy]\nun_ong = true\n");
+    assert!(c.input.fuzzy.un_ong);
+    assert!(!c.input.fuzzy.eng_ong);
 }
 
 #[test]
@@ -3389,14 +3389,14 @@ fn auto_learn_max_word_length_default_is_consistent() {
 
 #[test]
 fn pinyin_global_merge_partial() {
-    // 仅覆盖 [schema.pinyin.fuzzy] 的 enabled 和 zh_z，其余字段应保留默认值（深合并验证）
-    let c = merged_with("[schema.pinyin.fuzzy]\nenabled = true\nzh_z = true\n");
+    // 仅覆盖 [input.fuzzy] 的 enabled 和 zh_z，其余字段应保留默认值（深合并验证）
+    let c = merged_with("[input.fuzzy]\nenabled = true\nzh_z = true\n");
     // 被覆盖字段：变为 true
-    assert!(c.schema.pinyin.fuzzy.enabled, "enabled 应被覆盖为 true");
-    assert!(c.schema.pinyin.fuzzy.zh_z, "zh_z 应被覆盖为 true");
+    assert!(c.input.fuzzy.enabled, "enabled 应被覆盖为 true");
+    assert!(c.input.fuzzy.zh_z, "zh_z 应被覆盖为 true");
     // 未覆盖的 fuzzy 字段：保留默认 false
-    assert!(!c.schema.pinyin.fuzzy.ch_c, "ch_c 未覆盖，应保留默认 false");
-    assert!(!c.schema.pinyin.fuzzy.sh_s, "sh_s 未覆盖，应保留默认 false");
+    assert!(!c.input.fuzzy.ch_c, "ch_c 未覆盖，应保留默认 false");
+    assert!(!c.input.fuzzy.sh_s, "sh_s 未覆盖，应保留默认 false");
     // 未覆盖的 pinyin 顶层字段：保留默认值
     assert!(
         c.schema.pinyin.use_smart_compose,
@@ -3890,4 +3890,45 @@ fn take_legacy_type_settings_with_only_fuzzy_takes_nothing() {
         layer["schema"]["pinyin"]["fuzzy"]["enabled"].as_bool(),
         Some(true)
     );
+}
+
+#[test]
+fn migrate_fuzzy_moves_old_section_without_overriding_new_keys() {
+    let mut layer: toml::Value = toml::from_str(
+        "[schema.pinyin]\nsentence_count = 2\n[schema.pinyin.fuzzy]\nenabled = true\nzh_z = true\n\
+         [input.fuzzy]\nzh_z = false\n",
+    )
+    .unwrap();
+    Config::migrate_fuzzy_value(&mut layer);
+    assert_eq!(layer["input"]["fuzzy"]["enabled"].as_bool(), Some(true));
+    assert_eq!(
+        layer["input"]["fuzzy"]["zh_z"].as_bool(),
+        Some(false),
+        "新键已写的不覆盖"
+    );
+    assert!(layer["schema"]["pinyin"].get("fuzzy").is_none());
+    assert_eq!(
+        layer["schema"]["pinyin"]["sentence_count"].as_integer(),
+        Some(2)
+    );
+    // 没有旧段时不动。
+    let before = layer.clone();
+    Config::migrate_fuzzy_value(&mut layer);
+    assert_eq!(layer, before);
+}
+
+#[test]
+fn fuzzy_rides_into_engine_config_and_survives_scheme_fold() {
+    let mut cfg = Config::default();
+    cfg.input.fuzzy.enabled = true;
+    cfg.input.fuzzy.ch_c = true;
+    let base = cfg.pinyin_effective(ConfigOverlay::Base);
+    assert!(base.fuzzy.enabled && base.fuzzy.ch_c);
+    let spec: crate::schema::Schema = crate::schema::Schema::from_toml_value(
+        toml::from_str("[engine.pinyin]\nsentence_count = 3\n").unwrap(),
+    )
+    .unwrap();
+    let (folded, _) = base.for_scheme(&spec.engine.pinyin);
+    assert_eq!(folded.sentence_count, 3);
+    assert!(folded.fuzzy.enabled && folded.fuzzy.ch_c);
 }

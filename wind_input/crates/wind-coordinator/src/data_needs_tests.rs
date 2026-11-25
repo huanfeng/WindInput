@@ -1133,8 +1133,8 @@ fn fuzzy_fixture() -> (PathBuf, Config) {
     c.schema.available = vec!["fh".into()];
     c.schema.active = "fh".into();
     c.input.default.chinese_mode = true;
-    c.schema.pinyin.fuzzy.enabled = true;
-    c.schema.pinyin.fuzzy.zh_z = true;
+    c.input.fuzzy.enabled = true;
+    c.input.fuzzy.zh_z = true;
     c.input.correction.hint.enabled = false;
     (dir, c)
 }

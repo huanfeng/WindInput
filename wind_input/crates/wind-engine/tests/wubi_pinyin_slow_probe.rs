@@ -24,7 +24,7 @@ fn convert_latencies() {
     ];
     cfg.schema.active = "wubi86_pinyin".to_string();
     // Dev 实例拼音侧生效的差异
-    let f = &mut cfg.schema.pinyin.fuzzy;
+    let f = &mut cfg.input.fuzzy;
     f.enabled = true;
     f.en_eng = true;
     f.in_ing = true;

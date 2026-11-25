@@ -934,7 +934,7 @@ impl EngineManager {
             misread: Mutex::new(Arc::new(misread)),
             correct_pinyin_in_templates: std::sync::atomic::AtomicBool::new(false),
             pinyin_hint: crate::pinyin::fuzzy::HintSwitch::new(pinyin_hint_on(
-                &config.schema.pinyin.fuzzy,
+                &config.input.fuzzy,
                 &config.input.correction,
                 false,
             )),

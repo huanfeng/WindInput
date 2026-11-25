@@ -291,7 +291,7 @@ fn fuzzy_store_node_cost_on_real_dict() {
     let base = Config::load(Some(&dir)).unwrap_or_default();
     let mk = |fz: bool, s2: bool| {
         let mut c = base.clone();
-        let f = &mut c.schema.pinyin.fuzzy;
+        let f = &mut c.input.fuzzy;
         f.enabled = fz;
         f.zh_z = fz;
         f.ch_c = fz;

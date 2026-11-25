@@ -185,8 +185,8 @@ fn fuzzy_layer_still_provides_eng_when_enabled() {
         return;
     }
     let mut cfg = config();
-    cfg.schema.pinyin.fuzzy.enabled = true;
-    cfg.schema.pinyin.fuzzy.en_eng = true;
+    cfg.input.fuzzy.enabled = true;
+    cfg.input.fuzzy.en_eng = true;
     let cands = candidates_with(cfg, "fen");
     let hits = cross_syllable_hits(&cands, "fen", &["feng"]);
     assert!(

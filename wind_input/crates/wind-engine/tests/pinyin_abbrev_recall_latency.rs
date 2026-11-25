@@ -55,7 +55,7 @@ fn run(label: &str, fuzzy: bool) {
     };
     let mut config = Config::load(Some(&dir)).unwrap_or_default();
     if fuzzy {
-        let f = &mut config.schema.pinyin.fuzzy;
+        let f = &mut config.input.fuzzy;
         f.enabled = true;
         f.zh_z = true;
         f.ch_c = true;

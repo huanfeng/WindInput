@@ -328,7 +328,7 @@ fn step4_skip_matches_full_scan_on_real_dict() {
     let base = wind_config::Config::load(Some(&dir)).unwrap_or_default();
     let mut fuzzy = base.clone();
     {
-        let f = &mut fuzzy.schema.pinyin.fuzzy;
+        let f = &mut fuzzy.input.fuzzy;
         f.enabled = true;
         f.zh_z = true;
         f.ch_c = true;

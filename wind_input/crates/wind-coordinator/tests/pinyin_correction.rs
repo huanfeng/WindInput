@@ -172,8 +172,8 @@ fn corrected_never_takes_top_when_complete_exists() {
         .unwrap();
     let mut c = config("pinyin");
     c.input.correction.custom = vec!["in=ian".into()];
-    c.schema.pinyin.fuzzy.enabled = true;
-    c.schema.pinyin.fuzzy.in_ing = true;
+    c.input.fuzzy.enabled = true;
+    c.input.fuzzy.in_ing = true;
     let coord = Coordinator::new_headless_with_store(c, Some(&data_dir()), store);
     type_str(&coord, "din");
     let all = coord.debug_all_candidate_texts();

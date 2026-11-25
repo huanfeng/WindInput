@@ -46,7 +46,7 @@ fn head(v: &[String]) -> &[String] {
 /// 断言：开关打开时 `input` 召回 `want`，出厂配置下不召回。
 fn assert_gated(input: &str, want: &str, on: impl FnOnce(&mut Config)) {
     let Some(with_fuzzy) = candidates(input, |cfg| {
-        cfg.schema.pinyin.fuzzy.enabled = true;
+        cfg.input.fuzzy.enabled = true;
         on(cfg);
     }) else {
         eprintln!("跳过：build_dev 拼音词库不存在");
@@ -67,36 +67,30 @@ fn assert_gated(input: &str, want: &str, on: impl FnOnce(&mut Config)) {
 
 #[test]
 fn un_ong_single_syllable_dun_recalls_dong() {
-    assert_gated("dun", "东", |cfg| cfg.schema.pinyin.fuzzy.un_ong = true);
+    assert_gated("dun", "东", |cfg| cfg.input.fuzzy.un_ong = true);
 }
 
 #[test]
 fn un_ong_recalls_dongxi() {
-    assert_gated("dunxi", "东西", |cfg| {
-        cfg.schema.pinyin.fuzzy.un_ong = true
-    });
+    assert_gated("dunxi", "东西", |cfg| cfg.input.fuzzy.un_ong = true);
 }
 
 #[test]
 fn un_ong_recalls_yong_from_yun() {
-    assert_gated("yunyuan", "永远", |cfg| {
-        cfg.schema.pinyin.fuzzy.un_ong = true
-    });
+    assert_gated("yunyuan", "永远", |cfg| cfg.input.fuzzy.un_ong = true);
 }
 
 #[test]
 fn eng_ong_recalls_zhongguo() {
-    assert_gated("zhengguo", "中国", |cfg| {
-        cfg.schema.pinyin.fuzzy.eng_ong = true
-    });
+    assert_gated("zhengguo", "中国", |cfg| cfg.input.fuzzy.eng_ong = true);
 }
 
 /// 总开关关着时，单项开关不生效（`manager.rs` 的 `enabled &&` 映射）。
 #[test]
 fn master_switch_gates_un_ong() {
     let Some(cands) = candidates("dunxi", |cfg| {
-        cfg.schema.pinyin.fuzzy.enabled = false;
-        cfg.schema.pinyin.fuzzy.un_ong = true;
+        cfg.input.fuzzy.enabled = false;
+        cfg.input.fuzzy.un_ong = true;
     }) else {
         eprintln!("跳过：build_dev 拼音词库不存在");
         return;

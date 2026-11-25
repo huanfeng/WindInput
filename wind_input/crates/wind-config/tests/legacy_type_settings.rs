@@ -67,7 +67,7 @@ fn user_and_custom_layers_no_longer_feed_type_level_settings() {
     assert_eq!(cfg.schema.pinyin.sentence_count, 1);
     // 同一份文件里的其它内容照常生效。
     assert_eq!(cfg.schema.active, "pinyin");
-    assert!(cfg.schema.pinyin.fuzzy.enabled, "模糊音仍是全局项");
+    assert!(cfg.input.fuzzy.enabled, "模糊音旧键在加载时改名，仍然生效");
     // 用户层那份原样留着待搬。
     let legacy = &cfg.legacy_type_settings;
     assert_eq!(legacy["codetable"]["punct_commit"].as_bool(), Some(true));
@@ -87,7 +87,7 @@ fn user_and_custom_layers_no_longer_feed_type_level_settings() {
     );
     let cfg = Config::load(Config::data_dir().as_deref()).unwrap();
     assert!(cfg.legacy_type_settings.is_empty());
-    assert!(cfg.schema.pinyin.fuzzy.enabled);
+    assert!(cfg.input.fuzzy.enabled);
     assert!(
         !Config::clear_legacy_type_settings().unwrap(),
         "第二次无事可做"

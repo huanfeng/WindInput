@@ -143,8 +143,8 @@ fn pinyin_delete_system_word_blocks_everywhere() {
         return;
     }
     let mut cfg = config("pinyin");
-    cfg.schema.pinyin.fuzzy.enabled = true;
-    cfg.schema.pinyin.fuzzy.n_l = true;
+    cfg.input.fuzzy.enabled = true;
+    cfg.input.fuzzy.n_l = true;
     let store = fresh_store("full");
     for input in ["nihao", "ni'hao", "lihao", "nh", "nhao"] {
         assert!(

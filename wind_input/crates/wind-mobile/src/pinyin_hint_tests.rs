@@ -26,7 +26,7 @@ fn core(tag: &str, hint: bool, scope: HintScope) -> (MobileCore, std::path::Path
     cfg.schema.available = vec!["fh".into()];
     cfg.schema.active = "fh".into();
     cfg.input.default.chinese_mode = true;
-    let fz = &mut cfg.schema.pinyin.fuzzy;
+    let fz = &mut cfg.input.fuzzy;
     fz.enabled = true;
     fz.in_ing = true;
     let h = &mut cfg.input.correction.hint;

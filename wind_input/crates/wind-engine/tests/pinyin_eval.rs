@@ -120,7 +120,7 @@ fn manager(dir: &Path) -> EngineManager {
     }
     // 模糊音：逗号分隔的组名（`in_ing,an_ang`），`all` = 13 组全开。不设 = 出厂（全关）。
     if let Ok(groups) = std::env::var("WIND_PINYIN_EVAL_FUZZY") {
-        let f = &mut cfg.schema.pinyin.fuzzy;
+        let f = &mut cfg.input.fuzzy;
         f.enabled = true;
         for g in groups.split(',').map(str::trim) {
             let all = g == "all";

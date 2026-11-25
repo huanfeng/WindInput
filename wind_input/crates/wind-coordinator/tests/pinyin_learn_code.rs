@@ -39,9 +39,9 @@ fn cfg() -> Config {
     c.schema.available = vec!["pinyin".into()];
     c.schema.active = "pinyin".into();
     c.input.default.chinese_mode = true;
-    c.schema.pinyin.fuzzy.enabled = true;
-    c.schema.pinyin.fuzzy.sh_s = true;
-    c.schema.pinyin.fuzzy.en_eng = true;
+    c.input.fuzzy.enabled = true;
+    c.input.fuzzy.sh_s = true;
+    c.input.fuzzy.en_eng = true;
     c.schema.pinyin.auto_learn.enabled = true;
     c
 }
@@ -190,7 +190,7 @@ fn word_learned_by_fuzzy_typing_is_retypeable_by_fuzzy_typing() {
         return;
     }
     let mut c = cfg();
-    c.schema.pinyin.fuzzy.ch_c = true;
+    c.input.fuzzy.ch_c = true;
     let db = std::env::temp_dir().join("wind_learn_code_fuzzy_retype.redb");
     let _ = std::fs::remove_file(&db);
     let store = Arc::new(Store::open(&db).unwrap());
@@ -265,7 +265,7 @@ fn fuzzy_sentence_commit_learns_canonical_code() {
         return;
     }
     let mut c = cfg();
-    c.schema.pinyin.fuzzy.ch_c = true;
+    c.input.fuzzy.ch_c = true;
     let db = std::env::temp_dir().join("wind_learn_code_fuzzy_sentence.redb");
     let _ = std::fs::remove_file(&db);
     let store = Arc::new(Store::open(&db).unwrap());
@@ -294,7 +294,7 @@ fn s2_fuzzy_sentence_commit_learns_canonical_code() {
         return;
     }
     let mut c = cfg();
-    c.schema.pinyin.fuzzy.ch_c = true;
+    c.input.fuzzy.ch_c = true;
     c.schema.pinyin.sentence_uses_user_words = true;
     let db = std::env::temp_dir().join("wind_learn_code_s2_fuzzy_sentence.redb");
     let _ = std::fs::remove_file(&db);
@@ -330,7 +330,7 @@ fn fuzzy_pick_of_temp_word_advances_its_count() {
         return;
     }
     let mut c = cfg();
-    c.schema.pinyin.fuzzy.ch_c = true;
+    c.input.fuzzy.ch_c = true;
     let db = std::env::temp_dir().join("wind_learn_code_fuzzy_temp_count.redb");
     let _ = std::fs::remove_file(&db);
     let store = Arc::new(Store::open(&db).unwrap());
@@ -373,7 +373,7 @@ fn fuzzy_sentence_repeat_commit_counts_once() {
         return;
     }
     let mut c = cfg();
-    c.schema.pinyin.fuzzy.ch_c = true;
+    c.input.fuzzy.ch_c = true;
     let db = std::env::temp_dir().join("wind_learn_code_fuzzy_sentence_twice.redb");
     let _ = std::fs::remove_file(&db);
     let store = Arc::new(Store::open(&db).unwrap());
@@ -409,7 +409,7 @@ fn s2_single_user_word_sentence_does_not_duplicate() {
         return;
     }
     let mut c = cfg();
-    c.schema.pinyin.fuzzy.ch_c = true;
+    c.input.fuzzy.ch_c = true;
     c.schema.pinyin.sentence_uses_user_words = true;
     let db = std::env::temp_dir().join("wind_learn_code_s2_no_dup.redb");
     let _ = std::fs::remove_file(&db);
@@ -454,7 +454,7 @@ fn mixed_abbrev_sentence_commit_learns_full_pinyin() {
         return;
     }
     let mut c = cfg();
-    c.schema.pinyin.fuzzy.enabled = false;
+    c.input.fuzzy.enabled = false;
     let db = std::env::temp_dir().join("wind_learn_code_mixed_abbrev.redb");
     let _ = std::fs::remove_file(&db);
     let store = Arc::new(Store::open(&db).unwrap());
@@ -497,7 +497,7 @@ fn mixed_abbrev_sentence_does_not_duplicate_user_word() {
         return;
     }
     let mut c = cfg();
-    c.schema.pinyin.fuzzy.enabled = false;
+    c.input.fuzzy.enabled = false;
     let db = std::env::temp_dir().join("wind_learn_code_mixed_abbrev_dup.redb");
     let _ = std::fs::remove_file(&db);
     let store = Arc::new(Store::open(&db).unwrap());
@@ -529,7 +529,7 @@ fn user_abbrev_node_sentence_commit_learns_full_pinyin() {
         return;
     }
     let mut c = cfg();
-    c.schema.pinyin.fuzzy.enabled = false;
+    c.input.fuzzy.enabled = false;
     c.schema.pinyin.sentence_uses_user_words = true;
     let db = std::env::temp_dir().join("wind_learn_code_user_abbrev_node.redb");
     let _ = std::fs::remove_file(&db);
@@ -576,7 +576,7 @@ fn legacy_mixed_code_is_not_auto_promoted() {
         ("canon", "buzhidaonihao", 0b101_0010_0101, true),
     ] {
         let mut c = cfg();
-        c.schema.pinyin.fuzzy.enabled = false;
+        c.input.fuzzy.enabled = false;
         c.schema.pinyin.auto_learn.promote_count = PROMOTE;
         let db = std::env::temp_dir().join(format!("wind_learn_code_promo_{tag}.redb"));
         let _ = std::fs::remove_file(&db);

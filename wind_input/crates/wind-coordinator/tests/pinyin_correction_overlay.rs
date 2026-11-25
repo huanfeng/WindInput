@@ -59,8 +59,8 @@ fn quick_input_pinyin_member_applies_d6() {
     c.schema.primary_pinyin = "pinyin".into();
     c.input.default.chinese_mode = true;
     c.input.correction.custom = vec!["in=ian".into()];
-    c.schema.pinyin.fuzzy.enabled = true;
-    c.schema.pinyin.fuzzy.in_ing = true;
+    c.input.fuzzy.enabled = true;
+    c.input.fuzzy.in_ing = true;
     let coord = Coordinator::new_headless_with_store(c, Some(&data_dir()), store);
     coord.handle_key_event(&key(VK_SEMICOLON));
     for ch in "din".chars() {
@@ -96,8 +96,8 @@ fn rare_char_mode_over_pinyin_applies_d6() {
         .key_actions
         .insert("backslash".into(), "rare_char".into());
     c.input.correction.custom = vec!["in=ian".into()];
-    c.schema.pinyin.fuzzy.enabled = true;
-    c.schema.pinyin.fuzzy.in_ing = true;
+    c.input.fuzzy.enabled = true;
+    c.input.fuzzy.in_ing = true;
     let (coord, rx) = Coordinator::new_headless_with_ui_at(c, Some(&data_dir()), Some(&dir));
     let store = coord.user_store().unwrap();
     store

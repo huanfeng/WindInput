@@ -143,7 +143,9 @@ RPC 一侧经内部方法 `schema.aliasGet` / `schema.aliasSet` 转到宿主（`
 `data_custom/config.toml` 里的这四段**不迁移、不读取**，加载时告警一句：定制者把值写进
 `data_custom` 下的方案文件。文档站的定制说明同步更新。
 
-模糊音改名 `input.fuzzy.*` 另起一步做。
+模糊音改名 `input.fuzzy.*`：各层加载时把 `[schema.pinyin.fuzzy]` 搬过去（`migrate_fuzzy_value`，
+本层已写新键的项不覆盖）；按键寻址的入口先过 `config_schema::canonical_key`，旧键名照常可用。
+引擎仍从 `PinyinGlobalConfig::fuzzy` 取，它不进配置文件，由 `Config::pinyin_effective` 填入。
 
 ## 5 方案间复制
 

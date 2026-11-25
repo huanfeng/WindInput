@@ -747,7 +747,7 @@ fn scheme_alias_maps_type_level_keys_to_scheme_paths() {
 #[test]
 fn scheme_alias_leaves_real_globals_alone() {
     for key in [
-        "schema.pinyin.fuzzy.enabled",
+        "input.fuzzy.enabled",
         "schema.active",
         "schema.primary_pinyin",
         "schema.mix_modes",
@@ -757,4 +757,18 @@ fn scheme_alias_leaves_real_globals_alone() {
     ] {
         assert_eq!(scheme_alias(key), None, "{key}");
     }
+}
+
+#[test]
+fn canonical_key_maps_old_fuzzy_keys() {
+    assert_eq!(
+        canonical_key("schema.pinyin.fuzzy.zh_z"),
+        "input.fuzzy.zh_z"
+    );
+    assert_eq!(
+        canonical_key("schema.pinyin.sentence_count"),
+        "schema.pinyin.sentence_count"
+    );
+    assert!(is_known_key(&canonical_key("schema.pinyin.fuzzy.enabled")));
+    assert!(!is_known_key("schema.pinyin.fuzzy.enabled"));
 }

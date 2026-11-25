@@ -8392,8 +8392,8 @@ fn test_shuangpin_fuzzy_final_ziranma() {
     }
     let ov = shuangpin_layout_override("zrm_fuzzy", "ziranma");
     let mut cfg = shuangpin_cfg();
-    cfg.schema.pinyin.fuzzy.enabled = true;
-    cfg.schema.pinyin.fuzzy.in_ing = true;
+    cfg.input.fuzzy.enabled = true;
+    cfg.input.fuzzy.in_ing = true;
     let coord = Coordinator::new_headless_with_override(cfg, Some(&d), Some(ov.clone()));
     press_letter(&coord, 'd');
     press_letter(&coord, 'n');
@@ -8423,8 +8423,8 @@ fn test_shuangpin_fuzzy_preedit_ziranma() {
         for (on, (top, want)) in [(true, fuzzy), (false, plain)] {
             let ov = shuangpin_layout_override(&format!("zrm_fuzzy_pre_{keys}_{on}"), "ziranma");
             let mut cfg = shuangpin_cfg();
-            cfg.schema.pinyin.fuzzy.enabled = on;
-            cfg.schema.pinyin.fuzzy.in_ing = true;
+            cfg.input.fuzzy.enabled = on;
+            cfg.input.fuzzy.in_ing = true;
             let coord = Coordinator::new_headless_with_override(cfg, Some(&d), Some(ov.clone()));
             for c in keys.chars() {
                 press_letter(&coord, c);
@@ -8510,7 +8510,7 @@ fn test_shuangpin_shared_key_finals_both_readings() {
     for (tag, edit, keys, want) in cases {
         let (data, ov) = shuangpin_custom_layout_data(tag, &format!("zrm_{tag}"), edit);
         let mut cfg = shuangpin_cfg();
-        cfg.schema.pinyin.fuzzy.enabled = false;
+        cfg.input.fuzzy.enabled = false;
         let coord = Coordinator::new_headless_with_override(cfg, Some(&data), Some(ov));
         for c in keys.chars() {
             press_letter(&coord, c);
