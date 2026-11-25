@@ -446,6 +446,9 @@ impl Host {
             .as_ref()
             .map(|d| d.join(format!("extension-{id}.log")));
         Supervisor::new(move || {
+            if let Err(e) = ensure_owner_exec(&exe) {
+                log!("给扩展 {id} 的本体补可执行位失败: {e}");
+            }
             let mut cmd = Command::new(&exe);
             cmd.args(&args)
                 .current_dir(&dir)
@@ -509,6 +512,22 @@ impl Host {
             let _ = h.join();
         }
     }
+}
+
+/// Unix 上给扩展本体补 owner 可执行位：从 Windows 同步来的文件不带位，否则拉不起来。
+#[cfg(unix)]
+fn ensure_owner_exec(exe: &std::path::Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(exe)?.permissions().mode();
+    if mode & 0o100 == 0 {
+        std::fs::set_permissions(exe, std::fs::Permissions::from_mode(mode | 0o100))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_owner_exec(_exe: &std::path::Path) -> io::Result<()> {
+    Ok(())
 }
 
 fn spawn_writer(id: &str, link: Arc<Link>, mut stdin: ChildStdin) {

@@ -510,3 +510,18 @@ fn extension_without_options_gets_no_options_message() {
         .collect();
     assert_eq!(kinds, ["welcome", "mode", "lifecycle"]);
 }
+
+#[test]
+fn extension_exe_without_exec_bit_still_starts() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut core = Core::start();
+    let out = core._tmp.path().join("noexec.log");
+    core.install("noexec", &["echo", out.to_str().unwrap(), "mode"]);
+    // 从 Windows 同步来的本体不带可执行位
+    let exe = core.extensions.join("noexec/fake");
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o644)).unwrap();
+    core.config(&[("noexec", &["mode"])]);
+    core.wait_for("noexec", Duration::from_secs(5), |s| s.state == "running");
+    let mode = std::fs::metadata(&exe).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o744);
+}
