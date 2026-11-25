@@ -886,3 +886,30 @@ fn keypad_long_initials_pick_abbreviation_step_by_step() {
     let out = m.select_candidate(0);
     assert!(!m.coord.is_composing(), "{out:?}");
 }
+
+/// 长串分步简拼的第一步也吃词频：整串没有吃满的候选时，分段候选按自己的码调序。
+#[test]
+fn keypad_step_abbreviation_learns_selection() {
+    let Some((m, _rx)) = core("kp_learn", "pinyin", |c| {
+        no_assoc(c);
+        c.schema.pinyin.frequency.enabled = true;
+    }) else {
+        return;
+    };
+    let _ = m.set_keypad(true);
+    let pos = |m: &MobileCore| {
+        keypad(m, "99999999");
+        let items = m.candidates(0, 10).items;
+        items
+            .iter()
+            .position(|t| t == "真正意义")
+            .expect("真正意义 在首页")
+    };
+    let before = pos(&m);
+    assert!(before > 0, "前提：真正意义 原本不是首选");
+    let _ = m.select_candidate(before);
+    let _ = m.select_candidate(0);
+    assert!(!m.coord.is_composing());
+    let after = pos(&m);
+    assert!(after < before, "选过一次应前移：{before} → {after}");
+}

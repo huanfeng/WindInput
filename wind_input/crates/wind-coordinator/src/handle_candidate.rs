@@ -775,6 +775,13 @@ impl Coordinator {
         // 分隔符、前缀补全下都与击键不同）；码表用输入码（候选 code 是词条全码，拿它当键会让
         // `d`/`de`/`def` 码位互相串扰）。写端各调用点同样经 `freq_code`，两侧必须同口径。
         // 收齐键后一次事务批量查（见 `get_freq_batch`），避免每候选一次读事务。
+        //
+        // 例外：九宫格下整串读不通、列表里没有吃满整串的候选（`99999999` 的分步简拼）。这时分段
+        // 候选就是全部，各按自己的码（`9999`）查历史；比较器先按消费长度分层，提升只发生在同长度
+        // 的候选之间，不会越级。
+        let consumes_all_of =
+            |c: &Candidate| c.consumed_length == 0 || c.consumed_length >= input_len;
+        let step_only = self.keypad_active() && !candidates.iter().any(consumes_all_of);
         let mut probe: Vec<(String, String, String)> = Vec::new();
         // 词频按 `freq_text()` 查（与写端同键），重排纯函数按候选 `text` 认记录，故另收一份 `text`。
         // 两者只在模板展开 / 大小写投影过的候选上不同。
@@ -788,8 +795,7 @@ impl Coordinator {
             if settings.excluded_from_freq(c.freq_text()) {
                 continue;
             }
-            let consumes_all = c.consumed_length == 0 || c.consumed_length >= input_len;
-            if !consumes_all {
+            if !step_only && !consumes_all_of(c) {
                 continue;
             }
             // 混输按候选来源读子方案键空间（无法归因跳过）；非混输用统一 schema。
