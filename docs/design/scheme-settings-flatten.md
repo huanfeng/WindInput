@@ -1,6 +1,6 @@
 # 方案设置扁平化：取消类型级全局配置
 
-状态：实施中（阶段 1、2 已完成）。分支 `feat/scheme-settings`。
+状态：阶段 1–4 完成，阶段 5 部分完成（移动端门面已接别名）。分支 `feat/scheme-settings`。
 取代：`docs/redesign/schema-config-layering.md`（三层结构）中的「全局公共」一层。
 
 ## 1 问题
@@ -154,6 +154,10 @@ RPC 一侧经内部方法 `schema.aliasGet` / `schema.aliasSet` 转到宿主（`
 不建立任何跟随关系。
 
 ## 6 设置端
+
+实施要点（阶段 4）：方案对话框「方案设置」页四类方案通用，经 `schema.getSettings` /
+`schema.setSettings` 读写；「复制到…」按块（按键路径划分）排进目标方案的待提交改动，随保存提交；
+向导的方案级几项在切换默认方案之后按旧键（别名）写；引擎卡「恢复默认」叠加方案默认值。
 
 - 清单驱动的引擎卡渲染（`scheme_config_section`）改为绑定到一个方案 id，读写走
   `schema.getConfig` / `schema.saveConfig`。拼音、混输、英文由此直接获得方案级编辑。
