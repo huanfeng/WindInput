@@ -871,7 +871,8 @@ impl Coordinator {
             return;
         }
         let text = format!("{left}{right}");
-        let pair_on = {
+        // 应用级 `auto_pair = false`（如 Excel 里退回光标不可靠）同样要拦住显式命令。
+        let pair_on = self.auto_pair_allowed_here() && {
             let ap = &self.rt().config.input.auto_pair;
             if self.is_chinese_mode() {
                 ap.chinese

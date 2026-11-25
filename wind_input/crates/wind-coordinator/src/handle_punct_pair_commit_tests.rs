@@ -107,6 +107,16 @@ fn pair_disabled_degrades_to_plain_commit() {
     );
 }
 
+/// 全局配对开、应用级 `auto_pair = false`（Excel 等）：`ime.pair` 也要退化为纯上屏，
+/// 不压栈、不发光标偏移，否则宿主里光标会被错误地退回。
+#[test]
+fn per_app_auto_pair_off_degrades_to_plain_commit() {
+    let c = coord(true);
+    c.active_compat.lock().unwrap().auto_pair = Some(false);
+    c.cmd_pair_commit("<!--", "-->", 3);
+    assert!(stack_top(&c).is_none(), "应用级关闭时不该压栈");
+}
+
 /// 右段为空 = 没有要越过的内容，压栈只会让下一次 Tab 空跑一格。
 #[test]
 fn empty_right_does_not_push() {
