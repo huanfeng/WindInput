@@ -3209,6 +3209,7 @@ fn grid_expand_defaults_off_and_cell_truncation_takes_the_tighter_limit() {
     );
     assert_eq!(cfg.ui.candidate.grid_rows(), 5);
     assert!(cfg.ui.candidate.grid_pageupdown_screen);
+    assert!(cfg.ui.candidate.grid_expand_advance);
     let mut c = cfg.ui.candidate.clone();
     c.max_chars = 16;
     c.grid_cell_max_chars = 3;

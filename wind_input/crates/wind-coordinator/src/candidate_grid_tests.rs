@@ -26,6 +26,7 @@ fn coord(grid_on: bool) -> (Arc<Coordinator>, Receiver<UiCommand>) {
     let mut cfg = wind_config::Config::default();
     cfg.input.default.chinese_mode = true;
     cfg.ui.candidate.grid_expand = grid_on;
+    cfg.ui.candidate.grid_expand_advance = false; // 这组测试只看展开本身，下移另有专测
     let (c, rx) = Coordinator::new_headless_with_ui(cfg, None);
     c.debug_mark_coords_ready();
     (c, rx)
@@ -293,6 +294,7 @@ fn page_up_down_moves_a_row_when_screen_off() {
     let mut cfg = wind_config::Config::default();
     cfg.input.default.chinese_mode = true;
     cfg.ui.candidate.grid_expand = true;
+    cfg.ui.candidate.grid_expand_advance = false; // 这组测试只看展开本身，下移另有专测
     cfg.ui.candidate.grid_pageupdown_screen = false;
     let (c, _rx) = Coordinator::new_headless_with_ui(cfg, None);
     c.debug_mark_coords_ready();
@@ -340,6 +342,7 @@ fn coord_screen_verbs(grid_on: bool) -> (Arc<Coordinator>, Receiver<UiCommand>) 
     let mut cfg = wind_config::Config::default();
     cfg.input.default.chinese_mode = true;
     cfg.ui.candidate.grid_expand = grid_on;
+    cfg.ui.candidate.grid_expand_advance = false; // 这组测试只看展开本身，下移另有专测
     cfg.keys
         .session_actions
         .insert("period".into(), "page_screen_next".into());
@@ -536,6 +539,7 @@ fn vertical_layout_does_not_expand() {
     let mut cfg = wind_config::Config::default();
     cfg.input.default.chinese_mode = true;
     cfg.ui.candidate.grid_expand = true;
+    cfg.ui.candidate.grid_expand_advance = false; // 这组测试只看展开本身，下移另有专测
     cfg.ui.candidate.layout = "vertical".into();
     let (c, _rx) = Coordinator::new_headless_with_ui(cfg, None);
     seed(&c, PP * 3);
@@ -548,6 +552,7 @@ fn coord_with(per_page: usize, fill: &str) -> (Arc<Coordinator>, Receiver<UiComm
     let mut cfg = wind_config::Config::default();
     cfg.input.default.chinese_mode = true;
     cfg.ui.candidate.grid_expand = true;
+    cfg.ui.candidate.grid_expand_advance = false; // 这组测试只看展开本身，下移另有专测
     cfg.ui.candidate.per_page = per_page;
     cfg.ui.candidate.grid_index_fill = fill.into();
     let (c, rx) = Coordinator::new_headless_with_ui(cfg, None);
@@ -655,6 +660,7 @@ fn number_key_selects_in_the_highlighted_row() {
     cfg.schema.active = "pinyin".into();
     cfg.input.default.chinese_mode = true;
     cfg.ui.candidate.grid_expand = true;
+    cfg.ui.candidate.grid_expand_advance = false; // 这组测试只看展开本身，下移另有专测
     let (c, rx) = Coordinator::new_headless_with_ui(cfg, Some(&data_dir()));
     c.debug_mark_coords_ready();
     for ch in "YI".chars() {
@@ -686,6 +692,7 @@ fn typed_expanded(code: &str) -> Option<(Arc<Coordinator>, Receiver<UiCommand>)>
     cfg.schema.active = "pinyin".into();
     cfg.input.default.chinese_mode = true;
     cfg.ui.candidate.grid_expand = true;
+    cfg.ui.candidate.grid_expand_advance = false; // 这组测试只看展开本身，下移另有专测
     let (c, rx) = Coordinator::new_headless_with_ui(cfg, Some(&data_dir()));
     c.debug_mark_coords_ready();
     for ch in code.chars() {
@@ -1113,6 +1120,7 @@ fn tab_left_alone_when_bound_elsewhere() {
     );
     let mut cfg = wind_config::Config::default();
     cfg.ui.candidate.grid_expand = true;
+    cfg.ui.candidate.grid_expand_advance = false; // 这组测试只看展开本身，下移另有专测
     cfg.schema.pinyin.sentence_cycle_key = "tab".into();
     let (c, _rx) = Coordinator::new_headless_with_ui(cfg, None);
     assert!(!c.tab_free_for_grid(false), "Tab 是整句切换键 ⇒ 不截");
@@ -1134,6 +1142,7 @@ fn rare_category_keeps_only_uncommon_han() {
     cfg.schema.active = "pinyin".into();
     cfg.input.default.chinese_mode = true;
     cfg.ui.candidate.grid_expand = true;
+    cfg.ui.candidate.grid_expand_advance = false; // 这组测试只看展开本身，下移另有专测
     let (c, _rx) = Coordinator::new_headless_with_ui(cfg, Some(&data_dir()));
     c.debug_mark_coords_ready();
     crate::charset_test_support::set_common_chars(&c, "以一亿已亦易矣乙译意依".chars());
@@ -1167,6 +1176,7 @@ fn number_key_follows_indices_onto_the_next_row() {
     cfg.schema.active = "pinyin".into();
     cfg.input.default.chinese_mode = true;
     cfg.ui.candidate.grid_expand = true;
+    cfg.ui.candidate.grid_expand_advance = false; // 这组测试只看展开本身，下移另有专测
     cfg.ui.candidate.per_page = 5;
     let (c, _rx) = Coordinator::new_headless_with_ui(cfg, Some(&data_dir()));
     c.debug_mark_coords_ready();
@@ -1197,6 +1207,7 @@ fn temp_pinyin_under_wubi_expands() {
         cfg.schema.active = "wubi86".into();
         cfg.input.default.chinese_mode = true;
         cfg.ui.candidate.grid_expand = true;
+        cfg.ui.candidate.grid_expand_advance = false; // 这组测试只看展开本身，下移另有专测
         if rebind {
             cfg.keys
                 .key_actions
@@ -1251,6 +1262,7 @@ fn mix_coord_with(
     cfg.schema.active = "wubi86".into();
     cfg.input.default.chinese_mode = true;
     cfg.ui.candidate.grid_expand = true;
+    cfg.ui.candidate.grid_expand_advance = false; // 这组测试只看展开本身，下移另有专测
     if global_vertical {
         cfg.ui.candidate.layout = "vertical".into();
     }
