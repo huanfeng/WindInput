@@ -57,6 +57,13 @@ fn every_known_layout_entry_is_classified() {
                 "schemas/kf.schema.toml.bak-overlay",
                 "config.conflict-a-2026-11-24.toml",
                 "themes/a/x.tmp",
+                "data/user_data.db",
+                "data/pinyin/freq.redb",
+                "data/pinyin/temp.wjl",
+                "data/pinyin/assoc.db",
+                "data/x.wjl.sealed",
+                "data/user_data.legacy",
+                "data/lock.lock",
             ],
         ),
     ];

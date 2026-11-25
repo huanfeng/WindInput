@@ -68,6 +68,9 @@ pub fn classify(local: &str) -> Class {
         || last.contains(".bak-")
         || last.contains(".conflict-")
         || last.ends_with(".sys_hash")
+        || [".redb", ".db", ".wjl", ".sealed", ".legacy", ".lock"]
+            .iter()
+            .any(|x| last.ends_with(x))
     {
         return Class::Excluded;
     }
