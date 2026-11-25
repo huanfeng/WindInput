@@ -814,3 +814,21 @@ fn keypad_enter_commits_pinyin_letters() {
     assert!(out.ops.contains(&commit("nihao")), "{out:?}");
     assert!(!m.coord.is_composing());
 }
+
+/// 编码栏任何时候都不出数字：读不出的键显示该键首字母；补全过的尾音节只显示已打的字母。
+#[test]
+fn keypad_composition_never_shows_digits() {
+    let Some((m, _rx)) = core("kp_comp", "pinyin", no_assoc) else {
+        return;
+    };
+    for (keys, want) in [
+        ("99999", "wwwww"),
+        ("6442699", "ni'hao'ww"),
+        ("644269", "ni'hao'x"),
+    ] {
+        let _ = m.set_keypad(false);
+        let _ = m.set_keypad(true);
+        let comp = composition(&keypad(&m, keys)).unwrap_or_default();
+        assert_eq!(comp, want, "{keys}");
+    }
+}

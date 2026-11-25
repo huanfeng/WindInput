@@ -87,6 +87,41 @@ impl KeypadMap {
     }
 }
 
+/// 九宫格的预编辑文字。
+///
+/// `read` 是前 `covered` 个击键的拼音（音节间 `'`）。全拼下字母与击键一一对应，补全过的尾音节
+/// 只留已打的字母（`222` 读作 ba'ba 时显示 `ba'b`）；双拼下拼音与击键不对应，原样显示。
+/// 其余读不出的击键显示该键的首字母（锁定字母显示自己），用户看到的总是字母。
+fn keypad_preedit(read: &str, covered: usize, keys: &Keys, map: &KeypadMap, full: bool) -> String {
+    let mut out = String::new();
+    if full {
+        let mut letters = 0;
+        for c in read.chars() {
+            if c != SEPARATOR as char {
+                if letters == covered {
+                    break;
+                }
+                letters += 1;
+            }
+            out.push(c);
+        }
+        while out.ends_with(SEPARATOR as char) {
+            out.pop();
+        }
+    } else {
+        out.push_str(read);
+    }
+    for k in covered..keys.len() {
+        if !out.is_empty() && (k == covered || keys.forced[k]) {
+            out.push(SEPARATOR as char);
+        }
+        if let Some(&l) = map.letters(keys.clean[k]).first() {
+            out.push(l as char);
+        }
+    }
+    out
+}
+
 /// 去掉分词键后的击键，及其与原串的坐标对应。
 struct Keys<'a> {
     raw: &'a str,
@@ -476,18 +511,24 @@ impl PinyinEngine {
         cands.extend(words);
         cands.truncate(max_candidates);
 
-        let preedit = match (&preedit_source, cands.first()) {
-            (Some(p), _) => p.clone(),
-            (None, Some(top)) => {
-                let rest = &keys.raw[top.consumed_length..];
-                if rest.is_empty() {
-                    top.pinyin.clone()
-                } else {
-                    format!("{}'{}", top.pinyin, rest.trim_start_matches('\''))
-                }
+        // 预编辑：读得出的部分显示拼音，读不出的尾键显示该键的首字母——任何时候都不出数字。
+        // 跟着显示首选走（候选栏按 `candidate_display_order` 排，与引擎内顺序不同），编码栏与
+        // 首选的读音才对得上；没有候选时退回整句路径。
+        let shown = cands
+            .iter()
+            .min_by(|a, b| wind_candidate::candidate_display_order(a, b, false, false, keys.raw));
+        let (read, covered) = match (shown, &preedit_source) {
+            (None, Some(p)) => (p.clone(), n),
+            (Some(top), _) => {
+                let covered = keys.raw_start[..n]
+                    .iter()
+                    .filter(|&&s| s < top.consumed_length)
+                    .count();
+                (top.pinyin.clone(), covered)
             }
-            (None, None) => keys.raw.to_string(),
+            (None, None) => (String::new(), 0),
         };
+        let preedit = keypad_preedit(&read, covered, &keys, map, self.shuangpin.is_none());
         ConvertResult {
             is_empty: cands.is_empty(),
             candidates: cands,
