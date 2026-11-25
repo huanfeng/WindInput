@@ -68,6 +68,9 @@ fn phase_label(phase: &str) -> &str {
         "disabled" => "未启用",
         "not_installed" => "未安装",
         "starting" => "启动中",
+        "halted" => "已停止",
+        "not_configured" => "未配置",
+        "needs_setup" => "待设置",
         other => other,
     }
 }

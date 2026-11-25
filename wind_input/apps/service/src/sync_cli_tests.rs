@@ -72,6 +72,9 @@ fn status_phase_labels() {
         ("disabled", "未启用"),
         ("not_installed", "未安装"),
         ("starting", "启动中"),
+        ("halted", "已停止"),
+        ("not_configured", "未配置"),
+        ("needs_setup", "待设置"),
         ("weird", "weird"),
     ] {
         assert!(format_status(&json!({"phase":p}), t).starts_with(&format!("状态: {zh}\n")));

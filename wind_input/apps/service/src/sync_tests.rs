@@ -966,3 +966,102 @@ fn supervisor_trip_notifies_once() {
     }
     assert_eq!(lock(&got).len(), 1, "保持熔断不再提示");
 }
+
+#[test]
+fn second_click_while_ticket_pending_says_busy() {
+    let mut r = rig();
+    let _hello = r.stub.next();
+    run_active(&mut r, Ok(json!({ "queued": true, "ticket": 3 })));
+    let v = r.host.sync_now_active();
+    assert_eq!(v, json!({ "outcome": "requested" }));
+    assert_eq!(notices(&r), vec![SyncNotice::Busy]);
+}
+
+fn conflict_round(n: u32) -> Option<RoundStats> {
+    Some(RoundStats {
+        ok: true,
+        conflicts: n,
+        ..Default::default()
+    })
+}
+
+#[test]
+fn background_conflict_notifies_once_until_cleared() {
+    let mut r = rig();
+    send_status(&mut r, round_status("idle", 1, conflict_round(2)));
+    send_status(&mut r, round_status("idle", 2, conflict_round(2)));
+    assert_eq!(notices(&r), vec![SyncNotice::BackgroundConflict(2)]);
+    send_status(&mut r, round_status("idle", 3, ok_round(0, 0)));
+    send_status(&mut r, round_status("idle", 4, conflict_round(1)));
+    assert_eq!(
+        notices(&r),
+        vec![
+            SyncNotice::BackgroundConflict(2),
+            SyncNotice::BackgroundConflict(1)
+        ]
+    );
+}
+
+#[test]
+fn active_round_conflicts_are_in_done_only() {
+    let mut r = rig();
+    let _hello = r.stub.next();
+    run_active(&mut r, Ok(json!({ "queued": true, "ticket": 1 })));
+    send_status(&mut r, round_status("idle", 1, conflict_round(3)));
+    send_status(&mut r, round_status("idle", 2, conflict_round(3)));
+    assert_eq!(
+        notices(&r),
+        vec![SyncNotice::Done(conflict_round(3).unwrap())]
+    );
+}
+
+#[test]
+fn background_conflict_text() {
+    assert_eq!(
+        notice_text(&SyncNotice::BackgroundConflict(4)),
+        "同步产生 4 个冲突，请到设置页处理"
+    );
+}
+
+#[test]
+fn ticket_timeout_does_not_count_syncing_time_and_ignores_last_error() {
+    let mut r = rig();
+    let _hello = r.stub.next();
+    let base = Instant::now();
+    let offset = Arc::new(Mutex::new(Duration::ZERO));
+    {
+        let offset = offset.clone();
+        r.host.set_clock(Box::new(move || base + *lock(&offset)));
+    }
+    run_active(&mut r, Ok(json!({ "queued": true, "ticket": 9 })));
+    *lock(&offset) = Duration::from_secs(11 * 60);
+    send_status(&mut r, round_status("syncing", 8, ok_round(0, 0)));
+    assert!(notices(&r).is_empty(), "同步中不计时: {:?}", notices(&r));
+    *lock(&offset) = Duration::from_secs(15 * 60);
+    let mut s = round_status("idle", 8, ok_round(0, 0));
+    s.last_error = Some("旧错误".into());
+    send_status(&mut r, s);
+    assert!(notices(&r).is_empty(), "从同步结束起算: {:?}", notices(&r));
+    *lock(&offset) = Duration::from_secs(26 * 60);
+    r.host.pump();
+    assert_eq!(
+        notices(&r),
+        vec![SyncNotice::Failed("等待超过 10 分钟".into())]
+    );
+}
+
+#[test]
+fn error_already_present_at_attach_does_not_notify() {
+    let mut r = rig();
+    let mut s = round_status("error", 0, None);
+    s.last_error = Some("网络不通".into());
+    send_status(&mut r, s);
+    send_status(&mut r, round_status("error", 1, fail_round("网络不通")));
+    assert!(notices(&r).is_empty(), "{:?}", notices(&r));
+    send_status(&mut r, round_status("idle", 2, ok_round(0, 0)));
+    send_status(&mut r, round_status("error", 3, fail_round("又断")));
+    assert_eq!(
+        notices(&r),
+        vec![SyncNotice::BackgroundFailed("又断".into())]
+    );
+}

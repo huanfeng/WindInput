@@ -45,6 +45,8 @@ pub enum SyncNotice {
     Busy,
     Disabled,
     BackgroundFailed(String),
+    /// 后台轮产生冲突（K 个）。
+    BackgroundConflict(u32),
 }
 
 pub fn notice_text(n: &SyncNotice) -> String {
@@ -71,6 +73,7 @@ pub fn notice_text(n: &SyncNotice) -> String {
         SyncNotice::Busy => "正在同步，完成后会提示".into(),
         SyncNotice::Disabled => "数据同步未启用".into(),
         SyncNotice::BackgroundFailed(r) => format!("数据同步出错：{r}"),
+        SyncNotice::BackgroundConflict(k) => format!("同步产生 {k} 个冲突，请到设置页处理"),
     }
 }
 
@@ -101,6 +104,10 @@ struct Track {
     last_seen_round: u64,
     /// 上次判定时同步进程是否处于熔断（反复退出、已停止重启）。
     was_tripped: bool,
+    /// 已提示过后台冲突且之后还没出现过无冲突的成功轮。
+    conflict_notified: bool,
+    /// 本次连接已收到第一份状态（用来判断「一连上就在出错」）。
+    baseline_seen: bool,
 }
 
 /// 同步进程能经 core 执行的方法。其余一律拒绝：同步进程持有凭据，被攻破时不能借 core 做别的事。
@@ -519,6 +526,7 @@ impl SyncHost {
         inner.link = Some(Link { tx, epoch });
         inner.status = Status::default();
         inner.track.last_seen_round = 0;
+        inner.track.baseline_seen = false;
         let mut stdin = stdin;
         let _ = std::thread::Builder::new()
             .name("sync-write".into())
@@ -691,6 +699,23 @@ impl SyncHost {
         let (phase, last_error) = self.phase_of(inner);
         let linked = inner.link.is_some();
         let mut resolved = false;
+        // 同步进行中不计入票的等待时长：超时从最近一次非同步中起算
+        if phase == "syncing" {
+            let now = self.now();
+            match &mut inner.track.ticket {
+                Some(Active::Ticket { since, .. }) | Some(Active::Pending { since }) => {
+                    *since = now
+                }
+                None => {}
+            }
+        }
+        // 一连上就带着旧错误：当作「已在失败中」，不为它弹
+        if linked && !inner.track.baseline_seen && !inner.status.phase.is_empty() {
+            inner.track.baseline_seen = true;
+            if inner.status.round == 0 && phase == "error" && last_error.is_some() {
+                inner.track.was_error = true;
+            }
+        }
         match &inner.track.ticket {
             Some(Active::Ticket { ticket, since }) => {
                 if linked && inner.status.round >= *ticket {
@@ -738,6 +763,15 @@ impl SyncHost {
             if let Some(r) = &inner.status.last_round {
                 if r.ok {
                     inner.track.was_error = false;
+                    if r.conflicts == 0 {
+                        inner.track.conflict_notified = false;
+                    } else {
+                        // 主动轮的冲突已写进完成提示，只置位不另弹
+                        if !resolved && !inner.track.conflict_notified {
+                            out.push(SyncNotice::BackgroundConflict(r.conflicts));
+                        }
+                        inner.track.conflict_notified = true;
+                    }
                 } else {
                     if !inner.track.was_error && !resolved && inner.track.ticket.is_none() {
                         out.push(SyncNotice::BackgroundFailed(
@@ -779,7 +813,8 @@ impl SyncHost {
             "halted" => "同步已停止",
             _ if inner.status.needs_identity => "需要先确认本机身份",
             _ if self.now().saturating_duration_since(since) >= TICKET_TIMEOUT => {
-                "等待超过 10 分钟"
+                // 超时原因固定，不借用可能过时的 last_error
+                return Some("等待超过 10 分钟".into());
             }
             _ => return None,
         };
@@ -878,10 +913,17 @@ impl SyncHost {
                 return json!({ "outcome": "failed", "error": e });
             }
             // 已有等待中的票时再点不发新请求，弹出的是那张票的结果。
-            if inner.track.ticket.is_none() {
+            let had_ticket = inner.track.ticket.is_some();
+            if !had_ticket {
                 inner.track.ticket = Some(Active::Pending { since: self.now() });
             }
-            inner.link.is_some()
+            let linked = inner.link.is_some();
+            if had_ticket {
+                drop(inner);
+                self.notify_now(SyncNotice::Busy);
+                return json!({ "outcome": "requested" });
+            }
+            linked
         };
         if linked {
             self.spawn_sync_now();

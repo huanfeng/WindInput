@@ -427,7 +427,9 @@ fn main() {
             let weak = weak.clone();
             move |n| {
                 let kind = match n {
-                    sync::SyncNotice::Failed(_) | sync::SyncNotice::BackgroundFailed(_) => "error",
+                    sync::SyncNotice::Failed(_)
+                    | sync::SyncNotice::BackgroundFailed(_)
+                    | sync::SyncNotice::BackgroundConflict(_) => "error",
                     _ => "info",
                 };
                 toast(&weak, &sync::notice_text(&n), kind);
