@@ -1,6 +1,6 @@
 # 方案设置扁平化：取消类型级全局配置
 
-状态：阶段 1–4 完成，阶段 5 部分完成（移动端门面已接别名）。分支 `feat/scheme-settings`。
+状态：阶段 1–4 完成；阶段 5 中移动端门面、配置片段拒收、文档站（WindInputDocs 同名分支）已完成，Android 与同步见 §9。分支 `feat/scheme-settings`。
 取代：`docs/redesign/schema-config-layering.md`（三层结构）中的「全局公共」一层。
 
 ## 1 问题
@@ -189,3 +189,14 @@ RPC 一侧经内部方法 `schema.aliasGet` / `schema.aliasSet` 转到宿主（`
 破坏性变更：类型级全局配置取消，设置按方案保存；旧键作为别名继续可用，含义是「当前方案
 （或主方案）的对应设置」；`data_custom/config.toml` 里的这四段不再读取；
 `schema.pinyin.fuzzy.*` 改名 `input.fuzzy.*`。
+
+## 9 合入前待办
+
+- **Android**（WindInputAndroid，另有会话在改，本分支不动）：
+  - 设置清单里的 `schema.pinyin.fuzzy.*` 改为 `input.fuzzy.*`——快照里的 `schema.pinyin` 已不含 `fuzzy`；
+  - 主页面的 `schema.*` 键现在指当前方案（别名），文案要说明；
+  - 缺按方案的拼音详情页（全拼 / 双拼各一份），可走 `schema.getSettings` / `schema.setSettings` 同口径；
+  - `wind-mobile/src/schema_settings.rs` 主仓有并发改动，合入时再对一遍。
+- **同步**：main 的 `wind-sync/src/scope.rs` 不含 `schema_overrides/`，方案设置不会被同步。
+  `feat/sync-groups` 已把它归入 `Kind::Setting`；发版前要么那条线先合，要么在这里补上。
+- **备份**：已含 `config.toml` 与 `schema_overrides/`，旧备份还原后加载时迁移，无需改动。
