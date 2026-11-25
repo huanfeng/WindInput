@@ -21,6 +21,8 @@ pub enum CryptoError {
 }
 
 pub const META_FORMAT: u32 = 2;
+/// 32 字节的 base32 无填充长度。
+const KEY_CHARS: usize = 52;
 const OBJ_VERSION: u8 = 1;
 const NONCE_LEN: usize = 24;
 
@@ -57,13 +59,16 @@ impl Dek {
             .collect::<Vec<_>>()
             .join("-")
     }
-    /// 解析同步密钥：忽略大小写、空白与 `-`。
+    /// 解析同步密钥：忽略大小写、空白（含全角空格）与各种连字符（`-` `－` `—` `–`）。
     pub fn from_key_string(s: &str) -> Result<Self, CryptoError> {
         let norm: String = s
             .chars()
-            .filter(|c| !c.is_whitespace() && *c != '-')
+            .filter(|c| !c.is_whitespace() && !matches!(c, '-' | '－' | '—' | '–'))
             .map(|c| c.to_ascii_uppercase())
             .collect();
+        if norm.len() != KEY_CHARS {
+            return Err(CryptoError::Format("同步密钥长度不对".into()));
+        }
         let v = data_encoding::BASE32_NOPAD
             .decode(norm.as_bytes())
             .map_err(|_| CryptoError::Format("同步密钥含非法字符".into()))?;

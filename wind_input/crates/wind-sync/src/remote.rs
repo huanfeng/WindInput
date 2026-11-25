@@ -15,18 +15,24 @@ fn read_meta(b: &dyn Backend) -> Result<Meta, SyncError> {
 
 /// 首次启用：生成同步密钥并写 meta.json。远端已有 meta 则拒绝（不覆盖）。
 pub fn init_remote(b: &dyn Backend) -> Result<Dek, SyncError> {
+    let dek = Dek::generate();
+    init_remote_with(b, &dek)?;
+    Ok(dek)
+}
+
+/// 同 [`init_remote`]，但用调用方已生成（并已在本机保存）的密钥。
+pub fn init_remote_with(b: &dyn Backend, dek: &Dek) -> Result<(), SyncError> {
     if b.get(&manifest::meta_key())?.is_some() {
         return Err(SyncError::AlreadyInitialized);
     }
-    let dek = Dek::generate();
-    let meta = Meta::new(&dek).to_json();
+    let meta = Meta::new(dek).to_json();
     b.put(&manifest::meta_key(), &meta)?;
     // 并发首次初始化：后写覆盖先写。回读核对，输了就按「已初始化」处理，让用户改用同步密钥加入。
     // 同步引擎要求 meta 已存在才会上传任何 blob/清单，所以输家此前没有留下数据。
     if b.get(&manifest::meta_key())?.as_deref() != Some(meta.as_slice()) {
         return Err(SyncError::AlreadyInitialized);
     }
-    Ok(dek)
+    Ok(())
 }
 
 /// 新设备粘贴同步密钥加入（用 meta 里的校验值核对）。
@@ -43,7 +49,13 @@ pub fn join_with_key(b: &dyn Backend, key: &str) -> Result<Dek, SyncError> {
 /// 之后各设备以自己的本地内容为准重新上传。调用方负责取得用户的明确确认。
 pub fn reset_remote(b: &dyn Backend) -> Result<Dek, SyncError> {
     let dek = Dek::generate();
-    let meta = Meta::new(&dek).to_json();
+    reset_remote_with(b, &dek)?;
+    Ok(dek)
+}
+
+/// 同 [`reset_remote`]，但用调用方已生成（并已在本机保存）的密钥。
+pub fn reset_remote_with(b: &dyn Backend, dek: &Dek) -> Result<(), SyncError> {
+    let meta = Meta::new(dek).to_json();
     for o in b.list(&format!("{}/", manifest::ROOT))? {
         // meta 最后写：中途失败时远端仍是「已清空但未初始化」，重试即可
         if !manifest::safe_key(&o.key) {
@@ -52,7 +64,7 @@ pub fn reset_remote(b: &dyn Backend) -> Result<Dek, SyncError> {
         b.delete(&o.key)?;
     }
     b.put(&manifest::meta_key(), &meta)?;
-    Ok(dek)
+    Ok(())
 }
 
 /// 回收：任一设备最新两代清单都不引用、且修改时间早于 `now - min_age_secs` 的 blob。

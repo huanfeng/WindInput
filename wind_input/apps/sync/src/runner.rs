@@ -962,13 +962,27 @@ impl Runner {
         Ok(json!({ "ok": true, "remote_initialized": meta.is_some(), "joined": joined }))
     }
 
+    /// 本机先存下密钥（发布远端 meta 之前），返回旧值供回滚。保存失败则不改动。
+    fn store_dek(&mut self, dek: &Dek) -> Result<Option<String>, String> {
+        let prev = self.secrets.dek.replace(dek.to_base64());
+        if let Err(e) = self.save_secrets() {
+            self.secrets.dek = prev;
+            return Err(e);
+        }
+        Ok(prev)
+    }
+
+    /// 远端发布失败：把本机密钥退回原值。
+    fn rollback_dek(&mut self, prev: Option<String>) {
+        self.secrets.dek = prev;
+        if let Err(e) = self.save_secrets() {
+            log!("回滚本机同步密钥失败: {e}");
+        }
+    }
+
     /// DEK 变了说明换了同步库：旧的清单基线对新远端没有意义，重建（沿用设备号，回到单机组）。
     /// 密钥变了：只有初始化（`init`）直接确认身份，其余一律按加入处理、待确认；密钥没变则保持原有身份。
-    fn adopt_dek(&mut self, dek: &Dek, init: bool) -> Result<(), String> {
-        let b64 = dek.to_base64();
-        let changed = self.secrets.dek.as_deref() != Some(b64.as_str());
-        self.secrets.dek = Some(b64);
-        self.save_secrets()?;
+    fn finish_adopt(&mut self, changed: bool, init: bool) {
         if changed {
             let device = self.state.device.clone();
             self.state = SyncState::new(device.clone());
@@ -978,6 +992,12 @@ impl Runner {
         }
         self.after_user_fix();
         self.publish_info(false);
+    }
+
+    fn adopt_dek(&mut self, dek: &Dek, init: bool) -> Result<(), String> {
+        let prev = self.store_dek(dek)?;
+        let changed = prev.as_deref() != Some(dek.to_base64().as_str());
+        self.finish_adopt(changed, init);
         Ok(())
     }
 
@@ -987,8 +1007,21 @@ impl Runner {
         if Self::read_meta(&*b)?.is_some() {
             return Err(sync_error(&SyncError::AlreadyInitialized));
         }
-        let dek = remote::init_remote(&*b).map_err(|e| sync_error(&e))?;
-        self.adopt_dek(&dek, true)?;
+        let dek = Dek::generate();
+        // 先存本机再发布：本机存不下就不建库，免得远端有库而用户没拿到密钥
+        let prev = self.store_dek(&dek)?;
+        let published = remote::init_remote_with(&*b, &dek).map_err(|e| sync_error(&e));
+        // 已知局限：回读与此处复核之间仍有极小的并发创建窗口
+        let verified = published.and_then(|_| match Self::read_meta(&*b)? {
+            Some(m) if m.verify(&dek) => Ok(()),
+            _ => Err(sync_error(&SyncError::AlreadyInitialized)),
+        });
+        if let Err(e) = verified {
+            self.rollback_dek(prev);
+            return Err(e);
+        }
+        let changed = prev.as_deref() != Some(dek.to_base64().as_str());
+        self.finish_adopt(changed, true);
         log!("已生成同步密钥");
         Ok(json!({ "ok": true, "key": dek.to_key_string() }))
     }
@@ -1400,9 +1433,12 @@ impl Runner {
             return Err("重置远端会清空其中全部同步数据，须明确确认（confirm=true）".into());
         }
         let b = self.fresh_backend(None)?;
-        let dek = remote::reset_remote(&*b).map_err(|e| sync_error(&e))?;
-        self.secrets.dek = Some(dek.to_base64());
-        self.save_secrets()?;
+        let dek = Dek::generate();
+        let prev = self.store_dek(&dek)?;
+        if let Err(e) = remote::reset_remote_with(&*b, &dek) {
+            self.rollback_dek(prev);
+            return Err(sync_error(&e));
+        }
         // 远端已空：旧基线作废，所有本地文件当作新增上传；本机就是新库的首台设备
         let mut fresh = SyncState::new(self.state.device.clone());
         fresh.group = group_of(&self.state).to_string();

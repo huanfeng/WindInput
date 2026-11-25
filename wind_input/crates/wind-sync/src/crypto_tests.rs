@@ -78,6 +78,40 @@ fn dek_base64_roundtrip_and_blob_id_stable() {
     );
 }
 
+#[test]
+fn key_string_rejects_noncanonical_trailing_bits_and_accepts_wide_separators() {
+    let d = Dek::generate();
+    let s = d.to_key_string().replace('-', "");
+    // 最后一个字符只有高 4 位有效：换成同高位、低位不同的字符即非规范编码
+    let alphabet = "abcdefghijklmnopqrstuvwxyz234567";
+    let last = s.chars().last().unwrap();
+    let idx = alphabet.find(last).unwrap();
+    assert_eq!(idx & 0b1111, 0, "规范编码的低 4 位为 0");
+    let tampered = format!("{}{}", &s[..51], alphabet.chars().nth(idx | 1).unwrap());
+    assert!(Dek::from_key_string(&tampered).is_err());
+    // 全角 / 长连字符与全角空格
+    let wide: String = s
+        .as_bytes()
+        .chunks(4)
+        .map(|c| std::str::from_utf8(c).unwrap())
+        .collect::<Vec<_>>()
+        .join("－");
+    assert_eq!(Dek::from_key_string(&wide).unwrap(), d);
+    let mixed = format!(
+        "{}—{}\u{3000}{}–{}",
+        &s[..8],
+        &s[8..20],
+        &s[20..40],
+        &s[40..]
+    );
+    assert_eq!(Dek::from_key_string(&mixed).unwrap(), d);
+    // 长度错有自己的提示
+    match Dek::from_key_string(&s[..51]) {
+        Err(CryptoError::Format(m)) => assert!(m.contains("长度"), "{m}"),
+        o => panic!("{o:?}"),
+    }
+}
+
 const ALL: [Purpose; 5] = [
     Purpose::Files,
     Purpose::DevInfo,

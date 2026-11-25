@@ -705,3 +705,101 @@ fn status_is_reported_before_command_reply() {
         "回执前应先收到非停摆的状态: {sent:?}"
     );
 }
+
+/// 发布 meta 总是失败的内存后端。
+#[derive(Clone)]
+struct MetaPutFails(MemBackend);
+
+impl Backend for MetaPutFails {
+    fn list(&self, prefix: &str) -> Result<Vec<ObjMeta>, BackendError> {
+        self.0.list(prefix)
+    }
+    fn get(&self, key: &str) -> Result<Option<Vec<u8>>, BackendError> {
+        self.0.get(key)
+    }
+    fn put(&self, key: &str, bytes: &[u8]) -> Result<(), BackendError> {
+        if key == manifest::meta_key() {
+            return Err(BackendError::Transient("写 meta 失败（桩）".into()));
+        }
+        self.0.put(key, bytes)
+    }
+    fn delete(&self, key: &str) -> Result<(), BackendError> {
+        self.0.delete(key)
+    }
+}
+
+struct MetaPutFailsFactory(MetaPutFails);
+
+impl BackendFactory for MetaPutFailsFactory {
+    fn build(&self, _: &SyncSettings, _: &str) -> Result<Box<dyn Backend>, String> {
+        Ok(Box::new(self.0.clone()))
+    }
+}
+
+/// 写入总是失败的机密存储。
+struct FailingStore;
+
+impl crate::secrets::SecretStore for FailingStore {
+    fn read(&self) -> std::io::Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+    fn write(&self, _: &[u8]) -> std::io::Result<()> {
+        Err(std::io::Error::other("磁盘已满（桩）"))
+    }
+    fn delete(&self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// 本机存不下密钥：不建库，远端保持为空。
+#[test]
+fn create_key_does_not_publish_when_local_save_fails() {
+    let d = tempfile::tempdir().unwrap();
+    let mem = MemBackend::new();
+    let (mut r, _rx) = runner_with(d.path(), Box::new(MemFactory(mem.clone())), None, "pc");
+    r.cfg.secrets = Box::new(FailingStore);
+    assert!(r.command(Op::CreateKey, &Value::Null).is_err());
+    assert!(mem.raw_get(&manifest::meta_key()).is_none());
+    assert!(r.secrets.dek.is_none());
+}
+
+/// 发布 meta 失败：本机密钥退回原值，不留下用户没见过的密钥。
+#[test]
+fn create_key_rolls_back_local_key_when_publish_fails() {
+    let d = tempfile::tempdir().unwrap();
+    let f = MetaPutFails(MemBackend::new());
+    let (mut r, _rx) = runner_with(d.path(), Box::new(MetaPutFailsFactory(f)), None, "pc");
+    assert!(r.command(Op::CreateKey, &Value::Null).is_err());
+    assert!(r.secrets.dek.is_none());
+    assert!(!r.status().joined);
+}
+
+/// 重置时发布失败：本机仍持有原密钥。
+#[test]
+fn reset_remote_keeps_old_local_key_when_publish_fails() {
+    let d = tempfile::tempdir().unwrap();
+    let dek = Dek::generate();
+    let old = dek.to_base64();
+    let f = MetaPutFails(MemBackend::new());
+    let (mut r, _rx) = runner_with(d.path(), Box::new(MetaPutFailsFactory(f)), Some(dek), "pc");
+    assert!(
+        r.command(Op::ResetRemote, &json!({"confirm": true}))
+            .is_err()
+    );
+    assert_eq!(r.secrets.dek.as_deref(), Some(old.as_str()));
+}
+
+/// 重置时本机存不下新密钥：不动远端。
+#[test]
+fn reset_remote_does_not_touch_remote_when_local_save_fails() {
+    let d = tempfile::tempdir().unwrap();
+    let (mem, _key) = initialized_remote();
+    mem.raw_put("windinput-sync/v2/blobs/x", vec![1]);
+    let (mut r, _rx) = runner_with(d.path(), Box::new(MemFactory(mem.clone())), None, "pc");
+    r.cfg.secrets = Box::new(FailingStore);
+    assert!(
+        r.command(Op::ResetRemote, &json!({"confirm": true}))
+            .is_err()
+    );
+    assert!(mem.raw_get("windinput-sync/v2/blobs/x").is_some());
+}

@@ -399,13 +399,13 @@ fn command_round_trip() {
         panic!()
     };
     r.stub
-        .send(FromSync::command_reply(id, Err("口令错误".into())));
+        .send(FromSync::command_reply(id, Err("同步密钥不对".into())));
     assert!(
         call.join()
             .unwrap()
             .unwrap_err()
             .to_string()
-            .contains("口令错误")
+            .contains("同步密钥不对")
     );
 }
 
@@ -727,9 +727,9 @@ fn busy_then_done() {
 fn command_error_is_reported_as_failed() {
     let mut r = rig();
     let _hello = r.stub.next();
-    let v = run_active(&mut r, Err("口令错误".into()));
+    let v = run_active(&mut r, Err("同步密钥不对".into()));
     assert_eq!(v["outcome"], "requested");
-    assert_eq!(notices(&r), vec![SyncNotice::Failed("口令错误".into())]);
+    assert_eq!(notices(&r), vec![SyncNotice::Failed("同步密钥不对".into())]);
 }
 
 #[test]
@@ -1122,4 +1122,49 @@ fn error_already_present_at_attach_does_not_notify() {
         notices(&r),
         vec![SyncNotice::BackgroundFailed("又断".into())]
     );
+}
+
+fn identity_status() -> Status {
+    Status {
+        phase: "idle".into(),
+        has_secret: true,
+        joined: true,
+        device: "pc".into(),
+        group: "home".into(),
+        group_name: "家".into(),
+        ..Default::default()
+    }
+}
+
+/// 同步进程没在跑（停用）时，重启后的 core 仍报出上次的身份；第一份真实状态再覆盖。
+#[test]
+fn identity_snapshot_survives_restart_while_disabled() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut off = webdav(false);
+    off.enabled = false;
+    save_settings(&dir.path().join("state/sync/settings.toml"), &off).unwrap();
+    IdentitySnapshot::of(&identity_status()).save(&dir.path().join("state/sync"));
+
+    let host = host_in(dir.path(), true, COMMAND_TIMEOUT);
+    let v = host.view(&lock(&host.inner));
+    assert_eq!(v["phase"], "disabled");
+    assert_eq!(
+        (v["joined"].clone(), v["device"].clone(), v["group"].clone()),
+        (json!(true), json!("pc"), json!("home"))
+    );
+    assert_eq!(v["has_secret"], true);
+
+    // 接上进程后，第一份真实状态到来前不清空
+    let mut stub = attach_stub(&host);
+    assert!(lock(&host.inner).status.joined);
+    let real = Status {
+        phase: "idle".into(),
+        device: "pc-2".into(),
+        ..Default::default()
+    };
+    stub.send(FromSync::Status(real.clone()));
+    wait_for(|| lock(&host.inner).status == real);
+    // 真实状态变了身份，快照随之更新
+    wait_for(|| IdentitySnapshot::load(&dir.path().join("state/sync")).device == "pc-2");
+    assert!(!IdentitySnapshot::load(&dir.path().join("state/sync")).joined);
 }

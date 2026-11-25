@@ -19,6 +19,7 @@ use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::{error, info, warn};
 use wind_config::Config;
@@ -163,6 +164,64 @@ fn save_settings(path: &Path, s: &SyncSettings) -> Result<(), String> {
     wind_sync_ipc::save_settings_file(path, s)
 }
 
+/// 同步进程没在跑（停用、刚重启）时设置页仍要显示的「身份」字段，落盘在 `last_status.json`。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+struct IdentitySnapshot {
+    has_secret: bool,
+    joined: bool,
+    device: String,
+    group: String,
+    group_name: String,
+}
+
+impl IdentitySnapshot {
+    fn of(s: &Status) -> Self {
+        IdentitySnapshot {
+            has_secret: s.has_secret,
+            joined: s.joined,
+            device: s.device.clone(),
+            group: s.group.clone(),
+            group_name: s.group_name.clone(),
+        }
+    }
+
+    /// 只带身份字段的状态：其余等同步进程上报。
+    fn status(&self) -> Status {
+        Status {
+            has_secret: self.has_secret,
+            joined: self.joined,
+            device: self.device.clone(),
+            group: self.group.clone(),
+            group_name: self.group_name.clone(),
+            ..Default::default()
+        }
+    }
+
+    fn file(state_dir: &Path) -> PathBuf {
+        state_dir.join("last_status.json")
+    }
+
+    fn load(state_dir: &Path) -> Self {
+        std::fs::read(Self::file(state_dir))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default()
+    }
+
+    /// 临时文件 + rename，写一半不会留下半个文件。
+    fn save(&self, state_dir: &Path) {
+        let path = Self::file(state_dir);
+        let tmp = path.with_extension("json.tmp");
+        let r = std::fs::create_dir_all(state_dir)
+            .and_then(|_| std::fs::write(&tmp, serde_json::to_vec(self).unwrap_or_default()))
+            .and_then(|_| std::fs::rename(&tmp, &path));
+        if let Err(e) = r {
+            warn!("保存同步状态快照失败: {e}");
+        }
+    }
+}
+
 struct Paths {
     settings_file: PathBuf,
     state_dir: PathBuf,
@@ -206,6 +265,8 @@ struct Inner {
     settings: SyncSettings,
     link: Option<Link>,
     status: Status,
+    /// 已落盘的身份快照，变了才写。
+    saved_identity: IdentitySnapshot,
     epoch: u64,
     last_reconcile: Option<Instant>,
     track: Track,
@@ -277,6 +338,10 @@ impl SyncHost {
             .as_ref()
             .map(|p| load_settings(&p.settings_file))
             .unwrap_or_default();
+        let snapshot = paths
+            .as_ref()
+            .map(|p| IdentitySnapshot::load(&p.state_dir))
+            .unwrap_or_default();
         let host = Arc::new_cyclic(|me| SyncHost {
             me: me.clone(),
             now_in_flight: AtomicBool::new(false),
@@ -286,7 +351,8 @@ impl SyncHost {
                 sup,
                 settings,
                 link: None,
-                status: Status::default(),
+                status: snapshot.status(),
+                saved_identity: snapshot,
                 epoch: 0,
                 last_reconcile: None,
                 track: Track::default(),
@@ -501,6 +567,16 @@ impl SyncHost {
         }
     }
 
+    fn persist_identity(&self, inner: &mut Inner) {
+        let now = IdentitySnapshot::of(&inner.status);
+        if now != inner.saved_identity {
+            if let Some(p) = &self.paths {
+                now.save(&p.state_dir);
+            }
+            inner.saved_identity = now;
+        }
+    }
+
     fn on_exit(&self, inner: &mut Inner, next: Decision) -> bool {
         inner.link = None;
         inner.status.phase.clear();
@@ -531,7 +607,8 @@ impl SyncHost {
             });
         }
         inner.link = Some(Link { tx, epoch });
-        inner.status = Status::default();
+        // 保留身份快照，等同步进程报来第一份真实状态再覆盖
+        inner.status = IdentitySnapshot::of(&inner.status).status();
         inner.track.last_seen_round = 0;
         inner.track.baseline_seen = false;
         let mut stdin = stdin;
@@ -571,6 +648,7 @@ impl SyncHost {
                         false
                     } else {
                         inner.status = s;
+                        self.persist_identity(&mut inner);
                         true
                     }
                 };
