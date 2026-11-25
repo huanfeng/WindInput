@@ -996,54 +996,15 @@ pub struct SchemaOverride {
 /// 回答「全局改了，为什么某个方案里没变」，供设置页提示。它是静态事实，走 capability 快照
 /// （随 `system.capabilities` 拉一次）；别为它遍历 [`crate::config::OriginSnapshot`]。
 ///
-/// 没有编译期约束：对应关系只在各 `resolved()` 函数体里（[`crate::schema::SchemaBehavior`]、
-/// [`crate::config::CodetableGlobal::resolved`]、[`crate::config::AuxCodeGlobal::resolved`]），
-/// 新增方案级字段时必须回来加一行，漏了没有测试会红。
+/// 只收真全局项（`input.*` / `ui.*`）。`schema.codetable.*` 这类按类型共用的设置已取消，
+/// 它们现在就是方案自己的设置（见 [`scheme_alias`]），不在这张表里。
+///
+/// 没有编译期约束：对应关系只在 [`crate::schema::SchemaBehavior`] 里，新增方案级字段时必须
+/// 回来加一行，漏了没有测试会红。
 ///
 /// 不在表里的：`[candidate]` 的 `font_family` / `text_orientation`、`[punct]` 的 `mode`、
 /// `[phrases]` 整段，它们没有对应的全局配置键。
 pub const SCHEMA_OVERRIDES: &[SchemaOverride] = &[
-    SchemaOverride {
-        key: "schema.codetable.",
-        section: "[engine.codetable]",
-        note: "码表方案可逐项覆盖这里的设置；方案没写的项仍然用这里的值。",
-        fold: false,
-    },
-    // 调频子段单独登记：段前缀不递归（见 `SchemaOverride::key`）。
-    // ⚠️ 与它并列的 `auto_phrase` 子段**刻意不登记**——`CodetableGlobal::resolved` 里
-    // 只折叠到 `frequency` 就返回了，码表自动造词没有方案级形态。标了它等于教用户
-    // 去方案里写一段不会被读的配置。
-    SchemaOverride {
-        key: "schema.codetable.frequency.",
-        section: "[engine.codetable.frequency]",
-        note: "码表方案可逐项覆盖这里的调频设置；方案没写的项仍然用这里的值。",
-        fold: false,
-    },
-    // 同上：段前缀不递归，英文候选子段要自己登记一条。
-    SchemaOverride {
-        key: "schema.codetable.english_merge.",
-        section: "[engine.codetable.english_merge]",
-        note: "码表方案可逐项覆盖这里的英文候选设置；方案没写的项仍然用这里的值。",
-        fold: false,
-    },
-    SchemaOverride {
-        key: "schema.pinyin.aux_code.enabled",
-        section: "[engine.aux_code]",
-        note: "方案可覆盖这一项；方案没写则用这里的值。",
-        fold: false,
-    },
-    SchemaOverride {
-        key: "schema.pinyin.aux_code.max_phrase_len",
-        section: "[engine.aux_code]",
-        note: "方案可覆盖这一项；方案没写则用这里的值。",
-        fold: false,
-    },
-    SchemaOverride {
-        key: "schema.pinyin.aux_code.direct",
-        section: "[engine.aux_code]",
-        note: "方案可覆盖这一项；方案没写则用这里的值。只对双拼方案生效。",
-        fold: false,
-    },
     SchemaOverride {
         key: "input.punct.custom_mappings",
         section: "[punct]",
@@ -1151,149 +1112,9 @@ pub fn schema_override_of(key: &str) -> Option<&'static SchemaOverride> {
 ///
 /// `[punct] mode` 不在内：它没有对应的全局键（见 [`SCHEMA_OVERRIDES`] 的「不在表里」一节）。
 pub fn schema_overridden_keys(schema: &crate::schema::Schema) -> Vec<&'static str> {
-    let ct = &schema.engine.codetable;
-    let freq = ct.frequency.clone().unwrap_or_default();
-    let em = ct.english_merge.clone().unwrap_or_default();
-    let aux = &schema.engine.aux_code;
     let punct_table = schema.punct.custom_mappings.is_some();
     let cand = &schema.candidate;
     let checks = [
-        // ── [engine.codetable] ⇄ schema.codetable.* ──
-        (
-            "schema.codetable.top_code_commit",
-            ct.top_code_commit.is_some(),
-        ),
-        (
-            "schema.codetable.clear_on_empty_max",
-            ct.clear_on_empty_max.is_some(),
-        ),
-        (
-            "schema.codetable.auto_commit_at_full",
-            ct.auto_commit_at_full.is_some(),
-        ),
-        (
-            "schema.codetable.auto_commit_min_len",
-            ct.auto_commit_min_len.is_some(),
-        ),
-        ("schema.codetable.punct_commit", ct.punct_commit.is_some()),
-        (
-            "schema.codetable.show_code_hint",
-            ct.show_code_hint.is_some(),
-        ),
-        (
-            "schema.codetable.single_code_input",
-            ct.single_code_input.is_some(),
-        ),
-        (
-            "schema.codetable.single_code_complete",
-            ct.single_code_complete.is_some(),
-        ),
-        (
-            "schema.codetable.short_code_yield_level",
-            ct.short_code_yield_level.is_some(),
-        ),
-        ("schema.codetable.single_char", ct.single_char.is_some()),
-        ("schema.codetable.z_key_repeat", ct.z_key_repeat.is_some()),
-        ("schema.codetable.z_key_action", ct.z_key_action.is_some()),
-        ("schema.codetable.wildcard", ct.wildcard.is_some()),
-        ("schema.codetable.wildcard_key", ct.wildcard_key.is_some()),
-        (
-            "schema.codetable.wildcard_single_only",
-            ct.wildcard_single_only.is_some(),
-        ),
-        (
-            "schema.codetable.sentence_count",
-            ct.sentence_count.is_some(),
-        ),
-        (
-            "schema.codetable.sentence_max_count",
-            ct.sentence_max_count.is_some(),
-        ),
-        (
-            "schema.codetable.sentence_cycle_key",
-            ct.sentence_cycle_key.is_some(),
-        ),
-        (
-            "schema.codetable.sentence_grammar_weight",
-            ct.sentence_grammar_weight.is_some(),
-        ),
-        // 码元字符集用空串表达「未设置」（见 `CodetableGlobal::resolved`）。
-        ("schema.codetable.input_chars", !ct.input_chars.is_empty()),
-        (
-            "schema.codetable.leading_chars",
-            !ct.leading_chars.is_empty(),
-        ),
-        // ── [engine.codetable.frequency] ──
-        ("schema.codetable.frequency.enabled", freq.enabled.is_some()),
-        (
-            "schema.codetable.frequency.record_always",
-            freq.record_always.is_some(),
-        ),
-        (
-            "schema.codetable.frequency.strategy",
-            freq.strategy.is_some(),
-        ),
-        (
-            "schema.codetable.frequency.promote_prefix",
-            freq.promote_prefix.is_some(),
-        ),
-        (
-            "schema.codetable.frequency.half_life",
-            freq.half_life.is_some(),
-        ),
-        (
-            "schema.codetable.frequency.protect_top_n",
-            freq.protect_top_n.is_some(),
-        ),
-        (
-            "schema.codetable.frequency.protect_top_n_len1",
-            freq.protect_top_n_len1.is_some(),
-        ),
-        (
-            "schema.codetable.frequency.protect_top_n_len2",
-            freq.protect_top_n_len2.is_some(),
-        ),
-        (
-            "schema.codetable.frequency.protect_top_n_len3",
-            freq.protect_top_n_len3.is_some(),
-        ),
-        // ── [engine.codetable.english_merge] ──
-        ("schema.codetable.english_merge.enable", em.enable.is_some()),
-        (
-            "schema.codetable.english_merge.min_length",
-            em.min_length.is_some(),
-        ),
-        (
-            "schema.codetable.english_merge.block_commit",
-            em.block_commit.is_some(),
-        ),
-        (
-            "schema.codetable.english_merge.complete_min_length",
-            em.complete_min_length.is_some(),
-        ),
-        (
-            "schema.codetable.english_merge.block_commit_on_word",
-            em.block_commit_on_word.is_some(),
-        ),
-        (
-            "schema.codetable.english_merge.exact_position",
-            em.exact_position.is_some(),
-        ),
-        (
-            "schema.codetable.english_merge.complete_position",
-            em.complete_position.is_some(),
-        ),
-        (
-            "schema.codetable.english_merge.max_count",
-            em.max_count.is_some(),
-        ),
-        // ── [engine.aux_code] ⇄ schema.pinyin.aux_code.* ──
-        ("schema.pinyin.aux_code.enabled", aux.enabled.is_some()),
-        (
-            "schema.pinyin.aux_code.max_phrase_len",
-            aux.max_phrase_len.is_some(),
-        ),
-        ("schema.pinyin.aux_code.direct", aux.direct.is_some()),
         // ── [punct]：整表替换连总开关一起换掉，两条登记由同一个字段判定 ──
         ("input.punct.custom_mappings", punct_table),
         ("input.punct.custom_enabled", punct_table),

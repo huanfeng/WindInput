@@ -5,23 +5,13 @@ fn schema_of(body: &str) -> crate::schema::Schema {
     toml::from_str(&src).unwrap_or_else(|e| panic!("最小方案解析失败：{e}\n{src}"))
 }
 
+/// 方案自己的设置（`[engine.codetable]` 等）不算「覆盖全局」；只有压过真全局项的才算。
 #[test]
-fn overridden_keys_lists_codetable_option_fields_once() {
+fn overridden_keys_lists_real_global_overrides_only() {
     let s = schema_of(
         "[engine.codetable]\ntop_code_commit = true\n[candidate]\nlayout = \"vertical\"\n",
     );
-    let keys = schema_overridden_keys(&s);
-    assert!(
-        keys.contains(&"schema.codetable.top_code_commit"),
-        "{keys:?}"
-    );
-    assert!(keys.contains(&"ui.candidate.layout"), "{keys:?}");
-    assert_eq!(
-        keys.iter()
-            .filter(|k| **k == "schema.codetable.top_code_commit")
-            .count(),
-        1
-    );
+    assert_eq!(schema_overridden_keys(&s), ["ui.candidate.layout"]);
 }
 
 #[test]
@@ -37,17 +27,9 @@ fn overridden_keys_ignores_follow_and_none() {
     );
 }
 
-/// 前缀型登记在方案文件里的落点段。与 `SchemaOverride::section` 刻意不共用：那是给用户看
-/// 的提示文案（带方括号，如 `[engine.codetable]`），这里要的是点分路径。
+/// 前缀型登记在方案文件里的落点段。目前没有前缀型登记。
 fn schema_section_of_prefix(prefix: &str) -> &'static str {
-    match prefix {
-        "schema.codetable." => "engine.codetable",
-        "schema.codetable.frequency." => "engine.codetable.frequency",
-        "schema.codetable.english_merge." => "engine.codetable.english_merge",
-        other => panic!(
-            "新增了前缀登记 {other}：在此补它在方案文件里的段，并让 schema_overridden_keys 认它"
-        ),
-    }
+    panic!("新增了前缀登记 {prefix}：在此补它在方案文件里的段，并让 schema_overridden_keys 认它")
 }
 
 /// 通用折叠登记的结构约束：必须是 `ui.candidate.<叶子>`、落点段是 `[candidate]`、
@@ -77,9 +59,6 @@ fn candidate_typed_keys_are_not_foldable() {
 /// 精确登记项的最小方案片段——只设这一项。
 fn minimal_setting_of_exact(key: &str) -> &'static str {
     match key {
-        "schema.pinyin.aux_code.enabled" => "[engine.aux_code]\nenabled = true\n",
-        "schema.pinyin.aux_code.max_phrase_len" => "[engine.aux_code]\nmax_phrase_len = 3\n",
-        "schema.pinyin.aux_code.direct" => "[engine.aux_code]\ndirect = true\n",
         // 方案级没有 `custom_enabled`（见 `PunctSpec::custom_mappings` 的 ⛔）：声明了自己的
         // 表就整表替换、连全局开关一起换掉。于是两条登记由同一个字段判定，这是登记语义
         // 本身（见 SCHEMA_OVERRIDES 那条 note），不是豁免。
@@ -159,8 +138,11 @@ fn overridden_keys_covers_every_schema_override_entry() {
             checked += 1;
         }
     }
-    // 防「循环体一次没进」的空过：登记表 + 前缀展开至少有这么多键。
-    assert!(checked >= 30, "只验了 {checked} 个键，展开逻辑可能坏了");
+    // 防「循环体一次没进」的空过：每条登记至少验一个键。
+    assert!(
+        checked >= SCHEMA_OVERRIDES.len(),
+        "只验了 {checked} 个键，展开逻辑可能坏了"
+    );
 }
 
 #[test]

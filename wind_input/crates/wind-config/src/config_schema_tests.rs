@@ -604,29 +604,29 @@ fn schema_overrides_point_at_real_keys() {
     }
 }
 
-/// 前缀匹配不能误伤同前缀的兄弟段，也不能把段名本身当成叶子键。
+/// 只有真全局项才登记；按类型共用的设置已取消（`schema.codetable.*` 等现在就是方案自己的
+/// 设置，见 `scheme_alias`），不该再被标成「可被方案覆盖」。
 #[test]
-fn schema_override_prefix_matches_only_that_section() {
-    // 段内叶子命中。
-    assert!(schema_override_of("schema.codetable.top_code_commit").is_some());
-    // 段名本身不是叶子键，不该命中。
-    assert!(schema_override_of("schema.codetable").is_none());
-    // 同前缀的兄弟段不该被误伤（`schema.codetableX` 与 `schema.codetable` 只差一个字符）。
-    assert!(schema_override_of("schema.codetableX.foo").is_none());
-    // 精确登记项。
+fn schema_override_covers_real_globals_only() {
     assert!(schema_override_of("input.punct.custom_enabled").is_some());
+    assert!(schema_override_of("ui.candidate.per_page").is_some());
     // 同段但没登记的键不该命中（`smart_list` 不在方案级下放范围）。
     assert!(schema_override_of("input.punct.smart_list").is_none());
+    for k in [
+        "schema.codetable.top_code_commit",
+        "schema.codetable.frequency.half_life",
+        "schema.pinyin.aux_code.enabled",
+    ] {
+        assert!(schema_override_of(k).is_none(), "{k}");
+        assert!(scheme_alias(k).is_some(), "{k}");
+    }
 }
 
 /// 登记的段名必须是方案文件里真实存在的段——它原样进设置页提示，用户照着写；
 /// 写错段名的配置会被静默忽略（`Schema` 不拒未知字段）。
 #[test]
 fn schema_override_sections_exist_in_schema() {
-    // 可选子段默认是 None、序列化时不出现，先填上才能在树里找到它们。
-    let mut schema = crate::schema::Schema::default();
-    schema.engine.codetable.frequency = Some(Default::default());
-    schema.engine.codetable.english_merge = Some(Default::default());
+    let schema = crate::schema::Schema::default();
     let tree = toml::Value::try_from(schema).expect("序列化 Schema");
     for o in SCHEMA_OVERRIDES {
         let path = o
@@ -647,28 +647,6 @@ fn schema_override_sections_exist_in_schema() {
     }
 }
 
-/// 段前缀不递归：子段要么自己登记，要么不该被标记。
-///
-/// 递归前缀会把 `schema.codetable.auto_phrase.*` 一并标成可覆盖，而
-/// `CodetableGlobal::resolved` 根本不读它；标错比漏标更糟，用户会写一段不会被读的配置。
-#[test]
-fn section_prefix_does_not_leak_into_subsections() {
-    // 登记了的子段：命中，且命中的是子段那一条（提示文案要说 [engine.codetable.frequency]）。
-    let hit = schema_override_of("schema.codetable.frequency.half_life")
-        .expect("frequency 子段已单独登记，应命中");
-    assert_eq!(hit.section, "[engine.codetable.frequency]");
-    // 没登记的子段：绝不能因为父段登记了就跟着被标。
-    for k in [
-        "schema.codetable.auto_phrase.enabled",
-        "schema.codetable.auto_phrase.min_phrase_len",
-        "schema.codetable.auto_phrase.temp_max_entries",
-    ] {
-        assert!(
-            schema_override_of(k).is_none(),
-            "{k} 没有方案级形态（resolved 不折叠 auto_phrase），不该被标记"
-        );
-    }
-}
 /// 写盘闸的判据必须按「整值覆盖」而不是按 Map 分类。
 ///
 /// 设置端把数组也整份发送，只认 Map 会漏掉 `ui.toolbar.items` 等数组键：段降级时 base 是

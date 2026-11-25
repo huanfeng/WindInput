@@ -5939,24 +5939,29 @@ fn test_web_override_summary_counts_each_schema_once() {
     let data = override_summary_data_dir(
         "once",
         &[
-            // 方案文件自带 top_code_commit，override 层再写一次（值不同也仍是同一次覆盖）。
+            // 方案文件自带排列方向，override 层再写一次（值不同也仍是同一次覆盖）。
+            // `[engine.codetable]` 是方案自己的设置，不算覆盖全局。
             (
                 "ovs_a",
                 "[engine.codetable]\ntop_code_commit = true\n[candidate]\nlayout = \"vertical\"\n",
             ),
             ("ovs_b", ""),
             // 装了但没启用：它的覆盖不该出现在反查里。
-            ("ovs_c", "[engine.codetable]\ntop_code_commit = true\n"),
+            ("ovs_c", "[candidate]\nlayout = \"vertical\"\n"),
         ],
     );
     let ov = std::env::temp_dir().join(format!("wind_ovsum_ov_once_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&ov);
     std::fs::create_dir_all(&ov).unwrap();
     for id in ["ovs_a", "ovs_b"] {
-        let v = if id == "ovs_a" { "false" } else { "true" };
+        let v = if id == "ovs_a" {
+            "horizontal"
+        } else {
+            "vertical"
+        };
         std::fs::write(
             ov.join(format!("{id}.toml")),
-            format!("[engine.codetable]\ntop_code_commit = {v}\n"),
+            format!("[candidate]\nlayout = \"{v}\"\n"),
         )
         .unwrap();
     }
@@ -5969,17 +5974,16 @@ fn test_web_override_summary_counts_each_schema_once() {
         .web_data_rpc("schema.overrideSummary", &serde_json::json!({}))
         .unwrap();
     assert_eq!(
-        sum["schema.codetable.top_code_commit"],
+        sum["ui.candidate.layout"],
         serde_json::json!(["ovs_a", "ovs_b"]),
         "{sum}"
     );
-    assert_eq!(
-        sum["ui.candidate.layout"],
-        serde_json::json!(["ovs_a"]),
+    // 方案自己的设置不在反查里；谁都没写的键不出现（不是空数组）。
+    assert!(
+        sum.get("schema.codetable.top_code_commit").is_none(),
         "{sum}"
     );
-    // 谁都没写的键不出现（不是空数组）。
-    assert!(sum.get("schema.codetable.punct_commit").is_none(), "{sum}");
+    assert!(sum.get("ui.candidate.per_page").is_none(), "{sum}");
 
     let got = coord
         .web_data_rpc("schema.getConfig", &serde_json::json!({ "id": "ovs_a" }))
