@@ -27,6 +27,17 @@
 
 ---
 
+## 2026-11-25 · 拼音英文单词位次不再按全拼 / 双拼自动推断（0.133）
+
+- 合入：待填（push 前回填）；范围：拼音方案，英文候选开
+- 变化：出厂全拼、双拼不变（全拼 `hello` 第 1、双拼 `the` 第 2）。没写 `exact_position` 的
+  第三方双拼方案前：`the` 排第 2 → 后：排第 1（取类型默认 1）
+- 触发条件：第三方双拼方案、英文候选开
+- 回退旧行为：该方案的方案设置里把「英文单词最前位置」设为 2（`[engine.pinyin.english_merge] exact_position = 2`）
+- 钉住的测试：`wind-engine/tests/english_merge_pinyin_complete.rs::exact_position_comes_from_scheme`、
+  `wind-coordinator/tests/pinyin_english_policy.rs::shuangpin_english_not_first_by_default`
+- 来源：内部（方案设置扁平化，`docs/design/scheme-settings-flatten.md` §3.2）
+
 ## 2026-11-20 · 直接辅助码：退格重打不再冒出连打时没有的生僻字（0.133）
 
 - 合入：待填（push 前回填）；范围：双拼方案，`direct` 开（连续模式与逃生口下的串尾直接辅助都受影响），

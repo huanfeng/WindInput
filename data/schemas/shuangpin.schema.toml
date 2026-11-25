@@ -15,6 +15,10 @@ scheme = "shuangpin"
 [engine.pinyin.shuangpin]
 layout = "xiaohe"
 
+# 英文候选：完整单词最靠前排第 2。两键一音节，the、good 这类词几乎都解得出中文，英文不抢首选。
+[engine.pinyin.english_merge]
+exact_position = 2
+
 # 辅助码：拼音候选的字形二次筛选（小鹤拆分码）。路径相对 schemas 目录。
 # 词组逐字首码匹配为固定语义（第 i 位命中第 i 字任一码的首字符；短于词字数 = 前缀态保留）。
 #

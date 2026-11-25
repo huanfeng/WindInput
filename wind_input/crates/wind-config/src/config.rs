@@ -2693,9 +2693,9 @@ pub struct PinyinEnglishMerge {
     /// 见 `wind_engine::english_merge::prefix_complete_applies`。双拼方案下不生效（几乎任何串都解得开）。
     #[serde(default)]
     pub complete_min_length: usize,
-    /// 完整单词英文最靠前排第几位（1 起）。0 = 按方案自动：全拼 1、双拼 2（出厂值）；非 0 则都用它。
-    /// 仍先让过开头吃满整串的中文。双拼默认让一位：两键一音节，`the` / `good` 这类常用词几乎都解得出中文。
-    #[serde(default)]
+    /// 完整单词英文最靠前排第几位（1 起；0 = 默认 1）。仍先让过开头吃满整串的中文。
+    /// 出厂双拼方案写 2：两键一音节，`the` / `good` 这类常用词几乎都解得出中文。
+    #[serde(default = "default_english_exact_position")]
     pub exact_position: usize,
     /// 前缀补全英文最靠前排第几位（1 起；0 = 默认 2）。恒在完整单词英文之后。
     #[serde(default = "default_english_complete_position")]
@@ -2712,7 +2712,7 @@ impl Default for PinyinEnglishMerge {
             enable: false,
             min_length: 0,
             complete_min_length: 0,
-            exact_position: 0,
+            exact_position: default_english_exact_position(),
             complete_position: default_english_complete_position(),
             max_count: default_english_max_count(),
         }

@@ -2,7 +2,7 @@
 //!
 //! - 首选是吃满整串的高频拼音词库词（含简拼解出来的 bus→不是）时英文让到第 2；词库冷僻词
 //!   （test→托尔斯泰）、拼凑句不算；这个英文词选过一次就不再让；
-//! - `exact_position` 出厂按方案自动：全拼 1、双拼 2；
+//! - `exact_position` 出厂全拼 1、双拼 2（双拼方案文件里写的）；
 //! - 中文侧为空的前缀兜底页里，与输入相同的词排最前。
 //!
 //! 词库缺失时跳过（worktree 里要自备 `build_dev/data`）。
@@ -262,24 +262,18 @@ fn shuangpin_english_not_first_by_default() {
     assert_eq!(hello[0], "hello");
 }
 
-/// 显式写了 `exact_position` 时全拼双拼都用它。
+/// 方案没写 `exact_position` 时取类型内置默认（全拼方案没写，改默认就跟着变）。
 #[test]
-fn explicit_exact_position_applies_to_both() {
-    if !ready("shuangpin") || !ready("pinyin") {
+fn exact_position_follows_builtin_default_when_scheme_is_silent() {
+    if !ready("pinyin") {
         return;
     }
     let set3 = |c: &mut Config| c.schema.pinyin.english_merge.exact_position = 3;
-    let sp = typed(config("shuangpin", set3), "the", "sp_the_3");
-    assert_eq!(sp[2], "the", "双拼显式 3 时英文在第 3，实际 {:?}", &sp[..4]);
-    // 设 1 只去掉双拼那一位的下限：首选「他和」是够格的高频词，英文照样排它后面。
-    let set1 = |c: &mut Config| c.schema.pinyin.english_merge.exact_position = 1;
-    let sp1 = typed(config("shuangpin", set1), "the", "sp_the_1");
-    assert_eq!(&sp1[..2], ["他和", "the"], "实际 {:?}", &sp1[..4]);
     let qp = typed(config("pinyin", set3), "hello", "qp_hello_3");
     assert_eq!(
         qp[2],
         "hello",
-        "全拼显式 3 时英文在第 3，实际 {:?}",
+        "全拼默认 3 时英文在第 3，实际 {:?}",
         &qp[..4]
     );
 }

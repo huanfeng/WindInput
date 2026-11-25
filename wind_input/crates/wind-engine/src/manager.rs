@@ -4579,8 +4579,7 @@ impl EngineManager {
     ///
     /// 码表取方案级折叠后的 `english_merge.{exact,complete}_position`，混输取
     /// `schema.mix.english_{exact,complete}_position`，拼音取 `schema.pinyin.english_merge`
-    /// 的同名两项（完整单词那项 0 = 按方案自动：全拼 1、双拼 2）；英文方案恒 `(1, 1)`
-    /// （= 不额外限制）。
+    /// 的同名两项；英文方案恒 `(1, 1)`（= 不额外限制）。
     pub fn active_english_positions(&self) -> (usize, usize) {
         let Some(engine) = self.active_engine() else {
             return (1, 1);
@@ -4601,22 +4600,10 @@ impl EngineManager {
                     .pinyin_settings_of(&self.active_schema_id())
                     .english_merge
                     .clone();
-                // 英文候选没开时列表里不会有英文，不必再问方案是不是双拼。
                 if !e.enable {
                     return (1, 1);
                 }
-                // 双拼两键一音节，`the` / `good` 这类常用词几乎都解得出中文，英文不抢首选。
-                let auto = if self.pinyin_is_shuangpin_of(&self.active_schema_id()) {
-                    2
-                } else {
-                    1
-                };
-                let exact = if e.exact_position > 0 {
-                    e.exact_position
-                } else {
-                    auto
-                };
-                (exact, e.complete_position)
+                (e.exact_position, e.complete_position)
             }
             EngineType::English => return (1, 1),
         };

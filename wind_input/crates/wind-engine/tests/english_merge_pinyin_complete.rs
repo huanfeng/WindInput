@@ -160,10 +160,10 @@ fn shuangpin_ignores_completion() {
     assert!(!english_texts(&manager("pinyin", true), "templa").is_empty());
 }
 
-/// `exact_position` 出厂 0 = 按方案自动：全拼 1、双拼 2；显式写值时两者都用它。
-/// `complete_position` 出厂 2。
+/// `exact_position` 取方案的设置：出厂全拼 1、双拼方案文件写 2；`complete_position` 出厂 2。
+/// 改类型内置默认只影响没写这一项的方案。
 #[test]
-fn exact_position_auto_by_scheme() {
+fn exact_position_comes_from_scheme() {
     if !ready("pinyin") || !ready("shuangpin") {
         eprintln!("跳过：pinyin / shuangpin 方案或英文词库不存在");
         return;
@@ -173,13 +173,13 @@ fn exact_position_auto_by_scheme() {
         manager("shuangpin", false).active_english_positions(),
         (2, 2)
     );
-    for schema in ["pinyin", "shuangpin"] {
+    for (schema, want) in [("pinyin", 3), ("shuangpin", 2)] {
         let mut cfg = Config::default();
         cfg.schema.available = vec![schema.to_string()];
         cfg.schema.active = schema.to_string();
         cfg.schema.pinyin.english_merge.enable = true;
         cfg.schema.pinyin.english_merge.exact_position = 3;
         let mgr = EngineManager::new(&cfg, Some(&data_dir()));
-        assert_eq!(mgr.active_english_positions(), (3, 2), "{schema} 显式 3");
+        assert_eq!(mgr.active_english_positions(), (want, 2), "{schema}");
     }
 }
