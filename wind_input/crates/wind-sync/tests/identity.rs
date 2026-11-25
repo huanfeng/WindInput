@@ -169,12 +169,27 @@ fn claim_without_info_uses_device_as_group() {
 
 #[test]
 fn rename_keeps_files_reachable() {
-    let (b, dek, mut a, mut bb, mut c) = three();
+    // 只有 a 持有数据：d 能拿到文件只可能经由改号后的清单。
+    let (b, dek, mut a, bb, mut c) = three();
+    remove_device(&b, "b").unwrap();
+    drop(bb);
+    c.sync(&b);
+    let before: Vec<String> = a.state.files.keys().cloned().collect();
+    assert!(!before.is_empty());
     rename_device(&b, &mut a.state, "home-pc").unwrap();
     assert_eq!(a.state.retired_ids, vec!["a".to_string()]);
     a.sync(&b);
     remove_device(&b, "a").unwrap();
-    round(&mut [&mut bb, &mut c], &b);
+    let raw = b
+        .get(&manifest::manifest_key("home-pc", 1))
+        .unwrap()
+        .expect("改号后写出新号 gen 1 清单");
+    let m = Manifest::decode(&dek.files_key(), "home-pc", 1, &raw).unwrap();
+    for p in &before {
+        assert!(m.files.contains_key(p), "新清单缺少 {p}");
+    }
+    assert_eq!(m.files["groups/home/config.toml"].device, "a");
+    assert_eq!(m.files["data/pinyin/user.dict.yaml"].device, "a");
     let mut d = Dev::new("d", "home", &dek);
     d.sync(&b);
     assert_eq!(d.local.text("config.toml").as_deref(), Some("home=1"));
