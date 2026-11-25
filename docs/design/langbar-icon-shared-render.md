@@ -65,7 +65,7 @@ Rust 侧在状态变化时**预先**渲染好写入 SHM，`GetIcon` 只做一次
 ## 一个尚未验证的前提
 
 `ITfLangBarItemButton::GetIcon(HICON*)` **没有尺寸参数**。图标多大完全由我们创建位图时
-决定（现在是 `MulDiv(16, dpi, 96)` clamp 到 `[16,32]`），系统拿到 HICON 后如何使用是它的事。
+决定（现在是 `MulDiv(16, dpi, 96)` clamp 到 `[16,48]`，见「DLL 侧选档」），系统拿到 HICON 后如何使用是它的事。
 
 **所以"系统按我们给的尺寸原样显示"是假设，不是事实。** 如果系统实际需要的是别的尺寸，
 它会自行缩放，那才是真正的模糊来源——而这一层我们在代码里完全看不到。
@@ -212,11 +212,36 @@ PostMessage → OnUpdate → GetIcon」同样是毫秒级，谁先到取决于�
 1. 按本进程 DPI 与主题选一个变体
 2. seqlock 保护下 memcpy
 3. `CreateIconIndirect`
-4. **SHM 不可用时退回现有 DirectWrite 路径**
+4. **SHM 不可用时画「加载中」图标**（`LoadingIcon.h` 的 `loading_icon::RenderBgra`）
 
 第 4 条是硬要求，不是可选项。DLL 会被加载进每一个宿主进程，而服务可能尚未启动、
-可能刚崩溃重启、SHM 可能因权限打不开（AppContainer 宿主如 SearchHost）。
-**现有的 DirectWrite 绘制代码必须原样保留作为 fallback**，图标在任何情况下都不能空白。
+可能刚崩溃重启、SHM 可能因权限打不开（AppContainer 宿主如 SearchHost），图标在任何情况下
+都不能空白。
+
+> 现状：fallback 已不再用 DirectWrite 画模式主字，而是画一个与任何主字都不像的「…」。
+> 主字颜色由主题与用户配置决定、只有服务端知道，本地按黑白画出的「中/英」与服务端那份
+> 时有出入，用户分不清「服务没就绪」与正常状态。密码框、无可编辑上下文、键盘禁用三档
+> 同样由服务端渲进 SHM（含变淡），DLL 侧没有本地渲染旁路。不发布图标 SHM 的旧版服务
+> （v0.117 以前）也只显示加载中：协议里区分不出「旧服务」与「新服务尚未发布」（握手不带
+> 服务版本，两者在 DLL 看来都是 `OpenFileMappingW` 失败），而 DLL 与服务同包发布，
+> 新 DLL + 旧服务只会出现在异常的半升级状态里。
+
+### DLL 侧选档：主显示器的实时 DPI
+
+`_LangBarIconSizePx`（`LangBarItemButton.cpp`）按**主显示器的实时 DPI** 选档：
+`MulDiv(16, dpi, 96)` 钳到 `[16,48]`（48 = 300%；更高仍会被系统放大，放大是最糊的情形，
+再加档要连 SHM 一起放大）。指示器画在任务栏上，任务栏在主显示器；多任务栏且各屏 DPI
+不同时，`GetIcon` 只能返回一个 HICON，只能以主屏为准。
+
+- 不能用 `GetDeviceCaps(GetDC(NULL), LOGPIXELSX)`：它是本进程启动时的系统 DPI 快照，
+  改缩放后没重启的宿主一直取旧值，先开与后开的宿主还会给出不同档位（用尺寸标记
+  `IconRenderer::size_marks` 看出来的：强制重画后图标变了、点数不动）。
+- `GetDpiForMonitor` 同样受调用方 DPI 感知级别支配：unaware 进程恒得 96，system-aware
+  恒得启动时的系统 DPI，只有 per-monitor-aware 拿到真值（老程序如 EverEdit 换 API 后仍不动）。
+  因此查询前用 `SetThreadDpiAwarenessContext(PER_MONITOR_AWARE_V2)` 临时抬高本线程的感知
+  级别，查完无条件还原；期间只放这一次查询，因为它在宿主线程上回调，残留的上下文会改变
+  宿主后续窗口/坐标操作的语义。
+- 两个符号都动态取（Win10 1607+ / shcore），取不到时退回 `GetDeviceCaps`。
 
 这样 DLL 侧的这段代码变成稳定资产——所有视觉决策都在 Rust 侧，
 以后调整外观不再需要碰 DLL。
@@ -434,10 +459,8 @@ RGB 变了的按缓冲区原 alpha 预乘。
 这比读代码推断可靠：它同时回答了"系统挑了哪档"和"有没有被二次缩放"两个问题，
 而这两个问题都无法从 TSF 接口签名上看出来。
 
-顺带可以确认另一个既有隐患：现在取 DPI 用的是
-`GetDeviceCaps(hdcScreen, LOGPIXELSX)`，这是**主显示器**的 DPI，
-不是宿主窗口所在显示器的。多显示器混合 DPI 下这是错的（应为 `GetDpiForWindow`）。
-这是既有问题，不由本次改动引入，但新架构让它更容易被修正。
+顺带可以确认另一个既有隐患：当时取 DPI 用的是 `GetDeviceCaps(hdcScreen, LOGPIXELSX)`。
+已改为主显示器的实时 DPI，见「DLL 侧选档：主显示器的实时 DPI」。
 
 ## 分期（已定：通路与角标一起做）
 

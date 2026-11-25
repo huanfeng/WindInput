@@ -6,19 +6,11 @@
 //   cmake -S wind_tsf -B build/tsf-tests -DWIND_TSF_TESTS=ON
 //   cmake --build build/tsf-tests && ctest --test-dir build/tsf-tests
 //
-// 变异检验已做（2026-09-15），逐条命中：
-//   - IsHostDefaultPosition 去掉 `SameRect(caret, compRect)`            → TestFingerprint 红
-//   - IsHostDefaultPosition 去掉 `SameRect(caret, compStart)`           → TestFingerprint 红
-//   - IsHostDefaultPosition 去掉 `caret.bottom <= caret.top`            → TestFingerprint 红
-//   - IsHostDefaultPosition 把 hasCompStart/hasCompRect 缺席当放行      → TestFingerprint 红
-//   - LatchApplies 改成只看 latched（= 忘了加组合作用域那一版）         → TestLatchScope 红
-//   - SameRect 任一成员比较去掉                                          → TestSameRect 红
-//   - AllowCompositionRectFallback 任一前提去掉（含 !hostDefaultPos，2026-09-30） → TestCompositionRectFallback 红
-//   - ShowsLaidOutComposition 任一前提去掉（10 处）                      → TestLaidOutComposition 红
-// 改测试时请保住这个性质——一条永远绿的测试不会告诉你任何事。
+// 每个判据的任一前提被去掉（含 LatchApplies 只看 latched、SameRect 少比一个成员），
+// 都有对应用例变红；改测试时保住这个性质。
 //
-// ⚠️ 覆盖边界：这里测的只是**判据**。矩形怎么取、闩什么时候置、`_pComposition` 在哪几个
-// 出口变空，全在 TextService.cpp 里，这里一行也覆盖不到。判据全绿 ≠ 候选窗定对了。
+// 覆盖边界：这里只测判据。矩形怎么取、闩何时置、`_pComposition` 在哪些出口变空都在
+// TextService.cpp 里，判据全绿不等于候选窗定对了。
 
 #include "CaretDefaultPosPolicy.h"
 
@@ -58,8 +50,7 @@ struct Rect
     long bottom;
 };
 
-// Illustrator 30.8 画布文字实测值：三次布局查询同一个退化矩形，
-// 正是工作区（2560×1368）右下角最后一个像素。
+// Illustrator 画布文字的取值：三次布局查询同一个退化矩形，即工作区（2560×1368）右下角像素。
 constexpr Rect kIllustrator{2559, 1367, 2560, 1367};
 
 void TestSameRect()
@@ -78,14 +69,12 @@ void TestSameRect()
 void TestFingerprint()
 {
     CASE("IsHostDefaultPosition：Illustrator 实测形态必须命中");
-    // ★ 这组值就是 D-3 的实测数据。指纹改动后它若不再命中，Illustrator 画布会退回
-    //   「候选窗钉在屏幕左上角」——本条是整个修复的存活判据。
+    // 指纹改动后若不再命中，Illustrator 画布的候选窗会退回屏幕左上角。
     CHECK(IsHostDefaultPosition(kIllustrator, true, kIllustrator, true, kIllustrator));
 
     CASE("IsHostDefaultPosition：CUAS 上的 Java 宿主同形，必须命中");
-    // 医疗 HIS/LIS 的 Java 客户端实测（2026-09-30，1920×1040 工作区）。二级降级靠本判据
-    // 让路给 IMM32 那一级；不再命中的话，窗口一最大化这个角点就会被当作组合矩形采信，
-    // 候选窗整场钉在屏幕右缘。
+    // Java 客户端（1920×1040 工作区）。二级降级靠本判据让路给 IMM32 那一级；不命中的话
+    // 窗口最大化后这个角点会被当作组合矩形采信，候选窗钉在屏幕右缘。
     constexpr Rect kJavaCuas{1919, 1039, 1920, 1039};
     CHECK(IsHostDefaultPosition(kJavaCuas, true, kJavaCuas, true, kJavaCuas));
 
@@ -95,12 +84,10 @@ void TestFingerprint()
     CHECK(!IsHostDefaultPosition(tall, true, tall, true, tall));
 
     CASE("IsHostDefaultPosition：三者不全同 ⇒ 宿主是在排版，不是在答「没有」");
-    // shell 临时输入小窗实测（CaretEditSession.cpp 的一级降级注释）：selection 恒退化成
-    // (2559,1367,2560,1367)，而组合起点给出有效的 (473,189,473,217)。那时手上有真起点，
-    // 该走一级降级，绝不能当成「没有插入点」。
+    // shell 临时输入小窗：selection 恒退化在角点，组合起点却有效。手上有真起点就该走
+    // 一级降级（见 CaretEditSession.cpp），不能当成「没有插入点」。
     CHECK(!IsHostDefaultPosition(kIllustrator, true, Rect{473, 189, 473, 217}, true, kIllustrator));
-    // 洛克王国实测：组合整体矩形宽度随编码串增长（16→19→25→28→46），说明宿主算完了布局
-    // 只是不填高度。那是二级降级的地盘，不是本判据的。
+    // 洛克王国：组合矩形宽度随编码串增长，宿主算完了布局只是不填高度，归二级降级管。
     CHECK(!IsHostDefaultPosition(Rect{1353, 1647, 1353, 1647}, true, Rect{1353, 1647, 1353, 1647},
                                  true, Rect{1353, 1647, 1399, 1647}));
 
@@ -163,8 +150,7 @@ void TestCompositionRectFallback()
     CHECK(AllowCompositionRectFallback(false, true, true, 46, true));
 
     CASE("AllowCompositionRectFallback：宿主默认位置指纹命中 ⇒ 不走，哪怕角点在显示区内");
-    // ★ 医疗 HIS/LIS 的 Java 客户端（2026-09-30）：窗口最大化后角点 (1919,1039) 落在显示区
-    //   (0,23,1920,1040) 内、w=1，其它条件全满足。只有指纹这一维挡得住。
+    // Java 客户端最大化后角点落在显示区内、w=1，其它条件全满足，只有指纹这一维挡得住。
     CHECK(!AllowCompositionRectFallback(true, true, true, 1, true));
 
     CASE("AllowCompositionRectFallback：其余任一前提不满足 ⇒ 不走");
@@ -178,9 +164,8 @@ void TestLatchScope()
 {
     CASE("LatchApplies：判决只在同一次组合内作数");
     CHECK(LatchApplies(true, true));
-    // ★ 组合没了，判决就不作数——上屏走 CommitText 不经 EndComposition，闩会活过那次组合。
-    //   活过之后若还认，Illustrator 面板输入框的首帧退化会被当成「这里没有插入点」报到
-    //   屏幕角落，而那里正确的行为是回退 GUI_CARET。
+    // 组合没了判决就不作数：上屏走 CommitText 不经 EndComposition，闩会活过那次组合；
+    // 若仍认，Illustrator 面板输入框的首帧退化会被报到屏幕角落，而应回退 GUI_CARET。
     CHECK(!LatchApplies(true, false));
     CHECK(!LatchApplies(false, true));
     CHECK(!LatchApplies(false, false));

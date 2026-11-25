@@ -167,15 +167,8 @@ STDAPI CLangBarItemButton::GetTooltipString(BSTR* pbstrToolTip)
         return E_INVALIDARG;
 
     // 文案与选择逻辑全在服务端（Rust `langbar_tooltip`），经 CONFIG_KEY_LANGBAR_TOOLTIP
-    // 推来，这里只负责原样返回。
-    //
-    // 收归的理由：本 DLL 手里只有 _bChineseMode / _bCapsLock 两个量，判不出「密码框」
-    // 「输入法被系统禁用」这些成因——而图标只能表达「不可用」，说清是哪一种正是 tooltip
-    // 的职责。那些成因服务端全都有（见 Rust 侧 InputBlock），留在这边只会让同一件事有
-    // 两个负责者、各说各话。
-    //
-    // 例外是图标正显示加载中（SHM 取不到）时：服务端推来的旧文案描述的是某个模式，
-    // 与一个「…」图标对不上，这时只说正在加载。
+    // 推来，这里原样返回：「密码框」「被系统禁用」等成因只有服务端知道（InputBlock）。
+    // 例外是图标显示加载中时，旧文案与「…」图标对不上，只说正在加载。
     if (_bIconLoading)
     {
         *pbstrToolTip = SysAllocString(L"清风输入法：正在加载…");
@@ -191,9 +184,8 @@ STDAPI CLangBarItemButton::GetTooltipString(BSTR* pbstrToolTip)
         }
     }
 
-    // 回落：仅在「连接建立前」这段极短窗口内走到（服务端握手时必推一次）。
-    // 刻意只给一个中性文案而不在这里重建那套分支——留一份简化版判定，就是留一个会与
-    // 服务端漂移的第二真相源，而漂移了也没有任何信号。
+    // 回落：只在连接建立前走到（握手时必推一次）。刻意只给中性文案，不在这里重建一份
+    // 会与服务端漂移的判定。
     *pbstrToolTip = SysAllocString(L"清风输入法");
     return (*pbstrToolTip != nullptr) ? S_OK : E_OUTOFMEMORY;
 }
@@ -217,9 +209,8 @@ STDAPI CLangBarItemButton::OnClick(TfLBIClick click, POINT pt, const RECT* prcAr
     if (_bKeyboardDisabled)
         return S_OK;
 
-    // Left click: Toggle mode via Go service (all state changes go through Go).
-    // Go 端以 StatusUpdate 回应（含 iconLabel 完整状态），C++ 端走 UpdateFullStatus
-    // 一并同步 _bChineseMode/_bFullWidth 等 mirror + TSF compartments + LangBar UI。
+    // 左键：经服务端切换模式（状态一律以服务端为准）。应答 StatusUpdate 时走 UpdateFullStatus
+    // 同步本地镜像、TSF compartment 与语言栏。
     if (_pTextService != nullptr)
     {
         CIPCClient* pIPCClient = _pTextService->GetIPCClient();
@@ -228,23 +219,17 @@ STDAPI CLangBarItemButton::OnClick(TfLBIClick click, POINT pt, const RECT* prcAr
             ServiceResponse response;
             if (pIPCClient->SendToggleMode(response))
             {
-                // 服务端 CMD_TOGGLE_MODE 的应答二选一（server.rs）：有待提交文本时回
-                // CommitText，否则回 StatusUpdate。而**两种应答都意味着这段输入结束了**
-                // ——服务端在 handle_toggle_mode 里已经清了自己的输入态。DLL 侧的组合是
-                // 我们自己维护的，两条路都必须显式收口，否则组合残留在宿主里。
-                //
-                // 旧代码只在 CommitText 分支动组合，StatusUpdate 分支纯刷 UI，于是
-                // keys.commit_on_switch=false（切英文不上屏原码）时编码留在原地不走，
-                // 直到焦点回来才被别的清理路径收掉。
+                // CMD_TOGGLE_MODE 应答二选一：有待提交文本回 CommitText，否则回 StatusUpdate。
+                // 两种都意味着服务端已清掉这段输入，DLL 侧的组合两条路都必须显式收口，
+                // 否则 commit_on_switch=false 时编码会残留在宿主里。
                 const BOOL hasCommitText =
                     (response.type == ResponseType::CommitText && !response.text.empty());
 
                 if (hasCommitText)
                 {
-                    // CommitOnSwitch 边路: 先把 pending 输入 commit，状态由随后到达的 push pipe 同步
-                    // nonKeyContext=TRUE：OnClick 是 TSF 的 COM 回调（鼠标点语言栏图标），
-                    // 不在按键上下文；且此路径之前没有 EndComposition，组合仍在，
-                    // 走同步会话被 Word 拒时会漏编码（同 WM_COMMIT_TEXT 的病理）。
+                    // commit_on_switch：先上屏待提交文本，状态由随后的推送同步。
+                    // nonKeyContext=TRUE：OnClick 是 COM 回调不在按键上下文，且组合仍在，
+                    // 走同步会话被 Word 拒时会漏编码（同 WM_COMMIT_TEXT）。
                     _pTextService->CommitText(response.text, TRUE);
                     _pTextService->SetInputMode(response.IsChineseMode());
                 }
@@ -257,10 +242,8 @@ STDAPI CLangBarItemButton::OnClick(TfLBIClick click, POINT pt, const RECT* prcAr
                     _pTextService->EndComposition(nullptr, TRUE);
                 }
 
-                // 与 compartment 模式切换路径（TextService.cpp 的 CONVERSION/OPENCLOSE）
-                // 对齐：切换即一段输入结束，KeyEventSink 的组合态标志必须跟着清，否则
-                // 后续快捷键仍被会话门控挡下。keepPairState=TRUE 的理由见那两处注释
-                // （切换既不移光标也不消除已插入的右符号）。
+                // 同 TextService.cpp 的 CONVERSION/OPENCLOSE 切换路径：组合态标志必须清，否则
+                // 后续快捷键仍被会话门控挡下。keepPairState=TRUE：切换不移光标、不消除已插入的右符号。
                 _pTextService->ResetComposingState(TRUE);
 
                 if (response.type == ResponseType::StatusUpdate)
@@ -275,7 +258,7 @@ STDAPI CLangBarItemButton::OnClick(TfLBIClick click, POINT pt, const RECT* prcAr
                     );
                 }
             }
-            // If IPC fails, don't toggle locally - keep state consistent with Go
+            // IPC 失败时不在本地切换，保持与服务端一致
         }
     }
     return S_OK;
@@ -291,7 +274,7 @@ STDAPI CLangBarItemButton::InitMenu(ITfMenu* pMenu)
         return E_INVALIDARG;
     }
 
-    // Return S_OK with empty menu - the unified menu is rendered by Go service
+    // Return S_OK with empty menu - the unified menu is rendered by the service
     // On Win10, TSF may still call InitMenu, but we don't add any items
     // so no native menu will be displayed
     return S_OK;
@@ -334,7 +317,7 @@ STDAPI CLangBarItemButton::OnMenuSelect(UINT wID)
         return E_INVALIDARG;
     }
 
-    // Send menu command to Go service via IPC
+    // Send menu command to the service via IPC
     if (command != nullptr)
     {
         _pTextService->SendMenuCommand(command);
@@ -407,39 +390,12 @@ static HICON _CreateIconFromBgra(const BYTE* bgra, int size)
     return hIcon;
 }
 
-// 语言栏图标应有的边长（物理像素）。
+// 语言栏图标应有的边长（物理像素），按主显示器（任务栏所在）的实时 DPI 取。
 //
-// ⚠ **不能用 `GetDeviceCaps(GetDC(NULL), LOGPIXELSX)`**，那是本进程启动那一刻的
-// **系统 DPI 快照**，Windows 之后一直按这个值骗它。本 DLL 加载在每一个宿主进程里，
-// 于是同一台机器上会出现两种错：
-//
-//   · 用户改一次缩放后，所有没重启的程序图标一直糊到重启为止；
-//   · 先开的程序与后开的程序给出**不同**的档位——实测记事本与 EverEdit 显示的
-//     尺寸标记点数不同，也就是说其中至少一个必然是错的。
-//
-// 两条都靠调试用的尺寸标记（`IconRenderer::size_marks`）直接看出来的：切换缩放后
-// 按 Shift 强制重画，图标确实变了、点数却不动 ⇒ 重取发生了，错在取到的值。
-//
-// 改取**主显示器的实时 DPI**：指示器画在任务栏上，而任务栏在主显示器
-// （把窗口拖到别的屏时指示器并不跟着走，实测点数不变正与此一致）。
-//
-// ⚠⚠ **只换 API 不够，还必须临时抬高本线程的 DPI 感知级别。**
-// `GetDpiForMonitor` 同样受调用进程的感知级别支配：DPI-unaware 进程一律得到 96，
-// system-aware 进程一律得到进程启动时的系统 DPI，只有 per-monitor-aware 才拿到真值。
-// 我起初以为它是不受虚拟化的显式查询，**实测被推翻**：改用它之后记事本
-// （Win11 自带，per-monitor-v2）已能实时跟随，而 EverEdit（老程序）依旧不动、
-// 且与记事本给出不同档位——同一台机器上对同一个全局事实出现两个答案，
-// 就说明读到的不是那个事实。
-//
-// `SetThreadDpiAwarenessContext` 是这种「混合感知」场景的正解：它按线程临时改写
-// 上下文，即使宿主进程整体声明为 unaware 也能拿到真值。窗口开得**尽可能窄**——
-// 期间任何窗口/DC 操作都会跟着改变语义，故其中只放这一次查询。
-//
-// 动态取符号（Win10 1607+），与 `TextService.cpp` 的 `ConvertToPhysicalCoordinates`
-// 同一惯例；取不到就退回原样调用，至少不比从前差。
-//
-// 已知局限：多任务栏时各屏 DPI 可能不同，而 `GetIcon` 只能返回**一个** HICON，
-// 无法同时服侍两块屏，只能以主屏为准。
+// 不能用 `GetDeviceCaps(LOGPIXELSX)`：那是宿主进程启动时的系统 DPI 快照。`GetDpiForMonitor`
+// 也受调用方感知级别支配，故查询前临时把本线程抬到 per-monitor-v2，期间只放这一次查询。
+// 符号动态取（Win10 1607+），取不到就退回旧取法。多屏 DPI 不同时只能以主屏为准。
+// 详见 docs/design/langbar-icon-shared-render.md 的「DLL 侧选档」。
 static int _LangBarIconSizePx()
 {
     using SetThreadDpiAwarenessContextFn =
@@ -465,8 +421,7 @@ static int _LangBarIconSizePx()
         if (hMon != nullptr && SUCCEEDED(pGetDpiForMonitor(hMon, MDT_EFFECTIVE_DPI, &dpiX, &dpiY)))
             dpi = dpiX;
 
-        // 必须无条件还原：本函数由语言栏在宿主线程上回调，留下一个被抬高的上下文
-        // 会让宿主后续的窗口/坐标操作换一套语义，那种缺陷与图标毫无表面关联。
+        // 必须无条件还原：本函数在宿主线程上回调，残留的上下文会改变宿主后续窗口/坐标操作的语义。
         if (prevCtx != nullptr)
             pSetThreadDpiAwarenessContext(prevCtx);
     }
@@ -484,8 +439,7 @@ static int _LangBarIconSizePx()
         dpi = 96;
 
     int iconSize = MulDiv(16, (int)dpi, 96);
-    // 钳到档位表两端。上限 48 = 300%；再往上仍会被系统放大，而放大是实测最糊的情形
-    // （同机对照：原生无缩放那档明显更清晰），故再加档要连 SHM 一起放大。
+    // 钳到档位表两端。上限 48 = 300%；再往上会被系统放大（最糊），加档要连 SHM 一起放大。
     if (iconSize < 16) iconSize = 16;
     if (iconSize > 48) iconSize = 48;
     return iconSize;
@@ -502,14 +456,8 @@ STDAPI CLangBarItemButton::GetIcon(HICON* phIcon)
 
     const int iconSize = _LangBarIconSizePx();
 
-    // ── 优先取服务端预渲染的图标 ──
-    //
-    // 无条件优先取服务端预渲染图标。
-    //
-    // 这里曾有一道 localOnlyState 旁路：密码框 / 无可编辑上下文 / 键盘禁用三档改走本地
-    // 绘制，理由是「服务端无从得知」。判定收归服务端之后该前提不再成立——那三档现在由
-    // 服务端渲进 SHM（含变淡），本地只剩「服务没起来」时的加载中图标。
-    // 留着旁路的代价是同一件事有两个渲染实现，迟早各说各话。
+    // ── 无条件优先取服务端预渲染的图标 ──
+    // 密码框 / 无可编辑上下文 / 键盘禁用等状态也由服务端渲进 SHM，本地不另画。
     {
         std::vector<BYTE> shmPixels;
         int shmSize = 0;
@@ -520,9 +468,8 @@ STDAPI CLangBarItemButton::GetIcon(HICON* phIcon)
             if (hIcon != NULL)
             {
                 _bIconLoading = FALSE;
-                // seq 是判断「这一帧是不是最新版」的唯一可靠依据：与服务端
-                // 「语言栏图标已发布 seq=N」直接对号。此前只能按两侧时间戳去凑，
-                // 而毫秒级的陈旧读恰恰是时间戳最凑不准的场合（见 ReadVariant 注释）。
+                // seq 与服务端日志「语言栏图标已发布 seq=N」对号，是判断这一帧是否最新的
+                // 唯一可靠依据（时间戳对不准毫秒级的陈旧读，见 ReadVariant 注释）。
                 WIND_LOG_DEBUG_FMT(L"GetIcon: from SHM seq=%u want=%d got=%d dark=%d\n",
                                    shmSeq,
                                    iconSize, shmSize, _bDarkMode);
@@ -533,19 +480,9 @@ STDAPI CLangBarItemButton::GetIcon(HICON* phIcon)
     }
 
     // ── 加载中 ──
-    // 服务未启动、SHM 尚未发布、或读取失败时走这里。
-    // 这条路径**不可删除**：DLL 加载在每一个宿主进程里，而服务的可用性无法保证。
-    //
-    // 这里**刻意不再画模式主字**。主字颜色由主题 / 用户配置决定，只有服务端知道；
-    // 本地按黑白画出来的「中/英」与服务端那份时而不同，用户看到的就是颜色时有时无，
-    // 且无从分辨「服务没就绪」与「正常状态」。画一个与任何主字都不像的「…」即可区分。
-    // 键盘禁用的变淡也不适用：那是服务端才判得出的状态，由服务端渲进 SHM。
-    //
-    // 兼容旧版服务（不发布图标 SHM 的 v0.117 以前）时同样显示加载中，不回退主字：
-    // 协议里没有能区分「旧服务」与「新服务尚未发布」的判据（PROTOCOL_VERSION 自
-    // v1.1 起未变、握手不带服务版本；两者在 DLL 看来都只是 OpenFileMappingW 失败），
-    // 而 DLL 与服务同一安装包发布，新 DLL + 旧服务只会出现在异常的半升级状态里。
-    // 为这种状态保留一整套 DirectWrite 主字绘制，代价是继续背着上面那个颜色问题。
+    // 服务未启动、SHM 尚未发布或读取失败时走这里。这条路径不可删除：服务的可用性无法保证。
+    // 刻意不画模式主字（颜色只有服务端知道，画出来会与正常状态混淆），旧版服务同样显示加载中。
+    // 理由见 docs/design/langbar-icon-shared-render.md 的「DLL 侧职责」。
     const std::vector<uint8_t> loadingPixels =
         loading_icon::RenderBgra(iconSize, _bDarkMode != FALSE);
     HICON hIcon = _CreateIconFromBgra(loadingPixels.data(), iconSize);
@@ -556,9 +493,8 @@ STDAPI CLangBarItemButton::GetIcon(HICON* phIcon)
     }
     if (!_bIconLoading || !_bLoggedLoading)
     {
-        // 只在进入加载中的那一下记一条：GetIcon 由系统按需回调，每次都记会刷屏。
-        // _bLoggedLoading 兜住「服务从头到尾没起来」：那时 _bIconLoading 初值即 TRUE，
-        // 永远不经过 FALSE→TRUE，却正是最需要这条日志的现场。
+        // 只在进入加载中时记一条（GetIcon 按需回调，每次记会刷屏）。_bLoggedLoading 兜住
+        // 服务从头没起来的情形：_bIconLoading 初值即 TRUE，不经过 FALSE→TRUE。
         _bLoggedLoading = TRUE;
         WIND_LOG_INFO_FMT(L"GetIcon: icon SHM unavailable, showing loading icon size=%d\n",
                           iconSize);
@@ -573,7 +509,7 @@ STDAPI CLangBarItemButton::GetText(BSTR* pbstrText)
     if (pbstrText == nullptr)
         return E_INVALIDARG;
 
-    // Display text is determined by Go service via _inputTypeLabel
+    // Display text is determined by the service via _inputTypeLabel
     *pbstrText = SysAllocString(_inputTypeLabel);
 
     return (*pbstrText != nullptr) ? S_OK : E_OUTOFMEMORY;
@@ -622,12 +558,9 @@ LRESULT CALLBACK CLangBarItemButton::_MsgWndProc(HWND hwnd, UINT msg, WPARAM wPa
         if (pThis != nullptr && pData != nullptr)
         {
             WIND_LOG_DEBUG(L"MsgWndProc: Processing WM_UPDATE_STATUS\n");
-            // 走 TextService::UpdateFullStatus 而非本类的 UpdateFullStatus —— 前者会
-            // 顺带 _SetOpenCloseCompartment + _SetConversionMode 同步 TSF 全局 compartments,
-            // 否则 push pipe 推过来的状态变更会让 _bChineseMode 与 TSF 系统 compartment
-            // 出现 drift, 表现为 Ctrl+Space 失效 / 任务栏图标不刷新。
-            // TextService::UpdateFullStatus 内部会 cascade 调本类的 UpdateFullStatus，
-            // 因此 LangBar UI 仍然会被刷新。
+            // 走 TextService::UpdateFullStatus 而非本类的：前者顺带同步 TSF 的 OPENCLOSE /
+            // CONVERSION compartment（否则 _bChineseMode 与之漂移，Ctrl+Space 失效、任务栏
+            // 图标不刷新），并在内部调本类的 UpdateFullStatus 刷新语言栏。
             if (pThis->_pTextService != nullptr)
             {
                 pThis->_pTextService->UpdateFullStatus(
@@ -658,27 +591,14 @@ LRESULT CALLBACK CLangBarItemButton::_MsgWndProc(HWND hwnd, UINT msg, WPARAM wPa
         {
             WIND_LOG_DEBUG_FMT(L"MsgWndProc: Processing WM_COMMIT_TEXT, textLen=%zu\n", pData->text.length());
 
-            // Use atomic CommitText which ends composition + inserts text in a single
-            // EditSession. The previous separate EndComposition(async) +
-            // InsertText(sync) approach caused a race condition where the async
-            // EndComposition could clear the just-inserted text, especially in apps
-            // like VSCode and browsers when InlinePreedit is disabled.
-            //
-            // 改走合成提交键：缓冲文本 + 自注入触发键，把提交挪到 OnKeyDown 里以按键
-            // 上下文同步执行，而不是在这里（裸窗口消息回调，鼠标点候选经 push 通道
-            // 过来）直接发起异步会话。
-            //
-            // 这不只是把 `CommitText(text, TRUE)` 的已知问题（Word 拒同步会话导致
-            // "Sfge杜甫" 那类组合孤儿 finalize + 重复上屏）换个方式绕开——按键上下文本身
-            // 会触发宿主自己的输入时处理链路（AutoCorrect/内嵌 `\n` 转真实分段……），
-            // 这些在纯异步 EditSession 里不会发生，是 CommitTextViaSyntheticKey 存在
-            // 的主要原因。注入失败时内部退回旧的 `CommitText(text, TRUE)`，不会丢字。
+            // 走合成提交键：缓冲文本 + 自注入触发键，让提交在 OnKeyDown 的按键上下文里同步执行，
+            // 而不是在这个裸窗口消息回调里发起异步会话。按键上下文避开 Word 拒同步会话导致的
+            // 组合孤儿与重复上屏，也让宿主的输入时处理（AutoCorrect、内嵌 `\n` 转分段）生效。
+            // 注入失败时内部退回 `CommitText(text, TRUE)`，不会丢字。
             pThis->_pTextService->CommitTextViaSyntheticKey(pData->text);
             // Reset KeyEventSink state so shortcut keys work again.
-            // 保留配对状态：上屏只是在光标处插入文本，已配对的右符号仍在光标右侧
-            // （`（你好|）`）。此前一并清零 _pairPendingDepth，导致中文模式下
-            // 「输左符号 → 打字上屏 → 按 Enter」跳不出去（Enter 被会话门控挡下不转发；
-            // Tab 因中文模式无条件转发才幸免）。
+            // 保留配对状态：上屏只在光标处插入文本，已配对的右符号仍在光标右侧（`（你好|）`）；
+            // 清掉 _pairPendingDepth 会让随后的 Enter 跳不出去。
             pThis->_pTextService->ResetComposingState(TRUE);
         }
 
@@ -730,27 +650,13 @@ LRESULT CALLBACK CLangBarItemButton::_MsgWndProc(HWND hwnd, UINT msg, WPARAM wPa
 
         if (pThis != nullptr && pThis->_pTextService != nullptr)
         {
-            // 部署指纹（勿删）：本分支的改动是「把一个默认参数改成 TRUE」，二进制里不产生
-            // 任何新符号，光看时间戳无法区分「编进去了」与「增量跳过了」。这句话里的
-            // keep_pair_state 就是那个可 grep 的锚点 —— DLL 里搜得到 = 编进去了，
-            // 部署目录那份搜得到 = 换上了，真机日志出现本行 = 运行时确实加载了新 DLL。
+            // 日志里的 keep_pair_state 是可 grep 的部署指纹（DLL / 日志里搜得到即新版已加载），勿删。
             WIND_LOG_DEBUG(L"MsgWndProc: Processing WM_CLEAR_COMPOSITION keep_pair_state\n");
             pThis->_pTextService->EndComposition();
-            // keepPairState=TRUE：**保留**自动配对状态。本消息只服务于服务端经 push 主动推来的
-            // CMD_CLEAR_COMPOSITION，四个投递方（中英/方案切换的无按键路径、联想自动隐藏超时的
-            // 收口、服务重启、鼠标点命令候选）都不移动光标、也不消除已插入的右符号，配对的前提
-            // 「光标紧贴一个右符号」仍然成立 —— 与按键路径的中英切换取同一判据（见
-            // CTextService 里两处 ResetComposingState(TRUE) 的注释）。
-            //
-            // ⚠️ 曾用默认值（连配对栈一起清），症状：把 jump_out_keys 配成 tab 的用户，在 ()
-            // 里打字上屏后手停 5 秒，联想自动隐藏的收口把 _pairPendingDepth 清零，随后按 Tab
-            // 不再被吃 —— 那个 depth 正是「Tab 要不要转发给协调器裁决」的唯一闸门（本文件
-            // OnTestKeyDown 的 pair_jumpout_forward 分支），于是跳出退化成插入一个制表符。
-            // 按键路径的 ResponseType::ClearComposition 分支从不碰 depth，两条路因此行为分叉。
-            //
-            // 服务重启那一条会让 DLL 保留 depth 而服务端 pair_tracker 是新的（空）——
-            // 该 desync 由 OnKeyDown 的 pair_jumpout_desync_replay 分支自愈（以 core 为准把本地
-            // depth 归零并重放键），不需要在此提前清。
+            // keepPairState=TRUE：本消息的投递方（中英/方案切换的无按键路径、联想自动隐藏的收口、
+            // 服务重启、鼠标点命令候选）都不移光标、不消除已插入的右符号，配对前提仍成立。
+            // 清掉 _pairPendingDepth 会让 Tab 跳出退化成插入制表符（depth 是 pair_jumpout_forward
+            // 的唯一闸门）。服务重启后两侧 depth 不一致由 pair_jumpout_desync_replay 自愈。
             pThis->_pTextService->ResetComposingState(TRUE);
         }
         return 0;
@@ -773,10 +679,8 @@ LRESULT CALLBACK CLangBarItemButton::_MsgWndProc(HWND hwnd, UINT msg, WPARAM wPa
     else if (msg == WM_ACTIVATION_STATUS)
     {
         // lParam = heap-allocated ServiceResponse* (拥有权移交本 handler, 由本 handler delete)。
-        // 触发链：Go push pipe → CIPCClient::_AsyncReaderLoop → _activationPushCallback
+        // 触发链：push pipe → CIPCClient::_AsyncReaderLoop → _activationPushCallback
         //         → CTextService 的 lambda 调 PostActivationStatus → 本 handler。
-        // 等价于原同步路径 _DoFullStateSync 收到 ReceiveResponse 后调
-        // _SyncStateFromResponse + _EnsureHostRenderSetup。
         ServiceResponse* pResp = reinterpret_cast<ServiceResponse*>(lParam);
         CLangBarItemButton* pThis = reinterpret_cast<CLangBarItemButton*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
         if (pThis != nullptr && pResp != nullptr && pThis->_pTextService != nullptr)
@@ -818,11 +722,8 @@ LRESULT CALLBACK CLangBarItemButton::_MsgWndProc(HWND hwnd, UINT msg, WPARAM wPa
     }
     else if (msg == WM_REFRESH_ICON)
     {
-        // 合并积压：演示动画以固定帧率持续投递，宿主 UI 线程一旦卡顿，队列里会攒下一串
-        // 同类消息，恢复后连着重绘（表现为动画"追帧"）。它们彼此完全等价——图标内容的
-        // 真相在共享内存里而不在消息里——所以只处理最后一条即可。
-        // 可以在这里 Peek 是因为本函数就跑在拥有该队列的 TSF 线程上；投递侧（AsyncReader
-        // 线程）做不到这件事。
+        // 合并积压：演示动画按固定帧率投递，宿主卡顿后会攒下一串，连着重绘就是「追帧」。
+        // 图标内容在共享内存里，这些消息彼此等价，只处理最后一条。只有拥有队列的 TSF 线程能这样 Peek。
         MSG discarded;
         while (PeekMessageW(&discarded, hwnd, WM_REFRESH_ICON, WM_REFRESH_ICON, PM_REMOVE))
         {
@@ -831,11 +732,8 @@ LRESULT CALLBACK CLangBarItemButton::_MsgWndProc(HWND hwnd, UINT msg, WPARAM wPa
         CLangBarItemButton* pThis = reinterpret_cast<CLangBarItemButton*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
         if (pThis != nullptr && pThis->_pLangBarItemSink != nullptr)
         {
-            // 平时只报 TF_LBI_ICON：TEXT/TOOLTIP 没变，一起报只会让系统多查几次，而本命令
-            // 的调用频率可以很高（演示动画每帧一次）。
-            // 例外：还在「加载中」时 tooltip 是「正在加载…」，服务首次发布图标正是走这里，
-            // 只报 ICON 的话图标已恢复、悬停却一直停在「正在加载…」。GetIcon 会在这次
-            // 回调里把 _bIconLoading 清掉，故这一带只发生一次。
+            // 平时只报 TF_LBI_ICON（本命令可高频，演示动画每帧一次）。例外是加载中：服务首次
+            // 发布图标走这里，不连带 TOOLTIP 的话悬停会一直停在「正在加载…」。
             DWORD flags = TF_LBI_ICON;
             if (pThis->_bIconLoading)
                 flags |= TF_LBI_TOOLTIP;
@@ -868,11 +766,8 @@ LRESULT CALLBACK CLangBarItemButton::_MsgWndProc(HWND hwnd, UINT msg, WPARAM wPa
             CLangBarItemButton* pThis = reinterpret_cast<CLangBarItemButton*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
             const BOOL hasComp = (pThis != nullptr && pThis->_pTextService != nullptr
                                   && pThis->_pTextService->HasCompositionOrRecover());
-            // ⚠ 这行日志不可省。`WM_TIMER` 是消息队列里**优先级最低的合成消息**，只在队列
-            // 空闲时才生成，宿主忙时会被无限期饿死。2026-08-03 排查 Excel「点单元格后首字
-            // 错位」时，本 timer 在 680ms 的重排窗口里一次都没触发，而当时成功路径**没有
-            // 任何日志**，只能靠「这一整段零日志」反推它没跑——绕了一大圈。
-            // **判决点必须自己说话，不能靠周围的沉默去猜**：无论走哪条分支都要留下痕迹。
+            // 这行日志不可省：WM_TIMER 是优先级最低的合成消息，宿主忙时可被无限期饿死，
+            // 无论走哪条分支都要留下「触发过」的痕迹，否则只能靠零日志反推。
             WIND_LOG_DEBUG_FMT(L"CARET_RETRY timer fired: hasComposition=%d\n", hasComp ? 1 : 0);
             if (hasComp)
             {
@@ -880,17 +775,12 @@ LRESULT CALLBACK CLangBarItemButton::_MsgWndProc(HWND hwnd, UINT msg, WPARAM wPa
                 // （消费已缓存的坐标，应对不发 OnLayoutChange 的应用）。
                 pThis->_pTextService->ClearCompositionJustStarted();
 
-                // ⚠ 这里是 WM_TIMER，不是按键上下文——同步 edit session 在这里会被宿主合法
-                // 拒绝（Word 实测 TS_E_SYNCHRONOUS 15/15），而 SendCaretPositionUpdate 失败后
-                // 会回退到 GetGUIThreadInfo 的 Win32 caret。Word 只在正文行维护那个 caret，
-                // 标题等非正文样式行上它指向别处，候选窗因此错位数百像素。
-                // 故这条路径改用异步 edit session：宿主会把请求排队，等文档可用时回调。
-                // 发不出去才退回同步路径（非 TSF 宿主仍需要 GUIThreadInfo 那条链）。
+                // WM_TIMER 不是按键上下文，同步 edit session 会被宿主拒绝（Word 回 TS_E_SYNCHRONOUS），
+                // 回退到的 Win32 caret 在 Word 非正文行上指向别处，故走异步会话；发不出去才退回
+                // 同步路径（非 TSF 宿主仍需要 GUIThreadInfo 那条链）。
                 //
-                // kind 必须显式给 RetryDeadline，不能沿用默认的 Composition：本次取坐标是
-                // 「**重试窗口已经过完**」这个判决的唯一载体，回调据此把仍然退化的矩形当作
-                // 宿主的「本 context 没有插入点可报」采信（CARET_SRC_TSF_DEFAULT_POS），
-                // 而不是继续丢弃、跌到 GUIThreadInfo 的无关光标上。见 CaretProbeKind。
+                // kind 必须是 RetryDeadline：它是「重试窗口已过完」的唯一载体，回调据此把仍退化的
+                // 矩形采信为宿主默认位置（CARET_SRC_TSF_DEFAULT_POS），而不是跌到无关光标上。见 CaretProbeKind。
                 if (!pThis->_pTextService->RequestCaretPositionUpdateAsync(CaretProbeKind::RetryDeadline))
                 {
                     WIND_LOG_DEBUG(L"CARET_RETRY timer: async request not issued, falling back to sync path\n");
@@ -1060,17 +950,14 @@ void CLangBarItemButton::UpdateState(BOOL bChineseMode, BOOL bCapsLock)
 
 void CLangBarItemButton::UpdateFullStatus(BOOL bChineseMode, BOOL bFullWidth, BOOL bChinesePunct, BOOL bToolbarVisible, BOOL bCapsLock, const wchar_t* iconLabel)
 {
-    // Update icon label from Go service (if provided)
+    // Update icon label from the service (if provided)
     BOOL labelChanged = FALSE;
     if (iconLabel != nullptr && iconLabel[0] != L'\0')
     {
         if (wcscmp(_inputTypeLabel, iconLabel) != 0)
         {
-            // _TRUNCATE 而非 wcscpy_s：后者遇超长**不是截断而是调用 invalid parameter
-            // handler**，默认行为是终止进程——而这段代码跑在 Word / QQ 等宿主进程里。
-            // Rust 侧已把标签卡在 2 个字符（wind_config::ICON_LABEL_MAX_CHARS），这条路
-            // 本不该触发；留着它是防将来某条新路径绕过那道截断，把"显示被截断"和
-            // "宿主进程崩溃"这两种后果的差距抹平。
+            // _TRUNCATE 而非 wcscpy_s：后者遇超长会调 invalid parameter handler 终止宿主进程。
+            // Rust 侧已按 wind_config::ICON_LABEL_MAX_WIDTH 截断标签，这里是防绕过的兜底。
             wcsncpy_s(_inputTypeLabel, iconLabel, _TRUNCATE);
             labelChanged = TRUE;
         }
@@ -1297,9 +1184,8 @@ void CLangBarItemButton::PostRefreshIcon()
 {
     if (_hMsgWnd == NULL)
     {
-        // 不退回直接调用（对比 PostUpdateFullStatus 的兜底）：OnUpdate 是 COM 调用，
-        // 必须在 TSF 线程上发，而本函数跑在 AsyncReader 线程。没有消息窗口就只能放弃
-        // 这次刷新——代价仅仅是图标晚一步更新，而跨线程碰 COM 的代价是未定义行为。
+        // 不退回直接调用：OnUpdate 是 COM 调用，必须在 TSF 线程上发，而本函数跑在 AsyncReader
+        // 线程。放弃这次刷新只是图标晚一步更新。
         WIND_LOG_WARN(L"PostRefreshIcon: No message window, skipping\n");
         return;
     }
@@ -1521,8 +1407,8 @@ void CLangBarItemButton::SetInputTypeLabel(const wchar_t* label)
     }
 }
 
-// Show popup menu by sending screen coordinates to Go service
-// Go service renders the unified menu with consistent styling
+// Show popup menu by sending screen coordinates to the service,
+// which renders the unified menu with consistent styling
 void CLangBarItemButton::_ShowPopupMenu(POINT pt)
 {
     WIND_LOG_INFO_FMT(L"_ShowPopupMenu: Sending context menu request to service at (%ld, %ld)\n", pt.x, pt.y);

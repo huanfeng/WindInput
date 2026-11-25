@@ -775,7 +775,15 @@ Dota 2 实测第一版（只有事件缓存）一输入就弹窗把游戏卡死�
 TSF DLL 部署到 `%WINDIR%\System32\IME\WindInput[Dev]\`，x86 到
 `%WINDIR%\SysWOW64\IME\WindInput[Dev]\`，**对系统副本** `regsvr32`。
 `DllRegisterServer` 内的 `GetModuleFileName` 取到的就是系统副本路径，
-`InprocServer32` 与 profile 图标路径**自然指向系统副本**，无需后处理。
+`InprocServer32` **自然指向系统副本**，无需后处理。
+
+profile 图标（`IconFile`）则指向**安装目录里的副本**（`Register.cpp` 的 `_ResolveIconFile`）：
+CTF 的 TIP 键连同 `IconFile` 是 WOW64 两个视角共享的同一份字符串，64 位读者按字面解析
+`System32\…`，32 位读者被重定向到 `SysWOW64\…`，这隐含两处文件同名的前提。本项目 x64/x86
+刻意不同名（`wind_tsf.dll` / `wind_tsf_x86.dll`，为能并排放在同一安装目录），若写系统副本，
+后注册的 x86 会写下 64 位侧不存在的路径，输入法列表取不到图标。安装目录不受文件重定向影响，
+两种位数拿到同一个文件，也不再依赖注册先后；便携形态同理（`InstallDir` 指向便携目录）。
+安装目录里没有副本时回退系统副本路径。
 
 **三条部署路径都要改**，否则出现「装的方式不同、游戏里能不能用也不同」：
 

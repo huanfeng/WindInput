@@ -5,10 +5,9 @@
 // 或经 CMake：
 //   cmake -B build -DWIND_TSF_TESTS=ON && cmake --build build --target skip_key_table_test
 //
-// 变异检验已做：把 SkipKeyTable 换回「裸 WORD + 只比队首 + 无通道 + 无 TTL」的旧实现，
-// 除 TestBatchInjection 外全部变红（20 个断言），标着 ← 旧实现在此变红 的即是。
-// 改测试时请保住这个性质——一条永远绿的测试不会告诉你任何事。
-// TestBatchInjection 为何不在其列，见它自己的注释：那条缺陷在接线不在表。
+// 变异检验：把 SkipKeyTable 换成「裸 WORD + 只比队首 + 无通道 + 无 TTL」的实现，除
+// TestBatchInjection（缺陷在接线不在表，见其注释）外全部变红，标「← 旧实现在此变红」的即是。
+// 改测试时保住这个性质。
 
 #include "SkipKeyTable.h"
 
@@ -43,10 +42,9 @@ const char* g_case = "";
 
 // ── 形态①：连按同一个键 ────────────────────────────────────────────────────
 //
-// 联想窗弹出时连按 ← ←：每一下都被 OnTestKeyDown 吃掉、由 _ReplayKeyToHost 重放，
-// 于是表里可能同时排着两条 VK_LEFT。此前条目不带通道、down 与 up 共用一张表 ⇒
-// 第一次注入的 keyup 会把**给第二个 down 的那条**吃掉，第二个 ← 于是漏进 IME 逻辑
-// （不补发 WM_KEYDOWN 的宿主直接丢键）。
+// 联想窗弹出时连按 ← ←，每下都被 OnTestKeyDown 吃掉、由 _ReplayKeyToHost 重放，表里会同时
+// 排两条 VK_LEFT。条目不分通道的话，第一次注入的 keyup 会吃掉给第二个 down 的那条，
+// 第二个 ← 漏进 IME 逻辑（不补发 WM_KEYDOWN 的宿主直接丢键）。
 void TestSameKeyTwice()
 {
     CASE("形态①：同 vk 两条，注入的 keyup 不得吃掉给下一个 down 的条目");
@@ -62,17 +60,11 @@ void TestSameKeyTwice()
 
 // ── 形态②：批量注入 N 个键 = 2N 个事件 ────────────────────────────────────
 //
-// CommitText / ReplacePrecedingChars 的 SendInput 兜底路径（终端模拟器、微信、部分
-// 纯文本编辑器）每个键注入 down + up 两个事件。此前 MarkSyntheticKey 每键只压一条，
-// 于是 2N 个事件被 down/up 交替消费掉前 N 个，**后一半照样进 IME 逻辑**——正是那条
-// 路径的注释开头声明要防的「替换后的符号重复上屏」。N==1 时恰好不出问题，所以它
-// 藏了很久。
+// CommitText / ReplacePrecedingChars 的 SendInput 兜底路径每键注入 down + up 两个事件；
+// 每键只压一条的话，后一半事件会进 IME 逻辑，替换后的符号重复上屏（N==1 时不显）。
 //
-// ⚠️ **本条没有变异保护，已实测**：那个缺陷在调用方（MarkSyntheticKey 压几条），
-// 不在表里，对旧实现照样全绿。它钉的是表这一侧的前提——「成对条目能被成对消费、
-// 且 down 与 up 互不干扰」；「每键压两条」属接线，由 KeyEventSink.h 的 skip 表段落
-// 与真机负责。留着它是因为前提一旦被破坏（例如有人把通道判据改成单向匹配），
-// MarkSyntheticKey 会跟着坏，而那时这条会红。
+// 本条没有变异保护：「每键压两条」属调用方接线（MarkSyntheticKey，见 KeyEventSink.h 的
+// skip 表段落）。它钉的是表这一侧的前提：成对条目能成对消费、down 与 up 互不干扰。
 void TestBatchInjection()
 {
     CASE("形态②：批量注入的 down 与 up 全部放行");
@@ -102,10 +94,9 @@ void TestBatchInjection()
 
 // ── 形态③：残条不得挡死其后条目 ────────────────────────────────────────────
 //
-// 注入没能回到本 sink（前台窗口已换、宿主此刻不走 TSF、SendInput 被 UIPI 拦）时队首
-// 会留下一条永远等不到的条目。此前只比对队首 ⇒ 它挡死其后**全部**条目，直到
-// ResetComposingState 整表清零（换焦点/失焦/中英切换）——期间自动配对合成的左移键
-// 首当其冲，表现为「配对跳出时灵时不灵」。
+// 注入没回到本 sink（前台窗口已换、宿主不走 TSF、SendInput 被 UIPI 拦）时队首会留下
+// 永远等不到的条目。只比队首的话它会挡死其后全部条目直到整表清零，自动配对合成的
+// 左移键首当其冲。
 void TestStaleEntryDoesNotBlock()
 {
     CASE("形态③：队首残条不挡后续条目");
@@ -193,8 +184,7 @@ void TestClearKeepsDiagnostics()
     t.Push(VK_END_, false, 1000);
     t.Clear();
     CHECK(t.Count() == 0);
-    // 累计计数是跨会话的诊断信号，被 ResetComposingState 清掉就看不出这台机器上
-    // 到底发生过没有。
+    // 累计计数是跨会话的诊断信号，不能被 ResetComposingState 清掉。
     CHECK(t.ExpiredTotal() == 2);
 }
 

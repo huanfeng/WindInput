@@ -5,8 +5,8 @@
 // 或经 CMake：
 //   cmake -B build -DWIND_TSF_TESTS=ON && cmake --build build --target installer_guard_test
 //
-// 变异检验已做，逐条对应「把兜底去掉会怎样」：
-//   · ShouldBlockStart 改回「见 hasFlag 即挡」（即修复前的行为）→ 标着 ← 旧行为在此变红 的 3 条全红
+// 变异检验：每个兜底去掉都有用例变红——
+//   · ShouldBlockStart 改成「见 hasFlag 即挡」→ 标着「← 见 hasFlag 即挡在此变红」的 3 条全红
 //   · ShouldBlockStart 去掉 ownerHardStale 这条硬兜底 → OwnerHardStaleDoesNotBlock 变红
 //   · ParseOwner 去掉溢出检查、改用 wcstoull → OverflowRejected / LeadingSpaceRejected 变红
 //   · ParseOwner 不校验 pid != 0 → ZeroPidRejected 变红
@@ -48,9 +48,8 @@ void TestParseOwnerAccepts()
     CHECK(o.pid == 2628u);
     CHECK(o.createTime == 133712345678901234ull);
 
-    // 创建时间为 0 在语法上合法：解析器只把它当作与目标进程比对的不透明值。
-    // ⚠️ 但写端绝不能真写 0：那会让比对当场失败、闸门在安装刚开始就放行（= 不安全的
-    // 那一侧）。所以写端取不到身份时宁可不写 owner，见 wind-installer 的 registry.rs。
+    // 创建时间为 0 语法上合法（解析器只当不透明值）。但写端绝不能写 0：比对会当场失败、
+    // 闸门在安装刚开始就放行；取不到身份时宁可不写 owner，见 wind-installer 的 registry.rs。
     CHECK(InstallerGuard::ParseOwner(L"1|0", &o));
     CHECK(o.pid == 1u);
     CHECK(o.createTime == 0ull);
@@ -83,8 +82,7 @@ void TestParseOwnerRejects()
     CHECK(!InstallerGuard::ParseOwner(L"-2628|1", &o));
 
     g_case = "ZeroPidRejected";
-    // PID 0 是 System Idle Process，永远「活着」——认了它，闸门就永久卡死，
-    // 正是本次修复要根除的那个形态。
+    // PID 0 是 System Idle Process，永远「活着」，认了它闸门就永久卡死。
     CHECK(!InstallerGuard::ParseOwner(L"0|133712345678", &o));
 
     g_case = "OverflowRejected";
@@ -101,11 +99,8 @@ void TestIsStaleByAge()
     CHECK(!InstallerGuard::IsStaleByAge(base, base + 60ull * 1000 * kMs));  // 1 分钟，安装正常时长
 
     g_case = "BoundaryAtExactly10Min";
-    // ⚠️ 这里刻意写死 10 分钟，而不是用 kStaleAfterMs 算——拿常量去验常量，改了常量
-    // 测试跟着改，这条断言就永远绿。阈值是对外承诺的行为，要钉死在测试里。
-    //
-    // 用 static_assert 而非 CHECK：两个编译期常量比大小，MSVC 的 /W4 会报 C4127
-    // （条件表达式是常量），而这本来就该在编译期判死，不必等到运行。
+    // 刻意写死 10 分钟而不用 kStaleAfterMs 算：拿常量验常量的断言永远绿，阈值是对外承诺要钉死。
+    // 用 static_assert 而非 CHECK：常量比较在 MSVC /W4 下报 C4127。
     static_assert(InstallerGuard::kStaleAfterMs == 10ull * 60ull * 1000ull,
                   "陈旧阈值是对读端行为的承诺，改它须同时改本测试与 InstallerGuard.h 的注释");
     const uint64_t tenMin = 10ull * 60ull * 1000ull * kMs;
@@ -151,15 +146,13 @@ void TestShouldBlockStart()
     CHECK(InstallerGuard::ShouldBlockStart(true, true, true, true, false)); // 慢安装超过 10 分钟也照挡
 
     g_case = "OwnerDeadDoesNotBlock";
-    // ← 旧行为在此变红：安装器死了、标记成了遗物，必须放行，否则输入法永久不工作。
+    // ← 见 hasFlag 即挡在此变红：安装器死了、标记成了遗物，必须放行，否则输入法永久不工作。
     CHECK(!InstallerGuard::ShouldBlockStart(true, true, false, false, false));
     CHECK(!InstallerGuard::ShouldBlockStart(true, true, false, true, false));
 
     g_case = "OwnerHardStaleDoesNotBlock";
-    // owner 路径唯一的出口。IsOwnerAlive 在「打不开、看不清」时一律答「活着」，
-    // 于是「安装器死了 → PID 被一个 SYSTEM 服务复用 → 永远看不清」会让 ownerAlive
-    // 恒为 true；跨用户机器上更直接，用户 B 压根打不开用户 A 的安装器 PID。
-    // 没有这条，那两种局面就是没有出口的永久卡死，形态与 #120 一模一样。
+    // owner 路径唯一的出口。IsOwnerAlive 打不开进程时一律答「活着」，PID 被 SYSTEM 服务复用
+    // 或跨用户打不开安装器 PID 时 ownerAlive 恒为 true，没有这条就永久卡死。
     CHECK(!InstallerGuard::ShouldBlockStart(true, true, true, false, true));
     CHECK(!InstallerGuard::ShouldBlockStart(true, true, true, true, true));
 
@@ -170,7 +163,7 @@ void TestShouldBlockStart()
     g_case = "NoOwnerFallsBackToAge";
     // 新 DLL + 旧安装器：没有身份可查，只能看年龄。
     CHECK(InstallerGuard::ShouldBlockStart(true, false, false, false, false));   // 还新鲜 → 照挡（保住旧安装器的安装期）
-    // ← 旧行为在此变红
+    // ← 见 hasFlag 即挡在此变红
     CHECK(!InstallerGuard::ShouldBlockStart(true, false, false, true, false));   // 已陈旧 → 放行
 }
 
