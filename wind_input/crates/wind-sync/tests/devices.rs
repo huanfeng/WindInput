@@ -60,7 +60,7 @@ fn removal_drops_device_from_the_other_view() {
     put_device_info(&b, &dek.devinfo_key(), "dev-b", &info("b", T0)).unwrap();
     remove_device(&b, "dev-b").unwrap();
     assert_eq!(names(&b, &dek), vec![("dev-a".into(), Some("a".into()))]);
-    assert!(b.keys("windinput-sync/v1/devices/dev-b/").is_empty());
+    assert!(b.keys("windinput-sync/v2/devices/dev-b/").is_empty());
 }
 
 #[test]

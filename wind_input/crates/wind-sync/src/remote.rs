@@ -69,7 +69,7 @@ pub fn rewrap_passphrase(
     Ok(())
 }
 
-/// 重置远端：删光 `windinput-sync/v1/` 下所有对象，再用 `dek` 与新口令写 meta。
+/// 重置远端：删光 `windinput-sync/v2/` 下所有对象，再用 `dek` 与新口令写 meta。
 /// 之后各设备以自己的本地内容为准重新上传。调用方负责取得用户的明确确认。
 pub fn reset_remote(
     b: &dyn Backend,
@@ -148,7 +148,7 @@ mod tests {
     fn reset_clears_everything_then_writes_meta() {
         let b = MemBackend::new();
         let dek = init_remote(&b, "old", KdfParams::FAST_TEST).unwrap();
-        b.raw_put("windinput-sync/v1/blobs/x", vec![1]);
+        b.raw_put("windinput-sync/v2/blobs/x", vec![1]);
         b.raw_put("other/keep", vec![1]);
         reset_remote(&b, &dek, "fresh", KdfParams::FAST_TEST).unwrap();
         assert_eq!(b.keys("windinput-sync/"), vec![manifest::meta_key()]);

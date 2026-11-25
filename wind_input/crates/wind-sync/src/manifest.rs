@@ -4,7 +4,7 @@ use crate::crypto::{self, CryptoError, FilesKey, ObjKind};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const ROOT: &str = "windinput-sync/v1";
+pub const ROOT: &str = "windinput-sync/v2";
 /// 每设备保留的清单代数。
 pub const KEEP_GENS: u64 = 2;
 
@@ -44,12 +44,9 @@ pub fn safe_key(key: &str) -> bool {
             .all(|seg| !seg.is_empty() && seg != "." && seg != "..")
 }
 
-/// 设备号只允许字母数字与 `-_`：它会拼进远端键。
+/// 设备号规则见 [`crate::ids::valid_id`]：它会拼进远端键。
 pub fn valid_device_id(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 64
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    crate::ids::valid_id(s)
 }
 
 /// `devices/<dev>/manifest.<gen>` → (dev, gen)。
@@ -168,11 +165,11 @@ mod tests {
             Some(("dev-1".into(), 7))
         );
         assert_eq!(
-            parse_manifest_key("windinput-sync/v1/devices/a/other"),
+            parse_manifest_key("windinput-sync/v2/devices/a/other"),
             None
         );
         assert_eq!(
-            parse_manifest_key("windinput-sync/v1/devices/a b/manifest.1"),
+            parse_manifest_key("windinput-sync/v2/devices/a b/manifest.1"),
             None
         );
     }

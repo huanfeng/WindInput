@@ -13,6 +13,7 @@ pub mod crypto;
 pub mod devices;
 pub mod engine;
 pub mod error;
+pub mod ids;
 pub mod local;
 pub mod manifest;
 pub mod merge;
