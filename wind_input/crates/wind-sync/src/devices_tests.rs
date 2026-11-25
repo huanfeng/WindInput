@@ -9,6 +9,9 @@ fn sample() -> DeviceInfo {
         app_version: "1.2.3".into(),
         caps: vec!["files".into()],
         last_seen: 42,
+        group: String::new(),
+        group_name: String::new(),
+        group_name_at: 0,
     }
 }
 
@@ -73,4 +76,57 @@ fn remove_only_touches_that_device_and_rejects_bad_ids() {
     assert_eq!(b.keys(&manifest::blobs_prefix()).len(), 1);
     assert!(remove_device(&b, "../x").is_err());
     assert!(remove_device(&b, "").is_err());
+}
+
+fn grouped(group: &str, name: &str, at: u64) -> DeviceInfo {
+    DeviceInfo {
+        group: group.into(),
+        group_name: name.into(),
+        group_name_at: at,
+        ..sample()
+    }
+}
+
+fn roster() -> Vec<DeviceEntry> {
+    vec![
+        ("a".into(), Ok(grouped("home", "个人", 5))),
+        ("b".into(), Ok(grouped("home", "个人电脑", 9))),
+        ("c".into(), Ok(grouped("office", "", 0))),
+    ]
+}
+
+#[test]
+fn group_name_comes_from_latest_member() {
+    assert_eq!(group_name_of(&roster(), "home"), Some("个人电脑".into()));
+    assert_eq!(group_name_of(&roster(), "x"), None);
+}
+
+#[test]
+fn group_name_tie_takes_smaller_device_id_and_skips_unreadable() {
+    let r: Vec<DeviceEntry> = vec![
+        ("a".into(), Err(SyncError::Local("坏".into()))),
+        ("b".into(), Ok(grouped("g", "乙", 3))),
+        ("c".into(), Ok(grouped("g", "丙", 3))),
+    ];
+    assert_eq!(group_name_of(&r, "g"), Some("乙".into()));
+}
+
+#[test]
+fn old_info_without_group_fields_still_parses() {
+    let v: DeviceInfo = serde_json::from_str(
+        r#"{"name":"n","platform":"p","app_version":"v","caps":[],"last_seen":1}"#,
+    )
+    .unwrap();
+    assert_eq!(v.group, "");
+    assert_eq!(v.group_name_at, 0);
+}
+
+#[test]
+fn id_taken_reflects_remote_objects() {
+    let b = MemBackend::new();
+    let k = Dek::generate().devinfo_key();
+    put_device_info(&b, &k, "d1", &sample()).unwrap();
+    assert!(id_taken(&b, "d1").unwrap());
+    assert!(!id_taken(&b, "d2").unwrap());
+    assert!(!id_taken(&b, "d").unwrap());
 }

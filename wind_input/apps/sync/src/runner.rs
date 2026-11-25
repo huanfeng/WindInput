@@ -225,6 +225,9 @@ fn local_info(settings: &SyncSettings, now: u64) -> DeviceInfo {
         app_version: env!("WIND_APP_VERSION").into(),
         caps: vec!["files".into()],
         last_seen: now,
+        group: String::new(),
+        group_name: String::new(),
+        group_name_at: 0,
     }
 }
 

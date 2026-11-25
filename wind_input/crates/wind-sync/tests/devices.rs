@@ -23,6 +23,9 @@ fn info(name: &str, last_seen: u64) -> DeviceInfo {
         app_version: "0.0.1".into(),
         caps: vec!["files".into()],
         last_seen,
+        group: String::new(),
+        group_name: String::new(),
+        group_name_at: 0,
     }
 }
 

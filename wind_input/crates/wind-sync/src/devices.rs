@@ -19,6 +19,15 @@ pub struct DeviceInfo {
     pub caps: Vec<String>,
     /// 最近一次刷新的 Unix 秒（只在跨天时刷新，精度为天）。
     pub last_seen: u64,
+    /// 所在设备组号；空表示尚未入组。
+    #[serde(default)]
+    pub group: String,
+    /// 组名（组内成员各存一份，取 `group_name_at` 最大者）。
+    #[serde(default)]
+    pub group_name: String,
+    /// 组名最近修改的 Unix 秒。
+    #[serde(default)]
+    pub group_name_at: u64,
 }
 
 /// 名册一项：设备号与它的信息（读不出时为错误）。
@@ -69,6 +78,28 @@ pub fn list_devices(b: &dyn Backend, key: &DevInfoKey) -> Result<Vec<DeviceEntry
             (d, r)
         })
         .collect())
+}
+
+/// 该组的组名：成员中 `group_name_at` 最大者，并列取设备号小者；读不出的项跳过，无成员为 None。
+pub fn group_name_of(roster: &[DeviceEntry], group: &str) -> Option<String> {
+    roster
+        .iter()
+        .filter_map(|(dev, r)| Some((dev, r.as_ref().ok()?)))
+        .filter(|(_, i)| i.group == group)
+        .max_by(|(da, a), (db, b)| {
+            a.group_name_at
+                .cmp(&b.group_name_at)
+                .then_with(|| db.cmp(da))
+        })
+        .map(|(_, i)| i.group_name.clone())
+}
+
+/// 远端 `devices/<id>/` 下是否已有对象（号已被占用）。
+pub fn id_taken(b: &dyn Backend, id: &str) -> Result<bool, SyncError> {
+    if !manifest::valid_device_id(id) {
+        return Err(SyncError::Local(format!("非法设备号: {id}")));
+    }
+    Ok(!b.list(&manifest::device_dir_prefix(id))?.is_empty())
 }
 
 /// 删除该设备目录下全部对象（清单与 info），返回删除个数。拒绝删本机由调用方保证。

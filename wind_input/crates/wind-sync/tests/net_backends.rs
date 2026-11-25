@@ -143,6 +143,9 @@ fn sync_roundtrip(b: &dyn Backend) {
         app_version: "0.0.1".into(),
         caps: vec!["files".into()],
         last_seen: 1_795_478_400,
+        group: String::new(),
+        group_name: String::new(),
+        group_name_at: 0,
     };
     put_device_info(b, &dek.devinfo_key(), "devA", &info("甲")).unwrap();
     put_device_info(b, &dek.devinfo_key(), "devB", &info("乙")).unwrap();
