@@ -821,15 +821,20 @@ fn keypad_composition_never_shows_digits() {
     let Some((m, _rx)) = core("kp_comp", "pinyin", no_assoc) else {
         return;
     };
-    for (keys, want) in [
-        ("99999", "wwwww"),
-        ("6442699", "ni'hao'ww"),
-        ("644269", "ni'hao'x"),
-    ] {
+    for (keys, want) in [("6442699", "ni'hao'ww"), ("644269", "ni'hao'x")] {
         let _ = m.set_keypad(false);
         let _ = m.set_keypad(true);
         let comp = composition(&keypad(&m, keys)).unwrap_or_default();
         assert_eq!(comp, want, "{keys}");
+    }
+    for keys in ["99999", "99999999", "7777"] {
+        let _ = m.set_keypad(false);
+        let _ = m.set_keypad(true);
+        let comp = composition(&keypad(&m, keys)).unwrap_or_default();
+        assert!(
+            !comp.is_empty() && !comp.chars().any(|c| c.is_ascii_digit()),
+            "{keys}: {comp:?}"
+        );
     }
 }
 
@@ -858,4 +863,26 @@ fn keypad_full_reading_outranks_abbreviation() {
         m.candidates(0, 1).items.first().map(String::as_str),
         Some("我")
     );
+}
+
+/// 长串全是声母（`99999999`）：从开头起按简拼分步选，选掉一段后剩下的键接着出简拼词。
+#[test]
+fn keypad_long_initials_pick_abbreviation_step_by_step() {
+    let Some((m, _rx)) = core("kp_lab", "pinyin", no_assoc) else {
+        return;
+    };
+    let _ = m.set_keypad(true);
+    keypad(&m, "99999999");
+    let win = m.candidates(0, 10);
+    assert!(win.total > 0, "整串读不通时不该无候选");
+    let first = win.items[0].clone();
+    assert_eq!(first.chars().count(), 4, "{:?}", win.items);
+    let out = m.select_candidate(0);
+    assert!(
+        m.coord.is_composing(),
+        "选掉前 4 键后剩下的键还在组码：{out:?}"
+    );
+    assert!(m.candidates(0, 1).total > 0);
+    let out = m.select_candidate(0);
+    assert!(!m.coord.is_composing(), "{out:?}");
 }

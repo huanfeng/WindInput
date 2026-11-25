@@ -519,7 +519,18 @@ impl PinyinEngine {
         }
         cands.extend(words);
         if self.shuangpin.is_none() {
-            self.add_keypad_abbrevs(&keys, map, max_candidates, &mut cands);
+            let n = keys.len();
+            if n <= ABBREV_MAX_KEYS {
+                self.add_keypad_abbrevs(&keys, map, n, max_candidates, &mut cands);
+            }
+            // 没有吃满整串的候选（`99999999` 读不成音节）：从开头起按简拼分步选——前 2..=4 键的
+            // 简拼词、首键的单字，选掉一段后剩下的键接着解。读得通的串不走这里，不多花时间。
+            if !cands.iter().any(|c| c.consumed_length == keys.raw.len()) {
+                for l in (2..=ABBREV_MAX_KEYS.min(n.saturating_sub(1))).rev() {
+                    self.add_keypad_abbrevs(&keys, map, l, max_candidates, &mut cands);
+                }
+                self.add_leading_initial_chars(&keys, map, max_candidates, &mut cands);
+            }
         }
         cands.truncate(max_candidates);
 
@@ -532,14 +543,15 @@ impl PinyinEngine {
         let (read, covered) = match (shown, &preedit_source) {
             (None, Some(p)) => (p.clone(), n),
             // 简拼首选：每键一个声母，显示声母（`w'm`）而不是整个词的全拼
-            (Some(top), _) if top.is_abbrev => (
-                top.pinyin
+            (Some(top), _) if top.is_abbrev => {
+                let initials: Vec<&str> = top
+                    .pinyin
                     .split(SEPARATOR as char)
                     .filter_map(|syl| syl.get(..1))
-                    .collect::<Vec<_>>()
-                    .join("'"),
-                n,
-            ),
+                    .collect();
+                let covered = initials.len();
+                (initials.join("'"), covered)
+            }
             (Some(top), _) => {
                 let covered = keys.raw_start[..n]
                     .iter()
@@ -559,29 +571,31 @@ impl PinyinEngine {
         }
     }
 
-    /// 简拼（全拼九宫格）：整串 2..=[`ABBREV_MAX_KEYS`] 个键、每键读作一个声母时的词，
-    /// 如 `96` → w'm → 我们。
+    /// 简拼（全拼九宫格）：前 `len` 个键（2..=[`ABBREV_MAX_KEYS`]）每键读作一个声母时的词，
+    /// 如 `96` → w'm → 我们。`len` 小于键数时候选只吃这一段（分步上屏，剩下的键接着解）。
     ///
     /// 每个键取它能代表的声母首字母（`9` → w/x/y/z），组合后查简拼索引（同 26 键的纯简拼
-    /// step5：索引给全拼码，回主表装配，音节数必须等于键数）。候选标 `is_abbrev`、吃满整串：
-    /// 显示排序里排在同长度的全拼读法之后、只吃一部分的单字之前。带分词键或锁定字母的串不走这里。
+    /// step5：索引给全拼码，回主表装配，音节数必须等于键数）。候选标 `is_abbrev`：显示排序里
+    /// 排在同长度的全拼读法之后。这一段里有分词键或锁定字母时不走这里。
     fn add_keypad_abbrevs(
         &self,
         keys: &Keys,
         map: &KeypadMap,
+        len: usize,
         max_candidates: usize,
         cands: &mut Vec<Candidate>,
     ) {
-        let n = keys.len();
+        let n = len;
         if !self.config.enable_abbrev
             || !(2..=ABBREV_MAX_KEYS).contains(&n)
-            || keys.raw.len() != n
-            || keys.clean.iter().any(u8::is_ascii_lowercase)
+            || n > keys.len()
+            || keys.raw_start[n] != n
+            || keys.clean[..n].iter().any(u8::is_ascii_lowercase)
         {
             return;
         }
-        let per_key: Vec<Vec<u8>> = keys
-            .clean
+        let consumed = keys.raw_start[n];
+        let per_key: Vec<Vec<u8>> = keys.clean[..n]
             .iter()
             .map(|&k| {
                 map.letters(k)
@@ -613,12 +627,13 @@ impl PinyinEngine {
                     found.push(Candidate {
                         pinyin: split_pinyin(&code, eb),
                         text: h.text,
-                        code: keys.raw.to_string(),
+                        code: keys.raw[..consumed].to_string(),
                         weight: h.weight,
                         source: CandidateSource::Pinyin,
                         is_abbrev: true,
+                        is_partial: consumed < keys.raw.len(),
                         boundary: keys.raw_mask(0, all_syllables),
-                        consumed_length: keys.raw.len(),
+                        consumed_length: consumed,
                         meta: CandidateMeta {
                             learn_code: Some((code.clone(), eb)),
                             ..Default::default()
@@ -644,6 +659,54 @@ impl PinyinEngine {
                 i += 1;
             }
         }
+    }
+
+    /// 首键当声母的单字（分步上屏的兜底）：整串读不通时至少能先选掉第一个字。
+    fn add_leading_initial_chars(
+        &self,
+        keys: &Keys,
+        map: &KeypadMap,
+        max_candidates: usize,
+        cands: &mut Vec<Candidate>,
+    ) {
+        let Some(&k) = keys.clean.first() else {
+            return;
+        };
+        let consumed = keys.raw_start[1];
+        let mut seen: HashSet<String> = cands.iter().map(|c| c.text.clone()).collect();
+        let mut found: Vec<Candidate> = Vec::new();
+        for l in map.letters(k) {
+            let prefix = (l as char).to_string();
+            for hit in self.dict.search_prefix_with_boundary_syllable_capped(
+                &prefix,
+                PARTIAL_FINAL_NODE_LIMIT,
+                1,
+                0,
+            ) {
+                if hit.text.chars().count() != 1 || !seen.insert(hit.text.clone()) {
+                    continue;
+                }
+                found.push(Candidate {
+                    pinyin: hit.code.clone(),
+                    text: hit.text,
+                    code: keys.raw[..consumed].to_string(),
+                    weight: hit.weight,
+                    source: CandidateSource::Pinyin,
+                    is_prefix: true,
+                    is_partial: consumed < keys.raw.len(),
+                    boundary: keys.raw_mask(0, 1),
+                    consumed_length: consumed,
+                    meta: CandidateMeta {
+                        learn_code: Some((hit.code, 1)),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                });
+            }
+        }
+        found.sort_by(|a, b| b.weight.cmp(&a.weight).then(a.text.cmp(&b.text)));
+        found.truncate(max_candidates);
+        cands.extend(found);
     }
 
     /// 全部词节点：完整音节的词、尾部残缺音节的单字与（从开头起的）补全词。
