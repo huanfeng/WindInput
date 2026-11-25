@@ -274,3 +274,22 @@ fn status_carries_identity_fields() {
         (&json!("pc"), &json!("home"), &json!("家"), &json!(true))
     );
 }
+
+#[test]
+fn status_without_round_fields_still_decodes() {
+    let st: Status = serde_json::from_str(r#"{"phase":"idle"}"#).unwrap();
+    assert_eq!(st.round, 0);
+    assert_eq!(st.last_round, None);
+    roundtrip(Status {
+        round: 3,
+        last_round: Some(RoundStats {
+            ok: false,
+            downloaded: 1,
+            uploaded: 2,
+            conflicts: 3,
+            error: Some("x".into()),
+            forced: true,
+        }),
+        ..Default::default()
+    });
+}

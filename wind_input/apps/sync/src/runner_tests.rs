@@ -507,3 +507,83 @@ fn claim_fallback_group_checks_own_roster_entry() {
     let rep = b.command(Op::ClaimDevice, &json!({"dev": "c"})).unwrap();
     assert_ne!(rep["group"], "c");
 }
+
+struct FailFactory;
+
+impl BackendFactory for FailFactory {
+    fn build(&self, _: &SyncSettings, _: &str) -> Result<Box<dyn Backend>, String> {
+        Err("连接被拒绝".into())
+    }
+}
+
+fn setup_pc(r: &mut Runner) {
+    r.command(Op::SetPassphrase, &json!({"passphrase": "p"}))
+        .unwrap();
+    r.command(Op::ConfirmIdentity, &Value::Null).ok();
+}
+
+#[test]
+fn sync_now_returns_ticket_and_round_advances() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, rx) = runner_with(
+        d.path(),
+        Box::new(MemFactory(MemBackend::new())),
+        None,
+        "pc",
+    );
+    setup_pc(&mut r);
+    std::fs::write(d.path().join("user/config.toml"), "a = 1\n").unwrap();
+    let before = r.status().round;
+    let rep = r.command(Op::SyncNow, &Value::Null).unwrap();
+    assert_eq!(rep["queued"], true);
+    assert_eq!(rep["ticket"], before + 1);
+    round(&mut r, &rx);
+    let st = r.status();
+    assert_eq!(st.round, before + 1);
+    let last = st.last_round.unwrap();
+    assert!(last.ok && last.forced, "{last:?}");
+    assert_eq!(last.uploaded, 1);
+    assert_eq!(last.error, None);
+}
+
+#[test]
+fn sync_now_while_syncing_reports_busy() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, rx) = runner_with(
+        d.path(),
+        Box::new(MemFactory(MemBackend::new())),
+        None,
+        "pc",
+    );
+    setup_pc(&mut r);
+    r.command(Op::SyncNow, &Value::Null).unwrap();
+    r.start_round();
+    let rep = r.command(Op::SyncNow, &Value::Null).unwrap();
+    assert_eq!(rep["queued"], false);
+    assert_eq!(rep["busy"], true);
+    assert_eq!(rep["ticket"], r.status().round + 1);
+    let x = wait_round(&rx);
+    r.finish_round(*x);
+    assert!(!r.force_now, "不应再排一轮");
+    assert_eq!(r.status().round, 1);
+}
+
+#[test]
+fn failed_round_still_advances_round() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, rx) = runner_with(
+        d.path(),
+        Box::new(MemFactory(MemBackend::new())),
+        None,
+        "pc",
+    );
+    setup_pc(&mut r);
+    r.factory = Arc::new(FailFactory);
+    r.command(Op::SyncNow, &Value::Null).unwrap();
+    round(&mut r, &rx);
+    let st = r.status();
+    assert_eq!(st.round, 1);
+    let last = st.last_round.unwrap();
+    assert!(!last.ok && last.forced, "{last:?}");
+    assert!(last.error.unwrap().contains("连接被拒绝"));
+}

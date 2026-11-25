@@ -26,7 +26,7 @@ use wind_sync::state::backoff_secs;
 use wind_sync::{
     Backend, LocalStore, SyncCtx, SyncError, SyncReport, SyncState, manifest, remote, sync_once,
 };
-use wind_sync_ipc::{Backend as Target, FromSync, Op, Status, SyncSettings, ToSync};
+use wind_sync_ipc::{Backend as Target, FromSync, Op, RoundStats, Status, SyncSettings, ToSync};
 
 use crate::backends::BackendFactory;
 use crate::backup;
@@ -142,6 +142,11 @@ pub struct Runner {
     /// 同步进行中用户改了设置：本轮结束后再解除停止态。
     clear_halt_after_round: bool,
     force_now: bool,
+    /// 已结束的轮次数与最近一轮结果。
+    round_no: u64,
+    last_round: Option<RoundStats>,
+    /// 进行中的这一轮是否由强制触发。
+    round_forced: bool,
     /// 用户确认了大批量删除：下一轮放行（只此一轮）。
     allow_mass_once: bool,
     free_retries: u32,
@@ -372,6 +377,9 @@ impl Runner {
             syncing: false,
             clear_halt_after_round: false,
             force_now: false,
+            round_no: 0,
+            last_round: None,
+            round_forced: false,
             allow_mass_once: false,
             free_retries: 0,
             debounce_until: None,
@@ -461,6 +469,8 @@ impl Runner {
             group: group_of(&self.state).to_string(),
             group_name: self.state.group_name.clone(),
             needs_identity: self.needs_identity(),
+            round: self.round_no,
+            last_round: self.last_round.clone(),
         }
     }
 
@@ -628,6 +638,7 @@ impl Runner {
     /// 起工作线程跑一轮；结果经 `Input::RoundDone` 回主循环。
     fn start_round(&mut self) {
         let force = std::mem::take(&mut self.force_now);
+        self.round_forced = force;
         let allow_mass = std::mem::take(&mut self.allow_mass_once);
         self.debounce_until = None;
         let dek = match self.dek() {
@@ -723,8 +734,24 @@ impl Runner {
         let backoff = Duration::from_secs(backoff_secs(self.state.retry.failures));
         self.periodic_at = Instant::now() + backoff.min(interval(&self.settings));
         self.state.retry.last_error = Some(msg.to_string());
+        self.end_round(false, None, Some(msg.to_string()));
         self.save_state();
         self.report();
+    }
+
+    /// 一轮结束：编号 +1 并记下统计。
+    fn end_round(&mut self, ok: bool, rep: Option<&SyncReport>, error: Option<String>) {
+        self.round_no += 1;
+        self.last_round = Some(RoundStats {
+            ok,
+            downloaded: rep.map_or(0, |r| r.downloaded.len() as u32),
+            uploaded: rep.map_or(0, |r| r.uploaded.len() as u32),
+            conflicts: rep.map_or(0, |r| {
+                r.conflicts.iter().filter(|c| c.copy.is_some()).count() as u32
+            }),
+            error,
+            forced: self.round_forced,
+        });
     }
 
     fn finish_round(&mut self, r: Round) {
@@ -751,6 +778,7 @@ impl Runner {
             Ok(rep) if rep.skipped => {
                 log!("处于退避等待期，本轮跳过");
                 self.periodic_at = now + interval(&self.settings);
+                self.end_round(false, None, Some("处于退避等待期".into()));
             }
             Ok(rep) => {
                 for w in &rep.warnings {
@@ -767,8 +795,13 @@ impl Runner {
                     rep.conflicts.len()
                 );
                 self.periodic_at = now + interval(&self.settings);
+                self.end_round(true, Some(&rep), None);
             }
-            Err(e) => self.on_sync_error(e, r.failures_before, now),
+            Err(e) => {
+                self.on_sync_error(e, r.failures_before, now);
+                let msg = self.state.retry.last_error.clone();
+                self.end_round(false, None, msg);
+            }
         }
         self.save_state();
         self.publish_info(false);
@@ -1020,14 +1053,15 @@ impl Runner {
         if self.join_incomplete() {
             return Err(JOIN_INCOMPLETE.into());
         }
+        let ticket = self.round_no + 1;
         if self.syncing {
-            // 进行中的这一轮跑完后再来一轮
+            // 进行中的这一轮结束即算完成，不再另排一轮
             self.clear_halt_after_round = true;
-        } else {
-            self.clear_halt();
+            return Ok(json!({ "queued": false, "busy": true, "ticket": ticket }));
         }
+        self.clear_halt();
         self.force_now = true;
-        Ok(json!({ "queued": true }))
+        Ok(json!({ "queued": true, "ticket": ticket }))
     }
 
     /// 大批量删除护栏停止后，用户确认「这些删除是真的」：解除停止态，下一轮放行一次。

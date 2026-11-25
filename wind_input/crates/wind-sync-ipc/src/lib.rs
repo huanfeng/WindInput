@@ -294,6 +294,24 @@ pub struct Status {
     pub group_name: String,
     /// 已加入同步库但尚未确认身份（恢复设备 / 加入组 / 新建独立组），确认前不同步。
     pub needs_identity: bool,
+    /// 已结束的轮次数，每轮结束 +1（成败都算）。
+    pub round: u64,
+    /// 最近一轮的结果。
+    pub last_round: Option<RoundStats>,
+}
+
+/// 一轮同步的结果统计。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RoundStats {
+    pub ok: bool,
+    pub downloaded: u32,
+    pub uploaded: u32,
+    /// 本轮产生的冲突副本数。
+    pub conflicts: u32,
+    pub error: Option<String>,
+    /// 本轮由 `SyncNow` 触发。
+    pub forced: bool,
 }
 
 /// 同步进程 → core。
