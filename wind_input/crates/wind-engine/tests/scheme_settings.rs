@@ -385,7 +385,8 @@ fn snapshot_lists_effective_and_default_under_old_key_names() {
             "[engine.pinyin]\nsentence_count = 3\n[engine.aux_code]\nenabled = true\n",
         )],
     );
-    let (eff, def) = m.scheme_settings_snapshot("shuangpin").unwrap().unwrap();
+    let snap = m.scheme_settings_snapshot("shuangpin").unwrap().unwrap();
+    let (eff, def) = (&snap.effective, &snap.default);
     assert_eq!(eff["schema.pinyin.sentence_count"].as_integer(), Some(3));
     assert_eq!(def["schema.pinyin.sentence_count"].as_integer(), Some(1));
     assert_eq!(eff["schema.pinyin.aux_code.enabled"].as_bool(), Some(true));
@@ -399,8 +400,43 @@ fn snapshot_lists_effective_and_default_under_old_key_names() {
         "模糊音不是方案设置"
     );
     // 方案文件自己声明的值算方案默认（笔画的 z_key_repeat = false）。
-    let (_, def) = m.scheme_settings_snapshot("stroke").unwrap().unwrap();
+    let def = m
+        .scheme_settings_snapshot("stroke")
+        .unwrap()
+        .unwrap()
+        .default;
     assert_eq!(def["schema.codetable.z_key_repeat"].as_bool(), Some(false));
+}
+
+#[test]
+fn snapshot_builtin_lists_only_what_the_scheme_file_changed() {
+    let m = mgr(
+        "builtin",
+        "wubi86",
+        &[("stroke", "[engine.codetable]\ntop_code_commit = false\n")],
+    );
+    // 双拼方案文件把英文位次写成 2：给出的是类型内置默认 1。
+    let sp = m.scheme_settings_snapshot("shuangpin").unwrap().unwrap();
+    assert_eq!(
+        sp.builtin["schema.pinyin.english_merge.exact_position"].as_integer(),
+        Some(1)
+    );
+    assert_eq!(sp.builtin.len(), 1, "{:?}", sp.builtin);
+    // 笔画方案文件写的 wildcard 与内置默认相同，不算预设；用户层改的项也不算。
+    let snap = m.scheme_settings_snapshot("stroke").unwrap().unwrap();
+    assert!(!snap.builtin.contains_key("schema.codetable.wildcard"));
+    assert!(
+        !snap
+            .builtin
+            .contains_key("schema.codetable.top_code_commit")
+    );
+    assert_eq!(
+        snap.effective["schema.codetable.top_code_commit"].as_bool(),
+        Some(false)
+    );
+    // 全拼方案文件没改任何设置项。
+    let py = m.scheme_settings_snapshot("pinyin").unwrap().unwrap();
+    assert!(py.builtin.is_empty(), "{:?}", py.builtin);
 }
 
 #[test]

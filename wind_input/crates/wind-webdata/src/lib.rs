@@ -369,18 +369,20 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
                 .ok_or_else(|| anyhow::anyhow!("{key} 不是方案设置的别名"))??;
             Ok(json!({ "value": serde_json::to_value(v)? }))
         }
-        // 某方案的全部设置项（键用旧全局键名）：生效值与方案默认值。设置页据此画控件、
-        // 标出改过的项。
+        // 某方案的全部设置项（键用旧全局键名）：生效值、方案默认值，以及方案文件改过的项
+        // 原本的类型内置默认。设置页据此画控件、标出改过的项与方案预设。
         "schema.getSettings" => {
             let id = str_param(params, "id")?;
-            let (effective, default) = h
+            let snap = h
                 .engine_mgr()
                 .scheme_settings_snapshot(id)
                 .ok_or_else(|| anyhow::anyhow!("方案不存在或没有可设置的项: {id}"))??;
             Ok(json!({
                 "id": id,
-                "effective": serde_json::to_value(effective)?,
-                "default": serde_json::to_value(default)?,
+                "effective": serde_json::to_value(snap.effective)?,
+                "default": serde_json::to_value(snap.default)?,
+                // 方案文件改过的项在类型内置默认里的值：设置页据此列出「本方案预设」。
+                "builtin": serde_json::to_value(snap.builtin)?,
             }))
         }
         // 改某方案的设置：`items` = [{key, value}] 写入，`reset` = [key] 恢复方案默认。

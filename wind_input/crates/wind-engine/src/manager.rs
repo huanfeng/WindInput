@@ -391,6 +391,17 @@ pub fn schema_reads_on_current_thread() -> u64 {
     SCHEMA_READS.with(|n| n.get())
 }
 
+/// `scheme_settings_snapshot` 的结果，键为旧全局键名（`schema.<类型>.<项>`）。
+#[derive(Debug, Clone, Default)]
+pub struct SchemeSettingsSnapshot {
+    /// 现在按什么跑。
+    pub effective: toml::Table,
+    /// 方案默认值：恢复默认后的值。
+    pub default: toml::Table,
+    /// 方案文件改过的项在类型内置默认里的值（只含与方案默认不同的项），界面据此标出方案预设。
+    pub builtin: toml::Table,
+}
+
 /// 引擎管理器（懒加载：仅在需要时构建对应方案引擎，降低启动内存）。
 pub struct EngineManager {
     /// schema_id -> 引擎实例（懒加载，Arc 便于无锁 convert）+ 最后使用时刻
@@ -5764,12 +5775,12 @@ impl EngineManager {
         })
     }
 
-    /// 某方案的全部设置项，按旧全局键名（`schema.<类型>.<项>`）拍平：`(生效值, 方案默认值)`。
+    /// 某方案的全部设置项，按旧全局键名（`schema.<类型>.<项>`）拍平。
     /// 方案默认值 = 不看用户设置层时的值，「恢复方案默认」回到它。方案不属于四类时返回 `None`。
     pub fn scheme_settings_snapshot(
         &self,
         schema_id: &str,
-    ) -> Option<anyhow::Result<(toml::Table, toml::Table)>> {
+    ) -> Option<anyhow::Result<SchemeSettingsSnapshot>> {
         use wind_config::config_schema::SchemeKind;
         let kind = self.scheme_kind_of(schema_id)?;
         let section = match kind {
@@ -5789,7 +5800,16 @@ impl EngineManager {
         Some((|| {
             let merged = self.schema_def_cached(schema_id);
             let base = self.schema_base(schema_id);
-            Ok((flat(merged.as_deref())?, flat(base.as_ref())?))
+            let default = flat(base.as_ref())?;
+            let builtin = flat(None)?
+                .into_iter()
+                .filter(|(k, v)| default.get(k).is_some_and(|d| d != v))
+                .collect();
+            Ok(SchemeSettingsSnapshot {
+                effective: flat(merged.as_deref())?,
+                default,
+                builtin,
+            })
         })())
     }
 
@@ -5812,9 +5832,10 @@ impl EngineManager {
                 _ => anyhow::bail!("{key} 不是方案 {schema_id} 的设置项"),
             }
         };
-        let (_, defaults) = self
+        let defaults = self
             .scheme_settings_snapshot(schema_id)
-            .ok_or_else(|| anyhow::anyhow!("方案 {schema_id} 不存在"))??;
+            .ok_or_else(|| anyhow::anyhow!("方案 {schema_id} 不存在"))??
+            .default;
         let file = self
             .schema_override_path(schema_id)
             .ok_or_else(|| anyhow::anyhow!("无 override 目录"))?;
