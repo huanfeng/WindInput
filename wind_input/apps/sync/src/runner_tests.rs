@@ -4,11 +4,32 @@ use crate::testing::{FakeCore, MemFactory};
 use wind_sync::MemBackend;
 use wind_sync::backend::{BackendError, ObjMeta};
 
+const TEST_URL: &str = "http://127.0.0.1/x";
+
+fn test_target(url: &str) -> Target {
+    Target::Webdav {
+        url: url.into(),
+        user: "u".into(),
+    }
+}
+
 fn runner_with(
     dir: &std::path::Path,
     factory: Box<dyn BackendFactory>,
     dek: Option<Dek>,
     device_name: &str,
+) -> (Runner, Receiver<Input>) {
+    runner_at(dir, factory, dek, device_name, TEST_URL, TEST_URL)
+}
+
+/// `saved_url`：保存凭据时的存储地址；`url`：本次启动的设置里的存储地址。
+fn runner_at(
+    dir: &std::path::Path,
+    factory: Box<dyn BackendFactory>,
+    dek: Option<Dek>,
+    device_name: &str,
+    saved_url: &str,
+    url: &str,
 ) -> (Runner, Receiver<Input>) {
     std::fs::create_dir_all(dir.join("user")).unwrap();
     let state_dir = dir.join("state");
@@ -16,6 +37,7 @@ fn runner_with(
     Secrets {
         dek: dek.map(|d| d.to_base64()),
         password: Some("pw".into()),
+        backend_id: backend_fingerprint(Some(&test_target(saved_url))),
     }
     .save(&store)
     .unwrap();
@@ -26,10 +48,7 @@ fn runner_with(
         state_dir,
         settings: SyncSettings {
             enabled: true,
-            backend: Some(Target::Webdav {
-                url: "http://127.0.0.1/x".into(),
-                user: "u".into(),
-            }),
+            backend: Some(test_target(url)),
             device_name: device_name.into(),
             ..Default::default()
         },
@@ -772,6 +791,8 @@ fn create_key_rolls_back_local_key_when_publish_fails() {
     assert!(r.command(Op::CreateKey, &Value::Null).is_err());
     assert!(r.secrets.dek.is_none());
     assert!(!r.status().joined);
+    // 磁盘上的也是旧值（重新从存储读）
+    assert!(Secrets::load(&*r.cfg.secrets).unwrap().dek.is_none());
 }
 
 /// 重置时发布失败：本机仍持有原密钥。
@@ -802,4 +823,52 @@ fn reset_remote_does_not_touch_remote_when_local_save_fails() {
             .is_err()
     );
     assert!(mem.raw_get("windinput-sync/v2/blobs/x").is_some());
+}
+
+/// 停用期间改了存储地址：下次启动丢弃旧凭据，且不会拿它去连新地址；磁盘上也已清掉。
+#[test]
+fn startup_drops_password_when_backend_changed_while_disabled() {
+    let d = tempfile::tempdir().unwrap();
+    let (r, _rx) = runner_at(
+        d.path(),
+        Box::new(MemFactory(MemBackend::new())),
+        Some(Dek::generate()),
+        "pc",
+        TEST_URL,
+        "http://evil.example/x",
+    );
+    assert!(r.secrets.password.is_none());
+    assert!(r.secrets.dek.is_some(), "同步密钥与存储位置无关，保留");
+    assert!(r.fresh_backend(None).is_err(), "没有凭据可用");
+    let store = FileSecretStore::new(d.path().join("state").join(crate::secrets::FILE_NAME));
+    assert!(Secrets::load(&store).unwrap().password.is_none());
+}
+
+/// 存储位置没变：凭据保留。
+#[test]
+fn startup_keeps_password_when_backend_unchanged() {
+    let d = tempfile::tempdir().unwrap();
+    let (r, _rx) = runner(d.path());
+    assert_eq!(r.secrets.password.as_deref(), Some("pw"));
+}
+
+/// 旧版没有指纹的凭据按「对不上」处理。
+#[test]
+fn startup_drops_password_without_fingerprint() {
+    let d = tempfile::tempdir().unwrap();
+    let state_dir = d.path().join("state");
+    let store = FileSecretStore::new(state_dir.join(crate::secrets::FILE_NAME));
+    Secrets {
+        dek: None,
+        password: Some("pw".into()),
+        backend_id: None,
+    }
+    .save(&store)
+    .unwrap();
+    let mut s = Secrets::load(&store).unwrap();
+    assert!(drop_password_if_backend_moved(
+        &mut s,
+        Some(&test_target(TEST_URL))
+    ));
+    assert!(s.password.is_none());
 }

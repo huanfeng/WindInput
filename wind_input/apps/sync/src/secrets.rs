@@ -29,6 +29,9 @@ pub struct Secrets {
     /// WebDAV 密码或 S3 secret access key。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
+    /// 保存 `password` 时所对应存储位置的指纹（不含机密）；启动时与当前设置比对，对不上就丢弃密码。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_id: Option<String>,
 }
 
 impl fmt::Debug for Secrets {

@@ -170,14 +170,28 @@ pub fn load_settings_file(path: &std::path::Path) -> Result<SyncSettings, String
     toml::from_str(&text).map_err(|e| format!("同步设置 {} 解析失败: {e}", path.display()))
 }
 
-/// 写设置文件：同目录临时文件 + rename，写一半不会留下半个文件。
+/// 同目录临时文件 + fsync + rename：写一半或断电都不会留下半个文件。
+pub fn write_file_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    let dir = path.parent().ok_or("路径无父目录")?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("创建 {} 失败: {e}", dir.display()))?;
+    let tmp = path.with_extension("tmp");
+    let r = std::fs::File::create(&tmp)
+        .and_then(|mut f| f.write_all(bytes).and_then(|()| f.sync_all()))
+        .map_err(|e| format!("写 {} 失败: {e}", tmp.display()))
+        .and_then(|()| {
+            std::fs::rename(&tmp, path).map_err(|e| format!("替换 {} 失败: {e}", path.display()))
+        });
+    if r.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    r
+}
+
+/// 写设置文件。
 pub fn save_settings_file(path: &std::path::Path, s: &SyncSettings) -> Result<(), String> {
     let text = toml::to_string_pretty(s).map_err(|e| format!("序列化同步设置失败: {e}"))?;
-    let dir = path.parent().ok_or("设置路径无父目录")?;
-    std::fs::create_dir_all(dir).map_err(|e| format!("创建 {} 失败: {e}", dir.display()))?;
-    let tmp = path.with_extension("toml.tmp");
-    std::fs::write(&tmp, text).map_err(|e| format!("写 {} 失败: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("替换 {} 失败: {e}", path.display()))
+    write_file_atomic(path, text.as_bytes())
 }
 
 /// 设置端经 `sync.command` 发起的操作。

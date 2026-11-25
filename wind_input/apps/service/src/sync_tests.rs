@@ -1168,3 +1168,15 @@ fn identity_snapshot_survives_restart_while_disabled() {
     wait_for(|| IdentitySnapshot::load(&dir.path().join("state/sync")).device == "pc-2");
     assert!(!IdentitySnapshot::load(&dir.path().join("state/sync")).joined);
 }
+
+/// 快照文件损坏：按默认处理，不 panic。
+#[test]
+fn corrupt_identity_snapshot_falls_back_to_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state/sync");
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::write(IdentitySnapshot::file(&state), b"{not json").unwrap();
+    assert_eq!(IdentitySnapshot::load(&state), IdentitySnapshot::default());
+    let host = host_in(dir.path(), true, COMMAND_TIMEOUT);
+    assert!(!lock(&host.inner).status.joined);
+}

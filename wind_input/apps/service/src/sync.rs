@@ -209,14 +209,9 @@ impl IdentitySnapshot {
             .unwrap_or_default()
     }
 
-    /// 临时文件 + rename，写一半不会留下半个文件。
     fn save(&self, state_dir: &Path) {
-        let path = Self::file(state_dir);
-        let tmp = path.with_extension("json.tmp");
-        let r = std::fs::create_dir_all(state_dir)
-            .and_then(|_| std::fs::write(&tmp, serde_json::to_vec(self).unwrap_or_default()))
-            .and_then(|_| std::fs::rename(&tmp, &path));
-        if let Err(e) = r {
+        let bytes = serde_json::to_vec(self).unwrap_or_default();
+        if let Err(e) = wind_sync_ipc::write_file_atomic(&Self::file(state_dir), &bytes) {
             warn!("保存同步状态快照失败: {e}");
         }
     }
@@ -567,14 +562,14 @@ impl SyncHost {
         }
     }
 
-    fn persist_identity(&self, inner: &mut Inner) {
+    /// 身份字段变了就返回要落盘的快照（由调用方在锁外写）。
+    fn identity_changed(&self, inner: &mut Inner) -> Option<IdentitySnapshot> {
         let now = IdentitySnapshot::of(&inner.status);
-        if now != inner.saved_identity {
-            if let Some(p) = &self.paths {
-                now.save(&p.state_dir);
-            }
-            inner.saved_identity = now;
+        if now == inner.saved_identity {
+            return None;
         }
+        inner.saved_identity = now.clone();
+        Some(now)
     }
 
     fn on_exit(&self, inner: &mut Inner, next: Decision) -> bool {
@@ -642,16 +637,21 @@ impl SyncHost {
     fn on_message(self: &Arc<Self>, epoch: u64, msg: FromSync) {
         match msg {
             FromSync::Status(s) => {
+                let mut to_save = None;
                 let changed = {
                     let mut inner = lock(&self.inner);
                     if inner.link.as_ref().map(|l| l.epoch) != Some(epoch) || inner.status == s {
                         false
                     } else {
                         inner.status = s;
-                        self.persist_identity(&mut inner);
+                        to_save = self.identity_changed(&mut inner);
                         true
                     }
                 };
+                // 文件 I/O 不在锁内
+                if let (Some(snap), Some(p)) = (to_save, &self.paths) {
+                    snap.save(&p.state_dir);
+                }
                 if changed {
                     self.emit_status();
                 }

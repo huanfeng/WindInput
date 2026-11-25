@@ -8,6 +8,7 @@ fn roundtrip_and_clear() {
     let s = Secrets {
         dek: Some("AAAA".into()),
         password: Some("pw".into()),
+        ..Default::default()
     };
     s.save(&st).unwrap();
     assert_eq!(Secrets::load(&st).unwrap(), s);
@@ -44,6 +45,7 @@ fn debug_does_not_leak() {
     let s = Secrets {
         dek: Some("TOPSECRET".into()),
         password: Some("hunter2".into()),
+        ..Default::default()
     };
     let t = format!("{s:?}");
     assert!(!t.contains("TOPSECRET") && !t.contains("hunter2"));
@@ -58,6 +60,7 @@ fn dpapi_roundtrip_stores_no_plaintext_and_rejects_tampering() {
     let s = Secrets {
         dek: Some("ZGVrLXBsYWludGV4dA==".into()),
         password: Some("webdav-pass-123".into()),
+        ..Default::default()
     };
     s.save(st.as_ref()).unwrap();
     assert_eq!(Secrets::load(st.as_ref()).unwrap(), s);

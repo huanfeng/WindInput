@@ -166,29 +166,37 @@ fn str_arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
     args.get(key).and_then(Value::as_str)
 }
 
-/// 存储位置（地址 / 桶 / 账号）是否变了。区域、前缀、寻址方式不算：凭据发往的还是同一处。
-fn backend_changed(old: Option<&Target>, new: Option<&Target>) -> bool {
-    match (old, new) {
-        (None, None) => false,
-        (Some(Target::Webdav { url: a, user: ua }), Some(Target::Webdav { url: b, user: ub })) => {
-            a.trim() != b.trim() || ua != ub
-        }
-        (
-            Some(Target::S3 {
-                endpoint: ea,
-                bucket: ba,
-                access_key_id: ka,
-                ..
-            }),
-            Some(Target::S3 {
-                endpoint: eb,
-                bucket: bb,
-                access_key_id: kb,
-                ..
-            }),
-        ) => ea.trim() != eb.trim() || ba.trim() != bb.trim() || ka != kb,
-        _ => true,
+/// 存储位置（地址 / 桶 / 账号）的指纹，不含机密。区域、前缀、寻址方式不算：凭据发往的还是同一处。
+fn backend_fingerprint(t: Option<&Target>) -> Option<String> {
+    match t? {
+        Target::Webdav { url, user } => Some(format!("webdav\n{}\n{user}", url.trim())),
+        Target::S3 {
+            endpoint,
+            bucket,
+            access_key_id,
+            ..
+        } => Some(format!(
+            "s3\n{}\n{}\n{access_key_id}",
+            endpoint.trim(),
+            bucket.trim()
+        )),
     }
+}
+
+/// 存储位置是否变了。
+fn backend_changed(old: Option<&Target>, new: Option<&Target>) -> bool {
+    backend_fingerprint(old) != backend_fingerprint(new)
+}
+
+/// 已存的存储密码只属于保存它时的存储位置；对不上（含没有指纹）就丢弃，返回是否丢了。
+/// 实时改设置与进程启动（停用期间改过设置）共用这一处。
+fn drop_password_if_backend_moved(secrets: &mut Secrets, backend: Option<&Target>) -> bool {
+    if secrets.password.is_some() && secrets.backend_id != backend_fingerprint(backend) {
+        secrets.password = None;
+        secrets.backend_id = None;
+        return true;
+    }
+    false
 }
 
 /// 把引擎的「检测到大批量删除：本次将删除 N 个…（已同步共 M 个）」改写成面向用户的说明。
@@ -350,6 +358,13 @@ impl Runner {
                 (Secrets::default(), Some(e))
             }
         };
+        let mut secrets = secrets;
+        if drop_password_if_backend_moved(&mut secrets, cfg.settings.backend.as_ref()) {
+            log!("存储后端已变更，已清除保存的存储凭据");
+            if let Err(e) = secrets.save(&*cfg.secrets) {
+                log!("{e}");
+            }
+        }
         let default_id = ids::default_device_id(&display_name(&cfg.settings), cfg.portable);
         let state = statefile::load(&cfg.state_dir, &default_id);
         let settings = cfg.settings.clone();
@@ -574,9 +589,7 @@ impl Runner {
             return;
         }
         // 存储位置变了，已存的密码不能再发往新地址（防凭据被转发到别处）
-        if backend_changed(self.settings.backend.as_ref(), s.backend.as_ref())
-            && self.secrets.password.take().is_some()
-        {
+        if drop_password_if_backend_moved(&mut self.secrets, s.backend.as_ref()) {
             log!("存储后端已变更，已清除保存的存储凭据");
             if let Err(e) = self.save_secrets() {
                 log!("{e}");
@@ -918,8 +931,14 @@ impl Runner {
 
     fn cmd_set_secret(&mut self, args: &Value) -> Result<Value, String> {
         match args.get("password") {
-            Some(Value::String(p)) => self.secrets.password = Some(p.clone()),
-            Some(Value::Null) => self.secrets.password = None,
+            Some(Value::String(p)) => {
+                self.secrets.password = Some(p.clone());
+                self.secrets.backend_id = backend_fingerprint(self.settings.backend.as_ref());
+            }
+            Some(Value::Null) => {
+                self.secrets.password = None;
+                self.secrets.backend_id = None;
+            }
             _ => return Err("缺少参数 password（字符串；null 表示清除）".into()),
         }
         self.save_secrets()?;
