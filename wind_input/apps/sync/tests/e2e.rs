@@ -609,7 +609,8 @@ fn changing_backend_location_drops_saved_password_but_other_edits_keep_it() {
     });
     send_settings(&a, other_user);
     a.wait_status("凭据被清", |st| !st.has_secret);
-    assert!(a.status().joined, "密钥不受影响");
+    assert!(!a.status().joined, "换了存储位置，需重新核对后才算已加入");
+    assert!(a.cmd(Op::ExportKey, Value::Null).is_ok(), "密钥不受影响");
 }
 
 /// 让 b 在 beginEdit 处停住，造出「同步进行中」。返回 (进入标志, 放行标志)。

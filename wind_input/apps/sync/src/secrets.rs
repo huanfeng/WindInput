@@ -32,6 +32,9 @@ pub struct Secrets {
     /// 保存 `password` 时所对应存储位置的指纹（不含机密）；启动时与当前设置比对，对不上就丢弃密码。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_id: Option<String>,
+    /// 同步密钥上次在哪个存储位置核对通过（指纹）；与当前存储位置不同则视为尚未加入该库。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dek_backend_id: Option<String>,
 }
 
 impl fmt::Debug for Secrets {

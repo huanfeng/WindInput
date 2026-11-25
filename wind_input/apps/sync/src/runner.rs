@@ -411,6 +411,23 @@ impl Runner {
         self.settings.enabled && self.settings.backend.is_some()
     }
 
+    /// 已持有同步密钥，且它在当前存储位置核对通过过；换了存储位置后要重新核对。
+    fn joined(&self) -> bool {
+        let fp = backend_fingerprint(self.settings.backend.as_ref());
+        self.secrets.dek.is_some() && fp.is_some() && self.secrets.dek_backend_id == fp
+    }
+
+    /// 同步密钥与当前存储位置的远端库核对通过：记下指纹（同一个库搬了地方时自动恢复为已加入）。
+    fn mark_verified(&mut self) {
+        let fp = backend_fingerprint(self.settings.backend.as_ref());
+        if self.secrets.dek.is_some() && fp.is_some() && self.secrets.dek_backend_id != fp {
+            self.secrets.dek_backend_id = fp;
+            if let Err(e) = self.save_secrets() {
+                log!("{e}");
+            }
+        }
+    }
+
     fn ready(&self) -> bool {
         self.secrets.password.is_some() && self.secrets.dek.is_some()
     }
@@ -478,7 +495,7 @@ impl Runner {
                 .cloned()
                 .collect(),
             has_secret: self.ready(),
-            joined: self.secrets.dek.is_some(),
+            joined: self.joined(),
             device: self.state.device.clone(),
             group: group_of(&self.state).to_string(),
             group_name: self.state.group_name.clone(),
@@ -793,6 +810,7 @@ impl Runner {
                 self.periodic_at = now + interval(&self.settings);
             }
             Ok(rep) => {
+                self.mark_verified();
                 for w in &rep.warnings {
                     log!("警告: {w}");
                 }
@@ -978,6 +996,9 @@ impl Runner {
             (Some(m), Ok(d)) => m.verify(&d),
             _ => false,
         };
+        if joined {
+            self.mark_verified();
+        }
         Ok(json!({ "ok": true, "remote_initialized": meta.is_some(), "joined": joined }))
     }
 
@@ -1009,6 +1030,7 @@ impl Runner {
             self.state.identity_confirmed = init;
             self.info_written = None;
         }
+        self.mark_verified();
         self.after_user_fix();
         self.publish_info(false);
     }
@@ -1466,6 +1488,7 @@ impl Runner {
         fresh.identity_confirmed = true;
         self.state = fresh;
         self.info_written = None;
+        self.mark_verified();
         self.after_user_fix();
         self.publish_info(false);
         log!("远端已重置");

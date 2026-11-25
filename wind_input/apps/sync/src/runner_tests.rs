@@ -34,10 +34,14 @@ fn runner_at(
     std::fs::create_dir_all(dir.join("user")).unwrap();
     let state_dir = dir.join("state");
     let store = FileSecretStore::new(state_dir.join(crate::secrets::FILE_NAME));
+    let dek_set = dek.is_some();
     Secrets {
         dek: dek.map(|d| d.to_base64()),
         password: Some("pw".into()),
         backend_id: backend_fingerprint(Some(&test_target(saved_url))),
+        dek_backend_id: dek_set
+            .then(|| backend_fingerprint(Some(&test_target(saved_url))))
+            .flatten(),
     }
     .save(&store)
     .unwrap();
@@ -862,6 +866,7 @@ fn startup_drops_password_without_fingerprint() {
         dek: None,
         password: Some("pw".into()),
         backend_id: None,
+        dek_backend_id: None,
     }
     .save(&store)
     .unwrap();
@@ -871,4 +876,56 @@ fn startup_drops_password_without_fingerprint() {
         Some(&test_target(TEST_URL))
     ));
     assert!(s.password.is_none());
+}
+
+/// 换了存储：旧密钥对不上新库 -> 未加入；同一个库搬了地方 -> 自动已加入；新地址是空库 -> 未加入。
+#[test]
+fn test_connection_joined_needs_matching_remote_meta() {
+    let d = tempfile::tempdir().unwrap();
+    let old_remote = MemBackend::new();
+    let dek = remote::init_remote(&old_remote).unwrap();
+    let make = |remote: MemBackend, url: &str, dir: &std::path::Path| {
+        runner_at(
+            dir,
+            Box::new(MemFactory(remote)),
+            Some(Dek::from_base64(&dek.to_base64()).unwrap()),
+            "pc",
+            TEST_URL,
+            url,
+        )
+    };
+    // 别的库（有 meta 但密钥不同）
+    let (mut r, _rx) = make(initialized_remote().0, "http://other.example/x", d.path());
+    assert!(!r.status().joined, "地址变了，未核对前不算已加入");
+    let t = r
+        .command(Op::TestConnection, &json!({"password": "pw"}))
+        .unwrap();
+    assert_eq!(
+        (t["remote_initialized"].as_bool(), t["joined"].as_bool()),
+        (Some(true), Some(false))
+    );
+    assert!(!r.status().joined);
+
+    // 同一个库换了地址：核对通过后自动已加入，密钥保留
+    let d2 = tempfile::tempdir().unwrap();
+    let (mut r, _rx) = make(old_remote.clone(), "http://moved.example/x", d2.path());
+    assert!(!r.status().joined);
+    let t = r
+        .command(Op::TestConnection, &json!({"password": "pw"}))
+        .unwrap();
+    assert_eq!(t["joined"], true);
+    assert!(r.status().joined);
+    assert!(r.secrets.dek.is_some());
+
+    // 空的新库
+    let d3 = tempfile::tempdir().unwrap();
+    let (mut r, _rx) = make(MemBackend::new(), "http://empty.example/x", d3.path());
+    let t = r
+        .command(Op::TestConnection, &json!({"password": "pw"}))
+        .unwrap();
+    assert_eq!(
+        (t["remote_initialized"].as_bool(), t["joined"].as_bool()),
+        (Some(false), Some(false))
+    );
+    assert!(!r.status().joined);
 }
