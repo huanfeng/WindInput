@@ -62,6 +62,8 @@ pub struct Round {
     /// 本轮开始前的回声表快照：本轮扫描之后，这些旧条目就可以清掉了。
     echo_before: HashMap<String, String>,
     failures_before: u32,
+    /// 本轮开始时的库位置，核对结论只对它有效。
+    library_id: Option<String>,
     /// 本轮成功写出的设备信息。
     info_written: Option<DeviceInfo>,
 }
@@ -180,6 +182,15 @@ fn backend_fingerprint(t: Option<&Target>) -> Option<String> {
             endpoint.trim(),
             bucket.trim()
         )),
+    }
+}
+
+/// 同步库的位置：在凭据指纹之外再加 S3 前缀（WebDAV 的路径已在 URL 里）。
+fn library_id(t: Option<&Target>) -> Option<String> {
+    let base = backend_fingerprint(t)?;
+    match t? {
+        Target::S3 { prefix, .. } => Some(format!("{base}\n{}", prefix.trim().trim_matches('/'))),
+        _ => Some(base),
     }
 }
 
@@ -413,18 +424,30 @@ impl Runner {
 
     /// 已持有同步密钥，且它在当前存储位置核对通过过；换了存储位置后要重新核对。
     fn joined(&self) -> bool {
-        let fp = backend_fingerprint(self.settings.backend.as_ref());
-        self.secrets.dek.is_some() && fp.is_some() && self.secrets.dek_backend_id == fp
+        let id = library_id(self.settings.backend.as_ref());
+        self.secrets.dek.is_some() && id.is_some() && self.secrets.dek_backend_id == id
     }
 
-    /// 同步密钥与当前存储位置的远端库核对通过：记下指纹（同一个库搬了地方时自动恢复为已加入）。
-    fn mark_verified(&mut self) {
-        let fp = backend_fingerprint(self.settings.backend.as_ref());
-        if self.secrets.dek.is_some() && fp.is_some() && self.secrets.dek_backend_id != fp {
-            self.secrets.dek_backend_id = fp;
+    /// 同步密钥在 `lib`（核对时的库位置）核对通过：仅当它仍是当前位置才记下。
+    fn mark_verified(&mut self, lib: Option<String>) {
+        if self.secrets.dek.is_some()
+            && lib.is_some()
+            && lib == library_id(self.settings.backend.as_ref())
+            && self.secrets.dek_backend_id != lib
+        {
+            self.secrets.dek_backend_id = lib;
             if let Err(e) = self.save_secrets() {
                 log!("{e}");
             }
+        }
+    }
+
+    /// 远端没有库或密钥对不上：之前的核对结论作废。
+    fn invalidate_verified(&mut self) {
+        if self.secrets.dek_backend_id.take().is_some()
+            && let Err(e) = self.save_secrets()
+        {
+            log!("{e}");
         }
     }
 
@@ -701,6 +724,7 @@ impl Runner {
             self.echo.clone(),
         )
         .with_cancel(self.cancel.clone());
+        let library_id = library_id(self.settings.backend.as_ref());
         let tx = self.tx.clone();
         let spawned = std::thread::Builder::new()
             .name("sync-round".into())
@@ -749,6 +773,7 @@ impl Runner {
                     now,
                     echo_before,
                     failures_before,
+                    library_id,
                 };
                 let _ = tx.send(Input::RoundDone(Box::new(round)));
             });
@@ -810,7 +835,7 @@ impl Runner {
                 self.periodic_at = now + interval(&self.settings);
             }
             Ok(rep) => {
-                self.mark_verified();
+                self.mark_verified(r.library_id.clone());
                 for w in &rep.warnings {
                     log!("警告: {w}");
                 }
@@ -828,6 +853,13 @@ impl Runner {
                 self.end_round(true, Some(&rep), None);
             }
             Err(e) => {
+                if matches!(
+                    e,
+                    SyncError::Crypto(wind_sync::crypto::CryptoError::BadKey)
+                        | SyncError::NotInitialized
+                ) {
+                    self.invalidate_verified();
+                }
                 // 稍后重试类不算一轮结束：票号等真正完成的那一轮
                 if self.on_sync_error(e, r.failures_before, now) {
                     let msg = self.state.retry.last_error.clone();
@@ -843,7 +875,12 @@ impl Runner {
     /// 把本机信息写进远端名册。`daily` 为假时只在内容变了（改名等）才写；失败只记日志，下一轮会重试。
     fn publish_info(&mut self, daily: bool) {
         // 未确认身份时本机号可能是别人的，不写名册
-        if self.syncing || !self.configured() || !self.ready() || !self.state.identity_confirmed {
+        if self.syncing
+            || !self.configured()
+            || !self.ready()
+            || !self.joined()
+            || !self.state.identity_confirmed
+        {
             return;
         }
         let want = local_info(&self.settings, &self.state, now_unix());
@@ -997,7 +1034,9 @@ impl Runner {
             _ => false,
         };
         if joined {
-            self.mark_verified();
+            self.mark_verified(library_id(self.settings.backend.as_ref()));
+        } else {
+            self.invalidate_verified();
         }
         Ok(json!({ "ok": true, "remote_initialized": meta.is_some(), "joined": joined }))
     }
@@ -1030,7 +1069,7 @@ impl Runner {
             self.state.identity_confirmed = init;
             self.info_written = None;
         }
-        self.mark_verified();
+        self.mark_verified(library_id(self.settings.backend.as_ref()));
         self.after_user_fix();
         self.publish_info(false);
     }
@@ -1488,7 +1527,7 @@ impl Runner {
         fresh.identity_confirmed = true;
         self.state = fresh;
         self.info_written = None;
-        self.mark_verified();
+        self.mark_verified(library_id(self.settings.backend.as_ref()));
         self.after_user_fix();
         self.publish_info(false);
         log!("远端已重置");

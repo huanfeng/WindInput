@@ -929,3 +929,79 @@ fn test_connection_joined_needs_matching_remote_meta() {
     );
     assert!(!r.status().joined);
 }
+
+fn s3(prefix: &str) -> Target {
+    Target::S3 {
+        endpoint: "https://s3.example".into(),
+        region: String::new(),
+        bucket: "b".into(),
+        prefix: prefix.into(),
+        access_key_id: "k".into(),
+        path_style: false,
+    }
+}
+
+/// S3 同一端点与桶、前缀不同：库位置不同；凭据指纹不变。
+#[test]
+fn library_id_includes_s3_prefix_but_credential_fingerprint_does_not() {
+    assert_ne!(library_id(Some(&s3("a"))), library_id(Some(&s3("b"))));
+    assert_eq!(library_id(Some(&s3("a"))), library_id(Some(&s3("/a/"))));
+    assert_eq!(
+        backend_fingerprint(Some(&s3("a"))),
+        backend_fingerprint(Some(&s3("b")))
+    );
+}
+
+/// 核对结论只对核对时的位置有效，位置变了不被标成已核对。
+#[test]
+fn mark_verified_ignores_stale_library() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, _rx) = runner_at(
+        d.path(),
+        Box::new(MemFactory(MemBackend::new())),
+        Some(Dek::generate()),
+        "pc",
+        "http://old.example/x",
+        "http://new.example/x",
+    );
+    assert!(!r.joined());
+    r.mark_verified(library_id(Some(&test_target("http://old.example/x"))));
+    assert!(!r.joined());
+    r.mark_verified(library_id(Some(&test_target("http://new.example/x"))));
+    assert!(r.joined());
+}
+
+/// 远端库没了或密钥对不上：之前的已加入结论作废（test_connection 与同步轮）。
+#[test]
+fn verified_flag_is_invalidated_by_missing_or_foreign_remote() {
+    let d = tempfile::tempdir().unwrap();
+    let mem = MemBackend::new();
+    let dek = remote::init_remote(&mem).unwrap();
+    let (mut r, rx) = runner_with(d.path(), Box::new(MemFactory(mem.clone())), Some(dek), "pc");
+    assert!(r.joined());
+    // 远端被别人重置成另一把密钥
+    remote::reset_remote(&mem).unwrap();
+    let t = r.command(Op::TestConnection, &Value::Null).unwrap();
+    assert_eq!(t["joined"], false);
+    assert!(!r.joined());
+    let disk = Secrets::load(&*r.cfg.secrets).unwrap();
+    assert!(disk.dek_backend_id.is_none());
+
+    // 同步轮遇到 BadKey 同样作废
+    let d2 = tempfile::tempdir().unwrap();
+    let mem2 = MemBackend::new();
+    let dek2 = remote::init_remote(&mem2).unwrap();
+    let (mut r2, rx2) = runner_with(
+        d2.path(),
+        Box::new(MemFactory(mem2.clone())),
+        Some(dek2),
+        "pc",
+    );
+    r2.command(Op::ConfirmIdentity, &Value::Null).ok();
+    remote::reset_remote(&mem2).unwrap();
+    assert!(r2.joined());
+    r2.command(Op::SyncNow, &Value::Null).ok();
+    round(&mut r2, &rx2);
+    assert!(!r2.joined());
+    let _ = rx;
+}
