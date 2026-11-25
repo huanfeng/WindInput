@@ -109,6 +109,36 @@ fn write_batch_is_atomic_and_merges_reloads() {
 }
 
 #[test]
+fn newly_synced_files_trigger_their_reloads() {
+    let (d, core, mut l, _echo) = rig();
+    put(d.path(), "system.softkeyboard.toml", "old");
+    l.write_batch(&[
+        ("schema_overrides/wubi86.toml".into(), b"a".to_vec()),
+        ("emoji/a.txt".into(), b"e".to_vec()),
+        ("data/pinyin_misread.yaml".into(), b"m".to_vec()),
+        ("system.softkeyboard.toml".into(), b"k".to_vec()),
+        ("wind_setting.toml".into(), b"w".to_vec()),
+    ])
+    .unwrap();
+    assert_eq!(
+        core.methods(),
+        vec!["config.reload", "schema.reloadFiles", "softkeyboard.reload"]
+    );
+    let calls = core.calls.lock().unwrap();
+    let schema = calls.iter().find(|c| c.0 == "schema.reloadFiles").unwrap();
+    assert_eq!(schema.1, json!({"ids": ["wubi86"]}));
+}
+
+#[test]
+fn schema_override_with_odd_id_reloads_all_schemas() {
+    let (_d, core, mut l, _echo) = rig();
+    l.write_batch(&[("schema_overrides/a b.toml".into(), b"a".to_vec())])
+        .unwrap();
+    let calls = core.calls.lock().unwrap();
+    assert_eq!(calls[0], ("schema.reloadFiles".to_string(), json!({})));
+}
+
+#[test]
 fn begin_edit_failure_writes_nothing_and_releases_sessions() {
     let (d, core, mut l, _) = rig();
     put(d.path(), "data/pinyin/user.dict.yaml", "old");

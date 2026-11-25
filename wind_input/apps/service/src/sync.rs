@@ -44,6 +44,7 @@ pub const REQUEST_WHITELIST: &[&str] = &[
     "compat.reload",
     "schema.reloadFiles",
     "theme.reloadFiles",
+    "softkeyboard.reload",
 ];
 
 /// 同步进程文件名随变体带后缀（`wind_input_sync_dev.exe`），理由同扩展宿主：

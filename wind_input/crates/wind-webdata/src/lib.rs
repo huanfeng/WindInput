@@ -738,6 +738,11 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
         // ── softkeyboard.*：软键盘编辑器（逻辑在 wind_softkeyboard::admin）──
         "softkeyboard.get" => h.softkeyboard_view(),
         "softkeyboard.apply" => h.web_softkeyboard_apply(params),
+        // 外部改了 system.softkeyboard.toml 后让 core 重读（数据同步）
+        "softkeyboard.reload" => {
+            h.softkeyboard_reload();
+            Ok(json!({ "ok": true }))
+        }
         "quick.export" => h.web_quick_export(),
         "quick.import" => h.web_quick_import(params),
         "quick.previewImport" => h.web_quick_preview_import(params),

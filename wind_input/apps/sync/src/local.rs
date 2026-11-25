@@ -86,6 +86,7 @@ struct Reloads {
     themes_all: bool,
     /// data/ 下不走编辑会话的文件（字表等）：整体重扫
     dict_rescan: bool,
+    softkeyboard: bool,
 }
 
 fn plain_id(s: &str) -> bool {
@@ -100,6 +101,18 @@ impl Reloads {
         match segs.as_slice() {
             ["config.toml"] => self.config = true,
             ["compat.toml"] => self.compat = true,
+            // 方案覆盖：精确到方案，id 不规整则全部重载
+            ["schema_overrides", f] => match f.strip_suffix(".toml") {
+                Some(id) if plain_id(id) => {
+                    self.schemas
+                        .get_or_insert_with(BTreeSet::new)
+                        .insert(id.to_string());
+                }
+                _ => self.schemas_all = true,
+            },
+            // emoji 与误读表由 config.reload 一并重读
+            ["emoji", ..] | ["data", "pinyin_misread.yaml"] => self.config = true,
+            ["system.softkeyboard.toml"] => self.softkeyboard = true,
             ["schemas", rest @ ..] => {
                 // `<id>.schema.<ext>` 精确到方案；方案资源子目录里的文件被多个方案共用，重载全部
                 match rest {
@@ -428,6 +441,9 @@ impl FsLocal {
         }
         if r.dict_rescan {
             calls.push(("dict.reload", json!({})));
+        }
+        if r.softkeyboard {
+            calls.push(("softkeyboard.reload", json!({})));
         }
         for (m, p) in calls {
             if let Err(e) = self.req(m, p) {

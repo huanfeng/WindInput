@@ -53,6 +53,10 @@ fn reload_entries_are_routed() {
         .unwrap();
     assert_eq!(r["reloaded"], json!(["not-current"]));
     assert_eq!(r["applied"], false, "非当前主题不重新下发");
+    assert_eq!(
+        c.web_data_rpc("softkeyboard.reload", &json!({})).unwrap(),
+        json!({"ok": true})
+    );
 }
 
 #[test]

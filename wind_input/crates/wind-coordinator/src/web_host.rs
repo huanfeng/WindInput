@@ -159,6 +159,9 @@ pub trait WebDataHost {
     /// 软键盘编辑视图（设置 › 输入 › 软键盘）：`{ pages: [...] }`。
     fn softkeyboard_view(&self) -> anyhow::Result<serde_json::Value>;
 
+    /// 外部改了软键盘映射文件后重载映射表。
+    fn softkeyboard_reload(&self);
+
     /// 软键盘整批编辑：稀疏写用户层并热重载，返回新视图。
     fn softkeyboard_apply(
         &self,
@@ -451,6 +454,9 @@ impl WebDataHost for Coordinator {
     }
     fn softkeyboard_view(&self) -> anyhow::Result<serde_json::Value> {
         Coordinator::softkeyboard_editor_view(self)
+    }
+    fn softkeyboard_reload(&self) {
+        Coordinator::reload_softkeyboard(self)
     }
     fn softkeyboard_apply(
         &self,
