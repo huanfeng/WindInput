@@ -52,3 +52,15 @@ fn random_ids_valid() {
         assert!(valid_id(&random_id()));
     }
 }
+
+#[test]
+fn leading_junk_does_not_eat_name_budget() {
+    let id = id_from_name(&format!("!!{}", "a".repeat(20))).unwrap();
+    assert_eq!(id.len(), 16);
+}
+
+#[test]
+fn long_portable_id_stays_valid() {
+    let id = default_device_id("abcdefghijklmnop", true);
+    assert!(valid_id(&id) && id.ends_with("-portable"));
+}

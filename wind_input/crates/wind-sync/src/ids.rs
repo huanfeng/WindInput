@@ -5,6 +5,7 @@ use crate::crypto::random_bytes;
 pub const MAX_ID_LEN: usize = 24;
 /// 由名称生成时截到的长度。
 const NAME_LEN: usize = 16;
+const PORTABLE_SUFFIX: &str = "-portable";
 /// 随机码长度。
 const RANDOM_LEN: usize = 4;
 /// 随机码字母表：去掉易混的 0/1/i/l/o。
@@ -33,8 +34,8 @@ pub fn id_from_name(name: &str) -> Option<String> {
             out.push(c);
         }
     }
-    out.truncate(NAME_LEN);
     let out = out.trim_matches('-');
+    let out = out[..out.len().min(NAME_LEN)].trim_end_matches('-');
     (!out.is_empty()).then(|| out.to_string())
 }
 
@@ -50,7 +51,10 @@ pub fn random_id() -> String {
 pub fn default_device_id(name: &str, portable: bool) -> String {
     let base = id_from_name(name).unwrap_or_else(random_id);
     if portable {
-        format!("{base}-portable")
+        // 留出后缀位置，截短后可能露出尾 `-`
+        let keep = MAX_ID_LEN - PORTABLE_SUFFIX.len();
+        let head = base[..base.len().min(keep)].trim_end_matches('-');
+        format!("{head}{PORTABLE_SUFFIX}")
     } else {
         base
     }
