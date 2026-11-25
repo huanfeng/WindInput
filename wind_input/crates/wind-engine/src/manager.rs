@@ -5600,8 +5600,20 @@ impl EngineManager {
                 },
                 Err(_) => toml::Table::new(),
             };
+            let shuangpin = def.engine.pinyin.scheme.eq_ignore_ascii_case("shuangpin");
             let mut written = 0;
             for (leaf, value) in wind_config::config_schema::leaf_entries(values) {
+                // 注册表认不出的键、类型不对的值折叠时也会被丢掉，搬过去只是往方案文件里写垃圾。
+                if let Err(e) = wind_config::config_schema::validate(
+                    &format!("schema.{section}.{leaf}"),
+                    &value,
+                ) {
+                    warn!("旧全局设置 schema.{section}.{leaf} 无效，未搬入方案 {id}：{e}");
+                    continue;
+                }
+                if *section == "pinyin" && leaf.starts_with("shuangpin.") && !shuangpin {
+                    continue;
+                }
                 // 辅助码在方案里有自己的段。
                 let target = match leaf.strip_prefix("aux_code.") {
                     Some(rest) if *section == "pinyin" => format!("engine.aux_code.{rest}"),

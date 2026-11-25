@@ -351,6 +351,28 @@ fn legacy_settings_skip_what_the_scheme_already_sets() {
     );
 }
 
+/// 注册表里没有的键、类型不对的值不搬：搬过去也会在折叠时被丢掉，只会往用户的方案文件里写垃圾。
+#[test]
+fn legacy_settings_skip_unknown_keys_and_bad_values() {
+    let m = mgr("legacy_invalid", "wubi86", &[]);
+    m.migrate_legacy_type_settings(&legacy(
+        "[pinyin]\nallow_full_pinyin = true\nsentence_count = \"two\"\nsentence_max_count = 4\n",
+    ));
+    let text = override_text("legacy_invalid", "pinyin");
+    assert!(!text.contains("allow_full_pinyin"), "{text}");
+    assert!(!text.contains("two"), "{text}");
+    assert_eq!(m.pinyin_settings_of("pinyin").sentence_max_count, 4);
+}
+
+/// 双拼专有项只搬给双拼方案。
+#[test]
+fn legacy_shuangpin_settings_go_to_shuangpin_schemes_only() {
+    let m = mgr("legacy_sp", "wubi86", &[]);
+    m.migrate_legacy_type_settings(&legacy("[pinyin.shuangpin]\nallow_full_pinyin = true\n"));
+    assert!(override_text("legacy_sp", "shuangpin").contains("allow_full_pinyin"));
+    assert!(!override_text("legacy_sp", "pinyin").contains("shuangpin"));
+}
+
 // ── 按方案 id 读写设置（设置页走这条）──
 
 #[test]
