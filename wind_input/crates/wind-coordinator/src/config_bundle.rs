@@ -77,9 +77,6 @@ pub(crate) struct ConfigBundle {
     /// 英文大小写档位循环的触发键 VK（预解析自 `input.english_case_cycle_key`）。
     /// `None` = 功能关闭：键即开关，没有第二个闸门。
     pub(crate) english_case_cycle_vk: Option<u32>,
-    /// 整句切换键（预解析自 `schema.pinyin.sentence_cycle_key`）。`None` = 功能关闭，键即开关。
-    /// 带 `shift` 位：`shift+tab` 与 `tab` 是两个键。
-    pub(crate) sentence_cycle_key: Option<keymap::SessionKey>,
     /// 输入右符号本身是否跳出（`jump_out_keys` 含 `right_symbol`）。对称配对不受此项影响。
     pub(crate) jump_out_on_right_symbol: bool,
     /// 英文模式下需 DLL 吃键转发的标点源字符（见 `build` 的合成）。DLL 吃键与本侧出字的同源
@@ -378,17 +375,6 @@ impl ConfigBundle {
                 config.input.english_case_cycle_key
             );
         }
-        // 整句切换键与会话动作同一张键名表（`session_key_name_to_vk`），组合期间 C++ 本就转发。
-        let sentence_cycle_key = parse_sentence_cycle_key(
-            "schema.pinyin.sentence_cycle_key",
-            &config.schema.pinyin.sentence_cycle_key,
-        );
-        // 码表那把键按方案折叠、运行期现取（见 `Coordinator::active_sentence_cycle_key`），
-        // 这里只为全局值告警。
-        parse_sentence_cycle_key(
-            "schema.codetable.sentence_cycle_key",
-            &config.schema.codetable.sentence_cycle_key,
-        );
         let jump_out_on_right_symbol =
             parse_jump_out_on_right_symbol(&config.input.auto_pair.jump_out_keys);
         // 英文模式下需要 DLL 吃下转发的标点键 = 全局英半列自定义 ∪ 英文智能符号参与集 ∪
@@ -452,7 +438,6 @@ impl ConfigBundle {
             en_pairs,
             jump_out_keys,
             english_case_cycle_vk,
-            sentence_cycle_key,
             jump_out_on_right_symbol,
             custom_en_punct_chars,
             cn_passthrough_punct_chars,

@@ -1678,7 +1678,7 @@ impl Coordinator {
             self.finish_user_schema_switch(schema_id, "Switched to schema");
             // 切过来的方案有段被降级 ⇒ 现在说。落在切换成功之后，与加载失败的提示不会撞。
             self.notify_schema_degradation(schema_id);
-            self.warn_schema_sentence_cycle_conflict(schema_id);
+            self.warn_sentence_cycle_conflict();
         } else {
             // 走到这里说明 `ensure_schema` 之后 `switch_schema` 仍返回 false：只剩「已是当前方案」，
             // 而那已被上面的幂等分支接走。

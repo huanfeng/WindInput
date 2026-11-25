@@ -2948,7 +2948,6 @@ impl Coordinator {
         // 档位循环触发键的撞车体检（只告警）。出厂不配 ⇒ 默认直接返回。
         coordinator.warn_english_case_cycle_conflict();
         coordinator.warn_sentence_cycle_conflict();
-        coordinator.warn_schema_sentence_cycle_conflict(&coordinator.engine_mgr.active_schema_id());
         coordinator.warn_comment_switch_conflict();
         coordinator
     }
@@ -8826,60 +8825,34 @@ impl Coordinator {
         Some(composed.unwrap_or(KeyAction::Consumed))
     }
 
-    /// 启动体检：整句切换键被别的功能占着 → 告警（文案同 `warn_english_case_cycle_conflict`
-    /// 的形制：逐类点名占用方，并给出化解办法）。
+    /// 当前方案的整句切换键体检（只告警）：码表方案查它自己的设置，其余查起作用的拼音方案
+    /// （混输取次成员）。启动时与切方案后各调一次。键名写错也在这里告警（逐键路径静默按关闭处理）。
     ///
-    /// 不是配置冲突，而是运行期的优先级夺取：整句池 ≥ 2 条时那些绑定按不出来。
-    ///
-    /// 拼音与码表两把键各体检一次（码表取全局值；方案里另写的见
-    /// [`Self::warn_schema_sentence_cycle_conflict`]）。
+    /// 不是配置冲突，而是运行期的优先级夺取：整句池 ≥ 2 条时被占的那些绑定按不出来。
     pub(crate) fn warn_sentence_cycle_conflict(&self) {
-        let rt = self.rt();
-        let p = &rt.config.schema.pinyin;
-        let c = &rt.config.schema.codetable;
-        let codetable_key = keymap::session_key_name_to_vk(c.sentence_cycle_key.trim());
-        for (path, raw, key, counts) in [
-            (
-                "schema.pinyin.sentence_cycle_key",
-                p.sentence_cycle_key.as_str(),
-                rt.sentence_cycle_key,
-                (p.sentence_count, p.sentence_max_count),
-            ),
-            (
-                "schema.codetable.sentence_cycle_key",
-                c.sentence_cycle_key.as_str(),
-                codetable_key,
-                (c.sentence_count, c.sentence_max_count),
-            ),
-        ] {
-            if let Some(key) = key {
-                self.warn_one_sentence_cycle_conflict(path, raw, key, counts);
-            }
-        }
-    }
-
-    /// 码表方案自己写了整句切换键 / 条数（与全局不同）时补一次体检：启动时查活跃方案，
-    /// 切方案后查切到的方案。与全局相同的已由 [`Self::warn_sentence_cycle_conflict`] 查过，跳过。
-    /// 键名写错也在这里告警（逐键路径静默按关闭处理）。
-    pub(crate) fn warn_schema_sentence_cycle_conflict(&self, schema_id: &str) {
-        if self.engine_mgr.loaded_engine_type(schema_id)
-            != Some(wind_engine::engine::EngineType::CodeTable)
-        {
-            return;
-        }
-        let pick = |c: &wind_config::CodetableGlobal| {
-            (
-                c.sentence_cycle_key.clone(),
-                c.sentence_count,
-                c.sentence_max_count,
-            )
-        };
-        let own = self.engine_mgr.with_codetable_settings_of(schema_id, pick);
-        if own == pick(&self.rt().config.schema.codetable) {
-            return;
-        }
-        let (raw, count, max_count) = own;
-        let path = format!("方案 {schema_id} 的 schema.codetable.sentence_cycle_key");
+        let active = self.engine_mgr.active_schema_id();
+        let (scheme, raw, count, max_count) =
+            if self.engine_mgr.schema_engine_type(&active).as_deref() == Some("codetable") {
+                let (raw, count, max_count) =
+                    self.engine_mgr.with_codetable_settings_of(&active, |c| {
+                        (
+                            c.sentence_cycle_key.clone(),
+                            c.sentence_count,
+                            c.sentence_max_count,
+                        )
+                    });
+                (active, raw, count, max_count)
+            } else {
+                let scheme = self.engine_mgr.pinyin_scheme_in_effect();
+                let p = self.engine_mgr.pinyin_settings_of(&scheme);
+                (
+                    scheme,
+                    p.sentence_cycle_key.clone(),
+                    p.sentence_count,
+                    p.sentence_max_count,
+                )
+            };
+        let path = format!("方案 {scheme} 的 sentence_cycle_key");
         if let Some(key) = crate::config_bundle::parse_sentence_cycle_key(&path, &raw) {
             self.warn_one_sentence_cycle_conflict(&path, &raw, key, (count, max_count));
         }
