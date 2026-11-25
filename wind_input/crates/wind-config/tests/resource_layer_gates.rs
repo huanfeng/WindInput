@@ -73,8 +73,9 @@ const SCHEMAS_SITES: &[(&str, usize, &str)] = &[
     ),
     (
         "crates/wind-mobile/src/lib.rs",
-        2,
+        3,
         "scan_installed_schemas 已按层序（在 resource_layers_with 的循环体内拼 schemas）；\
+         scan_aux_role_schemas 同样在 resource_layers_with 的循环体内拼（同 id 靠前层胜出）；\
          scheme_dirs 同样在 resource_layers_named_with 的循环体内逐层拼 schemas（方案包导入/删除的目标）",
     ),
     (
