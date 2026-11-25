@@ -561,8 +561,9 @@ impl Runner {
             Input::Core(ToSync::Settings(s)) => self.on_settings(s),
             Input::Core(ToSync::Command { id, op, args }) => {
                 let r = self.command(op, &args);
-                self.cfg.link.send(FromSync::command_reply(id, r));
+                // 先报状态再回执：core 收到回执时已见到命令带来的状态变化
                 self.report();
+                self.cfg.link.send(FromSync::command_reply(id, r));
             }
             Input::Fs(p) => self.on_fs(&p),
             Input::Core(_) | Input::Eof => {}

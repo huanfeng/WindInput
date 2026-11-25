@@ -631,3 +631,35 @@ fn skipped_round_does_not_advance_round() {
     r.finish_round(*x);
     assert_eq!(r.status().round, 0);
 }
+
+/// 命令改变了可报告状态时，Status 必须先于 CommandReply 发出（core 才不会拿旧的停摆态放弃票）。
+#[test]
+fn status_is_reported_before_command_reply() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, _rx) = runner_with(
+        d.path(),
+        Box::new(MemFactory(MemBackend::new())),
+        None,
+        "pc",
+    );
+    setup_pc(&mut r);
+    let core = Arc::new(FakeCore::default());
+    r.cfg.link = core.clone();
+    r.state.retry.halted = Some("停摆原因".into());
+    r.report();
+    assert_eq!(r.status().phase, "halted");
+    r.handle(Input::Core(ToSync::Command {
+        id: 7,
+        op: Op::SyncNow,
+        args: Value::Null,
+    }));
+    let sent = core.sent.lock().unwrap();
+    let reply = sent
+        .iter()
+        .position(|m| matches!(m, FromSync::CommandReply { .. }))
+        .expect("应有回执");
+    assert!(
+        matches!(&sent[reply - 1], FromSync::Status(s) if s.phase != "halted"),
+        "回执前应先收到非停摆的状态: {sent:?}"
+    );
+}
