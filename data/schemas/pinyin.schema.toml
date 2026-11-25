@@ -16,7 +16,7 @@ scheme = "full"
 # 词组逐字首码匹配为固定语义（第 i 位命中第 i 字任一码的首字符；短于词字数 = 前缀态保留）。
 #
 # ⚠️ 本段只声明「全拼推荐哪张辅助码表」，**不代表功能开启**。
-# 总开关是 config.toml 的 [schema.pinyin.aux_code].enabled（出厂 false）。
+# 出厂关；在设置的「方案设置 → 辅助码」里开（落在 schema_overrides/pinyin.toml）。
 [engine.aux_code]
 # "schema:<码表方案 id>" = 取该方案系统词库 + 用户词库里的编码。这里引用内置的「笔画」
 # 码表方案（stroke.schema.toml，不在出厂切换列表里，但装着），它的词库与

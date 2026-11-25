@@ -9,7 +9,7 @@ description = "五笔86+拼音混合输入方案"
 [engine]
 type = "mixed"
 
-# 仅引擎固定参数（方案构成）；融合策略已上移至全局 [schema.mix]。
+# 方案构成。融合策略（[schema.mix] 那些项）没写的取内置默认，用户在方案设置里改。
 [engine.mixed]
 primary_schema = "wubi86"
 secondary_schema = "pinyin"
@@ -18,4 +18,4 @@ secondary_schema = "pinyin"
 #   用户词 / 临时词 / 词频 → 码表候选归主方案 (wubi86)，拼音候选归拼音 (pinyin)，英文归 english
 #   候选调整（置顶 / 按编码隐藏）→ 本方案自己 (wubi86_pinyin)；
 #   拼音候选的多字词删除按文字屏蔽，与拼音方案共用 (pinyin)
-# 调频/造词走子方案的全局 [schema.codetable] / [schema.pinyin] 配置。
+# 调频/造词取成员方案各自的设置。

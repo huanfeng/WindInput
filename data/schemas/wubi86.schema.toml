@@ -14,12 +14,9 @@ db_path = "wubi86/wubi86_chaizi.txt"
 font_path = "wubi86/HeiTiZiGen.ttf"
 font_family = "黑体字根"
 
-# 引擎固定参数。行为、调频、造词、临时拼音等用户可配项在全局 [schema.codetable]，
-# 用户也可在设置页给单个方案单独设（落在 schema_overrides/）。
-#
-# 本段里写的值**优先于全局**，所以内置方案只放引擎必需的参数，其余一律跟随全局，
-# 用户在设置页改什么就是什么。第三方方案可以在这里声明用户可配项——那属于方案定义的
-# 一部分，用户会看到它标着「方案自带」，取消勾选回到这里写的值而不是全局值。
+# 引擎固定参数。行为、调频、造词等用户可配项没写的取内置默认，用户在设置的方案设置里
+# 改（落在 schema_overrides/）。第三方方案可以在这里写这些项，作为本方案的默认值——
+# 用户「恢复默认」回到这里写的值。
 [engine.codetable]
 max_code_length = 4
 base_sort = "weight"
