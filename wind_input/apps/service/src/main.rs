@@ -412,9 +412,12 @@ fn main() {
                 }
             };
         let weak = Arc::downgrade(&coordinator);
-        let sync_for_menu = sync_host.clone();
+        // 弱引用：同步监护经 RPC 路由间接强持协调器，这里不再闭环
+        let sync_for_menu = Arc::downgrade(&sync_host);
         coordinator.set_sync_hook(Box::new(move || {
-            sync_for_menu.sync_now_active();
+            if let Some(s) = sync_for_menu.upgrade() {
+                s.sync_now_active();
+            }
         }));
         sync_host.set_notify(Box::new({
             let weak = weak.clone();

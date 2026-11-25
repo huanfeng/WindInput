@@ -305,10 +305,10 @@ impl SyncHost {
     /// 接上启用状态回调：设置时立即以当前值调一次，之后每次变化再调。
     pub fn set_enabled_hook(&self, f: EnabledHook) {
         let enabled = lock(&self.inner).settings.enabled;
-        if self.enabled_hook.set(f).is_ok() {
-            if let Some(h) = self.enabled_hook.get() {
-                h(enabled);
-            }
+        if self.enabled_hook.set(f).is_ok()
+            && let Some(h) = self.enabled_hook.get()
+        {
+            h(enabled);
         }
     }
 
@@ -939,10 +939,10 @@ impl SyncHost {
             self.reconcile(&mut inner, Instant::now(), true);
             was
         };
-        if was_enabled != now_enabled {
-            if let Some(h) = self.enabled_hook.get() {
-                h(now_enabled);
-            }
+        if was_enabled != now_enabled
+            && let Some(h) = self.enabled_hook.get()
+        {
+            h(now_enabled);
         }
         self.emit_status();
         Ok(())

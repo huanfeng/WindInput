@@ -26,9 +26,10 @@ use wind_ipc::protocol::{EVENT_KEY_DOWN, MOD_ALT, MOD_CTRL, MOD_SHIFT, MOD_WIN};
 use crate::coordinator::Coordinator;
 
 /// `[extensions]` 配置变化的订阅者（服务进程的扩展子系统）。
+pub(crate) type ExtensionsConfigHook = Box<dyn Fn(&wind_config::ExtensionsConfig) + Send + Sync>;
+
 /// 立即同步钩子：由服务进程接到同步监护。
 pub(crate) type SyncHook = Box<dyn Fn() + Send + Sync>;
-pub(crate) type ExtensionsConfigHook = Box<dyn Fn(&wind_config::ExtensionsConfig) + Send + Sync>;
 
 /// 组合会话与模式去重的状态。
 #[derive(Default)]
