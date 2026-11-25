@@ -569,7 +569,7 @@ fn file_changes_trigger_sync_after_debounce_and_echo_is_suppressed() {
     // 范围外的文件不触发
     let a_runs = a.syncing_count();
     write(&a.user(), "meta.toml", "x");
-    write(&a.user(), "data/pinyin/temp.wjl", "x");
+    write(&a.user(), "data/pinyin/temp.dict.yaml", "x");
     std::thread::sleep(Duration::from_millis(900));
     assert_eq!(a.syncing_count(), a_runs, "范围外文件不应触发同步");
 
