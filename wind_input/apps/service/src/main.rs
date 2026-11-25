@@ -403,6 +403,42 @@ fn main() {
     // 数据同步：设置启用且同步进程已安装时拉起 `wind_input_sync`（见 sync.rs）。
     let sync_host = sync::SyncHost::start();
     let sync_for_exit = sync_host.clone();
+    // 同步入口与提示：钩子只持 Weak<Coordinator>，不与协调器互持强引用。
+    {
+        let toast =
+            |weak: &std::sync::Weak<wind_coordinator::Coordinator>, text: &str, kind: &str| {
+                if let Some(c) = weak.upgrade() {
+                    let _ = c.ui_toast(text, kind, "", "bottom_right", 0);
+                }
+            };
+        let weak = Arc::downgrade(&coordinator);
+        let sync_for_menu = sync_host.clone();
+        coordinator.set_sync_hook(Box::new(move || {
+            sync_for_menu.sync_now_active();
+        }));
+        sync_host.set_notify(Box::new({
+            let weak = weak.clone();
+            move |n| {
+                let kind = match n {
+                    sync::SyncNotice::Failed(_) | sync::SyncNotice::BackgroundFailed(_) => "error",
+                    _ => "info",
+                };
+                toast(&weak, &sync::notice_text(&n), kind);
+            }
+        }));
+        extensions.set_notify(Box::new({
+            let weak = weak.clone();
+            move |text| toast(&weak, &text, "info")
+        }));
+        sync_host.set_enabled_hook(Box::new({
+            let weak = weak.clone();
+            move |on| {
+                if let Some(c) = weak.upgrade() {
+                    c.set_sync_enabled(on);
+                }
+            }
+        }));
+    }
     coordinator.set_extensions_config_hook(Box::new(move |c| extensions.apply_config(c)));
     deferred.set_ready(coordinator);
 

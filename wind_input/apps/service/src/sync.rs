@@ -47,7 +47,6 @@ pub enum SyncNotice {
     BackgroundFailed(String),
 }
 
-#[allow(dead_code)] // 接线在主循环里另做
 pub fn notice_text(n: &SyncNotice) -> String {
     match n {
         SyncNotice::Done(s) => {
@@ -299,13 +298,11 @@ impl SyncHost {
     }
 
     /// 接上同步结果提示（弹 toast 的接线处）。
-    #[allow(dead_code)]
     pub fn set_notify(&self, f: Notify) {
         let _ = self.notify.set(f);
     }
 
     /// 接上启用状态回调：设置时立即以当前值调一次，之后每次变化再调。
-    #[allow(dead_code)]
     pub fn set_enabled_hook(&self, f: EnabledHook) {
         let enabled = lock(&self.inner).settings.enabled;
         if self.enabled_hook.set(f).is_ok() {

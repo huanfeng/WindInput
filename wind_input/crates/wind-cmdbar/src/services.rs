@@ -164,6 +164,11 @@ pub trait ImeController: Send + Sync {
     fn reload_config(&self) -> anyhow::Result<()> {
         anyhow::bail!("reload_config: 宿主未支持")
     }
+    /// 立即同步一次数据（`sync.now`）。结果由宿主以提示反馈；未启用同步时宿主自行提示。
+    /// 默认未支持（测试/精简宿主）。
+    fn sync_now(&self) -> anyhow::Result<()> {
+        anyhow::bail!("sync_now: 宿主未支持")
+    }
     /// 打开设置窗口的指定页面。`page` 为规范页 id（schema/input/keys/ui/dict/
     /// advanced/about），空串打开默认页。未知 id 由设置端忽略并落到默认页。
     ///

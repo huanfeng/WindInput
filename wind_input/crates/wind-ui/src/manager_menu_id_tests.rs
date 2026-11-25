@@ -15,6 +15,7 @@ fn menu_cmd_id_roundtrip() {
         MenuCmd::ToggleToolbar,
         MenuCmd::ReloadConfig,
         MenuCmd::RestartService,
+        MenuCmd::SyncNow,
         MenuCmd::OpenConfigDir,
         MenuCmd::OpenAppDir,
         MenuCmd::OpenLogDir,

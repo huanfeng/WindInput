@@ -185,7 +185,6 @@ impl Extensions {
     }
 
     /// 接上「扩展首次到达」提示。
-    #[allow(dead_code)] // 接线在主循环里另做
     pub fn set_notify(&self, f: Box<dyn Fn(String) + Send + Sync>) {
         let _ = self.notify.set(f);
     }

@@ -43,6 +43,10 @@ impl ImeController for RecIme {
         self.0.lock().unwrap().push("reload".into());
         Ok(())
     }
+    fn sync_now(&self) -> anyhow::Result<()> {
+        self.0.lock().unwrap().push("sync".into());
+        Ok(())
+    }
 }
 
 fn ctx_with(rec: Arc<RecIme>) -> MemoryContext {
@@ -97,6 +101,19 @@ fn ime_reload_calls_host() {
     let ctx = ctx_with(rec.clone());
     fn_ime_reload(&ctx, &[]).unwrap();
     assert_eq!(rec.0.lock().unwrap().pop().unwrap(), "reload");
+}
+
+/// `sync.now()` 交宿主触发一次立即同步；Effect 类（不上屏文本）、有示例。
+#[test]
+fn sync_now_calls_host_and_is_registered() {
+    let rec = Arc::new(RecIme(Mutex::new(Vec::new())));
+    let ctx = ctx_with(rec.clone());
+    assert_eq!(fn_sync_now(&ctx, &[]).unwrap(), "");
+    assert_eq!(rec.0.lock().unwrap().as_slice(), ["sync"]);
+    let reg = crate::registry::Registry::full();
+    let spec = reg.lookup("sync.now").expect("sync.now 未注册");
+    assert!(!spec.example.is_empty());
+    assert!(!spec.pure);
 }
 
 /// `ime.set("comment", ...)` 的状态是 default / detail：走 `set_value`，on/off 报错且不调用宿主；

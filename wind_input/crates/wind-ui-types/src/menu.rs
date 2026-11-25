@@ -107,6 +107,8 @@ pub enum MenuCmd {
     ReloadConfig,
     /// 重启服务进程
     RestartService,
+    /// 立即同步数据（仅数据同步启用时出现在菜单里）
+    SyncNow,
     /// 打开用户数据目录（配置/词库等用户数据所在目录）
     OpenConfigDir,
     /// 打开应用程序目录（exe 所在目录，高级菜单）
@@ -304,6 +306,7 @@ impl MenuKind {
                 MenuCmd::TooltipCommitSection => 134,
                 MenuCmd::TooltipCopyLine => 135,
                 MenuCmd::TooltipCommitLine => 136,
+                MenuCmd::SyncNow => 137,
                 MenuCmd::IconBadgeStyle(i) => 10000 + i as i32,
                 MenuCmd::SoftKeyboardPage(i) => 11000 + i as i32,
                 MenuCmd::InputDiagToggleSection(i) => 8000 + i as i32,
@@ -379,6 +382,7 @@ impl MenuKind {
             134 => MenuCmd::TooltipCommitSection,
             135 => MenuCmd::TooltipCopyLine,
             136 => MenuCmd::TooltipCommitLine,
+            137 => MenuCmd::SyncNow,
             10000..=10099 => MenuCmd::IconBadgeStyle((id - 10000) as u8),
             11000..=11999 => MenuCmd::SoftKeyboardPage((id - 11000) as usize),
             8000..=8999 => MenuCmd::InputDiagToggleSection((id - 8000) as u8),

@@ -20,6 +20,7 @@ pub fn specs() -> Vec<FuncSpec> {
         "ime.theme_cycle" : Ime     (0, 1) effect => fn_theme_cycle, "循环切换主题并持久化; dir 可选 next(默认)/prev", "ime.theme_cycle()";
         "ime.undo_commit" : Ime     (0, 0) effect => fn_undo_commit,"撤销最近一次上屏 (删刚上屏的字符数; 焦点变化或又输入其它内容后退化删 1 个)", "ime.undo_commit()";
         "ime.reload"      : Ime     (0, 0) effect => fn_ime_reload,"重新读取用户配置并应用 (等同设置端保存后的热重载; 手改 config.toml 后用)", "ime.reload()";
+        "sync.now"        : Ime     (0, 0) effect => fn_sync_now,   "立即同步数据（需已启用数据同步）", "sync.now()";
         "ime.pair"        : Ime     (2, 2) effect => fn_ime_pair,   "上屏配对文本并激活配对状态, 光标落两段之间, 可用跳出键 (Tab/Enter) 越过右段", "ime.pair(\"《\", \"》\")"
             named(fn_ime_pair_named, "jump" = "跳出时光标右移的格数; 省略=按右段字符数");
         "setting.open"    : Setting (1, 2) effect => fn_setting_open,"打开设置窗口的指定页面 (schema/input/keys/ui/dict/advanced/about/import; 空串=默认页); args 可选, 原样直通给设置程序", "setting.open(\"dict\", \"--schema=wubi86 --type=shadow\")";
@@ -237,6 +238,12 @@ fn fn_ime_reload(ctx: &dyn EvalContext, _args: &[String]) -> Result<String> {
     let ime = ime(ctx, "ime.reload")?;
     ime.reload_config()
         .map_err(|e| runtime_err("ime.reload", e))?;
+    Ok(String::new())
+}
+
+fn fn_sync_now(ctx: &dyn EvalContext, _args: &[String]) -> Result<String> {
+    let ime = ime(ctx, "sync.now")?;
+    ime.sync_now().map_err(|e| runtime_err("sync.now", e))?;
     Ok(String::new())
 }
 

@@ -26,6 +26,8 @@ use wind_ipc::protocol::{EVENT_KEY_DOWN, MOD_ALT, MOD_CTRL, MOD_SHIFT, MOD_WIN};
 use crate::coordinator::Coordinator;
 
 /// `[extensions]` 配置变化的订阅者（服务进程的扩展子系统）。
+/// 立即同步钩子：由服务进程接到同步监护。
+pub(crate) type SyncHook = Box<dyn Fn() + Send + Sync>;
 pub(crate) type ExtensionsConfigHook = Box<dyn Fn(&wind_config::ExtensionsConfig) + Send + Sync>;
 
 /// 组合会话与模式去重的状态。
@@ -113,6 +115,28 @@ impl Coordinator {
     pub fn set_extensions_config_hook(&self, f: ExtensionsConfigHook) {
         f(&self.rt().config.extensions);
         let _ = self.extensions_config_hook.set(f);
+    }
+
+    /// 接上「立即同步」动作（菜单与 `sync.now()` 共用）。只能注册一次。
+    pub fn set_sync_hook(&self, f: SyncHook) {
+        let _ = self.sync_hook.set(f);
+    }
+
+    /// 数据同步是否启用：决定菜单里有没有「立即同步」。
+    pub fn set_sync_enabled(&self, on: bool) {
+        self.sync_enabled
+            .store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(crate) fn sync_enabled(&self) -> bool {
+        self.sync_enabled.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// 触发一次立即同步；钩子未接时无动作。
+    pub(crate) fn sync_now(&self) {
+        if let Some(f) = self.sync_hook.get() {
+            f();
+        }
     }
 
     pub(crate) fn notify_extensions_config(&self) {

@@ -380,6 +380,12 @@ impl ImeController for CoordIme {
         }
         Ok(())
     }
+    fn sync_now(&self) -> anyhow::Result<()> {
+        if let Some(c) = self.0.upgrade() {
+            c.sync_now();
+        }
+        Ok(())
+    }
     fn reload_config(&self) -> anyhow::Result<()> {
         if let Some(c) = self.0.upgrade()
             && !c.reload_user_config()

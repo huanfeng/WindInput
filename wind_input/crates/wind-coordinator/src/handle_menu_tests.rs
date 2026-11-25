@@ -373,3 +373,59 @@ fn settings_cmdline_keeps_extra_without_page() {
         "无页时附加参数不得被丢弃"
     );
 }
+
+/// 「立即同步」只在数据同步启用时出现，完整树与 macOS 精简树都一样。
+#[test]
+fn sync_now_menu_item_follows_sync_enabled() {
+    use crate::coordinator::Coordinator;
+    use wind_config::Config;
+
+    let c = Coordinator::new_headless(Config::default(), None);
+    fn contains(items: &[wind_ui_types::MenuItemSpec], label: &str) -> bool {
+        items
+            .iter()
+            .any(|i| i.label == label || contains(&i.children, label))
+    }
+    assert!(!contains(&c.build_main_menu_items(), "立即同步"));
+    c.set_sync_enabled(true);
+    assert!(contains(&c.build_main_menu_items(), "立即同步"));
+    c.set_sync_enabled(false);
+    assert!(!contains(&c.build_main_menu_items(), "立即同步"));
+}
+
+#[cfg(ext_presenter)]
+#[test]
+fn sync_now_menu_item_follows_sync_enabled_in_macos_tree() {
+    use crate::coordinator::Coordinator;
+    use wind_config::Config;
+
+    let c = Coordinator::new_headless(Config::default(), None);
+    let has = |c: &Coordinator| {
+        c.build_menu_items_macos()
+            .iter()
+            .any(|i| i.label == "立即同步")
+    };
+    assert!(!has(&c));
+    c.set_sync_enabled(true);
+    assert!(has(&c));
+}
+
+/// 点「立即同步」调同步钩子一次；钩子未设置时无动作（不 panic）。
+#[test]
+fn sync_now_menu_cmd_calls_hook_once() {
+    use crate::coordinator::Coordinator;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use wind_config::Config;
+    use wind_ui_types::MenuCmd;
+
+    let c = Coordinator::new_headless(Config::default(), None);
+    c.run_menu_cmd(MenuCmd::SyncNow);
+    let n = Arc::new(AtomicUsize::new(0));
+    let n2 = n.clone();
+    c.set_sync_hook(Box::new(move || {
+        n2.fetch_add(1, Ordering::SeqCst);
+    }));
+    c.run_menu_cmd(MenuCmd::SyncNow);
+    assert_eq!(n.load(Ordering::SeqCst), 1);
+}

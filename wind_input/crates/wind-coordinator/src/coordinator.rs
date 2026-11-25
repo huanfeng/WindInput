@@ -1817,6 +1817,9 @@ pub struct Coordinator {
     pub(crate) hook_session: std::sync::Mutex<crate::hook_events::HookSession>,
     pub(crate) extensions_config_hook:
         std::sync::OnceLock<crate::hook_events::ExtensionsConfigHook>,
+    /// 数据同步的「立即同步」钩子与启用状态（菜单据此显隐）。
+    pub(crate) sync_hook: std::sync::OnceLock<crate::hook_events::SyncHook>,
+    pub(crate) sync_enabled: std::sync::atomic::AtomicBool,
     /// 「不可输入」呈现的迟滞闸门（判定本身见 [`Coordinator::input_block`]）。
     ///
     /// 两个方向不对称：恢复立即生效（误显「英」很刺眼）；进入延迟 [`INPUT_BLOCK_DELAY`]（晚一点
@@ -2876,6 +2879,8 @@ impl Coordinator {
             hook: Arc::new(wind_hook::tap::Tap::new()),
             hook_session: std::sync::Mutex::new(Default::default()),
             extensions_config_hook: std::sync::OnceLock::new(),
+            sync_hook: std::sync::OnceLock::new(),
+            sync_enabled: std::sync::atomic::AtomicBool::new(false),
             password_suppress_enabled: std::sync::atomic::AtomicBool::new(
                 password_suppress_enabled_init,
             ),

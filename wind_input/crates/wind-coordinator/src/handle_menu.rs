@@ -251,6 +251,7 @@ impl Coordinator {
                 self.reload_user_config();
             }
             MenuCmd::RestartService => self.restart_service(),
+            MenuCmd::SyncNow => self.sync_now(),
             MenuCmd::OpenSettings => self.open_settings(None),
             MenuCmd::OpenDictionary => self.open_dictionary(),
             MenuCmd::OpenAbout => self.open_settings(Some("about")),
@@ -1482,6 +1483,9 @@ impl Coordinator {
             toolbar_vis,
         ));
         items.push(M::separator());
+        if self.sync_enabled() {
+            items.push(M::leaf("立即同步", cmd(MenuCmd::SyncNow), true, false));
+        }
         items.push(M::leaf(
             "重启服务",
             cmd(MenuCmd::RestartService),
@@ -1949,6 +1953,11 @@ impl Coordinator {
             M::submenu("主题", theme_children),
             M::separator(),
             M::leaf("重载配置", cmd(MenuCmd::ReloadConfig), true, false),
+        ]);
+        if self.sync_enabled() {
+            items.push(M::leaf("立即同步", cmd(MenuCmd::SyncNow), true, false));
+        }
+        items.extend([
             M::leaf("重启服务", cmd(MenuCmd::RestartService), true, false),
             M::separator(),
             M::submenu("应用独立配置", per_app_children),
