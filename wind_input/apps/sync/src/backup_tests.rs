@@ -39,3 +39,35 @@ fn keeps_latest_three_and_copies_settings_only() {
     assert!(last.join("data/x/dicts.toml").is_file());
     assert!(!last.join("data/x/user.dict.yaml").exists(), "数据不进备份");
 }
+
+#[test]
+fn same_second_backups_get_numbered_dirs() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path();
+    let paths = vec!["config.toml".to_string()];
+    let t0 = 1_795_564_800;
+    let mut got = Vec::new();
+    for i in 0..4 {
+        put(root, "config.toml", &format!("v = {i}\n"));
+        got.push(backup_settings(root, &paths, t0).unwrap());
+    }
+    let base = root.join("data/.backup/sync");
+    assert_eq!(got[1], base.join("20261125-000000-2"));
+    let mut dirs: Vec<String> = std::fs::read_dir(&base)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    dirs.sort();
+    assert_eq!(
+        dirs,
+        [
+            "20261125-000000-2",
+            "20261125-000000-3",
+            "20261125-000000-4"
+        ]
+    );
+    assert_eq!(
+        std::fs::read_to_string(got[3].join("config.toml")).unwrap(),
+        "v = 3\n"
+    );
+}

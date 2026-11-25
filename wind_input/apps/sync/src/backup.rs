@@ -35,7 +35,9 @@ fn join_rel(root: &Path, rel: &str) -> PathBuf {
 /// 把 `paths` 中属于设置的文件复制进新的时间戳目录，删掉超出份数的旧目录；返回新目录。
 pub fn backup_settings(userdata_dir: &Path, paths: &[String], now: u64) -> Result<PathBuf, String> {
     let base = join_rel(userdata_dir, "data/.backup/sync");
-    let dir = base.join(stamp(now));
+    std::fs::create_dir_all(&base)
+        .map_err(|e| format!("创建备份目录 {} 失败: {e}", base.display()))?;
+    let dir = new_dir(&base, &stamp(now))?;
     for rel in paths.iter().filter(|p| kind(p) == Kind::Setting) {
         let dst = join_rel(&dir, rel);
         if let Some(parent) = dst.parent() {
@@ -45,20 +47,53 @@ pub fn backup_settings(userdata_dir: &Path, paths: &[String], now: u64) -> Resul
         std::fs::copy(join_rel(userdata_dir, rel), &dst)
             .map_err(|e| format!("备份 {rel} 失败: {e}"))?;
     }
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("创建备份目录 {} 失败: {e}", dir.display()))?;
     let mut old: Vec<PathBuf> = std::fs::read_dir(&base)
         .map_err(|e| format!("读取备份目录失败: {e}"))?
         .flatten()
         .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
         .map(|e| e.path())
         .collect();
-    old.sort();
+    old.sort_by_key(|p| order_key(p));
     let excess = old.len().saturating_sub(KEEP);
     for p in &old[..excess] {
         let _ = std::fs::remove_dir_all(p);
     }
     Ok(dir)
+}
+
+/// 新建 `<时间戳>` 目录；同一秒已有则依次试 `-2`、`-3`…
+fn new_dir(base: &Path, stamp: &str) -> Result<PathBuf, String> {
+    for n in 1u32..1000 {
+        let name = if n == 1 {
+            stamp.to_string()
+        } else {
+            format!("{stamp}-{n}")
+        };
+        let dir = base.join(name);
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("创建备份目录 {} 失败: {e}", dir.display())),
+        }
+    }
+    Err("同一秒内备份过多".into())
+}
+
+/// 备份目录的先后：时间戳，再按序号（`-10` 排在 `-9` 之后）。
+fn order_key(p: &Path) -> (String, u32) {
+    let name = p
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    match name.split_at_checked(15) {
+        Some((head, tail)) => (
+            head.to_string(),
+            tail.strip_prefix('-')
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(1),
+        ),
+        None => (name, 0),
+    }
 }
 
 #[cfg(test)]
