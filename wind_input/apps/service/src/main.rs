@@ -30,6 +30,7 @@ mod phrase_cli;
 mod restart_cli;
 mod schema_cli;
 mod sync;
+mod sync_cli;
 mod theme_cli;
 mod ui_cli;
 // 仅 Windows：它的动作全是写 HKLM 的 TSF 登记项（`wind_coordinator::tsf_profile_name`
@@ -55,6 +56,7 @@ fn print_root_usage() {
          restart   重启输入法服务（未运行则直接启动）\n  \
          ui        桌面提示：ui toast <文案>（需 core 在线）\n  \
          ime       输入状态：中英/全半角/简繁/工具栏的查看与切换（需 core 在线）\n  \
+         sync      数据同步：sync now 立即同步、sync status 查看状态（需 core 在线）\n  \
          system    系统集成：Dota 2 兼容等（写 HKLM，需管理员权限）\n  \
          help      显示本帮助；--version 显示版本\n\
          \n\
@@ -138,6 +140,7 @@ fn main() {
                 | "restart"
                 | "ui"
                 | "ime"
+                | "sync"
                 | "help"
                 | "--help"
                 | "-h"
@@ -162,6 +165,7 @@ fn main() {
             Some("restart") => restart_cli::run(&cli_args[2..]),
             Some("ui") => ui_cli::run(&cli_args[2..]),
             Some("ime") => ime_cli::run(&cli_args[2..]),
+            Some("sync") => sync_cli::run(&cli_args[2..]),
             #[cfg(windows)]
             Some("system") => system_cli::run(&cli_args[2..]),
             Some("help" | "--help" | "-h") => {
