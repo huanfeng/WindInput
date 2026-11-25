@@ -54,6 +54,10 @@ fn runner(dir: &std::path::Path) -> (Runner, Receiver<Input>) {
     )
 }
 
+fn retired(r: &Runner) -> Vec<&str> {
+    r.state.retired_ids.iter().map(|x| x.id.as_str()).collect()
+}
+
 fn wait_round(rx: &Receiver<Input>) -> Box<Round> {
     loop {
         if let Input::RoundDone(x) = rx.recv_timeout(Duration::from_secs(10)).unwrap() {
@@ -247,7 +251,7 @@ fn renamed_device_removes_old_id_after_a_round_and_retries_on_failure() {
     r.command(Op::RenameDevice, &json!({"id": "home"})).unwrap();
     assert_eq!(r.status().device, "home");
     round(&mut r, &rx);
-    assert_eq!(r.state.retired_ids, ["pc"]);
+    assert_eq!(retired(&r), ["pc"]);
     assert!(!mem.keys(&manifest::device_dir_prefix("pc")).is_empty());
     assert!(mem.raw_get(&manifest::manifest_key("home", 1)).is_some());
 
@@ -324,7 +328,7 @@ fn claiming_another_id_retires_the_previous_one() {
     assert!(!mem.keys(&manifest::device_dir_prefix("lap")).is_empty());
 
     b.command(Op::ClaimDevice, &json!({"dev": "pc"})).unwrap();
-    assert_eq!(b.state.retired_ids, ["lap"]);
+    assert_eq!(retired(&b), ["lap"]);
     round(&mut b, &rxb);
     assert!(mem.keys(&manifest::device_dir_prefix("lap")).is_empty());
 }
@@ -384,4 +388,105 @@ fn confirmed_device_changing_passphrase_stays_confirmed() {
     assert_eq!(rep["mode"], "change");
     assert!(!r.status().needs_identity);
     r.command(Op::SyncNow, &Value::Null).unwrap();
+}
+
+fn put_info(mem: &MemBackend, dek: &Dek, id: &str, group: &str, platform: &str) {
+    let mut st = SyncState::new(id);
+    st.group = group.into();
+    let mut info = local_info(&SyncSettings::default(), &st, 1);
+    info.platform = platform.into();
+    put_device_info(mem, &dek.devinfo_key(), id, &info).unwrap();
+}
+
+/// 加入不存在或跨类别的组：报错且不动本机。
+#[test]
+fn join_group_rejects_missing_or_cross_class_groups() {
+    let d = tempfile::tempdir().unwrap();
+    let mem = MemBackend::new();
+    let dek = remote::init_remote(&mem, "p", KdfParams::FAST_TEST).unwrap();
+    put_info(&mem, &dek, "phone", "phones", "android");
+    put_info(&mem, &dek, "desk", "office", "linux");
+    let (mut r, _rx) = runner_with(d.path(), Box::new(MemFactory(mem)), None, "pc");
+    std::fs::write(d.path().join("user/config.toml"), "mine = 1\n").unwrap();
+    r.command(Op::SetPassphrase, &json!({"passphrase": "p"}))
+        .unwrap();
+    for g in ["nope", "phones"] {
+        let e = r
+            .command(Op::JoinGroup, &json!({"group": g, "mode": "theirs"}))
+            .unwrap_err();
+        assert!(e.contains("不存在"), "{g}: {e}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(d.path().join("user/config.toml")).unwrap(),
+        "mine = 1\n"
+    );
+    assert!(!d.path().join("user/data/.backup").exists());
+    assert!(r.status().needs_identity);
+    assert_eq!(r.status().device, "pc");
+    // 同类别的组可以加入
+    r.command(Op::JoinGroup, &json!({"group": "office", "mode": "mine"}))
+        .unwrap();
+    assert_eq!(r.status().group, "office");
+}
+
+/// 旧号在改号后被别处继续发布：本机不删它，并移出待删列表。
+#[test]
+fn retired_id_reused_elsewhere_is_not_deleted() {
+    let d = tempfile::tempdir().unwrap();
+    let mem = MemBackend::new();
+    let (mut r, rx) = runner_with(d.path(), Box::new(MemFactory(mem.clone())), None, "pc");
+    r.command(Op::SetPassphrase, &json!({"passphrase": "p"}))
+        .unwrap();
+    std::fs::write(d.path().join("user/config.toml"), "a = 1\n").unwrap();
+    round(&mut r, &rx);
+    let copy = r.state.clone();
+    r.command(Op::RenameDevice, &json!({"id": "home"})).unwrap();
+    // 复制出的目录以旧号接着发布
+    let dek = r.dek().unwrap();
+    let mut other = copy;
+    let mut local = wind_sync::MemLocal::new();
+    local.set("config.toml", "a = 1\n");
+    local.set("schemas/x.schema.toml", "x = 1\n");
+    let mut ctx = SyncCtx::new(
+        ScopeFlags::ALL,
+        now_unix(),
+        Namespace::new(DeviceClass::Desktop, "pc"),
+    );
+    ctx.force = true;
+    sync_once(&mem, &mut local, &mut other, &dek, &ctx).unwrap();
+    assert_eq!(other.gen_, 2);
+
+    round(&mut r, &rx);
+    assert!(r.state.retired_ids.is_empty());
+    assert!(
+        mem.raw_get(&manifest::manifest_key("pc", 2)).is_some(),
+        "不删别处的清单"
+    );
+}
+
+/// 认领的设备没有名册条目：回退的组号已被他人使用时改取空闲组号，且不覆盖本机设置。
+#[test]
+fn claim_fallback_group_is_deduplicated() {
+    let mem = MemBackend::new();
+    let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (mut a, rxa) = runner_with(da.path(), Box::new(MemFactory(mem.clone())), None, "c");
+    a.command(Op::SetPassphrase, &json!({"passphrase": "p"}))
+        .unwrap();
+    std::fs::write(da.path().join("user/config.toml"), "a = 1\n").unwrap();
+    round(&mut a, &rxa);
+    let dek = a.dek().unwrap();
+    mem.delete(&manifest::device_info_key("c")).unwrap();
+    put_info(&mem, &dek, "x", "c", "linux");
+
+    let (mut b, _rxb) = runner_with(db.path(), Box::new(MemFactory(mem.clone())), None, "lap");
+    std::fs::write(db.path().join("user/config.toml"), "b = 1\n").unwrap();
+    b.command(Op::SetPassphrase, &json!({"passphrase": "p"}))
+        .unwrap();
+    let rep = b.command(Op::ClaimDevice, &json!({"dev": "c"})).unwrap();
+    assert_eq!(rep["group"], "c-2");
+    assert_eq!(b.status().device, "c");
+    assert_eq!(
+        std::fs::read_to_string(db.path().join("user/config.toml")).unwrap(),
+        "b = 1\n"
+    );
 }

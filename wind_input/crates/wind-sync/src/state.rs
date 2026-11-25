@@ -47,6 +47,13 @@ impl RetryState {
     }
 }
 
+/// 待删的旧设备号与本机以它发布的最后一份清单的 nonce（删前据此核对号没有被别处接着用）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetiredId {
+    pub id: String,
+    pub nonce: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncState {
     /// 同步专用的随机设备号（进远端键，字母数字）。
@@ -88,7 +95,7 @@ pub struct SyncState {
     pub identity_confirmed: bool,
     /// 改号后待从远端删除的旧设备号。
     #[serde(default)]
-    pub retired_ids: Vec<String>,
+    pub retired_ids: Vec<RetiredId>,
 }
 
 impl SyncState {

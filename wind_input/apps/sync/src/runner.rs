@@ -21,7 +21,7 @@ use wind_sync::devices::{
 };
 use wind_sync::identity::{self, Overwrite};
 use wind_sync::ids;
-use wind_sync::scope::{DeviceClass, Namespace, ScopeFlags, in_scope, to_remote};
+use wind_sync::scope::{DeviceClass, Kind, Namespace, ScopeFlags, in_scope, kind, to_remote};
 use wind_sync::state::backoff_secs;
 use wind_sync::{
     Backend, LocalStore, SyncCtx, SyncError, SyncReport, SyncState, manifest, remote, sync_once,
@@ -76,6 +76,8 @@ impl std::fmt::Debug for Round {
 const BUSY_MSG: &str = "正在同步，请稍后再试";
 /// 加入同步库后、确认身份前拒绝同步的提示。
 const IDENTITY_MSG: &str = "请先确认本机身份";
+/// 覆盖本机设置只完成一部分时的停止态文案：只有重新加入成功才解除。
+const JOIN_INCOMPLETE: &str = "加入设备组未完成，请重试";
 /// 大批量删除护栏停止时 `halted` / `last_error` 里的识别标记。
 const MASS_MARK: &str = "为防误删已暂停";
 /// 连续这么多次「稍后重试」类的轮次后，改按普通失败退避。
@@ -281,20 +283,60 @@ fn info_stale(written: Option<&DeviceInfo>, want: &DeviceInfo, daily: bool) -> b
     !same || (daily && w.last_seen / DAY_SECS != want.last_seen / DAY_SECS)
 }
 
-/// 删除改号前的旧号目录：删成功的移出待删列表，失败的留待下一轮。
-fn retire_old_ids(b: &dyn Backend, state: &mut SyncState) {
+/// 首个空闲组号：`base`、`base-2`…；不等于 `taken`，也不被名册里 `skip` 以外的成员使用。
+fn free_group(
+    roster: &[DeviceEntry],
+    base: &str,
+    skip: &[&str],
+    taken: Option<&str>,
+) -> Result<String, String> {
+    let used = |g: &str| {
+        taken == Some(g)
+            || roster
+                .iter()
+                .any(|(d, r)| !skip.contains(&d.as_str()) && r.as_ref().is_ok_and(|i| i.group == g))
+    };
+    (1..1000)
+        .map(|n| ids::with_suffix(base, n))
+        .find(|g| !used(g))
+        .ok_or_else(|| "找不到可用的组号".to_string())
+}
+
+/// 重新加入成功：解除「加入设备组未完成」的停止态与错误文案。
+fn clear_join_halt(state: &mut SyncState) {
+    if state.retry.halted.as_deref() == Some(JOIN_INCOMPLETE) {
+        state.retry.last_error = None;
+    }
+    state.retry.clear_halt();
+}
+
+/// 名册里的平台对应的设备类别。
+fn class_of_platform(platform: &str) -> DeviceClass {
+    if platform == "android" {
+        DeviceClass::Mobile
+    } else {
+        DeviceClass::Desktop
+    }
+}
+
+/// 删除改号前的旧号目录：删成功或已归别处的移出待删列表，失败的留待下一轮。
+fn retire_old_ids(b: &dyn Backend, dek: &Dek, state: &mut SyncState) {
     let device = state.device.clone();
-    state.retired_ids.retain(|id| {
-        if *id == device {
+    state.retired_ids.retain(|r| {
+        if r.id == device {
             return false;
         }
-        match remove_device(b, id) {
-            Ok(n) => {
-                log!("已删除旧设备号 {id}（{n} 个对象）");
+        match identity::retire_device(b, dek, r) {
+            Ok(true) => {
+                log!("已删除旧设备号 {}", r.id);
+                false
+            }
+            Ok(false) => {
+                log!("旧设备号 {} 已被别处继续使用，不删除", r.id);
                 false
             }
             Err(e) => {
-                log!("删除旧设备号 {id} 失败: {}", sync_error(&e));
+                log!("删除旧设备号 {} 失败: {}", r.id, sync_error(&e));
                 true
             }
         }
@@ -374,6 +416,18 @@ impl Runner {
     /// 已加入同步库但尚未确认身份。
     fn needs_identity(&self) -> bool {
         self.secrets.dek.is_some() && !self.state.identity_confirmed
+    }
+
+    /// 覆盖本机设置只完成一部分：此时同步会把半成品当本机修改传进旧组。
+    fn join_incomplete(&self) -> bool {
+        self.state.retry.halted.as_deref() == Some(JOIN_INCOMPLETE)
+    }
+
+    /// 解除停止态；加入组未完成的停止态除外。
+    fn clear_halt(&mut self) {
+        if !self.join_incomplete() {
+            self.state.retry.clear_halt();
+        }
     }
 
     /// 停在「另一台设备在用本机号」上。
@@ -540,7 +594,7 @@ impl Runner {
         if self.syncing {
             self.clear_halt_after_round = true;
         } else {
-            self.state.retry.clear_halt();
+            self.clear_halt();
             self.save_state();
         }
         self.kick();
@@ -633,7 +687,7 @@ impl Runner {
                         if let Ok(rep) = &r
                             && !rep.skipped
                         {
-                            retire_old_ids(&*backend, &mut state);
+                            retire_old_ids(&*backend, &dek, &mut state);
                         }
                         // 本机 info 被其他设备「移除」后清单可能重新出现，info 却要等跨日才写回，
                         // 期间别人看到的是「无法解密」：每轮 stat 一次，缺了就补写。
@@ -695,7 +749,7 @@ impl Runner {
             self.info_written = r.info_written;
         }
         if std::mem::take(&mut self.clear_halt_after_round) {
-            self.state.retry.clear_halt();
+            self.clear_halt();
         }
         self.conflicts = r.conflicts;
         // 本轮扫描已完成：上一轮写下的回声记录用完，清掉（本轮重新写过的保留）
@@ -836,7 +890,7 @@ impl Runner {
 
     /// 用户处理完问题（改凭据 / 口令 / 密钥）后：解除停止态、丢旧连接、稍后同步。
     fn after_user_fix(&mut self) {
-        self.state.retry.clear_halt();
+        self.clear_halt();
         self.save_state();
         self.kick();
     }
@@ -978,11 +1032,14 @@ impl Runner {
         if !self.state.identity_confirmed {
             return Err(IDENTITY_MSG.into());
         }
+        if self.join_incomplete() {
+            return Err(JOIN_INCOMPLETE.into());
+        }
         if self.syncing {
             // 进行中的这一轮跑完后再来一轮
             self.clear_halt_after_round = true;
         } else {
-            self.state.retry.clear_halt();
+            self.clear_halt();
         }
         self.force_now = true;
         Ok(json!({ "queued": true }))
@@ -1086,6 +1143,37 @@ impl Runner {
         Ok(dir)
     }
 
+    /// 本机设置文件的（路径, 内容摘要），判断覆盖是否已经动过本机。
+    fn settings_digest(&self) -> Vec<(String, String)> {
+        let mut v: Vec<(String, String)> = self
+            .local_all()
+            .list()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|p| kind(p) == Kind::Setting)
+            .map(|p| {
+                let h = std::fs::read(self.abs(&p))
+                    .map(|b| content_hash(&b))
+                    .unwrap_or_default();
+                (p, h)
+            })
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// 覆盖本机设置失败：本机已被改动一部分则进停止态，免得半成品被当本机修改同步进旧组。
+    fn join_failed(&mut self, before: &[(String, String)], msg: String) -> String {
+        if self.settings_digest() == before {
+            return msg;
+        }
+        log!("加入设备组中途失败，本机设置已部分改写: {msg}");
+        self.state.retry.halted = Some(JOIN_INCOMPLETE.into());
+        self.state.retry.last_error = Some(JOIN_INCOMPLETE.into());
+        self.save_state();
+        format!("{JOIN_INCOMPLETE}（{msg}）")
+    }
+
     /// 本机号已被远端他人占用时改用首个空闲的 `<号>-<n>`。只用于未确认身份时：本机从未以这个号发布过。
     fn ensure_free_id(&mut self, b: &dyn Backend) -> Result<(), String> {
         let se = |e: SyncError| sync_error(&e);
@@ -1098,7 +1186,7 @@ impl Runner {
             if !id_taken(b, &id).map_err(se)? {
                 identity::rename_device(b, &mut self.state, &id).map_err(se)?;
                 // 旧号属于别的设备，不能当本机旧号删除
-                self.state.retired_ids.retain(|x| *x != base);
+                self.state.retired_ids.retain(|x| x.id != base);
                 log!("设备号 {base} 已被占用，本机改用 {id}");
                 return Ok(());
             }
@@ -1113,16 +1201,18 @@ impl Runner {
             let (device, group) = (self.state.device.clone(), group_of(&self.state));
             return Ok(json!({ "ok": true, "device": device, "group": group }));
         }
-        let (_, b) = self.identity_ctx()?;
+        let (dek, b) = self.identity_ctx()?;
         self.ensure_free_id(&*b)?;
         let device = self.state.device.clone();
-        identity::leave_group(&mut self.state, &device);
+        let roster = list_devices(&*b, &dek.devinfo_key()).map_err(|e| sync_error(&e))?;
+        let group = free_group(&roster, &device, &[&device], None)?;
+        identity::leave_group(&mut self.state, &group);
         self.state.group_name.clear();
         self.state.group_name_at = 0;
         self.state.identity_confirmed = true;
         self.after_identity_change();
-        log!("已确认本机身份（单机组）");
-        Ok(json!({ "ok": true, "device": device, "group": device }))
+        log!("已确认本机身份（单机组 {group}）");
+        Ok(json!({ "ok": true, "device": device, "group": group }))
     }
 
     fn cmd_rename_device(&mut self, args: &Value) -> Result<Value, String> {
@@ -1141,7 +1231,7 @@ impl Runner {
         }
         identity::rename_device(&*b, &mut self.state, id).map_err(|e| sync_error(&e))?;
         if !retire {
-            self.state.retired_ids.retain(|x| *x != old);
+            self.state.retired_ids.retain(|x| x.id != old);
         }
         self.after_identity_change();
         log!("设备号已改为 {id}");
@@ -1178,6 +1268,23 @@ impl Runner {
             _ => return Err("参数 mode 须为 theirs 或 mine".into()),
         };
         let (dek, b) = self.identity_ctx()?;
+        let roster = list_devices(&*b, &dek.devinfo_key()).map_err(|e| sync_error(&e))?;
+        let class = self.cfg.class;
+        // 未确认身份时本机从未发布过，名册里同号的条目是别人的
+        let me = self
+            .state
+            .identity_confirmed
+            .then_some(self.state.device.as_str());
+        let exists = roster.iter().any(|(d, r)| {
+            Some(d.as_str()) != me
+                && r.as_ref()
+                    .is_ok_and(|i| i.group == group && class_of_platform(&i.platform) == class)
+        });
+        if !exists {
+            return Err(format!(
+                "设备组 {group} 不存在，或其成员与本机不是同一类设备（桌面与手机不能同组）"
+            ));
+        }
         if !self.state.identity_confirmed {
             self.ensure_free_id(&*b)?;
         }
@@ -1185,16 +1292,18 @@ impl Runner {
         if mode == Overwrite::Theirs {
             self.backup_local(&local)?;
         }
+        let before = self.settings_digest();
         let ns = Namespace::new(self.cfg.class, group);
         let mut state = self.state.clone();
-        let rep = identity::join_group(&*b, &mut local, &mut state, &dek, &ns, mode)
-            .map_err(|e| sync_error(&e))?;
+        let rep = match identity::join_group(&*b, &mut local, &mut state, &dek, &ns, mode) {
+            Ok(r) => r,
+            Err(e) => return Err(self.join_failed(&before, sync_error(&e))),
+        };
         state.group_name.clear();
         state.group_name_at = 0;
-        if let Ok(roster) = list_devices(&*b, &dek.devinfo_key()) {
-            adopt_group_name(&mut state, &roster);
-        }
+        adopt_group_name(&mut state, &roster);
         state.identity_confirmed = true;
+        clear_join_halt(&mut state);
         self.state = state;
         self.after_identity_change();
         log!(
@@ -1224,16 +1333,7 @@ impl Runner {
         let roster = list_devices(&*b, &dek.devinfo_key()).map_err(|e| sync_error(&e))?;
         let device = self.state.device.clone();
         let current = group_of(&self.state).to_string();
-        let used = |g: &str| {
-            g == current
-                || roster
-                    .iter()
-                    .any(|(d, r)| *d != device && r.as_ref().is_ok_and(|i| i.group == g))
-        };
-        let group = (1..1000)
-            .map(|n| ids::with_suffix(&device, n))
-            .find(|g| !used(g))
-            .ok_or("找不到可用的组号")?;
+        let group = free_group(&roster, &device, &[&device], Some(&current))?;
         identity::leave_group(&mut self.state, &group);
         self.state.group_name = name.to_string();
         self.state.group_name_at = if name.is_empty() { 0 } else { now_unix() };
@@ -1254,16 +1354,45 @@ impl Runner {
         let se = |e: SyncError| sync_error(&e);
         let mut local = self.local_all();
         self.backup_local(&local)?;
+        let roster = list_devices(&*b, &dek.devinfo_key()).map_err(se)?;
         let mut state = self.state.clone();
-        let group = identity::claim_device(&*b, &mut state, &dek, dev).map_err(se)?;
-        let ns = Namespace::new(self.cfg.class, group.clone());
-        identity::join_group(&*b, &mut local, &mut state, &dek, &ns, Overwrite::Theirs)
-            .map_err(se)?;
+        let mut group = identity::claim_device(&*b, &mut state, &dek, dev).map_err(se)?;
+        let from_roster = roster
+            .iter()
+            .any(|(d, r)| d == dev && r.as_ref().is_ok_and(|i| i.group == group));
+        if from_roster {
+            let before = self.settings_digest();
+            let ns = Namespace::new(self.cfg.class, group.clone());
+            if let Err(e) =
+                identity::join_group(&*b, &mut local, &mut state, &dek, &ns, Overwrite::Theirs)
+            {
+                return Err(self.join_failed(&before, sync_error(&e)));
+            }
+        } else {
+            // 名册没给出组号（缺失或不合法）：回退的组号与他人查重；组未知就不覆盖本机设置
+            let fallback = free_group(&roster, dev, &[dev, &self.state.device], None)?;
+            if fallback == group {
+                let before = self.settings_digest();
+                let ns = Namespace::new(self.cfg.class, group.clone());
+                if let Err(e) =
+                    identity::join_group(&*b, &mut local, &mut state, &dek, &ns, Overwrite::Theirs)
+                {
+                    return Err(self.join_failed(&before, sync_error(&e)));
+                }
+            } else {
+                identity::leave_group(&mut state, &fallback);
+                group = fallback;
+            }
+        }
         state.identity_confirmed = true;
+        clear_join_halt(&mut state);
         // 已确认过身份的设备改认领别的号：原号与待删旧号都归入待删（撞号时原号另有主人，不删）
         if self.state.identity_confirmed && !self.id_conflict() {
             state.retired_ids = std::mem::take(&mut self.state.retired_ids);
-            state.retired_ids.push(self.state.device.clone());
+            state.retired_ids.push(wind_sync::state::RetiredId {
+                id: self.state.device.clone(),
+                nonce: self.state.last_nonce.clone(),
+            });
         }
         self.state = state;
         self.after_identity_change();

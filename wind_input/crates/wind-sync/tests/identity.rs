@@ -4,7 +4,9 @@ use wind_sync::backend::{Backend, MemBackend};
 use wind_sync::crypto::{Dek, KdfParams};
 use wind_sync::devices::{DeviceInfo, put_device_info, remove_device};
 use wind_sync::engine::{SyncCtx, sync_once};
-use wind_sync::identity::{Overwrite, claim_device, join_group, leave_group, rename_device};
+use wind_sync::identity::{
+    Overwrite, claim_device, join_group, leave_group, rename_device, retire_device,
+};
 use wind_sync::local::MemLocal;
 use wind_sync::manifest::{self, Entry, Manifest};
 use wind_sync::remote;
@@ -176,8 +178,11 @@ fn rename_keeps_files_reachable() {
     c.sync(&b);
     let before: Vec<String> = a.state.files.keys().cloned().collect();
     assert!(!before.is_empty());
+    let nonce = a.state.last_nonce.clone();
     rename_device(&b, &mut a.state, "home-pc").unwrap();
-    assert_eq!(a.state.retired_ids, vec!["a".to_string()]);
+    assert_eq!(a.state.retired_ids.len(), 1);
+    assert_eq!(a.state.retired_ids[0].id, "a");
+    assert_eq!(a.state.retired_ids[0].nonce, nonce);
     a.sync(&b);
     remove_device(&b, "a").unwrap();
     let raw = b
@@ -297,4 +302,53 @@ fn claim_restores_data_only_held_by_claimed_device() {
     let puts = b.put_count();
     n.sync(&b);
     assert_eq!(b.put_count(), puts, "后续同步不应再上传");
+}
+
+#[test]
+fn claim_ignores_invalid_group_in_roster() {
+    let (b, dek, _a, _bb, _c) = three();
+    let info = DeviceInfo {
+        name: "c".into(),
+        platform: "linux".into(),
+        app_version: "0".into(),
+        caps: vec![],
+        last_seen: T0,
+        group: "Bad Group/..".into(),
+        group_name: String::new(),
+        group_name_at: 0,
+    };
+    put_device_info(&b, &dek.devinfo_key(), "c", &info).unwrap();
+    let mut st = SyncState::new("x");
+    assert_eq!(claim_device(&b, &mut st, &dek, "c").unwrap(), "c");
+}
+
+/// 旧号在改号后被别处继续发布：不删；归属未变则删。
+#[test]
+fn retire_checks_ownership_by_nonce() {
+    let (b, dek, mut a, _bb, _c) = three();
+    let copy = a.state.clone();
+    rename_device(&b, &mut a.state, "a2").unwrap();
+    let r = a.state.retired_ids[0].clone();
+    // 一份复制出的目录仍以旧号同步并发布新代
+    let mut other = Dev::new("a", "home", &dek);
+    other.state = copy;
+    other.local.set("data/pinyin/user.dict.yaml", "别处\t1");
+    other.sync(&b);
+    assert!(!retire_device(&b, &dek, &r).unwrap());
+    assert!(
+        !b.list(&manifest::device_dir_prefix("a"))
+            .unwrap()
+            .is_empty()
+    );
+
+    let r = other.state.clone();
+    rename_device(&b, &mut other.state, "a3").unwrap();
+    let ret = other.state.retired_ids[0].clone();
+    assert_eq!(ret.nonce, r.last_nonce);
+    assert!(retire_device(&b, &dek, &ret).unwrap());
+    assert!(
+        b.list(&manifest::device_dir_prefix("a"))
+            .unwrap()
+            .is_empty()
+    );
 }

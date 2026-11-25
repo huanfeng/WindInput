@@ -10,7 +10,7 @@ use crate::ids::valid_id;
 use crate::local::{LocalError, LocalStore};
 use crate::manifest::{self, Entry, Manifest};
 use crate::scope::{self, Kind, Namespace, ScopeFlags};
-use crate::state::SyncState;
+use crate::state::{RetiredId, SyncState};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,7 +162,7 @@ pub fn claim_device(
     s.lamport = t.lamport;
     s.identity_confirmed = true;
     match info {
-        Some(i) if !i.group.is_empty() => {
+        Some(i) if valid_id(&i.group) => {
             s.group = i.group;
             s.group_name = i.group_name;
             s.group_name_at = i.group_name_at;
@@ -184,9 +184,38 @@ pub fn rename_device(
         return Err(unusable());
     }
     let old = std::mem::replace(&mut state.device, new_id.to_string());
-    state.retired_ids.push(old);
+    state.retired_ids.push(RetiredId {
+        id: old,
+        nonce: state.last_nonce.clone(),
+    });
     state.gen_ = 0;
     state.last_nonce.clear();
     state.published_digest.clear();
     Ok(())
+}
+
+/// 删除改号前的旧号目录。旧号最新清单的 nonce 与记录不符（号已被别处接着用）或解不开时不删，返回 false。
+pub fn retire_device(b: &dyn Backend, dek: &Dek, r: &RetiredId) -> Result<bool, SyncError> {
+    let latest = b
+        .list(&manifest::device_dir_prefix(&r.id))?
+        .iter()
+        .filter_map(|o| manifest::parse_manifest_key(&o.key))
+        .filter(|(d, _)| *d == r.id)
+        .map(|(_, g)| g)
+        .max();
+    let nonce = match latest {
+        None => String::new(),
+        Some(g) => match b.get(&manifest::manifest_key(&r.id, g))? {
+            None => String::new(),
+            Some(raw) => match Manifest::decode(&dek.files_key(), &r.id, g, &raw) {
+                Ok(m) => m.nonce,
+                Err(_) => return Ok(false),
+            },
+        },
+    };
+    if nonce != r.nonce {
+        return Ok(false);
+    }
+    devices::remove_device(b, &r.id)?;
+    Ok(true)
 }

@@ -1080,3 +1080,89 @@ fn same_default_id_gets_a_suffix_on_confirm() {
     assert_eq!(b.sync().phase, "idle");
     assert_eq!(a.sync().phase, "idle");
 }
+
+/// 组号与名册全部成员查重：A 退组得 pc-2 后，同名的 B 确认身份不会落进 A 的组。
+#[test]
+fn confirmed_group_does_not_collide_with_existing_groups() {
+    let remote = MemBackend::new();
+    let mut a = Node::with(&remote, false, named("pc"));
+    a.setup("p");
+    let r = a.cmd(Op::LeaveGroup, json!({})).unwrap();
+    assert_eq!(r["group"], "pc-2");
+    a.put("config.toml", "a = 1\n");
+    a.sync();
+
+    let mut b = Node::with(&remote, false, named("pc"));
+    b.put("config.toml", "b = 1\n");
+    b.setup("p");
+    let st = b.status();
+    assert_eq!(st.device, "pc-2");
+    assert_ne!(st.group, "pc-2", "{st:?}");
+    b.sync();
+    a.sync();
+    assert_eq!(a.read("config.toml").as_deref(), Some("a = 1\n"));
+}
+
+/// 覆盖本机设置时删除失败（写入已成功）：进停止态，不把半成品同步进旧组；重新加入成功后恢复。
+#[cfg(unix)]
+#[test]
+fn half_finished_join_halts_until_retried() {
+    use std::os::unix::fs::PermissionsExt;
+    let remote = MemBackend::new();
+    let mut a = Node::with(&remote, false, named("甲"));
+    a.setup("p");
+    a.put("config.toml", "a = 1\n");
+    a.sync();
+    let mut b = Node::with(&remote, false, named("乙"));
+    b.put("data/x/dicts.toml", "d = 1\n");
+    b.setup("p");
+    b.sync();
+    let old_group = b.status().group;
+    let gen_keys = remote.keys("windinput-sync/v2/devices/").len();
+
+    let dir = b.user().join("data/x");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let e = b
+        .cmd(
+            Op::JoinGroup,
+            json!({"group": a.status().group, "mode": "theirs"}),
+        )
+        .unwrap_err();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(e.contains("加入设备组未完成"), "{e}");
+    assert_eq!(
+        b.read("config.toml").as_deref(),
+        Some("a = 1\n"),
+        "写入已发生"
+    );
+    let st = b.status();
+    assert_eq!(st.phase, "halted", "{st:?}");
+    assert_eq!(st.group, old_group);
+    assert!(
+        b.cmd(Op::SyncNow, Value::Null)
+            .unwrap_err()
+            .contains("未完成")
+    );
+    // 改设置也不解除
+    send_settings(
+        &b,
+        SyncSettings {
+            interval_min: 30,
+            ..named("乙")
+        },
+    );
+    b.wait_status("设置已生效", |s| s.phase == "halted");
+    assert!(b.cmd(Op::SyncNow, Value::Null).is_err());
+    assert_eq!(
+        remote.keys("windinput-sync/v2/devices/").len(),
+        gen_keys,
+        "没有新清单"
+    );
+
+    b.join_group_of(&a);
+    assert_eq!(b.status().phase, "idle");
+    assert!(b.read("data/x/dicts.toml").is_none());
+    assert_eq!(b.sync().phase, "idle");
+    a.sync();
+    assert_eq!(a.read("config.toml").as_deref(), Some("a = 1\n"));
+}
