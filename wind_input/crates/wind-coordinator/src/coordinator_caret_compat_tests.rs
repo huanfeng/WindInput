@@ -534,6 +534,26 @@ fn focus_tip_shows_again_for_different_host() {
     assert!(got_status_tip(&rx), "换宿主必须重新提示一次");
 }
 
+/// 气泡还挂着没弹出（等 TSF 坐标）时，docMgr 级失焦把挂起作废：去重记录不能留着，否则同宿主
+/// 紧接着的下一次 focus_gained 被当成「已提示过」跳过，气泡永远不出（Edge 切回时的表现）。
+#[test]
+fn focus_tip_retries_when_parked_tip_was_cancelled_before_showing() {
+    let (c, rx) = coord_focus_tip(true, "follow_caret");
+    set_caret(&c, 0, 0, wind_ipc::protocol::caret_source::UNKNOWN);
+    c.show_focus_status_if_enabled(TOKEN_A);
+    assert!(!got_status_tip(&rx), "非 TSF 坐标：挂起，尚未弹出");
+
+    c.handle_focus_lost(TOKEN_A, wind_bridge::handler::FocusLostReason::DocChanged);
+    set_caret(
+        &c,
+        100,
+        200,
+        wind_ipc::protocol::caret_source::TSF_SELECTION,
+    );
+    c.show_focus_status_if_enabled(TOKEN_A);
+    assert!(got_status_tip(&rx), "上次根本没弹出，同宿主再次获焦应重试");
+}
+
 /// 离开宿主（Thread 级失焦）后再回来，应当重新提示。
 /// 只有 Thread 档清去重记录：CtxLost/DocChanged 是宿主内换 docMgr 的噪声，
 /// 若也清就等于按 docMgr 计数，Excel 下会退回「输入一次闪两下」。

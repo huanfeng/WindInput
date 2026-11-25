@@ -8142,8 +8142,17 @@ impl Coordinator {
     pub(crate) fn hide_tip(&self) {
         // 挂起中的焦点气泡一并作废：焦点都走了，那次挂起等来的权威坐标也已经属于别的上下文，
         // 补显示出来就是「切走之后气泡才姗姗弹出」。
-        self.pending_focus_tip
-            .store(false, std::sync::atomic::Ordering::Relaxed);
+        // 挂起的气泡从没弹出过，去重记录（`last_focus_tip_token`）要一起作废，否则同宿主紧接着的
+        // 下一次获焦被当成「已提示过」跳过，气泡永远不出（Edge 切回时 DocMgr 抖动即如此）。
+        if self
+            .pending_focus_tip
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            *self
+                .last_focus_tip_token
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = 0;
+        }
         let _ = self.ui_tx.send(UiCommand::HideStatusTip);
         // 清空去重缓存：否则重新获焦时"常驻显示"会因文本与隐藏前相同而不弹。
         self.last_status_text
