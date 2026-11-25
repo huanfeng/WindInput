@@ -797,7 +797,7 @@ impl Runner {
         self.secrets.dek = Some(b64);
         self.save_secrets()?;
         if changed {
-            self.state = SyncState::new_random();
+            self.state = SyncState::new(self.state.device.clone());
             self.info_written = None;
         }
         self.after_user_fix();
@@ -955,7 +955,7 @@ impl Runner {
         self.secrets.dek = Some(dek.to_base64());
         self.save_secrets()?;
         // 远端已空：旧基线作废，所有本地文件当作新增上传
-        self.state = SyncState::new_random();
+        self.state = SyncState::new(self.state.device.clone());
         self.info_written = None;
         self.after_user_fix();
         self.publish_info(false);

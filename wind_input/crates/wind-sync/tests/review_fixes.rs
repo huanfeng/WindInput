@@ -129,6 +129,7 @@ fn local_list_failure_is_an_error_not_empty() {
 #[test]
 fn rerun_after_crash_does_not_reuse_lamport() {
     let (b, mut d) = setup(2);
+    d[0].ok(&b); // 先有一份已提交的清单：全新状态遇到远端同号清单按撞号处理
     d[0].local.set("themes/x.json", "v1");
     let snapshot = d[0].state.clone();
     d[0].ok(&b); // 清单已写远端
@@ -145,6 +146,7 @@ fn rerun_after_crash_does_not_reuse_lamport() {
 #[test]
 fn crash_rerun_with_idle_observer_keeps_lamport_monotonic() {
     let (b, mut d) = setup(2);
+    d[0].ok(&b); // 先有一份已提交的清单：全新状态遇到远端同号清单按撞号处理
     d[0].local.set("themes/x.json", "v1");
     let snapshot = d[0].state.clone();
     d[0].ok(&b);
@@ -205,6 +207,7 @@ fn concurrent_init_loser_gets_error() {
 fn old_existing_blob_is_refreshed_on_upload() {
     let (b, mut d) = setup(1);
     b.set_now(1000);
+    d[0].ok(&b); // 先有一份已提交的清单：全新状态遇到远端同号清单按撞号处理
     d[0].local.set("themes/x.json", "v1");
     let snapshot = d[0].state.clone();
     d[0].ok(&b);
@@ -256,6 +259,7 @@ fn many_blobs_use_one_list_not_stat() {
 fn fresh_existing_blob_is_not_reuploaded_by_stat_path() {
     let (b, mut d) = setup(1);
     b.set_now(T0);
+    d[0].ok(&b); // 先有一份已提交的清单：全新状态遇到远端同号清单按撞号处理
     d[0].local.set("themes/x.json", "v1");
     let snapshot = d[0].state.clone();
     d[0].ok(&b);
@@ -275,6 +279,7 @@ fn old_existing_blob_is_refreshed_on_list_path() {
     // 超过阈值走 list 路径：旧 blob 同样要刷新
     let (b, mut d) = setup(1);
     b.set_now(1000);
+    d[0].ok(&b); // 先有一份已提交的清单：全新状态遇到远端同号清单按撞号处理
     for i in 0..40 {
         d[0].local
             .set(&format!("themes/t{i}.json"), &format!("v{i}"));

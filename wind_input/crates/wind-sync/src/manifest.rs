@@ -89,6 +89,12 @@ pub struct Manifest {
     pub gen_: u64,
     pub lamport: u64,
     pub files: BTreeMap<String, Entry>,
+    /// 本份清单的随机标识；与 `prev` 串成链，用来发现多处共用同一设备号。
+    #[serde(default)]
+    pub nonce: String,
+    /// 写出本份清单时本机状态记着的上一份 nonce。
+    #[serde(default)]
+    pub prev: String,
 }
 
 fn obj_id(dev: &str, gen_: u64) -> String {
@@ -145,6 +151,8 @@ mod tests {
             gen_: 4,
             lamport: 3,
             files,
+            nonce: "n4".into(),
+            prev: "n3".into(),
         }
     }
 

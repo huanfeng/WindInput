@@ -26,7 +26,7 @@ pub fn load(state_dir: &Path) -> SyncState {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => log!("读取同步状态失败: {e}"),
     }
-    SyncState::new_random()
+    SyncState::new(wind_sync::ids::random_id())
 }
 
 pub fn save(state_dir: &Path, s: &SyncState) -> Result<(), String> {

@@ -15,6 +15,8 @@ pub enum SyncError {
     AlreadyInitialized,
     #[error("同步已停止，等待用户处理: {0}")]
     Halted(String),
+    #[error("另一台设备在使用相同设备号（{0}），请给本机改号")]
+    DeviceIdConflict(String),
 }
 
 /// 大批量删除护栏触发时 `Halted` 消息的固定前缀（apps 侧据此识别并提示用户确认）。

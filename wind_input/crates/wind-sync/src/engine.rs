@@ -222,6 +222,26 @@ fn fetch_blob(
     }
 }
 
+/// 本机远端最新清单与本机状态对不上，说明另有一处在用同一个设备号。
+/// 仅「恰好领先一代且 prev 接得上」视为上次写出后未提交即崩溃；全新状态不适用（认领由调用方预先播种）。
+fn check_own_chain(me: &str, state: &SyncState, top: &Manifest) -> Result<(), SyncError> {
+    let g = top.gen_;
+    let ok = if g > state.gen_ {
+        (state.gen_ > 0 || !state.last_nonce.is_empty())
+            && g == state.gen_ + 1
+            && top.prev == state.last_nonce
+    } else if g == state.gen_ {
+        g == 0 || top.nonce == state.last_nonce
+    } else {
+        true
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(SyncError::DeviceIdConflict(me.to_string()))
+    }
+}
+
 fn run(
     backend: &dyn Backend,
     local: &mut dyn LocalStore,
@@ -295,12 +315,13 @@ fn run(
         .unwrap_or(0)
         .max(state.lamport);
 
-    // 本设备自己最新的远端清单：上次写出后、状态库提交前崩溃时，lamport 以它为下限。
+    // 本设备自己最新的远端清单：校验 nonce 链；崩溃于提交前时 lamport 以它为下限。
     if let Some(g) = own_gens.iter().copied().max()
         && let Some(raw) = backend.get(&manifest::manifest_key(&me, g))?
     {
         match Manifest::decode(dek, &me, g, &raw) {
             Ok(m) => {
+                check_own_chain(&me, state, &m)?;
                 let top = m.files.values().map(|e| e.lamport).max().unwrap_or(0);
                 lamport = lamport.max(m.lamport).max(top);
             }
@@ -712,13 +733,17 @@ fn run(
     }
     let digest = content_hash(&serde_json::to_vec(&files).expect("条目可序列化"));
     let mut gen_ = state.gen_;
+    let mut new_nonce = state.last_nonce.clone();
     if digest != state.published_digest {
         gen_ = own_gens.iter().copied().max().unwrap_or(0).max(state.gen_) + 1;
+        new_nonce = data_encoding::HEXLOWER.encode(&crypto::random_bytes::<16>());
         let m = Manifest {
             device: me.clone(),
             gen_,
             lamport,
             files: files.clone(),
+            nonce: new_nonce.clone(),
+            prev: state.last_nonce.clone(),
         };
         backend.put(&manifest::manifest_key(&me, gen_), &m.encode(dek))?;
         rep.manifest_gen = Some(gen_);
@@ -736,6 +761,7 @@ fn run(
     state.files = files;
     state.lamport = lamport;
     state.gen_ = gen_;
+    state.last_nonce = new_nonce;
     state.published_digest = digest;
     state.remote_cache = new_cache;
     state.pending.clear();

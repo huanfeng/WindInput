@@ -1,6 +1,5 @@
 //! 本机同步状态（可序列化；持久化由 S4 负责）与重试退避。
 
-use crate::crypto::random_bytes;
 use crate::error::SyncError;
 use crate::manifest::{Entry, Manifest};
 use serde::{Deserialize, Serialize};
@@ -57,6 +56,9 @@ pub struct SyncState {
     /// 本设备最近一次写出的清单代数。
     #[serde(default)]
     pub gen_: u64,
+    /// 本设备最近一份已提交清单的 nonce。
+    #[serde(default)]
+    pub last_nonce: String,
     /// 路径 → 上次同步后的条目（含删除标记）。
     #[serde(default)]
     pub files: BTreeMap<String, Entry>,
@@ -82,6 +84,7 @@ impl SyncState {
             device: device.into(),
             lamport: 0,
             gen_: 0,
+            last_nonce: String::new(),
             files: BTreeMap::new(),
             remote_cache: BTreeMap::new(),
             published_digest: String::new(),
@@ -89,10 +92,6 @@ impl SyncState {
             retry: RetryState::default(),
             last_ok: None,
         }
-    }
-    pub fn new_random() -> Self {
-        let b: [u8; 8] = random_bytes();
-        Self::new(data_encoding::HEXLOWER.encode(&b))
     }
 }
 

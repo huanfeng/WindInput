@@ -146,6 +146,8 @@ mod tests {
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.clone()))
                 .collect(),
+            nonce: String::new(),
+            prev: String::new(),
         }
     }
     fn run(

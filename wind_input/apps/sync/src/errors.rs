@@ -31,6 +31,7 @@ pub fn sync_error(e: &SyncError) -> String {
         SyncError::NotInitialized => "远端尚未初始化：请先在一台设备上设置同步口令".into(),
         SyncError::AlreadyInitialized => "远端已经初始化过，请用口令或密钥加入".into(),
         SyncError::Halted(d) => d.clone(),
+        SyncError::DeviceIdConflict(_) => e.to_string(),
     }
 }
 
