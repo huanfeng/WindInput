@@ -223,13 +223,11 @@ fn fetch_blob(
 }
 
 /// 本机远端最新清单与本机状态对不上，说明另有一处在用同一个设备号。
-/// 仅「恰好领先一代且 prev 接得上」视为上次写出后未提交即崩溃；全新状态不适用（认领由调用方预先播种）。
+/// 仅「恰好领先一代且 prev 接得上」视为上次写出后未提交即崩溃，全新状态同样适用（同号撞入首份清单由确认身份时的 id_taken 检查）。
 fn check_own_chain(me: &str, state: &SyncState, top: &Manifest) -> Result<(), SyncError> {
     let g = top.gen_;
     let ok = if g > state.gen_ {
-        (state.gen_ > 0 || !state.last_nonce.is_empty())
-            && g == state.gen_ + 1
-            && top.prev == state.last_nonce
+        g == state.gen_ + 1 && top.prev == state.last_nonce
     } else if g == state.gen_ {
         g == 0 || top.nonce == state.last_nonce
     } else {

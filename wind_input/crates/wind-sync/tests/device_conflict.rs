@@ -46,7 +46,6 @@ fn setup() -> (MemBackend, Dek) {
 fn crash_after_publish_is_not_conflict() {
     let (b, dek) = setup();
     let mut a = Dev::new("a", &dek);
-    a.sync(&b).unwrap();
     a.local.set("themes/t1.json", "1");
     let before = a.state.clone();
     a.sync(&b).unwrap();
@@ -81,9 +80,22 @@ fn fresh_state_with_existing_remote_id_conflicts() {
     let mut a = Dev::new("a", &dek);
     a.local.set("themes/t1.json", "1");
     a.sync(&b).unwrap();
+    a.local.set("themes/t1.json", "2");
+    a.sync(&b).unwrap();
     let mut fresh = Dev::new("a", &dek);
     assert!(matches!(
         fresh.sync(&b),
         Err(SyncError::DeviceIdConflict(_))
     ));
+}
+
+#[test]
+fn fresh_state_first_publish_crash_recovers() {
+    let (b, dek) = setup();
+    let mut a = Dev::new("a", &dek);
+    a.local.set("themes/t1.json", "1");
+    let fresh = a.state.clone();
+    a.sync(&b).unwrap();
+    a.state = fresh;
+    a.sync(&b).expect("首份清单写出后崩溃可恢复");
 }
