@@ -213,14 +213,25 @@ pub fn sanitize_info_text(
 ///
 /// 点分键与嵌套表两种写法在 TOML 解析层就已归一为同一棵表树，本函数天然视其等价。
 pub fn preview(fragment: &toml::Value, current: &toml::Value) -> Vec<PatchEntry> {
+    // 旧的 `[schema.pinyin.fuzzy]` 按新键 `input.fuzzy` 处理，同加载时的层内迁移。
+    let mut fragment = fragment.clone();
+    crate::config::Config::migrate_fuzzy_value(&mut fragment);
     let mut entries = Vec::new();
-    flatten("", fragment, &mut entries);
+    flatten("", &fragment, &mut entries);
     for e in &mut entries {
         // 风险提示在这个单点补（不在 flatten 的各构造点分别填，漏一处无人察觉）；放在 error
         // 判断之前，写错了的危险键照样要提示。
         e.warning = risk_warning(&e.key);
         // 未知键在展平期已定性，无当前值可取。
         if e.error.is_some() {
+            continue;
+        }
+        // 类型级旧键是方案设置：片段（含方案包的 config_patch）不知道该落到哪个方案，拒绝。
+        if let Some(alias) = config_schema::scheme_alias(&e.key) {
+            e.error = Some(format!(
+                "这是方案设置，不能写在配置片段里：写进方案文件的 `{}`，或在设置的「方案设置」里改",
+                alias.path
+            ));
             continue;
         }
         let path: Vec<&str> = e.key.split('.').collect();

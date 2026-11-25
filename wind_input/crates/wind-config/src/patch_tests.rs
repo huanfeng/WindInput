@@ -662,3 +662,21 @@ fn risky_keys_are_all_registered() {
         assert!(!msg.trim().is_empty(), "{key} 的提示语不能为空");
     }
 }
+
+/// 类型级旧键是方案设置，片段里写了就报错（不知道该落到哪个方案）。
+#[test]
+fn scheme_setting_keys_are_rejected() {
+    let entries = preview_text("[schema.codetable]\ntop_code_commit = true\n");
+    assert_eq!(entries.len(), 1);
+    let err = entries[0].error.as_deref().unwrap_or_default();
+    assert!(err.contains("engine.codetable.top_code_commit"), "{err}");
+}
+
+/// 旧模糊音段按新键 `input.fuzzy` 处理。
+#[test]
+fn legacy_fuzzy_section_maps_to_input_fuzzy() {
+    let entries = preview_text("[schema.pinyin.fuzzy]\nzh_z = true\n");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].key, "input.fuzzy.zh_z");
+    assert!(entries[0].error.is_none(), "{:?}", entries[0].error);
+}

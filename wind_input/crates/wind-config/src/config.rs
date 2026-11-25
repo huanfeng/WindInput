@@ -7728,7 +7728,7 @@ impl Config {
     }
 
     /// 存量迁移（层内）：`[schema.pinyin.fuzzy]` 改名 `[input.fuzzy]`。本层已写了新键的项不覆盖。
-    fn migrate_fuzzy_value(layer: &mut toml::Value) {
+    pub(crate) fn migrate_fuzzy_value(layer: &mut toml::Value) {
         let Some(old) = get_nested(layer, &["schema", "pinyin", "fuzzy"])
             .and_then(toml::Value::as_table)
             .cloned()
