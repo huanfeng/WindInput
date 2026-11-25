@@ -38,12 +38,10 @@ int64_t peerUid(int fd);
 std::string requestSocketPath();
 std::string pushSocketPath();
 /// POSIX SHM 名：`/WindInput{Dev}.<uid>`（与 Rust `endpoint.rs::shm_name` 的 Linux 外部宿主
-/// 分支对齐；macOS 仍是 `/WindInput_SHM{Dev}`，Swift 写死，不动）。
+/// 分支对齐；macOS 是 `/WindInput_SHM{Dev}`，Swift 写死）。
 ///
-/// 带 uid：`/dev/shm` 全系统共用，不带的话同机第二个用户的服务建不了段（`O_EXCL` 撞名、
-/// `shm_unlink` EPERM），别的用户还能抢先建个同名段。长度：`/WindInput`(10) + `Dev`(3) + `.`(1)
-/// + uid（u32 至多 10 位）+ 层后缀（至多 `_MN5` 4）= 28 ≤ 31。守 31 是 macOS 的 PSHMNAMLEN（Linux
-/// 实际上限是 NAME_MAX 255），两平台同一条规则，Rust 侧 debug_assert 同一个数。
+/// 带 uid：`/dev/shm` 全系统共用，不带则同机第二个用户建不了段，别的用户还能抢先建同名段。
+/// 名字连层后缀最长 28 字节，须守 macOS PSHMNAMLEN 的 31，Rust 侧 debug_assert 同一个数。
 std::string shmName();
 /// 同上，uid 显式给（单测钉样例用）。
 std::string shmNameForUid(uint32_t uid);
@@ -53,16 +51,15 @@ std::string overlayShmName(uint32_t kind, const std::string& base = shmName());
 
 // ── 请求/响应 ────────────────────────────────────────────────────────
 
-/// 阻塞式 UDS 客户端。**不是线程安全的**：同一连接上「发一帧、读一帧」必须配对，从别的
-/// 线程往里插帧会把两边的读写配对错开（macOS 侧 frontCtx 专用连接就是为此而设）。
+/// 阻塞式 UDS 客户端，不是线程安全的：同一连接上「发一帧、读一帧」必须配对，别的线程插帧会
+/// 把读写配对错开。
 ///
-/// 保命设置（addon 跑在 fcitx5 主进程里，这里卡住就是整个桌面的输入卡住）：
-///   - I/O 超时（默认 2000ms），**连 connect 一起管**：超时在 connect 之前就设好——服务整体
-///     停住（SIGSTOP、死锁）时 listen 队列塞满，AF_UNIX 的 connect 会一直阻塞，它认 SO_SNDTIMEO。
-///   - 熔断：任何一次超时（连接 / 写 / 读）之后 `breakerMs`（默认 3000ms）内 connect 直接
-///     失败、不碰 socket——服务卡死期间每个键至多付一次超时，其余直接透传；到期后下一键再试。
-///   - 写用 MSG_NOSIGNAL：对端重启后向死连接写不会 SIGPIPE 杀掉 fcitx5 进程
-///     （macOS 侧同一问题靠 SO_NOSIGPIPE，Linux 没有这个 socket 选项）。
+/// addon 跑在 fcitx5 主进程里，这里卡住就是整个桌面的输入卡住，所以：
+///   - I/O 超时（默认 2000ms）在 connect 之前就设好：服务停住时 listen 队列塞满，AF_UNIX 的
+///     connect 会一直阻塞，它认 SO_SNDTIMEO。
+///   - 熔断：任何一次超时后 `breakerMs`（默认 3000ms）内 connect 直接失败，服务卡死期间每个键
+///     至多付一次超时；到期后下一键再试。
+///   - 写用 MSG_NOSIGNAL：向死连接写不会 SIGPIPE 杀掉 fcitx5。
 class BridgeClient {
 public:
     /// 最近一次失败的种类：决定能不能重试（`retryable`）、要不要熔断（`isTimeout`）。
@@ -105,7 +102,7 @@ public:
     bool takeStallFlag();
 
     /// 这种失败能否原样重发同一帧：只有「对端确定没处理」的才行——写失败、或一个响应字节
-    /// 都没读到就断（服务在读帧前后崩溃，崩了就不会上屏）。读超时**不能**重发：服务可能已经
+    /// 都没读到就断（服务在读帧前后崩溃，崩了就不会上屏）。读超时不能重发：服务可能已经
     /// 处理、只是回得慢，协调器不按 event_seq 去重，重发就是重复上屏。
     static bool retryable(Failure f) { return f == Failure::Send || f == Failure::PeerClosed; }
     static bool isTimeout(Failure f)
@@ -127,7 +124,7 @@ private:
     bool stalled_ = false;
 };
 
-/// 发一帧、读响应；失败且 `BridgeClient::retryable` 时调 `reconnect` 换新连接再试**一次**
+/// 发一帧、读响应；失败且 `BridgeClient::retryable` 时调 `reconnect` 换新连接再试一次
 /// （服务重启后的第一个键就自愈、不丢字——对位 macOS `handle` 的同名策略）。
 /// `reconnect` 返回 false（连不上 / 熔断中）则放弃。
 bool requestWithRetry(BridgeClient& client, const Bytes& frame, Frame& out,
@@ -141,7 +138,7 @@ bool readFully(int fd, uint8_t* buf, size_t n);
 /// 订阅 `bridge_push.sock` 的后台线程：连上即收 SERVICE_READY，之后逐帧回调。
 /// 断开（服务重启）后每秒重连一次，直到 stop()。
 ///
-/// 回调在**推送线程**上执行；调用方负责把它转回自己的主线程（Fcitx5 侧用
+/// 回调在推送线程上执行；调用方负责把它转回自己的主线程（Fcitx5 侧用
 /// EventDispatcher）。push 连接不设读超时：它长期空闲等推送，设了会被误判断连。
 ///
 /// 协议上客户端只读不写（服务端 accept 即登记，见 wind-bridge/src/push_unix.rs）。

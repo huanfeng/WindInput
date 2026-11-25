@@ -159,7 +159,7 @@ private:
     static constexpr size_t kPanelCount = 2;
     static constexpr size_t kMenuLevels = OVERLAY_MENU_LEVELS;
 
-    /// 连上并就绪（必要时重连）。**只许**在贴帧路径上调：重连会销毁 IO 事件源与窗口，
+    /// 连上并就绪（必要时重连）。只许在贴帧路径上调：重连会销毁 IO 事件源与窗口，
     /// 从 X 事件 / 计时器回调里调就是释放正在执行的自己。
     bool ensureConnection();
     void dropConnection();

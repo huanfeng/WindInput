@@ -2,7 +2,7 @@
 //
 // 服务端在 ext_presenter 形态下不自己合成按键，把组合编成下行帧 CMD_KEY_TAP/SEQ/HOLD/RELEASE
 // 推给宿主（`handle_cmdbar_macos.rs::CoordKeys`，macOS 由 `.app` 的 KeySynthesizer 发 CGEvent）。
-// 本 addon 经 Fcitx5 `InputContext::forwardKey` 把键交给**当前输入上下文**的应用——不进输入法
+// 本 addon 经 Fcitx5 `InputContext::forwardKey` 把键交给当前输入上下文的应用——不进输入法
 // 引擎、不回流（取舍见 wind_linux/AGENTS.md「命令直通车按键合成」）。
 //
 // 这里只做三件事：键名 → X keysym 与修饰位、组合 → 有序的按下/抬起事件列、按住键的记账与
@@ -18,7 +18,7 @@
 
 namespace windlinux {
 
-/// 一个要合成的键事件。`states` 按 X11 语义是**事件之前**的修饰态（同真实键盘：按下 Ctrl
+/// 一个要合成的键事件。`states` 按 X11 语义是事件之前的修饰态（同真实键盘：按下 Ctrl
 /// 那一下 state 不含 Ctrl，抬起时含），位值见 KeyMap.h 的 xstate。
 struct SynthKey {
     uint32_t sym = 0;
@@ -40,7 +40,7 @@ struct ResolvedCombo {
 /// 主键名 → keysym；不认识返回 0。名字集合 = Windows `key_inject::parse_key`（含 `return` /
 /// `esc` / `bksp` / `del` / `ins` / `pgup` / `pgdn` 等别名与符号键的字符写法）∪ macOS
 /// `KeySynthesizer.keyCodeMap`（`capslock`、修饰键本身作主键）∪ `f1`…`f24`；`vk:NN` 按
-/// **Windows VK**（十六进制，`0x` 可省，同 Windows）反查。字母、符号取无 Shift 的基础层
+/// Windows VK（十六进制，`0x` 可省，同 Windows）反查。字母、符号取无 Shift 的基础层
 /// keysym（`c` 而非 `C`），Shift 放进 state——各前端按 keysym 反查键码、客户端按 state 解释，
 /// 与 `xdotool key ctrl+shift+c` 同法。大小写不敏感。
 uint32_t keyNameToKeysym(const std::string& name);

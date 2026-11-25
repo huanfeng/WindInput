@@ -42,7 +42,7 @@ namespace windlinux {
 namespace {
 
 /// 十六进制格式化。不直接往日志流里塞 std::hex：那个格式标志是粘性的，会把同一流上后续
-/// 日志的行号也印成十六进制（实测 `WindEngine.cpp:a8`）。
+/// 日志的行号也印成十六进制。
 std::string hex(uint32_t v)
 {
     char buf[16];
@@ -216,17 +216,16 @@ public:
         const std::string utf8 = clientPreeditText(composition);
         if (!utf8.empty()) {
             // DontCommit：客户端没声明 ClientUnfocusCommit 时，Fcitx5 会在失焦那一刻把 client
-            // preedit 当正文上屏（实测 DBus 客户端失焦后收到 "ni'hao"）。组合串是编码不是正文，
+            // preedit 当正文上屏。组合串是编码不是正文，
             // 失焦该丢（与服务端 FocusLost 清缓冲、macOS 失焦抹 marked text 一致）；其中待定
             // 标点那一截由 deactivate 里的 applyClearComposition 自己上屏，不靠这条路。
             text.append(utf8, {fcitx::TextFormatFlag::Underline, fcitx::TextFormatFlag::DontCommit});
             text.setCursor(int(caretBytes));
         }
-        // 宿主支持内嵌预编辑就摆在光标处（与 Windows/macOS 的内嵌组合同观感）。不支持的
-        // （WPS、QQ 这类走 XIM 的客户端）**什么都不交给 Fcitx5**：曾退到 `InputPanel::setPreedit`，
-        // classicui 就另起一个小窗画编码，正好压在我们的候选窗底下看不见。获焦时已经经
-        // `host.display` 的 inline_preedit=false 告诉服务端，编码由它画进候选窗顶部栏，这里
-        // 收到的只是占位组合（见 HostUi.h clientPreeditText）。
+        // 宿主支持内嵌预编辑就摆在光标处。不支持的（WPS、QQ 这类走 XIM 的客户端）什么都不交给
+        // Fcitx5：交给 `InputPanel::setPreedit` 会让 classicui 另起小窗画编码，压在候选窗底下。
+        // 获焦时已经 `host.display` 的 inline_preedit=false 让服务端把编码画进候选窗，这里收到的
+        // 只是占位组合（见 HostUi.h clientPreeditText）。
         if (ic_->capabilityFlags().test(fcitx::CapabilityFlag::Preedit)) {
             ic_->inputPanel().setClientPreedit(text);
             ic_->updatePreedit();
@@ -543,7 +542,7 @@ bool WindEngine::reconnect()
         // 激活那一刻没连上，服务从没听说过当前这个文本框：宿主名、密码框、能不能内嵌编码
         // （host.display 的 inline_preedit）全缺，服务端按默认值处理——WPS 这类没有 Preedit
         // 能力位的应用首次打字就既不内嵌、候选窗也不画编码。赶在这次按键之前补上。
-        // 服务**重启**那条路由 CMD_SERVICE_READY 补报；首次拉起没有这一手，靠的就是这里。
+        // 服务重启那条路由 CMD_SERVICE_READY 补报；首次拉起没有这一手，靠的就是这里。
         if (focusUnreported_) {
             if (fcitx::InputContext* ic = focusedIC()) {
                 reportFocus(ic);
@@ -959,7 +958,7 @@ void WindEngine::activate(const fcitx::InputMethodEntry&, fcitx::InputContextEve
     fcitx::InputContext* ic = event.inputContext();
     // 上一个 IC 还没失焦就有新 IC 获得焦点（没有焦点组的前端允许多个 IC 同时聚焦）：先替它
     // 收尾。否则它迟到的 FocusLost 会被服务端当作「旧宿主的陈旧失焦」丢弃（active token 已是
-    // 新 IC），留在服务端缓冲里的旧编码就会接着拼进新文本框（实测「你好你好」）。
+    // 新 IC），留在服务端缓冲里的旧编码就会接着拼进新文本框。
     if (fcitx::InputContext* old = currentIC_.get(); old && old != ic) {
         releaseHeldKeys("focus_changed");
         ICSink sink(old);

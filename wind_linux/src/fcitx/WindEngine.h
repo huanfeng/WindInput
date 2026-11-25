@@ -4,7 +4,7 @@
 // 把服务的上屏/预编辑写回 InputContext、把服务光栅化好的候选窗帧显示出来。引擎/词库/
 // 候选逻辑全在服务里，这里不做任何「中英判定」。
 //
-// 线程模型：Fcitx5 在主线程（事件循环）调 keyEvent/activate/deactivate，本类在其中**同步**
+// 线程模型：Fcitx5 在主线程（事件循环）调 keyEvent/activate/deactivate，本类在其中同步
 // 请求服务（UDS 往返 <1ms，2s 超时兜底）。push 通道在后台线程收帧，经 EventDispatcher
 // 转回主线程再碰 InputContext——InputContext 与 InputPanel 都不是线程安全的。
 #pragma once
@@ -73,7 +73,7 @@ private:
     ServiceLauncher launcher_;
     bool ensureConnected();
     bool reconnect();
-    /// 在 request 连接上发一帧、读响应；对端确定没处理时重连并**重试一次**（服务重启后的第一
+    /// 在 request 连接上发一帧、读响应；对端确定没处理时重连并重试一次（服务重启后的第一
     /// 个键就自愈、不丢字）。读超时不重试（见 `BridgeClient::retryable`）。
     bool requestWithRetry(const Bytes& frame, Frame& resp);
     /// 发一帧、读掉 ack，失败只记日志。返回是否成功（菜单据此决定要不要本端收起）。
@@ -101,7 +101,7 @@ private:
     uint16_t prevCharFor(fcitx::InputContext* ic);
     void noteHostCursor(fcitx::InputContext* ic);
     /// 修饰键单击 / CapsLock 状态通知：发一帧 eventType=UP 的 KeyEvent 并应用其响应。
-    /// `toggles` 必须是真实锁定态——服务端拿**每一帧**的 toggles 校准大写锁定镜像，
+    /// `toggles` 必须是真实锁定态——服务端拿每一帧的 toggles 校准大写锁定镜像，
     /// 发 0 等于告诉它「大写锁定关了」。
     void sendKeyUp(fcitx::InputContext* ic, uint32_t vk, uint32_t mods, uint8_t toggles);
     /// 组字中 Alt 的按下 / 松开转发给服务（注释态切换）；返回服务是否吃掉。

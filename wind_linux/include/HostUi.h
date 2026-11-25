@@ -20,7 +20,7 @@ std::string userHicolorDir();
 
 /// 建好 `root/<N>x<N>/apps`（N = 16/22/24/32/48/64，同服务端 `tray_icon::SIZES`）。成功或已存在返回 true。
 ///
-/// Fcitx5 的 `IconTheme`（classicui 托盘）、Qt 的 `QIconTheme`、KIconLoader 在构造主题时把**不存在**的
+/// Fcitx5 的 `IconTheme`（classicui 托盘）、Qt 的 `QIconTheme`、KIconLoader 在构造主题时把不存在的
 /// 目录永久排除：服务端第一次写图标若晚于它们，就要等宿主重启才看得见。addon 随 Fcitx5 启动而加载，
 /// 在这里先建一次（服务端写之前也会建）。
 bool ensureIconDirs(const std::string& root);
@@ -55,7 +55,7 @@ std::optional<ModeStatus> modeStatusOf(const Frame& frame);
 /// 算；那组文件还不在（服务没起来、目录不可写、缺字体）就退回随包的种子 `windinput-zh/en/caps`。
 class ModeIndicator {
 public:
-    /// 帧里带模式就记下；返回托盘图标 / 标签是否**变了**（调用方据此刷新状态区）。
+    /// 帧里带模式就记下；返回托盘图标 / 标签是否变了（调用方据此刷新状态区）。
     bool update(const Frame& frame);
 
     /// 本端判定的大写锁定态（`CapsLockTracker` 的结论）；返回图标 / 标签是否变了。
@@ -84,7 +84,7 @@ public:
     /// 运行时图标名：`<前缀><zh|en|caps>-<主字编码>`。前缀正式版 `windinput-lbl-`、dev 版
     /// `windinput-lbl-dev-`（两个变体共用用户图标目录，名字不分会在启动清理时互删）；主字编码是
     /// UTF-8 小写十六进制，超过 32 字节改为 `h` + FNV-1a 64 位散列的 16 位十六进制（文件名上限
-    /// 255 字节）。**与 `wind_ui::tray_icon::icon_name` 同一规则**（host_ui_test 读那边源码核对样例）。
+    /// 255 字节）。与 `wind_ui::tray_icon::icon_name` 同一规则（host_ui_test 读那边源码核对样例）。
     /// `dev` 缺省取本 addon 的变体（`variantSuffix()`）。
     static std::string dynamicIconName(Variant v, const std::string& label);
     static std::string dynamicIconName(Variant v, const std::string& label, bool dev);
@@ -105,11 +105,9 @@ private:
 
 /// 大写锁定的本端判定（纯逻辑）。
 ///
-/// X11 事件里的修饰状态是事件**之前**的（实测 Xvfb + xev：开 → 按下 state=0、松开 state=Lock；
-/// 关 → 按下 state=Lock、松开**仍是** Lock——XKB 的 LockMods 在按下时上锁、在松开时解锁）。
-/// 所以 Caps_Lock 本身的两个事件里都读不出「之后」的状态，只能按「按下时没锁 ⇒ 松开后锁上」
-/// 推；别的键的 Lock 位则就是当前锁定态（它们不改锁定），拿来校准（在别的输入法 / 应用里
-/// 切过大写回来，第一个键就对上）。
+/// X11 事件里的修饰状态是事件之前的（XKB 在按下时上锁、松开时解锁，关锁那次松开仍带 Lock），
+/// 所以 Caps_Lock 自身的事件读不出「之后」的状态，只能按「按下时没锁 ⇒ 松开后锁上」推；
+/// 别的键的 Lock 位就是当前锁定态，拿来校准（在别处切过大写回来，第一个键就对上）。
 class CapsLockTracker {
 public:
     /// 喂一个按键事件（按下 / 松开都喂）；返回本事件之后的锁定态（能判定时）。
@@ -126,7 +124,7 @@ private:
 /// 服务端下发的组合串 → 应用内预编辑该显示的文本。
 ///
 /// 非嵌入模式（`preedit_display` ≠ app_inline）与联想态、加词等模式下，服务端让宿主挂一段
-/// 单个空格的**占位组合**（`COMPOSITION_PLACEHOLDER`）：Windows 的 TSF 要有 composition 才
+/// 单个空格的占位组合（`COMPOSITION_PLACEHOLDER`）：Windows 的 TSF 要有 composition 才
 /// 取得到光标坐标。Fcitx5 直接给 `cursorRect`，不需要它；而它在应用里是真的一格空白，把光标
 /// 往右推一格。本端照常把它记成「有组合」（失焦 / 宿主重置要据此收尾、报服务端），只是不显示。
 std::string clientPreeditText(const std::string& composition);

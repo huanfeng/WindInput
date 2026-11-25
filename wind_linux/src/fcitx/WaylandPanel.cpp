@@ -617,7 +617,7 @@ bool WaylandCandidatePanel::handles(const fcitx::InputContext* ic) const
     if (std::strcmp(ic->frontend(), "wayland_v2") == 0) {
         return true;
     }
-    // input-method-v1（KWin）：没绑到面板全局时接不住，留给 X11 那条路（与改动前一致）
+    // input-method-v1（KWin）：没绑到面板全局时接不住，留给 X11 那条路
     return inputPanel_ && std::strcmp(ic->frontend(), "wayland") == 0;
 }
 
@@ -981,13 +981,10 @@ bool WaylandCandidatePanel::ensureSurface()
 {
     if (!surface_) {
         surface_ = wl_compositor_create_surface(compositor_);
-        // Fcitx5 classicui 对本连接上每个 wl_surface 的指针进入事件都会取 user_data 当它自己的
-        // 包装对象解引用（`surface->userData()`）：我们的 surface 它不认识，user_data 为空就崩
-        // （实测鼠标一移上候选窗就带崩 fcitx5）。给一块全零的内存，它读到的 userData 是空指针，
-        // 按「不是我的窗口」直接返回。包装类内部布局没有头文件可对，故留足余量而不依赖偏移。
-        // 注意 wl_proxy_add_listener 会把 user_data 覆盖成它的 data 参数：listener 的 data 也必须
-        // 传占位（实测传 this 时，classicui 把 this 当它的窗口对象解引用，照样崩）；
-        // this 另存进占位内存的 kFakeSelfOffset 处供回调取回。
+        // classicui 会把本连接上每个 surface 的 user_data 当自己的包装对象解引用，为空或传 this
+        // 都会崩 fcitx5：给一块全零占位（读出空 userData 即「不是我的窗口」），留足余量不依赖布局。
+        // add_listener 会覆盖 user_data，故 listener 的 data 也传占位；this 存在 kFakeSelfOffset 处。
+        // 见 docs/design/linux-port.md「Wayland 宿主行为」。
         static char fakeWrapper[1024] = {};
         *reinterpret_cast<WaylandCandidatePanel**>(fakeWrapper + WaylandListeners::kFakeSelfOffset) =
             this;
@@ -1696,13 +1693,9 @@ void WaylandCandidatePanel::hidePopup()
     }
     click_.cancel(); // 收起后的松开不再选
     decorClick_.cancel();
-    // 销毁 popup 角色（合成器据此摘窗，下一次显示重建时按当时的文本光标矩形重新摆位——只摘 buffer
-    // 不销毁角色，treeland 会让候选窗一直钉在第一次出现的地方），但 **wl_surface 本身留着**：
-    // 它一旦销毁，鼠标恰好正进入它时迟到的 `wl_pointer.enter` 带的是已销毁对象（libwayland 交给
-    // 回调的是 NULL），Fcitx5 classicui 的指针回调对它直接解引用 → 崩 fcitx5（实测鼠标一移上
-    // 候选窗就崩）。surface 活着，那些事件的 user_data（见 ensurePopup 里的占位）才有效。
-    // 先摘 buffer 提交（surface 取消映射），再销毁角色：反过来会让合成器有一瞬把无角色的
-    // surface 当普通内容画（实测 Toast 收起时闪出整块纯黑）。
+    // 销毁 popup 角色（否则 treeland 不按新光标重新摆位），但 wl_surface 留着：销毁后迟到的
+    // pointer.enter 会让 classicui 解引用空对象崩溃（user_data 占位见 ensureSurface）。
+    // 先摘 buffer 再销毁角色，反过来会闪一帧纯黑。见 docs/design/linux-port.md「Wayland 宿主行为」。
     unmapChild();
     wl_surface_attach(surface_, nullptr, 0, 0);
     wl_surface_commit(surface_);
@@ -2003,7 +1996,7 @@ void WaylandCandidatePanel::hideLayer(LayerSurf& ls)
     if (ls.mapped) {
         // 先摘 buffer 提交（取消映射），再连角色对象一起销毁：下次显示建新的角色对象、走全新的
         // 「空提交 → configure」。只摘 buffer 不换角色对象时，treeland 在状态没变的重新提交上
-        // 不再发 configure（实测：菜单底板第二次打开就一直等不到 configure）。
+        // 不再发 configure。
         wl_surface_attach(ls.surface, nullptr, 0, 0);
         wl_surface_commit(ls.surface);
     }

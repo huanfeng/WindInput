@@ -72,9 +72,8 @@ Bytes encodeKeyEventFrame(const KeyEvent& e);
 /// CMD_FOCUS_GAINED：39 字节定长段 + `bundleIdLen u32 + bundleId` + `windowClassLen u32 +
 /// windowClass`。对位 Swift `encodeFocusGainedFrame`（它只发到 bundleId 段为止）。
 ///
-/// ⚠ **必须发满 39 字节**：Rust `FocusGainedPayload::from_bytes` 的下限是 39（旧 38），
-/// 发短了解码恒失败，焦点重型段（按应用初始模式 / 密码框强制英文 / 焦点状态气泡）整段
-/// 不执行——macOS 早期就栽在这里（见 wind_macos/AGENTS.md「按应用配置 / 焦点重型段」）。
+/// 必须发满 39 字节（Rust `FocusGainedPayload::from_bytes` 的下限）：发短了解码恒失败，焦点
+/// 重型段（按应用初始模式 / 密码框强制英文 / 焦点状态气泡）整段不执行。
 ///
 /// caret 段全 0：服务端 `apply_focus_caret` 见 height==0 即返回，坐标另经 CMD_CARET_UPDATE。
 Bytes encodeFocusGainedFrame(uint64_t clientToken, uint64_t inputScopeMask,
@@ -83,7 +82,7 @@ Bytes encodeFocusGainedFrame(uint64_t clientToken, uint64_t inputScopeMask,
 /// CMD_FOCUS_LOST：clientToken u64 + reason u8（9 字节）。同步发送、服务端回 ack。
 Bytes encodeFocusLostFrame(uint64_t clientToken, uint8_t reason);
 
-/// CMD_IME_ACTIVATED / CMD_IME_DEACTIVATED：clientToken u64。服务端对这两条**从不回响应**
+/// CMD_IME_ACTIVATED / CMD_IME_DEACTIVATED：clientToken u64。服务端对这两条从不回响应
 /// （server.rs 的对应臂恒返回 None），故一律带 AsyncFlag 发、不读响应。
 Bytes encodeClientTokenFrame(uint16_t cmd, uint64_t clientToken);
 
@@ -108,7 +107,7 @@ Bytes encodeMenuPointerFrame(uint32_t event, uint32_t button, int32_t x, int32_t
 /// target ≥ 0 为该候选（页内下标）的右键菜单，-1 为功能主菜单；(x, y) 为菜单左上锚点。
 Bytes encodeMenuOpenFrame(int32_t target, int32_t x, int32_t y, int32_t left, int32_t top,
                           int32_t right, int32_t bottom);
-/// 同上，另带 `"lx":LX,"ly":LY`：右键点在悬停提示**位图内**的坐标（target =
+/// 同上，另带 `"lx":LX,"ly":LY`：右键点在悬停提示位图内的坐标（target =
 /// MENU_TARGET_TOOLTIP 时用；按段 / 按行的命中在服务端按这个点做）。
 Bytes encodeMenuOpenFrame(int32_t target, int32_t x, int32_t y, int32_t left, int32_t top,
                           int32_t right, int32_t bottom, int32_t lx, int32_t ly);
@@ -125,7 +124,7 @@ struct HostOutput {
 /// 同上，另带 `"output":"…"` 与 `"work":[左,上,右,下]`（与 menu.open 的 work 同格式）。
 Bytes encodeHostDisplayFrame(bool caretFree, bool caretTrusted, bool inlinePreedit, double scale,
                              const HostOutput& output);
-/// 上行扩展信封 `pos.*`（如 `pos.status_tip`）：body = `{"x":X,"y":Y}`，**内容**左上的屏幕坐标
+/// 上行扩展信封 `pos.*`（如 `pos.status_tip`）：body = `{"x":X,"y":Y}`，内容左上的屏幕坐标
 /// （与配置 `ui.status.custom_x/y` 同义）。对位 Rust `decode_ext_point`。即不带输出名的下一个。
 Bytes encodePosFrame(const std::string& kind, int32_t x, int32_t y);
 /// 上行扩展信封 `pos.toolbar` / `pos.softkeyboard`：body = `{"x":X,"y":Y,"output":"…"}`，内容盒
@@ -137,7 +136,7 @@ Bytes encodeReduceMotionFrame(bool reduce);
 Bytes encodeDecorClickFrame(uint32_t index);
 /// 上行扩展信封 `host.fullscreen`：body = `{"fullscreen":true|false}`。
 Bytes encodeHostFullscreenFrame(bool fullscreen);
-/// CMD_PANEL_POINTER：kind u32 + event u32 + button u32 + x i32 + y i32（20 字节，**位图内**坐标，
+/// CMD_PANEL_POINTER：kind u32 + event u32 + button u32 + x i32 + y i32（20 字节，位图内坐标，
 /// 含软阴影扩边）。对位 Rust `codec.rs::encode_panel_pointer`（那边只出载荷，这里带头）。
 Bytes encodePanelPointer(uint32_t kind, uint32_t event, uint32_t button, int32_t x, int32_t y);
 /// CMD_FRONT_CONTEXT：appLen+app + titleLen+title + selLen+sel（均 UTF-8）。
@@ -224,10 +223,11 @@ struct HostRenderFramePayload {
 std::optional<HostRenderFramePayload> decodeHostRenderFrame(const Bytes& p);
 
 /// CMD_OVERLAY_FRAME（push）：一层浮层（状态气泡 / Toast / tooltip）有新帧或该隐藏。
-/// 像素在该层自己的 SHM 段（`overlayShmName(kind)`）。68 字节基础布局（服务端现在恒在末尾多发一个 f32 scale 成 72 字节，addon 不读，按 ≥68 字节接收），逐字段对位 Rust
+/// 像素在该层自己的 SHM 段（`overlayShmName(kind)`）。68 字节基础布局（服务端末尾另发一个
+/// f32 scale 成 72 字节，addon 不读，按 ≥68 字节接收），逐字段对位 Rust
 /// `codec.rs::encode_overlay_frame`：kind seq w h flags place（u32）、x y altX altY（i32）、
 /// anchor（u32）、margin contentX contentY（i32）、contentW contentH（u32）、durationMs（i32）。
-/// 坐标一律是**内容盒**左上（不含软阴影扩边）。
+/// 坐标一律是内容盒左上（不含软阴影扩边）。
 ///
 /// 工具栏 / 软键盘（kind 10 / 11）在 72 字节之后多一段拖动区：count u32 + count × (x y w h) i32，
 /// 位图内坐标。只对这两个 kind 解析；尾段 count 与数据对不上整帧拒收。

@@ -162,7 +162,7 @@ void X11CandidatePanel::dropConnection()
     // 只从 ensureConnection 进来，而后者只在贴帧路径（push 帧，经 EventDispatcher）上调——
     // 不在 X 的 IO 回调、也不在任何计时器回调里（查指针 / 工作区连接坏了只返回空，不重连），
     // 所以销毁 IO 事件源是安全的。计时器仍一律只停不毁：将来谁从回调里走进来也不至于释放
-    // 正在执行的自己（菜单空闲计时器曾经就是：dropMenu → resyncAfterMenu → 查指针 → 重连）。
+    // 正在执行的自己（如 dropMenu → resyncAfterMenu → 查指针 → 重连这条链）。
     ioEvent_.reset();
     disarm(grabRetry_);
     disarm(menuIdle_);

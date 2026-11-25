@@ -1,9 +1,9 @@
 // 光栅浮层（状态气泡 / 悬停提示 / Toast）与候选窗悬停的鼠标交互纯逻辑（不依赖 Fcitx5 / X11）。
 //
 // 这三层浮层与候选窗同构：像素是服务端画的，本端只贴图。交互分两类：
-//   - **本端就能定的**：悬停保持、拖动、Toast 点击关闭、自动隐藏的暂停——计时与落位本来就在
+//   - 本端就能定的：悬停保持、拖动、Toast 点击关闭、自动隐藏的暂停——计时与落位本来就在
 //     本端（同 macOS `.app`），服务端没有要跟着动的状态；
-//   - **要服务端定的**：右键菜单（菜单项、勾选态、按段 / 按行命中都在服务端），经 `menu.open`
+//   - 要服务端定的：右键菜单（菜单项、勾选态、按段 / 按行命中都在服务端），经 `menu.open`
 //     报上去，与候选右键菜单同一条路（见 Menu.h）。
 // 每条规则对位 Windows 的哪个窗口 / 函数，写在各自的注释里。
 #pragma once
@@ -28,7 +28,7 @@ enum class OverlayPress { None, Drag, Menu, Close, Forward };
 OverlayPress overlayPressAction(uint32_t kind, uint8_t button);
 
 /// 同上，工具栏 / 软键盘另看按下点 `(x, y)`（位图内）是否落在该帧的拖动区 `drag` 里：左键落在
-/// 拖动区 → `Drag`，这次按下连同随后的移动、松开都由本端拖，松手只报一次 `pos.*`——按下**不能**
+/// 拖动区 → `Drag`，这次按下连同随后的移动、松开都由本端拖，松手只报一次 `pos.*`——按下不能
 /// 转给服务端，它收到拖动区里的按下会自己再发一次「已移动」，与 `pos.*` 重复。其余 → `Forward`。
 /// 别的 kind 忽略坐标，同两参版本。
 OverlayPress overlayPressAction(uint32_t kind, uint8_t button, int32_t x, int32_t y,
@@ -110,7 +110,7 @@ inline bool effectiveFullscreen(bool x11Fullscreen, bool waylandPanels)
 /// 该层没有菜单返回 MENU_TARGET_MAIN（调用方不应走到这里）。
 int32_t overlayMenuTarget(uint32_t kind);
 
-/// 悬停门控：**「收到移动事件」不等于「用户动了鼠标」**。气泡弹在静止的指针下面、或状态刷新时
+/// 悬停门控：「收到移动事件」不等于「用户动了鼠标」。气泡弹在静止的指针下面、或状态刷新时
 /// 挪到指针下面，X 一样会发进入 / 移动事件；把它当悬停，气泡就永远不会自动消失。故以窗口出现
 /// 那一刻的指针位置为基线，位置真变了才算。对位 Windows `StatusTipMouse::accept_move`。
 class HoverGate {
@@ -164,14 +164,14 @@ constexpr int32_t kKeepHover = INT32_MIN;
 int32_t tipRecheckHover(bool onTip, bool onCandidate, int32_t candidateHit, int32_t held);
 
 /// 拖动状态气泡：指针在 `(px, py)`、按下时指针相对窗口左上的偏移为 `(grabDx, grabDy)`，返回
-/// 新的**窗口**矩形。内容盒夹进工作区，规则与 `placeOverlay` 的最后一步是同一条（阴影扩边
+/// 新的窗口矩形。内容盒夹进工作区，规则与 `placeOverlay` 的最后一步是同一条（阴影扩边
 /// 允许出屏）——落点再经服务端存成固定位置、下一次按 ABSOLUTE 摆放时不会被挪动。
 /// 对位 Windows `StatusTipMouse` 的 WM_MOUSEMOVE（那边按窗口矩形钳制，这里按内容盒，与本端
 /// 其余浮层的落位一致）。`geo` 取该层最近一帧的尺寸与内容盒偏移。
 Rect dragOverlay(int32_t px, int32_t py, int32_t grabDx, int32_t grabDy,
                  const OverlayFramePayload& geo, const Rect& workArea);
 
-/// 候选窗左键点选：按下只记命中，**松开时仍落在同一项上**才选（候选与翻页按钮同理；移出后松开
+/// 候选窗左键点选：按下只记命中，松开时仍落在同一项上才选（候选与翻页按钮同理；移出后松开
 /// 视为放弃，按钮的通行语义）。对位 macOS `CandidateContentView.mouseUp`（ab671477，同 Squirrel）。
 /// 按下就选的话，上屏、收起候选窗在松开前就做完了，松开落到候选窗后面的应用上。
 class ClickGate {

@@ -4,9 +4,8 @@
 // 语义逐条对齐（待定标点 held / 定格前缀 / hold 计时器 / 数字后智能标点记账）。
 // 抽成纯逻辑的理由与 Swift 侧相同：单测不必起 Fcitx5。
 //
-// ⚠️ **新增下行 cmd 必须在 apply() 里显式接一臂**——default 是「消费按键但不出字」，
-// 漏接的表现是按键被吃掉、屏幕上什么都没有（macOS 的历史案例：commitThenDefer 漏接
-// 导致码表顶码上屏丢字）。判断要不要接只看**谁产出**，不看名字像不像 Windows 专有。
+// 新增下行 cmd 必须在 apply() 里显式接一臂：default 是「消费按键但不出字」，漏接就是按键被
+// 吃掉、屏幕上什么都没有。要不要接只看谁产出，不看名字像不像 Windows 专有。
 #pragma once
 
 #include "Codec.h"
@@ -25,7 +24,7 @@ public:
     virtual void commitText(const std::string& utf8) = 0;
     /// 摆组合串（预编辑）。`utf8` 为空 = 清除组合。`caretBytes` 为组合内光标的 UTF-8 字节偏移。
     virtual void setPreedit(const std::string& utf8, size_t caretBytes) = 0;
-    /// 删除光标前 `utf16Units` 个 **UTF-16 码元**（服务端的量纲，同 Windows / macOS）；实现方
+    /// 删除光标前 `utf16Units` 个 UTF-16 码元（服务端的量纲，同 Windows / macOS）；实现方
     /// 按光标前文本换算成码点（`codepointsForUtf16Back`）。宿主不支持（无 surrounding text 能力）
     /// 时返回 false、什么都不做。调用方保证不超过 `kMaxDeleteUnits`。
     virtual bool deleteBeforeCursor(size_t utf16Units) = 0;
@@ -35,7 +34,7 @@ public:
 };
 
 /// 数字后智能标点的 prevChar 记账——对位 Swift `SmartPunctDigitTracker`（语义与取舍见那边
-/// 的长注释）。「数字后」**只认本记账**（2026-10-13 定，三平台一致）：宿主 surrounding text
+/// 的长注释）。「数字后」只认本记账（三平台一致）：宿主 surrounding text
 /// 里的数字不算——那会把「光标恰好停在旧数字后面」也当成数字后，用户在那里打不出全角标点。
 class DigitTracker {
 public:
@@ -43,7 +42,7 @@ public:
     /// 发给服务端的 prevChar（对位 Windows `WindSmartPunct::ResolvePrevChar`）。`hostChar` 是
     /// surrounding text 读到的光标前字符（0 = 读不到）：记账有数字就报记账；否则报宿主字符，
     /// 但 ASCII 数字抹成 0。非数字照报——服务端智能符号 press2 守卫拿它比对武装串末位。
-    /// ⛔ 别让宿主字符「否决」记账：Qt / Electron 的 surrounding 是异步推送的，快打「3.」时
+    /// 别让宿主字符「否决」记账：Qt / Electron 的 surrounding 是异步推送的，快打「3.」时
     /// 读到的可能还是插入 3 之前的内容，会误判成非数字后。
     uint16_t resolve(uint16_t hostChar) const
     {
@@ -71,7 +70,7 @@ private:
 /// 与 DigitTracker 分开：组合串（预编辑）没写进文档，不动它——否则「打 nihao → Esc」会留下
 /// 编码末位 'o'，下一笔中文被误补空格。
 ///
-/// **光标被挪过**（鼠标点到别处）看不见，靠两条补：宿主发 reset（GTK 点击会发）时调 `reset()`；
+/// 光标被挪过（鼠标点到别处）看不见，靠两条补：宿主发 reset（GTK 点击会发）时调 `reset()`；
 /// 宿主支持周边文本时（Qt 系点击只报光标位置、不发 reset），每次按键前用 `noteCursor` 比对预期光标——每次
 /// 写进文档都把预期光标往前推，宿主报来的位置对不上、或光标前的字与记账对不上，就是被挪过。
 /// 不支持周边文本的宿主两条都没有。
@@ -150,7 +149,7 @@ constexpr uint32_t kMaxCursorMove = 64;
 
 class ResponseRouter {
 public:
-    /// 计时器调度器：ms 毫秒后在**主线程**回调 cb。未注入则 hold 计时器不工作（待定标点
+    /// 计时器调度器：ms 毫秒后在主线程回调 cb。未注入则 hold 计时器不工作（待定标点
     /// 只在下一次按键/失焦时收口，功能不丢，只是下划线留得久一点）。
     using TimerScheduler = std::function<void(uint32_t ms, std::function<void()> cb)>;
     /// 计时器到点时借用「此刻的宿主」：调用方拿当前焦点造一个 sink 交给 `use`，焦点已不在
@@ -163,8 +162,7 @@ public:
     /// 路由一帧。返回值 = 按键是否被输入法消费（false ⇒ 交还宿主）。
     ///
     /// `hostShortcut`：触发本帧的按键带 Ctrl/Alt/Super。此时 ClearComposition 只表示「把组合
-    /// 清掉」，不表示这个键归输入法——宿主仍须收到它去执行复制/粘贴（对位 Swift 同名参数与
-    /// macOS issue #64）。
+    /// 清掉」，不表示这个键归输入法——宿主仍须收到它去执行复制/粘贴（对位 Swift 同名参数）。
     bool apply(const Frame& frame, TextSink* sink, bool hostShortcut = false);
 
     /// 结束组合（失焦 / 宿主要求 reset）。待定标点转为提交而非丢弃。

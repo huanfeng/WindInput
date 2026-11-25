@@ -321,6 +321,20 @@ DBus 客户端能直接断言 `ForwardKey` 序列；代价是只作用于当前�
 键名全集、事件顺序与 state、限流数值、`hold` 的卡键保护（失焦 / 换 IC / reset / 服务重启或断线 /
 析构补发抬起，最长保持 10 秒）逐条见 `wind_linux/AGENTS.md`「命令直通车按键合成」。
 
+## 5g. Wayland 宿主行为（WaylandPanel 依据）
+
+- **classicui 解引用所有 surface 的 user_data**：Fcitx5 classicui 对同一连接上每个 `wl_surface` 的
+  指针进入事件都把 user_data 当自己的包装对象解引用。user_data 为空，或传本类 `this`，鼠标一移上
+  候选窗就带崩 fcitx5；所以 surface 与其 listener 的 data 一律传一块全零占位内存（读出空 userData，
+  按「不是我的窗口」返回），`this` 另存在占位内存里。
+- **wl_surface 不能随隐藏销毁**：鼠标恰好进入时迟到的 `wl_pointer.enter` 会带着已销毁对象（回调拿到
+  NULL），classicui 照样解引用崩溃。隐藏只销毁 popup 角色，surface 留着。
+- **隐藏要销毁 popup 角色**：只摘 buffer 不销毁角色，treeland 会把候选窗一直钉在第一次出现的位置；
+  销毁后重建才按当时的文本光标重新摆位。顺序须先摘 buffer 提交、再销毁角色，反过来合成器会有一瞬把
+  无角色 surface 当普通内容画（Toast 收起时闪一块纯黑）。
+- **layer surface 每次显示换新角色对象**：只摘 buffer 不换角色对象时，treeland 对状态没变的重新提交
+  不再发 configure（菜单底板第二次打开等不到 configure）。
+
 ## 6. 阶段
 
 | 阶段 | 内容 | 状态 |

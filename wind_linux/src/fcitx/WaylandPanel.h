@@ -4,7 +4,7 @@
 // X11 路径（X11Panel）靠 `cursorRect()` 是屏幕坐标这一条自己摆窗口；Wayland 客户端报的却是
 // 窗口相对坐标，应用的屏幕位置只有合成器知道。popup surface 正是为此设计的：把 wl_surface 交给
 // `zwp_input_method_v2.get_input_popup_surface`，合成器按文本光标矩形自己摆（含翻转、避让）。
-// 所以本类**不接收也不使用任何坐标**。
+// 所以本类不接收也不使用任何坐标。
 //
 // 连接：借 Fcitx5 wayland 模块已建好的 `wl_display`（popup 必须与输入法对象同一连接），对象建在
 // 默认队列上，事件由 Fcitx5 的事件读取线程 / 主线程分发，本类不另起 IO。

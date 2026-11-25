@@ -1,8 +1,8 @@
 // X11 keysym / 修饰键状态 → Windows VK + 协议修饰位（纯逻辑，不依赖 Fcitx5 头文件）。
 //
 // 服务端把按键一律当 Windows VK 处理（VK 常量 SSOT：wind-keys/src/keymap.rs）。
-// macOS 侧按**物理键码**映射（NSEvent.keyCode，见 KeyHandler.swift）；Linux 这边按
-// **keysym** 映射——Fcitx5 的 `Key::sym()` 已经是 XKB 按当前布局解出的键值，与 Windows
+// macOS 侧按物理键码映射（NSEvent.keyCode，见 KeyHandler.swift）；Linux 这边按
+// keysym 映射——Fcitx5 的 `Key::sym()` 已经是 XKB 按当前布局解出的键值，与 Windows
 // VK「随布局走」的语义一致。代价是 Shift 过的符号键（`!` `@` `{` …）要反查它所在的
 // 物理键，这张反查表按 US 布局写（与 Windows 的 VK_OEM_* 同样以 US 布局命名）。
 //
@@ -37,7 +37,7 @@ uint32_t statesToModifiers(uint32_t states);
 /// 修饰键状态 → 协议 toggles（TOGGLE_CAPSLOCK / TOGGLE_NUMLOCK）。
 uint8_t statesToToggles(uint32_t states);
 
-/// 这一键是否带**宿主快捷键修饰键**（Ctrl / Alt / Super）。服务端回「清组合」时，这类键
+/// 这一键是否带宿主快捷键修饰键（Ctrl / Alt / Super）。服务端回「清组合」时，这类键
 /// 仍要交还宿主（组字中按 Ctrl+C 不该被吞）——对位 Swift `KeyHandler.isHostShortcut`。
 /// Shift 不算：Shift+字母是大写、Shift+标点是另一个标点，都是正经输入。
 bool isHostShortcut(uint32_t states);
@@ -48,7 +48,7 @@ uint32_t toggleModifierVK(uint32_t keysym);
 /// 修饰键单击（tap）检测：按下 → 其间无别的键 → 抬起且按住不超过阈值 = 单击。
 ///
 /// 对位 Windows `KeyEventSink` 的 `TOGGLE_TAP_THRESHOLD_MS`（500ms，长按不切）与 macOS
-/// `InputController.handleFlagsChanged`。服务端只在 **keyup** 上处理切换键（TSF 惯例：
+/// `InputController.handleFlagsChanged`。服务端只在 keyup 上处理切换键（TSF 惯例：
 /// 吃掉 keydown 不转发、干净单击才在 keyup 转发），故判定为单击时由调用方发一帧
 /// eventType=UP 的 KeyEvent。
 ///
@@ -75,7 +75,7 @@ private:
 /// 候选显示时 Ctrl 如实上报（`KEY_EVENT_MOD_DOWN` / `KEY_EVENT_MOD_UP`）的一次按住记账，对位 TSF
 /// `CtrlRawPolicy.h`。协议权威在协调器 `handle_ctrl_raw`：
 ///
-/// - **按下那一刻**组字中（`altInputSession`）才走这条：按下报 MOD_DOWN、松开报 MOD_UP（哪怕那时
+/// - 按下那一刻组字中（`altInputSession`）才走这条：按下报 MOD_DOWN、松开报 MOD_UP（哪怕那时
 ///   已不在组字），调用方不再按 ToggleTapDetector 的单击上报；否则这次按住整个走旧路。一次按住
 ///   只走一条路，服务端不会两边各收到一次。
 /// - 按住期间按过别的键（服务端未必看得见，如透传的 Ctrl+C）→ 松开带 `TOGGLE_MOD_NOT_TAP`。

@@ -5,31 +5,13 @@ import Carbon.HIToolbox // IsSecureEventInputEnabled (密码框/安全输入检�
 import ApplicationServices // AXUIElement (前台窗口标题, 命令直通车 title())
 import os
 
-// InputController — IMKit 为每个文本框/会话实例化一个本类对象 (PR-1 设计 方案 A).
+// InputController — IMKit 为每个文本框/会话实例化一个本类对象。
 //
-// M2.2-C/D 实装范围:
-//   - init 时连 bridge.sock (BridgeClient.connect, 失败仅 log 不抛)
-//   - handle(_:client:) 把 NSEvent 翻译成 KeyEvent 帧, 同步发送, 等响应
-//   - applyResponse 路由 Go 返回的 cmd, 真调 IMKTextInput 协议方法:
-//       * CmdCommitText (0x0101)        → client.insertText
-//       * CmdUpdateComposition (0x0102) → client.setMarkedText
-//       * CmdClearComposition (0x0103)  → setMarkedText("") + 状态清零
-//       * CmdCommitTextWithCursor (0x0106) → insertText + 光标偏移
-//       * CmdConsumed / CmdPassThrough / CmdAck → 控制流路由
-//   - CompositionState 跟踪本端最新 marked text + caret
+// handle(_:client:) 把 NSEvent 译成 KeyEvent 帧同步发给服务、读响应，交 BridgeResponseRouter 路由成
+// IMKTextInput 调用（insertText / setMarkedText 等）。IMKit 的 handle 是同步的，没有 TSF 那种提交键
+// 竞态，所以 Space / Enter / 数字选词也直接走 KeyEvent，不需要 Windows 的 CmdCommitRequest barrier。
 //
-// Commit 触发键路径 (M2.2-D, 与 Win 端 barrier 设计不同):
-//   Win TSF DLL 用 CmdCommitRequest (0x0104) 异步 barrier 解决 TSF race condition
-//   (用户在 IME 处理中快速按 commit 键导致 commit 文本与下一键错位).
-//   darwin IMKit handle 是同步的, 没有 race, **不需要 barrier 机制**, server_darwin.go
-//   dispatch 也没处理 CmdCommitRequest. 所以 darwin 上 Space/Enter/数字 1-9 选词
-//   直接走 CmdKeyEvent: Go HandleKeyEvent 识别 VK_SPACE/VK_RETURN/0x31-0x39 时
-//   直接返 CmdCommitText, 由 applyResponse 调 insertText. KeyHandler 已覆盖这些键
-//   的翻译 (NSEvent.keyCode 0x12-0x19 / 0x1D → VK 0x30-0x39, 0x24 → VK_RETURN,
-//   0x31 → VK_SPACE, 0x35 → VK_ESCAPE).
-//
-// 线程模型: IMKit 在主线程调用 handle, BridgeClient 阻塞 socket I/O.
-//   UDS roundtrip < 1ms, 用户感知不到. 未来改 async + barrier seq.
+// 线程模型：IMKit 在主线程调用 handle，BridgeClient 阻塞 socket I/O（UDS 往返 <1ms）。
 @objc(WindInputController)
 public class InputController: IMKInputController {
 
@@ -47,7 +29,7 @@ public class InputController: IMKInputController {
     private weak var currentClient: (IMKTextInput & NSObjectProtocol)?
 
     // 修饰键单击 (tap) 检测: 按下某修饰键 → 抬起且其间无其它键 = tap, 发对应 VK 给
-    // Go 触发模式切换 (如 lshift 切中英)。macOS 修饰键走 .flagsChanged, 不是 keyDown。
+    // 服务端触发模式切换 (如 lshift 切中英)。macOS 修饰键走 .flagsChanged, 不是 keyDown。
     private var pendingModVK: UInt32?    // 当前按住、待判定的修饰键 Win VK (nil=无)
     private var pendingModSawOther = false // 修饰键按住期间是否出现过其它键 (→ 非 tap)
     // 组字中 ⌥ 转发 (注释态切换) 的这次按住记账, 见 OptionKeyHold。
@@ -55,16 +37,14 @@ public class InputController: IMKInputController {
     // 候选显示时 Ctrl 如实上报的这次按住记账, 见 CtrlRawReport。
     private var ctrlRaw = CtrlRawReport()
 
-    // 上次随 focusGained 上报给 Go 的系统安全输入(密码框)状态。handle 每键与系统实时值
+    // 上次随 focusGained 上报给服务端的系统安全输入(密码框)状态。handle 每键与系统实时值
     // 比对, 翻转即补发 focusGained —— 补偿同一 IMKit client 内字段切换不触发 activateServer
     // 的盲区(见 syncSecureInputIfChanged)。
     private var lastReportedSecureInput = false
 
-    /// 最近一次被 activateServer 的控制器。跨宿主切换时系统**先激活新 client、后失活旧
-    /// client**, 而 FocusLost 帧不带宿主标识, 服务端只能当"当前焦点失去"处理。旧控制器
-    /// 晚到的失活若照发, 就会把新宿主刚上报的状态清掉 —— 实测 macOS 27 安装器弹授权框:
-    /// SecurityAgent 激活 (报了密码位) 200ms 后才来安装器窗口的失活, 密码位被清, 授权框
-    /// 里的按键照常组字 (首字符进缓冲、候选窗出现在对话框后面)。失活时据此判断是否已被取代。
+    /// 最近一次被 activateServer 的控制器。跨宿主切换时系统先激活新 client、后失活旧 client,
+    /// 而 FocusLost 帧不带宿主标识: 旧控制器晚到的失活若照发, 会清掉新宿主刚上报的状态
+    /// (如授权框的密码位)。失活时据此判断是否已被取代。
     private static weak var lastActivated: InputController?
 
     /// 登录以来左 / 右 / 其他鼠标键按下的总次数（触控板轻点计入左键）。
@@ -114,8 +94,8 @@ public class InputController: IMKInputController {
 
     // MARK: - IMKit 生命周期 (激活/失活)
 
-    /// IME 获得某 client 焦点时由系统调用。发 FocusGained 让 Go 端置 imeActivated=true,
-    /// 从而驱动工具栏 reducer 显示模式指示器 (CmdModeStatus → 菜单栏)。
+    /// IME 获得某 client 焦点时由系统调用: 补发旧控制器欠的 FocusLost, 再报 FocusGained
+    /// 与前台上下文。
     public override func activateServer(_ sender: Any!) {
         super.activateServer(sender)
         currentClient = sender as? (IMKTextInput & NSObjectProtocol)
@@ -148,14 +128,11 @@ public class InputController: IMKInputController {
         active.sendImeActivated()
     }
 
-    /// IME 失去焦点 (切到别的输入法/应用) 时由系统调用。发 FocusLost 让 Go 端
-    /// 置 imeActivated=false, reducer 隐藏指示器。
+    /// IME 失去焦点 (切到别的输入法/应用) 时由系统调用, 发 FocusLost。
     public override func deactivateServer(_ sender: Any!) {
-        // 失焦即清干净: 若仍有嵌入编码 (marked text) 未提交, 主动抹掉残留并清本端
-        // composition 状态。否则切到别的文本框时旧 marked text 会残留 (macOS 不会
-        // 像 Win TSF 那样自动收回), 且与 Go 端不一致 (HandleFocusLost 对普通焦点切换
-        // 已 clearState 清空 inputBuffer)。两端一致后, 切回该文本框是全新一轮输入。
-        // 必须在 super.deactivateServer 之前做: 此时 sender client 仍可接收 setMarkedText。
+        // 失焦即抹掉未提交的 marked text 并清本端组合状态: macOS 不会像 TSF 那样自动收回,
+        // 服务端失焦也会清缓冲, 两端一致。必须在 super.deactivateServer 之前做, 此时 sender
+        // 仍可接收 setMarkedText。
         performDeactivation(sender)
         super.deactivateServer(sender)
     }
@@ -175,11 +152,9 @@ public class InputController: IMKInputController {
 
     /// 发 FocusGained 帧, 携带 InputScope bitmask。读掉 ack, 失败仅 log。
     ///
-    /// 密码框适配 (对齐 Win 36614ae): macOS 焦点进入密码框/NSSecureTextField 时, AppKit
-    /// 会启用系统"安全输入" (IsSecureEventInputEnabled 返回真; 浏览器 <input type=password>
-    /// 同样置位)。命中即把 InputScope 置上 IS_PASSWORD 位 (TSF 枚举 31), Go 端 coordinator
-    /// 据此对密码框强制英文半角直通 (sensitiveFieldActive), 与 Win 端共用同一套判定逻辑。
-    /// 非密码框时 mask=0, 行为与原空帧一致。
+    /// 密码框: 焦点进入密码框 / NSSecureTextField (浏览器密码框同样) 时系统启用「安全输入」
+    /// (IsSecureEventInputEnabled 为真), 命中即置 IS_PASSWORD 位 (TSF 枚举 31), 服务端据此
+    /// 强制英文直通, 与 Windows 同一套判定。
     private func sendFocusGained() {
         guard let bridge = bridge, bridge.isConnected else { return }
         // 读系统安全输入状态并记录, 供 handle 每键比对 (见 syncSecureInputIfChanged)。
@@ -222,23 +197,15 @@ public class InputController: IMKInputController {
 
     /// 宿主 app 的标识, 供服务端做「焦点是否跨应用切入」判定 (clientToken 高 32 位)。
     ///
-    /// **一律取 bundleID 的稳定散列, 不取真实 pid。**
-    ///
-    /// 曾经的做法是「前台 app 的 bundleID 对得上就用它的真 pid, 否则退化为散列」。问题在于
-    /// 同一个 app 会因此拿到两个不同的键 —— 输入法与宿主是两个进程, Spotlight 覆盖层、
-    /// 非前台面板等场景下 `frontmostApplication` 不是持有文本框的那个 app, 于是同一个
-    /// 微信一会儿记在 pid 上、一会儿记在散列上, 表现为「按应用记忆的中英状态和 compat 规则
-    /// 时不时自己重置」。
-    ///
-    /// 真 pid 在 macOS 上也换不来任何东西: 服务端拿 pid 只做两件事, 一是当 `pid_names`
-    /// 的键 (散列同样满足「同 app 恒等、异 app 相异」), 二是 `process_name(pid)` 反查进程名
-    /// —— 那个函数在非 Windows 恒返回空串, 宿主名改由 `.app` 随焦点事件直接送 bundleID。
-    /// 散列还有个附带好处: 宿主重启后仍相等, 对「按应用记忆」而言反而更合用。
+    /// 一律取 bundleID 的稳定散列, 不取真实 pid: `frontmostApplication` 未必是持有文本框的
+    /// app (Spotlight、非前台面板), 混用 pid 与散列会让同一 app 得到两个键, 按应用记忆时不时
+    /// 重置。服务端在 macOS 上只拿它当键 (进程名由 bundleID 另送), 散列跨宿主重启也不变。
     private func hostPid(for bundleID: String) -> UInt32 {
         return Self.stableHash(bundleID)
     }
 
-    /// FNV-1a 32 位散列, 结果恒非 0 (服务端以 pid==0 表示「未知宿主」并跳过按应用逻辑)。
+    /// FNV-1a 32 位散列; 非空串结果恒非 0, 空串返回 0 (服务端以 pid==0 表示「未知宿主」并跳过
+    /// 按应用逻辑)。
     private static func stableHash(_ s: String) -> UInt32 {
         if s.isEmpty { return 0 }
         var h: UInt32 = 2_166_136_261
@@ -262,21 +229,14 @@ public class InputController: IMKInputController {
     /// app()/title()/sel() 取值。聚焦时快照 —— app()/title() 稳定; sel() 反映聚焦时选区
     /// (best-effort, 部分 app 不支持取选中文本, 选区随后变化不会刷新)。
     ///
-    /// **窗口标题与发送一律挪出主线程。** 取标题走 AX, 那是到目标 app 的**同步跨进程调用**,
-    /// 而 `activateServer` 的调用时机恰恰是那个 app 刚被切到前台、正忙着重绘的时候 —— 实测
-    /// (sample 输入法进程 6 秒 / 切 6 次应用) 主线程 3467/4643 个采样点全部堵在这一个
-    /// `AXUIElementCopyAttributeValue` 上, 平均每次切换阻塞约 0.5 秒, 且阻塞期间 AX 的
-    /// mach_msg 会转 runloop, 下一次 activateServer 直接重入叠上来。IMKit 在主线程派发按键,
-    /// 于是表现为「切换应用后刚开始输入非常卡」。
-    ///
-    /// 这份快照只有命令直通车读 (`coordinator.rs::front_ctx_snapshot`), 是个用户偶尔主动触发
-    /// 的功能 —— 为它同步阻塞每一次焦点切换完全不成比例。异步晚到几十毫秒没有任何影响。
+    /// 窗口标题与发送一律挪出主线程: 取标题走 AX, 是到目标 app 的同步跨进程调用, 而激活时
+    /// 那个 app 正忙着重绘, 每次切换能把主线程堵约 0.5 秒 (还会经 runloop 重入下一次激活),
+    /// 表现为切换应用后刚开始输入很卡。快照只有命令直通车读, 异步晚到几十毫秒无妨。
     private func sendFrontContext() {
         let app = currentClient?.bundleIdentifier() ?? ""
         let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
-        // 选中文本只能在主线程取 (IMKTextInput 的约定), 但**不在 activateServer 里取**:
-        // `selectedRange()` 同样是跨进程调用, 实测占了另外 1191/4643 个采样点。改排到下一轮
-        // 主线程事件, 激活流程即刻返回; 那时 IMKit 已完成激活、目标 app 也缓过来了。
+        // 选中文本只能在主线程取 (IMKTextInput 的约定), 但不在 activateServer 里取:
+        // `selectedRange()` 同样是跨进程调用。排到下一轮主线程事件, 激活流程即刻返回。
         DispatchQueue.main.async { [weak self] in
             let sel = self?.selectedClientText() ?? ""
             Self.frontCtxQueue.async {
@@ -288,7 +248,7 @@ public class InputController: IMKInputController {
 
     /// 前台上下文的专用串行队列 + 专用连接。
     ///
-    /// **不能复用 `bridge`**: 那条连接由主线程发按键帧并同步读响应, 从别的线程往里插一帧
+    /// 不能复用 `bridge`: 那条连接由主线程发按键帧并同步读响应, 从别的线程往里插一帧
     /// 会与按键帧交错、把两边的读写配对错开。专用连接只被本队列碰, 天然串行。
     private static let frontCtxQueue = DispatchQueue(label: "to.feng.windinput.frontctx")
     /// 仅在 `frontCtxQueue` 上访问。
@@ -325,7 +285,7 @@ public class InputController: IMKInputController {
     /// 取指定进程聚焦窗口的标题 (AX)。需辅助功能授权 (本 IME 已为合成按键/移动光标申请);
     /// 未授权/取不到返回空, 不弹授权框。
     ///
-    /// **只在 `frontCtxQueue` 上调用**: 这是到目标 app 的同步跨进程调用, 目标忙时会一直等。
+    /// 只在 `frontCtxQueue` 上调用: 这是到目标 app 的同步跨进程调用, 目标忙时会一直等。
     private static func frontmostWindowTitle(pid: pid_t) -> String {
         let axApp = AXUIElementCreateApplication(pid)
         // 默认超时是 6 秒。窗口标题是「取不到就算了」的锦上添花, 没有任何理由等那么久 ——
@@ -346,17 +306,12 @@ public class InputController: IMKInputController {
     /// AX 跨进程调用的超时上限 (秒)。
     private static let axMessagingTimeout: Float = 0.5
 
-    /// IS_PASSWORD 位 (TSF InputScope 枚举 31) 的 bitmask, 与 Go coordinator 的
-    /// inputScopePassword 常量对齐。
+    /// IS_PASSWORD 位 (TSF InputScope 枚举 31) 的 bitmask, 与服务端协调器的判定对齐。
     private static let inputScopePasswordBit: UInt64 = UInt64(1) << 31
 
-    /// 每键检测系统安全输入(密码框)状态是否相对上次上报发生翻转, 变化则补发一帧
-    /// focusGained 同步 Go 端 sensitiveFieldActive。
-    ///
-    /// 为何需要: macOS IMKit 的 activateServer 是「输入法 ↔ 某 client」级别的激活, 而浏览器
-    /// 整个网页是单个 client —— 网页内普通框 ↔ 密码框的字段切换**不**触发 activateServer,
-    /// 只在激活时检测会漏掉(表现: 第二次进密码框不再抑制)。IsSecureEventInputEnabled 是
-    /// 全局实时状态, 随密码框聚焦翻转, 故在每个 keyDown 前比对补偿。轻量系统调用, 每键一次。
+    /// 每键检测系统安全输入(密码框)状态是否相对上次上报翻转, 变了就补发一帧 focusGained。
+    /// activateServer 是 client 级的, 浏览器整个网页是一个 client, 网页内切到密码框不触发它;
+    /// IsSecureEventInputEnabled 是全局实时状态, 每键比对一次 (轻量系统调用)。
     private func syncSecureInputIfChanged() {
         if IsSecureEventInputEnabled() != lastReportedSecureInput {
             sendFocusGained()
@@ -377,7 +332,7 @@ public class InputController: IMKInputController {
 
     // MARK: - 修饰键 tap (Shift/Ctrl 单击切换模式)
 
-    /// 处理 .flagsChanged: 修饰键按下记录待判定; 抬起且其间无其它键 = tap, 发 VK 给 Go。
+    /// 处理 .flagsChanged: 修饰键按下记录待判定; 抬起且其间无其它键 = tap, 发 VK 给服务端。
     /// ⌥ 另走 handleOptionChanged。返回是否吃掉事件。
     private func handleFlagsChanged(_ event: NSEvent, client sender: Any!) -> Bool {
         optionHold.note(modifiers: KeyHandler.toModifiers(event.modifierFlags))
@@ -390,7 +345,7 @@ public class InputController: IMKInputController {
         let isCtrl = vk == 0xA2 || vk == 0xA3
         if pressed && !isCtrl { ctrlRaw.noteOther() }
         if vk == 0xA4 || vk == 0xA5 {
-            // ⌥ 不做单击切换模式; 按住期间同样作废 Shift/Ctrl 的单击判定 (与先前一致)。
+            // ⌥ 不做单击切换模式; 按住期间同样作废 Shift/Ctrl 的单击判定。
             pendingModVK = nil
             return handleOptionChanged(vk, pressed: pressed, flags: event.modifierFlags, sender: sender)
         }
@@ -503,9 +458,8 @@ public class InputController: IMKInputController {
         // 插入点 (否则会显示在上一次组字的旧位置)。
         sendCaretUpdateIfAvailable(client: sender as? IMKTextInput)
         keySeq &+= 1
-        // prevChar 如实带上: 修饰键 tap 不走标点通路, 正确性上带不带都一样, 但服务端
-        // `key_event:` 日志会把这一帧印成 `prev_char=0x0000` —— 而恒 0 正是「客户端没接
-        // prevChar」这个故障的特征值, 留着就是给下次排查埋一个假阳性。
+        // prevChar 如实带上: 修饰键 tap 不走标点通路, 但日志里恒为 0 正是「客户端没接
+        // prevChar」的故障特征, 带上免得排查时误判。
         let frame = BinaryCodec.encodeKeyEventFrame(KeyEventPayload(
             keyCode: vk, scanCode: 0, modifiers: 0, eventType: .up, eventSeq: keySeq,
             prevChar: router.digitTracker.prevChar,
@@ -564,11 +518,8 @@ public class InputController: IMKInputController {
         guard let items = CandidatePanelHost.shared.unifiedMenuItems(), !items.isEmpty else {
             return imkFallbackMenu()
         }
-        // IMK 输入源菜单必须 target=nil 走 IMK doCommandBySelector 路由（菜单在 IMK 独立上下文
-        // 渲染，直接 AppKit target-action 投递不到本进程对象 → 整菜单失效）。而 IMK 对【嵌套子菜单】
-        // 叶子回传的是子菜单首项 tag（点五笔切英文/点微软切默认）。故拍平为顶层带「父·」前缀项，
-        // 各项 tag 即真实菜单 id，IMK 顶层项回传可靠——这是 IMK 输入源菜单的固有约束（无法保留子菜单）。
-        // 候选框右键/菜单栏指示器走 inProcess 直接投递，仍用原始嵌套树，不受影响。
+        // IMK 对嵌套子菜单的叶子回传的是子菜单首项的 tag, 故拍平为顶层带「父·」前缀的项, 各项 tag
+        // 即真实菜单 id。候选框右键 / 菜单栏指示器走进程内投递, 仍用原始嵌套树。
         return imkMenuBuilder.build(flattenForIMK(items), dispatch: .imkCommand(action: #selector(imkMenuCommand(_:))))
     }
 
@@ -593,14 +544,14 @@ public class InputController: IMKInputController {
 
     /// 统一菜单项被选中: IMK 经 doCommandBySelector 调用本方法, sender 是 infoDictionary
     /// (含 kIMKCommandMenuItemName = 被点的 NSMenuItem)。读其 tag (统一菜单 id) 回发
-    /// CmdMenuAction, 由 Go 端 handleUnifiedMenuAction 派发, 与其它两处菜单同一路径。
+    /// CmdMenuAction 由服务端派发, 与其它两处菜单同一路径。
     @objc public func imkMenuCommand(_ sender: Any!) {
         guard let info = sender as? NSDictionary,
               let item = info[kIMKCommandMenuItemName as Any] as? NSMenuItem else { return }
         CandidatePanelHost.shared.sendMenuAction(item.tag)
     }
 
-    /// 服务不可达时的兜底菜单: 仅「设置…」(直接拉起设置应用, 不依赖 Go)。避免空菜单。
+    /// 服务不可达时的兜底菜单: 仅「设置…」(直接拉起设置应用, 不依赖服务)。避免空菜单。
     private func imkFallbackMenu() -> NSMenu {
         let menu = NSMenu()
         menu.autoenablesItems = false
@@ -638,14 +589,13 @@ public class InputController: IMKInputController {
             return passThroughToHost(event)
         }
 
-        // 密码框实时跟随: 在发本键前同步系统安全输入状态(同一 client 内字段切换补偿),
-        // 让 Go 处理本键时 sensitiveFieldActive 已最新(密码框→英文直通 / 普通框→恢复中文)。
-        // 同连接串行: 补发的 focusGained 必先于本 keyEvent 被 Go 处理, 顺序正确。
+        // 发本键前同步系统安全输入状态, 让服务端处理本键时密码框判定已最新; 同连接串行,
+        // 补发的 focusGained 必先于本键被处理。
         syncSecureInputIfChanged()
 
         keySeq &+= 1
         // prevChar 取自本端记账 (macOS 无现读文档通路), 供服务端判「数字后智能标点」。
-        // 必须在处理本键**之前**取: 本键的响应回来后 tracker 就被更新成新的光标前字符了。
+        // 必须在处理本键之前取: 本键的响应回来后 tracker 就被更新成新的光标前字符了。
         guard let frame = KeyHandler.encodeKeyEvent(event, seq: keySeq,
                                                     prevChar: router.digitTracker.prevChar,
                                                     seqChar: router.seqTracker.seqChar) else {
@@ -654,7 +604,7 @@ public class InputController: IMKInputController {
         }
 
         // 无 composition 时本端 caret 可能是上一次组字的旧位置 (换行/移动光标后未更新)。
-        // 处理本键前先刷新一次, 让 Go 的状态气泡/首帧候选锚到当前真实插入点。
+        // 处理本键前先刷新一次, 让状态气泡/首帧候选锚到当前真实插入点。
         // 组字中 caret 由下方 (composition 非空) 分支持续更新, 无需在此重复。
         if composition.isEmpty {
             sendCaretUpdateIfAvailable(client: sender as? IMKTextInput)
@@ -669,9 +619,8 @@ public class InputController: IMKInputController {
             noteEatenFnKey(event, consumed: consumed, hostShortcut: hostShortcut)
             return consumed ? true : passThroughToHost(event)
         } catch {
-            // 服务重启后这条连接已死 (write→EPIPE 或 read→EOF)。重连到新服务
-            // 并**用新连接重试当前键一次**, 让服务重启后第一个键就自愈, 不丢字、不需手动
-            // 重启前端。重连或重试仍失败 (如服务尚在重启窗口未就绪) 才透传, 下一键再试。
+            // 服务重启后这条连接已死 (EPIPE / EOF): 重连并用新连接重试当前键一次, 第一个键
+            // 就自愈、不丢字。重连或重试仍失败才透传, 下一键再试。
             NSLog("WindInput[handle] bridge io error: \(error), 重连后重试本键")
             reconnect()
             // 超时 = 服务卡住而非连接陈旧, 重试只会再等一轮。
@@ -689,12 +638,11 @@ public class InputController: IMKInputController {
         }
     }
 
-    /// 本键最终**交回宿主**: 记账后返回 false (handle 的「未消费」)。
+    /// 本键最终交回宿主: 记账后返回 false (handle 的「未消费」)。
     ///
-    /// 数字后智能标点在 macOS 上只有备用通路 —— 宿主拿这一键去改文档, 我们看不见结果,
-    /// 只能按「这一键产出什么」推断光标前字符 (数字则记, 否则清零)。见
-    /// [`SmartPunctDigitTracker`]。**每一条透传出口都要走这里**, 漏一条的症状是
-    /// 「某种情形下打的数字后面标点仍出中文」。
+    /// 宿主拿这一键改文档, 我们看不见结果, 只能按「这一键产出什么」推断光标前字符
+    /// (见 [`SmartPunctDigitTracker`])。每一条透传出口都要走这里, 漏一条就是某种情形下
+    /// 数字后的标点仍出中文。
     ///
     /// 上屏侧 (经引擎写进文档的文本) 由 `BridgeResponseRouter.insertCommitted` 记, 两侧成对。
     @discardableResult
@@ -715,15 +663,15 @@ public class InputController: IMKInputController {
         try bridge.send(frame)
         let resp = try bridge.readFrame()
         let consumed = applyResponse(resp, sender: sender, hostShortcut: hostShortcut)
-        // M2.2-E: composition 启动/更新后, 上报当前 caret 屏幕位置给 Go,
-        // 让候选框/Toast/光标跟随有正确锚点. 仅在 marked text 非空时发。
+        // composition 启动/更新后上报当前 caret 屏幕位置, 让候选框/Toast/光标跟随有正确锚点。
+        // 仅在 marked text 非空时发。
         if !composition.isEmpty {
             sendCaretUpdateIfAvailable(client: sender as? IMKTextInput)
         }
         return consumed
     }
 
-    // MARK: - Caret update (M2.2-E)
+    // MARK: - Caret update
 
     /// 从 IMKTextInput 拿 caret 屏幕坐标, 转换为 wire top-left 坐标后发 CmdCaretUpdate.
     /// 不抛错, 失败仅 log.
@@ -753,9 +701,8 @@ public class InputController: IMKInputController {
             rect = NSRect(x: mouse.x, y: mouse.y, width: 1, height: 16)
         }
 
-        // 参照屏必须与浮窗落位那边同源（`PanelGeometry.referenceScreen`，带菜单栏的主屏）。
-        // 这里曾用 `NSScreen.main`：两个方向都用它时误差恰好抵消，一旦落位那边改用主屏，
-        // 两屏高度不同就直接变成候选窗相对光标的垂直偏移——在副屏比主屏高的机器上尤其明显。
+        // 参照屏必须与浮窗落位那边同源（`PanelGeometry.referenceScreen`，带菜单栏的主屏），
+        // 否则两屏高度不同时会变成候选窗相对光标的垂直偏移。
         let screenHeight = PanelGeometry.referenceHeight
         guard screenHeight > 0 else { return }
 
@@ -771,7 +718,7 @@ public class InputController: IMKInputController {
 
     // MARK: - Response routing
 
-    /// 把 Go 返回的 bridge 帧路由到 IMKTextInput 协议方法. 委托给 BridgeResponseRouter
+    /// 把服务端返回的 bridge 帧路由到 IMKTextInput 协议方法. 委托给 BridgeResponseRouter
     /// (在 WindInputKit 里, 不依赖 IMKit, 便于 swift test 用 mock 驱动).
     internal func applyResponse(_ frame: Frame, sender: Any?, hostShortcut: Bool = false) -> Bool {
         let imkClient = sender as? IMKTextInput
@@ -779,8 +726,6 @@ public class InputController: IMKInputController {
         return router.apply(frame, to: adapter, hostShortcut: hostShortcut)
     }
 
-    /// 应用 push 通道帧 (鼠标选词的 commit/composition 异步到达, 非 KeyEvent 同步响应)。
-    /// 路由到当前焦点 client。在主线程调用 (CandidatePanelHost 已 dispatch)。
     /// 见 `PushResponder.invalidateDigitTracking`。合成按键改了文档、我们不知道改成什么,
     /// 作废记账回落默认行为 (标点按中文出), 好过拿着陈旧的数字错出半角。
     public func invalidateDigitTracking() {
@@ -788,6 +733,8 @@ public class InputController: IMKInputController {
         router.seqTracker.reset()
     }
 
+    /// 应用 push 通道帧 (鼠标选词的 commit/composition 异步到达, 非 KeyEvent 同步响应)。
+    /// 路由到当前焦点 client。在主线程调用 (CandidatePanelHost 已 dispatch)。
     public func applyPushResponse(_ frame: Frame) {
         guard let client = currentClient else {
             NSLog("WindInput[applyPushResponse] no current client, drop cmd=\(frame.cmd)")
@@ -821,13 +768,8 @@ public class InputController: IMKInputController {
         /// # 必须传 NSAttributedString, 不能传裸 String
         ///
         /// 传裸 String 时 IMKit 会替我们合成默认分句 (整串) 并把转发给宿主的
-        /// `selectedRange` 覆写成 `{0, 全长}` —— 我们给的 `{caret, 0}` 就此丢失,
-        /// 宿主把组合内光标画在**最前面**。完整的现象、判据与影响面见
-        /// `MarkedTextAttributes` 的文件头注释。
-        ///
-        /// 真机判据 (改完必须复验): 用 `WINDUI_IME=1` 跑 wind-ui-rust 示例, 打 `sf`,
-        /// 日志应为 `selected={2,0} → caret=2 sel=None`; 若仍是 `selected={0,2}`,
-        /// 说明属性没被 IMKit 认可, 回头查 `markedClauseSegment` 是否真进了字典。
+        /// `selectedRange` 覆写成 `{0, 全长}`, 宿主把组合内光标画在最前面。现象、真机判据
+        /// (改完须复验) 与影响面见 `MarkedTextAttributes` 的文件头注释。
         func setMarkedText(_ text: String, selectionRange: NSRange, replacementRange: NSRange) {
             imkClient.setMarkedText(Self.markedText(text, controller: controller),
                                     selectionRange: selectionRange,
@@ -844,7 +786,7 @@ public class InputController: IMKInputController {
             let full = NSRange(location: 0, length: (text as NSString).length)
             // 空串 = 清除组合。此时无分句可言, 属性反而可能让宿主多走一遍无谓的重排。
             guard full.length > 0 else { return NSAttributedString(string: text) }
-            // `markForStyle:` 返回 [AnyHashable: Any], **逐项**转 key 而不是整体 `as?`:
+            // `markForStyle:` 返回 [AnyHashable: Any], 逐项转 key 而不是整体 `as?`:
             // 整体转换失败时会静默得到 nil, 于是丢掉系统按主题算好的样式、只剩兜底,
             // 而这种退化在界面上看不出来。逐项转则至少保住能转的那些。
             var base: [NSAttributedString.Key: Any] = [:]
@@ -867,11 +809,9 @@ public class InputController: IMKInputController {
 
     /// 确保 bridge 已连接; 未连/断开则尝试 (重)连, 返回是否已连。
     ///
-    /// 必要性 (实测): IME 的 InputController 在 Go 服务 socket 就绪前被创建 (装完首次激活,
-    /// 尤其重启后 IME 随登录自启与服务 LaunchAgent RunAtLoad 并发) 时, init() 那次连接会
-    /// 失败 → bridge=nil → 此后该实例所有按键直通英文且不重试 (得切走再切回让 IMKit 新建
-    /// 实例才会重连)。这里在 activate/handle 入口懒重连让同一实例自愈, 免去手动切换。
-    /// 已连时是廉价 no-op, 不影响正常路径。
+    /// 控制器可能在服务 socket 就绪前创建 (装完首次激活、登录时与服务 LaunchAgent 并发),
+    /// init() 那次连接失败后该实例就一直直通英文; 在 activate/handle 入口懒重连让同一实例
+    /// 自愈。已连时是廉价 no-op。
     @discardableResult
     private func ensureConnected() -> Bool {
         if let b = bridge, b.isConnected { return true }
