@@ -75,6 +75,15 @@ pub fn notice_text(n: &SyncNotice) -> String {
     }
 }
 
+/// `now_in_flight` 的 RAII 守卫：drop 时清标志。
+struct InFlight<'a>(&'a AtomicBool);
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 /// 一次主动同步在等什么。
 enum Active {
     /// 同步进程还没连上，连上后发 `SyncNow`。
@@ -87,8 +96,10 @@ enum Active {
 #[derive(Default)]
 struct Track {
     ticket: Option<Active>,
-    /// 已提示过后台失败且之后还没成功过一轮：重试中的 error/syncing 交替不重复提示。
+    /// 已提示过后台失败且之后还没成功过一轮。
     was_error: bool,
+    /// 已判定过的最大轮次：后台失败只看轮次推进，phase 抖动（稍后重试等）不算。
+    last_seen_round: u64,
 }
 
 /// 同步进程能经 core 执行的方法。其余一律拒绝：同步进程持有凭据，被攻破时不能借 core 做别的事。
@@ -508,6 +519,7 @@ impl SyncHost {
         }
         inner.link = Some(Link { tx, epoch });
         inner.status = Status::default();
+        inner.track.last_seen_round = 0;
         let mut stdin = stdin;
         let _ = std::thread::Builder::new()
             .name("sync-write".into())
@@ -679,32 +691,21 @@ impl SyncHost {
         let mut out = Vec::new();
         let (phase, last_error) = self.phase_of(inner);
         let linked = inner.link.is_some();
-        // 成功一轮才复位；syncing / starting 等中间态不复位。
-        if linked && phase != "error" && inner.status.last_round.as_ref().is_some_and(|r| r.ok) {
-            inner.track.was_error = false;
-        }
-        let round_error = inner
-            .status
-            .last_round
-            .as_ref()
-            .and_then(|r| r.error.clone());
-        let mut active_failed = false;
+        let mut resolved = false;
         match &inner.track.ticket {
             Some(Active::Ticket { ticket, since }) => {
                 if linked && inner.status.round >= *ticket {
                     out.push(match &inner.status.last_round {
-                        Some(r) if !r.ok => {
-                            active_failed = true;
-                            SyncNotice::Failed(
-                                r.error.clone().unwrap_or_else(|| "未知错误".to_string()),
-                            )
-                        }
+                        Some(r) if !r.ok => SyncNotice::Failed(
+                            r.error.clone().unwrap_or_else(|| "未知错误".to_string()),
+                        ),
                         Some(r) => SyncNotice::Done(r.clone()),
                         None => SyncNotice::Done(RoundStats {
                             ok: true,
                             ..Default::default()
                         }),
                     });
+                    resolved = true;
                     inner.track.ticket = None;
                 } else if let Some(why) = self.abandon_reason(inner, &phase, &last_error, *since) {
                     out.push(SyncNotice::Failed(why));
@@ -731,18 +732,25 @@ impl SyncHost {
             }
             None => {}
         }
-        // 主动那轮失败已提示过，不再算后台失败。
-        let entering = phase == "error" && !inner.track.was_error;
-        if entering && inner.track.ticket.is_none() && !active_failed && out.is_empty() {
-            out.push(SyncNotice::BackgroundFailed(
-                last_error
-                    .clone()
-                    .or(round_error)
-                    .unwrap_or_else(|| "未知错误".into()),
-            ));
-        }
-        if phase == "error" || active_failed {
-            inner.track.was_error = true;
+        // 后台失败只看轮次：新一轮失败且无主动同步在管才提示；成功一轮复位。
+        let round = inner.status.round;
+        if linked && round > inner.track.last_seen_round {
+            inner.track.last_seen_round = round;
+            if let Some(r) = &inner.status.last_round {
+                if r.ok {
+                    inner.track.was_error = false;
+                } else {
+                    if !inner.track.was_error && !resolved && inner.track.ticket.is_none() {
+                        out.push(SyncNotice::BackgroundFailed(
+                            r.error
+                                .clone()
+                                .or(last_error)
+                                .unwrap_or_else(|| "未知错误".into()),
+                        ));
+                    }
+                    inner.track.was_error = true;
+                }
+            }
         }
         out
     }
@@ -785,8 +793,22 @@ impl SyncHost {
             .spawn({
                 let me = me.clone();
                 move || {
-                    me.send_sync_now();
-                    me.now_in_flight.store(false, Ordering::Release);
+                    // 守卫保证 panic 时也会清标志；正常路径先清再提示，
+                    // 这样提示回调里再点「立即同步」不会被旧标志吞掉。
+                    let guard = InFlight(&me.now_in_flight);
+                    let notices = me.send_sync_now();
+                    drop(guard);
+                    for n in notices {
+                        me.notify_now(n);
+                    }
+                    me.pump();
+                    // 清标志前后若有人又登记了待发请求，补一个线程。
+                    let wants =
+                        matches!(lock(&me.inner).track.ticket, Some(Active::Pending { .. }))
+                            && lock(&me.inner).link.is_some();
+                    if wants {
+                        me.spawn_sync_now();
+                    }
                 }
             })
             .is_ok();
@@ -795,44 +817,38 @@ impl SyncHost {
         }
     }
 
-    /// 发 `SyncNow` 并把回执换成票号。只有回执回来时那张待发请求还在才登记、提示：
+    /// 发 `SyncNow` 并把回执换成票号，返回要弹的提示。只有回执回来时那张待发请求还在才登记、提示：
     /// 期间已被放弃（停用、超时）的不再报。
-    fn send_sync_now(&self) {
+    fn send_sync_now(&self) -> Vec<SyncNotice> {
         if !matches!(lock(&self.inner).track.ticket, Some(Active::Pending { .. })) {
-            return;
+            return Vec::new();
         }
         let since = self.now();
         let reply = self.command(Op::SyncNow, Value::Null);
         let mut notices = Vec::new();
-        {
-            let mut inner = lock(&self.inner);
-            if !matches!(inner.track.ticket, Some(Active::Pending { .. })) {
-                return;
-            }
-            match reply {
-                Ok(v) => match v.get("ticket").and_then(Value::as_u64) {
-                    Some(ticket) => {
-                        if v.get("busy").and_then(Value::as_bool).unwrap_or(false) {
-                            notices.push(SyncNotice::Busy);
-                        }
-                        inner.track.ticket = Some(Active::Ticket { ticket, since });
+        let mut inner = lock(&self.inner);
+        if !matches!(inner.track.ticket, Some(Active::Pending { .. })) {
+            return notices;
+        }
+        match reply {
+            Ok(v) => match v.get("ticket").and_then(Value::as_u64) {
+                Some(ticket) => {
+                    if v.get("busy").and_then(Value::as_bool).unwrap_or(false) {
+                        notices.push(SyncNotice::Busy);
                     }
-                    None => {
-                        inner.track.ticket = None;
-                        notices.push(SyncNotice::Failed("同步进程回执缺少票号".into()));
-                    }
-                },
-                Err(e) => {
-                    inner.track.ticket = None;
-                    notices.push(SyncNotice::Failed(e));
+                    inner.track.ticket = Some(Active::Ticket { ticket, since });
                 }
+                None => {
+                    inner.track.ticket = None;
+                    notices.push(SyncNotice::Failed("同步进程回执缺少票号".into()));
+                }
+            },
+            Err(e) => {
+                inner.track.ticket = None;
+                notices.push(SyncNotice::Failed(e));
             }
         }
-        for n in notices {
-            self.notify_now(n);
-        }
-        // 回执可能比登记还晚到：登记后立即按当前状态判一次。
-        self.pump();
+        notices
     }
 
     /// 用户主动「立即同步」：只做快速检查就返回，结果经提示送达。
@@ -851,6 +867,7 @@ impl SyncHost {
                 self.notify_now(SyncNotice::Failed(e.clone()));
                 return json!({ "outcome": "failed", "error": e });
             }
+            // 已有等待中的票时再点不发新请求，弹出的是那张票的结果。
             if inner.track.ticket.is_none() {
                 inner.track.ticket = Some(Active::Pending { since: self.now() });
             }

@@ -593,6 +593,8 @@ fn run_active(r: &mut Rig, reply: Result<Value, String>) -> Value {
         }
     }
     wait_for(|| !r.host.now_in_flight.load(Ordering::SeqCst));
+    // 提示在清标志之后才发，等一拍。
+    std::thread::sleep(Duration::from_millis(60));
     v
 }
 
@@ -900,4 +902,29 @@ fn reply_after_abandonment_is_ignored() {
     ));
     wait_for(|| !r.host.now_in_flight.load(Ordering::SeqCst));
     assert_eq!(notices(&r).len(), 1, "放弃之后的回执不再报");
+}
+
+#[test]
+fn free_retry_phase_flapping_never_notifies_until_a_round_fails() {
+    let mut r = rig();
+    send_status(&mut r, round_status("idle", 3, ok_round(0, 0)));
+    for st in [
+        round_status("error", 3, ok_round(0, 0)),
+        round_status("syncing", 3, ok_round(0, 0)),
+        round_status("error", 3, ok_round(0, 0)),
+        round_status("syncing", 3, ok_round(0, 0)),
+        round_status("error", 3, ok_round(0, 0)),
+    ] {
+        send_status(&mut r, st);
+    }
+    assert!(
+        notices(&r).is_empty(),
+        "稍后重试不结束一轮: {:?}",
+        notices(&r)
+    );
+    send_status(&mut r, round_status("error", 4, fail_round("断网")));
+    assert_eq!(
+        notices(&r),
+        vec![SyncNotice::BackgroundFailed("断网".into())]
+    );
 }
