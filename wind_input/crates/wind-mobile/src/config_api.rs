@@ -29,7 +29,7 @@ pub enum ConfigValue {
 }
 
 impl ConfigValue {
-    fn into_toml(self) -> toml::Value {
+    pub(crate) fn into_toml(self) -> toml::Value {
         match self {
             Self::Bool(v) => toml::Value::Boolean(v),
             Self::Int(v) => toml::Value::Integer(v),
@@ -141,6 +141,25 @@ pub fn defaults(data_dir: &Path) -> String {
 fn apply_overrides_to(mut cfg: Config) -> Config {
     apply_mobile_overrides(&mut cfg);
     cfg
+}
+
+/// 把快照里的旧类型段换成别名所指方案的值（`sections` 来自
+/// `EngineManager::scheme_alias_sections`）。快照解析不了就原样返回。
+pub(crate) fn overlay_scheme_sections(
+    snapshot: String,
+    sections: Vec<(&'static str, toml::Value)>,
+) -> String {
+    let Ok(mut root) = snapshot.parse::<toml::Table>() else {
+        return snapshot;
+    };
+    let Some(schema) = root.get_mut("schema").and_then(|v| v.as_table_mut()) else {
+        return snapshot;
+    };
+    for (name, tree) in sections {
+        // 拼音段里的模糊音已挪到 `input.fuzzy`，方案的设置树不含它；其余整段替换。
+        schema.insert(name.to_string(), tree);
+    }
+    toml::to_string(&root).unwrap_or(snapshot)
 }
 
 fn to_toml(cfg: &Config) -> String {

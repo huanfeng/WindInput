@@ -151,3 +151,17 @@ fn every_enum_field_has_options() {
         .collect();
     assert!(missing.is_empty(), "以下枚举键没有选项：{missing:?}");
 }
+
+/// 快照里的旧类型段整段换成方案的设置树，其余段不动。
+#[test]
+fn overlay_replaces_legacy_type_sections_only() {
+    let snap = "[schema]\nactive = \"pinyin\"\n\n[schema.pinyin]\nsentence_count = 1\n";
+    let tree: toml::Value = toml::from_str("sentence_count = 5").unwrap();
+    let out = overlay_scheme_sections(snap.to_string(), vec![("pinyin", tree)]);
+    let root: toml::Table = out.parse().unwrap();
+    assert_eq!(
+        root["schema"]["pinyin"]["sentence_count"].as_integer(),
+        Some(5)
+    );
+    assert_eq!(root["schema"]["active"].as_str(), Some("pinyin"));
+}

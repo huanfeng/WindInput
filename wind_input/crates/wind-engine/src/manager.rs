@@ -5856,6 +5856,28 @@ impl EngineManager {
         )
     }
 
+    /// 四个旧类型段（`schema.codetable` / `pinyin` / `mix` / `english`）各自的当前值：别名所指
+    /// 方案的设置树。整份配置的快照用它替换同名段——那几段在配置里只是类型内置默认。
+    pub fn scheme_alias_sections(&self) -> Vec<(&'static str, toml::Value)> {
+        use wind_config::config_schema::SchemeKind;
+        [
+            (SchemeKind::Codetable, "codetable"),
+            (SchemeKind::Pinyin, "pinyin"),
+            (SchemeKind::Mixed, "mix"),
+            (SchemeKind::English, "english"),
+        ]
+        .into_iter()
+        .filter_map(|(kind, name)| {
+            let def = self
+                .scheme_alias_target(kind)
+                .and_then(|id| self.schema_def_cached(&id));
+            self.scheme_settings_tree(kind, def.as_deref())
+                .ok()
+                .map(|t| (name, t))
+        })
+        .collect()
+    }
+
     /// 写一个旧全局键：落到它所指方案的用户层（`schema_overrides/<id>.toml`）并让该方案失效
     /// 重建。不是别名返回 `None`；成功返回写入的方案 id。值的类型由调用方按注册表校验。
     pub fn scheme_alias_set(

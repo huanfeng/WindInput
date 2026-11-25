@@ -843,7 +843,12 @@ impl MobileCore {
 
     /// 当前生效配置的全量快照（TOML 文本），含移动端强制改写项。
     pub fn config_snapshot(&self) -> String {
-        config_api::snapshot(&self.data_dir)
+        // 旧类型段（`schema.codetable` 等）是当前方案设置的别名，值取方案那边。
+        config_api::overlay_scheme_sections(
+            config_api::snapshot(&self.data_dir),
+            wind_coordinator::web_host::WebDataHost::engine_mgr(&*self.coord)
+                .scheme_alias_sections(),
+        )
     }
 
     /// 出厂默认配置的全量快照（TOML 文本）。设置页据此标注默认值、实现「恢复默认」。
@@ -860,7 +865,15 @@ impl MobileCore {
 
     /// 写一个配置键到用户层。只写盘，生效要另发
     /// [`MobileCommand::ReloadConfig`]——分开是为了让宿主把连改若干项合成一次重载。
+    ///
+    /// 旧类型级键（`schema.codetable.*` 等）是当前方案设置的别名，写到那个方案的用户层。
     pub fn config_set(&self, key: &str, value: config_api::ConfigValue) -> Result<(), String> {
+        let canonical = wind_config::config_schema::canonical_key(key);
+        if let Some(r) = wind_coordinator::web_host::WebDataHost::engine_mgr(&*self.coord)
+            .scheme_alias_set(&canonical, value.clone().into_toml())
+        {
+            return r.map(|_| ()).map_err(|e| e.to_string());
+        }
         config_api::set(key, value)
     }
 
