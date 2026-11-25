@@ -1409,15 +1409,19 @@ pub const USER_WORD_ADD_WEIGHT: i32 = 1200;
 /// `is_portable()` 也读这个根（看 `portable_mode` 标记文件），App 私有目录下不会有它。
 fn mount_dirs(data_dir: &Path, user_root: &Path, local_root: &Path) {
     Config::set_dir_override(user_root.to_path_buf(), local_root.to_path_buf());
+    // SAFETY: 这是构造核心的第一步，首次调用时核心还没起任何线程；键盘服务重建时再次构造，
+    // 写入的是同一组路径。宿主侧若有线程同时读环境变量仍属未定义行为——移动端没有别的办法
+    // 把这两个值交给核心（见上方文档），这是接受的代价。
     unsafe {
         std::env::set_var("HOME", local_root);
     }
     match (data_dir.file_name(), data_dir.parent()) {
+        // SAFETY: 同上。
         (Some(name), Some(install_root)) if name == "data" => unsafe {
             std::env::set_var("WIND_INSTALL_ROOT", install_root);
         },
         _ => tracing::warn!(
-            "数据目录 {} 不是 `<安装根>/data` 的形状，出厂默认取不到：             配置剪枝与「恢复默认」会退化为照常写入",
+            "数据目录 {} 不是 `<安装根>/data` 的形状，出厂默认取不到：配置剪枝与「恢复默认」会退化为照常写入",
             data_dir.display()
         ),
     }
