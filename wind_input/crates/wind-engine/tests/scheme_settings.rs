@@ -1,4 +1,4 @@
-//! 拼音设置按方案取值：全拼与双拼各设一份，互不影响。
+//! 方案设置按方案取值：全拼与双拼各设一份互不影响；混输、英文、码表自动造词同理。
 //! 设计见 `docs/design/scheme-settings-flatten.md`。只读方案定义，用仓库自带的 `data/` 即可。
 
 use std::path::PathBuf;
@@ -90,4 +90,53 @@ fn invalidate_picks_up_new_scheme_settings() {
     .unwrap();
     m.invalidate_schema("pinyin");
     assert_eq!(m.pinyin_settings_of("pinyin").sentence_count, 2);
+}
+
+#[test]
+fn mixed_english_and_auto_phrase_settings_come_from_their_scheme() {
+    let m = mgr(
+        "others",
+        "wubi86",
+        &[
+            (
+                "wubi86_pinyin",
+                "[engine.mixed]\nmin_pinyin_length = 5\nenable_english = true\n",
+            ),
+            (
+                "english",
+                "[engine.english]\ncommit_space = true\n[engine.english.frequency]\nenabled = true\n",
+            ),
+            (
+                "wubi86",
+                "[engine.codetable.auto_phrase]\nenabled = true\nmax_phrase_len = 3\n",
+            ),
+        ],
+    );
+    let mix = m.mix_settings_of("wubi86_pinyin");
+    assert_eq!(mix.min_pinyin_length, 5);
+    assert!(mix.enable_english);
+    // 方案文件里的成员声明不受设置项影响。
+    assert_eq!(
+        m.mixed_secondary_schema("wubi86_pinyin").as_deref(),
+        Some("pinyin")
+    );
+
+    let en = m.english_settings();
+    assert!(en.commit_space);
+    assert!(m.freq_settings_for("english").enabled);
+
+    let ap = m.codetable_settings().auto_phrase;
+    assert!(ap.enabled);
+    assert_eq!(ap.max_phrase_len, 3);
+    // 没写的项保持基线。
+    assert_eq!(
+        ap.min_phrase_len,
+        Config::default()
+            .schema
+            .codetable
+            .auto_phrase
+            .min_phrase_len
+    );
+    // 笔画方案没写，不受五笔的设置影响。
+    assert!(!m.effective_codetable("stroke").auto_phrase.enabled);
 }

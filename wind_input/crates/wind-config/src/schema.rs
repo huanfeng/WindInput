@@ -173,6 +173,8 @@ pub struct EngineSpec {
     pub pinyin: PinyinSpec,
     #[serde(default)]
     pub mixed: MixedSpec,
+    #[serde(default, skip_serializing_if = "EnglishSpec::is_empty")]
+    pub english: EnglishSpec,
     /// 拆字（字根分解）反查与字根字体（码表方案的悬停提示用）。
     #[serde(default)]
     pub chaizi: ChaiziSpec,
@@ -194,6 +196,12 @@ pub struct ChaiziSpec {
     /// 字根字体的 DirectWrite 家族名（取自 TTF name 表，如 "黑体字根"）；渲染时按此名引用。
     #[serde(default)]
     pub font_family: String,
+}
+
+impl EnglishSpec {
+    fn is_empty(&self) -> bool {
+        self.settings.is_empty()
+    }
 }
 
 impl ChaiziSpec {
@@ -395,6 +403,10 @@ pub struct CodeTableSpec {
     /// 缺省 = 整段跟随基线。不同码表对英文混入的诉求不同，故可按方案覆盖。
     #[serde(default)]
     pub english_merge: Option<CodeTableEnglishMergeSpec>,
+    /// 本方案的自动造词设置（`[engine.codetable.auto_phrase]`）：键名与
+    /// [`crate::config::AutoPhraseConfig`] 的字段相同，没写的跟随基线。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_phrase: Option<toml::Table>,
 }
 
 /// 方案级英文混入覆盖（`[engine.codetable.english_merge]`），**逐字段稀疏**。
@@ -497,6 +509,17 @@ pub struct MixedSpec {
     pub primary_schema: String,
     #[serde(default)]
     pub secondary_schema: String,
+    /// 本方案的融合设置：键名与 [`crate::config::MixGlobal`] 的字段相同，没写的取内置默认。
+    #[serde(flatten, default, skip_serializing_if = "toml::Table::is_empty")]
+    pub settings: toml::Table,
+}
+
+/// 英文引擎配置（`[engine.english]`）：键名与 [`crate::config::EnglishGlobal`] 的字段相同，
+/// 没写的取内置默认。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EnglishSpec {
+    #[serde(flatten, default, skip_serializing_if = "toml::Table::is_empty")]
+    pub settings: toml::Table,
 }
 
 /// 词库规格（[[dictionaries]]）

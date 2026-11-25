@@ -485,6 +485,10 @@ pub struct EngineManager {
     schema_def_cache: Mutex<HashMap<String, Option<Arc<Schema>>>>,
     /// 各拼音方案的生效设置（内置默认 ⊕ 方案 `[engine.pinyin]`），与 `schema_def_cache` 同生同灭。
     pinyin_settings_cache: Mutex<HashMap<String, Arc<wind_config::config::PinyinGlobalConfig>>>,
+    /// 同上，混输方案的融合设置（`[engine.mixed]`）。
+    mix_settings_cache: Mutex<HashMap<String, Arc<wind_config::MixGlobal>>>,
+    /// 同上，英文方案的设置（`[engine.english]`）。
+    english_settings_cache: Mutex<HashMap<String, Arc<wind_config::config::EnglishGlobal>>>,
     /// `schema_def_cache` 的失效代次（同 `aux_settings_gen`）。
     schema_def_gen: std::sync::atomic::AtomicU64,
     /// 词库统计结果（方案 id → (缓存键, 结果)），见 [`Self::dict_stats`]。键含各库摘要，
@@ -901,6 +905,8 @@ impl EngineManager {
             schema_type_cache: Mutex::new(HashMap::new()),
             schema_def_cache: Mutex::new(HashMap::new()),
             pinyin_settings_cache: Mutex::new(HashMap::new()),
+            mix_settings_cache: Mutex::new(HashMap::new()),
+            english_settings_cache: Mutex::new(HashMap::new()),
             schema_def_gen: std::sync::atomic::AtomicU64::new(0),
             dict_stats_cache: Mutex::new(HashMap::new()),
             dict_stats_gates: Mutex::new(HashMap::new()),
@@ -2903,11 +2909,7 @@ impl EngineManager {
             // 词组分词：英文方案读 `schema.english.phrase_seg`，临英与快捷输入英文共读
             // `input.temp_english.phrase_seg`，两份开关相或。引擎只需知道「要不要具备
             // 这个能力」——按作用域把关是协调器的事，见 `build_engine` 的参数说明。
-            let phrase_seg_anywhere = self
-                .english
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .phrase_seg
+            let phrase_seg_anywhere = self.english_settings_of(ENGLISH_SCHEMA).phrase_seg
                 || self
                     .temp_english
                     .lock()
@@ -4589,14 +4591,12 @@ impl EngineManager {
                 (e.exact_position, e.complete_position)
             }
             EngineType::Mixed => {
-                let m = self.mix.lock().unwrap_or_else(|e| e.into_inner());
+                let m = self.mix_settings_of(&self.active_schema_id());
                 (m.english_exact_position, m.english_complete_position)
             }
             EngineType::Pinyin => {
                 let e = self
-                    .pinyin
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
+                    .pinyin_settings_of(&self.active_schema_id())
                     .english_merge
                     .clone();
                 // 英文候选没开时列表里不会有英文，不必再问方案是不是双拼。
@@ -5197,6 +5197,13 @@ impl EngineManager {
         } else {
             schema_id.to_string()
         };
+        if let Some(patch) = self
+            .schema_def_cached(&resolve_id)
+            .and_then(|d| d.engine.codetable.auto_phrase.clone())
+        {
+            let (_, problems) = global.auto_phrase.for_scheme(&patch);
+            warn_scheme_problems(&resolve_id, "[engine.codetable.auto_phrase]", &problems);
+        }
         Self::resolve_codetable(
             &resolve_id,
             self.data_dir.as_deref(),
@@ -5276,12 +5283,7 @@ impl EngineManager {
 
     /// 英文方案的词频衰减参数。与码表/拼音三者互不相干，各读各的 `half_life`。
     pub fn english_freq_profile(&self) -> wind_store::freq::FreqProfile {
-        let hl = self
-            .english
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .frequency
-            .half_life;
+        let hl = self.english_settings().frequency.half_life;
         let def = wind_store::freq::FreqProfile::default();
         wind_store::freq::FreqProfile {
             half_life_hours: Self::resolve_half_life(hl, def.half_life_hours),
@@ -5469,14 +5471,17 @@ impl EngineManager {
         s
     }
 
-    /// 指定拼音方案的生效设置：内置默认叠上方案 `[engine.pinyin]`（含 `schema_overrides`）里
-    /// 写的项。`schema_id` 为空或方案读不到时返回内置默认。
-    pub fn pinyin_settings_of(
+    /// 按方案取设置的公共骨架：查缓存 → 取方案定义 → `fold` 折叠 → 代次未变才回填。
+    /// `fold` 返回 `None` 表示该方案读不到，用基线。
+    fn scheme_settings_cached<T>(
         &self,
+        cache: &Mutex<HashMap<String, Arc<T>>>,
         schema_id: &str,
-    ) -> Arc<wind_config::config::PinyinGlobalConfig> {
-        if let Some(v) = self
-            .pinyin_settings_cache
+        section: &str,
+        base: T,
+        fold: impl FnOnce(&T, &Schema) -> (T, Vec<String>),
+    ) -> Arc<T> {
+        if let Some(v) = cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(schema_id)
@@ -5486,23 +5491,16 @@ impl EngineManager {
         let generation = self
             .schema_def_gen
             .load(std::sync::atomic::Ordering::Acquire);
-        let base = self.pinyin_global();
         let settings = match self.schema_def_cached(schema_id) {
             Some(def) if !schema_id.is_empty() => {
-                let (s, problems) = base.for_scheme(&def.engine.pinyin);
-                if !problems.is_empty() {
-                    warn!(
-                        "方案 {schema_id} 的 [engine.pinyin] 有 {} 项未生效：{}",
-                        problems.len(),
-                        problems.join("；")
-                    );
-                }
+                let (s, problems) = fold(&base, &def);
+                warn_scheme_problems(schema_id, section, &problems);
                 s
             }
             _ => base,
         };
         let settings = Arc::new(settings);
-        // 持 `schema_def_cache` 的锁比对代次：失效方清两张表时也持着它。
+        // 持 `schema_def_cache` 的锁比对代次：失效方清这几张表时也持着它。
         let _defs = self
             .schema_def_cache
             .lock()
@@ -5512,12 +5510,71 @@ impl EngineManager {
             .load(std::sync::atomic::Ordering::Acquire)
             == generation
         {
-            self.pinyin_settings_cache
+            cache
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(schema_id.to_string(), Arc::clone(&settings));
         }
         settings
+    }
+
+    /// 指定拼音方案的生效设置：内置默认叠上方案 `[engine.pinyin]`（含 `schema_overrides`）里
+    /// 写的项。`schema_id` 为空或方案读不到时返回内置默认。
+    pub fn pinyin_settings_of(
+        &self,
+        schema_id: &str,
+    ) -> Arc<wind_config::config::PinyinGlobalConfig> {
+        self.scheme_settings_cached(
+            &self.pinyin_settings_cache,
+            schema_id,
+            "[engine.pinyin]",
+            self.pinyin_global(),
+            |base, def| base.for_scheme(&def.engine.pinyin),
+        )
+    }
+
+    /// 指定混输方案的融合设置，取法同 [`Self::pinyin_settings_of`]。
+    pub fn mix_settings_of(&self, schema_id: &str) -> Arc<wind_config::MixGlobal> {
+        let base = self.mix.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        self.scheme_settings_cached(
+            &self.mix_settings_cache,
+            schema_id,
+            "[engine.mixed]",
+            base,
+            |base, def| base.for_scheme(&def.engine.mixed),
+        )
+    }
+
+    /// 指定英文方案的设置，取法同 [`Self::pinyin_settings_of`]。
+    pub fn english_settings_of(&self, schema_id: &str) -> Arc<wind_config::config::EnglishGlobal> {
+        let base = self
+            .english
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        self.scheme_settings_cached(
+            &self.english_settings_cache,
+            schema_id,
+            "[engine.english]",
+            base,
+            |base, def| base.for_scheme(&def.engine.english),
+        )
+    }
+
+    /// 此刻起作用的英文方案：活跃方案是英文类就是它，否则是出厂英文方案（临时英文、混入的
+    /// 英文候选都用它）。
+    pub fn english_scheme_in_effect(&self) -> String {
+        let active = self.active_schema_id();
+        if self.schema_engine_type(&active).as_deref() == Some("english") {
+            active
+        } else {
+            ENGLISH_SCHEMA.to_string()
+        }
+    }
+
+    /// [`Self::english_settings_of`] 取 [`Self::english_scheme_in_effect`]。
+    pub fn english_settings(&self) -> Arc<wind_config::config::EnglishGlobal> {
+        self.english_settings_of(&self.english_scheme_in_effect())
     }
 
     /// 此刻起作用的拼音方案：活跃方案是拼音就是它，是混输取它的拼音成员，否则取主拼音方案
@@ -5593,6 +5650,14 @@ impl EngineManager {
             .unwrap_or_else(|e| e.into_inner());
         cache.clear();
         self.pinyin_settings_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.mix_settings_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.english_settings_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
@@ -5837,7 +5902,7 @@ impl EngineManager {
         // 英文记账口径按候选来源生效、不按当前方案（混输里的英文候选同样读它），故在分流
         // 之外取一次、三个分支共用。
         let english_code_by_input = {
-            let en = self.english.lock().unwrap_or_else(|e| e.into_inner());
+            let en = self.english_settings_of(ENGLISH_SCHEMA);
             en.frequency.code_scope == "input"
         };
         // 同上：跨引擎共用一个值。
@@ -5845,7 +5910,7 @@ impl EngineManager {
         let engine_type = self.schema_engine_type(&id);
         let settings = match engine_type.as_deref() {
             Some("english") => {
-                let en = self.english.lock().unwrap_or_else(|e| e.into_inner());
+                let en = self.english_settings_of(&id);
                 FreqSettings {
                     enabled: en.frequency.enabled,
                     record_always: en.frequency.record_always,
@@ -6531,6 +6596,11 @@ impl EngineManager {
         // 混输方案：递归构建主（码表）+ 次（拼音）子引擎，包装为 MixedEngine
         if schema.engine.engine_type.to_lowercase() == "mixed" {
             let m = &schema.engine.mixed;
+            // 本方案的融合设置。子引擎递归仍传未折叠的基线：成员若是混输，自己再折自己的。
+            let mix_base = mix_cfg;
+            let (mix_own, problems) = mix_base.for_scheme(m);
+            warn_scheme_problems(schema_id, "[engine.mixed]", &problems);
+            let mix_cfg = &mix_own;
             if m.primary_schema.is_empty() {
                 warn!("mixed schema {} 缺少 primary_schema", schema_id);
                 return None;
@@ -6555,7 +6625,7 @@ impl EngineManager {
                 Some(data_dir),
                 store.clone(),
                 codetable_cfg,
-                mix_cfg,
+                mix_base,
                 override_dir,
                 pinyin_cfg,
                 pinyin_hint,
@@ -6600,7 +6670,7 @@ impl EngineManager {
                     Some(data_dir),
                     store.clone(),
                     codetable_cfg,
-                    mix_cfg,
+                    mix_base,
                     override_dir,
                     pinyin_cfg,
                     pinyin_hint,
@@ -6741,13 +6811,7 @@ impl EngineManager {
             };
             // 从全局拼音配置构建引擎配置和模糊音。enabled 作总开关：未启用时所有模糊标志归零。
             let (pg, problems) = pinyin_cfg.for_scheme(&schema.engine.pinyin);
-            if !problems.is_empty() {
-                warn!(
-                    "方案 {schema_id} 的 [engine.pinyin] 有 {} 项未生效：{}",
-                    problems.len(),
-                    problems.join("；")
-                );
-            }
+            warn_scheme_problems(schema_id, "[engine.pinyin]", &problems);
             let pg = &pg;
             // 双拼不启用换位纠错（规则是全拼字母层的），纠错置空。
             let shuangpin = schema
@@ -8523,3 +8587,14 @@ fn pinyin_hint_on(
 #[cfg(test)]
 #[path = "manager_tests.rs"]
 mod tests;
+
+/// 方案设置里未生效的项统一告警一句。
+fn warn_scheme_problems(schema_id: &str, section: &str, problems: &[String]) {
+    if !problems.is_empty() {
+        warn!(
+            "方案 {schema_id} 的 {section} 有 {} 项未生效：{}",
+            problems.len(),
+            problems.join("；")
+        );
+    }
+}

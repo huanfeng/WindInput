@@ -233,12 +233,8 @@ impl Coordinator {
     /// idle 超时（连续单字最大间隔）。0 = 用默认 5s。
     pub(crate) fn auto_phrase_idle_timeout(&self) -> std::time::Duration {
         let ms = self
-            .rt()
-            .config
-            .schema
-            .codetable
-            .auto_phrase
-            .idle_timeout_ms;
+            .engine_mgr
+            .with_codetable_settings(|c| c.auto_phrase.idle_timeout_ms);
         if ms == 0 {
             crate::draft_window::DEFAULT_IDLE_TIMEOUT
         } else {
@@ -347,13 +343,14 @@ impl Coordinator {
     /// 其余沿用码表那份——两者各在自己的 schema 分区里淘汰，互不相干。
     pub(crate) fn maybe_evict_temp(&self, store: &wind_store::Store, schema: &str) {
         let english = self.is_english_data_schema(schema);
-        let max = {
-            let rt = self.rt();
-            if english {
-                rt.config.schema.english.auto_learn.temp_max_entries
-            } else {
-                rt.config.schema.codetable.auto_phrase.temp_max_entries
-            }
+        let max = if english {
+            self.engine_mgr
+                .english_settings()
+                .auto_learn
+                .temp_max_entries
+        } else {
+            self.engine_mgr
+                .with_codetable_settings(|c| c.auto_phrase.temp_max_entries)
         };
         if max == 0 {
             return;
@@ -665,7 +662,7 @@ impl Coordinator {
             self.engine_mgr.auto_learn_settings().promote_count
         } else if self.is_english_data_schema(&schema) {
             // 英文临时词（自动造词）的晋升阈值在英文那份配置里；落到下面码表那份就是读错桶。
-            self.rt().config.schema.english.auto_learn.promote_count
+            self.engine_mgr.english_settings().auto_learn.promote_count
         } else {
             self.engine_mgr
                 .codetable_settings()

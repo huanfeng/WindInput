@@ -1756,7 +1756,7 @@ impl Coordinator {
         // 配置与临英各自独立，产出共用 crate::english_candidates。
         if self.engine_mgr.active_is_english() {
             let (raw_mode, want_variants, follow_case) = {
-                let en = &self.rt().config.schema.english;
+                let en = self.engine_mgr.english_settings();
                 (en.raw_candidate, en.case_variants, en.case_follow_input)
             };
             // 取影子串而不是 `input_buffer`（恒为全小写），否则大小写传不进来，且毫无报错。
@@ -1777,7 +1777,7 @@ impl Coordinator {
             // `InDict` 档的判据必须在投影之后求值：投影后 `hell` 才与所打的 `Hell` 字面相同，否则
             // 同一档会随另一个开关给出不同答案。词组分词生效时 `Always` 降级成 `InDict`
             // （见 `raw_mode_under_phrase_seg`）：含分词符的串是查询语法，但 `o'clock` 这类词库词不能误伤。
-            let phrase_active = self.rt().config.schema.english.phrase_seg
+            let phrase_active = self.engine_mgr.english_settings().phrase_seg
                 && raw.contains(wind_engine::english_phrase::PHRASE_SEPARATOR);
             let raw_mode =
                 crate::english_candidates::raw_mode_under_phrase_seg(raw_mode, phrase_active);
@@ -2665,7 +2665,7 @@ impl Coordinator {
         if key_code != wind_keys::keymap::VK_QUOTE {
             return false;
         }
-        if !self.rt().config.schema.english.phrase_seg {
+        if !self.engine_mgr.english_settings().phrase_seg {
             return false;
         }
         // 只在英文引擎下夺取：那个开关属于英文方案的作用域，其余方案 `'` 维持选词键身份。
@@ -3376,7 +3376,7 @@ impl Coordinator {
         if in_temp_english {
             return self.rt().config.input.temp_english.commit_space;
         }
-        self.engine_mgr.active_is_english() && self.rt().config.schema.english.commit_space
+        self.engine_mgr.active_is_english() && self.engine_mgr.english_settings().commit_space
     }
 
     /// 英文候选上屏后是否补一个空格：方案口径之上，再要求「这条候选算英文内容」。

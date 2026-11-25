@@ -1082,6 +1082,30 @@ pub struct PinyinGlobalConfig {
     pub grammar: PinyinGrammar,
 }
 
+impl AutoPhraseConfig {
+    /// 叠上方案 `[engine.codetable.auto_phrase]` 里写的项。返回值同
+    /// [`PinyinGlobalConfig::for_scheme`]。
+    pub fn for_scheme(&self, patch: &toml::Table) -> (Self, Vec<String>) {
+        crate::scheme_fold::fold(self, patch, "schema.codetable.auto_phrase", &[])
+    }
+}
+
+impl MixGlobal {
+    /// 某个混输方案的生效设置：以 `self` 为基线，叠上方案 `[engine.mixed]` 里写的项。
+    /// 返回值同 [`PinyinGlobalConfig::for_scheme`]。
+    pub fn for_scheme(&self, spec: &crate::schema::MixedSpec) -> (Self, Vec<String>) {
+        crate::scheme_fold::fold(self, &spec.settings, "schema.mix", &[])
+    }
+}
+
+impl EnglishGlobal {
+    /// 某个英文方案的生效设置：以 `self` 为基线，叠上方案 `[engine.english]` 里写的项。
+    /// 返回值同 [`PinyinGlobalConfig::for_scheme`]。
+    pub fn for_scheme(&self, spec: &crate::schema::EnglishSpec) -> (Self, Vec<String>) {
+        crate::scheme_fold::fold(self, &spec.settings, "schema.english", &[])
+    }
+}
+
 impl PinyinGlobalConfig {
     /// 某个拼音方案的生效设置：以 `self` 为基线，叠上方案 `[engine.pinyin]` 里写的项。
     /// 第二个返回值是被丢弃的项（键名 + 原因），供日志与设置页提示。
@@ -2199,6 +2223,10 @@ impl CodetableGlobal {
         }
         if let Some(v) = o.sentence_grammar_weight {
             out.sentence_grammar_weight = v;
+        }
+        if let Some(patch) = &o.auto_phrase {
+            // 写错的项只丢那一项，告警在 `EngineManager::resolve_codetable_settings`。
+            out.auto_phrase = out.auto_phrase.for_scheme(patch).0;
         }
         // 调频段逐字段折叠，整段缺省 = 全部跟随基线。消费方是 `EngineManager::freq_settings`，
         // 与上屏行为字段（`build_engine` 的 CommitOptions）不同路径；加字段时两条都要看。

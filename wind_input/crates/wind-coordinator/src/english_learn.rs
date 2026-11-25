@@ -56,9 +56,8 @@ impl Coordinator {
     /// 临英传它的英文方案 id（出厂 `english`）。
     pub(crate) fn learn_english_raw(&self, schema: &str, text: &str) {
         let (enabled, promote_count) = {
-            let rt = self.rt();
-            let al = &rt.config.schema.english.auto_learn;
-            (al.enabled, al.promote_count)
+            let en = self.engine_mgr.english_settings();
+            (en.auto_learn.enabled, en.auto_learn.promote_count)
         };
         if !enabled || !learnable(text) || self.learning_suspended() {
             return;
