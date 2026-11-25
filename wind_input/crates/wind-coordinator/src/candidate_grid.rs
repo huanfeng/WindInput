@@ -188,6 +188,18 @@ impl Coordinator {
         true
     }
 
+    /// 用户按翻页键（或点翻页箭头）触发的展开：开了 `grid_expand_advance` 时高亮顺势下移一行。
+    /// 只用于用户动作；`grid_resume` 的自动再展开不能下移。
+    pub(crate) fn expand_on_page_next(&self, state: &mut State) -> bool {
+        if !self.try_expand_grid(state) {
+            return false;
+        }
+        if self.rt().config.ui.candidate.grid_expand_advance {
+            self.grid_move_row(state, true);
+        }
+        true
+    }
+
     /// 候选原地重建（输入没变：置顶 / 调位 / 删除）之前记下展开态的位置。
     pub(crate) fn grid_snapshot(state: &State) -> Option<GridSnapshot> {
         Self::grid_active(state).then_some(GridSnapshot {

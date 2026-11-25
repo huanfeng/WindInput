@@ -305,6 +305,36 @@ fn page_up_down_moves_a_row_when_screen_off() {
     assert_eq!(view(&c), (0, 0, Some(0)), "首行停住，不收起");
 }
 
+/// `grid_expand_advance` 开着：首次翻页键展开并下移一行，保持列号；之后照常逐行。
+#[test]
+fn first_page_key_expands_and_advances_a_row() {
+    let mut cfg = wind_config::Config::default();
+    cfg.input.default.chinese_mode = true;
+    cfg.ui.candidate.grid_expand = true;
+    cfg.ui.candidate.grid_expand_advance = true;
+    let (c, _rx) = Coordinator::new_headless_with_ui(cfg, None);
+    c.debug_mark_coords_ready();
+    seed(&c, PP * 3);
+    c.handle_key_event(&key(keymap::VK_EQUAL));
+    assert_eq!(view(&c), (1, 0, Some(0)), "展开且高亮落到第 2 行");
+    c.handle_key_event(&key(keymap::VK_EQUAL));
+    assert_eq!(view(&c), (2, 0, Some(0)), "已展开后仍逐行");
+}
+
+/// 只有一页时不展开，也就不下移。
+#[test]
+fn advance_does_nothing_when_single_page() {
+    let mut cfg = wind_config::Config::default();
+    cfg.input.default.chinese_mode = true;
+    cfg.ui.candidate.grid_expand = true;
+    cfg.ui.candidate.grid_expand_advance = true;
+    let (c, _rx) = Coordinator::new_headless_with_ui(cfg, None);
+    c.debug_mark_coords_ready();
+    seed(&c, PP);
+    c.handle_key_event(&key(keymap::VK_EQUAL));
+    assert_eq!(view(&c).2, None);
+}
+
 /// 把 `.` / `,` 绑成「翻屏」动词；`grid_on` 控制是否开展开。
 fn coord_screen_verbs(grid_on: bool) -> (Arc<Coordinator>, Receiver<UiCommand>) {
     let mut cfg = wind_config::Config::default();

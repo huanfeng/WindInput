@@ -657,6 +657,7 @@ static REGISTRY: &[ConfigField] = &[
         Enum(&["rows", "cells", "off"]),
     ),
     f("ui.candidate.grid_pageupdown_screen", Bool),
+    f("ui.candidate.grid_expand_advance", Bool),
     f("ui.candidate.grid_categories", StrList),
     f("ui.candidate.comment_max_chars_vertical", Int),
     f("ui.candidate.comment_max_chars_horizontal", Int),

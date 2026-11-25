@@ -5605,7 +5605,9 @@ impl Coordinator {
                 keymap::NavAction::HighlightUp => self.move_up(state),
                 keymap::NavAction::HighlightDown => self.move_down(state),
                 keymap::NavAction::PagePrev => self.page_prev(state),
-                keymap::NavAction::PageNext => self.try_expand_grid(state) || self.page_next(state),
+                keymap::NavAction::PageNext => {
+                    self.expand_on_page_next(state) || self.page_next(state)
+                }
             }
         };
         if changed {
@@ -7777,7 +7779,7 @@ impl Coordinator {
         } else if dir < 0 {
             self.page_prev(&mut state)
         } else {
-            self.try_expand_grid(&mut state) || self.page_next(&mut state)
+            self.expand_on_page_next(&mut state) || self.page_next(&mut state)
         };
         if changed {
             self.notify_ui_update(&state);

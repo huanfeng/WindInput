@@ -1514,6 +1514,8 @@ grid_cell_max_chars = 6
 grid_index_fill = "rows"
 # 展开态下 PageUp/PageDown 翻一整屏；关掉后也逐行。其余翻页键（如 - =）恒逐行。
 grid_pageupdown_screen = true
+# 首次按翻页键（或点翻页箭头）展开时，高亮同时下移一行；关闭则只展开、高亮不动。
+grid_expand_advance = false
 # 展开态的分类标签（Tab / Shift+Tab 或鼠标点击切换）：all 全部、single 单字、phrase 词组、
 # rare 生僻、symbol 符号。只决定有哪些，顺序固定按这个次序；少于两个时不显示标签栏。
 grid_categories = ["all", "single", "phrase", "rare"]
