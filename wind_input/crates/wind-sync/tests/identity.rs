@@ -388,21 +388,23 @@ impl Backend for FailDelete {
 #[test]
 fn retire_resumes_after_partial_delete() {
     let (b, dek, mut a, _bb, _c) = three();
-    while a.state.gen_ < 10 {
+    for _ in 0..30 {
+        if a.state.gen_ >= 10 {
+            break;
+        }
         a.local.set("config.toml", &format!("v{}", a.state.gen_));
         a.sync(&b);
     }
+    assert!(a.state.gen_ >= 10, "未发布到第 10 代");
     let old = a.state.device.clone();
     let keys = b.keys(&manifest::device_dir_prefix(&old));
     assert!(keys.iter().any(|k| k.ends_with("manifest.10")), "{keys:?}");
     rename_device(&b, &mut a.state, "a2").unwrap();
     let r = a.state.retired_ids[0].clone();
-    // 让 9 号清单之前就有残留：只保证 9 与 10 同在
-    for g in [9u64] {
-        if b.raw_get(&manifest::manifest_key(&old, g)).is_none() {
-            let raw = b.raw_get(&manifest::manifest_key(&old, 10)).unwrap();
-            b.raw_put(&manifest::manifest_key(&old, g), raw);
-        }
+    // 引擎可能已回收 9 号清单：缺则补一份，保证 9 与 10 同在
+    if b.raw_get(&manifest::manifest_key(&old, 9)).is_none() {
+        let raw = b.raw_get(&manifest::manifest_key(&old, 10)).unwrap();
+        b.raw_put(&manifest::manifest_key(&old, 9), raw);
     }
     let fb = FailDelete {
         inner: b.clone(),
@@ -412,4 +414,21 @@ fn retire_resumes_after_partial_delete() {
     *fb.fail_on.lock().unwrap() = None;
     assert!(retire_device(&fb, &dek, &r).unwrap());
     assert!(b.keys(&manifest::device_dir_prefix(&old)).is_empty());
+}
+
+/// 旧号被别的设备接手并发布了更低代次：nonce 不符，不删它的对象。
+#[test]
+fn retire_skips_id_taken_over_with_lower_gen() {
+    let (b, dek, _a, _bb, _c) = three();
+    remove_device(&b, "a").unwrap();
+    let mut other = Dev::new("a", "home", &dek);
+    other.local.set("config.toml", "别人");
+    other.sync(&b);
+    let r = wind_sync::state::RetiredId {
+        id: "a".into(),
+        nonce: "old-nonce".into(),
+        gen_: 5,
+    };
+    assert!(!retire_device(&b, &dek, &r).unwrap());
+    assert!(!b.keys(&manifest::device_dir_prefix("a")).is_empty());
 }
