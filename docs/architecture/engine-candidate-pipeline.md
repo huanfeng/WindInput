@@ -1267,7 +1267,10 @@ merged_codes。**当前四个归并点**：`composite::merge_search`（跨词库
 ## 11. 配置速查（实际生效默认值）
 
 引擎相关配置三层合并：代码默认 → 系统 `data/config.toml` → 用户 `%APPDATA%\WindInput\config.toml`。
-下表「默认」为**系统配置层实际值**（与代码默认不同处已注明）：
+下表「默认」为**系统配置层实际值**（与代码默认不同处已注明）。`schema.codetable` / `pinyin` /
+`mix` / `english` 四段只是类型内置默认：设置按方案保存在方案文件与 `schema_overrides/<id>.toml`
+（对应 `[engine.<类型>]` 段），这些旧键是「当前方案（或主方案）对应设置」的别名，见
+`docs/design/scheme-settings-flatten.md`。
 
 | 键 | 默认 | 说明 |
 |---|---|---|
@@ -1283,12 +1286,12 @@ merged_codes。**当前四个归并点**：`composite::merge_search`（跨词库
 | `schema.mix.block_commit_on_english_word` | true | 成词级英文否决（整串恰是英文单词时否决满码 / 顶码 / 清空） |
 | `schema.mix.english_complete_min_length` / `english_exact_position` / `english_complete_position` / `english_max_count` | 0 / 1 / 2 / 2 | 英文补全门槛、两项位次下限、条数上限（口径同 `schema.codetable.english_merge`） |
 | `schema.mix.show_source_hint` | false | 拼音候选「拼」标记 |
-| `schema.codetable.*`（auto_commit_at_full / auto_commit_min_len / clear_on_empty_max / top_code_commit / show_code_hint / single_code_input / single_code_complete 等） | 见 config.toml | 可被 `schema_overrides/{id}.toml [codetable]` 按方案覆盖 |
+| `schema.codetable.*`（auto_commit_at_full / auto_commit_min_len / clear_on_empty_max / top_code_commit / show_code_hint / single_code_input / single_code_complete 等） | 见 config.toml | 按方案设置（`[engine.codetable]`） |
 | `schema.pinyin.use_smart_compose` | — | Viterbi 整句开关 |
 | `schema.pinyin.sentence_uses_user_words` | **true**（2026-09-28 起，此前 false） | 用户词与临时词进整句词图（S2，简拼段也认），不接草稿层。只在 `use_smart_compose` 开着时有效，UI 的 `enabled_when` 挂在它上面 |
 | `schema.pinyin.sentence_count` / `sentence_max_count` | 1 / 1 | 整句 N-best：露几条 / 算几条（上限 8，算的不少于露的）。露 >1 时协调器把整句块强制摆到最前（`place_sentence_block`）；混输辅助引擎钉成 1/1 |
 | `schema.pinyin.sentence_cycle_key` | ""（关） | 整句切换键，**键即开关**。只在整句池 ≥ 2 条时夺取，窗口在池中滚动一格并回卷；其余时候按键照旧（Tab 出厂是高亮/翻页键）。撞车启动告警 |
-| `schema.pinyin.fuzzy.*` | — | 模糊音 11 对开关 |
+| `input.fuzzy.*` | — | 模糊音开关，拼音族全局共用（旧键 `schema.pinyin.fuzzy.*` 仍可用） |
 | `schema.pinyin.frequency.*`（half_life / base_scale / recency_peak） | — | 拼音词频衰减参数 |
 | `schema.pinyin.auto_learn.*` | — | 自动造词 |
 | `[engine.pinyin] scheme` / `[engine.pinyin.shuangpin] layout` | quanpin / — | 双拼判定与布局 |
