@@ -789,3 +789,15 @@ fn keypad_active_for_letter_only_shuangpin() {
     let win = m.candidates(0, 10);
     assert!(win.items.iter().any(|t| t == "你好"), "{:?}", win.items);
 }
+
+/// 键盘列表据此给九宫格格子：全拼、小鹤双拼可以，五笔、英文不行。
+#[test]
+fn keypad_supported_by_schema() {
+    let Some((m, _rx)) = core("kp_sup", "pinyin", no_assoc) else {
+        return;
+    };
+    assert!(m.keypad_supported("pinyin"));
+    assert!(m.keypad_supported("shuangpin"));
+    assert!(!m.keypad_supported("wubi86"));
+    assert!(!m.keypad_supported("english"));
+}

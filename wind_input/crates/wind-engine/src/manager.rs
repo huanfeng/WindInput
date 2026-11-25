@@ -3109,6 +3109,22 @@ impl EngineManager {
         *self.keypad.write().unwrap_or_else(|e| e.into_inner()) = keypad;
     }
 
+    /// 指定方案能否用九宫格输入（宿主据此在键盘列表里给不给「九宫格」那一格）。
+    ///
+    /// 读方案文件判断，不加载引擎：全拼恒可；双拼限纯字母布局（同 [`Engine::keypad_supported`]）；
+    /// 码表、混输、英文不能。不缓存：只在宿主摆列表时问，双拼布局改了也即时反映。
+    pub fn keypad_supported_of(&self, schema_id: &str) -> bool {
+        if self.schema_engine_type(schema_id).as_deref() != Some("pinyin") {
+            return false;
+        }
+        match self.shuangpin_layout_id_of(schema_id) {
+            None => true,
+            Some(_) => self
+                .load_shuangpin_layout(schema_id)
+                .is_some_and(|l| crate::pinyin::t9::shuangpin_layout_is_letter_only(&l)),
+        }
+    }
+
     /// 当前生效的九宫格映射：设置了映射且活跃引擎能按九宫格解码时才有（全拼；双拼限纯字母
     /// 布局，见 [`Engine::keypad_supported`]）。其余方案照旧按 26 键，宿主据此换回 26 键。
     pub fn active_keypad(&self) -> Option<Arc<crate::pinyin::t9::KeypadMap>> {

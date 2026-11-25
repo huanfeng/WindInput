@@ -725,6 +725,12 @@ impl MobileCore {
         outcome
     }
 
+    /// 指定方案能否用九宫格输入（全拼；双拼限纯字母布局）。宿主摆键盘列表时问，
+    /// 决定这个方案除了全键盘要不要再给一格九宫格。读方案文件，不加载引擎。
+    pub fn keypad_supported(&self, schema_id: &str) -> bool {
+        self.coord.keypad_supported_of(schema_id)
+    }
+
     /// 九宫格解码此刻是否生效（开了且活跃方案是拼音类）。
     pub fn keypad_active(&self) -> bool {
         self.coord.keypad_active()

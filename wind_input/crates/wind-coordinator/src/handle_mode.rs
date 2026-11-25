@@ -1165,6 +1165,11 @@ impl Coordinator {
             .set_keypad(on.then(|| std::sync::Arc::new(wind_engine::pinyin::t9::KeypadMap::t9())));
     }
 
+    /// 指定方案能否用九宫格输入（见 `EngineManager::keypad_supported_of`）。
+    pub fn keypad_supported_of(&self, schema_id: &str) -> bool {
+        self.engine_mgr.keypad_supported_of(schema_id)
+    }
+
     /// 九宫格解码此刻是否生效（开了且活跃方案是拼音类）。
     pub fn keypad_active(&self) -> bool {
         self.engine_mgr.active_keypad().is_some()
