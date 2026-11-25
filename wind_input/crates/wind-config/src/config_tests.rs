@@ -3846,3 +3846,48 @@ fn rare_char_bound_action_parses() {
     assert_eq!(BoundAction::parse("rare"), BoundAction::None);
     assert_eq!(BoundAction::parse(""), BoundAction::None);
 }
+
+#[test]
+fn take_legacy_type_settings_strips_four_sections_but_keeps_fuzzy() {
+    let mut layer: toml::Value = toml::from_str(
+        "[schema]\nactive = \"wubi86\"\n\
+         [schema.codetable]\nwildcard = true\n[schema.codetable.frequency]\nenabled = true\n\
+         [schema.pinyin]\nsentence_count = 2\n[schema.pinyin.fuzzy]\nenabled = true\n\
+         [schema.mix]\nenable_english = true\n[schema.english]\ncommit_space = true\n\
+         [schema.quick_input]\ndecimal_places = 2\n",
+    )
+    .unwrap();
+    let taken = take_legacy_type_settings(&mut layer);
+    assert_eq!(
+        taken.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["codetable", "english", "mix", "pinyin"]
+    );
+    assert_eq!(
+        taken["codetable"]["frequency"]["enabled"].as_bool(),
+        Some(true)
+    );
+    assert!(taken["pinyin"].get("fuzzy").is_none());
+    let schema = layer.get("schema").unwrap();
+    assert_eq!(schema["active"].as_str(), Some("wubi86"));
+    assert_eq!(schema["pinyin"]["fuzzy"]["enabled"].as_bool(), Some(true));
+    assert_eq!(
+        schema["quick_input"]["decimal_places"].as_integer(),
+        Some(2)
+    );
+    for gone in ["codetable", "mix", "english"] {
+        assert!(schema.get(gone).is_none(), "{gone}");
+    }
+    assert!(schema["pinyin"].get("sentence_count").is_none());
+    // 第二次没有可摘的。
+    assert!(take_legacy_type_settings(&mut layer).is_empty());
+}
+
+#[test]
+fn take_legacy_type_settings_with_only_fuzzy_takes_nothing() {
+    let mut layer: toml::Value = toml::from_str("[schema.pinyin.fuzzy]\nenabled = true\n").unwrap();
+    assert!(take_legacy_type_settings(&mut layer).is_empty());
+    assert_eq!(
+        layer["schema"]["pinyin"]["fuzzy"]["enabled"].as_bool(),
+        Some(true)
+    );
+}

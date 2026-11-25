@@ -32,8 +32,10 @@
 ```
 
 - 用户可见两层：**方案默认**与**用户配置**。
-- 类型内置默认只为「方案文件没写的字段」兜底，取值等于改造前 `data/config.toml` 的出厂值，
-  第三方方案升级后行为不变。
+- 类型内置默认只为「方案文件没写的字段」兜底。它就是只读出厂文件 `data/config.toml` 里的
+  `[schema.codetable]` / `[schema.pinyin]` / `[schema.mix]` / `[schema.english]` 四段：这四段
+  **只从出厂层（L1 ⊕ L2）读**，定制层与用户层写了也不生效。取值不变，第三方方案升级后行为
+  不变；注册表、`data/config.toml` 列全门禁、结构体零值（大量测试靠它）都不用动。
 - overlay 方案今天已经是这个模型（`special_schema_baseline`），本次把它推广到全部方案。
 
 ### 2.1 不变的部分
@@ -89,8 +91,8 @@
 
 ## 4 旧键：别名
 
-四段从 `Config` 结构体里删除，`config.toml` 不再存它们。旧键在注册表里保留，标为别名，
-只在**按键寻址**的读写口转址：
+用户 `config.toml` 不再存这四段（`Config` 里的同名字段只装出厂层的值，充当类型内置默认）。
+旧键在注册表里保留，只在**按键寻址**的读写口转址：
 
 | 入口 | 位置 |
 |---|---|
@@ -128,17 +130,20 @@ RPC 一侧经内部方法 `schema.aliasGet` / `schema.aliasSet` 转到宿主（`
 
 ### 4.2 一次性迁移
 
-用户 `config.toml` 里的四段，升级后首次加载时：
+`Config::load` 把用户层里的四段摘下来（模糊音留在原处），放进 `Config::legacy_type_settings`，
+不参与合并。`EngineManager` 在构造与重载时见它非空就搬（`migrate_legacy_type_settings`）：
 
-1. 对每个已安装、非 overlay 的同类方案，把用户写过的每个键写进它的 `schema_overrides`
-   ——该方案自己已覆盖的键跳过；
-2. `schema.pinyin.fuzzy.*` 改写为 `input.fuzzy.*`；
-3. 从 `config.toml` 删掉这四段。
+1. 对每个已安装、非 overlay 的同类方案，把用户写过的每个键写进它的 `schema_overrides`；
+   该方案自己已有值的键跳过（方案文件里写的和用户设置里写的都算）；
+2. 搬完从用户 `config.toml` 删掉这四段（`Config::clear_legacy_type_settings`）。
 
-这样升级前后每个方案的生效值逐项不变。之后新装的方案不再继承这些值。
+用户层只存与出厂不同的值，所以「用户写过的键」就是他改过的项。搬完后每个方案的生效值与搬
+之前逐项相同；之后新装的方案不再继承这些值。幂等：删除失败时下次启动重搬，各项都已有值。
 
-`data_custom/config.toml` 里的旧段**不迁移、不读取**：定制者把值写进 `data_custom` 下的方案
-文件。文档站的定制说明同步更新。
+`data_custom/config.toml` 里的这四段**不迁移、不读取**，加载时告警一句：定制者把值写进
+`data_custom` 下的方案文件。文档站的定制说明同步更新。
+
+模糊音改名 `input.fuzzy.*` 另起一步做。
 
 ## 5 方案间复制
 
@@ -166,7 +171,7 @@ RPC 一侧经内部方法 `schema.aliasGet` / `schema.aliasSet` 转到宿主（`
 |---|---|---|
 | 1 | 拼音：`[engine.pinyin]` 收设置项，通用折叠（`scheme_fold`），管理器与协调器按方案取值 | 全量测试绿；全拼、双拼可各设一份 |
 | 2 | 混输 `[engine.mixed]`、英文 `[engine.english]`、码表 `auto_phrase` 同法下沉 | 同上 |
-| 3 | 翻转：码表的三态字段与手写 `resolved()` 换成通用折叠；四段离开 `config.toml` 与 `Config`，基线改内置默认；内置方案文件写明偏好；模糊音改 `input.fuzzy`；别名转址、一次性迁移；删类型层登记表 | 迁移单测：单方案 / 多方案 / 已有覆盖 / overlay 各一例；旧键读写可用；内置方案生效值与改造前逐项相同 |
+| 3 | 翻转：别名转址；四段不再从用户层与定制层读、一次性迁移；模糊音改 `input.fuzzy`；删类型层登记表与 `followed*` / `overrideSummary` 的类型层内容；码表的三态字段与手写 `resolved()` 换成通用折叠 | 迁移单测：单方案 / 多方案 / 已有覆盖 / overlay 各一例；旧键读写可用；内置方案生效值与改造前逐项相同 |
 | 4 | 设置端 | 渲染与写回测试；截图核对 |
 | 5 | 移动端、备份与方案包、同步、文档站、规则文档 | 各自门禁 |
 

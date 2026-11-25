@@ -281,3 +281,72 @@ fn non_alias_keys_are_not_intercepted() {
             .is_none()
     );
 }
+
+// ── 用户层旧全局段搬入方案设置 ──
+
+fn legacy(text: &str) -> toml::Table {
+    toml::from_str(text).unwrap()
+}
+
+/// 搬给每个同类方案，生效值与搬之前「全局值对所有同类方案生效」时相同。
+#[test]
+fn legacy_settings_spread_to_every_scheme_of_the_type() {
+    let m = mgr("legacy_spread", "wubi86", &[]);
+    let done = m.migrate_legacy_type_settings(&legacy(
+        "[codetable]\nwildcard = true\n[codetable.frequency]\nenabled = true\n\
+         [pinyin]\nsentence_count = 2\n[pinyin.aux_code]\nenabled = true\n\
+         [mix]\nenable_english = true\n[english]\ncommit_space = true\n",
+    ));
+    let ids: Vec<&str> = done.iter().map(|(id, _)| id.as_str()).collect();
+    assert_eq!(
+        ids,
+        [
+            "english",
+            "pinyin",
+            "shuangpin",
+            "stroke",
+            "wubi86",
+            "wubi86_pinyin"
+        ]
+    );
+    for id in ["wubi86", "stroke"] {
+        assert!(m.effective_codetable(id).frequency.enabled, "{id}");
+    }
+    assert!(m.effective_codetable("wubi86").wildcard);
+    for id in ["pinyin", "shuangpin"] {
+        assert_eq!(m.pinyin_settings_of(id).sentence_count, 2, "{id}");
+        assert!(
+            override_text("legacy_spread", id).contains("[engine.aux_code]"),
+            "{id}"
+        );
+    }
+    assert!(m.mix_settings_of("wubi86_pinyin").enable_english);
+    assert!(m.english_settings_of("english").commit_space);
+}
+
+/// 方案自己已有值的项不动：方案文件里写的（笔画的 wildcard = false）和用户设置里写的都算。
+#[test]
+fn legacy_settings_skip_what_the_scheme_already_sets() {
+    let m = mgr(
+        "legacy_skip",
+        "wubi86",
+        &[("shuangpin", "[engine.pinyin]\nsentence_count = 5\n")],
+    );
+    m.migrate_legacy_type_settings(&legacy(
+        "[codetable]\nwildcard = true\n[pinyin]\nsentence_count = 2\n",
+    ));
+    assert!(
+        !m.effective_codetable("stroke").wildcard,
+        "方案文件声明了 false"
+    );
+    assert!(m.effective_codetable("wubi86").wildcard);
+    assert_eq!(m.pinyin_settings_of("shuangpin").sentence_count, 5);
+    assert_eq!(m.pinyin_settings_of("pinyin").sentence_count, 2);
+    // 再搬一次什么都不写。
+    assert!(
+        m.migrate_legacy_type_settings(&legacy(
+            "[codetable]\nwildcard = true\n[pinyin]\nsentence_count = 2\n"
+        ))
+        .is_empty()
+    );
+}

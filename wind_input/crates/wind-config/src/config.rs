@@ -199,6 +199,35 @@ fn prune_retired(root: &mut toml::Value) -> usize {
         .count()
 }
 
+/// 类型级全局设置的四个段名（`schema.<段>`）。
+pub const LEGACY_TYPE_SECTIONS: [&str; 4] = ["codetable", "pinyin", "mix", "english"];
+
+/// 从一层配置里摘掉类型级全局设置，返回摘下的内容（键为段名）。
+///
+/// 模糊音（`schema.pinyin.fuzzy`）是拼音族共用的真全局项，留在原处。
+pub fn take_legacy_type_settings(layer: &mut toml::Value) -> toml::Table {
+    let mut out = toml::Table::new();
+    let Some(toml::Value::Table(schema)) = layer.get_mut("schema") else {
+        return out;
+    };
+    for name in LEGACY_TYPE_SECTIONS {
+        let Some(toml::Value::Table(mut section)) = schema.remove(name) else {
+            continue;
+        };
+        if name == "pinyin"
+            && let Some(fuzzy) = section.remove("fuzzy")
+        {
+            let mut keep = toml::Table::new();
+            keep.insert("fuzzy".into(), fuzzy);
+            schema.insert(name.into(), toml::Value::Table(keep));
+        }
+        if !section.is_empty() {
+            out.insert(name.into(), toml::Value::Table(section));
+        }
+    }
+    out
+}
+
 /// 用户层是否已完成引导键物化（版本号 >= [`KEY_ACTIONS_MATERIALIZE_VERSION`]）。
 /// 只认显式版本号，不做「key_actions 非空就算迁过」之类推断：手工配过 key_actions 的用户会被猜错，
 /// 导致出厂绑定永久丢失。
@@ -580,6 +609,11 @@ pub struct Config {
     /// 它不是被禁止的 `skip_serializing_if`（那个用于让配置键退出体系），本字段从来就不是配置键。
     #[serde(skip)]
     pub degradation: ConfigDegradation,
+    /// 用户层里残留的类型级全局设置（`schema.codetable` / `pinyin` / `mix` / `english` 四段，
+    /// 键为段名）。这四段不再从用户层生效，由 `EngineManager` 搬进各方案的设置后清掉；
+    /// 非空表示还没搬。不是配置键。见 `docs/design/scheme-settings-flatten.md` §4.2。
+    #[serde(skip)]
+    pub legacy_type_settings: toml::Table,
     #[serde(default)]
     pub schema: SchemaConfig,
     #[serde(default)]
@@ -7528,12 +7562,25 @@ impl Config {
                 Self::read_toml_value_reporting(&custom_config, "custom", &mut unparsable)
             {
                 Self::migrate_user_layer_value(&mut v);
+                let ignored = take_legacy_type_settings(&mut v);
+                if !ignored.is_empty() {
+                    warn!(
+                        "定制版 config.toml 里的 [schema.{}] 不再读取：按类型共用的设置已取消，\
+                         请把这些值写进 data_custom 下对应方案文件的 [engine.*] 段。",
+                        ignored
+                            .keys()
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join("] / [schema.")
+                    );
+                }
                 merge_value(&mut merged, v);
                 info!("Loaded custom config: {}", custom_config.display());
             }
         }
 
         // Layer 3: 用户配置 (%APPDATA%/WindInput/config.toml)
+        let mut legacy_type_settings = toml::Table::new();
         match Self::user_config_dir() {
             Some(user_dir) => {
                 let user_config = user_dir.join("config.toml");
@@ -7541,6 +7588,7 @@ impl Config {
                     Self::read_toml_value_reporting(&user_config, "user", &mut unparsable)
                 {
                     Self::migrate_user_layer_value(&mut v);
+                    legacy_type_settings = take_legacy_type_settings(&mut v);
                     merge_value(&mut merged, v);
                     info!("Loaded user config: {}", user_config.display());
                 }
@@ -7563,6 +7611,7 @@ impl Config {
         // 语法故障挂在段级降级之后：`deserialize_with_section_fallback` 会整个改写
         // `config.degradation`（unparsable 恒空），先挂会被覆盖。两者可同时发生。
         config.degradation.unparsable = unparsable;
+        config.legacy_type_settings = legacy_type_settings;
         config.normalize();
         Ok(config)
     }
@@ -8147,6 +8196,32 @@ impl Config {
         std::fs::rename(&tmp, &file)?;
         info!("Pruned {} stale key(s) from user config", removed);
         Ok(removed)
+    }
+
+    /// 把用户层里残留的类型级全局设置删掉（见 [`Config::legacy_type_settings`]），返回是否改了文件。
+    /// 调用方须先把这些值搬进各方案的设置。文件语法不合法时不动它。
+    pub fn clear_legacy_type_settings() -> anyhow::Result<bool> {
+        let Some(dir) = Self::user_config_dir() else {
+            return Ok(false);
+        };
+        let file = dir.join("config.toml");
+        let Ok(text) = std::fs::read_to_string(&file) else {
+            return Ok(false);
+        };
+        let mut root: toml::Value = toml::from_str(&text)?;
+        if take_legacy_type_settings(&mut root).is_empty() {
+            return Ok(false);
+        }
+        if let Some(toml::Value::Table(schema)) = root.get("schema")
+            && schema.is_empty()
+            && let toml::Value::Table(t) = &mut root
+        {
+            t.remove("schema");
+        }
+        let tmp = file.with_extension("toml.tmp");
+        std::fs::write(&tmp, toml::to_string_pretty(&root)?)?;
+        std::fs::rename(&tmp, &file)?;
+        Ok(true)
     }
 
     /// 一次性物化：把折算后的引导键绑定写进用户层 `keys.key_actions`，此后停止折算。

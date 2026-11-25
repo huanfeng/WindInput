@@ -955,6 +955,7 @@ impl EngineManager {
         };
         // 仅同步构建活跃方案；其余方案由 Coordinator 启动后台预热（prewarm_schema）提前构建，
         // 避免首次切换时同步重熔大词库卡顿。单飞构建锁保证预热与切换不重复构建。
+        mgr.settle_legacy_type_settings(config);
         mgr.ensure_loaded(&active_id);
         mgr
     }
@@ -4100,6 +4101,7 @@ impl EngineManager {
     /// 清空引擎/词频/名称缓存使其按新配置/词典重建，并切到新的活跃方案。
     /// 返回活跃方案是否发生变化（供上层决定是否清输入缓冲、刷新 UI）。
     pub fn reload_from_config(&self, config: &Config) -> bool {
+        self.settle_legacy_type_settings(config);
         // 与构造同源：活跃方案被定制版 hide 掉时降级（不改写用户配置）。
         let cfg_active = config.active_schema().to_string();
         let new_active = Self::resolve_active_schema_id(
@@ -5559,6 +5561,104 @@ impl EngineManager {
             base,
             |base, def| base.for_scheme(&def.engine.english),
         )
+    }
+
+    /// 把用户层残留的类型级全局设置搬进各方案的设置（见 `Config::legacy_type_settings`），
+    /// 返回 `(方案 id, 写入的项数)`。
+    ///
+    /// 写给每个已安装、非 overlay 的同类方案；方案自己已有值的项跳过。这样搬完后每个方案的
+    /// 生效值与搬之前逐项相同。幂等：第二次调用时各项都已有值。
+    pub fn migrate_legacy_type_settings(&self, legacy: &toml::Table) -> Vec<(String, usize)> {
+        const SECTIONS: [(&str, &str, &str); 4] = [
+            ("codetable", "codetable", "engine.codetable"),
+            ("pinyin", "pinyin", "engine.pinyin"),
+            ("mix", "mixed", "engine.mixed"),
+            ("english", "english", "engine.english"),
+        ];
+        let mut done = Vec::new();
+        if legacy.is_empty() || self.override_dir.is_none() {
+            return done;
+        }
+        for id in self.installed_schemas() {
+            let Some(def) = self.schema_def_cached(&id) else {
+                continue;
+            };
+            if def.overlay.is_some() {
+                continue;
+            }
+            let ty = def.engine.engine_type.to_lowercase();
+            let Some((section, _, prefix)) = SECTIONS.iter().find(|(_, t, _)| *t == ty) else {
+                continue;
+            };
+            let Some(values) = legacy.get(*section) else {
+                continue;
+            };
+            let Ok(current) = def.to_toml_value() else {
+                continue;
+            };
+            let Some(path) = self.schema_override_path(&id) else {
+                continue;
+            };
+            // 设置文件坏了就跳过这个方案：拿空表起步写回会冲掉里面其它内容。
+            let mut ov = match std::fs::read_to_string(&path) {
+                Ok(text) => match toml::from_str::<toml::Table>(&text) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        warn!("方案 {id} 的设置文件解析失败，旧全局设置未搬入：{e}");
+                        continue;
+                    }
+                },
+                Err(_) => toml::Table::new(),
+            };
+            let mut written = 0;
+            for (leaf, value) in wind_config::config_schema::leaf_entries(values) {
+                // 辅助码在方案里有自己的段。
+                let target = match leaf.strip_prefix("aux_code.") {
+                    Some(rest) if *section == "pinyin" => format!("engine.aux_code.{rest}"),
+                    _ => format!("{prefix}.{leaf}"),
+                };
+                let has_own = target
+                    .split('.')
+                    .try_fold(&current, |cur, part| cur.get(part))
+                    .is_some_and(|v| v.as_str() != Some(""));
+                if has_own {
+                    continue;
+                }
+                set_toml_leaf(&mut ov, &target, value);
+                written += 1;
+            }
+            if written == 0 {
+                continue;
+            }
+            match self.persist_schema_override(&id, &toml::Value::Table(ov)) {
+                Ok(()) => done.push((id, written)),
+                Err(e) => warn!("方案 {id} 的旧全局设置搬入失败：{e}"),
+            }
+        }
+        if !done.is_empty() {
+            self.invalidate_schema_def_cache();
+            self.invalidate_codetable_settings_cache();
+            self.invalidate_aux_settings_cache();
+            self.freq_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
+            info!("旧的类型级全局设置已搬入方案设置：{done:?}");
+        }
+        done
+    }
+
+    /// [`Self::migrate_legacy_type_settings`] 之后把用户层里的旧段删掉；配置里没有残留时不做事。
+    fn settle_legacy_type_settings(&self, config: &Config) {
+        if config.legacy_type_settings.is_empty() || self.override_dir.is_none() {
+            return;
+        }
+        self.migrate_legacy_type_settings(&config.legacy_type_settings);
+        match Config::clear_legacy_type_settings() {
+            Ok(true) => info!("已从用户配置里移除类型级全局设置"),
+            Ok(false) => {}
+            Err(e) => warn!("移除用户配置里的类型级全局设置失败（下次启动重试）：{e}"),
+        }
     }
 
     /// 旧全局键此刻指向哪个方案：当前方案属于该类型就是它（混输取对应成员），否则是该类型的
