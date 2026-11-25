@@ -16,9 +16,11 @@ use std::sync::OnceLock;
 use wind_candidate::{Candidate, CandidateMeta, CandidateSource};
 
 use super::PinyinEngine;
+use super::fuzzy::{FuzzyConfig, FuzzyMatcher};
 use super::lattice::{
-    PARTIAL_FINAL_NODE_LIMIT, PARTIAL_FINAL_PENALTY, USER_NODE_BONUS, USER_NODE_LIMIT,
-    USER_NODE_WEIGHT_CAP, is_sentence_store_word, score_node, score_node_partial_final,
+    FUZZY_SYLLABLE_LOG_PENALTY, PARTIAL_FINAL_NODE_LIMIT, PARTIAL_FINAL_PENALTY, USER_NODE_BONUS,
+    USER_NODE_LIMIT, USER_NODE_WEIGHT_CAP, is_sentence_store_word, score_node,
+    score_node_partial_final,
 };
 use super::shuangpin::{Layout, ShuangpinConverter};
 use super::syllable::STANDARD_SYLLABLES;
@@ -254,10 +256,21 @@ pub fn shuangpin_layout_is_letter_only(layout: &Layout) -> bool {
     layout.code_char_set().is_none()
 }
 
+/// 音节图上的一条边。
+#[derive(Debug, Clone, Copy)]
+struct Edge {
+    end: usize,
+    /// 查词典用的音节（模糊变体时是变体，`94` 读 zi、开了 `zh↔z` 时另有一条 zhi）
+    syl: &'static str,
+    /// 按键实际拼出的音节（编码栏显示它）；非模糊边与 `syl` 相同。双拼下与 `syl` 相同。
+    typed: &'static str,
+    /// 模糊改动处数（声母、韵母各算一处），0 = 按键原样拼出。
+    edits: usize,
+}
+
 /// 击键上的音节图：每个起点出发的完整音节，以及尾部残缺音节的拼法。
 struct SylGraph {
-    /// `edges[p]` = `(终点, 音节)`
-    edges: Vec<Vec<(usize, &'static str)>>,
+    edges: Vec<Vec<Edge>>,
     /// `tails[p]` = 从 `p` 到串尾只打了开头的完整音节
     tails: Vec<Vec<&'static str>>,
     /// `tail_prefixes[p]` = 尾部残缺音节已打出的全拼前缀（查末字用，已去重）
@@ -270,9 +283,12 @@ struct SylGraph {
 
 impl SylGraph {
     /// 全拼：一键一个字母，按 414 个标准音节逐个比对键位。
-    fn full(keys: &Keys, map: &KeypadMap) -> Self {
+    ///
+    /// `fuzzy` 有值时，每个按键吻合的音节再按用户开的模糊组展开出变体边（同一击键区间，
+    /// 查词典用变体）。只展开完整音节，尾部残缺音节不展开：补全本就宽，再叠模糊候选太散。
+    fn full(keys: &Keys, map: &KeypadMap, fuzzy: Option<&FuzzyConfig>) -> Self {
         let n = keys.len();
-        let mut edges = vec![Vec::new(); n + 1];
+        let mut edges: Vec<Vec<Edge>> = vec![Vec::new(); n + 1];
         let mut tails: Vec<Vec<&'static str>> = vec![Vec::new(); n + 1];
         let mut tail_prefixes: Vec<Vec<String>> = vec![Vec::new(); n + 1];
         for p in 0..n {
@@ -281,7 +297,12 @@ impl SylGraph {
                 let s = syl.as_bytes();
                 if p + l <= n {
                     if keys.open_span(p, p + l) && matches(map, &keys.clean[p..p + l], s) {
-                        edges[p].push((p + l, syl));
+                        edges[p].push(Edge {
+                            end: p + l,
+                            syl,
+                            typed: syl,
+                            edits: 0,
+                        });
                     }
                 } else if keys.open_span(p, n) && matches(map, &keys.clean[p..], &s[..n - p]) {
                     tails[p].push(syl);
@@ -290,6 +311,9 @@ impl SylGraph {
             }
             tail_prefixes[p].sort_unstable();
             tail_prefixes[p].dedup();
+            if let Some(fuzzy) = fuzzy {
+                add_fuzzy_edges(&mut edges[p], fuzzy);
+            }
         }
         Self::finish(edges, tails, tail_prefixes, false)
     }
@@ -299,7 +323,7 @@ impl SylGraph {
     /// 不成边，图在那里断开。
     fn shuangpin(keys: &Keys, map: &KeypadMap, conv: &ShuangpinConverter) -> Self {
         let n = keys.len();
-        let mut edges: Vec<Vec<(usize, &'static str)>> = vec![Vec::new(); n + 1];
+        let mut edges: Vec<Vec<Edge>> = vec![Vec::new(); n + 1];
         let mut tails: Vec<Vec<&'static str>> = vec![Vec::new(); n + 1];
         let mut tail_prefixes: Vec<Vec<String>> = vec![Vec::new(); n + 1];
         let mut p = 0;
@@ -326,14 +350,19 @@ impl SylGraph {
                 p += 1;
                 continue;
             }
-            let mut out: Vec<(usize, &'static str)> = Vec::new();
+            let mut out: Vec<Edge> = Vec::new();
             for l1 in map.letters(keys.clean[p]) {
                 for l2 in map.letters(keys.clean[p + 1]) {
                     for syl in conv.convert_pair(l1, l2) {
                         if let Some(s) = intern(&syl)
-                            && !out.iter().any(|&(_, o)| o == s)
+                            && !out.iter().any(|e| e.syl == s)
                         {
-                            out.push((p + 2, s));
+                            out.push(Edge {
+                                end: p + 2,
+                                syl: s,
+                                typed: s,
+                                edits: 0,
+                            });
                         }
                     }
                 }
@@ -345,7 +374,7 @@ impl SylGraph {
     }
 
     fn finish(
-        edges: Vec<Vec<(usize, &'static str)>>,
+        edges: Vec<Vec<Edge>>,
         tails: Vec<Vec<&'static str>>,
         tail_prefixes: Vec<Vec<String>>,
         strict_tail: bool,
@@ -355,8 +384,8 @@ impl SylGraph {
         reachable[0] = true;
         for p in 0..n {
             if reachable[p] {
-                for &(q, _) in &edges[p] {
-                    reachable[q] = true;
+                for e in &edges[p] {
+                    reachable[e.end] = true;
                 }
             }
         }
@@ -370,11 +399,63 @@ impl SylGraph {
     }
 }
 
+/// 给同一起点的边追加模糊变体：`(终点, 变体)` 已有边时不重复（精确边优先，变体间取处数少的）。
+fn add_fuzzy_edges(edges: &mut Vec<Edge>, fuzzy: &FuzzyConfig) {
+    let exact = edges.len();
+    for i in 0..exact {
+        let base = edges[i];
+        for (variant, edits) in FuzzyMatcher::group_variants_scored(base.syl, fuzzy) {
+            let Some(syl) = intern(&variant) else {
+                continue;
+            };
+            match edges.iter_mut().find(|e| e.end == base.end && e.syl == syl) {
+                Some(old) if old.edits > edits => *old = Edge { syl, edits, ..base },
+                Some(_) => {}
+                None => edges.push(Edge { syl, edits, ..base }),
+            }
+        }
+    }
+}
+
 /// 音节 `syl` 的声母恰是 `initial`（零声母时 `initial` 是首字母，如 `a` → a/ai/an…）。
 /// `s` / `c` / `z` 不含翘舌的 `sh` / `ch` / `zh`。
 fn has_initial(syl: &str, initial: &str) -> bool {
     syl.starts_with(initial)
         && !(matches!(initial, "s" | "c" | "z") && syl.as_bytes().get(1) == Some(&b'h'))
+}
+
+/// 候选 `top` 按键实际拼出的读音（音节间 `'`），只在它含模糊读出的音节时返回。
+///
+/// 按候选的音节边界（原串坐标）把击键切段，逐段在音节图里找「同终点、查词音节等于候选
+/// 该音节」的边，换成它的 `typed`；尾部补全的残缺音节没有边，原样保留。
+fn typed_reading(graph: &SylGraph, keys: &Keys, top: &Candidate) -> Option<String> {
+    let canon: Vec<&str> = top.pinyin.split(SEPARATOR as char).collect();
+    let starts: Vec<usize> = (0..keys.len())
+        .filter(|&k| {
+            let r = keys.raw_start[k];
+            r < 64 && top.boundary >> r & 1 == 1
+        })
+        .collect();
+    if starts.len() != canon.len() {
+        return None;
+    }
+    let covered = keys.raw_start[..keys.len()]
+        .iter()
+        .filter(|&&s| s < top.consumed_length)
+        .count();
+    let mut out: Vec<&str> = Vec::with_capacity(canon.len());
+    let mut fuzzy = false;
+    for (i, (&s, &syl)) in starts.iter().zip(&canon).enumerate() {
+        let end = starts.get(i + 1).copied().unwrap_or(covered);
+        match graph.edges[s].iter().find(|e| e.end == end && e.syl == syl) {
+            Some(e) => {
+                fuzzy |= e.edits > 0;
+                out.push(e.typed);
+            }
+            None => out.push(syl),
+        }
+    }
+    fuzzy.then(|| out.join("'"))
 }
 
 /// 一个词节点（全拼坐标）。
@@ -393,6 +474,8 @@ struct Node {
     is_user: bool,
     /// 末音节是补全出来的（尾部残缺音节）
     completed_tail: bool,
+    /// 模糊改动处数（各音节累加）
+    fuzzy_edits: usize,
 }
 
 /// 从同一起点出发、逐音节延伸的在途组合。
@@ -402,6 +485,7 @@ struct Combo {
     mask: u64,
     key_mask: u64,
     syls: usize,
+    fuzzy_edits: usize,
 }
 
 fn bit_at(len: usize) -> u64 {
@@ -469,6 +553,19 @@ impl PinyinEngine {
         out
     }
 
+    /// 九宫格用的模糊组：只取用户开的声母/韵母组。换位纠错针对 26 键的手误，九宫格上
+    /// 同键位的错拼本就读得出，不叠；双拼同键音节（`shared_key`）全拼方案下恒空。
+    /// 全关时为 `None`，音节图不展开。
+    fn keypad_fuzzy(&self) -> Option<FuzzyConfig> {
+        let cfg = FuzzyConfig {
+            shared_key: HashMap::new(),
+            correction: Default::default(),
+            misread: None,
+            ..self.fuzzy_config.clone()
+        };
+        cfg.any_enabled().then_some(cfg)
+    }
+
     /// 歧义键盘输入的转换（全拼）。见模块文档。
     pub(crate) fn convert_keypad(
         &self,
@@ -488,7 +585,7 @@ impl PinyinEngine {
         }
         let graph = match &self.shuangpin {
             Some(conv) => SylGraph::shuangpin(&keys, map, conv),
-            None => SylGraph::full(&keys, map),
+            None => SylGraph::full(&keys, map, self.keypad_fuzzy().as_ref()),
         };
         let mut nodes = self.keypad_nodes(&keys, &graph, max_candidates.max(1));
         let blocked = self.blocked_words();
@@ -545,7 +642,10 @@ impl PinyinEngine {
             b.end
                 .cmp(&a.end)
                 .then(a.completed_tail.cmp(&b.completed_tail))
-                .then(b.weight.cmp(&a.weight))
+                .then(
+                    super::fuzzy_penalized(b.weight, b.fuzzy_edits)
+                        .cmp(&super::fuzzy_penalized(a.weight, a.fuzzy_edits)),
+                )
                 .then(a.text.cmp(&b.text))
         });
         let mut seen: HashSet<&str> = cands.iter().map(|c| c.text.as_str()).collect();
@@ -562,8 +662,9 @@ impl PinyinEngine {
                 text: nd.text.clone(),
                 pinyin: split_pinyin(&nd.code, nd.mask),
                 code: keys.digit_code(nd.end, map),
-                weight: nd.weight,
+                weight: super::fuzzy_penalized(nd.weight, nd.fuzzy_edits),
                 source: CandidateSource::Pinyin,
+                is_fuzzy: nd.fuzzy_edits > 0,
                 is_prefix: nd.completed_tail,
                 is_partial: nd.end < n,
                 boundary: keys.raw_mask(0, nd.key_mask),
@@ -636,6 +737,10 @@ impl PinyinEngine {
             }
             (None, None) => (String::new(), 0),
         };
+        // 模糊读出的首选（`94` 出「知」）编码栏仍显示按键拼出的 `zi`，不显示 `zh`。
+        let read = shown
+            .and_then(|top| typed_reading(&graph, &keys, top))
+            .unwrap_or(read);
         let preedit = keypad_preedit(&read, covered, &keys, map, self.shuangpin.is_none());
         ConvertResult {
             is_empty: cands.is_empty(),
@@ -887,6 +992,7 @@ impl PinyinEngine {
                 mask: 0,
                 key_mask: 0,
                 syls: 0,
+                fuzzy_edits: 0,
             }];
             for _ in 0..max_syls {
                 let mut next: Vec<Combo> = Vec::new();
@@ -895,13 +1001,14 @@ impl PinyinEngine {
                     if p == 0 && c.syls > 0 {
                         self.add_tail_words(keys, graph, c, &mut add);
                     }
-                    for &(q, syl) in &graph.edges[c.pos] {
+                    for e in &graph.edges[c.pos] {
                         next.push(Combo {
-                            pos: q,
-                            code: format!("{}{syl}", c.code),
+                            pos: e.end,
+                            code: format!("{}{}", c.code, e.syl),
                             mask: c.mask | bit_at(c.code.len()),
                             key_mask: c.key_mask | bit_at(c.pos - p),
                             syls: c.syls + 1,
+                            fuzzy_edits: c.fuzzy_edits + e.edits,
                         });
                     }
                 }
@@ -922,6 +1029,7 @@ impl PinyinEngine {
                         hits.select_nth_unstable_by(cap, |a, b| b.weight.cmp(&a.weight));
                         hits.truncate(cap);
                     }
+                    let fuzzy_cost = FUZZY_SYLLABLE_LOG_PENALTY * c.fuzzy_edits as f64;
                     for hit in hits {
                         if hit.boundary != 0 && hit.boundary != c.mask {
                             continue;
@@ -929,7 +1037,7 @@ impl PinyinEngine {
                         add(Node {
                             start: p,
                             end: c.pos,
-                            log_prob: score_node(&hit.text, &c.code, hit.weight),
+                            log_prob: score_node(&hit.text, &c.code, hit.weight) - fuzzy_cost,
                             text: hit.text,
                             code: c.code.clone(),
                             mask: c.mask,
@@ -937,6 +1045,7 @@ impl PinyinEngine {
                             weight: hit.weight,
                             is_user: false,
                             completed_tail: false,
+                            fuzzy_edits: c.fuzzy_edits,
                         });
                     }
                     let Some(store) = store else { continue };
@@ -948,7 +1057,8 @@ impl PinyinEngine {
                         add(Node {
                             start: p,
                             end: c.pos,
-                            log_prob: score_node(&cand.text, &c.code, weight) + USER_NODE_BONUS,
+                            log_prob: score_node(&cand.text, &c.code, weight) + USER_NODE_BONUS
+                                - fuzzy_cost,
                             text: cand.text,
                             code: c.code.clone(),
                             mask: c.mask,
@@ -956,6 +1066,7 @@ impl PinyinEngine {
                             weight: cand.weight,
                             is_user: true,
                             completed_tail: false,
+                            fuzzy_edits: c.fuzzy_edits,
                         });
                     }
                 }
@@ -989,6 +1100,7 @@ impl PinyinEngine {
                         weight: hit.weight,
                         is_user: false,
                         completed_tail: true,
+                        fuzzy_edits: 0,
                     });
                 }
             }
@@ -1023,7 +1135,9 @@ impl PinyinEngine {
                 add(Node {
                     start: 0,
                     end: n,
-                    log_prob: score_node(&hit.text, &code, hit.weight) - PARTIAL_FINAL_PENALTY,
+                    log_prob: score_node(&hit.text, &code, hit.weight)
+                        - PARTIAL_FINAL_PENALTY
+                        - FUZZY_SYLLABLE_LOG_PENALTY * c.fuzzy_edits as f64,
                     text: hit.text,
                     code: code.clone(),
                     mask,
@@ -1031,6 +1145,7 @@ impl PinyinEngine {
                     weight: hit.weight,
                     is_user: false,
                     completed_tail: true,
+                    fuzzy_edits: c.fuzzy_edits,
                 });
             }
         }

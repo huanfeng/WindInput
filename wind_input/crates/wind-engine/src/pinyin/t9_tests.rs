@@ -212,3 +212,90 @@ fn whole_word_outranks_char_sentence() {
         .sort_by(|a, b| wind_candidate::candidate_display_order(a, b, false, false, keys));
     assert_eq!(r.candidates[0].text, "布袋", "{:?}", texts(&r));
 }
+
+fn fuzzy_engine(tag: &str, entries: &[(&str, &str, i32)], cfg: FuzzyConfig) -> PinyinEngine {
+    engine(tag, entries).with_fuzzy(cfg)
+}
+
+fn fuzzy_words() -> Vec<(&'static str, &'static str, i32)> {
+    vec![
+        ("字", "zi", 3000),
+        ("知", "zhi", 5000),
+        ("你", "ni", 9000),
+        ("里", "li", 6000),
+        ("知道", "zhi dao", 7000),
+        ("帮", "bang", 4000),
+    ]
+}
+
+#[test]
+fn fuzzy_off_keeps_keypad_exact() {
+    let eng = engine("fz_off", &fuzzy_words());
+    // 54 = li；没开 n↔l 不出「你」
+    assert!(!texts(&t9(&eng, "54")).contains(&"你"));
+    // 94326 = zi'dao；没开 zh↔z 不出「知道」（94 是 zh 的前缀，但不在串尾就不补全）
+    assert!(!texts(&t9(&eng, "94326")).contains(&"知道"));
+}
+
+#[test]
+fn fuzzy_initial_n_l_crosses_keys() {
+    let cfg = FuzzyConfig {
+        n_l: true,
+        ..Default::default()
+    };
+    let eng = fuzzy_engine("fz_nl", &fuzzy_words(), cfg);
+    let r = t9(&eng, "54");
+    let ni = find(&r, "你");
+    assert!(ni.is_fuzzy);
+    assert_eq!(ni.pinyin, "ni");
+    assert_eq!(ni.code, "54");
+    assert_eq!(ni.consumed_length, 2);
+    // 罚分：你 9000 × 0.5 = 4500，排在精确的「里」（6000）之后
+    assert_eq!(ni.weight, 4500);
+    assert!(!find(&r, "里").is_fuzzy);
+    let t = texts(&r);
+    assert!(t.iter().position(|&x| x == "里") < t.iter().position(|&x| x == "你"));
+}
+
+#[test]
+fn fuzzy_initial_reads_retroflex_inside_word() {
+    let cfg = FuzzyConfig {
+        zh_z: true,
+        ..Default::default()
+    };
+    let eng = fuzzy_engine("fz_zh", &fuzzy_words(), cfg);
+    let r = t9(&eng, "94326");
+    let w = find(&r, "知道");
+    assert!(w.is_fuzzy);
+    assert_eq!(w.consumed_length, 5);
+    // 造词码记规范码
+    assert_eq!(
+        w.meta.learn_code.as_ref().map(|(c, _)| c.as_str()),
+        Some("zhidao")
+    );
+}
+
+#[test]
+fn fuzzy_final_ang_from_an_keys() {
+    let cfg = FuzzyConfig {
+        an_ang: true,
+        ..Default::default()
+    };
+    let eng = fuzzy_engine("fz_ang", &fuzzy_words(), cfg);
+    // 226 = ban，an↔ang 后出「帮」
+    let r = t9(&eng, "226");
+    assert!(find(&r, "帮").is_fuzzy);
+}
+
+#[test]
+fn fuzzy_preedit_shows_typed_spelling() {
+    let cfg = FuzzyConfig {
+        zh_z: true,
+        ..Default::default()
+    };
+    // 只有翘舌词：首选是模糊读出的「知道」，编码栏仍显示按键拼的 zi'dao
+    let eng = fuzzy_engine("fz_pre", &[("知道", "zhi dao", 7000)], cfg);
+    let r = t9(&eng, "94326");
+    assert_eq!(r.candidates[0].text, "知道");
+    assert_eq!(r.preedit_display, "zi'dao");
+}

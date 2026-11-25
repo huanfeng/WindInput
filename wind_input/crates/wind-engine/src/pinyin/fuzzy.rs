@@ -444,7 +444,7 @@ impl FuzzyMatcher {
     }
 
     /// 只看用户模糊组的单音节变体（[`Self::fuzzy_variants_scored`] 的本体）。
-    fn group_variants_scored(input: &str, config: &FuzzyConfig) -> Vec<(String, usize)> {
+    pub(crate) fn group_variants_scored(input: &str, config: &FuzzyConfig) -> Vec<(String, usize)> {
         let (initial, final_) = split_initial_final(input);
         let initials = part_options(initial, INITIAL_GROUPS, config);
         let finals = part_options(final_, FINAL_GROUPS, config);
