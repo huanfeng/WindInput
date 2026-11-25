@@ -743,6 +743,18 @@ SDL2 `SDL_windowskeyboard.c`（`UILess_GetCandidateList`）。
   最后一条守的是上面那条边界：这条分界线在代码注释、提交信息和本节都反复强调，却一度没有
   任何用例钉它——谁「顺手补全」把用户关窗也收进来，全量一条都不会红。
 
+#### 已知缺口：UIElement 状态按裸 pid 记账
+
+`UiElementStatePayload` 不带 tid，服务端按裸 pid 记账，而 DLL 是每个 TSF 线程一个 `CTextService`、各有一份
+`_uiElementStateSent` 去重。同进程另一 UI 线程首次 `BeginUIElement` 报 flags=0，会把本线程主张过的位从 pid
+记账里抹掉；本线程因去重不再重报，本次激活余下时间都不收窗（`_NoteHostReadCandidates` 也因闩已合而早退）。
+
+现行缓解：有位要主张时每次组合起手强制重报一次（异步 8 字节，服务端状态没变就早退）。这只把「永久」降级成
+「到本线程下一次组合起手为止」：抹账发生在组合中途时本次组合仍不收窗；抹账方若恰是正在打字的线程，本线程
+可能再也不起组合；同进程两线程持不同位（A 声明接管、B 只是读过）时会在各自组合起手互相翻牌，而推断那条默认
+不收窗（opt-in），收不收窗随之抖动。根治要载荷加 tid、服务端按 (pid, tid) 记账、pid 级判据对同 pid 各线程
+按位或，属协议变更，单列跟进。
+
 ### 4.5 独占全屏不弹窗（P2）
 
 `is_foreground_fullscreen` 拆成 `foreground_fullscreen_kind() -> {None, D3dExclusive, Covering}`：

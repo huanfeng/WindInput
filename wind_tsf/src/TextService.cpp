@@ -19,10 +19,8 @@
 #include <shellscalingapi.h>
 #include <inputscope.h> // ITfInputScope / InputScope 枚举
 
-// EditableContextPolicy.h 为了能用 g++ 在非 Windows 机器上单测而不含任何 Win32 头，两个
-// SDK 常量在那边是按数值重述的。这两行把「与 SDK 对一遍」从人工纪律变成编译期门禁——
-// 抄错的后果不对称：`kEmptyContextHr` 一旦对不上，判据**静默**退回改动前的行为
-// （GH#134 后半条原样复发），而那边的单测用的是同一个常量，自证循环、照绿。
+// EditableContextPolicy.h 为了能用 g++ 在非 Windows 机器上单测而不含 Win32 头，两个 SDK 常量在那边按数值
+// 重述。这两行把「与 SDK 对一遍」变成编译期门禁：抄错时判据静默失效，而那边的单测用同一个常量，照绿。
 static_assert(wind::editable::kEmptyContextHr == static_cast<std::uint32_t>(TF_E_EMPTYCONTEXT),
               "kEmptyContextHr 与 SDK 的 TF_E_EMPTYCONTEXT 不一致");
 static_assert(wind::editable::kReadOnlyDynFlag == static_cast<std::uint32_t>(TF_SD_READONLY),
@@ -39,24 +37,19 @@ static_assert(wind::candhotkey::kModWin == KEYMOD_WIN, "candhotkey kModWin != KE
 static const GUID kGuidPropInputScope =
     { 0x1713dd5a, 0x68e7, 0x4a5b, { 0x9a, 0xf6, 0x59, 0x2a, 0x59, 0x5c, 0x77, 0x8d } };
 
-// InputScope bit 常量（与 Go 端、inputscope.h 一致）。
-// 权威定义见 Windows SDK `um/InputScope.h`：IS_PASSWORD=31、IS_NUMERIC_PASSWORD=63。
-// ⚠ 邻近的 IS_PRIVATE=61 / IS_SEARCH=50 **不是**密码框信号（无痕窗口的普通输入框即报
-// IS_PRIVATE），勿因位号相近而并入——两者的处置完全不同。
+// InputScope bit 常量（与服务端、inputscope.h 一致；权威定义见 Windows SDK `um/InputScope.h`）。
+// 邻近的 IS_PRIVATE=61 / IS_SEARCH=50 不是密码框信号（无痕窗口的普通输入框即报 IS_PRIVATE），勿并入。
 static const UINT64 kScopeBitPassword = 1ULL << 31; // IS_PASSWORD
 static const UINT64 kScopeBitNumericPassword = 1ULL << 63; // IS_NUMERIC_PASSWORD
 // 密码框判据的唯一定义处：core 的 `is_password_scope` 与之逐位对齐，勿各自展开。
 static const UINT64 kPasswordScopeBits = kScopeBitPassword | kScopeBitNumericPassword;
 
-// 输入诊断 HUD（Task 7）：由 disabled + InputScope mask 计算上报 reason，语义与 Rust
-// coordinator 侧 reason_from 完全一致。reason: 0 None / 1 CompartmentDisabled /
-// 2 InputScopePassword / 3 NumericPassword / 4 ContextDisabled。disabled（线程级 compartment
-// 命中）优先级最高。
+// 诊断 HUD 的上报 reason，语义与 Rust coordinator 侧 reason_from 一致：0 None / 1 CompartmentDisabled /
+// 2 InputScopePassword / 3 NumericPassword / 4 ContextDisabled。disabled（线程级 compartment）优先级最高。
 //
-// ★ `rawMask` 必须是**折位之前**宿主原始报的 InputScope：context 级 KEYBOARD_DISABLED 会被折进
-// mask 的 IS_PASSWORD 位（抑制门控靠它），折位后就分不出「宿主报了密码」与「宿主只是禁用了输入」。
-// 4 这一档正是把折位前的区分带给服务端，让 HUD / 图标提示说真话（t197：Zen 无输入焦点时也置
-// context 级禁用，被说成「密码框」）。服务端见 reason=4 且 mask 含密码位才采信。
+// `rawMask` 必须是折位之前宿主原始报的 InputScope：context 级 KEYBOARD_DISABLED 会被折进 IS_PASSWORD 位，
+// 折位后分不出「宿主报了密码」与「宿主只是禁用了输入」（有的浏览器无输入焦点时也置 context 级禁用）。
+// 4 这一档把这个区分带给服务端，服务端见 reason=4 且 mask 含密码位才采信。
 static inline uint8_t ComputeInputReason(bool disabled, UINT64 rawMask, bool ctxDisabled)
 {
     if (disabled) return 1;
@@ -72,40 +65,23 @@ static inline uint8_t ComputeInputReason(bool disabled, UINT64 rawMask, bool ctx
 static const GUID kGuidCompartmentKeyboardDisabled =
     { 0x71a5b253, 0x1951, 0x466b, { 0x9f, 0xbc, 0x9c, 0x88, 0x08, 0xfa, 0x84, 0xf2 } };
 
-// 判断屏幕坐标点是否**不落在任何显示器上**，即物理上不存在的野坐标。个别宿主（某些 Qt /
-// OpenGL / 异常渲染应用）的 GetTextExt 会返回这类坐标，直接用会把候选框甩到屏幕角落。
-// 检出后调用方应丢弃该坐标、回退到窗口相对的方法。
+// 判断屏幕坐标点是否不落在任何显示器上（物理上不存在的野坐标）。个别宿主（某些 Qt / OpenGL 应用）的
+// GetTextExt 会返回这类坐标，调用方应丢弃、回退到窗口相对的方法。
 //
-// ⚠ 2026-08-01 之前这里判的是「是否落在**前台窗口矩形**外」（参考 Weasel enhanced_position）。
-// 那个判据同时表达了两件事——「坐标是不是野值」和「坐标属不属于前台窗口」——而后者在下面两类
-// 合法场景里必然误判（实测误伤 19 次 vs 正确拦截 12 次）：
-//   ① **焦点窗口 ≠ 前台窗口**：桌面输入时焦点属于 shell 左上角的搜索小窗 (13,9,13,37)，
-//      而点过任务栏后前台窗口是 Shell_TrayWnd（屏幕底部一条）⇒ 合法坐标被判越界；
-//   ② **窗口移动中**：GetTextExt 与 GetWindowRect 是两次独立查询，拖动窗口时它们来自不同
-//      时刻，光标便"落在窗口外"（实测每 7ms 一帧、y 逐格递减的序列里最后一帧被误杀）。
-// 真正要挡的野坐标（(1284,1309)、(-25563,1198)、(669,-3375) 等）全部远离**所有**显示器，
-// 换成本判据照样挡得住。
-//
-// ⚠ 用 MonitorFromPoint 而非 SM_*VIRTUALSCREEN：虚拟屏幕是所有显示器的**外接矩形**，
-// 多屏错位排布时屏幕之间存在空隙（实测机器副屏 X∈[-1920,-480]、主屏 X∈[0,1707]，中间是空的），
-// 外接矩形会放行落在空隙里的坐标，逐显示器判定才挡得住。
-//
-// ⚠ 本判据比原先的前台窗口判据**粗**：它在 DPI 转换前执行，而 TSF DLL 运行在各种 DPI awareness
-// 的宿主里，显示器范围与坐标可能不同语境（前台窗口判据因 GetWindowRect 与 GetTextExt 同进程
-// 同语境而天然免疫）。可接受的理由是这里只做「离谱与否」的粗判断——真野坐标差的是几千像素，
-// 远超 DPI 缩放能造成的 1.5~2 倍偏差。
+// 不要改回「是否落在前台窗口矩形外」：焦点窗口 ≠ 前台窗口（桌面输入、点过任务栏后）与拖动窗口时
+// （GetTextExt 与 GetWindowRect 来自不同时刻）都会误判合法坐标；真野坐标都远离所有显示器。
+// 用 MonitorFromPoint 而非 SM_*VIRTUALSCREEN：虚拟屏幕是外接矩形，多屏错位排布时会放行空隙里的坐标。
+// 本判据在 DPI 转换前执行，显示器范围与坐标可能不同语境；可接受，因为它只做「离谱与否」的粗判断，
+// 野坐标差的是几千像素，远超 DPI 缩放造成的偏差。
 static bool IsScreenPointOutsideAllMonitors(LONG x, LONG y)
 {
     POINT pt = { x, y };
     return MonitorFromPoint(pt, MONITOR_DEFAULTTONULL) == nullptr;
 }
 
-// EditSession for reading the focused context's TSF InputScope set.
-// 用于识别密码框等语义控件：GetInputScopes 返回的枚举值按位编码为 bitmask
-// （bit N 表示枚举值 N 存在，如 IS_PASSWORD=31 → bit 31），交由 Go 端决策。
-// 需要读锁：InputScope 属性值通过 ITfReadOnlyProperty::GetValue 读取，必须在
-// 编辑会话的 read cookie 下进行。同步读锁在 OnSetFocus 期间通常可获得（与
-// CCaretEditSession 一致）；获取失败时返回 0（视为默认/未知，行为同既有逻辑）。
+// 读焦点 context 的 TSF InputScope 集合，用于识别密码框等语义控件：枚举值按位编码为 bitmask
+// （bit N 表示枚举值 N 存在，如 IS_PASSWORD=31），交由服务端决策。
+// 需要读锁（ITfReadOnlyProperty::GetValue 要 read cookie）；OnSetFocus 期间同步读锁通常可得，失败时返回 0。
 class CQueryInputScopeEditSession : public ITfEditSession
 {
 public:
@@ -208,10 +184,7 @@ private:
     UINT64* _pMaskOut;
 };
 
-// EditSession for ending composition
-// NOTE: This class takes ownership of the composition pointer passed to it.
-// The composition will be ended and released when DoEditSession is called,
-// or in the destructor if the edit session request fails.
+// 结束组合的编辑会话。接管传入组合指针的所有权：DoEditSession 里结束并释放，请求失败则在析构里释放。
 class CEndCompositionEditSession : public ITfEditSession
 {
 public:
@@ -475,8 +448,8 @@ public:
 
     STDMETHODIMP DoEditSession(TfEditCookie ec)
     {
-        // 「本会话确实跑过」——**必须是函数第一句**，且与成败无关。CommitText 靠它区分
-        // 「宿主没给锁、会话一次都没执行」与「执行了但没写成」，两者的善后相反。见 WasExecuted()。
+        // 「本会话确实跑过」，必须是函数第一句，且与成败无关。CommitText 靠它区分「宿主没给锁、会话一次都没执行」
+        // 与「执行了但没写成」，两者的善后相反。见 WasExecuted()。
         _executed = TRUE;
 
         // 恢复中（宿主过早终止过组合）：同一会话里删残留，再不带组合地插入上屏文字。Chromium 只要见到
@@ -501,45 +474,23 @@ public:
             return S_OK;
         }
 
-        // 标准 IME 提交语义: 把最终上屏文字 SetText 到 composition range 后再
-        // EndComposition, 让宿主应用通过 OnEndComposition 看到的 range 内容就是
-        // 上屏文字, 与微软拼音/搜狗/Rime 一致。
+        // 标准 IME 提交语义：把上屏文字 SetText 到组合 range 后再 EndComposition，宿主在 OnEndComposition
+        // 看到的就是上屏文字（同微软拼音/搜狗/Rime）。「清空组合 + 旁路 InsertTextAtSelection」会被跟打/统计类
+        // 应用判为非 IME 输入。原子性由单一编辑会话保证。
         //
-        // 历史实现 (SetText("") + EndComposition + InsertTextAtSelection) 等价于
-        // "IME 取消了 composition + 旁路插入了一段普通文本", 跟打/统计类应用会
-        // 把这次上屏误判为"非 IME 输入", 影响正确率统计。原子性由单一 EditSession
-        // 保证 (历史 02a753f 修的浏览器异步竞态), 与此次模式调整正交。
-
-        // ── 已知宿主缺陷: WPS 对"以换行结尾的上屏文本" ─────────────────────────
-        // 上屏文本以换行结尾时, WPS 会在此后把新的组合区渲染成带下划线的组合态, 且
-        // 重绘、换光标位置都不消失 (文档格式本身是干净的, 故不是字符格式而是残留的
-        // display attribute)。**本层刻意不做任何规避**: 我们的提交流程完全符合 TSF
-        // 标准语义 (SetText + 清 GUID_PROP_ATTRIBUTE + EndComposition, 与 Weasel /
-        // 微软 SampleIME 一致), 末尾换行也没有任何特殊处理, 问题在 WPS 一侧。
-        //
-        // 排查记录 (2026-08-23), 避免后人重走:
-        //  - 两次 Clear (SetText 前后各一次, 且 SetText 后重新 GetRange 取 range):
-        //    日志显示均返回 S_OK 且区间精确覆盖全文 —— 清除请求就没有被 WPS 采纳;
-        //  - SetText 的 flags 由 TF_ST_CORRECTION 改为 0 (该 flag 要求宿主保留原文本
-        //    格式, 语义上上屏本就不是"更正"): 改动本身正确并已保留, 但不解决本现象;
-        //  - 摘掉末尾换行、EndComposition 后再 InsertTextAtSelection 补回: 无效, 已回退。
-        //  - 对照: key.type 正常, 因为它走 SendInput 把换行拆成真实回车按键, 全程不经
-        //    composition —— 那是按键模拟语义, 与 IME 上屏语义不同, 不可用来实现 type()。
-        //  - 范围: 与 $CC/type() 无关, 普通短语词条末尾带换行同样触发。
+        // 已知宿主缺陷，本层刻意不规避：上屏文本以换行结尾时，WPS 会把之后新的组合区渲染成带下划线的组合态
+        // 且重绘不消失（残留的 display attribute，文档格式本身干净）。我们的流程（SetText + 清 GUID_PROP_ATTRIBUTE
+        // + EndComposition）与 Weasel / SampleIME 一致。已证伪的规避：SetText 前后两次 Clear（均 S_OK、区间精确，
+        // WPS 不采纳）、摘掉末尾换行后 InsertTextAtSelection 补回。
         if (_pComposition != nullptr)
         {
             BOOL committedViaComposition = FALSE;
             ITfRange* pRange = nullptr;
             if (SUCCEEDED(_pComposition->GetRange(&pRange)))
             {
-                // 在 EndComposition 之前清掉组合态的显示属性（下划线挂在
-                // GUID_PROP_ATTRIBUTE 上, 由 _SetDisplayAttribute 在每次 UpdateComposition
-                // 时写入）。TSF 不保证宿主会在 EndComposition 时自行清除, 微软 SampleIME /
-                // Weasel 同样在结束组合前显式 Clear。
-                //
-                // SetText 前后各清一次: Clear 作用于 range 的当前覆盖区间, 而 SetText 前后
-                // range 覆盖的是两段不同的文本（旧组合文本 / 新上屏文本）。都不可挪到
-                // Collapse 之后: 塌缩后 range 长度为 0, 清到的是空区间。
+                // EndComposition 之前清掉组合态的显示属性（下划线挂在 GUID_PROP_ATTRIBUTE 上，由 _SetDisplayAttribute
+                // 写入）：TSF 不保证宿主在 EndComposition 时自行清除，SampleIME / Weasel 同样显式 Clear。
+                // SetText 前后各清一次：前后 range 覆盖的是两段不同文本。都不可挪到 Collapse 之后（那时长度为 0）。
                 ITfProperty* pDisplayAttrProp = nullptr;
                 HRESULT hrProp = _pContext->GetProperty(GUID_PROP_ATTRIBUTE, &pDisplayAttrProp);
                 if (FAILED(hrProp) || pDisplayAttrProp == nullptr)
@@ -551,25 +502,15 @@ public:
                 if (pDisplayAttrProp != nullptr)
                     hrClearBefore = pDisplayAttrProp->Clear(ec, pRange);
 
-                // 把 composition range 内容替换为最终文字; _text 为空则等价于清空。
+                // 把组合 range 内容替换为最终文字；_text 为空则等价于清空。粘贴模式只清空，正文随后经 Ctrl+V 送达。
                 //
-                // **flags 必须是 0，不能用 TF_ST_CORRECTION**。后者的语义是"本次替换是对
-                // 已有文本的更正", 契约要求宿主**尽量保留原文本的格式与属性**——而这里被
-                // 替换掉的原文本正是带着组合态下划线的 preedit, 于是宿主忠实地把下划线
-                // "保留"给了上屏后的定稿文字, 而且是作为文档里的真实字符格式写进去的。
-                // 一旦落进文档, 它就成了光标处的当前格式, 之后新输入的普通字、英文全都
-                // 继承下划线, 且 TSF 侧再怎么 Clear 属性都无效（清得掉 property, 清不掉
-                // 文档内容自身的格式）。
-                //
-                // 上屏是"定稿", 语义上本就不是更正; Weasel 的 CInsertTextEditSession 同样
-                // 用 flags=0。代价是宿主会把它当作新输入、可能触发自动更正类处理, 这对
-                // 中文上屏无实际影响, 且正是"让宿主按输入法上屏来对待"所期望的。
-                // 粘贴模式只清空组合，正文随后经 Ctrl+V 送达。
+                // flags 必须是 0，不能用 TF_ST_CORRECTION：后者要求宿主保留原文本的格式，而原文本正是带组合下划线的
+                // preedit，宿主会把下划线作为真实字符格式写进文档，之后新输入的字全都继承，TSF 侧 Clear 也清不掉。
+                // 上屏是定稿不是更正（Weasel 同样用 0）。
                 pRange->SetText(ec, 0, _paste ? L"" : _text.c_str(), _paste ? 0 : (LONG)_text.length());
 
-                // SetText 之后重新取一次 composition range 再 Clear: 上面那个 pRange 是
-                // 替换**之前**取的, 它在替换后是否仍覆盖新文本属于宿主实现细节, 重新取
-                // 才与实现无关。
+                // SetText 之后重新取一次组合 range 再 Clear：上面那个 pRange 是替换之前取的，替换后是否仍覆盖
+                // 新文本属于宿主实现细节。
                 HRESULT hrClearAfter = E_FAIL;
                 if (pDisplayAttrProp != nullptr)
                 {
@@ -643,24 +584,12 @@ public:
     void SetRecoverDropped() { _recoverDropped = TRUE; }
 
 
-    // 组合是否仍在本对象手里。
-    //
-    // DoEditSession 一旦跑到组合分支，无论成败都会 EndComposition + Release + 置空
-    // （GetRange 失败那条 fallthrough 也已经 EndComposition 过了）。
-    //
-    // ⚠️ **不要拿它当「会话是否执行过」的判据**——那是 [`WasExecuted`] 的活儿。本对象
-    // 构造时 pComposition 就可能是 nullptr（空缓冲直接上屏符号、鼠标上屏），那时它恒为
-    // FALSE，与执行与否无关。判据要的是"执行过没有"就直接问 WasExecuted()。
+    // 组合是否仍在本对象手里。DoEditSession 跑到组合分支后无论成败都会 EndComposition + Release + 置空。
+    // 不要拿它当「会话是否执行过」的判据：无组合的提交里它从一开始就是 FALSE，用 WasExecuted()。
     BOOL HasPendingComposition() const { return _pComposition != nullptr; }
 
-    // 「DoEditSession 是否真的被执行过」——与成败无关，只答跑没跑。
-    //
-    // 为什么需要它而不能沿用 HasPendingComposition()：后者只在**本来就有 composition**
-    // 时才与"执行过没有"同义。无 composition 的提交（空缓冲直接上屏符号、鼠标上屏）里
-    // _pComposition 从一开始就是 nullptr，恒 FALSE ⇒ 宿主拒发同步锁时会被误判成"已执行
-    // 过"，于是跳过异步重试、直接落 SendInput 末路兜底。而 SendInput 是三条出路里最差的
-    // 一条：受 UIPI（被拦时静默失败）、受物理修饰键污染，且非 TSF-aware 宿主普遍会把
-    // 注入的字符码当虚拟键码解释（B-9 在 Tkinter 上实测到的就是这一类）。能退异步就别落它。
+    // DoEditSession 是否真的被执行过，与成败无关。宿主拒发同步锁时据此退异步重试，而不是落 SendInput：
+    // SendInput 受 UIPI（被拦时静默失败）与物理修饰键污染，非 TSF-aware 宿主还会把注入字符当虚拟键码解释。
     BOOL WasExecuted() const { return _executed; }
 
 private:
@@ -754,10 +683,8 @@ public:
             return hr;
         }
 
-        // 诊断用：SetText 报成功后，回读同一 range 的实际内容核对是否真的等于 _text。
-        // 部分宿主（Chromium/Qt 内嵌 TSFTextStore）对 SetText 报 S_OK 但实际渲染结果
-        // 与 TSF 内部模型不一致（自身的编辑事务/diff 机制未正确落地），此时回读仍会
-        // "看起来正确"——用于区分是我们这边 range 算错了，还是宿主渲染层的问题。
+        // 诊断用：SetText 报成功后回读同一 range 核对内容。Chromium/Qt 内嵌 TSFTextStore 可能报 S_OK 而渲染与
+        // TSF 模型不一致，此时回读仍「看起来正确」，用来区分是我们 range 算错还是宿主渲染层的问题。
         {
             WCHAR readback[64] = {};
             ULONG readbackLen = 0;
@@ -858,24 +785,11 @@ public:
                 return E_FAIL;
             }
 
-            // ⚠️ 这里**不再对 selection 做任何加工**（不折叠、不改写）：`StartComposition`
-            // 拿到的就是当前 selection 本身，用户选中着文字时它是非退化的。
-            //
-            // 曾试过「空文本时折叠成插入点，再照常建 composition」来救 t123，靶机上不成立：
-            // admin 实测**只要对 composition 做操作，选中的内容就会被清空，且与宿主有关**
-            // （2026-09-15）。故那条路整个作废 —— 开关关掉的模式改为**根本不发**
-            // `UpdateComposition`（见 `input.caret.*`），压根走不到这里。
-            //
-            // ⛔ **但这不等于 selection 安全**，别把上面那句读成「t123 已修」：
-            // 开关为 **true**（出厂）时协调器发来的是一个占位空格，下面的 `SetText` 会把
-            // 这个 range（＝当前 selection）整体替换成它 —— **t123 的「吃掉选中文字」在
-            // 出厂配置下依然发生**，躲开的唯一办法是把对应开关关成 false。
-            //
-            // ⚠️ 这两件事机制不同，别混为一谈：
-            //   · 上面 admin 那条 —— 空文本、只 StartComposition 不 SetText，选中内容被
-            //     清空，**与宿主有关**（所以那条路不可靠、被作废）；
-            //   · 这里说的 —— `SetText` 往一个覆盖着选中文字的 range 里写入，是 TSF 的
-            //     标准语义，**必然发生、与宿主无关**。
+            // 不对 selection 做任何加工：StartComposition 拿到的就是当前 selection，用户选中着文字时它非退化。
+            // 「空文本时折叠成插入点再建组合」不可行：对组合做任何操作都可能清掉选中内容，且因宿主而异；
+            // 故开关关掉的模式根本不发 UpdateComposition（见 `input.caret.*`）。
+            // 但 selection 并不安全：开关为 true（出厂）时协调器发来占位空格，下面的 SetText 会把覆盖着选中文字的
+            // range 整体替换掉（TSF 标准语义，与宿主无关），出厂配置下选中文字依然会被吃掉。
 
             ITfContextComposition* pContextComp = nullptr;
             if (FAILED(_pContext->QueryInterface(IID_ITfContextComposition, (void**)&pContextComp)))
@@ -906,13 +820,9 @@ public:
             // 50ms timer 兜底（应对不发 OnLayoutChange 的应用，如某些 CUAS 路径）。
             _pTextService->_compositionJustStarted = TRUE;
             _pTextService->_firstShowProbeSeq = 0; // 新组合开始：试探采样计数归零
-            // 「宿主没有插入点可报」是上一轮组合的判决，新组合重新判。Illustrator 同一
-            // 进程内画布文字恒退化、面板输入框却正常（21 次组合里 5 次全程有效），
-            // 判决若跨组合残留，就会把面板里本来正确的坐标也按默认位置处理。
-            //
-            // ★ 这是该闩**唯一的复位点**，也必须有：读闩处的组合作用域
-            // （wind::caret::LatchApplies）挡的是「组合已经没了」，而这里新组合刚建好、
-            // _pComposition 又非空，作用域拦不住上一轮的残留判决。两者各管一头。
+            // 「宿主没有插入点可报」是上一轮组合的判决，新组合重新判：同一进程里画布退化而面板输入框正常，
+            // 判决跨组合残留会把面板里正确的坐标也按默认位置处理。这是该闩唯一的复位点：读闩处的
+            // LatchApplies 只挡「组合已经没了」，拦不住新组合建好时上一轮的残留判决。
             _pTextService->_caretDefaultPosLatched = FALSE;
         }
 
@@ -924,24 +834,12 @@ public:
         }
 
         // 3. Set text
-        // When composition text is empty (non-inline preedit mode), use a space as
-        // placeholder so GetTextExt can return a valid caret rect. Without this,
-        // apps like WPS return a degenerate rect (height=0) for zero-length ranges.
-        // The cursor is positioned before the space (step 5), so visually there's
-        // no offset. The placeholder is cleared on EndComposition/CommitText.
-        // 空文本 ⇒ 补一个占位空格把 range 撑开。**这是覆盖所有路径的全局兜底，别删。**
-        //
-        // ⚠️ 2026-09-15 曾以「让 `[input.caret]` 的逐模式开关能管住占位」为由删掉这一段，
-        // 是误判：开关为 false 时协调器返回 `Consumed`、**根本不发** UpdateComposition，
-        // 这里收不到东西也就无从补起，开关照样生效。而删掉它波及的是**所有**发空组合区的
-        // 路径 —— 临拼 / 特殊 / 生僻字经直达热键进入时（`key_code == 0` ⇒ 无引导符）组合区
-        // 就是空的，`commit_then_new_composition(text, String::new())` 一类同样如此，它们
-        // 全靠这一段兜住。删掉后这些路径拿到零长度 range，而 WPS 等宿主对零长度 range 回的
-        // 是退化矩形（height=0），候选窗失去坐标来源。
-        //
-        // 占位字符由调用方传进来（_placeholder）：core 按应用 compat 规则下发，默认空格（上面
-        // 说的 WPS 等），浏览器出厂是 ZWSP —— 受控 `<input>` 会 trim 组合中的 value，空格会让
-        // React 回写 value、浏览器随即终止组合（GH#175，见 CompositionPlaceholder.h）。
+        // 空文本 ⇒ 补一个占位字符把 range 撑开，覆盖所有路径的全局兜底，别删：WPS 等对零长度 range 回退化矩形，
+        // 候选窗失去坐标来源；临拼 / 特殊 / 生僻字经直达热键进入、`commit_then_new_composition(text, "")` 等路径
+        // 都发空组合区。`[input.caret]` 的逐模式开关不靠删它生效：开关为 false 时协调器根本不发 UpdateComposition。
+        // 插入点放在占位之前（step 5），视觉上无偏移；EndComposition/CommitText 时清掉。
+        // 占位字符由调用方传入（_placeholder）：core 按 compat 规则下发，默认空格，浏览器出厂 ZWSP
+        // （受控 `<input>` 会 trim 组合中的 value，见 CompositionPlaceholder.h）。
         BOOL isPlaceholder = _text.empty();
         const wchar_t* textPtr = isPlaceholder ? _placeholder : _text.c_str();
         LONG textLen = isPlaceholder ? 1 : (LONG)_text.length();
@@ -953,10 +851,8 @@ public:
             _pTextService->_lastCompositionWriteTick = GetTickCount64();
 
             // 4. Apply display attribute to show underline
-            // Skip for placeholder text to avoid any visual artifacts
-            // 服务端自己发来的占位（非嵌入模式的编码替身、联想态等，文本恰为占位字符）同样不加
-            // 下划线属性：有宽度的盲文空白（U+2800）被加上组合下划线后，在钉钉表格里会显示成
-            // 一小段「_」（GH#175 实测）。
+            // 占位不加下划线；服务端自己发来的占位（非嵌入模式的编码替身、联想态等）同样不加：有宽度的盲文空白
+            // （U+2800）加上下划线后在钉钉表格里会显示成一小段「_」。
             if (!isPlaceholder && !wind::placeholder::IsPlaceholderText(_text))
                 _SetDisplayAttribute(ec, pRange);
 
@@ -998,13 +894,8 @@ public:
 
         pRange->Release();
 
-        // Cache caret position from within this valid edit session.
-        // This is critical for WebView apps where a separate CCaretEditSession
-        // with TF_INVALID_COOKIE would be rejected.
-        // 但 composition 刚刚创建（_compositionJustStarted）时跳过缓存：宿主
-        // 在此刻尚未完成 reflow，GetTextExt 返回的是 pre-reflow 旧坐标，写入
-        // 缓存会让后续 timer 兜底取到陈旧值。等 timer/OnLayoutChange 路径走
-        // GetCaretPosition fresh 查询。
+        // 在这个有效编辑会话里缓存 caret 位置：WebView 类宿主会拒绝 TF_INVALID_COOKIE 的独立 CCaretEditSession。
+        // 组合刚创建时跳过：宿主尚未 reflow，缓存旧坐标会让 timer 兜底取到陈旧值，等 timer/OnLayoutChange 现查。
         if (SUCCEEDED(hr) && !_pTextService->_compositionJustStarted)
         {
             _CacheCaretPosition(ec);
@@ -1033,10 +924,7 @@ private:
             BOOL clipped = FALSE;
             if (SUCCEEDED(pContextView->GetTextExt(ec, sel[0].range, &caretRect, &clipped)))
             {
-                // Skip degenerate rects (height=0) — apps like WPS may return
-                // an invalid rect on the first composition before layout reflow.
-                // Cache 仅作为 timer 兜底使用；OnLayoutChange 路径会清掉 cache
-                // 并重新通过 fallback 查询，因此这里不再需要标记延迟重试。
+                // 跳过退化矩形（h=0，WPS 首次组合 reflow 前常见）。缓存仅供 timer 兜底；OnLayoutChange 路径会清缓存现查。
                 LONG h = caretRect.bottom - caretRect.top;
                 // 同 GetCaretPositionFromTSF：跳过退化矩形(h<=0)与越界坐标，避免把不可信坐标
                 // 缓存后被后续路径取用。越界时不缓存，留待 fallback 链重新求解。
@@ -1084,9 +972,8 @@ private:
                     pStartRange->Release();
                 }
 
-                // 整个组合 range 的包围矩形——与上面折叠版取自同一次 edit session、同一 cookie。
-                // 这条缓存路径（src=TSF_CACHED）是**上报的主力**：记事本实测 482 条 caret_update
-                // 里绝大多数走它，只接异步路径会让矩形几乎永远发不出去。
+                // 整个组合 range 的包围矩形，与上面折叠版取自同一次会话、同一 cookie。这条缓存路径（src=TSF_CACHED）
+                // 是上报的主力，只接异步路径会让矩形几乎永远发不出去。
                 RECT compRect = {};
                 BOOL clippedRect = FALSE;
                 if (SUCCEEDED(pContextView->GetTextExt(ec, pCompRange, &compRect, &clippedRect)) &&
@@ -1535,25 +1422,17 @@ STDAPI CTextService::ActivateEx(ITfThreadMgr* pThreadMgr, TfClientId tfClientId,
     // This ensures status indicators appear at the correct position immediately
     SendCaretPositionUpdate();
 
-    // Notify Go service that IME is activated and sync full state.
-    // Uses _DoFullStateSync which also handles lazy connect (service may
-    // still be starting after first install).
+    // 通知服务端 IME 已激活并全量同步状态；_DoFullStateSync 内含 lazy connect（首次安装后服务可能还在启动）。
     _DoFullStateSync(); // 内含 UIElement 状态上报（UI-less 线程从激活起就不弹窗）
 
-    // 切换输入法不会重发 OnSetFocus：不在这里补读，服务端就沿用上一个实例留下的密码态
-    // （实测 Zen：页面无焦点时 context 级 KEYBOARD_DISABLED 被折成 IS_PASSWORD，
-    // 切走再切回后图标一直显「英」）。必须排在 IMEActivated 之后——同一 bridge 线程按序处理，
-    // 服务端先清旧态、再收到这份新读数。
+    // 切换输入法不会重发 OnSetFocus：不在这里补读，服务端就沿用上一个实例留下的密码态，切走再切回后
+    // 图标一直显「英」。必须排在 IMEActivated 之后：同一 bridge 线程按序处理，服务端先清旧态再收新读数。
     _ReportFocusInputStateOnActivate();
 
-    // 焦点已在某个文本框里时，按「刚拿到焦点」走一遍完整的焦点处理（同 Weasel：激活时对当前
-    // 焦点 DocMgr 补做焦点初始化）。只补上面那份密码读数不够：focus_gained 才带顶层窗口类名 /
-    // 标题，服务端按 client_token 记窗口上下文——新实例的 token 没有记录，按类名的应用兼容规则
-    // 全部不命中（GH#175：Edge 里从别的输入法切进来，占位按空格推下来，番茄小说搜索框打不了字，
-    // 切一下焦点才好）。顺带补上新实例从未做过的 layout / edit sink 挂接与 _hasFocus。
-    // 服务端还没连上时 OnSetFocus 挂 _needsFocusRecovery，连上后 _DoFullStateSync 末尾补发。
-    // 只在本线程是前台线程时做（_hasThreadFocus 由上面 _InitHotkeyWindow 按前台窗口算好）：
-    // 后台线程被激活时补发会冒充前台焦点，把服务端的活动客户端 / 初始模式归属推到后台进程。
+    // 焦点已在文本框里时，按「刚拿到焦点」走一遍完整焦点处理（同 Weasel）。只补密码读数不够：focus_gained
+    // 才带顶层窗口类名 / 标题，新实例的 client_token 在服务端没有窗口上下文，按类名的应用兼容规则全不命中。
+    // 顺带补上新实例从未做过的 layout / edit sink 挂接与 _hasFocus。服务端还没连上时由 _needsFocusRecovery 补发。
+    // 只在本线程是前台线程时做：后台线程补发会冒充前台焦点，把活动客户端 / 初始模式归属推到后台进程。
     if (_pThreadMgr != nullptr && _hasThreadFocus)
     {
         ITfDocumentMgr* pDocMgrFocus = nullptr;
@@ -1625,8 +1504,7 @@ STDAPI CTextService::Deactivate()
     // Release key event sink
     _UninitKeyEventSink();
 
-    // Notify Go service that IME is being deactivated (before disconnecting)
-    // This allows the service to hide the toolbar immediately
+    // 断开前通知服务端 IME 即将停用，让它立即隐藏工具栏。
     if (_pIPCClient != nullptr && _pIPCClient->IsConnected())
     {
         WIND_LOG_DEBUG(L"Sending ime_deactivated to service\n");
@@ -1768,67 +1646,39 @@ void CTextService::_UninitThreadMgrEventSink()
     }
 }
 
-// ITfThreadFocusSink — 线程进入 foreground（应用窗口被激活）。
-// 跨进程协调：当某个进程通过 race check 让出热键时，PostMessage 给当前前台
-// 进程的 IME hidden window，让对方立即重试注册（避免对方等到下次 IME 事件
-// 才发现热键空出来）。消息 ID 用 RegisterWindowMessage 全局注册，所有进程
-// 取到相同 ID。
+// 跨进程让出热键：某进程经 race check 让出热键时，PostMessage 给当前前台进程的 IME 隐藏窗口，
+// 让对方立即重试注册。消息 ID 用 RegisterWindowMessage 全局注册，各进程取到相同 ID。
 static UINT GetRetryHotkeyMessageId()
 {
     static UINT s_msg = RegisterWindowMessageW(L"WindInputHotkeyRetry_v1");
     return s_msg;
 }
 
-// Foreground self-check timer：兜底**热键泄漏**（不是兜底焦点信号缺失）。
-// ⚠ 此处旧注释称 OnKillThreadFocus 在 Chromium / Wails 类宿主「可能不触发」——
-// 2026-07-20 实测证伪：Chrome 5/5、VSCode 5/5、Edge 11/11 次触发，零漏，与实际
-// 切换严格一一对应；只是比 DocMgr 级失焦晚约 100ms。定时器偶尔抢先执行释放，
-// 是在与这个迟到 100ms 的信号赛跑，不是在替补失踪的信号。
-// 保留本定时器的真正理由：热键注册状态可能因 WM_HOTKEY 竞态等原因与焦点不同步，
-// 且 RegisterHotKey 冲突（1409）的后果是前台应用彻底拿不到热键，值得一道独立防线。
-// 只要本进程持有任何热键就需要定期校验，500ms 间隔既能尽快让出，开销又可忽略。
+// 前台自检定时器：兜底热键泄漏，不是兜底焦点信号缺失（OnKillThreadFocus 在 Chrome/VSCode/Edge 上可靠触发，
+// 只比 DocMgr 级失焦晚约 100ms）。热键注册状态可能因 WM_HOTKEY 竞态等与焦点不同步，而 RegisterHotKey 冲突
+// （1409）会让前台应用彻底拿不到热键，值得一道独立防线。本进程持有任何热键就定期校验。
 static constexpr UINT_PTR kFocusCheckTimerId = 0x57494E44; // 'WIND'
 static constexpr UINT     kFocusCheckIntervalMs = 500;
 
-// 语言栏输入可用性同步的迟滞。取 200ms 的依据：须显著大于宿主 DocMgr churn 的翻转
-// 间隔（实测 QQ 密码框每约 180ms 一轮「可编辑 ↔ READONLY」，轮内两次翻转相隔约 17ms），
-// 又要短到用户点进文本框后察觉不出图标滞后。托盘图标不是跟随光标的 UI，200ms 无感。
+// 语言栏输入可用性同步的迟滞。须显著大于宿主 DocMgr churn 的翻转间隔（QQ 密码框约 180ms 一轮
+// 「可编辑 ↔ READONLY」），又要短到点进文本框后察觉不出图标滞后。
 
-// 慢焦点探针阈值：超过此值的 OnSetFocus 记一行 WARN。取 20ms 的依据——实测正常
-// 焦点切换（开 DEBUG 日志、含两次进程信息采集）约 5~13ms，关日志后更低；20ms 既
-// 不会被常规切换触发，又能抓住宿主 churn 焦点导致的堆积。
+// 慢焦点探针阈值：正常焦点切换（开 DEBUG 日志）约 5~13ms，20ms 不会被常规切换触发，又能抓住宿主 churn 焦点的堆积。
 static constexpr double kSlowFocusWarnMs = 20.0;
 
-// 焦点空窗超过多久才值得抬到 INFO。0~2ms 的 DocMgr 抖动实测一小时可达数十次、用户
-// 完全无从感知，全抬会把日志淹掉；而用户从「切过去」到「敲下第一个键」最快也要几十
-// 毫秒，50ms 以上才是「首字符直通」真正可能发生的区间。
+// 焦点空窗超过多久才抬到 INFO。0~2ms 的 DocMgr 抖动很常见且用户无感，全抬会淹没日志；用户从切过去到敲下
+// 第一个键最快也要几十毫秒，50ms 以上才是「首字符直通」可能发生的区间。
 static constexpr ULONGLONG kFocusGapWarnMs = 50;
 
-// locked/transient DocMgr 判据：XamlIsland 之类的**容器**文档，RequestEditSession 对它
-// 返回 TF_E_NOLOCK，OnSetFocus 对这类 DocMgr 跳过 focus_gained（防 composition replay
-// 到不稳定文档）。**两位必须同时置**才算命中。
-//
-// ★ 为什么不能只判 dynFlags 0x20：那是 `TS_SD_UIINTEGRATIONENABLE`，语义为「宿主支持
-//   IME UI 集成」——一个**能力位**，不回答「这个文档是什么」。初版只判它，2026-08-18
-//   被实测推翻：Win11 任务管理器（WinUI 3 重写）的搜索框**主** DocMgr 天生
-//   dynFlags=0x30 statFlags=0x40（0x40 = TS_SS_UWPCONTROL，TS_SS_TRANSITORY 一位没置），
-//   用户长期停在上面正常打字，却被判成 transient ⇒ 该进程从头到尾一次 focus_gained 都
-//   发不出去，服务端焦点归属永远停在上一个应用。症状是三合一的：per-app 模式不跟随、
-//   切走再切回工具栏不显示、右键菜单里的应用名还是上一个进程。全量日志统计：守卫命中
-//   100% 出自 taskmgr.exe，而 WinUI 3 只会越来越多。
-//
-// ★ 为什么也不能只判 statFlags 0x4（`TS_SS_TRANSITORY`，真正的身份位）：Chrome /
-//   JetBrains 会在**有真实文本输入**的 context 上置它（见 _DocMgrHasEditableContext 内
-//   的注释），单判必然误伤一大批正常宿主；且 explorer 任务栏（dynFlags=0x80000000
-//   statFlags=0x4）目前是照发 focus_gained 的，单判会连它一起改掉。
-//
-// 合取两位是唯一同时避开这两类误伤的写法，且**命中集必为原判据的子集** —— 本次改动
-// 只可能让原本被跳过的文档恢复上报，不可能新增跳过。真正的 XamlIsland 容器
-// （explorer 地址栏，实测 dynFlags 含 0x20 且 statFlags 含 0x4）仍照旧命中。
-//
-// 提为文件级常量/函数是因为 OnSetFocus 里有**三处**要判它：跳过 focus_gained 的守卫
-// 本身、doc_changed 收口的预判（否则会发出没有配对 focus_gained 的 focus_lost）、以及
-// _pLastActiveDocMgr 的入缓存条件。三处必须同源，任何一处漏改都会让 lost/gained 失配。
+// locked/transient DocMgr 判据：XamlIsland 之类的容器文档，RequestEditSession 返回 TF_E_NOLOCK，OnSetFocus
+// 对它跳过 focus_gained（防组合 replay 到不稳定文档）。两位必须同时置才算命中：
+//   · 只判 dynFlags 0x20（TS_SD_UIINTEGRATIONENABLE，能力位）：Win11 任务管理器（WinUI 3）搜索框的主
+//     DocMgr 天生带它（dynFlags=0x30 statFlags=0x40），会被整个吞掉，焦点归属停在上一个应用；
+//   · 只判 statFlags 0x4（TS_SS_TRANSITORY，身份位）：Chrome / JetBrains 在真能打字的 context 上也置它，
+//     explorer 任务栏（dynFlags=0x80000000 statFlags=0x4）也会被改掉。
+// 真正的 XamlIsland 容器（explorer 地址栏）两位都有。
+// OnSetFocus 里三处要判它（跳过 focus_gained 的守卫、doc_changed 收口的预判、_pLastActiveDocMgr 入缓存条件），
+// 必须同源，漏改一处就会让 lost/gained 失配。
 static constexpr DWORD kUiIntegrationDynFlag = 0x20; // TS_SD_UIINTEGRATIONENABLE（能力位）
 static constexpr DWORD kTransitoryStatFlag   = 0x04; // TS_SS_TRANSITORY（身份位）
 
@@ -1839,13 +1689,9 @@ static inline BOOL IsLockedTransientDocMgr(DWORD dynFlags, DWORD statFlags)
                : FALSE;
 }
 
-// 激活静默期：ActivateEx 之后这段时间内的 compartment 变化视为系统初始化同步而非用户
-// 操作。实测激活后 ~96ms 出现一次 CONVERSION 变化，取 250ms 留 2.6 倍余量。
-//
-// 不取更大值是因为它会和 _hasThreadFocus 的滞后叠加：后者由 500ms 自检定时器兜底
-// （OnSetThreadFocus 可能漏，见 _MsgWndProc 里的反向纠正），两者相加就是切换应用后
-// 「外部改模式的通道被忽略」的最长窗口。Ctrl+Space 不受影响——它在 OnTestKeyDown
-// 就被拦截、由 OnKeyDown 自行处理，根本不走 compartment OnChange。
+// 激活静默期：ActivateEx 之后这段时间内的 compartment 变化视为系统初始化同步而非用户操作
+// （激活后约 96ms 出现一次 CONVERSION 变化，取 250ms 留余量）。不取更大值：它与 _hasThreadFocus 的滞后
+// （500ms 自检定时器兜底）叠加，就是切换应用后外部改模式被忽略的最长窗口。
 static constexpr ULONGLONG kActivateSettleMs = 250;
 
 // Win32 RegisterHotKey 热键 ID（前置声明给 OnKillThreadFocus 使用）
@@ -1858,12 +1704,8 @@ static const wchar_t* kHotkeyWndTitle     = L"WindInputHotkeyDebug";
 static const wchar_t* kHotkeyWndClassName = L"WindInputHotkeyWnd";
 static const wchar_t* kHotkeyWndTitle     = L"WindInputHotkey";
 #endif
-// 候选热键（置顶/删除）的 id 段。**id 与具体组合键之间不再有约定**：注册时按服务端
-// SESSION 热键表的迭代序顺次取 id，并把 (id, rawHash) 记进 _candidateHotkeyIds，
-// WM_HOTKEY 分发处反解——与加词热键完全同构。
-//
-// 原先是 Pin 段 0x4000+N、Delete 段 0x4010+N：id 的低 4 位是候选序号、段号是动作，
-// 于是「哪组修饰键对应哪个动作」被烧进了 id 编码，C++ 想不硬编码都做不到。
+// 候选热键（置顶/删除）的 id 段。id 与组合键之间没有约定：注册时按服务端 SESSION 热键表的迭代序顺次取 id，
+// 并把 (id, rawHash) 记进 _candidateHotkeyIds，WM_HOTKEY 分发处反解，与加词热键同构。
 static constexpr int  kHotkeyIdCandidateBase = 0x4000; // 候选热键，32 个槽位（0x4000..0x401F）
 static constexpr int  kHotkeyIdCandidateMax  = 32;
 static constexpr int  kHotkeyIdAddWordBase = 0x4020; // 加词热键（add_word / open_add_word_dialog），最多 16 个
@@ -1879,19 +1721,9 @@ STDAPI CTextService::OnSetThreadFocus()
     WIND_LOG_DEBUG_FMT(L"OnSetThreadFocus called tid=%lu inst=0x%p\n", GetCurrentThreadId(), this);
     _hasThreadFocus = TRUE;
 
-    // ── 重新取一次「当前焦点文档有没有可编辑上下文」 ──
-    // ⚠ **必须先查再用**：此刻手上的 _hasTextInputContext 很可能是 OnSetFocus 失焦分支
-    // 留下的陈旧 FALSE。那个 FALSE 是给加词热键门卫用的（"DocMgr 走了"），**不是**
-    // "用户进了不可输入的地方"的判据——与失焦分支同一条原则：「没有文档」≠「不可输入」。
-    //
-    // 直接拿它驱动语言栏的后果实测过（2026-08-18 修复后复测，新 DLL 上 4/4 次全中）：
-    //   39.987 DocMgr focus lost → 40.089 OnSetThreadFocus → 40.287 noEditCtx=1
-    //   → 40.350 GetIcon text=英 → 41.282 下一次 gaining(hasTextCtx=1) 才恢复
-    // 图标错显「英」1.02 秒，比修复前那版的 202ms 还久，症状是「Alt+Tab / 点任务栏时
-    // 闪英文」。同一段日志里 hasTextCtx=0 出现 0 次 ⇒ 这 4 次没有一次是真的。
-    //
-    // GetFocus 拿不到文档时**什么都不做**（保持冻结），等 gaining 分支给权威判据——
-    // 过渡态不该有结论。
+    // 重新取一次「当前焦点文档有没有可编辑上下文」：此刻的 _hasTextInputContext 很可能是 OnSetFocus 失焦分支
+    // 留下的陈旧 FALSE（给加词热键门卫用的「DocMgr 走了」），不是「进了不可输入的地方」。直接拿它驱动语言栏，
+    // Alt+Tab / 点任务栏时图标会闪「英」。GetFocus 拿不到文档时什么都不做，等 gaining 分支给权威判据。
     BOOL langBarJudgeable = FALSE;
     if (_pThreadMgr != nullptr)
     {
@@ -1906,10 +1738,8 @@ STDAPI CTextService::OnSetThreadFocus()
     WIND_LOG_DEBUG_FMT(L"OnSetThreadFocus: judgeable=%d hasTextCtx=%d",
                        langBarJudgeable ? 1 : 0, _hasTextInputContext ? 1 : 0);
 
-    // 拿回 thread focus：候选可见性热键由 NotifyCandidatesVisibilityChanged 驱动，
-    // 这里不主动补——切焦点时候选窗通常已经消失。
-    // 加词热键不依赖候选，重新评估（若当前中文+文本框则重新注册）。
-    // 放在上面的重查**之后**：门卫读的就是 _hasTextInputContext，读陈旧值会少注册一次。
+    // 候选可见性热键由 NotifyCandidatesVisibilityChanged 驱动，这里不补（切焦点时候选窗通常已消失）。
+    // 加词热键不依赖候选，重新评估；放在上面的重查之后，门卫读的就是 _hasTextInputContext。
     _ReevaluateAddWordHotkey();
 
     return S_OK;
@@ -1926,9 +1756,7 @@ STDAPI CTextService::OnKillThreadFocus()
         _pKeyEventSink->ResetCtrlRaw();
         _pKeyEventSink->ResetEatenFnKey();
     }
-    // 空窗计时**丢弃而非结算**：整个应用失去前台后，用户是去别处干活了，这段时间
-    // 再长也不是「想输入却输不进」。不丢的话，切走十分钟再切回来就会记出一条
-    // duration=600000ms 的假空窗，把真正要找的那几十毫秒淹在噪声里。
+    // 空窗计时丢弃而非结算：应用失去前台后用户是去别处干活了，不丢的话切走十分钟再回来会记出一条假空窗。
     _focusGapStartTick = 0;
     _focusGapReason = nullptr;
     // 立即让出所有热键，让前台应用的 IME 实例能注册成功。
@@ -1941,43 +1769,25 @@ STDAPI CTextService::OnKillThreadFocus()
         _UnregisterAddWordHotkeys();
     }
 
-    // 整个应用失去前台 = 真正离开了当前文档，在此收口输入态。
-    // DocMgr 级失焦不再承担这件事（见 OnSetFocus 失焦分支注释），故必须由这里兜住，
-    // 否则切走再切回同一文档时会残留上次没打完的 composition。
-    // 传缓存的 DocMgr 作 hint：composition 建在它上面，而此刻 GetFocus() 未必还可用；
-    // 不传则可能落到 forced cleanup，把残留文本提交进文档（Excel/WPS 表格的 'd' 漏字）。
-    // 实测本回调在 Chrome/VSCode/Edge 各 5/5、5/5、11/11 次触发零漏，仅比 DocMgr
-    // 级失焦晚约 100ms —— 该延迟用户不可感知，且远优于 500ms 自检定时器兜底。
-    // ⚠ 这里**刻意不做** doc_changed 那样的 willSkipFocusGained 对称预判（2026-08-18 评估后
-    // 决定不做，别再"补齐"它）。三条理由，任一条单独成立：
-    //   1. 判据跨层：locked/transient 守卫是 **DocMgr 级**判据，而线程失焦是**进程级**事件；
-    //      服务端的 client token 也是进程级（同进程多 DocMgr 共用一个）。拿前者挡后者，
-    //      与 [三层判据不可跨层复用] 是同一个错误。
-    //   2. 会造成净回归：真 transient 场景（explorer 地址栏）里，该进程此前必定有过正常
-    //      DocMgr 的 focus_gained，此刻进程确实失焦了，这条 lost 是**对的**。挡掉它，
-    //      切到非 TSF 宿主时工具栏就永远不隐藏。
-    //   3. 服务端已有结构性防线：`is_stale_focus_event` 只放行 token == active 的失焦，
-    //      而 active 只能由 focus_gained / ime_activated 设置 ⇒ 从未获焦的 token 发来的
-    //      lost 必被丢弃。真正漏网的只有「active 由 ime_activated 设、gained 全被吃掉」
-    //      一种，那一种已由服务端的 gained_token 探针记 WARN（见 handle_focus_lost）。
+    // 整个应用失去前台 = 真正离开了当前文档，在此收口输入态（DocMgr 级失焦不承担这件事），否则切走再切回
+    // 会残留上次没打完的组合。传缓存的 DocMgr 作 hint：组合建在它上面，此刻 GetFocus() 未必可用，不传可能落到
+    // forced cleanup，把残留文本提交进文档。
+    //
+    // 刻意不做 doc_changed 那样的 willSkipFocusGained 预判，别再「补齐」它：
+    //   1. locked/transient 是 DocMgr 级判据，线程失焦是进程级事件，跨层复用；
+    //   2. 真 transient 场景里该进程此前必有过正常 focus_gained，这条 lost 是对的，挡掉会让工具栏不隐藏；
+    //   3. 服务端 `is_stale_focus_event` 只放行 token == active 的失焦，从未获焦的 token 发来的 lost 必被丢弃。
     CleanupInputStateForDocChange(_pLastActiveDocMgr, FOCUS_LOST_REASON_THREAD);
-    // 注意：失焦时**不**销毁 HostWindow。SearchHost/任务管理器等用 XamlIsland
-    // locked/transient DocMgr，OnSetFocus 对其跳过 focus_gained（防 composition
-    // replay），而 HostWindow 重建依赖 focus_gained → 一旦销毁就再也不会重建，
-    // 候选永久不显示。per-PID event 模型下 HostWindow 可常驻：失焦时 Go 发 WriteHide
-    // 经本进程 event 隐藏窗口即可，无需销毁。
+    // 失焦时不销毁 HostWindow：SearchHost/任务管理器等的 locked/transient DocMgr 会被跳过 focus_gained，
+    // 而 HostWindow 重建依赖 focus_gained，销毁就再也不会重建。失焦时服务端经本进程 event（WriteHide）隐藏即可。
     return S_OK;
 }
 
 // ============================================================================
 // Win32 RegisterHotKey 支持
-// 候选可见时把置顶/删词热键注册为系统级热键，OS 在 WM_KEYDOWN 派发之前直接消费，
-// 规避 QQNT 等 Chromium 类宿主的加速键双处理。无候选时立即 UnregisterHotKey 让宿主
-// 重获这些键。机制来自第三方输入法的实测验证。
-//
-// ★ 组合键来自服务端 SESSION 热键表（`keys.pin_candidate` / `keys.delete_candidate`），
-// **本层不写死**。此处原注释写的是「Ctrl+0..9 + Ctrl+Shift+0..9」，与当时的硬编码一致，
-// 副作用是这段代码在 `grep pin_candidate` 里完全隐形——2026-08-24 我据此漏判了整条通路。
+// 候选可见时把置顶/删词热键注册为系统级热键，OS 在 WM_KEYDOWN 派发之前直接消费，规避 QQNT 等 Chromium
+// 类宿主的加速键双处理；无候选时立即 UnregisterHotKey 还给宿主。
+// 组合键来自服务端 SESSION 热键表（`keys.pin_candidate` / `keys.delete_candidate`），本层不写死。
 // ============================================================================
 
 BOOL CTextService::_InitHotkeyWindow()
@@ -2032,7 +1842,7 @@ BOOL CTextService::_InitHotkeyWindow()
         WIND_LOG_DEBUG_FMT(L"_InitHotkeyWindow: initial thread focus seed=%d (fgPid=%u ownPid=%u)\n",
                            (int)_hasThreadFocus, fgPid, GetCurrentProcessId());
     }
-    // 启动前台自检 timer：兜底热键泄漏（非焦点信号缺失，实测数据见 kFocusCheckTimerId 注释）
+    // 启动前台自检 timer：兜底热键泄漏，见 kFocusCheckTimerId 注释。
     SetTimer(_hHotkeyWnd, kFocusCheckTimerId, kFocusCheckIntervalMs, nullptr);
     return TRUE;
 }
@@ -2052,10 +1862,8 @@ void CTextService::_UninitHotkeyWindow()
         DestroyWindow(_hHotkeyWnd);
         _hHotkeyWnd = nullptr;
     }
-    // DestroyWindow 会连带销毁该窗口的所有 timer（故此处无需 KillTimer，kFocusCheckTimerId
-    // 同理），但 pending 标志必须手动复位：本函数与 _InitHotkeyWindow 成对、可重入
-    // （Deactivate → Activate），标志残留为 TRUE 会让重建后的窗口再也不起计时，
-    // 语言栏图标从此卡在旧状态。
+    // DestroyWindow 会连带销毁该窗口的所有 timer，但 pending 标志必须手动复位：本函数与 _InitHotkeyWindow
+    // 成对、可重入（Deactivate → Activate），标志残留为 TRUE 会让重建后的窗口不再起计时，语言栏图标卡在旧状态。
     if (_hotkeyWndClass != 0)
     {
         UnregisterClassW(kHotkeyWndClassName, g_hInstance);
@@ -2080,32 +1888,21 @@ namespace
 
 // 候选可见时把置顶/删除热键注册成系统级热键。
 //
-// ★★★ 组合键**只能**来自服务端推来的 SESSION 热键表，绝不能在本层写死。
-// 2026-08-24 现场：这里曾硬编码 Ctrl+0..9 与 Ctrl+Shift+0..9，于是用户把
-// `keys.pin_candidate` 配成 `ctrl+alt+number` 之后，服务端热键表、TSF 转发白名单、
-// 协调器判据三处**全都改对了**，唯独这条 RegisterHotKey 通路照旧只注册老组合——
-// 而它恰恰是实际生效的那条（RegisterHotKey 先于一切拿到键），新组合直接落进宿主，
-// 表现为「记事本自己把这组键执行了」。
-//
-// ⚠️ 这类缺陷不会被任何单元测试抓到：Rust 侧测的是热键表内容，而表是对的。
-// 判据：**改热键值域时，先数清「谁在按这个值域做决定」，RegisterHotKey 这条系统级
-// 通路不出现在任何 grep `pin_candidate` 的结果里。**
+// 组合键只能来自服务端推来的 SESSION 热键表，绝不能在本层写死：RegisterHotKey 先于一切拿到键，这里写死的话
+// 用户改了 `keys.pin_candidate`，新组合会直接落进宿主。这条通路不出现在 grep `pin_candidate` 的结果里，
+// 单元测试也抓不到（Rust 侧测的是表内容）；改热键值域时要记得它。
 void CTextService::_RegisterCandidateHotkeys()
 {
     if (_hHotkeyWnd == nullptr || _hotkeysActive) return;
-    // 没拿到 thread focus 时绝不注册 — 多进程 IME 实例竞争同一组热键会引发
-    // ERROR_HOTKEY_ALREADY_REGISTERED (1409)，让前台应用 IME 实例反而注册不上。
-    // 两个条件都要：本应用在前台（TSF 信号）**且**本进程就是前台窗口所属进程。
-    // 多进程宿主（WebView 类）下后者为假，热键该让给真正拥有前台窗口的那个进程。
-    // 英文模式也不注册：表里的键服务端只在中文模式认领（英文补全有候选时 Alt+数字 会被
-    // 吞掉而无人处理）。不置 _hotkeysActive，切回中文后下一次候选出现时自然重试。
+    // 没拿到 thread focus 时绝不注册：多进程 IME 实例竞争同一组热键会 1409，让前台实例反而注册不上。
+    // 要本应用在前台（TSF 信号）且本进程就是前台窗口所属进程（多进程宿主下后者为假）。
+    // 英文模式也不注册：表里的键服务端只在中文模式认领。不置 _hotkeysActive，切回中文后下次候选出现时自然重试。
     if (!wind::candhotkey::ShouldRegister(_hasThreadFocus, _isProcessForeground, _bChineseMode)
         || _pHotkeyManager == nullptr) return;
 
     const auto& session = _pHotkeyManager->SessionHotkeys();
-    // 表还没同步过来就**不要**置 _hotkeysActive：置了就等于宣称「已注册」，
-    // 而候选的显隐不会再触发一次注册，这一整段输入的候选热键就此静默失效。
-    // 留着不置位，下一次候选出现时自然重试。
+    // 表还没同步过来就不置 _hotkeysActive：置了等于宣称「已注册」，候选显隐不会再触发注册，这一段输入的
+    // 候选热键就静默失效。留着不置位，下一次候选出现时自然重试。
     if (session.empty())
     {
         WIND_LOG_DEBUG(L"RegisterCandidateHotkeys skipped: session hotkey table empty\n");
@@ -2288,11 +2085,8 @@ LRESULT CALLBACK CTextService::_HotkeyWndProc(HWND hWnd, UINT msg, WPARAM wParam
             {
                 WIND_LOG_DEBUG_FMT(L"FocusCheck timer: not foreground (fgPid=%u ownPid=%u), releasing\n",
                                    fgPid, GetCurrentProcessId());
-                // 只动热键归属，**不碰 _hasThreadFocus**——本分支的注释一直声明自己
-                // 「纠正的是热键状态而非焦点信号」，但此前确实在写焦点信号。多进程宿主
-                // （前台窗口在别的 pid）下它会把 TSF 刚给的 TRUE 冲掉且永不恢复
-                // （恢复分支要求 nowForeground，在这类宿主里恒假），OnChange 的
-                // !_hasThreadFocus 早退随之恒成立，中英切换整个失效。
+                // 只动热键归属，不碰 _hasThreadFocus：多进程宿主（前台窗口在别的 pid）下写它会冲掉 TSF 给的
+                // TRUE 且永不恢复，OnChange 的 !_hasThreadFocus 早退恒成立，中英切换整个失效。
                 self->_isProcessForeground = FALSE;
                 if (self->_hotkeysActive) self->_UnregisterCandidateHotkeys();
                 if (self->_addWordHotkeysActive) self->_UnregisterAddWordHotkeys();
@@ -2332,12 +2126,8 @@ LRESULT CALLBACK CTextService::_HotkeyWndProc(HWND hWnd, UINT msg, WPARAM wParam
         {
             // 不论下面分不分发（竞态丢弃、vk 解不出），这都是一次组合键：先作废待判单击。
             self->_pKeyEventSink->NoteHotkeyMessage();
-            // 焦点切换竞态防护：用户按下 Ctrl+= 的瞬间焦点可能正从 App A 切到 App B，
-            // 此时 A 的 OnKillThreadFocus 还没来得及 unregister，WM_HOTKEY 会落到
-            // A 的 hidden window；如果直接处理，会把加词动作下发到已经失焦的 IME
-            // 实例（错的 PID / 错的光标位置）。
-            // 实时复核当前前台进程是否是自己，不是就主动 unregister 让出热键，
-            // 这一次按键丢弃（用户下一次按时新前台已经注册好）。
+            // 焦点切换竞态：按下热键的瞬间焦点可能正从 A 切到 B，A 尚未 unregister，WM_HOTKEY 落到 A 的隐藏窗口，
+            // 直接处理会把动作下发到已失焦的实例。实时复核前台进程，不是自己就让出热键，丢弃这一次按键。
             HWND hFg = GetForegroundWindow();
             DWORD fgPid = 0;
             if (hFg != nullptr)
@@ -2381,8 +2171,7 @@ LRESULT CALLBACK CTextService::_HotkeyWndProc(HWND hWnd, UINT msg, WPARAM wParam
             if (candidateSegment)
             {
                 // 候选热键：从注册记录反解 (vk, KEYMOD)，与加词热键同法。
-                // ⚠️ 绝不能按 id 推算修饰键——组合键来自服务端配置，本层不知道也不该知道
-                // 「哪一组是置顶、哪一组是删除」；那个判断在协调器侧按 hash 做。
+                // 绝不能按 id 推算修饰键：组合键来自服务端配置，「哪一组是置顶、哪一组是删除」在协调器侧按 hash 判。
                 for (const auto& kv : self->_candidateHotkeyIds)
                 {
                     if (kv.first == id)
@@ -2410,31 +2199,15 @@ LRESULT CALLBACK CTextService::_HotkeyWndProc(HWND hWnd, UINT msg, WPARAM wParam
                 if (vk != 0)
                 {
                     self->SendCaretPositionUpdate();
-                    // ★ 「热键模式会话」的**乐观置位**——只为盖住 IPC 空窗，不是权威。
+                    // 「热键模式会话」的乐观置位，只为盖住 IPC 空窗，不是权威。权威是服务端的
+                    // STATUS_HOTKEY_SESSION（见 _SyncStateFromResponse），但 DispatchHotkey 是同步 IPC，状态推送
+                    // 还在它之后，空窗里按 Esc 会被判「无会话」透传。随后第一条状态推送以权威值覆盖。
                     //
-                    // 权威是服务端的 STATUS_HOTKEY_SESSION（level-triggered，见
-                    // _SyncStateFromResponse）。但 DispatchHotkey 是同步 IPC（真机实测
-                    // 16~75ms），状态推送还在它之后；这段空窗里按下 Esc 会被判「无会话」
-                    // 而透传给宿主。先乐观置上，随后第一条状态推送就会以权威值覆盖。
-                    //
-                    // ⚠️ 正因为它**过宽**才必须是乐观的而非权威的：这里能看到的 id 段是
-                    // `_RegisterAddWordHotkeys` 注册的 GlobalHotkeys() 全集 —— 除加词外还有
-                    // softkeyboard、open_add_word_dialog，以及 keys.key_actions 里一切进
-                    // overlay 的动词（special:* / rare_char / temp_pinyin / temp_english /
-                    // aux_code / mix:*），而 DLL 这边只有 (vk, keymod)、分不出是哪个动作。
-                    //
-                    // ⚠️ 那个集合在 2026-09-18 的组合键值域合流后**变大了**（服务端
-                    // hotkey.rs 的 `hotkey_policy_for` 决定谁带 GLOBAL 位）。本函数的
-                    // id 段只有 16 个（kHotkeyIdAddWordBase + 16），超出静默 break ——
-                    // 超出的那些退回普通 TSF 转发链路，在 Chromium 类宿主里会被同名
-                    // 加速键抢走。服务端那侧给 GLOBAL 位要克制，理由就在这里。
-                    //
-                    // 前一版把它当权威用（置位 + 靠 ClearComposition 清位），于是按一次
-                    // 软键盘开关就卡死：软键盘在这个 id 段内，却不产候选也不发
-                    // ClearComposition，两条清位路径都不走，此后 Enter/Esc/Backspace 全被
-                    // 吃下转发而协调器无会话 —— 「吃了再吐」，严格宿主直接丢键。
-                    // 现在置错了也会被下一条状态推送纠正回来（软键盘那条推送里本位为
-                    // false），不再需要 DLL 侧任何清位逻辑。
+                    // 正因为过宽才必须是乐观的：这个 id 段是 GlobalHotkeys() 全集（加词、软键盘、key_actions 里进
+                    // overlay 的动词……），DLL 只有 (vk, keymod)，分不出动作；当权威用的话，软键盘开关这种不产候选、
+                    // 不发 ClearComposition 的动作会让位永远不清，此后 Enter/Esc/Backspace 吃了再吐。
+                    // id 段只有 16 个，超出的静默退回普通 TSF 转发链路，在 Chromium 类宿主里会被同名加速键抢走，
+                    // 故服务端给 GLOBAL 位（hotkey.rs 的 `hotkey_policy_for`）要克制。
                     if (self->_pKeyEventSink != nullptr)
                     {
                         self->_pKeyEventSink->ReleaseAssocBareOwnership();
@@ -2480,12 +2253,9 @@ LRESULT CALLBACK CTextService::_HotkeyWndProc(HWND hWnd, UINT msg, WPARAM wParam
 
 // ============================================================================
 // ITfFunctionProvider
-// 通过 ITfSourceSingle::AdviseSingleSink 把自己注册为该 IME 的 Function Provider。
-// 其它成熟 TSF IME 都这么做，让 Chromium / QQNT 识别为完整 IME。
-// 当前 stub 实现：GetFunction 一律返回 E_NOINTERFACE，不提供任何具体函数。
-// 仅"注册存在"本身就足以达到识别效果。
-// 注意 ITfFunctionProvider::GetDescription 与 ITfUIElement::GetDescription 同签名，
-// C++ 多继承合并为单一实现，复用 ITfUIElement 那一份即可。
+// 经 ITfSourceSingle::AdviseSingleSink 注册为该 IME 的 Function Provider，让 Chromium / QQNT 识别为完整 IME。
+// stub 实现：GetFunction 一律返回 E_NOINTERFACE，注册存在本身就够了。
+// ITfFunctionProvider::GetDescription 与 ITfUIElement::GetDescription 同签名，多继承合并为单一实现。
 // ============================================================================
 
 STDAPI CTextService::GetType(GUID* pguid)
@@ -2509,44 +2279,32 @@ STDAPI CTextService::GetFunction(REFGUID rguid, REFIID riid, IUnknown** ppunk)
 // ITfUIElement / ITfCandidateListUIElement / ITfCandidateListUIElementBehavior
 //
 // 两种宿主、两套数据：
-//  - 宿主**不接管**（BeginUIElement 回 pbShow=TRUE，绝大多数桌面程序）：候选由服务进程
-//    自己的窗口绘制。这里只维持「注册存在」——Chromium / QQNT 据此走完整 IME-first
-//    调度、不再和我们抢 Ctrl+数字；getter 返回占位数据（count=1 / "…"），键路径不多
-//    一次 IPC 往返。
-//  - 宿主**接管**（pbShow=FALSE，或线程以 TF_TMAE_UIELEMENTENABLEDONLY 激活；全屏游戏、
-//    搜索框、SDL / Unreal 等引擎）：候选窗由宿主画。本类每次候选变化经 CMD_UIELEMENT_QUERY
-//    从服务端同步拉一份快照（_uiSnapshot），再 UpdateUIElement 通知宿主来读；宿主的
-//    SetSelection / Finalize / Abort 经 CMD_UIELEMENT_ACTION 回流。服务端按 pid 记账
+//  - 宿主不接管（BeginUIElement 回 pbShow=TRUE，绝大多数桌面程序）：候选由服务进程自己的窗口绘制。这里只维持
+//    「注册存在」，Chromium / QQNT 据此走完整 IME-first 调度、不再和我们抢 Ctrl+数字；getter 返回占位数据
+//    （count=1 / "…"），键路径不多一次 IPC。
+//  - 宿主接管（pbShow=FALSE，或线程以 TF_TMAE_UIELEMENTENABLEDONLY 激活；全屏游戏、搜索框、SDL / Unreal 等）：
+//    候选由宿主画。每次候选变化经 CMD_UIELEMENT_QUERY 从服务端拉快照（_uiSnapshot），再 UpdateUIElement 通知
+//    宿主来读；宿主的 SetSelection / Finalize / Abort 经 CMD_UIELEMENT_ACTION 回流。服务端按 pid 记账
 //    （CMD_UIELEMENT_STATE），该进程聚焦期间不弹自己的候选窗。
 //
 // 规范要点（learn.microsoft.com/windows/win32/tsf/uiless-mode-overview）：
-//  - BeginUIElement 回 FALSE 后 TIP **必须**调 UpdateUIElement，宿主到那时才读内容
-//    （首次 GetUpdatedFlags 应全位置位）；回 TRUE 时可不调，但 EndUIElement 必须调。
+//  - BeginUIElement 回 FALSE 后 TIP 必须调 UpdateUIElement，宿主到那时才读内容（首次 GetUpdatedFlags 应全位
+//    置位）；回 TRUE 时可不调，但 EndUIElement 必须调。
 //  - 候选列表须按「页」而非「滚动」推进，页索引在列表存续期间不该变。
 //  - GetSelection 无选中时回 S_FALSE。
 // 设计与状态机见 docs/design/game-compat-tsf-uielement.md。
 //
-// ⛔ **Dota 2（起源2引擎）画不出候选，不是这段代码的问题，别在这里试。**
-// 2026-09-06 在 Dota 2 进程内实测定案：它的 imemanager.dll 不读 TSF UI 元素（走 IMM32），
-// 且进 IMM32 取候选那条路之前有一道**身份闸门**——按注册表里的 TSF Profile Description
-// 与硬编码白名单全等比对。我们不在表里 ⇒ 消息落到 DefWindowProc ⇒ 默认 IME 窗口接管
-// （就是左上角那个小窗），宿主对我们的 ImmGetCandidateListW 是**零次调用**。
-// 已逐条实测证伪：GetCount 大小 / flags / GetPageIndex / GetSelection 绝对vs页内 /
-// IsShown / GetDocumentMgr 三种回法 / Integratable 接口挂不挂 / Begin 交不交数据 /
-// 换元素 GUID / 多注册隐藏 profile。清单与证据见设计文档 §1.1。
+// Dota 2（起源2引擎）画不出候选不是这段代码的问题，别在这里试：它走 IMM32 且有按 TSF Profile Description
+// 比对的身份白名单，见设计文档 §1.1。
 // ============================================================================
 
-// 候选列表 UI 元素的 GUID。按规范这是给宿主 QI/去重用的标识，CUAS 桥不据它决定是否开
-// 候选盒（本机 IMM32 测试宿主实测：换成微软拼音的 GUID 也不改变 OPENCANDIDATE 行为）。
+// 候选列表 UI 元素的 GUID：给宿主 QI/去重用的标识，CUAS 桥不据它决定是否开候选盒。
 // 故保留自有稳定 GUID，不impersonate 其它输入法。
 static const GUID kWindCandidateUIElementGuid =
     { 0xb3e54a91, 0x7c20, 0x4b6a, { 0xa1, 0x5e, 0x82, 0x09, 0x77, 0x55, 0x44, 0x33 } };
 
-// 含 TF_CLUIE_DOCUMENTMGR：GetDocumentMgr 返回真实焦点文档（Weasel 同款），首次 Update 通知
-// 宿主取一次 docmgr，宿主据此把候选关联到文本。
-// ⛔ 原注释称「能自绘候选的游戏宿主（Dota 2）据此绘制」——已证伪，Dota 2 根本不读
-// 我们的 TSF 候选（见本段开头的 ⛔ 说明与设计文档 §1.1）。保留本位是因为它符合规范，
-// 不是因为哪个游戏需要它。
+// 含 TF_CLUIE_DOCUMENTMGR：GetDocumentMgr 返回真实焦点文档（同 Weasel），首次 Update 通知宿主取一次 docmgr，
+// 据此把候选关联到文本。保留本位是因为它符合规范，与游戏能否绘制无关（设计文档 §1.1）。
 static constexpr DWORD kUiElementAllFlags =
     TF_CLUIE_DOCUMENTMGR | TF_CLUIE_COUNT | TF_CLUIE_SELECTION
     | TF_CLUIE_STRING | TF_CLUIE_PAGEINDEX | TF_CLUIE_CURRENTPAGE;
@@ -2601,13 +2359,8 @@ STDAPI CTextService::GetUpdatedFlags(DWORD* pdwFlags)
 
 STDAPI CTextService::GetDocumentMgr(ITfDocumentMgr** ppdim)
 {
-    // 返回当前焦点文档：宿主靠它把候选列表关联到文本。对照 Weasel：取 GetFocus 的真实 docmgr。
-    // 这是规范里该有的答法，先于任何宿主的具体需要。
-    //
-    // ⛔ 原注释称「曾返 E_NOTIMPL 导致 Dota 2 读了候选却不画」——已证伪。同一份 Dota 2
-    // 日志里能被游戏绘制的两家，这个方法的答法**彼此就不一致**（QQ五笔回 S_OK+NULL、
-    // 微软拼音回真实文档）⇒ 它不可能是判据。真正的判据是输入法名字（设计文档 §1.1）。
-    // ⛔ 别再为了某个游戏来回改这里的返回值，三种答法都试过、都无效。
+    // 返回当前焦点文档：宿主靠它把候选列表关联到文本（同 Weasel，取 GetFocus 的真实 docmgr），这是规范该有的答法。
+    // 它不是游戏能否绘制候选的判据，别为某个游戏来回改这里的返回值（设计文档 §1.1）。
     if (ppdim == nullptr) return E_INVALIDARG;
     *ppdim = nullptr;
     if (_pThreadMgr == nullptr) return E_FAIL;
@@ -2659,8 +2412,8 @@ STDAPI CTextService::GetString(UINT uIndex, BSTR* pstr)
     const std::wstring& text = _uiSnapshot.items[uIndex];
     *pstr = SysAllocStringLen(text.c_str(), (UINT)text.size());
     WIND_LOG_DEBUG_FMT(L"UIElement host read: GetString(%u)=\"%s\"\n", uIndex, text.c_str());
-    // ★ 判定点：把真实候选串交出去了。GetCount / GetUpdatedFlags 这类元信息 msctf 自己
-    // 也会问，不足以说明有人要画；**取走文本**才是。占位分支（上面那个早退）不打闩。
+    // 判定点：把真实候选串交出去了。GetCount / GetUpdatedFlags 这类元信息 msctf 自己也会问，不足以说明有人要画，
+    // 取走文本才是。占位分支（上面的早退）不打闩。
     _NoteHostReadCandidates();
     return *pstr ? S_OK : E_OUTOFMEMORY;
 }
@@ -2739,9 +2492,8 @@ STDAPI CTextService::Abort(void)
 }
 
 // ==== ITfIntegratableCandidateListUIElement ====
-// Win8+ 搜索框一类宿主的候选集成（键路由、候选编号显示）。对照 Weasel CandidateList.cpp。
-// ⛔ 原注释称它是「让游戏宿主画出候选」的关键——已证伪：微软五笔在 Dota 2 里画得出来，
-// 而它**根本不实现这个接口**。挂与不挂都试过，对游戏毫无影响（设计文档 §1.1）。
+// Win8+ 搜索框一类宿主的候选集成（键路由、候选编号显示），对照 Weasel CandidateList.cpp。
+// 与游戏能否绘制候选无关（设计文档 §1.1）。
 STDAPI CTextService::SetIntegrationStyle(GUID guidIntegrationStyle)
 {
     (void)guidIntegrationStyle;
@@ -2759,8 +2511,8 @@ STDAPI CTextService::OnKeyDown(WPARAM wParam, LPARAM lParam, BOOL* pfEaten)
 {
     (void)wParam; (void)lParam;
     if (pfEaten == nullptr) return E_INVALIDARG;
-    // ⛔ 不在这里吃键：按键的权威处理在 ITfKeyEventSink，本方法不真正处理键，谎报吃键会把
-    // 本该走那条路的键吞掉。返回 FALSE 让键落回正常处理链（Dota 走的是组合/键路径，通常不调本方法）。
+    // 不在这里吃键：按键的权威处理在 ITfKeyEventSink，谎报吃键会把本该走那条路的键吞掉。返回 FALSE 让键落回
+    // 正常处理链。
     *pfEaten = FALSE;
     return S_OK;
 }
@@ -2780,8 +2532,7 @@ STDAPI CTextService::FinalizeExactCompositionString(void)
 void CTextService::_ReportUiElementState()
 {
     uint32_t flags = 0;
-    // ⚠ HOST_DRAWS 只报**声明**，不带上读取闩：声明是事实、读取是推断，core 要能分开
-    // 记账（推断那条可被 compat 规则关掉）。合并成一位就没法只关掉推断的那一半。
+    // HOST_DRAWS 只报声明，不带上读取闩：声明是事实、读取是推断，core 要能分开记账（推断那条可被 compat 规则关掉）。
     if (_uiHostDraws) flags |= UIELEMENT_FLAG_HOST_DRAWS;
     if (_uiLessThread) flags |= UIELEMENT_FLAG_UI_LESS_THREAD;
     if (_uiHostReadsCandidates) flags |= UIELEMENT_FLAG_HOST_READS;
@@ -2842,26 +2593,13 @@ void CTextService::_UpdateUiElementForHost()
 
 void CTextService::_EnsureUiSnapshotFresh(BOOL contentRead)
 {
-    // ⚠ 这是本类唯一一处在 **msctf 的 sink 派发栈内**发生的同步 IPC（UpdateUIElement →
-    // 宿主 GetString → 这里），最坏会把宿主 UI 线程按住 READ_TIMEOUT_MS（1500ms），
-    // 期间进程内其它 sink / TIP 一并挂起。
-    //
-    // 频率上界（2026-09-14 修正，原先写的「每次激活至多一次」**不成立**）：
-    //   - 正常路径确实每次激活至多一次——这次调用会在 GetString 的成功出口合上闩，
-    //     此后第三分支走 _UpdateUiElementForHost() 急刷、dirty 恒为 FALSE，再也走不到；
-    //   - 但闩**只在成功出口合**。GetString 前面两个早退（补拉回空/失败 → 占位；
-    //     uIndex 越界 → E_INVALIDARG）都跳过合闩，于是下一键 dirty 又置真、再付一次。
-    //     真实上界是「快照查询持续失败或回空时，每键一次」，由 IPC 熔断
-    //     （_ShouldAttemptOperation / _RecordFailure）兜住，撑不到持续每键 1500ms。
-    //
-    // ⛔ 不要为此调小超时：读超时与 _RecordFailure/Disconnect/熔断是同一套（见
-    // IPCClient.h 的 IPCConfig 注释——「超时过短会把偶发慢误判为服务挂死而断连」），
-    // 调小换来的是负载高时误断 IPC + 熔断 3 秒，比顿一下更糟。上面那条「失败时每键一次」
-    // 恰恰是**不该调小**的又一条理由：熔断才是这条路的正确闸门。
-    // 不变量看守：脏位与「已认定在画」不该共存（见 UiElementPolicy.h 的 InvariantBroken）。
-    // 破了不是崩溃级问题——下面照常补拉，结果仍然正确——但它说明有人在别处置了脏，
-    // 取元信息那 5 个 getter 里的补拉会从死代码变回活代码，那些路径此前从未被执行过。
-    // 记 WARN 而非 DEBUG：WARN 恒进环形缓冲，用户不开文件日志也能用 Ctrl+Shift+F12 导出。
+    // 这是本类唯一一处在 msctf sink 派发栈内的同步 IPC（UpdateUIElement → 宿主 GetString → 这里），最坏把宿主
+    // UI 线程按住读超时（1500ms），期间进程内其它 sink / TIP 一并挂起。
+    // 正常路径每次激活至多一次（GetString 成功出口合闩）；但 GetString 的两个早退不合闩，快照查询持续失败或
+    // 回空时会每键一次，由 IPC 熔断（_ShouldAttemptOperation / _RecordFailure）兜住。
+    // 不要为此调小超时：读超时与断连/熔断是同一套，调小会在负载高时误断 IPC，熔断才是这条路的闸门。
+    // 不变量看守：脏位与「已认定在画」不该共存（UiElementPolicy.h 的 InvariantBroken）。破了下面照常补拉、结果
+    // 仍正确，但说明有人在别处置了脏。记 WARN 以便不开文件日志也能导出。
     if (wind::uielement::InvariantBroken(_uiSnapshotDirty != FALSE,
                                          _uiHostDraws != FALSE,
                                          _uiHostReadsCandidates != FALSE))
@@ -2898,10 +2636,8 @@ void CTextService::_SendUiElementAction(uint32_t action, uint32_t arg)
 
 void CTextService::NotifyCandidatesVisibilityChanged(BOOL hasCandidates)
 {
-    // 候选可见 → 注册系统级热键拦截置顶/删词组合键（取自 keys.pin_candidate /
-    // keys.delete_candidate，见 _RegisterCandidateHotkeys）；候选消失 → 卸载，
-    // 让宿主重新获得这些键。这是第三方输入法使用的成熟机制，规避 Chromium 类宿主
-    // 的加速键双处理。
+    // 候选可见 → 注册系统级热键拦截置顶/删词组合键（keys.pin_candidate / keys.delete_candidate，
+    // 见 _RegisterCandidateHotkeys）；候选消失 → 卸载，还给宿主。规避 Chromium 类宿主的加速键双处理。
     _candidatesVisible = hasCandidates;
     if (hasCandidates && !_hotkeysActive)
     {
@@ -2917,13 +2653,8 @@ void CTextService::NotifyCandidatesVisibilityChanged(BOOL hasCandidates)
     if (hasCandidates && _uiElementId == (DWORD)-1)
     {
         BOOL bShow = TRUE;
-        // ★ 先取快照再 BeginUIElement：宿主（以及 IMM32 桥）在 Begin 回调里就会读
-        // GetCount/GetString，那一刻只有占位「…」的话，宿主拿到的就是占位。
-        // 代价：每个组合起手多一次同步拉取（亚毫秒）。
-        // ⛔ 原注释把它挂在「Dota 2 靠 IMN_OPENCANDIDATE 开候选盒」上——已证伪：
-        // Dota 2 那边 OPENCANDIDATE 从未出现过，两家能被它绘制的输入法一个在 Begin 交全表、
-        // 一个交空列表，交不交数据不是判据（设计文档 §1.1）。本位保留是为了「宿主读到的
-        // 是真数据而非占位」这个本身就对的理由。
+        // 先取快照再 BeginUIElement：宿主（以及 IMM32 桥）在 Begin 回调里就会读 GetCount/GetString，
+        // 那时只有占位「…」宿主拿到的就是占位。代价是每个组合起手多一次同步拉取（亚毫秒）。
         _RefreshUiElementSnapshot();
         _uiUpdatedFlags = kUiElementAllFlags;
         // 通过 Behavior 路径解决菱形继承
@@ -2935,40 +2666,22 @@ void CTextService::NotifyCandidatesVisibilityChanged(BOOL hasCandidates)
             _uiElementShown = bShow;
             _uiHostDraws = !bShow;
             WIND_LOG_DEBUG_FMT(L"BeginUIElement ok id=%u show=%d\n", _uiElementId, (int)bShow);
-            // ⛔ 这里**不再**置「热键模式会话」位。它现在由服务端经 STATUS_HOTKEY_SESSION
-            // 权威驱动（见 _SyncStateFromResponse），DLL 侧只镜像、不推断 —— 多一个本地
-            // 写入方就多一个真相源，而「候选窗起/收」与「热键模式活着」本就不是同一件事
-            // （普通打字也会走这里，那时根本没有热键模式）。
-            // ⚠ 有位要主张就**强制重报一次**，绕过 _uiElementStateSent 的去重。
-            // CTextService 是每 TSF 线程一个实例、各有一份 _uiElementStateSent，而服务端
-            // 按**裸 pid** 记账：同进程另一个 UI 线程首次 Begin 报 flags=0，会把本线程
-            // 已经主张过的位从那一份 pid 记账里清掉；本实例因为去重再也不会重报 ⇒
-            // 本次激活余下时间都不收窗，且无人纠正（_NoteHostReadCandidates 也因闩已合
-            // 而早退）。每次组合起手重新主张一次：异步 8 字节，服务端见状态没变就早退，
-            // 不多刷一次 UI。
+            // 这里不置「热键模式会话」位：它由服务端经 STATUS_HOTKEY_SESSION 权威驱动（见
+            // _SyncStateFromResponse），DLL 只镜像，多一个本地写入方就多一个真相源。
             //
-            // ⚠ **这只是把「永久」降级成「到本线程下一次组合起手为止」，不是修好了**：
-            //   - 抹账发生在本线程组合**中途**时，本次组合余下时间仍不收窗；
-            //   - 抹账方若恰是真正在打字的那个线程，本线程可能再也不起组合 ⇒ 永不自愈；
-            //   - 同进程两线程持**不同位**时（A 声明接管、B 只是读过），双方都满足下面
-            //     这个条件，会在各自组合起手互相翻牌，使收窗理由在「声明/推断」之间跳动
-            //     ——而推断那条 core 侧默认就不收窗（opt-in）⇒ 收不收窗随翻牌抖动。
-            // 根因是载荷里没有 tid、服务端按**裸 pid** 记账（UiElementStatePayload）。
-            // 真正的修法是载荷加 tid、服务端按 (pid, tid) 记账、pid 级判据对同 pid 各线程
-            // 做按位或——那是协议变更，单列跟进，见设计文档 §1.4。
+            // 有位要主张就强制重报一次，绕过 _uiElementStateSent 的去重：每个 TSF 线程一个实例、各有一份
+            // 去重状态，而服务端按裸 pid 记账，同进程另一线程首次 Begin 报 flags=0 会抹掉本线程主张过的位，
+            // 本实例因去重不再重报就一直不收窗。每次组合起手重报只是把「永久」降级成「到下一次组合起手为止」，
+            // 同进程两线程持不同位时还会互相翻牌；根治要载荷加 tid、服务端按 (pid, tid) 记账，
+            // 见 docs/design/game-compat-tsf-uielement.md §4.4「已知缺口」。
             if (_uiHostDraws || _uiLessThread || _uiHostReadsCandidates)
             {
                 _uiElementStateSent = -1;
             }
             _ReportUiElementState();
-            // 规范：回 FALSE 后**必须** UpdateUIElement（快照已在 Begin 前取好，首次全位置位）。
-            // 回 TRUE 时规范说可不调——这里仍然调，为的是**把会读的宿主逼出来**：
-            // IMM32 桥只在收到 UpdateUIElement 之后才来读（新枫之谷实测：Begin 之后静默
-            // 1.3s 不读，第二键的 Update 一到立刻读满 9 条）。不在首键就给它这次机会，
-            // 读取闩要等到第二键才合上，而我们自己的候选窗在首显闸门（25~600ms）里早已
-            // 弹出来了——用户看到的就是「先两个框、再收掉一个」。
-            // 代价：不读的宿主每次组合起手多一次 UpdateUIElement，它们不会因此拉快照
-            // （getter 不被调用 ⇒ _EnsureUiSnapshotFresh 不触发），键路径零额外 IPC。
+            // 规范：回 FALSE 后必须 UpdateUIElement；回 TRUE 时可不调，这里仍调，为的是把会读的宿主逼出来：
+            // IMM32 桥只在收到 UpdateUIElement 之后才来读，不在首键给它这次机会，读取闩要到第二键才合上，
+            // 用户会看到「先两个框、再收掉一个」。不读的宿主不会因此拉快照，键路径零额外 IPC。
             _uiUpdatedFlags = kUiElementAllFlags;
             _pUIElementMgr->UpdateUIElement(_uiElementId);
         }
@@ -2984,12 +2697,10 @@ void CTextService::NotifyCandidatesVisibilityChanged(BOOL hasCandidates)
         WIND_LOG_DEBUG_FMT(L"EndUIElement id=%u hr=0x%08X\n", _uiElementId, (uint32_t)hr);
         _uiElementId = (DWORD)-1;
         _uiElementShown = FALSE;
-        // ⛔ 同 BeginUIElement：不再在这里清「热键模式会话」位。服务端权威驱动之后，
-        // 在这里清反而危险 —— 加词开着时若候选窗因任何原因收一次（例如宿主自绘判定
-        // 命中），会把仍然活着的会话当场清掉，而服务端那边没有状态变化、不会再推一次
-        // 来纠正，位就一直是错的，直到下一次任何状态推送。
-        // 只清快照，**不动** _uiHostDraws：它记录的是宿主的意愿（谁画），下一次
-        // BeginUIElement 会重新问；服务端那边的记账也照旧，避免每次组合结束都收/弹一次。
+        // 同 BeginUIElement：不在这里清「热键模式会话」位。加词开着时候选窗若因故收一次会把活着的会话清掉，
+        // 而服务端没有状态变化、不会再推来纠正。
+        // 只清快照，不动 _uiHostDraws：它记录宿主的意愿，下一次 BeginUIElement 会重新问；服务端记账照旧，
+        // 避免每次组合结束都收/弹一次。
         _uiSnapshot = UiElementSnapshot();
         _uiUpdatedFlags = 0;
         _uiSnapshotDirty = FALSE;
@@ -3003,11 +2714,8 @@ void CTextService::NotifyCandidatesVisibilityChanged(BOOL hasCandidates)
         }
         else
         {
-            // 还不知道有没有人在读：**只记账不拉取**，通知照发。宿主真来读 getter 时
-            // 由 _EnsureUiSnapshotFresh 补拉，届时拿到的就是当前候选。
-            // ⛔ 别改成无条件 _UpdateUiElementForHost()：那是给每个宿主的每一次按键
-            // 都加一次宿主 UI 线程上的同步 IPC（读超时 1500ms），代价落在所有人身上，
-            // 而真正需要它的只有会读的那一小撮。
+            // 还不知道有没有人在读：只记账不拉取，通知照发。宿主真来读 getter 时由 _EnsureUiSnapshotFresh 补拉。
+            // 别改成无条件 _UpdateUiElementForHost()：那会给每个宿主的每次按键加一次 UI 线程上的同步 IPC。
             _uiSnapshotDirty = TRUE;
             _pUIElementMgr->UpdateUIElement(_uiElementId);
         }
@@ -3028,14 +2736,9 @@ STDAPI CTextService::OnSetFocus(ITfDocumentMgr* pDocMgrFocus, ITfDocumentMgr* pD
 {
     WIND_LOG_DEBUG_FMT(L"OnSetFocus called focus=0x%p prev=0x%p", pDocMgrFocus, pDocMgrPrevFocus);
 
-    // 慢焦点探针：本函数在宿主 UI 线程上同步做 COM 查询（GetStatus / InputScope 的
-    // TF_ES_SYNC 编辑会话 / GetCaretPosition）外加一次阻塞 IPC 往返——SendFocusGained
-    // 内部是 send + ReceiveResponse，读超时 1500ms（见 IPCClient.cpp 与 IPCConfig）。
-    // 焦点切换罕见时这个取舍是划算的（换来首键模式必然就绪），但宿主若高频 churn 焦点，
-    // 每次都占住 UI 线程，WM_MOUSEMOVE 排其后 → 表现为鼠标光标卡顿。
-    // 记 WARN 而非 DEBUG 的用意：WARN 恒进环形缓冲（见 WindLog::Output 的 ringWorthy），
-    // 用户无需开启文件日志即可用 Ctrl+Shift+F12 导出证据——开 DEBUG 本身会加重卡顿，
-    // 让被测对象因观测而改变。
+    // 慢焦点探针：本函数在宿主 UI 线程上同步做 COM 查询外加一次阻塞 IPC 往返（SendFocusGained），
+    // 宿主高频 churn 焦点时会表现为鼠标光标卡顿。记 WARN：WARN 恒进环形缓冲，用户不开文件日志也能用
+    // Ctrl+Shift+F12 导出证据，开 DEBUG 本身会加重卡顿。
     const LONGLONG focusProbeT0 = WindLog::PerfNow();
     double focusIpcMs = 0.0;
 
@@ -3059,37 +2762,22 @@ STDAPI CTextService::OnSetFocus(ITfDocumentMgr* pDocMgrFocus, ITfDocumentMgr* pD
             _pIPCClient->SendSelectionChanged(0);
         }
 
-        // ── 焦点抖动免疫：判据取「文档变没变」而非「失过焦没有」 ──
-        // Excel 在 cell-select → cell-edit 时把**同一个** DocMgr 置空再设回（实测指针
-        // 不变、间隔 6ms）；VSCode 一次应用切换伴随 5 次 DocMgr 焦点事件。DocMgr 级
-        // 是噪声层，在失焦那一刻无从区分「抖动」与「真的换了文档」，因此不能在那里
-        // 销毁输入态——那正是「Excel 首字符不进编码、直接上屏」的根因。
-        // 把清理推迟到「另一个文档拿到焦点」时执行，抖动便自然被判为同一文档而跳过。
-        // 同源做法见 Weasel（ThreadMgrEventSink.cpp）：DocMgr 级失焦完全不碰 composition。
-        // 判据取 _pLastFocusedDocMgr（含 transient）而非 _pLastActiveDocMgr：后者刻意排除
-        // locked/transient DocMgr，拿它判抖动会让 transient 永远等不到自己、次次判成换文档。
-        // explorer 地址栏正是这样丢掉首字母的，详见该字段的注释。
+        // 焦点抖动免疫：判据取「文档变没变」而非「失过焦没有」。DocMgr 级是噪声层，清理推迟到另一个文档
+        // 拿到焦点时执行，抖动自然被判为同一文档而跳过（见 docs/architecture/tsf-docmgr-focus-semantics.md）。
+        // 判据取 _pLastFocusedDocMgr（含 transient）而非 _pLastActiveDocMgr：后者排除 locked/transient，
+        // 拿它判抖动会让 transient 次次判成换文档（explorer 地址栏丢首字母）。
         const BOOL isSameDocMgr = (_pLastFocusedDocMgr != nullptr && pDocMgrFocus == _pLastFocusedDocMgr);
         WIND_LOG_DEBUG_FMT(L"Focus gained focusSession=%llu sameDoc=%d doc=0x%p",
                            _focusSessionId, isSameDocMgr ? 1 : 0, pDocMgrFocus);
 
         if (!isSameDocMgr && _pLastActiveDocMgr != nullptr)
         {
-            // 真的换了文档：在**旧** doc 上收口。传 hint 是必须的——此刻 GetFocus() 已指向
-            // 新 doc，不传的话 EndComposition 会拿新 context 的 cookie 去清旧 context 的
-            // range，轻则失败，重则动到新文档的内容。
+            // 真的换了文档：在旧 doc 上收口。必须传 hint：此刻 GetFocus() 已指向新 doc。
             //
-            // ⚠ 收口会发 focus_lost，而它**必须与随后的 focus_gained 配对**。下面的
-            // XamlIsland locked 守卫会对 dynFlags&0x20 的新 DocMgr 跳过 focus_gained——
-            // 两个决策各自都对，组合起来却让服务端只收到半边失焦：ime_active 被清掉后
-            // 再没有东西恢复它，工具栏就此消失。实测 explorer 地址栏（2026-07-26）：点
-            // 地址栏 → 换到 transient DocMgr → 发 lost、跳过 gained，用户停在该 DocMgr
-            // 上正常打字，4 秒内再无任何 focus_gained（守卫旧注释断言的「后续稳定 DocMgr
-            // 会补一个 gained」不成立）。
-            // 故此处预判守卫是否将命中：会命中就不发这个 lost（焦点其实没离开本宿主的可
-            // 输入上下文，只是换了个 transient 容器）。EndComposition 等本地清理照常做。
-            // _DocMgrHasEditableContext 是纯查询（GetTop + GetStatus），提前问一次无副作用；
-            // 只在真正换文档时多查一次，不在焦点热路径上。
+            // 收口会发 focus_lost，它必须与随后的 focus_gained 配对。下面的 XamlIsland locked 守卫会对
+            // transient 新 DocMgr 跳过 focus_gained，用户可能就停在它上面打字、不再有 gained，服务端的
+            // ime_active 被清掉后无人恢复。故预判守卫是否命中，命中就不发 lost，本地清理照做。
+            // _DocMgrHasEditableContext 是纯查询，只在真正换文档时多查一次。
             DWORD incomingDynFlags = 0;
             DWORD incomingStatFlags = 0;
             _DocMgrHasEditableContext(pDocMgrFocus, &incomingDynFlags, &incomingStatFlags);
@@ -3115,46 +2803,34 @@ STDAPI CTextService::OnSetFocus(ITfDocumentMgr* pDocMgrFocus, ITfDocumentMgr* pD
         WindLogCurrentProcessInfo(4, L"compat.focus.current_host");
         WindLogForegroundProcessInfo(4, L"compat.focus.foreground_host");
 
-        // ⚠ 语言栏的 ForceRefresh **不在这里**：它会让系统回调 GetIcon 重绘，而此刻
-        // _hasTextInputContext 还是上一段焦点的值（下面才算），重绘出来的就是陈旧状态。
+        // 语言栏的 ForceRefresh 不在这里：它会让系统回调 GetIcon 重绘，而此刻 _hasTextInputContext 还是上一段焦点
+        // 的值（下面才算）。
 
-        // Reset composing state on focus gained to ensure clean state
-        // This prevents stale composition state from affecting new input
-        // 同一文档抖回来时**不**复位：_isComposing/_hasCandidates 一旦清零，
-        // hasInputSession 即为假，紧接着的 Backspace / 空格 / 数字选字会被判为
-        // 「无输入会话」而透传给宿主。上面 doc_changed 分支已负责真正换文档的复位。
-        //
-        // 配对状态同样在此复位（跨焦点保留已于 2026-07-29 放弃，理由见
-        // CleanupInputStateForDocChange）。
+        // 换文档时复位组合状态。同一文档抖回来不复位：_isComposing/_hasCandidates 清零后 hasInputSession
+        // 为假，紧接着的 Backspace / 空格 / 数字选字会被透传给宿主。
+        // 配对状态同样在此复位（理由见 CleanupInputStateForDocChange）。
         if (!isSameDocMgr && _pKeyEventSink != nullptr)
         {
             _pKeyEventSink->ResetComposingState();
         }
 
-        // Detect whether the focused doc manager has a real editable context.
-        // Use TSF context status flags (TF_SD_READONLY / TF_SS_TRANSITORY) rather than
-        // GetTextExt: GetTextExt is a layout API and is not implemented by many frameworks
-        // (JetBrains/Java Swing). Chrome marks its "no text field" context as TF_SD_READONLY,
-        // which is the correct TSF-standard signal for "no writable text input".
+        // 判焦点 DocMgr 有没有可编辑 context：用 TSF 状态位（TF_SD_READONLY 等）而非 GetTextExt，
+        // 后者是布局 API，很多框架（JetBrains/Java Swing）不实现；Chrome 把「无文本框」context 标为只读。
         DWORD docMgrDynFlags = 0;
         DWORD docMgrStatFlags = 0;
         _hasTextInputContext =
             _DocMgrHasEditableContext(pDocMgrFocus, &docMgrDynFlags, &docMgrStatFlags);
         WIND_LOG_DEBUG_FMT(L"OnSetFocus: hasTextCtx=%d focusSession=%llu", _hasTextInputContext, _focusSessionId);
 
-        // 读取焦点控件的 InputScope（密码框/邮箱/URL 等语义），随 focus_gained 上报给 Go 决策。
+        // 读取焦点控件的 InputScope（密码框/邮箱/URL 等语义），随 focus_gained 上报给服务端决策。
         // 仅对真正有可编辑上下文的文档查询，避免对无文本控件的 DocMgr 多跑一次同步读锁。
         UINT64 inputScopeMask = _hasTextInputContext ? _QueryInputScopeMask(pDocMgrFocus) : 0;
 
-        // 密码框信号（Weasel/小狼毫做法）：宿主在 **context** 上置 GUID_COMPARTMENT_KEYBOARD_DISABLED
-        // 表示"此控件禁用输入法"。Chromium 系浏览器密码框会置位，而无痕模式普通可编辑框不会，
-        // 因此能精确区分密码框与隐私字段。
-        // ⚠ 这是 context 级，与线程级的 `_bKeyboardDisabled` 是**两回事**：后者才是 OnTestKeyDown
-        // 开头全放行的依据，网页密码框并不会置它。因此 context 级命中时键仍会被 DLL 吃下，
-        // 必须靠补 IS_PASSWORD 位驱动抑制门控（IsPasswordSuppressActive / core apply_input_diag）
-        // 来强制英文——mask 是这条信号唯一的出口，勿删。
-        // InputScope 原始位（IS_PRIVATE/IS_SEARCH 等）仍随 mask 上报，留作将来扩展判断。
-        // 密码框判据复用到加词热键门卫：密码框（中文已被抑制）不注册加词热键，缩小抢占面。
+        // 密码框信号（同 Weasel）：宿主在 context 上置 GUID_COMPARTMENT_KEYBOARD_DISABLED 表示此控件禁用输入法。
+        // Chromium 密码框会置位，无痕模式普通可编辑框不会。
+        // 它是 context 级，与线程级 `_bKeyboardDisabled`（OnTestKeyDown 全放行的依据）是两回事：命中时键仍会被
+        // DLL 吃下，必须靠补 IS_PASSWORD 位驱动抑制门控（IsPasswordSuppressActive / core apply_input_diag），
+        // mask 是这条信号唯一的出口，勿删。密码框判据也复用到加词热键门卫：密码框不注册加词热键。
         const UINT64 rawScopeMask = inputScopeMask; // 补位前的原始 InputScope，供诊断区分来源
         _focusIsPassword = (_hasTextInputContext && _IsFocusKeyboardDisabled(pDocMgrFocus)) != FALSE;
         if (_focusIsPassword)
@@ -3162,16 +2838,9 @@ STDAPI CTextService::OnSetFocus(ITfDocumentMgr* pDocMgrFocus, ITfDocumentMgr* pD
         // 自留一份：IsPasswordSuppressActive 的吃键门控须在 OnTestKeyDown 本地算出（早于 IPC）。
         _focusInputScopeMask = inputScopeMask;
 
-        // 诊断汇总：把「这个焦点为什么（不）该输入中文」的全部信号打在同一行，便于按宿主
-        // 统计取值分布。此前它们分散在多条日志里，且 **context 级 KEYBOARD_DISABLED 没有
-        // 独立记录**——只体现为 mask 的 bit31 补位，与宿主自己报的 IS_PASSWORD 混在一起，
-        // 事后无从区分来源。2026-08-03 排查 QQ 密码框正因此绕路：实测该场景
-        // rawScope=IS_PRIVATE(bit61)、ctxKbdDisabled=0、threadKbdDisabled=0，三条密码/禁用
-        // 信号全灭，真正的「不可输入」只表达为另一个 DocMgr 的 TF_SD_READONLY（hasTextCtx=0）。
-        //
-        // ⚠ 取值一律用已算好的标量，不做 bit→名字翻译：日志宏不做级别短路（见 Globals.h，
-        // WIND_LOG_DEBUG_FMT 直接展开为 OutputFmt(4, ...)），参数会在级别判定**之前**求值，
-        // 在焦点热路径上拼字符串即是无条件开销。
+        // 诊断汇总：「这个焦点为什么（不）该输入中文」的全部信号打在同一行，含单独记录的 context 级
+        // KEYBOARD_DISABLED（否则只体现为 mask 补位，与宿主报的 IS_PASSWORD 分不开）。
+        // 只传已算好的标量：日志宏不做级别短路，参数在级别判定之前求值，焦点热路径上拼字符串即是开销。
         WIND_LOG_DEBUG_FMT(
             L"compat.focus.signals focusSession=%llu hasTextCtx=%d dynFlags=0x%X statFlags=0x%X "
             L"rawScope=0x%llX scopePassword=%d ctxKbdDisabled=%d threadKbdDisabled=%d",
@@ -3180,23 +2849,16 @@ STDAPI CTextService::OnSetFocus(ITfDocumentMgr* pDocMgrFocus, ITfDocumentMgr* pD
             (rawScopeMask & kPasswordScopeBits) != 0 ? 1 : 0,
             _focusIsPassword ? 1 : 0, _bKeyboardDisabled ? 1 : 0);
 
-        // 「不可输入」的呈现已收归协调器单点判定（见 Rust 侧 InputBlock）：
-        // DLL 只上报信号（focus_gained 的 disabled/reason/inputScopeMask、
-        // focus_lost 的 NoEditCtx/CtxLost），不再自己判、也不再自带一份迟滞。
-        // ⚠ 吃键闸门 IsPasswordSuppressActive() **保留**：那要在 IPC 之前给出答案。
-        // Force refresh the language bar button to ensure it's visible
+        // 「不可输入」的呈现由协调器单点判定（Rust 侧 InputBlock），DLL 只上报信号，不自己判、不带迟滞。
+        // 吃键闸门 IsPasswordSuppressActive() 保留：那要在 IPC 之前给出答案。
         if (_pLangBarItemButton != nullptr)
         {
             _pLangBarItemButton->ForceRefresh();
         }
 
-        // 焦点 caret。**先发异步 edit session 请求，再走同步回退链** —— 顺序是有意的：
-        // 内联执行的宿主（记事本实测 hrSession=S_OK）会在下面这行里把回调跑完，
-        // 于是 _lastFocusCaretX/Y/Source 当场变成 TSF 权威值，后面的同步链只是兜底。
-        // 排队执行的宿主（Word 实测 TF_S_ASYNC）则由回调补发 caret_update。
-        //
-        // 为什么不能只靠同步链：OnSetFocus 不是按键上下文，TF_ES_SYNC 必被宿主拒绝
-        // （TS_E_SYNCHRONOUS），回退链交出的是**跨窗口的** Win32 光标却仍以 TRUE 返回。
+        // 焦点 caret：先发异步编辑会话请求，再走同步回退链。内联执行的宿主（记事本）会在下面这行里跑完回调，
+        // _lastFocusCaretX/Y/Source 当场就是 TSF 值；排队执行的宿主（Word）由回调补发 caret_update。
+        // 不能只靠同步链：OnSetFocus 不是按键上下文，同步会话必被拒，回退链交出跨窗口的 Win32 光标却返回 TRUE。
         _lastFocusCaretSource = CARET_SRC_UNKNOWN;
         RequestFocusCaretAsync(pDocMgrFocus);
 
@@ -3229,21 +2891,12 @@ STDAPI CTextService::OnSetFocus(ITfDocumentMgr* pDocMgrFocus, ITfDocumentMgr* pD
         _lastFocusCaretHeight = caretHeight > 0 ? caretHeight : DEFAULT_CARET_HEIGHT;
         _lastFocusCaretSource = caretSource;
 
-        // XamlIsland/transient locked DocMgr guard: 这类**容器**文档上 RequestEditSession
-        // 返回 TF_E_NOLOCK，发 focus_gained 会让服务端把 composition replay 进去；用户随后
-        // 点走时，组合中的文字会在屏幕 (0,0) 处上屏。故对它们跳过 focus_gained。
-        // 命中条件见 IsLockedTransientDocMgr —— **能力位 dynFlags 0x20 必须与身份位
-        // statFlags 0x4 合取**，只判前者会把 WinUI 3 宿主（任务管理器）整个吞掉。
-        //
-        // ⚠ 旧注释断言「the subsequent stable DocMgr focus_gained will arrive」——**实测
-        // 不成立**：explorer 地址栏点击后用户就停在这个 transient DocMgr 上正常打字，
-        // 4 秒内再无第二个 focus_gained（2026-07-26 实测）。依赖它补配对是错的，因此
-        // 上面的 doc_changed 收口会预判本守卫是否命中、命中则不发 focus_lost。
-        // **改动本守卫的命中条件时，必须同步那一处的预判。**
-        // 本条是「能力位不等于身份位」这次修复的现场证据行：WinUI 3 宿主（任务管理器等）
-        // 天生带 UI 集成能力位却不是 transient，旧判据在这里会把它整个吞掉。留一行日志，
-        // 下次再出现「某宿主焦点归属对不上」时能一眼看出守卫有没有介入。
-        // 参数都是已算好的标量，日志宏无级别短路也没有额外开销。
+        // XamlIsland/transient locked DocMgr 守卫：这类容器文档上 RequestEditSession 返回 TF_E_NOLOCK，
+        // 发 focus_gained 会让服务端把组合 replay 进去，用户点走时组合文字在屏幕 (0,0) 处上屏，故跳过。
+        // 命中条件见 IsLockedTransientDocMgr：能力位 dynFlags 0x20 必须与身份位 statFlags 0x4 合取，只判前者
+        // 会把 WinUI 3 宿主（任务管理器）整个吞掉，下面这行日志用来看守卫有没有介入。
+        // 不会有「后续稳定 DocMgr 补一个 gained」：上面 doc_changed 收口据此预判是否发 focus_lost，
+        // 改本守卫的命中条件时必须同步那一处。
         if ((docMgrDynFlags & kUiIntegrationDynFlag) && !(docMgrStatFlags & kTransitoryStatFlag))
         {
             WIND_LOG_INFO_FMT(
@@ -3260,11 +2913,8 @@ STDAPI CTextService::OnSetFocus(ITfDocumentMgr* pDocMgrFocus, ITfDocumentMgr* pD
             // Do not send focus_gained IPC.
             _BeginFocusGap(L"locked_transient");
         }
-        // No editable context (QQ Ctrl+1 切会话场景等)：新 DocMgr 没有任何可输入的
-        // 文本控件 (_DocMgrHasEditableCtx -> 0)。发 focus_gained 会让 Go 把上一次
-        // composition 状态 replay 回来 (UpdateComposition with residual buffer)，
-        // 而 QQ 这边根本没地方接，结果是 IME 候选框残留、Go 内部 buffer 滞留。
-        // 显式发 focus_lost 让 Go 强制清空 (clearState + hideUI)。
+        // 无可编辑 context（如 QQ Ctrl+1 切会话）：发 focus_gained 会让服务端把上次组合状态 replay 回来，
+        // 宿主没地方接，候选框与服务端缓冲残留。改为显式发 focus_lost 让服务端清空并隐藏 UI。
         else if (!_hasTextInputContext)
         {
             WIND_LOG_INFO_FMT(
@@ -3286,35 +2936,24 @@ STDAPI CTextService::OnSetFocus(ITfDocumentMgr* pDocMgrFocus, ITfDocumentMgr* pD
             _needsFocusRecovery = FALSE;
             _BeginFocusGap(L"no_edit_ctx");
         }
-        // ⚠ SendFocusGained 是**同步**的（send + ReceiveResponse，读超时 1500ms），
-        // 不是 fire-and-forget——此处旧注释曾如此描述，与实现不符，已更正。
-        // 同步是有意为之：Go 在响应里回传权威模式，使首个 OnTestKeyDown 之前模式必然
-        // 就绪，根治「切过来首键上屏英文」（见 IPCClient::SendFocusGained 注释）。
-        // 代价是每次焦点切换都在宿主 UI 线程上做一次 IPC 往返；重型 HandleFocusGained
-        // 仍由 Go 在写响应之后异步执行，再经 push pipe 推 CMD_ACTIVATION_STATUS_PUSH,
-        // AsyncReader → WM_ACTIVATION_STATUS → ApplyActivationStatusResponse 完成同步。
-        // Lazy connect: 服务在 TSF 加载之后才启动也能覆盖（SendFocusGained 内部已处理）。
+        // SendFocusGained 是同步的（send + ReceiveResponse）：服务端在响应里回传权威模式，保证首个
+        // OnTestKeyDown 之前模式就绪，避免切过来首键上屏英文（见 IPCClient::SendFocusGained）。代价是每次
+        // 焦点切换在宿主 UI 线程上一次 IPC 往返；重型处理由服务端写响应后异步执行，再经
+        // CMD_ACTIVATION_STATUS_PUSH 推回。服务晚于 TSF 启动也能覆盖（内部 lazy connect）。
         else if (_pIPCClient != nullptr)
         {
-            // 上报的 disabled 字段统一为**线程级** KEYBOARD_DISABLED（与 OnChange 里的
-            // SendInputStateReport 同源），语义＝「系统禁用了输入法，DLL 已全放行」。
-            // 密码框（context 级）不走这个字段，它已折进 mask 的 IS_PASSWORD 位——此前这里
-            // 传 _focusIsPassword，让 core 把「密码框」误读成「键已放行」，抑制被自我否决。
+            // 上报的 disabled 字段统一为线程级 KEYBOARD_DISABLED（与 OnChange 里的 SendInputStateReport 同源），
+            // 语义＝「系统禁用了输入法，DLL 已全放行」。密码框（context 级）已折进 mask 的 IS_PASSWORD 位，
+            // 传 _focusIsPassword 会让 core 误读成「键已放行」，抑制被自我否决。
             uint8_t inputReason = ComputeInputReason(_bKeyboardDisabled != FALSE, rawScopeMask, _focusIsPassword);
-            // 焦点顶层窗口类：服务端据此区分 explorer.exe 的过渡型窗口（任务栏 /
-            // Alt+Tab 切换器，用户点它是为了去别处）与停留型窗口（桌面 / 文件管理器）。
-            // 二者进程名相同，per-app 规则仅凭进程名分不开。
-            // 成本＝GetTop + GetActiveView + GetWnd + GetAncestor + GetClassNameW，
-            // 全是进程内调用，与紧随其后的同步 IPC 往返不在一个量级；且同分支上方已经
-            // 有一次 _DocMgrHasEditableContext（GetTop + GetStatus），量级相当。
-            // 标题只在 core 推开采集（本进程可能命中标题规则）时取，否则恒空；取法不发 WM_GETTEXT。
+            // 焦点顶层窗口类：服务端据此区分 explorer.exe 的过渡型窗口（任务栏 / Alt+Tab 切换器）与停留型窗口
+            // （桌面 / 文件管理器），二者进程名相同。成本是几次进程内调用，与随后的同步 IPC 不在一个量级。
+            // 标题只在 core 推开采集时取，否则恒空；取法不发 WM_GETTEXT。
             std::wstring focusRootClass;
             std::wstring focusRootTitle;
             _QueryFocusRootWindowIdentity(pDocMgrFocus, focusRootClass, focusRootTitle);
-            // 独立日志行：与同分支的 compat.focus.foreground_host（打的是**前台**窗口类）
-            // 配对，就能在日志里直接比对「焦点顶层窗口」与「前台窗口」是否同一个——
-            // 判据该取哪一个，此前从来没有记录过，只能靠这两行对照。
-            // ⚠ 标题是用户数据（网页标题、文件名）：任何级别都只记长度，不记原文。
+            // 与 compat.focus.foreground_host（前台窗口类）配对，可在日志里比对焦点顶层窗口与前台窗口是否同一个。
+            // 标题是用户数据：任何级别都只记长度。
             WIND_LOG_DEBUG_FMT(L"compat.focus.rootclass focusSession=%llu class=%ls title_len=%u",
                                _focusSessionId, focusRootClass.c_str(), (unsigned)focusRootTitle.size());
             // 单独计时这一段：它是本函数里唯一会阻塞在别的进程上的调用，
@@ -3324,8 +2963,8 @@ STDAPI CTextService::OnSetFocus(ITfDocumentMgr* pDocMgrFocus, ITfDocumentMgr* pD
                 caretX, caretY, caretHeight, inputScopeMask, _bKeyboardDisabled != FALSE, inputReason,
                 caretSource, focusRootClass.c_str(), focusRootTitle.c_str());
             focusIpcMs += WindLog::PerfMsSince(focusIpcT0);
-            // 排队档的异步回调据此判定"该补发 caret_update"。**必须在这里置位而非发送前**：
-            // 内联档的回调早已在上面跑完，那时它读到的是旧值（≠本会话），于是正确地选择"不补发"。
+            // 排队档的异步回调据此判定是否补发 caret_update。必须在这里置位而非发送前：内联档的回调早已在上面跑完，
+            // 那时读到旧值，正确地选择不补发。
             _focusGainedSentForSession = _focusSessionId;
             _focusSentTitleBlind = (focusSent && !IsTitleMatchEnabled()) ? TRUE : FALSE;
             if (focusSent)
@@ -3350,19 +2989,14 @@ STDAPI CTextService::OnSetFocus(ITfDocumentMgr* pDocMgrFocus, ITfDocumentMgr* pD
             }
         }
 
-        // 诊断快照（异步、默认关）。刻意放在 focus_gained **之后**：那条是宿主 UI 线程上的
-        // 同步 IPC 往返，首字延迟就挂在它身上，采集的三次类名查询绝不能进去。
-        //
-        // ⚠ docMgrChanged 必须在下面更新 _pLastActiveDocMgr **之前**算——缓存一旦刷新，
-        // 「换没换文档」这个信息就永久丢失了，而它只有 DLL 知道，core 无从推导。
-        // 位置也刻意在 transient 跳过分支之外：那个分支不发 focus_gained，但恰恰是
-        // 「首字母上屏」「候选窗钉死旧 DocMgr」这类问题的现场，诊断必须能看见它。
+        // 诊断快照（异步、默认关）。放在 focus_gained 之后：那条同步 IPC 挂着首字延迟，采集不能进去。
+        // docMgrChanged 必须在下面更新 _pLastActiveDocMgr 之前算，缓存一刷新这个信息就丢了（只有 DLL 知道）。
+        // 也刻意放在 transient 跳过分支之外：那正是「首字母上屏」类问题的现场。
         SendDiagSnapshotIfEnabled(pDocMgrFocus, _pLastActiveDocMgr != pDocMgrFocus);
 
-        // 记住本次活跃文档，供下次 OnSetFocus 比对。**必须 AddRef 保活**：仅存裸指针的话，
-        // 旧 DocMgr 释放后新对象可能落在同一地址，"换了文档"会被误判成抖动而漏清理。
-        // locked/transient（XamlIsland）不入缓存——上面已对其跳过 focus_gained 视作非事件，
-        // 若缓存它，紧随其后的真实文档就会被判成"换了文档"，反而清掉刚输入的内容。
+        // 记住本次活跃文档供下次比对。必须 AddRef 保活：旧 DocMgr 释放后新对象可能落在同一地址，
+        // 换文档会被误判成抖动而漏清理。locked/transient 不入缓存：否则紧随其后的真实文档会被判成换文档，
+        // 清掉刚输入的内容。
         if (!IsLockedTransientDocMgr(docMgrDynFlags, docMgrStatFlags) &&
             _pLastActiveDocMgr != pDocMgrFocus)
         {
@@ -3372,10 +3006,9 @@ STDAPI CTextService::OnSetFocus(ITfDocumentMgr* pDocMgrFocus, ITfDocumentMgr* pD
             _pLastActiveDocMgr->AddRef();
         }
 
-        // 抖动判据用的缓存：**无条件**记录本次获焦的 DocMgr，transient 也要记。
-        // 上面那个缓存排除 transient 是为了「换文档收口时 hint 必须指向真实文档」，
-        // 而这里回答的是另一个问题——「下次同一个 doc 又获焦时，该不该当成抖动」。
-        // 两个问题的答案对 transient 恰好相反，故必须分开存，合用一个就是首字母上屏的成因。
+        // 抖动判据用的缓存：无条件记录本次获焦的 DocMgr，transient 也要记。上面那个缓存排除 transient
+        // 是为了收口 hint 指向真实文档，这里回答「同一个 doc 又获焦时该不该当成抖动」，两者对 transient
+        // 的答案恰好相反，必须分开存。
         if (_pLastFocusedDocMgr != pDocMgrFocus)
         {
             if (_pLastFocusedDocMgr != nullptr)
@@ -3396,31 +3029,20 @@ STDAPI CTextService::OnSetFocus(ITfDocumentMgr* pDocMgrFocus, ITfDocumentMgr* pD
             _pKeyEventSink->FlushEnglishStats();
         }
 
-        // ⚠ 这里**刻意不做**结束 composition / 清输入态 / 复位会话态这三件事。
-        // 曾经做过，那正是「Excel 首字符不进编码、直接上屏」的根因：Excel 在
-        // cell-select → cell-edit 时把同一个 DocMgr 置空再设回（实测指针不变、间隔 6ms），
-        // 在此销毁输入态就把用户刚敲的首字符连同 composition 一起清掉了。
-        // DocMgr 级失焦是噪声信号（VSCode 实测一次应用切换伴随 5 次 DocMgr 焦点事件），
-        // 且在这一刻无从区分「抖动」与「真的换了文档」。
+        // 这里刻意不结束组合 / 清输入态 / 复位会话态：DocMgr 级失焦是噪声（Excel 同一 DocMgr 置空再设回），
+        // 在此销毁会让首字符直接上屏。输入态清理由两条能分辨真伪的路径承担：另一个文档拿到焦点（OnSetFocus
+        // 的 doc_changed 分支）与整个应用失去前台（OnKillThreadFocus）。见 docs/architecture/tsf-docmgr-focus-semantics.md。
         //
-        // 输入态清理仍由两条能分辨真伪的路径承担：
-        //   1. 另一个文档拿到焦点   → OnSetFocus 的 doc_changed 分支（本函数上半部分）
-        //   2. 整个应用失去前台     → OnKillThreadFocus（实测 Chrome/VSCode/Edge 各
-        //      5/5、5/5、11/11 次触发，零漏；仅比本回调晚约 100ms）
-        // 同源做法见 Weasel ThreadMgrEventSink.cpp（其 issue #185 就是同一个 Excel bug）。
-        //
-        // **但工具栏可见性不同**：它不需要"分辨真伪"，因为翻错了也只是闪一下，UI 层
-        // 50ms 隐藏防抖会吸收，而漏报的代价是应用内点到非文本框后工具栏永不隐藏（实测
-        // LogExpert / 文件管理器，2026-07-26）。故这里补一条 CTX_LOST——它只翻可见性
-        // 标志、不碰输入态，是唯一能安全放在噪声层的通知。
+        // 工具栏可见性例外：翻错了只是闪一下（UI 层隐藏防抖吸收），漏报则点到非文本框后工具栏永不隐藏。
+        // 故补一条 CTX_LOST，它只翻可见性标志、不碰输入态。
         _ReportEditContextLost();
 
         // Unregister layout sink when losing focus
         _UnadviseTextLayoutSink();
         _UnadviseTextEditSink();
 
-        // 失焦时**不**销毁 HostWindow（见 OnKillThreadFocus 注释）：locked/transient
-        // DocMgr 会跳过 focus_gained，销毁后无法重建。靠 Go 的 WriteHide 隐藏即可。
+        // 失焦时不销毁 HostWindow（见 OnKillThreadFocus）：locked/transient DocMgr 会跳过 focus_gained，销毁后
+        // 无法重建，靠服务端的 WriteHide 隐藏即可。
 
         _needsFocusRecovery = FALSE;
 
@@ -3504,8 +3126,8 @@ void CTextService::_SyncStateFromResponse(const ServiceResponse& response)
     _bChinesePunct = response.IsChinesePunct();
     _bSoftKeyboard = response.IsSoftKeyboard();
     _bSoftKeyboardKeys = response.IsSoftKeyboardKeys();
-    // 热键模式会话：**无条件镜像**服务端的值（level-triggered，见 STATUS_HOTKEY_SESSION）。
-    // 服务端是这一位的唯一权威，DLL 这边不做任何本地推断——本地推断正是前一版卡死的根因。
+    // 热键模式会话：无条件镜像服务端的值（level-triggered，见 STATUS_HOTKEY_SESSION），服务端是唯一权威，
+    // DLL 不做本地推断。
     if (_pKeyEventSink != nullptr)
     {
         _pKeyEventSink->SetCandidateSessionActive(response.IsHotkeySession());
@@ -3585,9 +3207,8 @@ void CTextService::_EnsureHostRenderSetup(const ServiceResponse& response, BOOL 
         WIND_LOG_WARN(L"Host render flag missing after reconnect, retrying setup because host window was previously active\n");
     }
 
-    // 唯一调用点（ApplyActivationStatusResponse）传 forceRefresh=TRUE：activation 即重建。
-    // 此前这里有「!forceRefresh 时按 band 变化惰性重建」的分支，因此从未走到，band 复核
-    // 改由 RecheckHostBand 在输入首键时做。
+    // 唯一调用点（ApplyActivationStatusResponse）传 forceRefresh=TRUE：activation 即重建。band 复核由
+    // RecheckHostBand 在输入首键时做。
     if (candidate != nullptr)
     {
         WIND_LOG_INFO(L"Refreshing host render windows after service reconnection\n");
@@ -3612,15 +3233,12 @@ BOOL CTextService::_HostBandNeedsRebuild()
                : FALSE;
 }
 
-// 建窗时的 band 是「当时」探的：SearchHost 开机预启动、界面还没显示时就收到 activation，
-// 枚举到的窗口不在开始菜单那一层，建出来的候选窗被开始菜单盖住；activation 推送不会因为
-// 用户打开开始菜单而重来，于是一直错到下一次重建（2026-10-09 靶机「开机第一次被遮挡」）。
-// 故在一段输入的第一个键（宿主界面必定已显示）按前台 band 复核一次。不放在焦点进入：
-// SearchHost 二次聚焦会跳过 focus_gained，键才是必经之路。
+// 建窗时的 band 是当时探的：SearchHost 开机预启动、界面未显示时就收到 activation，建出的候选窗被开始菜单
+// 盖住，且 activation 推送不会重来。故在一段输入的第一个键（宿主界面必定已显示）按前台 band 复核一次；
+// 不放在焦点进入：SearchHost 二次聚焦会跳过 focus_gained，键才是必经之路。
 //
-// 跑在键路径上：不需要重建时只是 GetForegroundWindow + GetWindowBand 两个调用，且只在
-// 本线程有 host 候选窗（白名单宿主）时发生。整组重建而不是 UpdateBand：tooltip/状态窗
-// 被候选窗 own，只重建候选会让它们挂在已销毁的 owner 上。
+// 跑在键路径上：不需重建时只是两个系统调用，且只在本线程有 host 候选窗时发生。整组重建而不是 UpdateBand：
+// tooltip/状态窗被候选窗 own，只重建候选会让它们挂在已销毁的 owner 上。
 void CTextService::RecheckHostBand(const wchar_t* why)
 {
     if (!_HostBandNeedsRebuild())
@@ -3677,7 +3295,7 @@ void CTextService::_CreateHostWindows(const wind::hostband::Placement* prev)
                         info.eventName.c_str(),
                         info.maxBufferSize,
                         hrResponse.hostRenderInstanceId, // stamp frames' target against this
-                        _pIPCClient, // weak ref: candidate routes mouse events back to Go
+                        _pIPCClient, // weak ref: candidate routes mouse events back to the service
                         (HostWindowKind)info.windowKind,
                         owner))
                 {
@@ -3699,8 +3317,8 @@ void CTextService::_CreateHostWindows(const wind::hostband::Placement* prev)
         else
         {
             WIND_LOG_WARN(L"Candidate host window missing after setup, falling back to Go window\n");
-            // Tell Go so it can log centrally + notify the user the candidate fell back to its
-            // local window (e.g. restricted UWP hosts where even band=0 CreateWindowInBand fails).
+            // 通知服务端集中记日志并提示用户候选已回退到本地窗口（如受限 UWP 宿主里连 band=0 的
+            // CreateWindowInBand 都失败）。
             uint32_t reason = HOST_RENDER_FAIL_WINDOW_CREATE;
             _pIPCClient->SendAsync(CMD_HOST_RENDER_FAILED, &reason, sizeof(reason));
         }
@@ -3840,17 +3458,11 @@ LONG CTextService::GetOpenCloseCompartmentValue()
     return var.lVal;
 }
 
-// 写 OPENCLOSE compartment，使其**如实等于当前中英模式**（0=英文/IME 关，1=中文/IME 开）。
+// 写 OPENCLOSE compartment，使其如实等于当前中英模式（0=英文/IME 关，1=中文/IME 开）。
 //
-// ⚠ 不变量：任何改变 _bChineseMode 的路径都必须调用本函数同步 compartment。
-//   它现在是我们对宿主说的唯一真话——脱节的后果比当年「恒为 1」更难查，因为
-//   宿主会据此保存并恢复错误的状态（gvim 就是这么被坑的）。
-//
-// 历史（2026-08-04 用一整天实测换来，勿回退）：这里曾长期钉死为 1，公开理由是
-// 「否则英文态收不到 OnTestKeyDown，英文统计/自动配对失效」。**该理由已被受控实验
-// 证伪**：抑制全部写入后 compartment 长期停在 0，英文统计照常计数（实测 23 次）、
-// 字母正常上屏、中文候选正常——TSF 在 compartment=0 时依然回调 OnTestKeyDown。
-// 钉死带来的四个衍生缺陷与它们各自的补丁，见 OnChange 的 OPENCLOSE 分支注释。
+// 不变量：任何改变 _bChineseMode 的路径都必须调用本函数，脱节时宿主会保存并恢复错误状态（如 gvim）。
+// 不要改回钉死为 1：TSF 在 compartment=0 时照样回调 OnTestKeyDown，见
+// docs/architecture/tsf-openclose-compartment-semantics.md。
 BOOL CTextService::_SetOpenCloseCompartment(BOOL bOpen)
 {
     if (_pThreadMgr == nullptr)
@@ -3868,18 +3480,9 @@ BOOL CTextService::_SetOpenCloseCompartment(BOOL bOpen)
     if (FAILED(hr) || pCompartment == nullptr)
         return FALSE;
 
-    // 值没变就别写。ITfCompartment::SetValue **不做值比较**——写入相同的值同样会向
-    // 宿主和所有已 advise 的 sink 广播 OnChange，而 OPENCLOSE 是线程级全局 compartment，
-    // 语义是「输入法开/关状态变了」，宿主据此重建输入状态是合理反应。
-    //
-    // 为什么要紧：_SyncStateFromResponse 每收到一次服务端状态推送就调用本函数一次，
-    // 而推送是广播给所有已加载本 DLL 的进程的（实测同一份日志里有 17 个 PID）。
-    // 于是任何一个应用里的状态变化，都会让每一个宿主收到一次「IME 开关变了」的通知。
-    // 参见 295350e「抑制 CapsLock 联动触发的 OPENCLOSE 变化，防模式振荡」——
-    // 同一类问题此前已出现过一次。
-    //
-    // 姊妹函数 _SetConversionMode 早有同样的守卫（注释写着「避免触发多余 OnChange」），
-    // 本函数漏了——两个 compartment 一个防了一个没防。
+    // 值没变就别写：ITfCompartment::SetValue 不做值比较，同值写入也会向宿主和所有 sink 广播 OnChange。
+    // _SyncStateFromResponse 每收到一次状态推送就调用本函数，而推送广播给所有加载本 DLL 的进程，
+    // 不加守卫则任何一个应用里的状态变化都会让每个宿主收到一次「IME 开关变了」。_SetConversionMode 有同样的守卫。
     const LONG desired = bOpen ? TRUE : FALSE;
     VARIANT cur;
     VariantInit(&cur);
@@ -3900,23 +3503,18 @@ BOOL CTextService::_SetOpenCloseCompartment(BOOL bOpen)
 
     _bInCompartmentChange = FALSE;
 
-    // ⚠ 这条日志此前**不存在**，是 2026-08-18 排查「快到看不清的一闪」时补的。
-    // OPENCLOSE 是 Windows 自己那个语言指示器的数据源（不是我们画进 SHM 的图标），
-    // 没有它就无法回答「系统指示器被翻了几次」——而那恰恰是我们画的图标全程正确、
-    // 用户却仍看到闪烁时唯一剩下的解释。上面的幂等守卫会吃掉同值写入，
-    // 所以能走到这里的**每一条都是真的翻转**。
+    // OPENCLOSE 是 Windows 语言指示器的数据源，这条日志回答「系统指示器被翻了几次」（我们的图标全程正确
+    // 而用户仍见闪烁时的唯一解释）。上面的幂等守卫吃掉同值写入，能走到这里的每一条都是真的翻转。
     WIND_LOG_DEBUG_FMT(L"compat.openclose.write value=%d hr=0x%08X tid=%lu inst=0x%p",
                        (int)desired, (uint32_t)hr, GetCurrentThreadId(), this);
 
     return SUCCEEDED(hr);
 }
 
-// Ctrl 当前是否按住。**两条 compartment 路径都要在写 IPC 的那一刻取**，它是服务端
-// 「忽略软件切换中英」放行系统热键的唯一判据（Ctrl+Space 与宿主切中英走同一
-// 条通路、载荷相同，不交代就分不出）。
-// 两个 API 都问一遍：`GetAsyncKeyState` 读硬件当下状态，`GetKeyState` 读本线程消息
-// 队列的同步状态，而 compartment 回调不保证排在按键消息之后。同款判据已在本文件的
-// CapsLock 联动抑制窗用过并经真机验证。
+// Ctrl 当前是否按住。两条 compartment 路径都要在写 IPC 的那一刻取：它是服务端「忽略软件切换中英」放行
+// 系统热键的唯一判据（Ctrl+Space 与宿主切中英走同一条通路、载荷相同）。
+// 两个 API 都问：`GetAsyncKeyState` 读硬件当下状态，`GetKeyState` 读本线程消息队列的同步状态，
+// 而 compartment 回调不保证排在按键消息之后。
 static bool _CtrlHeldNow()
 {
     return (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0 || (GetKeyState(VK_CONTROL) & 0x8000) != 0;
@@ -3968,10 +3566,8 @@ STDAPI CTextService::OnChange(REFGUID rguid)
         if (_pLangBarItemButton != nullptr)
             _pLangBarItemButton->UpdateKeyboardDisabled(bDisabled);
 
-        // 输入诊断 HUD（Task 7）：compartment 变更是"焦点未变但禁用态翻转"的场景（如 SPA 内
-        // 原地跳转到密码框），不会触发新的 OnSetFocus/focus_gained，因此单独上报一次
-        // input_state_report 让 HUD 即时刷新。mask 用当前焦点 DocMgr 重新查询（可能与
-        // OnSetFocus 时不同一个 DocMgr），仅算一次避免重复同步读锁。
+        // 诊断 HUD：compartment 变更是「焦点未变但禁用态翻转」（如 SPA 内原地跳到密码框），不触发 OnSetFocus，
+        // 故单独上报一次 input_state_report。mask 用当前焦点 DocMgr 重新查询，只算一次。
         if (_pIPCClient != nullptr && _pIPCClient->IsConnected())
         {
             ITfDocumentMgr* pDocMgrCur = nullptr;
@@ -3986,10 +3582,8 @@ STDAPI CTextService::OnChange(REFGUID rguid)
             _focusInputScopeMask = curMask;
             uint8_t curReason = ComputeInputReason(bDisabled != FALSE, curMask, false);
             _pIPCClient->SendInputStateReport(GetCurrentProcessId(), bDisabled != FALSE, curReason, curMask);
-            // 同一现场的窗口/上下文快照也补一份：本路径「焦点未变但禁用态翻转」不走
-            // OnSetFocus，不补的话 HUD 的输入态那半会更新、窗口那半停在上一次焦点，
-            // 两半各自为真却互相矛盾——诊断工具自身自相矛盾是最坏的一种失败。
-            // docMgrChanged=FALSE：本路径按定义就没换文档。
+            // 窗口/上下文快照也补一份，否则 HUD 的输入态那半更新、窗口那半停在上一次焦点，自相矛盾。
+            // docMgrChanged=FALSE：本路径按定义没换文档。
             ITfDocumentMgr* pDocMgrDiag = nullptr;
             if (SUCCEEDED(_pThreadMgr->GetFocus(&pDocMgrDiag)) && pDocMgrDiag != nullptr)
             {
@@ -4012,19 +3606,10 @@ STDAPI CTextService::OnChange(REFGUID rguid)
         if (_bInConversionChange)
             return S_OK;  // 自身写入引起的通知，跳过
 
-        // 无焦点时的 compartment 变化只能是系统切换输入法等噪声（用户 Ctrl+Space 必有
-        // 前台焦点；KBLSwitch 也按前台应用写入）——忽略，防止污染服务端权威模式。
-        // 下次聚焦/激活会从服务同步权威值。
-        // 判据必须是 _hasThreadFocus（ITfThreadFocusSink，「本应用在前台」），
-        // 不是 _hasFocus（DocMgr 级焦点，OnSetFocus 收到非 null 即置位）。
-        // 上面那段注释的意图本来就是前台——「用户 Ctrl+Space 必有前台焦点；KBLSwitch
-        // 也按前台应用写入」——只是取错了变量。实测两个方向都会出错：
-        //   hasFocus=1 hasThreadFocus=0（最小化的记事本仍残留 DocMgr 焦点）
-        //     → 把用户操作**别的输入法**（微软五笔）引起的线程级 compartment 变化
-        //       误当成用户操作上报 → handle_system_mode_switch 覆盖全局 chinese_mode
-        //       → 广播给所有 client → 切回来的应用被带成英文。
-        //   hasFocus=0 hasThreadFocus=1（本应用在前台但 DocMgr 焦点尚未建立）
-        //     → 把用户的真实切换当噪声丢弃。
+        // 无前台焦点时的 compartment 变化只能是系统切换输入法等噪声（Ctrl+Space 与 KBLSwitch 都针对前台应用），
+        // 忽略，防止污染服务端权威模式。判据必须是 _hasThreadFocus（本应用在前台），不是 _hasFocus（DocMgr 级）：
+        // 最小化的记事本仍残留 DocMgr 焦点，会把用户操作别的输入法引起的变化上报成全局模式切换；反过来
+        // 前台但 DocMgr 焦点未建立时会丢掉真实切换。
         WIND_LOG_INFO_FMT(L"compat.conversion.onchange hasFocus=%d hasThreadFocus=%d curMode=%d\n",
                           _hasFocus ? 1 : 0, _hasThreadFocus ? 1 : 0, _bChineseMode ? 1 : 0);
         if (!_hasThreadFocus)
@@ -4032,9 +3617,8 @@ STDAPI CTextService::OnChange(REFGUID rguid)
             WIND_LOG_INFO(L"Compartment CONVERSION changed while not foreground, ignored\n");
             return S_OK;
         }
-        // 激活静默期：刚 ActivateEx 完时系统会写 compartment 做初始化同步（实测 ~96ms），
-        // 那不是用户操作。此前这类噪声靠 _hasFocus 尚未置位被顺带挡住，改用
-        // _hasThreadFocus 后不再被挡（激活时本应用正是前台），故显式加窗口。
+        // 激活静默期：刚 ActivateEx 完时系统会写 compartment 做初始化同步，不是用户操作；激活时本应用正是前台，
+        // _hasThreadFocus 挡不住它，故显式加窗口。
         if (GetTickCount64() - _lastActivateTick < kActivateSettleMs)
         {
             WIND_LOG_INFO(L"Compartment CONVERSION changed within activate settle window, ignored\n");
@@ -4069,7 +3653,7 @@ STDAPI CTextService::OnChange(REFGUID rguid)
             _bChineseMode ? L"Chinese" : L"English",
             bWantChinese ? L"Chinese" : L"English");
 
-        // 与 OPENCLOSE 路径一致：清状态、通知 Go 服务、刷新 LangBar。
+        // 与 OPENCLOSE 路径一致：清状态、通知服务端、刷新 LangBar。
         if (_pKeyEventSink != nullptr)
             _pKeyEventSink->FlushEnglishStats();
 
@@ -4096,7 +3680,7 @@ STDAPI CTextService::OnChange(REFGUID rguid)
         if (_pLangBarItemButton != nullptr)
             _pLangBarItemButton->UpdateLangBarButton(_bChineseMode);
 
-        // 若 Go 服务把模式仲裁成了与外部请求不同的值，回写 compartment 保持一致。
+        // 若服务端把模式仲裁成了与外部请求不同的值，回写 compartment 保持一致。
         if (newChineseMode != bWantChinese)
             _SetConversionMode(newChineseMode);
 
@@ -4113,14 +3697,10 @@ STDAPI CTextService::OnChange(REFGUID rguid)
     if (_bInCompartmentChange)
         return S_OK;
 
-    // 无焦点时的 OPENCLOSE 变化是系统切换输入法等噪声（本路径任何变化都被视为 toggle，
-    // 误报会直接翻转服务端权威模式）——忽略，下次聚焦/激活从服务同步权威值。
-    // 同 CONVERSION 路径：判据须为 _hasThreadFocus（前台），而非 _hasFocus（DocMgr 级）。
-    // 本路径的误报后果更重——「任何变化都被视为 toggle」，直接翻转服务端权威模式。
-    // tid/inst：同一进程里可能有多个 TSF 线程，各自持有独立的 CTextService 与
-    // 独立的 _hasThreadFocus。若 OnSetThreadFocus 落在实例 A 而本回调发生在实例 B，
-    // 表现就是「明明刚置了 TRUE，这里读到的还是 0」——不打出实例身份根本分不出
-    // 这种情况与「有人把它清零了」。
+    // 无焦点时的 OPENCLOSE 变化是系统切换输入法等噪声，照单全收会改写服务端权威模式，故忽略，下次聚焦/激活
+    // 从服务端同步权威值。判据须为 _hasThreadFocus（前台），而非 _hasFocus（DocMgr 级）。
+    // tid/inst：同一进程可能有多个 TSF 线程各持一个 CTextService，不打实例身份分不清
+    // 「回调落在另一实例」与「有人把它清零了」。
     WIND_LOG_INFO_FMT(L"compat.openclose.onchange hasFocus=%d hasThreadFocus=%d fg=%d curMode=%d tid=%lu inst=0x%p\n",
                       _hasFocus ? 1 : 0, _hasThreadFocus ? 1 : 0, _isProcessForeground ? 1 : 0,
                       _bChineseMode ? 1 : 0, GetCurrentThreadId(), this);
@@ -4129,7 +3709,7 @@ STDAPI CTextService::OnChange(REFGUID rguid)
         WIND_LOG_INFO(L"Compartment OPENCLOSE changed while not foreground, ignored\n");
         return S_OK;
     }
-    // 激活静默期，理由同 CONVERSION 路径。本路径误报后果更重：任何变化都被当作 toggle。
+    // 激活静默期，理由同 CONVERSION 路径。
     if (GetTickCount64() - _lastActivateTick < kActivateSettleMs)
     {
         WIND_LOG_INFO(L"Compartment OPENCLOSE changed within activate settle window, ignored\n");
@@ -4161,16 +3741,12 @@ STDAPI CTextService::OnChange(REFGUID rguid)
     WIND_LOG_INFO_FMT(L"Compartment OPENCLOSE changed: %d (current mode: %s)\n",
         bOpen, _bChineseMode ? L"Chinese" : L"English");
 
-    // CapsLock 联动噪声抑制：Windows 输入系统在 CapsLock 状态变化（物理按键或服务端
-    // cancel_on_mode_switch 的注入取消）后会异步联动写 OPENCLOSE compartment（实测
-    // 延迟 0.5~1s）。这不是用户的 Ctrl+Space 切换请求——若照常 toggle 并上报服务，
-    // 会与服务端的 CapsLock 注入形成「注入→联动→切换→再注入」振荡回路（模式每拍
-    // 翻转、大写灯乱闪）。短窗口内把 compartment 拉回真实模式，不切换不上报。
+    // CapsLock 联动噪声抑制：CapsLock 状态变化（物理按键或服务端 cancel_on_mode_switch 的注入）后，
+    // Windows 会异步联动写 OPENCLOSE（延迟约 0.5~1s）。照常 toggle 并上报会与服务端的 CapsLock 注入
+    // 形成振荡回路，故短窗口内把 compartment 拉回真实模式，不切换不上报。
     //
-    // 例外（勿删）：用户「开大写后立刻按 Ctrl+Space」的真实切换与系统联动落在同一
-    // 时间窗（都是 caps 活动后 0.5~1s），纯时间窗口会误吞真实请求（实测复现）。
-    // 判据：系统热键触发的 OPENCLOSE 变化发生在 Ctrl 按住期间（Space down 即触发，
-    // Ctrl 尚未释放）；系统的 CapsLock 联动写入则无任何伴随按键。Ctrl 按住 → 放行。
+    // 例外（勿删）：开大写后立刻按 Ctrl+Space 的真实切换落在同一时间窗。系统热键触发时 Ctrl 仍按住，
+    // 联动写入则无伴随按键，故 Ctrl 按住 → 放行。
     if (GetTickCount64() - _lastCapsKeyTick < 1500)
     {
         BOOL ctrlHeld = (GetAsyncKeyState(VK_CONTROL) & 0x8000) || (GetKeyState(VK_CONTROL) & 0x8000);
@@ -4183,33 +3759,13 @@ STDAPI CTextService::OnChange(REFGUID rguid)
         WIND_LOG_INFO(L"Compartment OPENCLOSE changed within CapsLock window but Ctrl held -> treat as user toggle\n");
     }
 
-    // ===== 严格值语义 =====
-    // compartment 的值**就是**中英状态的真相：0=英文（IME 关闭）、1=中文（IME 开启）。
-    // 不再把它钉死为 1，而是让它如实反映模式——这是与其它输入法一致的语义，
-    // 也是 TSF/IMM 对宿主的契约。
+    // 严格值语义：compartment 的值就是中英状态的真相（0=英文/IME 关，1=中文/IME 开），与其它输入法
+    // 及 TSF/IMM 对宿主的契约一致。系统热键取反 compartment ⇒ 直接按值切换，不需要看见那个按键。
+    // 放弃「钉死为 1」的原因见 docs/architecture/tsf-openclose-compartment-semantics.md。
     //
-    // 为什么放弃「钉死 1 + 事件语义」（2026-08-04 用一整天实测换来的结论）：
-    // 钉死之后这个位同时被要求承担三件互相冲突的事，衍生出四个独立缺陷：
-    //   ① 值失去区分能力 ⇒ 只能把「任何变化」当 toggle ⇒ gvim 每次 ESC 随机翻转中英；
-    //   ② 幂等写入变成事件 ⇒ 宿主重复下发同一状态被反复触发；
-    //   ③ 宿主查询到假状态 ⇒ gvim 记住「开」并在进插入模式时恢复，覆盖用户选择；
-    //   ④ 谎言需要持续维护 ⇒ 任何跳过 re-open 的分支都会让值序列错乱
-    //      （no-op 早退不发 IPC ⇒ 补写缺失 ⇒ 系统 toggle 方向反转 ⇒「按三次才切一次」）。
-    // 为①②③④各自打的补丁（toggle、Ctrl+Space 标记、忽略 bOpen=1、Ctrl 兜底、
-    // 联动抑制窗）曾在这里堆到 9 道判据，且互相之间只靠代码顺序确定优先级。
-    //
-    // 说真话之后这些全部不需要：
-    //   - 系统热键（Ctrl+Space）取反 compartment ⇒ 值变化 ⇒ 直接按值切换。
-    //     **不再需要看见那个按键**，因此 WebView 类宿主不把 Space 递给 keystroke sink
-    //     也毫无影响（DBX 正是栽在这一点上）。
-    //   - gvim 查到英文态=关 ⇒ 记住「关」⇒ 进插入模式恢复「关」⇒ 保持英文；
-    //     用户若在插入模式切了中文，它记住「开」并在下次恢复中文——正是应有的行为。
-    //   - _SetConversionMode 的联动写 0 只在「值与模式已经一致」时到达，天然是 no-op。
-    //
-    // ⚠ 不变量：**任何改变 _bChineseMode 的路径都必须同步写 compartment**
-    //   （_SetOpenCloseCompartment(_bChineseMode)）。漏一处就会让 compartment 与实际模式
-    //   脱节，而它现在是对宿主的唯一真话——脱节比当年钉死更难查。
-    // compartment 的值就是目标模式；它已由系统/宿主写好，故 compartmentAlreadySet=TRUE。
+    // 不变量：任何改变 _bChineseMode 的路径都必须同步写 compartment（_SetOpenCloseCompartment），
+    // 漏一处就会让它与实际模式脱节，而它是对宿主的唯一真话。
+    // 这里 compartment 已由系统/宿主写好，故 compartmentAlreadySet=TRUE。
     return _ApplyModeSwitch(bOpen, TRUE, ModeSwitchSource::CompartmentOpenClose);
 }
 
@@ -4221,8 +3777,8 @@ STDAPI CTextService::OnChange(REFGUID rguid)
 //                                  必须无条件写，否则违反「改 _bChineseMode 必同步写
 //                                  compartment」的不变量，对宿主说的就是假话。
 // source 只进日志，用于把两条路径在排查时分开。
-// 日志用的来源名。**排查锚点，勿改字面**：`Mode switch via compartment|ctrl_space_key`
-// 这两个串写在 project_tsf_openclose_compartment_semantics 的排查步骤里。
+// 日志用的来源名。排查锚点，勿改字面：`Mode switch via compartment|ctrl_space_key` 写在
+// docs/architecture/tsf-openclose-compartment-semantics.md 的排查步骤里。
 static const WCHAR* _ModeSwitchSourceName(ModeSwitchSource source)
 {
     switch (source)
@@ -4238,15 +3794,12 @@ HRESULT CTextService::_ApplyModeSwitch(BOOL requestedMode, BOOL compartmentAlrea
 {
     BOOL newChineseMode = requestedMode;
     const WCHAR* sourceName = _ModeSwitchSourceName(source);
-    // 服务端的「忽略软件切换中英」靠这一位放行系统热键，必须在**这一刻**取：
-    // 系统热键（Ctrl+Space）翻 compartment 时 Ctrl 尚未释放，宿主自己写则没有伴随按键。
-    // 同款判据已在本文件 CapsLock 联动抑制窗用过。
+    // 服务端的「忽略软件切换中英」靠这一位放行系统热键，必须在这一刻取：系统热键（Ctrl+Space）翻 compartment
+    // 时 Ctrl 尚未释放，宿主自己写则没有伴随按键。
     const bool ctrlHeld = _CtrlHeldNow();
 
-    // 值与当前模式一致：宿主重复下发同一状态（gvim 每次 ESC 都写 0）或系统联动噪声。
-    // 早退，不做任何副作用——否则每次都会白跑一轮 EndComposition + 同步 IPC +
-    // 刷 LangBar/工具栏（实测一轮 30ms），并把英文统计切成碎片段上报。
-    // 注意此处**不需要**回写 compartment：值语义下它已经是对的。
+    // 值与当前模式一致：宿主重复下发同一状态（gvim 每次 ESC 都写 0）或系统联动噪声。早退不做任何副作用，
+    // 否则每次都白跑 EndComposition + 同步 IPC + 刷 LangBar/工具栏，并把英文统计切碎。值语义下无需回写。
     if (newChineseMode == _bChineseMode)
     {
         WIND_LOG_INFO_FMT(L"Mode request via %s (%d) matches current mode (%s), no-op\n",
@@ -4259,18 +3812,11 @@ HRESULT CTextService::_ApplyModeSwitch(BOOL requestedMode, BOOL compartmentAlrea
         _bChineseMode ? L"Chinese" : L"English",
         newChineseMode ? L"Chinese" : L"English");
 
-    // ⚠ 已知限制（2026-09-08 code review #5，未修）：下面三行在**同步 IPC 之前**执行，
-    // 而「服务端要不要采纳这次切换」的答案在 IPC 之后才知道。于是被 per-app
-    // `ignore_host_ime_switch` 拒绝的那次，用户正在打的组合照样已经被终止、英文统计段也
-    // 已经被切开——「我们忽略了这个请求」与「你的组合被扔了」自相矛盾。
-    //
-    // 没有立刻修，是因为触发场景里组合基本已经没了：宿主关 IME 几乎总发生在焦点离开
-    // 输入框时（WinForms 的 `ImeMode.Disable` 挂在按钮获得焦点上），TSF 本来就会终止组合。
-    // 而修法要把 IPC 提到销毁之前，那是上屏路径的顺序调整，会让已通过的真机验证作废。
-    //
-    // 真要修的形状：先 `SendSystemModeSwitch` 拿到仲裁结果 → 若等于当前模式则只修
-    // compartment 后早退（不动组合）→ 否则再 Flush/End/Reset 并按回包 CommitText。
-    // 届时须重测「切换时上屏待定文本」那条路径（`take_input_on_mode_switch` 的回包）。
+    // 已知限制：下面几步在同步 IPC 之前执行，而服务端是否采纳这次切换要 IPC 之后才知道，于是被 per-app
+    // `ignore_host_ime_switch` 拒绝的那次，组合照样已被终止、英文统计段也已切开。暂不修：宿主关 IME 几乎
+    // 总发生在焦点离开输入框时，组合本就会被终止。要修的形状：先 `SendSystemModeSwitch` 拿仲裁结果，
+    // 等于当前模式则只修 compartment 后早退，否则再 Flush/End/Reset 并按回包 CommitText；届时须重测
+    // `take_input_on_mode_switch` 的回包路径。
 
     // Flush English stats before any mode switch
     if (_pKeyEventSink != nullptr)
@@ -4280,7 +3826,7 @@ HRESULT CTextService::_ApplyModeSwitch(BOOL requestedMode, BOOL compartmentAlrea
     EndComposition();
     ResetComposingState(TRUE);  // 中英切换保留配对状态：光标与已插入的右符号都没变
 
-    // Notify Go service of the mode switch (sync: may return CommitText for pending input)
+    // 通知服务端模式切换（同步：可能回带待定输入的 CommitText）
     if (_pIPCClient != nullptr && _pIPCClient->IsConnected())
     {
         ServiceResponse response;
@@ -4307,13 +3853,9 @@ HRESULT CTextService::_ApplyModeSwitch(BOOL requestedMode, BOOL compartmentAlrea
     if (_pLangBarItemButton != nullptr)
         _pLangBarItemButton->UpdateLangBarButton(_bChineseMode);
 
-    // compartment 通常已经等于新模式（这次变化正是宿主/系统写的），无需回写。
-    // 唯一例外：服务端把模式仲裁成了与请求不同的值（如密码框强制英文），此时必须
-    // 把 compartment 拉回真实模式，否则它对宿主说的就是假话。
-    //
-    // 注意在 OnChange 上下文里写 compartment **未必生效**（实测：内部「值相同就不写」
-    // 的守卫会读到尚未落定的旧值而跳过）。真正兜底的是 IPC 状态推送回来后
-    // _SyncStateFromResponse 里的那次写入，窗口实测 400~670ms。判定逻辑不依赖此处成功。
+    // compartment 通常已等于新模式，无需回写。例外：服务端仲裁出不同模式（如密码框强制英文）时，
+    // 必须把它拉回真实模式。在 OnChange 上下文里写未必生效（内部「值相同就不写」的守卫会读到未落定的
+    // 旧值），真正兜底的是状态推送回来后 _SyncStateFromResponse 里的那次写入，判定逻辑不依赖此处成功。
     if (!compartmentAlreadySet || newChineseMode != requestedMode)
     {
         // 只有真被仲裁时才这么说：按键路径 compartmentAlreadySet=FALSE 恒进入本分支，
@@ -4335,15 +3877,9 @@ HRESULT CTextService::_ApplyModeSwitch(BOOL requestedMode, BOOL compartmentAlrea
 
 // 按键侧兜底的中英切换（Ctrl+Space）。
 //
-// 只有当系统没把 Ctrl+Space 当作 IME 热键时才会走到这里——判据不是猜的，而是 TSF 契约：
-// OnKeyDown 只在 OnTestKeyDown 返回 pfEaten=TRUE 之后才被调用，而吃下该键就意味着
-// msctf 不会再拿它当热键、compartment 不会被翻。两条路径因此天然互斥，不存在双切换。
-//
-// 背景：此前 Ctrl+Space 的切换 100% 外包给系统（见 OnChange 的 OPENCLOSE 分支），
-// 按键侧那条兜底曾以「实测从未执行」为由删除（e152da9b）。但那次实测只采样了系统热键
-// 正常的机器；在系统热键实质失效的机器上 OnKeyDown 确实会被调用，此时整个功能无人接管。
-// 真机日志指纹：test_down eaten=1 decision=ctrl_space_intercept 紧跟 down eaten=0
-// decision=passthrough_not_handled，且全程 0 条 compat.openclose.onchange。
+// 只有系统没把 Ctrl+Space 当 IME 热键时才会走到这里：OnKeyDown 只在 OnTestKeyDown 吃键后调用，
+// 而吃下该键就意味着 msctf 不会再拿它当热键、compartment 不会被翻，两条路径天然互斥。
+// 系统热键失效的机器上全靠这条，见 docs/architecture/tsf-openclose-compartment-semantics.md 第 4 节。
 BOOL CTextService::ToggleModeFromKey()
 {
     // 不加 _hasThreadFocus 守卫：那是 OnChange 用来过滤 compartment 广播噪声的，
@@ -4424,11 +3960,8 @@ void CTextService::_UninitKeyboardDisabledCompartment()
 // ============================================================================
 // Compartment event sink for GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION
 //
-// 此 compartment 是 Windows 标准的「中/英文模式」对外通信通道：
-//   - IME_CMODE_NATIVE 位置 1：当前为本地（中文）输入
-//   - IME_CMODE_NATIVE 位置 0：当前为字母（英文）输入
-// 第三方工具（KBLSwitch 等按应用锁中英文）与 Win11 任务栏语言指示器都
-// 读写此 compartment。OPENCLOSE 在内部约定下始终为 TRUE，不应承担模式信号。
+// 此 compartment 是 Windows 标准的「中/英文模式」对外通道：IME_CMODE_NATIVE 位 1=中文、0=英文。
+// 第三方工具（KBLSwitch 等按应用锁中英文）与 Win11 任务栏语言指示器都读写它。
 // ============================================================================
 
 // IME_CMODE_NATIVE from imm.h. 不引入 imm.h，避免拉入整个 IMM32 头文件。
@@ -4566,14 +4099,10 @@ BOOL CTextService::_DoFullStateSync(BOOL fromServiceReady)
         return FALSE;
     }
 
-    // 异步化（Go 端 server.go::handleClient 走"先 Ack 后处理"）：本调用仅发 fire-and-forget
-    // CMD_IME_ACTIVATED。Go 端收到立即回 Ack 解除本同步调用，HandleIMEActivated 在 Go
-    // 端的 handler goroutine 中完成后通过 push pipe 推 CMD_ACTIVATION_STATUS_PUSH，
-    // AsyncReader 线程上的回调 PostMessage 到 TSF 线程触发 ApplyActivationStatusResponse,
-    // 完成 _SyncStateFromResponse + _EnsureHostRenderSetup 的全套状态同步动作。
-    //
-    // 这条路径消除了原同步 ReceiveResponse 在宿主 UI 线程上的 1500ms 阻塞窗口——
-    // explorer.exe 等 shell 宿主进程不再因任何 Go 端 handler 内的跨进程调用形成环形等待。
+    // 异步：只发 fire-and-forget 的 CMD_IME_ACTIVATED，服务端先回 Ack 解除本同步调用，处理完再经
+    // push 管道推 CMD_ACTIVATION_STATUS_PUSH，AsyncReader 回调 PostMessage 到 TSF 线程执行
+    // ApplyActivationStatusResponse（_SyncStateFromResponse + _EnsureHostRenderSetup）。
+    // 同步等回包会阻塞宿主 UI 线程，explorer.exe 等 shell 宿主会与服务端的跨进程调用形成环形等待。
     WIND_LOG_INFO(L"Sending IMEActivated (async); state will arrive via CMD_ACTIVATION_STATUS_PUSH\n");
 
     BOOL sent = _pIPCClient->SendIMEActivated();
@@ -4586,13 +4115,11 @@ BOOL CTextService::_DoFullStateSync(BOOL fromServiceReady)
     }
     _pIPCClient->SetPipeBusyExempt(FALSE);
 
-    // 注：清除 _needsStateSync 提前到此处，让后续 KeyEventSink 路径不再触发重复 state sync。
-    // 即便 push 暂时未到，下一次焦点切换会重新拉起 activation 流程。
+    // 清除 _needsStateSync 提前到此处，后续 KeyEventSink 路径不再重复 state sync；push 暂未到时
+    // 下一次焦点切换会重新拉起 activation 流程。
     //
-    // ⛔ _needsFocusRecovery **不在这里清**，交给本函数末尾的 TryRecoverFocusState 消费：
-    // IME_ACTIVATED 不带窗口类名 / 标题，服务端据此认不出窗口，按类名的应用兼容规则全部
-    // 不命中（GH#175 冷启动：服务没起来时 focus_gained 发不出去，此前在这里一清，补发就再也
-    // 不会发生，要用户切一下焦点才好）。
+    // _needsFocusRecovery 不在这里清，交给末尾的 TryRecoverFocusState 消费：IME_ACTIVATED 不带窗口
+    // 类名 / 标题，按类名的应用兼容规则全部不命中；冷启动时 focus_gained 发不出去，在这里一清补发就不会发生。
     _pIPCClient->ClearNeedsSyncFlag();
 
     // UIElement「谁画候选」的记账住在服务端，服务重启就没了；本函数正是每次（重）连后
@@ -4627,8 +4154,7 @@ void CTextService::ApplyActivationStatusResponse(const ServiceResponse& response
 // 两侧日志都不留痕，只能在进出空窗的边界上主动记一笔，否则事后无从归因。
 void CTextService::_BeginFocusGap(const WCHAR* reason)
 {
-    // 已在空窗中就不重新计时：宿主一次焦点重建会连抖数次（微信实测 3~5 次），
-    // 每次都重置就把一段连续的「不能输入」切成若干段短的，正好抹掉要找的那个长空窗。
+    // 已在空窗中就不重新计时：宿主一次焦点重建会连抖数次，每次重置会把一段连续的「不能输入」切成若干短段。
     if (_focusGapStartTick != 0)
         return;
     _focusGapStartTick = GetTickCount64();
@@ -4771,12 +4297,9 @@ BOOL CTextService::_ResendFocusGained(const wchar_t* why)
     WIND_LOG_INFO_FMT(L"Resending focus_gained (%ls) focusSession=%llu x=%ld y=%ld h=%ld src=%d",
         why, _focusSessionId, caretX, caretY, caretHeight, caretSource);
 
-    // 输入诊断 HUD（Task 7）：与 OnSetFocus / compartment OnChange 一致，重新查询当前
-    // 焦点 DocMgr 的 InputScope mask，避免恢复路径硬编码 mask=0 让 HUD 误显示
-    // "原因: 无"。若此刻拿不到焦点 DocMgr（理论上不应发生，仅作防御），mask 退化为 0，
-    // reason 仍据线程级 _bKeyboardDisabled + mask 计算，与另两条上报路径同语义。
-    // 窗口类名 / 标题同样现取（与 OnSetFocus 同一函数）：不带的话服务端按「不知道是哪个窗口」
-    // 解析，窗口规则全部不命中，且会被当成换了窗口去重推 DLL 配置。
+    // 与 OnSetFocus / compartment OnChange 一致，重新查询焦点 DocMgr 的 InputScope mask，避免诊断 HUD
+    // 误显示「原因: 无」；拿不到焦点 DocMgr 时 mask 退化为 0。窗口类名 / 标题同样现取：不带的话
+    // 服务端按「不知道是哪个窗口」解析，窗口规则全不命中，且会被当成换了窗口去重推 DLL 配置。
     UINT64 mask = 0;
     bool ctxDisabled = false;
     std::wstring rootClass;
@@ -4809,16 +4332,14 @@ BOOL CTextService::_InitIPCClient()
     if (_pIPCClient == nullptr)
         return FALSE;
 
-    // Try to connect to Go Service (failure is OK, will retry later)
+    // 连接服务端（失败无妨，之后会重试）
     if (!_pIPCClient->Connect())
     {
         WIND_LOG_WARN(L"Failed to connect to Service, will retry later\n");
     }
 
-    // Set up activation status push callback (CMD_ACTIVATION_STATUS_PUSH)
-    // 触发链：Go HandleIMEActivated / HandleFocusGained 异步完成 → push pipe → 本回调。
-    // 必须 Post 到 TSF 线程：_SyncStateFromResponse / _EnsureHostRenderSetup 会触碰 TSF
-    // COM 对象（compartment、LangBar 等），它们都是 STA-bound。
+    // 激活状态推送回调（CMD_ACTIVATION_STATUS_PUSH）：服务端 HandleIMEActivated / HandleFocusGained 异步完成后推来。
+    // 必须 Post 到 TSF 线程：_SyncStateFromResponse / _EnsureHostRenderSetup 会碰 STA-bound 的 TSF COM 对象。
     CTextService* pThis = this;
     _pIPCClient->SetActivationPushCallback([pThis](const ServiceResponse& response) {
         if (pThis->_pLangBarItemButton != nullptr)
@@ -4827,11 +4348,10 @@ BOOL CTextService::_InitIPCClient()
         }
     });
 
-    // Set up mode-only push callback (CMD_MODE_PUSH)
-    // FocusGained 竞态优化：Go 在回 Ack 前入队此轻量包，使 _bChineseMode/_bFullWidth
-    // 在 ~1ms 内就绪（vs 激活 push 的 ~15ms），消除首次按键竞态窗口。
-    // 此回调在 AsyncReader 线程执行，不得访问 TSF COM 对象。
-    // InterlockedExchange 提供全内存屏障，保证 TSF 主线程 OnTestKeyDown 立即见到新值。
+    // 仅模式推送回调（CMD_MODE_PUSH）：服务端在回 Ack 前入队此轻量包，让 _bChineseMode/_bFullWidth
+    // 比激活推送更早就绪，消除首次按键竞态窗口。
+    // 此回调在 AsyncReader 线程执行，不得访问 TSF COM 对象；InterlockedExchange 的全屏障保证
+    // TSF 主线程 OnTestKeyDown 立即见到新值。
     _pIPCClient->SetModePushCallback([pThis](bool chineseMode, bool fullWidth, bool chinesePunct) {
         ::InterlockedExchange(reinterpret_cast<LONG*>(&pThis->_bChineseMode),
                               chineseMode ? TRUE : FALSE);
@@ -4851,17 +4371,14 @@ BOOL CTextService::_InitIPCClient()
         }
     });
 
-    // Set up shell exec callback (CMD_SHELL_EXEC)
-    // 在前台应用进程中调用 ShellExecuteW，拥有前台权限，打开的窗口可正确置顶。
-    // 回调在 AsyncReader 线程执行，ShellExecuteW 是线程安全的，无需切换到 TSF 主线程。
-    // lpDirectory 传服务端算好的工作目录：传 nullptr 等于沿用**本进程**（即用户正在
-    // 打字的那个宿主应用）的当前目录，那个值不可控——通用文件对话框会改掉它——
-    // 于是靠相对路径找数据文件的程序（词典等）会找不到自己的词库。
+    // 外部程序启动回调（CMD_SHELL_EXEC）：在前台宿主进程里调 ShellExecuteW，借它的前台权限让窗口正确置顶。
+    // 回调在 AsyncReader 线程执行，ShellExecuteW 线程安全，无需切回 TSF 线程。
+    // lpDirectory 用服务端算好的工作目录：传 nullptr 会沿用宿主的当前目录（通用文件对话框会改掉它），
+    // 靠相对路径找数据文件的程序会找不到自己的数据。
     _pIPCClient->SetShellExecCallback([](const std::wstring& target, const std::wstring& params, const std::wstring& dir, const std::wstring& verb, const std::wstring& show) {
         const wchar_t* pParams = params.empty() ? nullptr : params.c_str();
         const wchar_t* pDir = dir.empty() ? nullptr : dir.c_str();
-        // 空 verb 传 nullptr 而非 L"open"：nullptr 用的是该文件类型的**默认动词**，
-        // 未必是 open（如某些类型默认 play/edit），与不带 verb 的历史行为一致。
+        // 空 verb 传 nullptr 而非 L"open"：nullptr 用该文件类型的默认动词（未必是 open）。
         const wchar_t* pVerb = verb.empty() ? nullptr : verb.c_str();
         // 语义名 → SW_ 常量。取值已由服务端白名单校验；未知值落 SW_SHOWNORMAL，
         // 这只会在「新服务加了新取值 + 旧 DLL」的版本错配下出现。
@@ -4870,34 +4387,16 @@ BOOL CTextService::_InitIPCClient()
         else if (show == L"max")    nShow = SW_SHOWMAXIMIZED;
         else if (show == L"hidden") nShow = SW_HIDE;
 
-        // ── 启动期间把线程降为 DPI-unaware ────────────────────────────────
+        // 启动期间把线程降为 DPI-unaware：manifest 未声明 DPI 感知的子进程继承创建线程的上下文，
+        // 而本回调跑在用户所在的宿主里，同一程序在不同宿主里启动会得到不同感知级别（宿主是 PMv2 时，
+        // 老程序按 96 DPI 作画而系统不再缩放）。降为 unaware 后与用户自己双击启动一致：有 manifest 的
+        // 照走自己的声明，没有的由系统做位图缩放。
         //
-        // 子进程若自身 manifest **未声明** DPI 感知，就继承**创建它的那个线程**的
-        // 上下文。而本回调跑在宿主应用进程里（借它的前台权限），于是被启动的程序
-        // 继承的既不是它自己该有的、也不是输入法的，而是**用户当时所在的那个宿主的**
-        // ——在微信里点和在记事本里点，同一个程序可以得到两种感知级别。
+        // 动态取符号（Win10 1607+），取不到就退回原样调用。必须无条件还原且只包这一次 ShellExecuteW：
+        // 这是宿主的 AsyncReader 线程，留下被改写的上下文会让宿主后续的窗口/坐标操作换一套语义。
         //
-        // 后果：宿主是 per-monitor-v2 时，一个本该 unaware 的老程序会被当成 PMv2，
-        // 于是它按 96 DPI 作画而系统不再替它缩放，高 DPI 屏上界面又小又错位。
-        // 2026-08-26 用户经工具栏自定义按钮启动外部程序时报到。
-        //
-        // 判据：**让「从输入法启动」与「用户自己双击启动」表现一致**。降为 unaware 后，
-        // 有 manifest 的程序照走自己的声明（manifest 优先，不受影响），没有 manifest 的
-        // 回到它本该有的 unaware，由系统做位图缩放——正是双击时的行为。
-        //
-        // 动态取符号（Win10 1607+），与 `LangBarItemButton.cpp` 的 `_LangBarIconSizePx`
-        // 同一惯例；取不到就退回原样调用，至少不比从前差。
-        //
-        // ⚠️ 必须无条件还原，且窗口开得**尽可能窄**（只包这一次 ShellExecuteW）：
-        // 本回调在宿主的 AsyncReader 线程上执行，留下一个被改写的上下文会让宿主后续
-        // 的窗口/坐标操作换一套语义——那种缺陷与"启动了一个程序"毫无表面关联。
-        //
-        // 为什么**只**改这一处（其余启动路径已逐条核过，不需要）：
-        //   - cmdbar 的 `open` 与 `proc.run` 都经 push_shell_exec 走到这里，一处覆盖两个；
-        //   - `proc.shell` 走 `cmd /C`，目标进程继承的是 **cmd.exe 自己的**感知级别
-        //     （它有 manifest），与输入法无关；
-        //   - 服务端的 open_path / open_app 目标是资源管理器、浏览器、本产品的设置程序
-        //     ——都带 manifest，manifest 优先，继承什么都不影响。
+        // 只需改这一处：cmdbar 的 `open` 与 `proc.run` 都经 push_shell_exec 到这里；`proc.shell` 走
+        // `cmd /C`，继承 cmd.exe 自己的感知级别；服务端 open_path / open_app 的目标都带 manifest。
         using SetThreadDpiAwarenessContextFn =
             DPI_AWARENESS_CONTEXT(WINAPI*)(DPI_AWARENESS_CONTEXT);
         static auto pSetThreadDpiAwarenessContext =
@@ -5043,7 +4542,7 @@ BOOL CTextService::_InitIPCClient()
         }
     });
 
-    // Start async reader thread for receiving state pushes from Go
+    // 启动异步读线程，接收服务端的状态推送
     if (!_pIPCClient->StartAsyncReader())
     {
         WIND_LOG_WARN(L"Failed to start async reader thread (non-fatal)\n");
@@ -5054,9 +4553,8 @@ BOOL CTextService::_InitIPCClient()
         WIND_LOG_INFO(L"Async reader thread started for state push\n");
     }
 
-    // Service-ready callback: Go sends CMD_SERVICE_READY when push pipe connects.
-    // Route through LangBarItemButton's proven message window (same TSF thread,
-    // known-working cross-thread channel used by PostUpdateFullStatus et al.).
+    // 服务就绪回调：推送管道连上时服务端发 CMD_SERVICE_READY。经 LangBarItemButton 的消息窗口转到 TSF 线程
+    // （与 PostUpdateFullStatus 等共用的跨线程通道）。
     _pIPCClient->SetServiceReadyCallback([pThis]() {
         // 推送通道（重）连上了 = 新的服务会话：会话级开关回到默认。标题采集开关必须清零——
         // 服务端收到 token 后、待自身就绪才发 CMD_SERVICE_READY，且必排在握手配置之前（同一条
@@ -5332,11 +4830,8 @@ BOOL CTextService::GetCaretPositionFromTSF(LONG* px, LONG* py, LONG* pHeight, BO
         return FALSE;
     }
 
-    // Use EditSession to get caret position
-    //
-    // 带上 _pComposition：组合进行中若 selection 的 GetTextExt 退化，edit session 内部会降级
-    // 用组合起点当 caret（见 CCaretEditSession::DoEditSession 的「锚点降级」）。无组合时
-    // _pComposition 为 nullptr，行为与从前一致。
+    // 用编辑会话取坐标。带上 _pComposition：组合中若 selection 的 GetTextExt 退化，会话内部
+    // 降级用组合起点当 caret（见 CCaretEditSession::DoEditSession 的「锚点降级」）。
     RECT rc = {}, rcCompStart = {};
     BOOL hasCompStart = FALSE;
     BOOL usedCompStart = FALSE;
@@ -5363,26 +4858,15 @@ BOOL CTextService::GetCaretPositionFromTSF(LONG* px, LONG* py, LONG* pHeight, BO
         *py = rc.bottom;  // Position below the caret
         *pHeight = rc.bottom - rc.top;
 
-        // A zero-height rect (top == bottom) means GetTextExt returned a degenerate
-        // result — common in apps like WPS when no TSF composition is active (e.g.,
-        // non-inline-preedit mode). Return FALSE so the caller falls through to
-        // GetGUIThreadInfo which tracks the Win32 caret independently of composition.
+        // 零高矩形 = GetTextExt 退化（WPS 等在无组合时常见），返回 FALSE 让调用方回退到
+        // GetGUIThreadInfo。
         if (*pHeight <= 0)
         {
-            // 唯一的例外：本次组合已被判定为「宿主对本 context 没有插入点可报」
-            // （CARET_RETRY 定时器那次异步取坐标在重试窗口过完后仍拿到退化矩形）。
-            //
-            // 此后每个按键都会走到这里、拿到同一个退化矩形。继续 return FALSE 就会跌到
-            // GUI_CARET —— Illustrator 实测 (10,30)，是界面上某个无关控件的 Win32 光标；
-            // 服务端的大偏移逃生阀会拿它把刚锁好的锚点重锁过去，于是首显落对了、第二个键
-            // 又跳回屏幕左上角。采信宿主自己给的那个角落坐标，两半症状才一起消失。
-            //
-            // ⚠ 没有闩住判决时**一字不改**：那时退化只意味着「宿主还没排完版」，丢弃、
-            // 等下一帧才是对的（详见 CaretProbeKind::RetryDeadline 的注释）。
-            //
-            // ⚠⚠ 判决的作用域是**同一次组合**，而组合的结束出口有四个（EndComposition、
-            // CommitText 自己把 _pComposition 置空、OnCompositionTerminated、焦点切换）。
-            // 作用域做在这里、不在各个出口复位——理由与失败场景见 LatchApplies 的注释。
+            // 唯一例外：本次组合已判定「宿主对本 context 没有插入点可报」（CARET_RETRY 那次异步取坐标在
+            // 重试窗口过完后仍是退化矩形）。此后每个按键都拿到同一个退化矩形，return FALSE 会跌到无关控件的
+            // GUI_CARET，服务端大偏移逃生阀把锚点重锁过去，第二个键又跳回左上角；故采信宿主给的角落坐标。
+            // 没闩住判决时退化只意味着宿主还没排完版，照旧丢弃等下一帧。
+            // 判决作用域是同一次组合，组合有四个结束出口，作用域在这里判而不在各出口复位，见 LatchApplies。
             if (!wind::caret::LatchApplies(_caretDefaultPosLatched, _pComposition != nullptr))
             {
                 WIND_LOG_DEBUG(L"GetCaretPositionFromTSF: Degenerate rect (height=0), falling back\n");
@@ -5400,25 +4884,15 @@ BOOL CTextService::GetCaretPositionFromTSF(LONG* px, LONG* py, LONG* pHeight, BO
         }
         else if (_caretDefaultPosLatched)
         {
-            // 宿主排完版了 ⇒ 上一轮「没有插入点」的判决作废，回到常规语义。
-            //
-            // ⚠ 这行日志不可省，理由同 LangBarItemButton.cpp 的 CARET_RETRY 定时器：
-            // **判决点必须自己说话，不能靠周围的沉默去猜**。清闩不打日志的话，
-            // 「闩是谁清的」就只能从别的行反推——而 `OnAsyncCaretRectReady(...)` 那行是
-            // 在清闩**之后**才打的，它只证明回调到达、证明不了有没有清闩；下游那一跳
-            // `src=gui_caret` 又有好几个同形成因（二级降级失手、越界校验、宿主真恢复了）。
-            // 2026-08-03 查 Excel 680ms 重排窗口就是因为成功路径零日志绕了一大圈。
+            // 宿主排完版了 ⇒ 上一轮「没有插入点」的判决作废。这行日志不可省：清闩点必须自己留痕，
+            // 下游 `src=gui_caret` 有好几个同形成因，靠周围日志反推不出闩是谁清的。
             WIND_LOG_DEBUG_FMT(L"退化判决作废: by=sync_valid_rect h=%ld\n", *pHeight);
             _caretDefaultPosLatched = FALSE;
         }
 
-        // 坐标越界保护：坐标不落在任何显示器上时判定不可信，返回 FALSE，让 GetCaretPosition
-        // 回退到 GUIThreadInfo / GetCaretPos。详见 IsScreenPointOutsideAllMonitors。
-        //
-        // ⚠ 原先用的是前台窗口判据，2026-08-01 改宽。「有回退链」曾被当成「丢弃代价小」的理由，
-        // 但**回退值的质量从未被检验**：桌面输入时 GUIThreadInfo 返回的是别的 shell 窗口残留的
-        // caret（实测 (1479,1217)，来自已关闭的"更多图标"弹框），比被丢弃的 TSF 坐标 (473,189)
-        // 差得多。判据放宽后这类误伤消失，真野坐标（远离所有显示器）照样挡住。
+        // 坐标越界保护：不落在任何显示器上时判不可信，返回 FALSE 回退到 GUIThreadInfo / GetCaretPos
+        // （见 IsScreenPointOutsideAllMonitors）。不要收紧成前台窗口判据：桌面输入时 GUIThreadInfo 给的是
+        // 别的 shell 窗口残留的 caret，比被丢弃的 TSF 坐标差得多。
         if (IsScreenPointOutsideAllMonitors(rc.left, rc.top))
         {
             WIND_LOG_DEBUG_FMT(L"GetCaretPositionFromTSF: caret(%ld,%ld) outside all monitors, falling back\n", rc.left, rc.top);
@@ -5562,44 +5036,35 @@ bool CTextService::_IsFocusKeyboardDisabled(ITfDocumentMgr* pDocMgr)
     return disabled;
 }
 
-// 密码框强制英文抑制当前是否生效。**必须镜像** core `apply_input_diag` 的判据：
-//   suppress = is_password_scope(mask) && password_suppress_enabled
-// 两侧判据一旦漂移就会重现「吃了再吐」——DLL 吃了键、core 却回 PassThrough → 严格 TSF
-// 宿主（Chrome/Electron）不回退合成 WM_CHAR，键直接丢失（密码框里表现为完全打不出字）。
-//
-// ⚠ KEYBOARD_DISABLED 有**两个层级**，混为一谈正是本函数此前失效的原因（2026-07-27 修）：
-//   · 线程级 `_bKeyboardDisabled`（advise 在 _pThreadMgr 的 compartment 上）——
-//     OnTestKeyDown 开头 `IsKeyboardDisabled()` 全放行看的就是它。此时引擎压根收不到键，
-//     抑制无从谈起，故在此早退。
-//   · context 级 `_focusIsPassword`（读焦点 context 的 compartment，见 _IsFocusKeyboardDisabled）
-//     —— **Chromium 系网页密码框置的是这一层**，线程级纹丝不动，DLL 照常吃键。
-//
-// 旧判据把 `_focusIsPassword` 也列为早退条件，理由是「compartment 置位时键已被放行」，
-// 但那句话只对线程级成立。于是网页密码框同时逃过了「放行」与「抑制」两道闸，中文照打，
-// 而高级菜单里的开关怎么切都没反应（它只能改 _passwordSuppressEnabled，改不动早退）。
-//
-// context 级的密码信号已在 OnSetFocus 折进 mask 的 IS_PASSWORD 位（见 _focusIsPassword
-// 赋值处），因此这里只判 mask 就已覆盖两种来源，无需再单独看 _focusIsPassword。
+// 焦点是否为密码框：InputScope 的密码位，含 OnSetFocus 折进来的 context 级 KEYBOARD_DISABLED。
 BOOL CTextService::IsPasswordScope() const
 {
     return (_focusInputScopeMask & kPasswordScopeBits) != 0;
 }
 
+// 密码框强制英文抑制当前是否生效。必须镜像 core `apply_input_diag` 的判据：
+//   suppress = is_password_scope(mask) && password_suppress_enabled
+// 两侧漂移就会「吃了再吐」：DLL 吃了键、core 回 PassThrough，严格 TSF 宿主（Chrome/Electron）
+// 不回退合成 WM_CHAR，密码框里完全打不出字。
+//
+// KEYBOARD_DISABLED 有两个层级，不能混为一谈：
+//   · 线程级 `_bKeyboardDisabled`：OnTestKeyDown 开头全放行看的就是它，引擎收不到键，故在此早退；
+//   · context 级 `_focusIsPassword`：Chromium 网页密码框置的是这一层，线程级不动，DLL 照常吃键。
+// context 级信号已在 OnSetFocus 折进 mask 的 IS_PASSWORD 位，只判 mask 就覆盖两种来源；
+// 不要把 `_focusIsPassword` 也列为早退条件，那会让网页密码框同时逃过放行与抑制。
 BOOL CTextService::IsPasswordSuppressActive() const
 {
     if (!_passwordSuppressEnabled)
         return FALSE;
     if (_bKeyboardDisabled)
         return FALSE;
-    // IS_PASSWORD=31 / IS_NUMERIC_PASSWORD=63（对齐 core is_password_scope 的两位）。
-    // 常量在文件顶部单点定义——此处曾另有一份局部展开，两处各自维护即有漂移风险。
+    // IS_PASSWORD=31 / IS_NUMERIC_PASSWORD=63（对齐 core is_password_scope 的两位），常量在文件顶部单点定义。
     return (_focusInputScopeMask & kPasswordScopeBits) != 0;
 }
 
-// GetWindowBand：user32 的未文档化导出（与 CHostWindow::_ResolveAPIs 同源）。
-// 独立解析一份而不复用 CHostWindow 的：诊断要在**未建 host 窗口**时也能报 band，
-// 那正是"该走 host 却没走"的排查现场，此时那个对象根本不存在。
-// 解析一次后缓存（含失败态：解析不到就恒返回 0，不必每次重试）。
+// GetWindowBand：user32 的未文档化导出（与 CHostWindow::_ResolveAPIs 同源）。独立解析一份：
+// 诊断要在未建 host 窗口时也能报 band，那正是「该走 host 却没走」的排查现场。
+// 解析一次后缓存（含失败态，解析不到恒返回 0）。
 static DWORD _QueryWindowBand(HWND hwnd)
 {
     typedef BOOL (WINAPI* GetWindowBand_t)(HWND, DWORD*);
@@ -5628,14 +5093,10 @@ static std::wstring _QueryWindowClass(HWND hwnd)
     return n > 0 ? std::wstring(buf, (size_t)n) : std::wstring();
 }
 
-// ── 焦点窗口：两条通路按可信度依次尝试，并回报**实际用了哪条** ──
-// 不记来源的话，「焦点窗口」在不同宿主下会是语义完全不同的东西，读者无从分辨。
+// 焦点窗口：两条通路按可信度依次尝试，并回报实际用了哪条（不同宿主下「焦点窗口」语义不同）。
 //
-// ⚠ 刻意**不含** GetForegroundWindow 兜底：那一级在 WebView 类多进程宿主下会返回
-// **别的进程**的窗口（前台窗口在渲染进程、TSF 在另一进程），当「本次焦点在哪个窗口里」
-// 的答案是错的。诊断快照另有它自己的 fg 兜底（那里的语义是「诊断时尽量给个值」，
-// 与本函数的「窗口身份判据」不是同一个问题）。同类教训见 _hasThreadFocus /
-// _isProcessForeground 的拆分。
+// 刻意不含 GetForegroundWindow 兜底：WebView 类多进程宿主下它返回别的进程的窗口，当窗口身份判据是错的。
+// 诊断快照另有自己的 fg 兜底，那里只求尽量给个值。
 //
 // pCtxIdOut 可为 nullptr；非空时顺带回填 top context 的指针值（诊断快照用）。
 HWND CTextService::_ResolveFocusWindow(ITfDocumentMgr* pDocMgr, uint8_t* pSrcOut, uint64_t* pCtxIdOut)
@@ -5681,8 +5142,8 @@ HWND CTextService::_ResolveFocusWindow(ITfDocumentMgr* pDocMgr, uint8_t* pSrcOut
 
 // 窗口标题，至多 kMaxTitleChars 个 UTF-16 码元（截断不留半个代理对）。取不到为空串。
 //
-// 用 InternalGetWindowText 而非 GetWindowTextW：后者对本进程窗口会**发 WM_GETTEXT**，宿主 UI
-// 线程卡住时就卡在这里，而本函数跑在 OnSetFocus 的同步路径上。前者直接读系统存的标题，不进窗口过程。
+// 用 InternalGetWindowText 而非 GetWindowTextW：后者对本进程窗口会发 WM_GETTEXT，宿主 UI 线程卡住时
+// 就卡在这里，而本函数跑在 OnSetFocus 的同步路径上。
 static std::wstring _QueryWindowTitle(HWND hwnd)
 {
     if (hwnd == nullptr)
@@ -5695,12 +5156,10 @@ static std::wstring _QueryWindowTitle(HWND hwnd)
     return std::wstring(wind::window_title::TruncateTitle(std::wstring_view(buf, (size_t)n)));
 }
 
-// 焦点所在**顶层**窗口的类名与标题，随 focus_gained 上报。空串 = 拿不到（服务端回落既有行为）。
+// 焦点所在顶层窗口的类名与标题，随 focus_gained 上报。空串 = 拿不到（服务端回落既有行为）。
 //
-// 取顶层（GA_ROOT）而不是焦点窗口本身：要回答的是「这次焦点落在哪一种壳窗口里」，
-// 而任务栏 / 切换器的身份写在顶层窗口的类名上（Shell_TrayWnd 等），子控件类名五花八门。
-// 标题同取顶层窗口（浏览器 / 编辑器的标签页名、文件名写在那里）；**仅当** core 推开了
-// CONFIG_KEY_COMPAT_TITLE_MATCH 才取，否则一次都不碰（标题是用户数据）。
+// 取顶层（GA_ROOT）：任务栏 / 切换器的身份写在顶层窗口类名上（Shell_TrayWnd 等），子控件类名五花八门；
+// 标题也在顶层（标签页名、文件名）。仅当 core 推开了 CONFIG_KEY_COMPAT_TITLE_MATCH 才取标题（用户数据）。
 void CTextService::_QueryFocusRootWindowIdentity(ITfDocumentMgr* pDocMgr, std::wstring& windowClass,
                                                  std::wstring& windowTitle)
 {
@@ -5756,7 +5215,7 @@ void CTextService::SendDiagSnapshotIfEnabled(ITfDocumentMgr* pDocMgr, BOOL docMg
         GetWindowThreadProcessId(hwndFg, &fgPid);
         head.fgPid = fgPid;
     }
-    // 报**实际建成**的 band，不是当初想建的那个（见 CHostWindow::GetCurrentBand 注释）。
+    // 报实际建成的 band，不是当初想建的那个（见 CHostWindow::GetCurrentBand）。
     CHostWindow* pCandHost = _pHostWindow[HOST_WINDOW_CANDIDATE];
     head.hostBand = (pCandHost != nullptr) ? pCandHost->GetCurrentBand() : 0;
 
@@ -5788,11 +5247,9 @@ BOOL CTextService::_DocMgrHasEditableContext(ITfDocumentMgr* pDocMgr, DWORD* pDy
 
     TF_STATUS status = {};
     HRESULT hrStatus = pCtx->GetStatus(&status);
-    // 判据本体抽在 EditableContextPolicy.h（纯逻辑、可单测）。两条分支的依据都写在那里：
-    // 成功时只认 TF_SD_READONLY（TS_SS_TRANSITORY 单独判不可靠 —— Chrome 与 JetBrains
-    // 都把它挂在真能打字的 context 上；它作为 locked/transient 判据的**一半**仍然有效，
-    // 见 IsLockedTransientDocMgr，两个判据回答的是不同的问题）；失败时只有
-    // TF_E_EMPTYCONTEXT 判不可编辑，其余未知失败码仍走宽松兜底。
+    // 判据本体在 EditableContextPolicy.h（纯逻辑、可单测），依据写在那里：成功时只认 TF_SD_READONLY
+    // （TS_SS_TRANSITORY 单判不可靠，Chrome 与 JetBrains 都挂在能打字的 context 上）；失败时只有
+    // TF_E_EMPTYCONTEXT 判不可编辑，其余未知失败码走宽松兜底。
     BOOL result = wind::editable::ContextIsEditable(static_cast<std::uint32_t>(hrStatus),
                                                     status.dwDynamicFlags)
                       ? TRUE
@@ -5807,10 +5264,8 @@ BOOL CTextService::_DocMgrHasEditableContext(ITfDocumentMgr* pDocMgr, DWORD* pDy
     }
     else
     {
-        // ★ 这一行是 GH#134 后半条的现场证据行：`hr=0x80040509`（TF_E_EMPTYCONTEXT）
-        // 就是 Chromium 给「焦点不在可编辑元素上」准备的那个 DocMgr —— 它照常建 context
-        // 但不挂 text store。改动前这里兜底成 TRUE，于是点网页空白处照发 focus_gained，
-        // 服务端的 has_edit_context 再也回不到假，工具栏永不隐藏。
+        // `hr=0x80040509`（TF_E_EMPTYCONTEXT）是 Chromium 给「焦点不在可编辑元素上」准备的 DocMgr：
+        // 照常建 context 但不挂 text store。把它兜底成 TRUE，点网页空白处也会发 focus_gained，工具栏永不隐藏。
         WIND_LOG_DEBUG_FMT(L"_DocMgrHasEditableCtx: GetStatus hr=0x%08X -> %s",
                            hrStatus, result ? L"TRUE(未知失败码, 宽松兜底)" : L"FALSE(空上下文)");
     }
@@ -5987,11 +5442,8 @@ BOOL CTextService::GetCaretPosition(LONG* px, LONG* py, LONG* pHeight, int* pSou
     }
 
     // 出现过宿主默认位置指纹的线程（见 ImmOpenCandidateNudge.h 的 IsGuiCaretUnreliable）：GUI caret 不可用，
-    // 直接判失败，调用方退到 last known（上一次真正发出去的坐标）。
-    // 实测（2026-10-04 靶机 Zulu 7u45）：Java 的系统光标恒在窗口客户区原点 (0,54)。JTable 这类
-    // 被动客户端按键时报上去，服务端把它当「组合前空闲上报」，25ms 兜底拿它首显——候选窗
-    // 先闪到屏幕左边，62ms 后 CARET_RETRY 拿到 Windows 输入编辑框 (473,217) 才跳回。
-    // 编辑框位置不随单元格变，last known 恰是它。
+    // 直接判失败，调用方退到 last known。Java 的系统光标恒在窗口客户区原点，报上去候选窗会先闪到屏幕左边；
+    // 而 Windows 输入编辑框位置不随单元格变，last known 恰是它。
     if (wind::caret::IsGuiCaretUnreliable())
     {
         WIND_LOG_DEBUG(L"GetCaretPosition: IMM32 宿主不取 GUI caret（恒为窗口原点），交由 last known\n");
@@ -6030,8 +5482,8 @@ BOOL CTextService::GetCaretPosition(LONG* px, LONG* py, LONG* pHeight, int* pSou
                 s_lastCaretHeight = *pHeight;
                 s_hasLastCaretPos = TRUE;
 
-                // ⚠ 这是**跨窗口**的 Win32 光标，不属于当前 TSF context。宿主只在部分场景维护它
-                // （Word 仅正文行、shell 场景指向别的窗口），故标为 GUI 源，消费端不得当权威坐标。
+                // 这是跨窗口的 Win32 光标，不属于当前 TSF context，宿主只在部分场景维护它（Word 仅正文行），
+                // 故标为 GUI 源，消费端不得当权威坐标。
                 if (pSource)
                 {
                     *pSource = CARET_SRC_GUI_CARET;
@@ -6125,11 +5577,8 @@ BOOL CTextService::GetCaretPosition(LONG* px, LONG* py, LONG* pHeight, int* pSou
     return FALSE;
 }
 
-// Convert logical coordinates to physical screen coordinates when the host process
-// is not Per-Monitor DPI aware. DPI-unaware apps receive virtualized 96-DPI coordinates
-// from Windows, but our Go service (wind_input.exe) is Per-Monitor DPI aware and works
-// in physical pixels. This mismatch causes the candidate window to appear at the wrong
-// position in legacy/old applications.
+// 宿主进程不是 Per-Monitor DPI aware 时把逻辑坐标换成物理屏幕坐标：DPI-unaware 宿主拿到的是
+// 虚拟化的 96-DPI 坐标，而服务端（wind_input.exe）是 Per-Monitor DPI aware、按物理像素工作。
 static void ConvertToPhysicalCoordinates(LONG& x, LONG& y, LONG& height,
                                          LONG& compStartX, LONG& compStartY)
 {
@@ -6206,9 +5655,7 @@ static void ConvertToPhysicalCoordinates(LONG& x, LONG& y, LONG& height,
 
 // 与 ConvertToPhysicalCoordinates 同源的单点转换：组合矩形的两个角点各走一次。
 //
-// ⚠ 组合矩形**必须与 caret / compStart 走同一套转换**，否则同一帧里会混进两个坐标系——
-// 服务端拿它们互相比较时得到的差值毫无意义。高 DPI 下 TSF DLL 与候选窗进程 DPI 感知级别
-// 不同导致的偏移是这类问题的经典形态。
+// 组合矩形必须与 caret / compStart 走同一套转换，否则同一帧混进两个坐标系，服务端互相比较的差值毫无意义。
 static void ConvertPointToPhysical(LONG& x, LONG& y)
 {
     static auto pGetProcessDpiAwareness =
@@ -6240,15 +5687,14 @@ static void ConvertPointToPhysical(LONG& x, LONG& y)
     }
 }
 
-// 坐标出口：DPI 归一 → 记为 last known → 发 IPC。同步与异步两条取坐标路径共用，
-// 保证「记住的坐标」和「发出去的坐标」永远是同一份（曾经只有同步路径更新 last known）。
+// 坐标出口：DPI 归一 → 记为 last known → 发 IPC。同步与异步两条取坐标路径共用，保证「记住的坐标」与
+// 「发出去的坐标」是同一份。
 void CTextService::_EmitCaretUpdate(LONG x, LONG y, LONG height, LONG compStartX, LONG compStartY, int source,
                                    const RECT* pCompRect)
 {
     ConvertToPhysicalCoordinates(x, y, height, compStartX, compStartY);
 
-    // 组合矩形与上面同批转换。四值全 0 = 本帧没取到，此时**不转换**——
-    // 转换会把 (0,0) 映射成某个真实坐标，让「没取到」看起来像「取到了个奇怪的值」。
+    // 组合矩形与上面同批转换。四值全 0 = 本帧没取到，此时不转换：转换会把 (0,0) 映射成某个真实坐标。
     LONG rectL = 0, rectT = 0, rectR = 0, rectB = 0;
     if (pCompRect != nullptr &&
         (pCompRect->left != 0 || pCompRect->top != 0 || pCompRect->right != 0 || pCompRect->bottom != 0))
@@ -6312,11 +5758,8 @@ BOOL CTextService::RequestCaretPositionUpdateAsync(CaretProbeKind kind)
 
 // OnSetFocus 专用的异步取坐标，见头文件说明。
 //
-// 为什么焦点路径必须走异步：OnSetFocus **不是按键上下文**，MSDN 明文限定 TF_ES_SYNC 只在
-// "documented situations (such as keystroke handling)" 下可期待成功，否则 "the call will
-// likely fail"。实测宿主返回 TS_E_SYNCHRONOUS 拒绝，GetCaretPosition 于是下坠到
-// GetGUIThreadInfo——那是个**跨窗口**的 Win32 光标，Word 只在正文行维护它，标题行上取到的是
-// 别处的陈旧值（实测偏差 814px，指纹 height=20）。
+// 焦点路径必须走异步：OnSetFocus 不是按键上下文，同步编辑会话会被拒（TS_E_SYNCHRONOUS），
+// GetCaretPosition 随之下坠到 GetGUIThreadInfo 这个跨窗口的 Win32 光标，在 Word 标题行上是别处的陈旧值。
 BOOL CTextService::RequestFocusCaretAsync(ITfDocumentMgr* pDocMgrFocus)
 {
     if (pDocMgrFocus == nullptr)
@@ -6344,9 +5787,8 @@ BOOL CTextService::RequestFocusCaretAsync(ITfDocumentMgr* pDocMgrFocus)
         return FALSE;
     }
 
-    // 传 nullptr 组合：焦点刚到达时本就没有 composition，edit session 只取 selection 的
-    // GetTextExt。这也意味着「组合起点降级」那条路在焦点场景走不到，caret 取不到就是取不到，
-    // 由回调如实丢弃——**不在这条路上造回退值**。
+    // 传 nullptr 组合：焦点刚到达时本就没有组合，会话只取 selection 的 GetTextExt，「组合起点降级」走不到；
+    // 取不到就由回调如实丢弃，不在这条路上造回退值。
     BOOL requested = CCaretEditSession::RequestCaretRectAsync(
         pContext, _tfClientId, nullptr, 0, this,
         CaretProbeKind::Focus, _focusSessionId);
@@ -6355,9 +5797,8 @@ BOOL CTextService::RequestFocusCaretAsync(ITfDocumentMgr* pDocMgrFocus)
     return requested;
 }
 
-// 异步 edit session 的回调出口。这里**刻意不做任何回退**：取不到就不发，服务端会用按键
-// 时缓存的坐标兜底，那份来自按键路径的同步 edit session，比 Win32 caret 可信得多。
-// 曾经的 bug 正是回退到 GetGUIThreadInfo，在 Word 非正文样式行上拿到无关窗口的 caret。
+// 异步编辑会话的回调出口。刻意不做任何回退：取不到就不发，服务端用按键时缓存的坐标兜底（来自按键路径的
+// 同步会话），比回退到 GetGUIThreadInfo 拿到的无关窗口 caret 可信得多。
 void CTextService::OnAsyncCaretRectReady(const AsyncCaretResult& result)
 {
     const RECT& caretRect     = result.caretRect;
@@ -6366,12 +5807,10 @@ void CTextService::OnAsyncCaretRectReady(const AsyncCaretResult& result)
     const RECT* pCompRect     = result.hasCompRect ? &result.compRect : nullptr;
     const BOOL  isFocusProbe  = (result.kind == CaretProbeKind::Focus);
 
-    // 归属校验。**两种用途的判据不同，不能合并**：
-    //   Composition —— 排队期间用户可能已上屏，这份坐标属于上一轮组合，发出去会把候选窗
-    //                  钉在已消失的组合上；
-    //   Focus       —— 此时本就没有 composition（拿 _pComposition 判会 100% 丢弃，且完全
-    //                  静默），改判焦点会话号：回调到达前用户可能已经切走，那份坐标属于
-    //                  上一个应用——正是「切过去气泡出现在无关位置」的成因之一。
+    // 归属校验，两种用途判据不同、不能合并：
+    //   Composition —— 排队期间用户可能已上屏，坐标属于上一轮组合，发出去会钉在已消失的组合上；
+    //   Focus       —— 此时本就没有组合（拿 _pComposition 判会静默全丢），改判焦点会话号：
+    //                  回调到达前用户可能已切走，坐标属于上一个应用。
     if (isFocusProbe)
     {
         if (result.sessionTag != _focusSessionId)
@@ -6393,23 +5832,14 @@ void CTextService::OnAsyncCaretRectReady(const AsyncCaretResult& result)
                                                                                 : L"composition";
 
     LONG height = caretRect.bottom - caretRect.top;
-    // 「本 context 没有插入点可报」——退化矩形在**重试窗口过完之后**仍然是它。
+    // 「本 context 没有插入点可报」：退化矩形在重试窗口过完之后仍是它。
     //
-    // 普通 probe 见到退化矩形一律丢弃（宿主还在排版，等下一帧即可），这条不变；
-    // 而 RetryDeadline 这一次是 CARET_RETRY 定时器到期后发起的，走到这里说明已经等过
-    // 一整个重试窗口，宿主给的还是同一个退化矩形。那不是「还没算完」，是宿主在答
-    // 「这里没有插入点」——Illustrator 30.8 画布文字恒为 (2559,1367,2560,1367)。
-    // 丢弃它的代价是回退链跌到 GUIThreadInfo 的无关光标 (10,30)，候选窗钉死在屏幕左上角，
-    // 比采信这个屏幕角落坐标糟得多（详见 BinaryProtocol.h 的 CARET_SRC_TSF_DEFAULT_POS）。
-    //
-    // ⚠ 高度必须**合成**一个：原值 0 会被服务端 `caret_is_valid`（要求 height > 0）整条
-    // 丢掉。补 WIND_DEFAULT_CARET_HEIGHT，与 GUI 回退路径补高度的口径一致。
-    //
-    // ⚠⚠ 判据**不是**「退化就采信」，而是一条指纹：选区矩形 / 组合起点 / 组合整体矩形
-    // 三者全同（见 wind::caret::IsHostDefaultPosition）。证据只来自 Illustrator 一家，
-    // 而「形态相同、期望相反」在本仓翻过车——compat.toml:261 的
-    // pin_anchor_when_start_drifts 2026-09-05 全局化当场弄坏 Excel。同一类风险，
-    // 所以要指纹而不是全局放行。
+    // 普通 probe 见到退化矩形一律丢弃（宿主还在排版）；RetryDeadline 已等过一整个重试窗口，
+    // 仍是同一个退化矩形就是宿主在答「没有插入点」（如 Illustrator 画布）。丢弃会让回退链跌到
+    // GUIThreadInfo 的无关光标、候选窗钉在左上角（见 BinaryProtocol.h 的 CARET_SRC_TSF_DEFAULT_POS）。
+    // 高度须合成：0 高会被服务端 `caret_is_valid` 丢掉，补 WIND_DEFAULT_CARET_HEIGHT，与 GUI 回退同口径。
+    // 判据是指纹（选区 / 组合起点 / 组合矩形三者全同，wind::caret::IsHostDefaultPosition），不是
+    // 「退化就采信」：证据只来自一家宿主，全局放行有弄坏别的宿主的先例。
     BOOL isDefaultPos = FALSE;
     if (height <= 0)
     {
@@ -6426,10 +5856,9 @@ void CTextService::OnAsyncCaretRectReady(const AsyncCaretResult& result)
         }
         isDefaultPos = TRUE;
         height = DEFAULT_CARET_HEIGHT;
-        // 闩住这个判决，供本次组合内的**同步**路径复用：宿主每来一个按键都会走
-        // GetCaretPositionFromTSF，那里拿到的是同一个退化矩形。不闩住的话它照旧
-        // return FALSE 跌到 GUI_CARET (10,30)，服务端的大偏移逃生阀会把刚锁好的锚点
-        // 重锁过去 —— 首显对了、第二个键又跳回左上角。StartComposition 处复位。
+        // 闩住判决供本次组合内的同步路径复用：每个按键都会走 GetCaretPositionFromTSF 拿到同一个
+        // 退化矩形，不闩住就跌到 GUI_CARET，服务端大偏移逃生阀会把锚点重锁过去，第二个键又跳回左上角。
+        // StartComposition 处复位。
         _caretDefaultPosLatched = TRUE;
         WIND_LOG_INFO_FMT(L"OnAsyncCaretRectReady(retry_deadline): 重试窗口过完仍退化 "
                           L"rect=(%ld,%ld,%ld,%ld)，按宿主默认位置采信，补高度 h=%ld\n",
@@ -6438,22 +5867,14 @@ void CTextService::OnAsyncCaretRectReady(const AsyncCaretResult& result)
     }
     else if (result.kind == CaretProbeKind::Composition || result.kind == CaretProbeKind::RetryDeadline)
     {
-        // 宿主拿得出一个有高度的矩形 ⇒ 它是有插入点的，之前那条「没有插入点」的判决
-        // （若有）就此作废。判据与同步路径同口径：**任何一帧有效矩形都撤销判决**，
-        // 而不是只认 RetryDeadline 那一次——两处不同口径迟早各自漂移。
+        // 宿主拿得出有高度的矩形 ⇒ 有插入点，之前「没有插入点」的判决作废。与同步路径同口径：
+        // 任何一帧有效矩形都撤销判决。
         //
-        // ⚠ **白名单，不是黑名单**：只有「本组合的正式取坐标」这两个 kind 有资格作废判决。
-        // 与本次改动在 LatchApplies 上用的是同一条教训——不要逐个排除，那种写法会漏掉
-        // 下一个新增项。两个被排除者各有各的理由：
-        //   FirstShowProbe —— CaretEditSession.h 给它立的规矩是「本探测**不改变任何现有
-        //     行为**」，它只发 CMD_CARET_PROBE、不走正式 caret_update。在这里清闩就是一次
-        //     悄悄的行为改变，而且极其隐蔽：它是组合刚启动就发的，若与 RetryDeadline 的
-        //     回调交错到达，会把刚作出的判决无声撤销，症状是「有时好有时钉在左上角」。
-        //   Focus —— 它讲的是**另一个 context** 的事。拿它的有效高度去作废旧组合的判决
-        //     没有依据（可达性很窄：要焦点回调在旧组合仍活着时返回，但窄不等于没有）。
-        //
-        // 内层再判一次「闩着没」只为日志：这是每帧都走的热路径，无条件打就是刷屏，
-        // 而这行的全部价值在于**它出现的那一刻**。
+        // 白名单而非黑名单：只有本组合正式取坐标的这两个 kind 有资格作废判决。
+        //   FirstShowProbe —— 约定不改变任何现有行为；它组合刚启动就发，若与 RetryDeadline 回调交错
+        //     会无声撤销刚作出的判决（「有时好有时钉在左上角」）。
+        //   Focus —— 讲的是另一个 context，拿它作废旧组合的判决没有依据。
+        // 内层再判一次只为日志：热路径，只在判决作废那一刻打。
         if (_caretDefaultPosLatched)
         {
             WIND_LOG_DEBUG_FMT(L"退化判决作废: by=async_valid_rect(%s) h=%ld\n", kindName, height);
@@ -6461,10 +5882,8 @@ void CTextService::OnAsyncCaretRectReady(const AsyncCaretResult& result)
         }
     }
 
-    // 本路径丢弃即终点（没有回退链），误伤一次候选窗就定位失败。
-    // ⚠ 曾以「同步路径有回退链所以代价小」为由只放宽这一处，结果桌面输入第二个字走按键同步
-    // 路径照样错位——**「有回退」不等于「回退值更好」**：那里回退到的 GUIThreadInfo 值是别的
-    // shell 窗口残留的 caret，比被丢弃的 TSF 坐标差得多。三处判据现已统一。
+    // 本路径丢弃即终点（没有回退链）。三处越界判据已统一：同步路径虽有回退链，但回退到的
+    // GUIThreadInfo 值是别的 shell 窗口残留的 caret，比被丢弃的 TSF 坐标差得多。
     if (IsScreenPointOutsideAllMonitors(caretRect.left, caretRect.top))
     {
         WIND_LOG_DEBUG_FMT(L"OnAsyncCaretRectReady: caret(%ld,%ld) outside all monitors, dropping\n",
@@ -6489,34 +5908,11 @@ void CTextService::OnAsyncCaretRectReady(const AsyncCaretResult& result)
                        kindName,
                        caretRect.left, caretRect.bottom, height, compStartX, compStartY, source);
 
-    // 首显试探：**只记日志，不发任何 IPC**。
-    //
-    // 2026-08-01 实测结论（否定）：组合刚启动就发起的异步请求，绝大多数宿主选择**内联执行**
-    // （accepted 分布 inline 170 : queued 38），那等同于同步取，拿到的就是 reflow **前**的坐标
-    // ——Excel 实测探测值 (542,784) 与随后权威值 (558,786) 差 16px。
-    // 故这条来源**不能**用于「让 fast 档摆脱 25ms 短兜底」。
-    //
-    // ⚠ 曾让它走 probe 通道，以为「wait 档忽略 ⇒ 零风险」，结果 **fast 档会读 probe**：
-    // 本探测比 OnLayoutChange 的采样早约 19ms 到达，抢先被判据 2 采信提前首显，随后真权威
-    // 坐标的 16px 偏差又被 settle 容差吞掉，错位就此固定。Excel 上表现为候选窗持续错位。
-    // **「某档位忽略它」不等于「所有档位都忽略它」**——多消费者通道上的新增生产者必须逐个
-    // 消费者过一遍。
-    // 2026-09-02 修正：改为**发送，但打上 CARET_SRC_PRE_REFLOW 标记**。
-    //
-    // 上面那条否定结论的适用前提是「权威坐标终将及时到达」——在连续快速上屏时它不成立：
-    // 五笔 4 码自动上屏 + 长按（33ms 一键），宿主的 OnLayoutChange 被 50ms debounce 彻底
-    // 压住，实测整段**一条权威 caret_update 都不来**（松手后 82ms 才到）。此时服务端每轮
-    // 兜底首显都用缓存里几百毫秒前的旧坐标，候选窗钉在原地，实测偏差 **456px**；而这里
-    // 手上就有一份 reflow 前的坐标，偏差只有 ~30px。
-    //
-    // ★ 所以问题从来不在「这个来源准不准」，而在**拿它做什么**：
-    //     做首显决策 → 有害（就是上面记的 Excel 16px 错位被 settle 固定）
-    //     刷新坐标缓存 → 有益（这是那段时间里唯一的位置信息）
-    // 独立的 source 值把这个区分交给消费端：服务端见到 PRE_REFLOW 不拿它当位置来源，
-    // 只更新缓存 + 记成「本轮重排前的坐标」当否决基准（后续 probe 与它相同即判未重排，
-    // 2026-09-17 追加，治终端行满回绕时候选窗横穿屏幕）。
-    // **不要把它改回普通 probe 通道**，那才是当初翻车的原因——区别在于「拿它定位置」
-    // 会把错位固定下来，而「拿它否决别人」只会多等一轮。
+    // 首显试探：以 CARET_SRC_PRE_REFLOW 发出，服务端只拿它刷新缓存、记作「本轮重排前的坐标」当否决基准
+    // （后续 probe 与它相同即判未重排），不拿它定位置。
+    // 多数宿主内联执行这次请求，拿到的是 reflow 前的坐标：拿它做首显决策会把错位固定下来；但连续快速上屏
+    // 时 OnLayoutChange 被 debounce 压住、权威坐标一条都不来，它是那段时间唯一的位置信息。
+    // 不要改回普通 probe 通道，见 docs/architecture/caret-position-host-compat-notes.md 的「已否定的方向」。
     if (result.kind == CaretProbeKind::FirstShowProbe)
     {
         if (_pIPCClient != nullptr && _pIPCClient->IsConnected())
@@ -6529,17 +5925,15 @@ void CTextService::OnAsyncCaretRectReady(const AsyncCaretResult& result)
 
     if (isFocusProbe)
     {
-        // 刷新焦点 caret 缓存。**内联档（记事本实测 hrSession=S_OK）此刻仍在 OnSetFocus 栈里**，
-        // 这次写入会赶在同一次 SendFocusGained 读取之前，于是权威坐标直接随焦点包发出去。
+        // 刷新焦点 caret 缓存。内联档此刻仍在 OnSetFocus 栈里，这次写入赶在同一次 SendFocusGained 读取之前，
+        // 权威坐标直接随焦点包发出去。
         _lastFocusCaretX      = caretRect.left;
         _lastFocusCaretY      = caretRect.bottom;
         _lastFocusCaretHeight = height;
         _lastFocusCaretSource = source;
 
-        // 排队档（Word 实测 TF_S_ASYNC，1~2ms）此刻 focus_gained 已经发走，只能补一条
-        // caret_update 修正服务端缓存。内联档则跳过——那条会**早于** focus_gained 到达，
-        // 而服务端的 handle_focus_gained 随后会拿焦点包里的坐标覆写缓存，补发反被吃掉，
-        // 白白多一次 IPC。判据：焦点包是否已经发出去。
+        // 排队档（Word 为 TF_S_ASYNC）此刻 focus_gained 已发走，只能补一条 caret_update 修正服务端缓存。
+        // 内联档跳过：那条会早于 focus_gained 到达，随后被焦点包里的坐标覆写，白多一次 IPC。
         if (_focusGainedSentForSession == _focusSessionId)
         {
             _EmitCaretUpdate(caretRect.left, caretRect.bottom, height, compStartX, compStartY, source,
@@ -6563,25 +5957,19 @@ void CTextService::SendCaretPositionUpdate()
     {
         return;
     }
-    // Weasel 模式：composition 刚创建后第一次调用，不立即发 IPC。
-    // 应用尚未完成 layout reflow，GetTextExt 此时返回的可能是旧坐标
-    // （WPS 中 h>0 但坐标陈旧），先发会导致候选窗显示在错误位置然后跳到正确位置。
-    // 改为等 OnLayoutChange 触发（reflow 完成的权威信号），50ms timer 兜底。
+    // 组合刚创建后第一次调用不立即发 IPC：宿主尚未完成 reflow，GetTextExt 可能是旧坐标（WPS h>0 但陈旧），
+    // 先发会让候选窗先错位再跳。等 OnLayoutChange（reflow 完成的信号），50ms timer 兜底。
     if (_compositionJustStarted && _pComposition != nullptr)
     {
         if (_pLangBarItemButton != nullptr)
         {
             _pLangBarItemButton->PostDelayedCaretPositionUpdate();
         }
-        // 通知 Go 端：composition 刚启动, 真正的 caret 会在 reflow 后到达。
-        // Go 端据此延长 pendingFirstShow 超时, 避免回退到按键前的旧坐标。
-        // 适用于 OnLayoutChange burst 跨度较长的应用 (如 EverEdit ~200ms 间隔)。
-        // 首显试探（纯观测，走 probe 通道，wait 档忽略）：组合刚启动就发起一次异步 edit
-        // session，用来实测「排在宿主当前 edit session 之后执行时，拿到的是 reflow 前还是
-        // 后的坐标」。这是 fast 档能否摆脱 25ms 短兜底的前提——目前它的判据 1/2 只读
-        // OnLayoutChange 驱动的 probe，而 Word/记事本根本不发该回调。
+        // 首显试探：发一次异步取坐标，结果以 PRE_REFLOW 上报（见 OnAsyncCaretRectReady）。
         RequestCaretPositionUpdateAsync(CaretProbeKind::FirstShowProbe);
 
+        // 通知服务端组合刚启动、真坐标会在 reflow 后到达，服务端据此延长首显等待，
+        // 避免回退到按键前的旧坐标（OnLayoutChange burst 跨度长的宿主如 EverEdit）。
         if (_pIPCClient != nullptr && _pIPCClient->IsConnected())
         {
             _pIPCClient->SendCaretPending();
@@ -6594,11 +5982,9 @@ void CTextService::SendCaretPositionUpdate()
     BOOL hasPosition = FALSE;
     int  source = CARET_SRC_UNKNOWN;
 
-    // Priority 1: Use cached position from edit session (reliable for WebView apps
-    // where separate CaretEditSession with TF_INVALID_COOKIE is rejected).
-    // The cache is set inside CUpdateCompositionEditSession::DoEditSession, which
-    // guarantees that caret and composition-start come from the SAME edit session
-    // and thus the same coordinate space.
+    // Priority 1：用编辑会话里缓存的位置（WebView 类宿主会拒绝 TF_INVALID_COOKIE 的独立
+    // CaretEditSession）。缓存在 CUpdateCompositionEditSession::DoEditSession 里写入，
+    // 保证 caret 与组合起点出自同一会话、同一坐标空间。
     // 整个组合 range 的包围矩形：两条分支各自填充，最后一并上报（四值全 0 = 本帧没有）。
     RECT compRect = {};
     BOOL hasCompRect = FALSE;
@@ -6660,11 +6046,9 @@ void CTextService::SendCaretPositionUpdate()
             hasPosition = TRUE;
         }
 
-        // 本线程的宿主给过 TSF 坐标，现在却落到了 Win32 光标：这是同步 edit session 被拒
-        // （Word 按键期实测 TS_E_SYNCHRONOUS）后的回退，而那个光标是跨窗口的陈旧位置——Word 实测
-        // 恒在别的行，发出去会把候选窗拽走约 270px。不发：异步探针 / UpdateComposition 缓存会
-        // 补上真坐标，服务端缓存里还留着上一帧 TSF 值。从未给过 TSF 坐标的宿主（纯 Win32 控件）
-        // 不受影响，GUI 光标仍是它们唯一的来源。
+        // 宿主给过 TSF 坐标、这次却落到 Win32 光标：是同步会话被拒后的回退，那个光标是跨窗口的陈旧位置，
+        // 发出去会把候选窗拽走。不发，等异步探针 / UpdateComposition 缓存补真坐标。从未给过 TSF 坐标的
+        // 宿主（纯 Win32 控件）不受影响。
         if (hasPosition && source == CARET_SRC_GUI_CARET && _hostGaveTsfCaret)
         {
             WIND_LOG_DEBUG_FMT(L"SendCaretPositionUpdate: 宿主有 TSF 坐标但本次回退到 GUI 光标 (%ld,%ld)，丢弃", x, y);
@@ -6760,8 +6144,7 @@ void CTextService::ToggleInputMode()
         _pKeyEventSink->FlushEnglishStats();
     }
 
-    // Toggle mode locally (this is used as a fallback when Go service is unavailable)
-    // The actual mode toggle is handled via KeyUp event -> Go service -> StatusUpdate response
+    // 本地切换模式（服务端不可用时的兜底；正常切换走按键 → 服务端 → 状态推送）
     EndComposition();
     _SetChineseMode(!_bChineseMode);
 
@@ -6927,7 +6310,7 @@ void CTextService::SendShowContextMenu(int screenX, int screenY)
     payload.x = (int32_t)screenX;
     payload.y = (int32_t)screenY;
 
-    // Send async (fire-and-forget, Go side will show the menu)
+    // 异步发送（fire-and-forget，由服务端弹出菜单）
     pClient->SendAsync(CMD_SHOW_CONTEXT_MENU, &payload, sizeof(payload));
 
     // Clean up temporary client if we created one
@@ -7029,17 +6412,11 @@ STDAPI CTextService::OnCompositionTerminated(TfEditCookie ecWrite, ITfCompositio
     // It may have already been released in DoEditSession
     if (_pComposition != nullptr && _pComposition == pComposition)
     {
-        // CRITICAL: This is an unexpected termination (we didn't call EndComposition)
-        // This can happen when:
-        // 1. Fast typing: new composition starts before previous InsertText completes
-        // 2. Application forcefully terminates composition
+        // 意外终止（不是我们调的 EndComposition）：快速打字时新组合先于上一次写入完成，
+        // 或宿主强行终止。必须清空组合文字，否则它会作为正文泄漏进文档（首字母直接上屏）。
         //
-        // We MUST clear the composition text to prevent it from leaking to the document
-        // as plain text (which would cause the "d being committed directly" bug)
-        //
-        // 例外：智能符号 hold 中被宿主终止（切窗口等）。组合内容（prefix+held 符号）
-        // 语义上是"预上屏"，宿主终止组合时文本默认 finalize 留在文档——不清空即等于
-        // 提交，正是"切窗口应直接提交符号"的期望行为；照常清空反而丢字。
+        // 例外：智能符号 hold 中被宿主终止（切窗口等）。组合内容语义上是预上屏，宿主终止时
+        // 默认 finalize 留在文档，不清空即等于提交，正是期望行为；清空反而丢字。
         if (holdWasActive)
         {
             // 文本已随 finalize 留在文档，prefix 记账必须清，防下次 CommitText 双写。
@@ -7092,17 +6469,15 @@ STDAPI CTextService::OnLayoutChange(ITfContext* pContext, TfLayoutCode lCode, IT
 {
     if (lCode == TF_LC_CHANGE && _pComposition != nullptr)
     {
-        // UI-less / 宿主接管绘制：跳过整条 caret 重探（探测采样 + debounce timer + flush）。
-        // 这是 Dota 2 独占全屏冻死的直接来源——SDL 回无效光标(-1000,-1000)，OnLayoutChange
-        // 反复触发同步 GetTextExt 把渲染线程拖死。我们不弹自己的窗，本就不需要这些坐标。
+        // UI-less / 宿主接管绘制：跳过整条 caret 重探。SDL 回无效光标，OnLayoutChange 反复触发
+        // 同步 GetTextExt 会拖死独占全屏游戏的渲染线程；我们不弹自己的窗，本不需要这些坐标。
         if (_CaretQuerySuppressed())
         {
             return S_OK;
         }
-        // 首次 reflow 阶段（_compositionJustStarted）：WPS 等宿主会在 reflow 完成前
-        // 连续触发多次 OnLayoutChange，前几次 GetTextExt 仍返回旧坐标。这里改用
-        // debounce：每次 OnLayoutChange 都重置 timer，等事件 burst 结束后再 flush，
-        // 此时 reflow 已稳定。timer 兜底也覆盖了完全不发 OnLayoutChange 的应用。
+        // 首次 reflow 阶段：WPS 等宿主在 reflow 完成前连续触发多次 OnLayoutChange，前几次
+        // GetTextExt 仍是旧坐标。故 debounce：每次重置 timer，burst 结束后再 flush。
+        // timer 兜底也覆盖完全不发 OnLayoutChange 的应用。
         if (_compositionJustStarted)
         {
             _hasCachedCaretPos = FALSE;
@@ -7111,21 +6486,11 @@ STDAPI CTextService::OnLayoutChange(ITfContext* pContext, TfLayoutCode lCode, IT
             {
                 _pLangBarItemButton->PostDelayedCaretPositionUpdate();
             }
-            // 首帧 reflow 期间的**试探采样**：每次 layout change 取一次坐标发给服务端。
-            // DLL 一侧不做任何判断——哪一帧可信取决于 per-app 策略，而策略要读 compat.toml，
-            // 那是服务端的事。实测两类宿主表现相反：EverEdit 第 1 次采样就已是 reflow 后的
-            // 正确值；WPS 前两次仍是上一轮的旧坐标、第 3 次才更新。服务端据此判定。
-            //
-            // ⚠ 本采样的前提是宿主**会**发 OnLayoutChange，而这远非普遍：实测 Word 在 50 轮
-            // 连打中一次都没发过（记事本仅首轮 1 次），它俩的组合坐标只能靠下面的 50ms timer
-            // 兜底 + 异步 GetTextExt 拿到，实测要 60~190ms（Word 的 edit session 排队）。
-            // 所以服务端的 fast 档必须自带短兜底（ui.candidate.fast_first_show_fallback_ms），
-            // 否则在这类宿主上它会退化成 wait 档、候选窗几乎不出现。
-            //
-            // 仍然保留下面的 debounce + 50ms timer 兜底：本采样只是让**已启用快速首显的**宿主
-            // 能提前放行，不改变默认行为（服务端默认忽略 probe），也不改变本地 composition 状态。
-            // 限前 5 次：burst 长的宿主会刷 IPC，且嵌套 EditSession 有触发额外 layout change 的
-            // 风险，限次数同时兜住这两点。
+            // 首帧 reflow 期间的试探采样：每次 layout change 取一次坐标发给服务端，DLL 不做判断，
+            // 哪一帧可信由服务端按 per-app 策略定（服务端默认忽略 probe）。不改变本地组合状态，
+            // 也不替代上面的 debounce + timer 兜底。限前 5 次，防 IPC 洪泛与嵌套会话引发额外 layout change。
+            // 各宿主表现与「Word 不发 OnLayoutChange」见 docs/architecture/caret-position-host-compat-notes.md
+            // 的「首帧试探采样」一节。
             if (++_firstShowProbeSeq <= 5 && _pIPCClient != nullptr && _pIPCClient->IsConnected())
             {
                 RECT probeCaret = {};
@@ -7143,18 +6508,9 @@ STDAPI CTextService::OnLayoutChange(ITfContext* pContext, TfLayoutCode lCode, IT
                     LONG ph = probeCaret.bottom - probeCaret.top;
                     LONG csx = probeHasCs ? probeCs.left : 0;
                     LONG csy = probeHasCs ? probeCs.bottom : 0;
-                    // ★ DPI 归一必须在此**单独**做一次。本路径刻意不走 _EmitCaretUpdate：那个
-                    // 出口除归一外还做两件探针不能做的事——写 _lastKnownCaret*（权威兜底缓存，
-                    // 喂进 reflow 前的试探值会让 50ms timer 兜底取到未经验证的坐标），以及发
-                    // CMD_CARET_UPDATE（服务端据此当权威坐标，首显闸门直接失效）。故两条路径
-                    // 只共用「归一化」这一步，不共用出口。
-                    //
-                    // ⚠ 漏掉这一步的后果只在 **DPI-unaware 宿主 + 缩放≠100% 的显示器** 上显形，
-                    // 双屏异缩放是最常见的触发场景：GetTextExt 返回的是虚拟化 96-DPI 逻辑坐标，
-                    // 未换算就发出去 = 把逻辑坐标当物理坐标。实测 200% 缩放副屏上（QQ/TIM），
-                    // 探针 y/height 恰为权威值的 2 倍（839→1678、19→38），候选窗被定位到屏幕外。
-                    // 症状是「第一个字正常、后续字能打但候选窗不显示、停顿一下又恢复」——因为
-                    // 第一个字走的是长等待（拒绝探针、只认权威坐标），后续字才吃这份错误采样。
+                    // DPI 归一必须在此单独做一次：本路径刻意不走 _EmitCaretUpdate，那个出口会写权威兜底
+                    // 缓存并发 CMD_CARET_UPDATE，喂进试探值会让首显闸门失效。漏掉归一时 DPI-unaware 宿主在
+                    // 缩放≠100% 的屏上会把逻辑坐标当物理坐标，候选窗定位到屏幕外（见上面同一节）。
                     ConvertToPhysicalCoordinates(px, py, ph, csx, csy);
                     const int probeSrc = probeUsedImm  ? CARET_SRC_IMM_CANDIDATE_FORM
                                          : probeUsedCs ? CARET_SRC_TSF_COMPOSITION
@@ -7271,15 +6627,8 @@ STDAPI CTextService::OnEndEdit(ITfContext* pContext, TfEditCookie ecReadOnly, IT
         }
     }
 
-    // When selection changes outside of composition (e.g., mouse click, arrow keys),
-    // notify Go to reset smart punct state.
-    // During composition, Go tracks state internally via key events.
-    // NOTE: Do NOT call ClearPassthroughDigit() here. OnEndEdit fires for normal digit
-    // insertion too (cursor moves after typing '1'), which would incorrectly clear the
-    // digit tracking that OnTestKeyDown just set. Mouse click detection relies on
-    // caret Y comparison in _SendKeyToService instead.
-    // Shift/Ctrl 正等 keyup 切换时选区变了 ⇒ 按住期间有鼠标点选，那次 keyup 不算单击
-    // （论坛 t257）。不受 `_pComposition` 限制：组合中 Shift+点击同样是点选。
+    // Shift/Ctrl 正等 keyup 切换时选区变了 ⇒ 按住期间有鼠标点选，那次 keyup 不算单击。
+    // 不受 `_pComposition` 限制：组合中 Shift+点击同样是点选。
     if (selChanged && _pKeyEventSink != nullptr)
     {
         _pKeyEventSink->NoteSelectionChangedDuringToggle();
@@ -7310,7 +6659,8 @@ STDAPI CTextService::OnEndEdit(ITfContext* pContext, TfEditCookie ecReadOnly, IT
 
     if (selChanged && _pComposition == nullptr)
     {
-        // Notify Go side to reset its smart punct state
+        // 组合外选区变化（鼠标点击、方向键）：通知服务端复位智能标点状态。
+        // 组合中由服务端从按键事件自行跟踪。
         if (_pIPCClient != nullptr && _pIPCClient->IsConnected())
         {
             _pIPCClient->SendSelectionChanged((uint16_t)prevChar);
@@ -7384,14 +6734,12 @@ BOOL CTextService::UpdateComposition(const std::wstring& text, int caretPos, BOO
         return FALSE;
     }
 
-    // 空文本兜底占位用哪个字符（GH#175）：由 core 按本进程 compat 规则
-    // `composition_placeholder` 决定、经 CONFIG_KEY_COMPOSITION_PLACEHOLDER 下发（默认空格）。
-    // 浏览器受控 `<input>` 会 trim 组合中的 value，空格被削掉后 React 回写、浏览器终止组合，
-    // 故出厂给浏览器下发 ZWSP。core 自己发来的占位（非空文本）原样写入，这里不做任何映射。
+    // 空文本兜底占位用哪个字符：由 core 按本进程 compat 规则 `composition_placeholder` 决定，经
+    // CONFIG_KEY_COMPOSITION_PLACEHOLDER 下发（默认空格；浏览器受控 `<input>` 会 trim 组合中的 value，
+    // 出厂给浏览器发 ZWSP）。core 自己发来的占位（非空文本）原样写入。
     //
-    // ⚠️ 写组合区只有这一个口子（InsertTextAndStartComposition / 延迟组合 / hold 全都汇到这里）。
-    // 上屏 / 取消 / 宿主终止都是整段替换或清空组合 range，ZWSP 与空格一样不会残留
-    // （见 CCommitTextEditSession / CEndCompositionEditSession / OnCompositionTerminated）。
+    // 写组合区只有这一个口子（顶码、延迟组合、hold 都汇到这里）；上屏 / 取消 / 宿主终止都是整段
+    // 替换或清空组合 range，ZWSP 与空格一样不会残留。
     const wchar_t* placeholder = wind::placeholder::PlaceholderForKind(
         static_cast<uint8_t>(InterlockedCompareExchange(&_compositionPlaceholderKind, 0, 0)));
 
@@ -7438,24 +6786,6 @@ BOOL CTextService::UpdateComposition(const std::wstring& text, int caretPos, BOO
     return SUCCEEDED(hr);
 }
 
-// 把光标前 count 个已上屏字符替换为 text（智能符号纠错替换）。
-//
-// 默认优先走 TSF 同步范围替换（CReplaceBackwardEditSession：ShiftStart+SetText，
-// 原子、不发任何按键）——这是通用性最好的方案，不依赖修饰键是否松开：用户按住
-// Shift 连续输入多个符号（如连按 Shift+1 多次）也不受影响。失败才回退到真实合成
-// 按键（Backspace × count + Unicode 注入 text，已通过 MarkSyntheticKey 防止被自己
-// 的 OnTestKeyDown 钩子二次处理）。
-//
-// 已知例外（2026-07 实测，Tabby/微信）：这两个宿主自制的 TSFTextStore（Chromium
-// 内嵌 / Qt）会对 ShiftStart+SetText 全程报告成功（hr、hrSession、GetSuccess() 皆
-// S_OK），但实际画面上旧符号没删掉、新符号又插入了一份——不是我们这边 range 算错，
-// 是宿主自己的 TSFTextStore 跟它真实渲染的内容对不上，靠更严格检查 TSF 返回码也
-// 识别不出来。反过来，全局默认改用合成按键又会在 EverEdit 这类应用里撞上 Shift
-// 类标点的发键抑制问题（Shift 还按着时发退格，被宿主解读成别的操作，同样表现为
-// 重复上屏），且用户连续按住 Shift 输入多个符号时无法排队处理。两条路径互有短板，
-// 目前没有对所有宿主都成立的通用方案，因此保留 TSF 优先作为默认（覆盖面更广），
-// Tabby/微信类宿主的问题如果后续真机测试仍然存在，再按宿主进程名特判走合成按键
-// （kTryTsfRangeReplace 换成按 host 判断），而不是全局切换。
 void CTextService::HandlePairCommitPush(const std::wstring& text, uint32_t moveLeft)
 {
     if (_pKeyEventSink == nullptr)
@@ -7479,6 +6809,13 @@ BOOL CTextService::CommitTextViaSyntheticKey(const std::wstring& text, BOOL repl
     return CommitText(text, TRUE, replacingHeld);
 }
 
+// 把光标前 count 个已上屏字符替换为 text（智能符号 DeleteReplace 方案）。
+//
+// 优先走 TSF 同步范围替换（CReplaceBackwardEditSession：ShiftStart+SetText，原子、不发按键，
+// 不受修饰键是否按住影响）；失败才回退到合成按键（Backspace × count + Unicode 注入）。
+// 已知例外：Tabby/微信的 TSFTextStore 对范围替换报成功却画面不符，而全局改用合成按键又会在
+// EverEdit 撞上 Shift 类标点的发键抑制；若要处理，应按宿主特判 kTryTsfRangeReplace 而不是全局切换。
+// 见 docs/architecture/smart-symbol-compat-notes.md。
 BOOL CTextService::ReplacePrecedingChars(int count, const std::wstring& text)
 {
     if (count <= 0)
@@ -7512,11 +6849,8 @@ BOOL CTextService::ReplacePrecedingChars(int count, const std::wstring& text)
                 pEditSession->Release();
                 pContext->Release();
 
-                // 同 CommitText：只信 GetSuccess()，不要求外层 hr/hrSession 也成功。
-                // 部分终端模拟器的 TSF 支持不完整，RequestEditSession 外层可能报告失败，
-                // 但 DoEditSession 里的 ShiftStart+SetText 其实已经原子替换成功；若仍
-                // 按 hr/hrSession 判失败去做 SendInput 退格+重打兜底，就会在已经替换
-                // 正确的文字上再删再打一遍，表现为"文字被复制"。
+                // 同 CommitText：只信 GetSuccess()。部分终端模拟器外层报失败但替换其实已完成，
+                // 按 hr/hrSession 判失败再退格重打会让文字被复制。
                 if (success)
                 {
                     WIND_LOG_DEBUG_FMT(L"ReplacePrecedingChars: TSF range replace succeeded count=%d\n", count);
@@ -7528,11 +6862,8 @@ BOOL CTextService::ReplacePrecedingChars(int count, const std::wstring& text)
         }
     }
 
-    // 真实合成按键：count 次 Backspace + Unicode 注入 text。
-    // 注入前须把每个键标记为"自生成"（MarkSyntheticKey），否则这些合成按键会被
-    // 自己的 OnTestKeyDown 钩子当成真实用户按键二次处理：在 TSF EditSession 本身
-    // 就走不通的宿主（终端模拟器/微信/部分纯文本编辑器）里，退格没被真正放行、
-    // 新字符又被当作"新按键"重新走一遍输入流程，表现为替换后的符号重复上屏。
+    // 真实合成按键：count 次 Backspace + Unicode 注入 text。每个键须先 MarkSyntheticKey，
+    // 否则会被自己的 OnTestKeyDown 当真实按键再处理一遍，表现为替换后的符号重复上屏。
     std::vector<INPUT> inputs;
     inputs.reserve((size_t)count * 2 + text.length() * 2);
     for (int i = 0; i < count; i++)
@@ -7574,36 +6905,6 @@ BOOL CTextService::ReplacePrecedingChars(int count, const std::wstring& text)
     return TRUE;
 }
 
-// Commit text atomically: end composition + insert text in a single EditSession.
-// This avoids race conditions in browsers where async EndComposition could clear
-// text that was inserted by a subsequent synchronous InsertText.
-//
-// 换行形式（CR / LF / CRLF）**不在这一层决定**，本层收到什么就写什么。
-//
-// # 为什么挪走了
-//
-// 这里曾有一个 `NormalizeNewlinesToCR`，把提交文本里所有换行**无条件**折成 CR。
-// 起因是 2026-08-23 的真机现场：LF 在 Word 里不构成段落边界，每个换行处渲染成一段
-// 类似 Tab 的空白（见 7c9da37a）。那个观察是对的，无条件是错的——
-//
-// · 「换行用什么字符表达」取决于**宿主的文本模型**：富文本模型（Word / WPS / RichEdit /
-//   TOM）的段落边界就是 CR；而 VS Code / 终端 / 浏览器输入框是「写进去什么就存什么」，
-//   在那里做转换就是改写用户的数据（论坛 t112：正则直通后行尾从 \n 变成 \r）。
-// · 宿主是**服务端**才认得全的东西（compat 表按进程名配置、用户可覆盖），DLL 这一侧
-//   没有也不该有那份名单。
-// · 挂在 CommitText 一条出口上还带来了不一致：InsertText / ReplacePrecedingChars /
-//   pair commit 都绕过了它，同一段文本走哪条出口决定它最后是 CR 还是 LF。
-//
-// ⇒ 改写统一发生在服务端推送之前（协调器 `apply_commit_newline`，档位来自
-//   `input.commit_newline` 与 compat 的 `[[commit_newline]]`），四条出口天然一致，
-//   macOS / Android 也不必背 Windows 的文本约定。
-//
-// ⚠️ 仍有一处**未解决**、且不属于本层策略的问题：SendInput 兜底路径把换行当 Unicode
-//   字符注入，多数控件既不换行也不报错（key.type 8/22 的实测，见 wind-keys 的
-//   `split_type_text`）。那是那条出口的物理限制，修法是拆成 VK_RETURN，单独立案。
-
-// 多行文本的粘贴上屏（compat `multiline_commit = "paste"`），由 CCommitTextEditSession 在组合结束后调用。
-// 剪贴板不备份也不恢复：恢复会让剪贴板历史工具多记一条，且宿主何时处理 Ctrl+V 不可知，恢复早了会贴出旧内容。
 // 给剪贴板追加一个注册格式，值为 DWORD。须在 OpenClipboard 之后、CloseClipboard 之前调用。
 static void SetClipboardDwordFormat(const wchar_t* name, DWORD value)
 {
@@ -7625,6 +6926,8 @@ static void SetClipboardDwordFormat(const wchar_t* name, DWORD value)
         GlobalFree(h);
 }
 
+// 多行文本的粘贴上屏（compat `multiline_commit = "paste"`），由 CCommitTextEditSession 在组合结束后调用。
+// 剪贴板不备份也不恢复：恢复会让剪贴板历史工具多记一条，且宿主何时处理 Ctrl+V 不可知，恢复早了会贴出旧内容。
 BOOL CTextService::_PasteTextViaClipboard(const std::wstring& text)
 {
     const std::wstring crlf = wind::multiline::NormalizeToCrlf(text);
@@ -7695,10 +6998,9 @@ BOOL CTextService::_PasteTextViaClipboard(const std::wstring& text)
     }
 
     // Ctrl↓ V↓ V↑ Ctrl↑ 一次注入，中间不被真实键鼠穿插；纯 VK、无 UNICODE 标志，宿主按快捷键处理。
-    // 两个键都是凭空造的，down / up 都不该进本输入法的按键逻辑 ⇒ MarkSyntheticKey（各压 down、up
-    // 两条，见 SkipKeyTable.h），而不是 _ReplayKeyToHost 那种只压 down 的：注入的 Ctrl keyup 若走
-    // 正常路径，会落进修饰键释放的处理（defer 中的配对动作会吃掉它 ⇒ 宿主里 Ctrl 卡住；Ctrl 配成
-    // 切换键时有误切的风险）。宿主不调 OnTestKeyUp 时残留的 keyup 条目由 skip 表的 TTL 收掉。
+    // 两个键都凭空造出，down / up 都用 MarkSyntheticKey 压条目（见 SkipKeyTable.h），不能像
+    // _ReplayKeyToHost 只压 down：注入的 Ctrl keyup 若走正常路径会落进修饰键释放处理，可能让宿主里
+    // Ctrl 卡住或误切模式。宿主不调 OnTestKeyUp 时残留的 keyup 条目由 skip 表的 TTL 收掉。
     if (_pKeyEventSink != nullptr)
     {
         _pKeyEventSink->MarkSyntheticKey(VK_CONTROL);
@@ -7735,25 +7037,26 @@ BOOL CTextService::_PasteTextViaClipboard(const std::wstring& text)
     return TRUE;
 }
 
+// 原子上屏：结束组合 + 写入文本在同一个编辑会话里完成，避免浏览器里异步 EndComposition 清掉
+// 随后同步 InsertText 写入的文字。
+//
+// 换行形式（CR / LF / CRLF）不在这一层决定，收到什么写什么：该用哪种取决于宿主的文本模型，
+// 只有服务端认得宿主（协调器 `apply_commit_newline`，见 docs/architecture/app-compat-host-notes.md
+// 的「上屏换行」），统一在推送前改写，各条出口天然一致。
+// 未解决：SendInput 兜底把换行当 Unicode 字符注入，多数控件既不换行也不报错（见 wind-keys 的
+// `split_type_text`），修法是拆成 VK_RETURN，单独立案。
 BOOL CTextService::CommitText(const std::wstring& text, BOOL nonKeyContext, BOOL replacingHeld,
                               BOOL* pAsyncDeferred)
 {
     // 默认"已落定"，只有真的把编辑交给异步会话时才置位（两处 RequestEditSession 成功后）。
     if (pAsyncDeferred != nullptr) *pAsyncDeferred = FALSE;
 
-    // hold 预览态活跃时（智能符号已把中文符号放进组合、等 press2），本次提交必须交代
-    // 那个符号的去向——下面提交走的是**组合 range 的 SetText**，range 里此刻显示的正是
-    // 它，不主动处置就会被静默覆盖掉。
-    //
-    //   replacingHeld=TRUE （press2）：本就是要拿英文符号换掉它 → 丢弃，让 SetText 覆盖。
-    //   replacingHeld=FALSE（其余一切）：并入 prefix，与本次文本一起上屏（追加语义）。
-    //
-    // 默认取追加：hold 期间可能触发提交的路径远不止一处（全角空格/数字、临时英文、各
-    // 独占模式出字……），把安全的一侧设为默认，新增路径自动正确。曾经默认丢弃，表现为
-    // 全角下「。」+空格 → 符号消失、只剩全角空格。
-    //
-    // 智能符号超时收口那条路上，计时器已在 OnHoldTimerExpired 里清零、文本也已 move
-    // 进 text 参数，两个分支在那条路上都是无副作用的 no-op。
+    // hold 预览态活跃时，本次提交必须交代那个符号的去向：下面走的是组合 range 的 SetText，
+    // 不处置它就会被静默覆盖。
+    //   replacingHeld=TRUE （press2）：要拿英文符号换掉它 → 丢弃，让 SetText 覆盖。
+    //   replacingHeld=FALSE（其余一切）：并入 prefix，与本次文本一起上屏。
+    // 默认取追加：hold 期间可能触发提交的路径很多（全角空格/数字、临时英文、独占模式出字……），
+    // 安全的一侧做默认，新增路径自动正确。超时收口那条路上两个分支都是 no-op。
     if (replacingHeld)
         CancelHoldTimer();
     else
@@ -7763,7 +7066,7 @@ BOOL CTextService::CommitText(const std::wstring& text, BOOL nonKeyContext, BOOL
     std::wstring full = _pendingCommitPrefix + text;
     _pendingCommitPrefix.clear();
 
-    // 只**数**换行，不改写（改写在服务端完成，见本文件上方那段说明）。
+    // 只数换行，不改写（改写在服务端完成，见函数头）。
     int newlineCount = 0;
     for (size_t i = 0; i < full.length(); i++)
     {
@@ -7778,9 +7081,8 @@ BOOL CTextService::CommitText(const std::wstring& text, BOOL nonKeyContext, BOOL
     const BOOL paste = wind::multiline::ContainsNewline(full) && wind::multiline::IsPasteMode(
         static_cast<uint8_t>(InterlockedCompareExchange(&_multilineCommitMode, 0, 0)));
 
-    // 诊断用：只统计换行符个数、不打印正文（日志隐私红线）。用来确认到本函数为止
-    // 换行是否还完整——如果这里已经是 0，说明丢字发生在 Rust/IPC 一侧；如果这里
-    // 不为 0 但宿主里没体现出分段，说明问题出在 TSF/宿主对本次提交的处理上。
+    // 诊断用：只统计换行符个数、不打印正文（日志隐私红线）。这里已为 0 说明丢换行在 Rust/IPC 一侧，
+    // 不为 0 而宿主没分段则问题在 TSF/宿主。
     {
         WIND_LOG_DEBUG_FMT(L"CommitText: textLen=%zu, newlines=%d, nonKeyContext=%d, replacingHeld=%d, paste=%d\n",
                            full.length(), newlineCount, (int)nonKeyContext, (int)replacingHeld, (int)paste);
@@ -7829,8 +7131,7 @@ BOOL CTextService::CommitText(const std::wstring& text, BOOL nonKeyContext, BOOL
         }
 
         // 恢复中且宿主是 Chromium：残留先在单独一把锁里删掉，上屏会话再插入。删和插混在同一把锁里，
-        // 受控输入框上屏文字照样重复一份（实测）；分两把锁时页面先收到删除、再收到一次 insertText。
-        // 非按键上下文不能发同步会话，改发异步，TSF 按请求顺序执行，仍排在上屏会话之前。
+        // 受控输入框上屏文字会重复一份。非按键上下文不能发同步会话，改发异步，TSF 按请求顺序执行。
         BOOL recoverDropped = FALSE;
         if (pCompToEnd == nullptr && HasRecoverRecord() && CCaretEditSession::IsChromiumContext(pContext))
         {
@@ -7850,26 +7151,11 @@ BOOL CTextService::CommitText(const std::wstring& text, BOOL nonKeyContext, BOOL
 
         if (nonKeyContext)
         {
-            // 非按键上下文（裸 WM_TIMER 回调 / 窗口消息回调 / COM 回调）。MSDN 限定
-            // TF_ES_SYNC 只在处理按键时合法，Word 严格照此校验，会拒发同步会话
-            // （hrSession=TS_E_SYNCHRONOUS 0x80040208），DoEditSession 根本不执行 →
-            // pCompToEnd 被当孤儿 Release（Word 默认把组合里已显示的内容 finalize 落进
-            // 文档）→ 旧逻辑再见 GetSuccess()==FALSE 就走 SendInput 兜底又打一遍。
-            // 两条已实锤的受害路径：
-            //   · 智能符号 HoldComposition 超时收口 → "符号 500ms 后重复上屏"
-            //     （d5d5815 只治了"谎报失败"，治不了这里的"真拒绝同步"）
-            //   · 鼠标点候选（WM_COMMIT_TEXT）→ Word 里打 sfge 点候选得到 "Sfge杜甫"：
-            //     组合里的原码被 Word finalize 成正文（还吃了 autocorrect 首字母大写），
-            //     正文"杜甫"再由 SendInput 追加在后面。
-            //
-            // 改用异步会话：交给 TSF 在能拿到锁时原地 SetText+EndComposition 落定即可，
-            // 绝不 SendInput。TF_ES_ASYNCDONTCARE 在能立即给锁的宿主（如 Tabby）会同步
-            // 执行、行为不变；Word 则延后到可授予锁时执行。异步下 pEditSession 由 TSF
-            // 保活至 DoEditSession 运行，pCompToEnd 随之正确收尾。
-            //
-            // 两条路的组合区内容不同，但都由 DoEditSession 的 SetText(full) 统一覆盖：
-            // 超时收口时组合里已经是最终文字（覆盖=原样重写）；鼠标上屏时组合里还是
-            // 原码（覆盖=换成上屏文字）。后者在拿到锁之前，用户会多看到原码若干毫秒。
+            // 非按键上下文（WM_TIMER / 窗口消息 / COM 回调）里 TF_ES_SYNC 不合法，Word 会拒发
+            // 同步会话；此时 Release 组合会让宿主把组合里的内容 finalize 成正文，再走 SendInput
+            // 就重复上屏。故改用异步会话，由 TSF 在可授予锁时原地 SetText+EndComposition，绝不
+            // SendInput。代价是鼠标上屏时用户可能多看到原码若干毫秒。
+            // 见 docs/architecture/tsf-commit-edit-session-notes.md。
             HRESULT hrSession = S_OK;
             hr = pContext->RequestEditSession(_tfClientId, pEditSession,
                                               TF_ES_ASYNCDONTCARE | TF_ES_READWRITE, &hrSession);
@@ -7894,11 +7180,8 @@ BOOL CTextService::CommitText(const std::wstring& text, BOOL nonKeyContext, BOOL
             QueryPerformanceCounter(&endTime);
             int durationMs = (int)((endTime.QuadPart - startTime.QuadPart) * 1000 / freq.QuadPart);
 
-            // 只信 DoEditSession 内部的 GetSuccess()——它只在 SetText/EndComposition 真正
-            // 执行完毕后才置 TRUE，是文档是否已被修改的唯一可信信号。外层 hr/hrSession 在
-            // 部分宿主里会出现"编辑其实已经执行、但外层返回码不达标"的情况；若仍要求三者
-            // 同时成功，会误判为失败并接着走 SendInput 兜底，在已经正确写入的文字后面再打
-            // 一遍。（Word 在非按键上下文"真拒绝同步"另见上面 nonKeyContext 分支。）
+            // 只信 GetSuccess()：它在 SetText/EndComposition 真正执行后才置 TRUE。外层 hr/hrSession
+            // 在部分宿主里会在编辑已执行时仍报失败，按它判就会 SendInput 再打一遍。
             if (success)
             {
                 pEditSession->Release();
@@ -7907,29 +7190,13 @@ BOOL CTextService::CommitText(const std::wstring& text, BOOL nonKeyContext, BOOL
                 return TRUE;
             }
 
-            // ★ 同步会话失败且组合还活着 = 宿主拒发了锁，DoEditSession 一次都没跑。
+            // 同步会话没跑过（宿主拒发锁，TF_ES_SYNC 只是「期待成功」）时绝不能 SendInput 兜底：
+            // Release 让组合成孤儿，宿主把组合里的原码 finalize 进文档，正文再追加在后面。
+            // 改为退到异步会话，与 nonKeyContext 分支同构；代价是可能多看到原码若干毫秒。
             //
-            // 此时**绝不能**沿用 SendInput 兜底：Release 会把组合变成孤儿，而宿主普遍
-            // 把孤儿组合区 finalize 成正文（Word 实测如此，其余宿主同样 —— 2026-09-02
-            // 临时改代码跳过同步请求，在 Word / 记事本 / EverEdit 上逐个验过）：
-            // 组合里此刻显示的正是**原始编码**，
-            // 于是编码落进文档，SendInput 再把正文追加在后面：打 fffb + 空格得到
-            // "fffb土地"。这正是 37d79d88 在非按键上下文修掉的那条腿，按键上下文这条
-            // 一直漏着：MSDN 对 TF_ES_SYNC 的措辞是"can be expected to succeed"，是期待
-            // 不是保证，宿主忙时照样拒 —— 故表现为偶发。
-            //
-            // 改为退到异步会话，交给 TSF 在能授予锁时原地 SetText + EndComposition 落定，
-            // 与 nonKeyContext 分支同构。pEditSession 由 TSF 保活至 DoEditSession 运行，
-            // 组合随之正确收尾。代价是用户可能多看到原码若干毫秒——比文档里多一串编码轻。
-            //
-            // 判据是「会话跑过没有」，**不是**「组合还在不在」。
-            //   没跑过（宿主拒发锁）⇒ 退异步，让 TSF 在能授予锁时原地落定；
-            //   跑过但没写成       ⇒ 再请求一次只会重复出字，按原样走 SendInput 兜底。
-            //
-            // ⚠️ 曾用 HasPendingComposition() 当这个判据，对**无 composition 的提交**是错的：
-            // 空缓冲直接上屏符号 / 鼠标上屏时 _pComposition 从一开始就是 nullptr，它恒为
-            // FALSE ⇒ 同步被拒也被当成"已执行过"，跳过异步重试直接落 SendInput。而 Tk 一类
-            // 非 TSF-aware 宿主上 SendInput 恰是最坏的一条路（B-9）。见 WasExecuted()。
+            // 判据是「会话跑过没有」（WasExecuted），不是「组合还在不在」：无组合的提交（空缓冲
+            // 直接上屏符号、鼠标上屏）里 HasPendingComposition() 恒 FALSE，会错过异步重试。
+            // 跑过但没写成时再请求只会重复出字，照旧走 SendInput。
             if (!pEditSession->WasExecuted())
             {
                 HRESULT hrAsyncSession = S_OK;
@@ -7946,8 +7213,7 @@ BOOL CTextService::CommitText(const std::wstring& text, BOOL nonKeyContext, BOOL
                     return TRUE;
                 }
 
-                // 同步与异步都被拒：context 已不可用，组合只能孤儿释放，编码泄漏无从避免。
-                // 落 SendInput 至少保证文字不丢。这条真出现的话是宿主侧的硬故障，值得单独查。
+                // 同步与异步都被拒：组合只能孤儿释放，编码泄漏无从避免；落 SendInput 至少不丢字。
                 WIND_LOG_ERROR_FMT(L"CommitText: sync AND async both rejected (sync hrSession=0x%08X, async hr=0x%08X) - composition will leak\n",
                                    hrSession, hrAsyncReq);
             }
@@ -7977,8 +7243,7 @@ fallback:
 
     for (wchar_t ch : full)
     {
-        // 标记为自生成，避免被自己的 OnTestKeyDown 钩子当成真实按键二次处理
-        // （同 ReplacePrecedingChars 兜底路径，见其注释）。
+        // 标记为自生成，避免被自己的 OnTestKeyDown 当成真实按键二次处理。
         if (_pKeyEventSink != nullptr) _pKeyEventSink->MarkSyntheticKey(VK_PACKET);
 
         INPUT inputDown = {};
@@ -8006,11 +7271,9 @@ fallback:
 }
 
 // 以 VK_PACKET（KEYEVENTF_UNICODE）把文本注入宿主，产生真实 WM_CHAR。
-//
-// AutoCAD 表格在位编辑器丢弃 TSF 直写的 ASCII 却谎报 S_OK（2026-11-18 靶机实测）。靶机上
-// 试过的 TSF 写法——直写两字符、开组合 SetText、同会话逐字符插入、每字符独立会话、直接复用
-// CommitText——宿主 store 读回都含字符，屏幕却全无；只有真实按键消息能上屏。
-// 配对插入后的光标回移由调用方走 _SimulatePairKey：修饰键按住时它会延后到松开再发，
+// 用于 AutoCAD 表格在位编辑器这类丢弃 TSF 写入却报 S_OK 的宿主，
+// 见 docs/architecture/pair-commit-host-compat-notes.md。
+// 配对插入后的光标回移由调用方走 _SimulatePairKey：修饰键按住时延后到松开再发，
 // 否则物理 Shift 会把注入的 VK_LEFT 变成 Shift+Left 选中右括号。
 BOOL CTextService::InjectUnicodeText(const std::wstring& text)
 {
@@ -8034,8 +7297,7 @@ BOOL CTextService::InjectUnicodeText(const std::wstring& text)
     return sent == inputs.size() ? TRUE : FALSE;
 }
 
-// FOCUS_LOST_REASON_* 的日志名。日志文案与协议值共用一处，避免两边各写一份而说反
-// （TextService.cpp 的 "notifying service" 就是这么错了一年）。
+// FOCUS_LOST_REASON_* 的日志名。与协议值共用一处，避免两边各写一份而说反。
 static const wchar_t* FocusLostReasonName(uint8_t reason)
 {
     switch (reason)
@@ -8047,12 +7309,10 @@ static const wchar_t* FocusLostReasonName(uint8_t reason)
     }
 }
 
-// 输入态整体清理。**只应由「离开了原来那个文档」的两条路径调用**（OnKillThreadFocus /
-// doc_changed），不要挂回失焦回调：DocMgr 级失焦是噪声信号（VSCode 实测一次应用切换伴随
-// 5 次 DocMgr 焦点事件，Excel 更是同一指针 6ms 内掉了又回），在那里销毁用户输入正是
-// 「首字符直接上屏」的根因。
-// DocMgr 级失焦要通知服务端隐藏工具栏时，走 _ReportEditContextLost() 而**不是**本函数——
-// 那条路径只翻可见性标志、不碰输入态。
+// 输入态整体清理。只应由「离开了原来那个文档」的两条路径调用（OnKillThreadFocus /
+// doc_changed），不要挂回 DocMgr 级失焦：那是噪声层，在那里销毁输入会让首字符直接上屏，
+// 见 docs/architecture/tsf-docmgr-focus-semantics.md。
+// DocMgr 级失焦要隐藏工具栏时走 _ReportEditContextLost()，它只翻可见性标志、不碰输入态。
 void CTextService::CleanupInputStateForDocChange(ITfDocumentMgr* pDocMgrHint, uint8_t reason,
                                                  BOOL sendFocusLost)
 {
@@ -8066,43 +7326,31 @@ void CTextService::CleanupInputStateForDocChange(ITfDocumentMgr* pDocMgrHint, ui
     // 顺序反了则服务端已清 buffer 而宿主里仍留着未清的 composition 文本。
     EndComposition(pDocMgrHint);
 
-    // sendFocusLost=FALSE：本地清理照做，但**不通知服务端失焦**。用于「新 DocMgr 会被
-    // XamlIsland locked 守卫跳过 focus_gained」的情形——发了就没人配对，服务端的
-    // ime_active 会被永久清掉（见 OnSetFocus doc_changed 分支注释）。
+    // sendFocusLost=FALSE：本地清理照做但不通知服务端失焦。用于新 DocMgr 会被 XamlIsland
+    // locked 守卫跳过 focus_gained 的情形：发了无人配对，ime_active 会被永久清掉。
     if (sendFocusLost && !_focusLostSent && _pIPCClient != nullptr && _pIPCClient->IsConnected())
     {
         _pIPCClient->SendFocusLost(reason);
         _focusLostSent = TRUE;
-        // 本函数发出的两种 reason（THREAD / DOC_CHANGED）都意味着「已经不在原来那个可编辑
-        // 上下文里了」，故一并复位上报态：否则紧接着的 DocMgr 失焦会再补一条 CTX_LOST。
+        // THREAD / DOC_CHANGED 都意味着已离开原可编辑上下文，一并复位上报态，
+        // 否则紧接着的 DocMgr 失焦会再补一条 CTX_LOST。
         _editCtxReported = FALSE;
     }
 
     if (_pKeyEventSink != nullptr)
     {
-        // 失焦一律复位，**配对状态也不例外**（keepPair 取默认 FALSE）。
-        // 曾按 reason 细分保留过（THREAD 时光标其实还在括号中间），2026-07-29 真机后放弃：
-        // 本 DLL 的 _pairPendingDepth 是**每个宿主进程各自一份**的，而 core 侧是全局单栈，
-        // 两种作用域模型对不齐；开启「为每个应用配置不同输入法」后切换应用还会重建整个
-        // IME 上下文。实测「大部分情况不行」——功能时灵时不灵比没有更糟，故收敛为确定行为。
+        // 失焦一律复位，配对状态也不例外（keepPair 取默认 FALSE）：本 DLL 的配对栈是每宿主
+        // 进程一份，core 侧是全局单栈，作用域对不齐，按 reason 保留会时灵时不灵。
         _pKeyEventSink->ResetComposingState();
     }
 }
 
 // 焦点离开可编辑控件（DocMgr 级失焦）时通知服务端隐藏工具栏。
 //
-// 与 CleanupInputStateForDocChange 的分工是本次设计的要点：本函数**只翻可见性标志，
-// 绝不碰输入态**。这正是它能在 DocMgr 噪声层安全调用的原因——Excel 那种「同一 DocMgr
-// 6ms 内掉了又回」的抖动，最多让工具栏闪一下（UI 层 50ms 隐藏防抖会吸收），而输入缓冲
-// 毫发无损。反过来，若在这里调 CleanupInputStateForDocChange，就是把「首字符不进编码、
-// 直接上屏」原样请回来。
-//
-// **不设 _focusLostSent**：那个标志表示「真失焦已上报」，供 OnKillThreadFocus 去重。
-// CTX_LOST 不是真失焦（应用还在前台、输入法仍激活），置位会让随后真正的
-// thread_focus_lost 被吞掉，ime_active 就永远清不掉了。
-//
-// 靠 _editCtxReported 去重：DocMgr 级失焦实测可达 60~98 次/秒，每次都发会造成 IPC 洪泛。
-// 只在「上报过有可编辑上下文 → 现在没有了」这个翻转沿发一次。
+// 只翻可见性标志、绝不碰输入态，所以能在 DocMgr 噪声层安全调用：抖动最多让工具栏闪一下
+// （UI 层隐藏防抖会吸收）。在这里调 CleanupInputStateForDocChange 会让首字符直接上屏。
+// 不设 _focusLostSent：CTX_LOST 不是真失焦，置位会吞掉随后真正的 thread_focus_lost。
+// 靠 _editCtxReported 只在「有上下文 → 没有」翻转沿发一次，DocMgr 级失焦频率高，避免 IPC 洪泛。
 void CTextService::_ReportEditContextLost()
 {
     if (!_editCtxReported)
@@ -8117,19 +7365,16 @@ void CTextService::_ReportEditContextLost()
     }
 }
 
-// End composition
-// NOTE: This method is now ASYNC - it returns immediately without waiting for
-// the composition to actually end. The _pComposition pointer is cleared immediately
-// so that HasActiveComposition() returns FALSE and new compositions can start.
+// 结束组合。异步：立即返回，_pComposition 当场清空，HasActiveComposition() 随即为 FALSE，
+// 新组合可以马上开始。
 void CTextService::EndComposition(ITfDocumentMgr* pDocMgrHint, BOOL nonKeyContext)
 {
     // direct_commit 顶码：失焦/强制收口前，先把待重开的余码组合落定，语义与下方
     // HoldComposition flush 一致——收口时不能让余码组合悬空未开。
     StartDeferredCompositionIfPending();
 
-    // 智能符号 hold 中（符号预上屏观感，语义=待提交）：主动结束组合（失焦/Deactivate
-    // 等）时转为提交而非放弃，模拟标准输入流程——切换窗口时符号应直接上屏而不是清空。
-    // CommitText 内 full = prefix + held，聚合定格的旧符号一并收口。
+    // 智能符号 hold 中（语义=待提交）：主动结束组合（失焦/Deactivate 等）时转为提交而非放弃，
+    // 切换窗口时符号应直接上屏。CommitText 内 full = prefix + held，定格的旧符号一并收口。
     if (_hHoldTimer != 0 && _pComposition != nullptr)
     {
         WIND_LOG_DEBUG(L"EndComposition: flushing held smart symbol as commit\n");
@@ -8137,10 +7382,8 @@ void CTextService::EndComposition(ITfDocumentMgr* pDocMgrHint, BOOL nonKeyContex
         return;
     }
 
-    // 顶码聚合中（组合头部有待提交前缀）：不能按「放弃组合」处理——引擎已把
-    // 顶出的字按上屏记账（词频/统计）。转为提交前缀、丢弃余码（CommitText 的
-    // EditSession 会 SetText(前缀)+EndComposition）。
-    // 注：此路径使用当前焦点 context 提交；失焦竞态下可能落到兜底 SendInput。
+    // 顶码聚合中（组合头部有待提交前缀）：引擎已按上屏记账，不能放弃组合，转为提交前缀、
+    // 丢弃余码。此路径用当前焦点 context 提交，失焦竞态下可能落到 SendInput 兜底。
     if (!_pendingCommitPrefix.empty() && _pComposition != nullptr)
     {
         WIND_LOG_DEBUG(L"EndComposition: flushing pending top-code prefix as commit\n");
@@ -8177,13 +7420,9 @@ void CTextService::EndComposition(ITfDocumentMgr* pDocMgrHint, BOOL nonKeyContex
     _pComposition = nullptr;  // Clear immediately - HasActiveComposition() now returns FALSE
     _compositionJustStarted = FALSE;
 
-    // Need a document manager to request edit session.
-    // pDocMgrHint 一旦给出即**具有权威性**，不再只是 GetFocus 失败时的兜底：
-    // composition 属于创建它的那个 context，调用方（CleanupInputStateForDocChange）
-    // 明确知道是哪一个。而此刻 GetFocus() 可能已经指向**新**文档（doc_changed 路径就是
-    // 在新文档拿到焦点后才收口的），照它去跑 EditSession 会拿着新 context 的 cookie 去
-    // 清旧 context 的 range —— 轻则失败，重则动到新文档的内容。
-    // 无 hint 时（其余调用点均在焦点未变时触发）仍回落 GetFocus。
+    // pDocMgrHint 给出即具有权威性：composition 属于创建它的 context，而此刻 GetFocus()
+    // 可能已指向新文档（doc_changed 路径在新文档获焦后才收口），拿新 context 的 cookie
+    // 清旧 context 的 range 轻则失败、重则改到新文档。无 hint 时回落 GetFocus。
     ITfDocumentMgr* pDocMgr = nullptr;
     if (pDocMgrHint != nullptr)
     {
@@ -8273,9 +7512,8 @@ void CTextService::_DisarmRecover(const wchar_t* why)
     pRange->AddRef();
     _ClearRecoverRecord();
 
-    // 不再接上：按原先「宿主意外终止就清掉组合文字」的语义清残留（原先在终止回调里就清，恢复把它
-    // 推迟到了这里）。Chromium 例外：原先那次清除在它上面本就不生效；它把无组合的删改译成相对页面
-    // 当前光标的删除，光标已挪开时删到的是别处的字。
+    // 不再接上：按「宿主意外终止就清掉组合文字」的语义清残留。Chromium 例外：它把无组合的删改
+    // 译成相对页面当前光标的删除，光标已挪开时会删到别处的字。
     HRESULT hr = S_FALSE;
     if (!CCaretEditSession::IsChromiumContext(pContext))
     {
@@ -8365,8 +7603,7 @@ void CTextService::_DropRecoverLeftover(TfEditCookie ec, ITfContext* pContext)
     const LONG len = (LONG)_recoverLeftover.length();
     if (!found)
     {
-        // 光标不在残留末尾、或不是残留所在的 context：不接上，残留另开会话处理（不与本会话的写入混在
-        // 同一把锁里）。
+        // 光标不在残留末尾或不是残留所在的 context：不接上，残留另开会话处理，不与本会话的写入混在同一把锁里。
         _DisarmRecover(L"leftover not before caret");
         return;
     }
@@ -8393,21 +7630,12 @@ void CTextService::ResetComposingState(BOOL keepPairState)
     }
 }
 
-// Insert text and start new composition (for top code commit)
-// 新开组合时插入点该放哪。
+// 新开组合时插入点该放哪：常规放末尾。
 //
-// 常规：放在末尾（余码/引导符都是「用户还要接着打」的内容，插入点自然跟在后面）。
-//
-// ★ 例外是**占位组合**（内容恰为一个空格，见 Rust 侧 `COMPOSITION_PLACEHOLDER`；浏览器宿主里
-// 按 compat 规则 `composition_placeholder` 发的是 ZWSP，见 CompositionPlaceholder.h / GH#175，两者都认）：
-// 它不是给用户看的内容，只是因为 TSF 不接受空组合、而输入法又需要一个活着的组合
-// （非嵌入模式下编码由候选窗自绘；联想态压根没有编码）。此时插入点必须落在**它前面**，
-// 否则用户看到光标凭空右移一格——正是「空格很突兀」的由来（2026-08-16 用户反馈）。
-//
-// 正常打字时下一键的 UpdateComposition 会立刻把插入点拉回 0，所以这个缺陷长期被掩盖；
-// 联想态没有「下一键」，组合就那么挂着，才暴露出来。
-//
-// ⚠️ 取值必须与 Rust 侧 `COMPOSITION_PLACEHOLDER` 一致，改一处要同步改另一处。
+// 例外是占位组合（内容恰为空格或 ZWSP，见 CompositionPlaceholder.h 与 Rust 侧
+// `COMPOSITION_PLACEHOLDER`）：TSF 不接受空组合，它只为维持一个活着的组合，插入点必须落在
+// 它前面，否则光标凭空右移一格。联想态没有「下一键」把插入点拉回 0，所以只在那里显形。
+// 取值须与 Rust 侧 `COMPOSITION_PLACEHOLDER` 一致。
 int CTextService::_CompositionCaretFor(const std::wstring& composition)
 {
     return wind::placeholder::IsPlaceholderText(composition) ? 0 : static_cast<int>(composition.length());
@@ -8418,15 +7646,12 @@ BOOL CTextService::InsertTextAndStartComposition(const std::wstring& insertText,
     WIND_LOG_DEBUG_FMT(L"InsertTextAndStartComposition: insert='%s', newComp='%s', prefixLen=%zu, _pComposition=%p\n",
                  insertText.c_str(), newComposition.c_str(), _pendingCommitPrefix.length(), _pComposition);
 
-    // 顶码聚合（微软 IME 行为，经 Chrome 事件探针实测微软五笔确认）：顶出的文本
-    // 不立即提交文档，而是累入待提交前缀、留在组合头部显示（无下划线段），真正的
-    // 提交推迟到最终上屏（CommitText）一次完成。宿主全程只看到 compositionupdate、
-    // 最后一次 compositionend —— 与微软五笔事件流完全一致，快照式宿主（tabby/
-    // xterm.js 读 textarea 快照）与 diff 式宿主（Chromium TSFTextStore）都不会
-    // 把余码并入提交（此前 EndComposition→StartComposition 各种拆法均双写余码）。
+    // 顶码聚合（对齐微软五笔的事件流）：顶出的文本不立即提交，累入待提交前缀、留在组合头部
+    // 显示，推迟到最终上屏（CommitText）一次提交。宿主全程只见 compositionupdate 和最后一次
+    // compositionend，快照式（xterm.js）与 diff 式（Chromium TSFTextStore）宿主都不会把余码
+    // 并入提交；EndComposition→StartComposition 的拆法会双写余码。
     //
-    // 有活动组合：纯组合内容更新（'skce' → '可能y'）；无活动组合（罕见）：
-    // UpdateComposition 会新建组合并显示 前缀+余码。
+    // 有活动组合：纯组合内容更新；无活动组合（罕见）：UpdateComposition 新建组合显示 前缀+余码。
     _pendingCommitPrefix += insertText;
     return UpdateComposition(newComposition, _CompositionCaretFor(newComposition));
 }
@@ -8504,11 +7729,9 @@ BOOL CTextService::HoldComposition(const std::wstring& text, UINT timeoutMs)
     WIND_LOG_DEBUG_FMT(L"HoldComposition: text=%s timeoutMs=%u\n",
                        text.c_str(), timeoutMs);
 
-    // 旧 held 符号定格并入 prefix（不 commit、不动文档），与新符号在同一次
-    // UpdateComposition（单一 EditSession）内完成显示更新。曾用「先 CommitText 旧符号
-    // 再开新组合」——Chromium TSFTextStore（微信等）按整锁 diff 会把 commit 与紧随的
-    // 新组合合并解读成替换、WPS 同步锁失败走 SendInput 乱序，表现为后一个符号顶掉
-    // 前一个（与顶码双写 7f616c2 同根，同用聚合方案修复）。
+    // 旧 held 符号定格并入 prefix（不 commit、不动文档），与新符号在同一次 UpdateComposition
+    // 内完成显示。「先 CommitText 旧符号再开新组合」会被 Chromium TSFTextStore 按整锁 diff
+    // 误读成替换、在 WPS 同步锁失败走 SendInput 乱序，表现为后一个符号顶掉前一个。
     AbsorbHeldIntoPrefix();
 
     // 将中文符号放入 TSF 组合态（caretPos = 文本长度，光标置末；显示 = prefix + text）。
@@ -8542,12 +7765,9 @@ void CTextService::FlushHoldCompositionIfActive(BOOL nonKeyContext)
         OnHoldTimerExpired(nonKeyContext);
 }
 
-// 把当前 held 的智能符号定格并入 _pendingCommitPrefix（不 commit、不动文档）。
-// 用于「定格旧符号 + 立即更新/开启组合」场景（连续智能符号、符号后快速输入）：
-// 宿主只见组合文本更新，最终由 CommitText 一次收口（full = prefix + text），
-// 规避「commit + 立即重启组合」在 Chromium/WPS 下的替换误读。
-// 定格后的符号不可再被 press2 替换——语义上已承诺提交，与服务端状态机一致
-// （press2 只作用于最新 armed 的符号）。
+// 把当前 held 的智能符号定格并入 _pendingCommitPrefix（不 commit、不动文档），最终由
+// CommitText 一次收口，规避「commit + 立即重启组合」在 Chromium/WPS 下的替换误读。
+// 定格后的符号不可再被 press2 替换，与服务端状态机一致（press2 只作用于最新 armed 的符号）。
 void CTextService::AbsorbHeldIntoPrefix()
 {
     if (_hHoldTimer == 0)
@@ -8598,9 +7818,8 @@ void CTextService::OnHoldTimerExpired(BOOL nonKeyContext)
     g_holdTimerInstance = nullptr;
     KillTimer(NULL, timerId);
 
-    // 判据原样透传给 CommitText：WM_TIMER 回调、以及经 EndComposition 从窗口消息/COM
-    // 回调进来的 Flush 都走异步会话收口（不走 SendInput 兜底，见 CommitText 内注释）；
-    // 按键上下文里的 Flush 保持同步，以确保收口先于后续透传字符。
+    // 判据原样透传：WM_TIMER 回调与经窗口消息/COM 回调进来的 Flush 走异步会话收口；
+    // 按键上下文里的 Flush 保持同步，确保收口先于后续透传字符。
     CommitText(textToCommit, nonKeyContext);
     // 待定符号落定 = 文档里多了这个符号：seqChar 跟上（否则「hello，」之后的汉字前会被误补空格）。
     if (_pKeyEventSink != nullptr)
@@ -8653,11 +7872,9 @@ void CTextService::StartDeferredCompositionIfPending()
     // 此刻 CommitText 已结束旧组合、_pComposition 为空 → UpdateComposition 新建组合并显示余码
     //（有下划线的正常编码态）。对齐真实输入法 compositionstart@keyup。
     const BOOL opened = UpdateComposition(text, _CompositionCaretFor(text));
-    // 延迟组合是在 keyup / 定时器里开的，不经 keydown 的应答处理，没人替它上报坐标：
-    // 上屏使宿主光标前移，服务端若没收到这条，首显只能拿上屏前的陈旧坐标兜底，
-    // 候选窗留在原处，直到下一个按键才跳（Shift+字母上屏进临英实测，2026-10-09）。
-    // 组合没建成（失败 / 宿主排成异步还没落地）就不报：非按键上下文里同步取坐标会被宿主拒，
-    // 退到 GUI 光标的值会被服务端当权威坐标。异步落地的由 OnLayoutChange 去报。
+    // 延迟组合在 keyup / 定时器里开，没人替它上报坐标；不报的话候选窗首显用上屏前的陈旧坐标，
+    // 直到下一键才跳。组合没建成（失败或宿主排成异步）就不报：非按键上下文同步取坐标会被拒，
+    // 退到 GUI 光标的值会被服务端当权威坐标；异步落地的由 OnLayoutChange 去报。
     if (opened && HasActiveComposition())
     {
         SendCaretPositionUpdate();
