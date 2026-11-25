@@ -86,6 +86,9 @@ const FREQ_STRATEGIES: [&str; 3] = ["top", "step", "position"];
 /// wind-engine，只为这一个常量不值得加一条依赖边）。
 const DEFAULT_SHUANGPIN_LAYOUT: &str = "xiaohe";
 
+/// 辅助码来源（`[engine.aux_code].files`，数组）；设置页以单选呈现。
+const AUX_FILES_KEY: &str = "engine.aux_code.files";
+
 /// 码表覆盖项：相对 `engine.codetable` 的路径与形态。
 ///
 /// = PC 可覆盖集合（`wind-setting` `schema_codetable.rs` 的 `SPEC_BEHAVIOR_FIELDS` + `frequency.*` +
@@ -236,6 +239,30 @@ impl MobileCore {
                 overridden: get_path(&ov, key).is_some(),
                 options: Vec::new(),
             });
+            // 辅助码来源：手机上以码表文件（小鹤 / 自然码 / 首右…）为主，笔画等码表方案为辅。
+            // 值是 `files` 的第一项；写入时整组替换为单元素数组（override 层数组整体替换）。
+            // 只有一个可选来源时不给下拉（没得选）。
+            let opts = mgr.aux_code_source_options(schema_id);
+            let options: Vec<String> = opts
+                .files
+                .iter()
+                .map(|(rel, _)| rel.clone())
+                .chain(opts.schemas.iter().map(|(id, _)| {
+                    format!("{}{id}", wind_config::schema::AUX_SCHEMA_SOURCE_PREFIX)
+                }))
+                .collect();
+            let first = |s: &Schema| s.engine.aux_code.files.first().cloned().unwrap_or_default();
+            if options.len() > 1 {
+                items.push(SchemaSetting {
+                    key: AUX_FILES_KEY.to_string(),
+                    group: SchemaSettingGroup::AuxCode,
+                    kind: SchemaSettingKind::Choice,
+                    value: first(&merged),
+                    default_value: first(&base),
+                    overridden: get_path(&ov, AUX_FILES_KEY).is_some(),
+                    options,
+                });
+            }
         }
 
         Ok(SchemaSettings {
@@ -378,7 +405,10 @@ fn parse_value(item: &SchemaSetting, raw: &str) -> Result<Value, String> {
             .options
             .iter()
             .any(|o| o == raw)
-            .then(|| Value::String(raw.to_string()))
+            .then(|| match item.key.as_str() {
+                AUX_FILES_KEY => Value::Array(vec![Value::String(raw.to_string())]),
+                _ => Value::String(raw.to_string()),
+            })
             .ok_or_else(bad),
     }
 }
@@ -659,6 +689,45 @@ mod core_tests {
             "{:?}",
             py.items
         );
+        let _ = std::fs::remove_dir_all(&r);
+    }
+
+    /// 辅助码来源可选：双拼默认小鹤，换成自然码写进覆盖层且整组替换；选回默认即删键。
+    #[test]
+    fn aux_source_choice_roundtrip() {
+        if !has_data() {
+            return;
+        }
+        let r = root("auxsrc");
+        let m = core_at(&r);
+        let s = m.schema_settings("shuangpin").unwrap();
+        let src = item(&s, AUX_FILES_KEY);
+        assert_eq!(src.kind, SchemaSettingKind::Choice);
+        assert_eq!(src.value, "aux_code/flypy_full.txt");
+        assert!(
+            src.options.iter().any(|o| o == "aux_code/ZRM-wanxiang.txt"),
+            "{:?}",
+            src.options
+        );
+        assert!(
+            m.set_schema_setting("shuangpin", AUX_FILES_KEY, Some("aux_code/nope.txt"))
+                .is_err()
+        );
+        m.set_schema_setting(
+            "shuangpin",
+            AUX_FILES_KEY,
+            Some("aux_code/ZRM-wanxiang.txt"),
+        )
+        .unwrap();
+        let s = m.schema_settings("shuangpin").unwrap();
+        let src = item(&s, AUX_FILES_KEY);
+        assert_eq!(
+            (src.value.as_str(), src.overridden),
+            ("aux_code/ZRM-wanxiang.txt", true)
+        );
+        m.set_schema_setting("shuangpin", AUX_FILES_KEY, Some("aux_code/flypy_full.txt"))
+            .unwrap();
+        assert!(!item(&m.schema_settings("shuangpin").unwrap(), AUX_FILES_KEY).overridden);
         let _ = std::fs::remove_dir_all(&r);
     }
 
