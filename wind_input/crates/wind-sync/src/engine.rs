@@ -322,6 +322,14 @@ fn run(
                 check_own_chain(&me, state, &m)?;
                 let top = m.files.values().map(|e| e.lamport).max().unwrap_or(0);
                 lamport = lamport.max(m.lamport).max(top);
+                // 刚认领旧设备号（代数已对齐）：状态库里没有的路径，以本机清单里的条目当作远端变化参与裁决。
+                if m.gen_ == state.gen_ {
+                    let mut own = m;
+                    own.files.retain(|p, _| !state.files.contains_key(p));
+                    if !own.files.is_empty() {
+                        remotes.push(own);
+                    }
+                }
             }
             Err(e) => rep.warnings.push(format!("本设备清单 {g} 无法读取: {e}")),
         }

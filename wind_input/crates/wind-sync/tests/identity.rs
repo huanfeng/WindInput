@@ -260,3 +260,26 @@ fn join_lifts_lamport_above_group_entries() {
     let max = c.state.files.values().map(|e| e.lamport).max().unwrap();
     assert!(c.state.lamport >= max);
 }
+
+#[test]
+fn claim_restores_data_only_held_by_claimed_device() {
+    let b = MemBackend::new();
+    let dek = remote::init_remote(&b, "pw", KdfParams::FAST_TEST).unwrap();
+    let mut a = Dev::new("a", "a", &dek);
+    a.local.set("config.toml", "a=1");
+    a.local.set("data/pinyin/user.dict.yaml", "词\t1");
+    a.sync(&b);
+    let mut n = Dev::new("tmp-new", "", &dek);
+    let g = claim_device(&b, &mut n.state, &dek, "a").unwrap();
+    n.join(&b, &g, Overwrite::Theirs);
+    n.sync(&b);
+    assert_eq!(n.local.text("config.toml").as_deref(), Some("a=1"));
+    assert_eq!(
+        n.local.text("data/pinyin/user.dict.yaml").as_deref(),
+        Some("词\t1")
+    );
+    b.reset_calls();
+    let puts = b.put_count();
+    n.sync(&b);
+    assert_eq!(b.put_count(), puts, "后续同步不应再上传");
+}
