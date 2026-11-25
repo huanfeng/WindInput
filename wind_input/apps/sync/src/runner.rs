@@ -1370,7 +1370,7 @@ impl Runner {
             }
         } else {
             // 名册没给出组号（缺失或不合法）：回退的组号与他人查重；组未知就不覆盖本机设置
-            let fallback = free_group(&roster, dev, &[dev, &self.state.device], None)?;
+            let fallback = free_group(&roster, dev, &[dev], None)?;
             if fallback == group {
                 let before = self.settings_digest();
                 let ns = Namespace::new(self.cfg.class, group.clone());
@@ -1392,6 +1392,7 @@ impl Runner {
             state.retired_ids.push(wind_sync::state::RetiredId {
                 id: self.state.device.clone(),
                 nonce: self.state.last_nonce.clone(),
+                gen_: self.state.gen_,
             });
         }
         self.state = state;

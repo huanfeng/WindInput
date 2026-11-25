@@ -71,3 +71,40 @@ fn same_second_backups_get_numbered_dirs() {
         "v = 3\n"
     );
 }
+
+/// 源文件读不了：报错，不留半截目录，已有的好备份不被挤掉。
+#[cfg(unix)]
+#[test]
+fn backup_copy_failure_leaves_no_partial_dir() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path();
+    put(root, "config.toml", "a = 1\n");
+    put(root, "data/x/dicts.toml", "d = 1\n");
+    let paths: Vec<String> = ["config.toml", "data/x/dicts.toml"]
+        .map(String::from)
+        .to_vec();
+    let t0 = 1_795_564_800;
+    for i in 0..3 {
+        backup_settings(root, &paths, t0 + i * 61).unwrap();
+    }
+    let list = |base: &Path| {
+        let mut v: Vec<String> = std::fs::read_dir(base)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    };
+    let base = root.join("data/.backup/sync");
+    let before = list(&base);
+    let bad = root.join("data/x/dicts.toml");
+    std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&bad).is_ok() {
+        return; // root 下 chmod 无效
+    }
+    let r = backup_settings(root, &paths, t0 + 500);
+    std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(r.is_err());
+    assert_eq!(list(&base), before);
+}

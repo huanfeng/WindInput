@@ -52,6 +52,9 @@ impl RetryState {
 pub struct RetiredId {
     pub id: String,
     pub nonce: String,
+    /// 本机以它发布的最后一代清单（旧号清单被删到比它还小，说明是本机删了一半）。
+    #[serde(default)]
+    pub gen_: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

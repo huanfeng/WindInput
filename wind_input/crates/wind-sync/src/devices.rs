@@ -106,19 +106,26 @@ pub fn id_taken(b: &dyn Backend, id: &str) -> Result<bool, SyncError> {
     Ok(!b.list(&manifest::device_dir_prefix(id))?.is_empty())
 }
 
-/// 删除该设备目录下全部对象（清单与 info），返回删除个数。拒绝删本机由调用方保证。
+/// 删除该设备目录下全部对象（清单按代次升序，info 最后），返回删除个数。拒绝删本机由调用方保证。
 pub fn remove_device(b: &dyn Backend, dev: &str) -> Result<usize, SyncError> {
     if !manifest::valid_device_id(dev) {
         return Err(SyncError::Local(format!("非法设备号: {dev}")));
     }
-    let mut n = 0;
-    for o in b.list(&manifest::device_dir_prefix(dev))? {
-        if manifest::safe_key(&o.key) {
-            b.delete(&o.key)?;
-            n += 1;
-        }
+    // 先删清单（代次升序、最新最后），最后删 info：中途失败时剩下的仍能认出是同一个号
+    let mut objs: Vec<_> = b
+        .list(&manifest::device_dir_prefix(dev))?
+        .into_iter()
+        .filter(|o| manifest::safe_key(&o.key))
+        .map(|o| {
+            let gen_ = manifest::parse_manifest_key(&o.key).map(|(_, g)| g);
+            (gen_.is_none(), gen_.unwrap_or(0), o.key)
+        })
+        .collect();
+    objs.sort();
+    for (_, _, key) in &objs {
+        b.delete(key)?;
     }
-    Ok(n)
+    Ok(objs.len())
 }
 
 #[cfg(test)]

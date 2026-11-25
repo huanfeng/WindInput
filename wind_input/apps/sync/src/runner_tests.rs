@@ -490,3 +490,24 @@ fn claim_fallback_group_is_deduplicated() {
         "b = 1\n"
     );
 }
+
+/// 身份未确认的本机号在名册里属于别人、组号恰为回退号：回退取别的组号。
+#[test]
+fn claim_fallback_group_checks_own_roster_entry() {
+    let mem = MemBackend::new();
+    let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (mut a, rxa) = runner_with(da.path(), Box::new(MemFactory(mem.clone())), None, "c");
+    a.command(Op::SetPassphrase, &json!({"passphrase": "p"}))
+        .unwrap();
+    std::fs::write(da.path().join("user/config.toml"), "a = 1\n").unwrap();
+    round(&mut a, &rxa);
+    let dek = a.dek().unwrap();
+    mem.delete(&manifest::device_info_key("c")).unwrap();
+    put_info(&mem, &dek, "lap", "c", "linux");
+
+    let (mut b, _rxb) = runner_with(db.path(), Box::new(MemFactory(mem.clone())), None, "lap");
+    b.command(Op::SetPassphrase, &json!({"passphrase": "p"}))
+        .unwrap();
+    let rep = b.command(Op::ClaimDevice, &json!({"dev": "c"})).unwrap();
+    assert_ne!(rep["group"], "c");
+}

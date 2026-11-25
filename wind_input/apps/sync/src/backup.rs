@@ -37,20 +37,21 @@ pub fn backup_settings(userdata_dir: &Path, paths: &[String], now: u64) -> Resul
     let base = join_rel(userdata_dir, "data/.backup/sync");
     std::fs::create_dir_all(&base)
         .map_err(|e| format!("创建备份目录 {} 失败: {e}", base.display()))?;
-    let dir = new_dir(&base, &stamp(now))?;
-    for rel in paths.iter().filter(|p| kind(p) == Kind::Setting) {
-        let dst = join_rel(&dir, rel);
-        if let Some(parent) = dst.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("创建备份目录 {} 失败: {e}", parent.display()))?;
-        }
-        std::fs::copy(join_rel(userdata_dir, rel), &dst)
-            .map_err(|e| format!("备份 {rel} 失败: {e}"))?;
+    // 先写进同级临时目录再改名：中途失败或崩溃都不会留下半截的正式备份
+    let (dir, tmp) = new_dir(&base, &stamp(now))?;
+    let done = copy_settings(userdata_dir, paths, &tmp)
+        .and_then(|()| std::fs::rename(&tmp, &dir).map_err(|e| format!("备份目录改名失败: {e}")));
+    if let Err(e) = done {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(e);
     }
     let mut old: Vec<PathBuf> = std::fs::read_dir(&base)
         .map_err(|e| format!("读取备份目录失败: {e}"))?
         .flatten()
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .filter(|e| {
+            e.file_type().is_ok_and(|t| t.is_dir())
+                && !e.file_name().to_string_lossy().starts_with('.')
+        })
         .map(|e| e.path())
         .collect();
     old.sort_by_key(|p| order_key(p));
@@ -61,19 +62,37 @@ pub fn backup_settings(userdata_dir: &Path, paths: &[String], now: u64) -> Resul
     Ok(dir)
 }
 
-/// 新建 `<时间戳>` 目录；同一秒已有则依次试 `-2`、`-3`…
-fn new_dir(base: &Path, stamp: &str) -> Result<PathBuf, String> {
+/// 复制到 `dir`；调用方在失败时删掉 `dir`。
+fn copy_settings(userdata_dir: &Path, paths: &[String], dir: &Path) -> Result<(), String> {
+    for rel in paths.iter().filter(|p| kind(p) == Kind::Setting) {
+        let dst = join_rel(dir, rel);
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("创建备份目录 {} 失败: {e}", parent.display()))?;
+        }
+        std::fs::copy(join_rel(userdata_dir, rel), &dst)
+            .map_err(|e| format!("备份 {rel} 失败: {e}"))?;
+    }
+    Ok(())
+}
+
+/// 选定 `<时间戳>` 目录名（同一秒已有则依次试 `-2`、`-3`…），新建同级临时目录 `.<名>.tmp`；返回（正式目录, 临时目录）。
+fn new_dir(base: &Path, stamp: &str) -> Result<(PathBuf, PathBuf), String> {
     for n in 1u32..1000 {
         let name = if n == 1 {
             stamp.to_string()
         } else {
             format!("{stamp}-{n}")
         };
-        let dir = base.join(name);
-        match std::fs::create_dir(&dir) {
-            Ok(()) => return Ok(dir),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(format!("创建备份目录 {} 失败: {e}", dir.display())),
+        let dir = base.join(&name);
+        if dir.exists() {
+            continue;
+        }
+        let tmp = base.join(format!(".{name}.tmp"));
+        let _ = std::fs::remove_dir_all(&tmp); // 上次崩溃留下的
+        match std::fs::create_dir(&tmp) {
+            Ok(()) => return Ok((dir, tmp)),
+            Err(e) => return Err(format!("创建备份目录 {} 失败: {e}", tmp.display())),
         }
     }
     Err("同一秒内备份过多".into())

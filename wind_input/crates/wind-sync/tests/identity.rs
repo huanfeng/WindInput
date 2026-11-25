@@ -352,3 +352,64 @@ fn retire_checks_ownership_by_nonce() {
             .is_empty()
     );
 }
+
+/// 删除键含 `fail_on` 片段时失败（可随时解除）。
+struct FailDelete {
+    inner: MemBackend,
+    fail_on: std::sync::Mutex<Option<String>>,
+}
+
+impl Backend for FailDelete {
+    fn list(
+        &self,
+        p: &str,
+    ) -> Result<Vec<wind_sync::backend::ObjMeta>, wind_sync::backend::BackendError> {
+        self.inner.list(p)
+    }
+    fn get(&self, k: &str) -> Result<Option<Vec<u8>>, wind_sync::backend::BackendError> {
+        self.inner.get(k)
+    }
+    fn put(&self, k: &str, v: &[u8]) -> Result<(), wind_sync::backend::BackendError> {
+        self.inner.put(k, v)
+    }
+    fn delete(&self, k: &str) -> Result<(), wind_sync::backend::BackendError> {
+        if let Some(f) = self.fail_on.lock().unwrap().as_deref()
+            && k.contains(f)
+        {
+            return Err(wind_sync::backend::BackendError::Transient(
+                "删除失败（桩）".into(),
+            ));
+        }
+        self.inner.delete(k)
+    }
+}
+
+/// 旧号有 manifest.9 与 manifest.10，第一轮删除失败后第二轮必须删净。
+#[test]
+fn retire_resumes_after_partial_delete() {
+    let (b, dek, mut a, _bb, _c) = three();
+    while a.state.gen_ < 10 {
+        a.local.set("config.toml", &format!("v{}", a.state.gen_));
+        a.sync(&b);
+    }
+    let old = a.state.device.clone();
+    let keys = b.keys(&manifest::device_dir_prefix(&old));
+    assert!(keys.iter().any(|k| k.ends_with("manifest.10")), "{keys:?}");
+    rename_device(&b, &mut a.state, "a2").unwrap();
+    let r = a.state.retired_ids[0].clone();
+    // 让 9 号清单之前就有残留：只保证 9 与 10 同在
+    for g in [9u64] {
+        if b.raw_get(&manifest::manifest_key(&old, g)).is_none() {
+            let raw = b.raw_get(&manifest::manifest_key(&old, 10)).unwrap();
+            b.raw_put(&manifest::manifest_key(&old, g), raw);
+        }
+    }
+    let fb = FailDelete {
+        inner: b.clone(),
+        fail_on: std::sync::Mutex::new(Some("manifest.9".into())),
+    };
+    assert!(retire_device(&fb, &dek, &r).is_err());
+    *fb.fail_on.lock().unwrap() = None;
+    assert!(retire_device(&fb, &dek, &r).unwrap());
+    assert!(b.keys(&manifest::device_dir_prefix(&old)).is_empty());
+}

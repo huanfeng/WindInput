@@ -187,6 +187,7 @@ pub fn rename_device(
     state.retired_ids.push(RetiredId {
         id: old,
         nonce: state.last_nonce.clone(),
+        gen_: state.gen_,
     });
     state.gen_ = 0;
     state.last_nonce.clear();
@@ -194,7 +195,8 @@ pub fn rename_device(
     Ok(())
 }
 
-/// 删除改号前的旧号目录。旧号最新清单的 nonce 与记录不符（号已被别处接着用）或解不开时不删，返回 false。
+/// 删除改号前的旧号目录。旧号最新清单代次不小于记录、而 nonce 不符（号已被别处接着用）或解不开时不删，返回 false；
+/// 最新代次小于记录说明是上次删了一半的本机残留，继续删。
 pub fn retire_device(b: &dyn Backend, dek: &Dek, r: &RetiredId) -> Result<bool, SyncError> {
     let latest = b
         .list(&manifest::device_dir_prefix(&r.id))?
@@ -203,6 +205,10 @@ pub fn retire_device(b: &dyn Backend, dek: &Dek, r: &RetiredId) -> Result<bool, 
         .filter(|(d, _)| *d == r.id)
         .map(|(_, g)| g)
         .max();
+    if latest.map_or(r.gen_ > 0, |g| g < r.gen_) {
+        devices::remove_device(b, &r.id)?;
+        return Ok(true);
+    }
     let nonce = match latest {
         None => String::new(),
         Some(g) => match b.get(&manifest::manifest_key(&r.id, g))? {
