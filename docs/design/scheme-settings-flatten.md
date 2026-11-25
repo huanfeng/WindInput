@@ -216,11 +216,12 @@ RPC 一侧经内部方法 `schema.aliasGet` / `schema.aliasSet` 转到宿主（`
 
 ## 9 合入前待办
 
-- **Android**（WindInputAndroid，另有会话在改，本分支不动）：
-  - 设置清单里的 `schema.pinyin.fuzzy.*` 改为 `input.fuzzy.*`——快照里的 `schema.pinyin` 已不含 `fuzzy`；
-  - 主页面的 `schema.*` 键现在指当前方案（别名），文案要说明；
-  - 缺按方案的拼音详情页（全拼 / 双拼各一份），可走 `schema.getSettings` / `schema.setSettings` 同口径；
-  - `wind-mobile/src/schema_settings.rs` 主仓有并发改动，合入时再对一遍。
+- **Android**：已跟进（WindInputAndroid `feat/t9-pinyin`，2026-11-25）——
+  - 模糊音键改为 `input.fuzzy.*`；
+  - 全部方案设置项按方案存：`wind-mobile/src/scheme_form.rs`（`scheme_form` / `scheme_form_apply`，
+    与 `schema.getSettings` / `schema.setSettings` 同口径），设置页「方案」改为一个列表、每个方案一页按组分子页；
+    全局设置页不再列 `schema.*` 方案项（只剩全局的模糊音）；
+  - 移动端另加：`role = "aux"` 的方案（笔画）装了默认不启用（`config_api::set_default_off_schemas`）。
 - **同步**：main 的 `wind-sync/src/scope.rs` 不含 `schema_overrides/`，方案设置不会被同步。
   `feat/sync-groups` 已把它归入 `Kind::Setting`；发版前要么那条线先合，要么在这里补上。
 - **备份**：已含 `config.toml` 与 `schema_overrides/`，旧备份还原后加载时迁移，无需改动。
