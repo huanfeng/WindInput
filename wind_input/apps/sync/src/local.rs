@@ -28,8 +28,11 @@ pub type Echo = Arc<Mutex<HashMap<String, String>>>;
 
 pub const TMP_SUFFIX: &str = ".wind-sync.tmp";
 
-/// 扩展文件被替换 / 删除时先改名让路的旧文件后缀（点开头，不进同步范围）。
+/// Windows 上替换扩展文件时先改名让路的旧文件后缀（点开头，不进同步范围）；目标缺失时会被还原。
 pub const OLD_SUFFIX: &str = ".wind-sync.old";
+
+/// 删除扩展文件时改名让路的后缀：永不还原，下次清理时删掉。
+pub const DEL_SUFFIX: &str = ".wind-sync.del";
 
 /// 可重试错误的前缀：本批没有写任何东西，稍后重跑一轮即可（不计入失败退避）。
 pub const RETRY_TAG: &str = "[稍后重试]";
@@ -245,7 +248,8 @@ impl FsLocal {
         v.into_iter().map(|(_, p)| p).collect()
     }
 
-    fn write_atomic(&self, rel: &str, bytes: &[u8]) -> io::Result<()> {
+    /// `exec`：落位前给临时文件加上可执行位（Unix）。覆盖时原文件的权限也在落位前拷过来。
+    fn write_atomic(&self, rel: &str, bytes: &[u8], exec: bool) -> io::Result<()> {
         let path = self.abs(rel);
         let dir = path.parent().ok_or_else(|| io::Error::other("无父目录"))?;
         std::fs::create_dir_all(dir)?;
@@ -257,9 +261,15 @@ impl FsLocal {
                 f.write_all(bytes)?;
                 f.sync_all()
             })
+            .and_then(|()| copy_mode(&path, &tmp, exec))
             .and_then(|()| {
-                // 运行中的扩展 exe / DLL 在 Windows 上不能被覆盖或删除，但可以改名：先让路再落位。
-                let aside = self.move_aside(rel);
+                // 运行中的扩展 exe / DLL 在 Windows 上不能被覆盖，但可以改名：先让路再落位。
+                // Unix 上 rename 本身就能原子替换，不让路，免得崩溃时只剩 .old。
+                let aside = if cfg!(windows) {
+                    self.move_aside(rel)
+                } else {
+                    None
+                };
                 let r = std::fs::rename(&tmp, &path);
                 if r.is_err()
                     && let Some(a) = aside
@@ -278,7 +288,7 @@ impl FsLocal {
         if is_extension_file(rel) {
             return match std::fs::rename(
                 self.abs(rel),
-                crate::fsutil::tmp_sibling(&self.abs(rel), OLD_SUFFIX),
+                crate::fsutil::tmp_sibling(&self.abs(rel), DEL_SUFFIX),
             ) {
                 Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
                 _ => Ok(()),
@@ -300,18 +310,44 @@ impl FsLocal {
         std::fs::rename(&path, &old).ok().map(|()| old)
     }
 
-    /// 清理 `extensions/` 下让路留下的旧文件；仍被占用的删不掉，留待下次。
-    fn sweep_old(&self) {
+    /// 整理 `extensions/` 下的让路文件：`.del` 删掉；`.old` 的目标缺失（两次改名之间崩溃、
+    /// 落位与还原都失败）则把最新的一个改回原名，目标在则删掉。仍被占用的删不掉，留待下次。
+    fn sweep_aside(&self) {
         fn walk(dir: &Path) {
             let Ok(rd) = std::fs::read_dir(dir) else {
                 return;
             };
+            // 原文件名 → [(修改时间, 让路文件)]
+            let mut olds: HashMap<String, Vec<(std::time::SystemTime, PathBuf)>> = HashMap::new();
             for e in rd.flatten() {
                 let Ok(ft) = e.file_type() else { continue };
+                let name = e.file_name().to_string_lossy().into_owned();
                 if ft.is_dir() {
                     walk(&e.path());
-                } else if e.file_name().to_string_lossy().ends_with(OLD_SUFFIX) {
+                } else if aside_target(&name, DEL_SUFFIX).is_some() {
                     let _ = std::fs::remove_file(e.path());
+                } else if let Some(orig) = aside_target(&name, OLD_SUFFIX) {
+                    let t = e
+                        .metadata()
+                        .and_then(|m| m.modified())
+                        .unwrap_or(std::time::UNIX_EPOCH);
+                    olds.entry(orig.to_string())
+                        .or_default()
+                        .push((t, e.path()));
+                }
+            }
+            for (orig, mut v) in olds {
+                let target = dir.join(&orig);
+                v.sort_by(|a, b| b.0.cmp(&a.0));
+                if std::fs::symlink_metadata(&target).is_err() {
+                    let (_, newest) = v.remove(0);
+                    match std::fs::rename(&newest, &target) {
+                        Ok(()) => log!("还原让路的扩展文件 {}", target.display()),
+                        Err(e) => log!("还原 {} 失败: {e}", target.display()),
+                    }
+                }
+                for (_, p) in v {
+                    let _ = std::fs::remove_file(p);
                 }
             }
         }
@@ -349,16 +385,17 @@ impl FsLocal {
     }
 
     /// 运行中的扩展 exe 在 Windows 上无法覆盖：涉及扩展文件的批次先让 core 暂停它们，
-    /// 写完（无论成败）再恢复。
-    fn apply(
+    /// 写完（无论成败）再恢复。写入与删除在同一批里，一轮只暂停 / 恢复一次。
+    fn apply_batch(
         &mut self,
         writes: &[(String, Vec<u8>)],
+        exec: &[String],
         deletes: &[String],
     ) -> Result<(), LocalError> {
-        self.sweep_old();
+        self.sweep_aside();
         let ids = Self::touched_extensions(writes, deletes);
         if ids.is_empty() {
-            return self.apply_inner(writes, deletes);
+            return self.apply_inner(writes, exec, deletes);
         }
         let params = json!({ "ids": ids });
         if let Err(e) = self.req("extensions.suspend", params.clone()) {
@@ -368,23 +405,28 @@ impl FsLocal {
             }
             return Err(LocalError(format!("核心拒绝暂停扩展: {e}")));
         }
-        let r = self.apply_inner(writes, deletes);
+        let r = self.apply_inner(writes, exec, deletes);
         let resumed = self
             .req("extensions.resume", params.clone())
             .or_else(|_| self.req("extensions.resume", params));
         if let Err(e) = resumed {
             log!("extensions.resume 失败: {e}");
         }
-        self.sweep_old();
+        self.sweep_aside();
         r
     }
 
     fn apply_inner(
         &mut self,
         writes: &[(String, Vec<u8>)],
+        exec: &[String],
         deletes: &[String],
     ) -> Result<(), LocalError> {
-        let all = writes.iter().map(|(p, _)| p).chain(deletes.iter());
+        let all = writes
+            .iter()
+            .map(|(p, _)| p)
+            .chain(exec.iter())
+            .chain(deletes.iter());
         if let Some(p) = all.into_iter().find(|p| !safe_rel(p)) {
             return Err(LocalError(format!("拒绝写入不安全的路径: {p}")));
         }
@@ -470,7 +512,7 @@ impl FsLocal {
                 failure = Some(LocalError("同步已取消".into()));
                 break;
             }
-            match self.write_atomic(p, bytes) {
+            match self.write_atomic(p, bytes, exec.contains(p)) {
                 Ok(()) => {
                     lock(&self.echo).insert(p.clone(), content_hash(bytes));
                     reloads.note(p);
@@ -557,6 +599,8 @@ impl FsLocal {
 
 impl LocalStore for FsLocal {
     fn list(&self) -> Result<Vec<String>, LocalError> {
+        // 先还原崩溃留下的 .old：否则目标缺失会被判成本地删除并推给全组
+        self.sweep_aside();
         let mut v: Vec<String> = self
             .all_files()
             .into_iter()
@@ -584,11 +628,31 @@ impl LocalStore for FsLocal {
     }
 
     fn write_batch(&mut self, files: &[(String, Vec<u8>)]) -> Result<(), LocalError> {
-        self.apply(files, &[])
+        self.apply_batch(files, &[], &[])
     }
 
     fn delete(&mut self, paths: &[String]) -> Result<(), LocalError> {
-        self.apply(&[], paths)
+        self.apply_batch(&[], &[], paths)
+    }
+
+    fn apply(
+        &mut self,
+        writes: &[(String, Vec<u8>)],
+        exec: &[String],
+        deletes: &[String],
+    ) -> Result<(), LocalError> {
+        self.apply_batch(writes, exec, deletes)
+    }
+
+    fn size(&self, path: &str) -> Result<Option<u64>, LocalError> {
+        if !safe_rel(path) {
+            return Err(LocalError(format!("拒绝读取不安全的路径: {path}")));
+        }
+        match std::fs::metadata(self.abs(path)) {
+            Ok(m) => Ok(m.is_file().then_some(m.len())),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(LocalError(format!("读取 {path} 大小失败: {e}"))),
+        }
     }
 
     #[cfg(unix)]
@@ -619,6 +683,38 @@ impl LocalStore for FsLocal {
         }
         Ok(())
     }
+}
+
+/// 让路文件名 `.<原名>.<pid>-<12 位十六进制><suffix>`（见 `fsutil::tmp_sibling`）对应的原名。
+fn aside_target<'a>(name: &'a str, suffix: &str) -> Option<&'a str> {
+    let (orig, tag) = name
+        .strip_prefix('.')?
+        .strip_suffix(suffix)?
+        .rsplit_once('.')?;
+    let (pid, hex) = tag.split_once('-')?;
+    let ok = !orig.is_empty()
+        && !pid.is_empty()
+        && pid.bytes().all(|b| b.is_ascii_digit())
+        && hex.len() == 12
+        && hex.bytes().all(|b| b.is_ascii_hexdigit());
+    ok.then_some(orig)
+}
+
+/// 落位前把目标原有的权限拷给临时文件，`exec` 时再加 owner 可执行位（Unix；其余平台无事可做）。
+#[cfg(unix)]
+fn copy_mode(target: &Path, tmp: &Path, exec: bool) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = match std::fs::metadata(target) {
+        Ok(m) if m.is_file() => m.permissions().mode(),
+        _ => std::fs::metadata(tmp)?.permissions().mode(),
+    };
+    let want = if exec { mode | 0o100 } else { mode };
+    std::fs::set_permissions(tmp, std::fs::Permissions::from_mode(want))
+}
+
+#[cfg(not(unix))]
+fn copy_mode(_target: &Path, _tmp: &Path, _exec: bool) -> io::Result<()> {
+    Ok(())
 }
 
 /// `p` 相对 `root` 的路径，以 `/` 分隔；不在 `root` 下或含 `..` 等返回 None。

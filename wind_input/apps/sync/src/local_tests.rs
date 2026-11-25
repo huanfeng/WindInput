@@ -478,13 +478,17 @@ fn exec_bit_is_set_and_read_back_on_unix() {
 }
 
 fn old_files(d: &Path) -> Vec<PathBuf> {
+    aside_files(d, OLD_SUFFIX)
+}
+
+fn aside_files(d: &Path, suffix: &str) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![d.to_path_buf()];
     while let Some(p) = stack.pop() {
         for e in std::fs::read_dir(&p).into_iter().flatten().flatten() {
             if e.path().is_dir() {
                 stack.push(e.path());
-            } else if e.file_name().to_string_lossy().ends_with(OLD_SUFFIX) {
+            } else if e.file_name().to_string_lossy().ends_with(suffix) {
                 out.push(e.path());
             }
         }
@@ -493,8 +497,8 @@ fn old_files(d: &Path) -> Vec<PathBuf> {
 }
 
 #[test]
-fn replacing_an_extension_file_moves_the_old_one_aside_until_next_apply() {
-    let (d, _c, mut l, _) = rig();
+fn moved_aside_file_is_hidden_and_swept_once_replaced() {
+    let (d, _c, l, _) = rig();
     put(d.path(), "extensions/k/k.exe", "old");
     // 让路后的旧文件在清理前还在：在 resume 之后、sweep 之前看不到，所以直接验证两步
     let path = d.path().join("extensions/k/k.exe");
@@ -508,12 +512,10 @@ fn replacing_an_extension_file_moves_the_old_one_aside_until_next_apply() {
             .to_string_lossy()
             .starts_with('.')
     );
-    // 旧文件不进同步范围
-    assert!(l.list().unwrap().is_empty());
+    // 新内容已落位时旧文件不进同步范围，扫描时顺带清掉
+    std::fs::write(&path, "new").unwrap();
     assert!(l.conflict_files().is_empty());
-    // 写入落新内容；下一次 apply 清掉旧文件
-    l.write_batch(&[("extensions/k/k.exe".into(), b"new".to_vec())])
-        .unwrap();
+    assert_eq!(l.list().unwrap(), vec!["extensions/k/k.exe"]);
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
     assert!(old_files(d.path()).is_empty());
 }
@@ -537,9 +539,11 @@ fn extension_delete_renames_aside_instead_of_removing() {
     put(d.path(), "extensions/k/k.exe", "old");
     l.remove("extensions/k/k.exe").unwrap();
     assert!(!d.path().join("extensions/k/k.exe").exists());
-    assert_eq!(old_files(d.path()).len(), 1);
-    l.sweep_old();
+    assert_eq!(aside_files(d.path(), DEL_SUFFIX).len(), 1);
     assert!(old_files(d.path()).is_empty());
+    l.sweep_aside();
+    assert!(aside_files(d.path(), DEL_SUFFIX).is_empty());
+    assert!(!d.path().join("extensions/k/k.exe").exists());
 }
 
 #[test]
@@ -548,4 +552,217 @@ fn non_extension_files_are_not_moved_aside() {
     put(d.path(), "config.toml", "a");
     assert!(l.move_aside("config.toml").is_none());
     assert!(d.path().join("config.toml").exists());
+}
+
+// ───────── 终审修复：让路文件的还原、一轮一次暂停、可执行位、体积 ─────────
+
+const T0: u64 = 1_795_478_400;
+
+struct Remote {
+    b: wind_sync::MemBackend,
+    dek: wind_sync::Dek,
+    st: wind_sync::SyncState,
+}
+
+impl Remote {
+    fn new() -> Remote {
+        let b = wind_sync::MemBackend::new();
+        let dek =
+            wind_sync::remote::init_remote(&b, "pw", wind_sync::KdfParams::FAST_TEST).unwrap();
+        Remote {
+            b,
+            dek,
+            st: wind_sync::SyncState::new("a"),
+        }
+    }
+    fn round(&mut self, l: &mut FsLocal) -> wind_sync::SyncReport {
+        let ns = wind_sync::Namespace::new(wind_sync::DeviceClass::Desktop, "g");
+        let mut ctx = wind_sync::SyncCtx::new(T0, ns);
+        ctx.force = true;
+        wind_sync::sync_once(&self.b, l, &mut self.st, &self.dek, &ctx).expect("同步应成功")
+    }
+}
+
+#[test]
+fn old_aside_with_missing_target_is_restored_before_scan() {
+    let (d, _c, mut l, _) = rig();
+    let mut r = Remote::new();
+    put(d.path(), "extensions/k/k.exe", "bin");
+    r.round(&mut l);
+    // 两次改名之间崩溃：只剩 .old
+    l.move_aside("extensions/k/k.exe").unwrap();
+    assert!(!d.path().join("extensions/k/k.exe").exists());
+    let rep = r.round(&mut l);
+    assert!(rep.deleted_remote.is_empty(), "{rep:?}");
+    assert_eq!(
+        std::fs::read_to_string(d.path().join("extensions/k/k.exe")).unwrap(),
+        "bin"
+    );
+    assert!(old_files(d.path()).is_empty());
+}
+
+#[test]
+fn del_aside_is_never_restored() {
+    let (d, _c, mut l, _) = rig();
+    let mut r = Remote::new();
+    put(d.path(), "extensions/k/k.exe", "bin");
+    r.round(&mut l);
+    l.remove("extensions/k/k.exe").unwrap();
+    let rep = r.round(&mut l);
+    assert_eq!(rep.deleted_remote, vec!["extensions/k/k.exe".to_string()]);
+    assert!(!d.path().join("extensions/k/k.exe").exists());
+    assert!(aside_files(d.path(), DEL_SUFFIX).is_empty());
+}
+
+#[test]
+fn sweep_restores_newest_old_and_drops_stale_ones() {
+    let (d, _c, l, _) = rig();
+    let dir = d.path().join("extensions/k");
+    std::fs::create_dir_all(&dir).unwrap();
+    let older = crate::fsutil::tmp_sibling(&dir.join("a.exe"), OLD_SUFFIX);
+    std::fs::write(&older, "旧").unwrap();
+    let t = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+    std::fs::File::options()
+        .write(true)
+        .open(&older)
+        .unwrap()
+        .set_modified(t)
+        .unwrap();
+    let newer = crate::fsutil::tmp_sibling(&dir.join("a.exe"), OLD_SUFFIX);
+    std::fs::write(&newer, "新").unwrap();
+    // 目标在：.old 已无用
+    put(d.path(), "extensions/k/b.exe", "b");
+    let stale = crate::fsutil::tmp_sibling(&dir.join("b.exe"), OLD_SUFFIX);
+    std::fs::write(&stale, "b 旧").unwrap();
+    // 不像让路文件的隐藏文件不动
+    put(d.path(), "extensions/k/.keep.wind-sync.old", "x");
+    l.sweep_aside();
+    assert_eq!(std::fs::read_to_string(dir.join("a.exe")).unwrap(), "新");
+    assert_eq!(std::fs::read_to_string(dir.join("b.exe")).unwrap(), "b");
+    assert_eq!(old_files(d.path()), vec![dir.join(".keep.wind-sync.old")]);
+}
+
+#[test]
+fn writes_and_deletes_share_one_suspend_resume() {
+    let (d, core, mut l, _) = rig();
+    put(d.path(), "extensions/k/old.dll", "x");
+    l.apply(
+        &[("extensions/k/k.exe".into(), b"MZ".to_vec())],
+        &[],
+        &["extensions/k/old.dll".into()],
+    )
+    .unwrap();
+    let ids = json!({ "ids": ["k"] });
+    assert_eq!(
+        ext_calls(&core),
+        vec![
+            ("extensions.suspend".to_string(), ids.clone()),
+            ("extensions.resume".to_string(), ids)
+        ]
+    );
+    assert!(!d.path().join("extensions/k/old.dll").exists());
+}
+
+#[cfg(unix)]
+fn exec_seen_at_resume(core: &FakeCore, abs: PathBuf) -> Arc<Mutex<Option<u32>>> {
+    use std::os::unix::fs::PermissionsExt;
+    let seen = Arc::new(Mutex::new(None));
+    let s2 = seen.clone();
+    *core.on_call.lock().unwrap() = Some(Box::new(move |m: &str, _: &Value| {
+        if m == "extensions.resume" {
+            *s2.lock().unwrap() = std::fs::metadata(&abs).ok().map(|m| m.permissions().mode());
+        }
+    }));
+    seen
+}
+
+#[cfg(unix)]
+#[test]
+fn overwrite_keeps_exec_bit_before_resume() {
+    use std::os::unix::fs::PermissionsExt;
+    let (d, core, mut l, _) = rig();
+    let abs = d.path().join("extensions/k/run");
+    put(d.path(), "extensions/k/run", "v1");
+    std::fs::set_permissions(&abs, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let seen = exec_seen_at_resume(&core, abs.clone());
+    l.write_batch(&[("extensions/k/run".into(), b"v2".to_vec())])
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(&abs).unwrap(), "v2");
+    let mode = seen.lock().unwrap().expect("resume 时文件应已在");
+    assert_eq!(mode & 0o777, 0o755);
+}
+
+#[cfg(unix)]
+#[test]
+fn new_exec_file_has_bit_before_resume() {
+    let (d, core, mut l, _) = rig();
+    let abs = d.path().join("extensions/k/run");
+    let seen = exec_seen_at_resume(&core, abs.clone());
+    l.apply(
+        &[
+            ("extensions/k/run".into(), b"bin".to_vec()),
+            ("extensions/k/extension.toml".into(), b"x".to_vec()),
+        ],
+        &["extensions/k/run".into()],
+        &[],
+    )
+    .unwrap();
+    let mode = seen.lock().unwrap().expect("resume 时文件应已在");
+    assert_ne!(mode & 0o100, 0);
+    assert!(!l.is_exec("extensions/k/extension.toml").unwrap());
+}
+
+#[cfg(unix)]
+#[test]
+fn unix_write_does_not_move_aside() {
+    let (d, core, mut l, _) = rig();
+    put(d.path(), "extensions/k/k.exe", "old");
+    let root = d.path().to_path_buf();
+    let seen = Arc::new(Mutex::new(usize::MAX));
+    let s2 = seen.clone();
+    *core.on_call.lock().unwrap() = Some(Box::new(move |m: &str, _: &Value| {
+        if m == "extensions.resume" {
+            *s2.lock().unwrap() = old_files(&root).len();
+        }
+    }));
+    l.write_batch(&[("extensions/k/k.exe".into(), b"new".to_vec())])
+        .unwrap();
+    assert_eq!(*seen.lock().unwrap(), 0);
+}
+
+#[test]
+fn size_reports_bytes_without_reading() {
+    let (d, _c, l, _) = rig();
+    put(d.path(), "emoji/big.txt", "");
+    std::fs::File::options()
+        .write(true)
+        .open(d.path().join("emoji/big.txt"))
+        .unwrap()
+        .set_len(wind_sync::engine::MAX_FILE_BYTES + 1)
+        .unwrap();
+    assert_eq!(
+        l.size("emoji/big.txt").unwrap(),
+        Some(wind_sync::engine::MAX_FILE_BYTES + 1)
+    );
+    assert_eq!(l.size("emoji/none.txt").unwrap(), None);
+    assert!(l.size("../x").is_err());
+}
+
+#[test]
+fn oversized_local_file_is_skipped_in_a_round() {
+    let (d, _c, mut l, _) = rig();
+    let mut r = Remote::new();
+    put(d.path(), "emoji/big.txt", "");
+    std::fs::File::options()
+        .write(true)
+        .open(d.path().join("emoji/big.txt"))
+        .unwrap()
+        .set_len(wind_sync::engine::MAX_FILE_BYTES + 1)
+        .unwrap();
+    let rep = r.round(&mut l);
+    assert!(rep.uploaded.is_empty());
+    assert_eq!(
+        rep.warnings,
+        vec!["文件过大未同步：emoji/big.txt".to_string()]
+    );
 }
