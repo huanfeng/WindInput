@@ -310,7 +310,7 @@ pub struct RoundStats {
     /// 本轮产生的冲突副本数。
     pub conflicts: u32,
     pub error: Option<String>,
-    /// 本轮由 `SyncNow` 触发。
+    /// 本轮由 `SyncNow` 或大批量删除确认强制触发。
     pub forced: bool,
 }
 

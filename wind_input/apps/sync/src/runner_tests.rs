@@ -587,3 +587,47 @@ fn failed_round_still_advances_round() {
     assert!(!last.ok && last.forced, "{last:?}");
     assert!(last.error.unwrap().contains("连接被拒绝"));
 }
+
+#[test]
+fn free_retry_round_does_not_advance_round() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, rx) = runner_with(
+        d.path(),
+        Box::new(MemFactory(MemBackend::new())),
+        None,
+        "pc",
+    );
+    setup_pc(&mut r);
+    r.command(Op::SyncNow, &Value::Null).unwrap();
+    r.start_round();
+    let mut x = wait_round(&rx);
+    x.result = Ok(Err(SyncError::Local(format!("{RETRY_TAG}文件正被编辑"))));
+    r.finish_round(*x);
+    assert_eq!(r.status().round, 0);
+    assert_eq!(r.status().last_round, None);
+    round(&mut r, &rx);
+    let st = r.status();
+    assert_eq!(st.round, 1);
+    let last = st.last_round.unwrap();
+    assert!(last.ok && last.forced, "{last:?}");
+}
+
+#[test]
+fn skipped_round_does_not_advance_round() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, rx) = runner_with(
+        d.path(),
+        Box::new(MemFactory(MemBackend::new())),
+        None,
+        "pc",
+    );
+    setup_pc(&mut r);
+    r.start_round();
+    let mut x = wait_round(&rx);
+    x.result = Ok(Ok(SyncReport {
+        skipped: true,
+        ..Default::default()
+    }));
+    r.finish_round(*x);
+    assert_eq!(r.status().round, 0);
+}

@@ -638,7 +638,7 @@ impl Runner {
     /// 起工作线程跑一轮；结果经 `Input::RoundDone` 回主循环。
     fn start_round(&mut self) {
         let force = std::mem::take(&mut self.force_now);
-        self.round_forced = force;
+        self.round_forced |= force;
         let allow_mass = std::mem::take(&mut self.allow_mass_once);
         self.debounce_until = None;
         let dek = match self.dek() {
@@ -750,7 +750,7 @@ impl Runner {
                 r.conflicts.iter().filter(|c| c.copy.is_some()).count() as u32
             }),
             error,
-            forced: self.round_forced,
+            forced: std::mem::take(&mut self.round_forced),
         });
     }
 
@@ -778,7 +778,6 @@ impl Runner {
             Ok(rep) if rep.skipped => {
                 log!("处于退避等待期，本轮跳过");
                 self.periodic_at = now + interval(&self.settings);
-                self.end_round(false, None, Some("处于退避等待期".into()));
             }
             Ok(rep) => {
                 for w in &rep.warnings {
@@ -798,9 +797,11 @@ impl Runner {
                 self.end_round(true, Some(&rep), None);
             }
             Err(e) => {
-                self.on_sync_error(e, r.failures_before, now);
-                let msg = self.state.retry.last_error.clone();
-                self.end_round(false, None, msg);
+                // 稍后重试类不算一轮结束：票号等真正完成的那一轮
+                if self.on_sync_error(e, r.failures_before, now) {
+                    let msg = self.state.retry.last_error.clone();
+                    self.end_round(false, None, msg);
+                }
             }
         }
         self.save_state();
@@ -827,7 +828,8 @@ impl Runner {
         }
     }
 
-    fn on_sync_error(&mut self, e: SyncError, failures_before: u32, now: Instant) {
+    /// 返回这一轮是否真正结束（稍后重试类返回假）。
+    fn on_sync_error(&mut self, e: SyncError, failures_before: u32, now: Instant) -> bool {
         // 稍后重试类：本批什么都没写，下一轮重新扫描即可，不算失败、不退避
         if let SyncError::Local(m) = &e
             && m.starts_with(RETRY_TAG)
@@ -840,7 +842,7 @@ impl Runner {
             self.state.retry.next_at = 0;
             self.state.retry.last_error = Some(msg);
             self.periodic_at = now + self.cfg.timing.retry_delay;
-            return;
+            return false;
         }
         let msg = if e.is_mass_deletion() {
             mass_deletion_message(&e.to_string())
@@ -858,6 +860,7 @@ impl Runner {
         // 重试按退避；停止态不排期（runnable 为假）
         let backoff = Duration::from_secs(backoff_secs(self.state.retry.failures));
         self.periodic_at = now + backoff.min(interval(&self.settings));
+        true
     }
 
     fn dek(&self) -> Result<Dek, String> {
