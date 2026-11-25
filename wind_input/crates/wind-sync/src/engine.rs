@@ -12,7 +12,7 @@ use crate::manifest::{self, Entry, Manifest};
 use crate::merge::{self, Conflict};
 use crate::plan::{Action, PlanInput, decide};
 use crate::remote;
-use crate::scope::{self, Namespace, ScopeFlags, to_local};
+use crate::scope::{self, Namespace, ScopeFlags, to_local, to_remote};
 use crate::state::SyncState;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -29,21 +29,25 @@ const STAT_THRESHOLD: usize = 32;
 const ABSORBED_CAP: usize = 64;
 
 /// 把冲突副本落到一个不覆盖他人内容的名字：同名已存在且内容不同则追加 `-2`、`-3`…
+///
+/// 副本名在本机路径上拼再换回远端逻辑路径：设置的副本不再是设置，拼在 `groups/<组>/` 下会映射不回本机。
 fn unique_copy_name(
     local: &dyn LocalStore,
     taken: &BTreeSet<String>,
     path: &str,
+    ns: &Namespace,
     device: &str,
     date: &str,
     bytes: &[u8],
 ) -> Result<String, SyncError> {
+    let local_path = to_local(path, ns).unwrap_or_else(|| path.to_string());
     for n in 1u32.. {
         let tag = if n == 1 {
             date.to_string()
         } else {
             format!("{date}-{n}")
         };
-        let name = merge::conflict_copy_name(path, device, &tag);
+        let name = to_remote(&merge::conflict_copy_name(&local_path, device, &tag), ns);
         if taken.contains(&name) {
             continue;
         }
@@ -323,6 +327,8 @@ fn run(
                 let top = m.files.values().map(|e| e.lamport).max().unwrap_or(0);
                 lamport = lamport.max(m.lamport).max(top);
                 // 刚认领旧设备号（代数已对齐）：状态库里没有的路径，以本机清单里的条目当作远端变化参与裁决。
+                // 不变量：稳态下状态库包含本机清单的全部路径，只有身份操作（认领、加入组）会让它缺路径，
+                // 所以这个条件每轮都成立也无副作用。
                 if m.gen_ == state.gen_ {
                     let mut own = m;
                     own.files.retain(|p, _| !state.files.contains_key(p));
@@ -586,6 +592,7 @@ fn run(
                         local,
                         &used_copies,
                         &path,
+                        &ctx.ns,
                         &e.device,
                         &merge::date_string(ctx.now),
                         bytes,
@@ -625,6 +632,7 @@ fn run(
                 local,
                 &used_copies,
                 &path,
+                &ctx.ns,
                 &r.device,
                 &merge::date_string(ctx.now),
                 &remote_bytes,
