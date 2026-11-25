@@ -107,10 +107,7 @@ struct BandEnumData
     DWORD bestBand;
 };
 
-// Free function with explicit CALLBACK (__stdcall). The x86 (i686) build does
-// not infer the stdcall calling convention from an inline lambda, so passing a
-// lambda to EnumWindows fails to convert to WNDENUMPROC there. x64 has a single
-// calling convention and would accept the lambda, but this form builds on both.
+// 显式 CALLBACK 的自由函数：x86 下 lambda 转不成 stdcall 的 WNDENUMPROC，别改回 lambda。
 BOOL CALLBACK BandEnumProc(HWND hwnd, LPARAM lParam)
 {
     auto* data = reinterpret_cast<BandEnumData*>(lParam);
@@ -170,10 +167,8 @@ DWORD CHostWindow::GetHostBand()
         return wind::hostband::PickHostBand(fgBand, focusRootBand, 0);
 
     // Enumerate visible, non-empty top-level windows owned by this process.
-    //
-    // ⚠ 前台不是本进程时这里只是猜：SearchHost 开机预启动、界面还没显示时它的窗口不在
-    // 开始菜单那一层，据此建的窗口会被开始菜单盖住（2026-10-09 靶机开机首次）。所以建窗
-    // 后由 CTextService::RecheckHostBand 在一段输入的第一个键按前台 band 复核。
+    // 前台不是本进程时这里只是猜（SearchHost 开机预启动时窗口还不在开始菜单那一层），
+    // 建窗后由 CTextService::RecheckHostBand 在一段输入的第一个键按前台 band 复核。
     BandEnumData enumData = { GetCurrentProcessId(), _pfnGetWindowBand, 0 };
     EnumWindows(BandEnumProc, (LPARAM)&enumData);
 
@@ -183,11 +178,8 @@ DWORD CHostWindow::GetHostBand()
 LRESULT CALLBACK CHostWindow::_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     CHostWindow* self = reinterpret_cast<CHostWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-    // Never take focus on click. WS_EX_NOACTIVATE blocks foreground activation but a
-    // click can still pull keyboard focus off the host's edit control (host then fires
-    // KILLFOCUS → composition terminates → candidates vanish). MA_NOACTIVATE tells the
-    // host "don't activate me, and don't eat the click" so WM_LBUTTONDOWN still arrives.
-    // Handle this even before resolving `self` so it applies during window creation too.
+    // 点击不夺焦：WS_EX_NOACTIVATE 挡不住点击把焦点从宿主编辑框拉走（随即 KILLFOCUS 终止组合）；
+    // MA_NOACTIVATE 不激活也不吃掉点击。放在解析 `self` 之前，建窗期间同样生效。
     if (msg == WM_MOUSEACTIVATE)
         return MA_NOACTIVATE;
 
@@ -238,12 +230,8 @@ void CHostWindow::_UpdateHitRects(const FrameSnapshot& frame)
     _frameY = header->y;
     // 表已在拷帧时按帧头拷贝校验、截到上限（HostFrameSnapshot.h）。
     _hitRects = frame.rects;
-    // Sync the hover-dedup baseline to what Go actually highlighted in THIS frame. When a
-    // content change (typing) clears the highlight without any mouse event, Go renders with
-    // renderedHoverIndex = -1; adopting it here means a later real move back onto the same
-    // candidate index differs from the baseline and re-sends hover (re-highlighting). Without
-    // this, _lastHoverIndex kept the pre-typing index and deduped the move away. Held under
-    // _rectLock because the UI thread (_OnMouseMove/_OnMouseLeave) also touches it.
+    // 悬停去重基线同步为本帧实际高亮的项：打字清掉高亮时，鼠标移回同一项才会重新发 hover。
+    // 持 _rectLock，因为 UI 线程（_OnMouseMove/_OnMouseLeave）也写它。
     _lastHoverIndex = header->renderedHoverIndex;
     LeaveCriticalSection(&_rectLock);
 }
@@ -294,7 +282,7 @@ void CHostWindow::_OnMouseUp(int clientX, int clientY)
     _pressedHit = INT_MIN;
     if (GetCapture() == _hwnd)
         ReleaseCapture(); // posts WM_CAPTURECHANGED; _pressedHit is already cleared
-    // Hidden while held (commit / Esc / focus loss came from the keyboard or Go): the hit
+    // Hidden while held (commit / Esc / focus loss came from the keyboard or the service): the hit
     // rects are stale, the release must not select whatever sat under the cursor.
     if (!IsWindowVisible(_hwnd))
         return;
@@ -318,12 +306,8 @@ void CHostWindow::_OnMouseMove(int clientX, int clientY)
             _trackingMouse = TRUE;
     }
 
-    // Filter synthetic moves: when the candidate window repaints or follows the caret under
-    // a physically-stationary cursor, Windows still posts WM_MOUSEMOVE (with new client
-    // coords because the window moved). Compare the SCREEN cursor position — it only changes
-    // on real movement — so typing with the cursor parked over a candidate doesn't flicker
-    // the highlight/tooltip. Robust regardless of window/content changes (unlike comparing
-    // client coords or frame geometry, which break when re-showing identical candidates).
+    // 过滤合成的 WM_MOUSEMOVE：窗口重绘或跟随光标移动时鼠标没动也会收到。比屏幕坐标
+    // （只随真实移动变化），客户区坐标或帧几何在窗口移动、重显同样候选时都不可靠。
     POINT pt = { clientX, clientY };
     ClientToScreen(_hwnd, &pt);
     if (_hasScreenPos && pt.x == _lastScreenX && pt.y == _lastScreenY)
@@ -346,12 +330,8 @@ void CHostWindow::_OnMouseMove(int clientX, int clientY)
     else
         hoverIndex = -1;         // INT_MIN: nothing
 
-    // Dedup against what's actually on screen. _lastHoverIndex is updated by BOTH this UI
-    // thread and the render thread (_UpdateHitRects syncs it to the frame's
-    // renderedHoverIndex). Guard the compare-and-set with _rectLock so a concurrent render
-    // sync can't slip between our read and write and make us dedup against a stale value
-    // (which would skip re-highlighting). _rectLock is recursive, so _HitTest above
-    // re-entering it is safe.
+    // _lastHoverIndex 由 UI 线程与渲染线程（_UpdateHitRects）共同写，比较并设置要持 _rectLock，
+    // 否则会按陈旧值去重而漏掉重新高亮。_rectLock 可重入，上面 _HitTest 再进无妨。
     BOOL changed = TRUE;
     if (_rectLockInit) EnterCriticalSection(&_rectLock);
     if (hoverIndex == _lastHoverIndex)
@@ -378,7 +358,7 @@ void CHostWindow::_OnMouseLeave()
     }
     if (_rectLockInit) LeaveCriticalSection(&_rectLock);
     if (doSend)
-        _SendHover(-1); // tell Go the cursor left the candidate area (hide tooltip / clear highlight)
+        _SendHover(-1); // tell the service the cursor left the candidate area (hide tooltip / clear highlight)
 }
 
 void CHostWindow::_OnMouseWheel(int delta)
@@ -386,8 +366,8 @@ void CHostWindow::_OnMouseWheel(int delta)
     if (delta == 0 || _pIPCClient == nullptr)
         return;
 
-    // Forward the raw wheel delta to Go as a distinct event — do NOT page here. The
-    // standard (local) candidate window has no wheel paging, so Go owns the decision
+    // Forward the raw wheel delta to the service as a distinct event — do NOT page here. The
+    // standard (local) candidate window has no wheel paging, so the service owns the decision
     // (default: no-op) and any unified scroll behavior is added there behind config.
     int32_t raw = (int32_t)delta;
     _pIPCClient->SendAsync(CMD_CANDIDATE_SCROLL, &raw, sizeof(raw));
@@ -399,7 +379,7 @@ void CHostWindow::_SendHover(int index)
         return;
 
     // Compute the tooltip screen anchor from the hovered candidate's panel-local rect
-    // + this frame's screen origin, so Go can position the tooltip without knowing the
+    // + this frame's screen origin, so the service can position the tooltip without knowing the
     // host window's geometry. For index<0 (left area) anchors are 0 (unused).
     int32_t payload[4] = { (int32_t)index, 0, 0, 0 };
     if (index >= 0 && _rectLockInit)
@@ -451,13 +431,8 @@ BOOL CHostWindow::_CreateBandWindow(DWORD band)
     DWORD exStyle = WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
     DWORD style = WS_POPUP;
 
-    // For WS_POPUP windows, the hWndParent parameter sets the "owner" window.
-    // Owned windows always appear above their owner in z-order.
-    //
-    // If an owner override was supplied (tooltip/status → candidate hwnd), use it so the
-    // window sits above the candidate band window and never gets occluded by it. Otherwise
-    // (candidate) use the foreground window from the same process so the candidate appears
-    // above the host's search panel (especially at band=13).
+    // WS_POPUP 的 hWndParent 即 owner，被拥有的窗口总在 owner 之上。提示/状态窗传入候选窗作 owner，
+    // 免被候选窗遮挡；候选窗用本进程的前台窗口作 owner，才能压在宿主搜索面板之上（band=13）。
     HWND owner = NULL;
     if (_ownerOverride != NULL)
     {
@@ -495,10 +470,8 @@ BOOL CHostWindow::_CreateBandWindow(DWORD band)
         band
     );
 
-    // CreateWindowInBand rejects band=1 (ZBID_DESKTOP) with ERROR_INVALID_PARAMETER (87) in
-    // restricted UWP/AppContainer hosts — notably the Microsoft Store (WinStore.App.exe).
-    // Retry at band=0 (ZBID_DEFAULT, the process's normal band): these hosts aren't in a high
-    // band anyway, so WS_EX_TOPMOST + the foreground owner keep the candidate above content.
+    // 受限的 UWP/AppContainer 宿主（如 WinStore.App.exe）对 band=1 回 ERROR_INVALID_PARAMETER，
+    // 改用 band=0 重试；它们本就不在高 band，TOPMOST + 前台 owner 足以压住内容。
     if (!_hwnd && band != 0)
     {
         DWORD err = GetLastError();
@@ -555,21 +528,15 @@ BOOL CHostWindow::Initialize(const wchar_t* shmName, const wchar_t* eventName, D
     _windowKind = kind;
     _instanceId = instanceId;
     _ownerOverride = ownerOverride;
-    _pIPCClient = ipcClient; // weak ref for routing mouse events back to Go (candidate only)
+    _pIPCClient = ipcClient; // weak ref for routing mouse events back to the service (candidate only)
 
     // Resolve undocumented APIs
     if (!_ResolveAPIs())
         return FALSE;
 
-    // Query host Band for window PLACEMENT only — the decision to host-render is
-    // owned by the Go service (whitelist). We get here because Go set hostRender=1
-    // and sent setup, so we MUST honor it and create the window even for normal
-    // apps (band<=1). For high-band hosts (taskbar search=13, Start Menu=6) we place
-    // at that band to escape occlusion; otherwise we fall back to band 1 (desktop) —
-    // combined with WS_EX_TOPMOST + owner window the candidate still renders above
-    // the host's content. (Previously this aborted at band<=1, which left whitelisted
-    // normal apps with no host window while Go still suppressed its own window →
-    // candidates invisible.)
+    // 查 band 只为决定放在哪一层；要不要宿主内渲染由服务端（白名单）决定，走到这里就必须建窗，
+    // 普通应用（band<=1）也不例外，否则服务端已压掉自己的窗口、候选就不可见了。高 band 宿主
+    // （任务栏搜索 13、开始菜单 6）放在同层，其余退到 band 1，靠 TOPMOST + owner 压住内容。
     DWORD hostBand = GetHostBand();
     DWORD targetBand = (hostBand > 1) ? hostBand : 1;
     _probedHostBand = hostBand;
@@ -777,11 +744,8 @@ void CHostWindow::_RenderLoop()
             if (header->sequence == _lastSequence)
                 continue;
 
-            // Frame targeting: multiple TextService instances in this process share the one
-            // global SHM and each was signaled. Render only if the frame is visible AND aimed
-            // at THIS instance; otherwise hide. This is what makes exactly one band window show
-            // while sibling instances (e.g. the other Notepad window) clear — without it, the
-            // shared auto-reset-event design left stale duplicate layers that never hid.
+            // 本进程多个 TextService 实例共享一块 SHM 且都被唤醒：只有帧可见且指向本实例才画，
+            // 否则隐藏，保证同时只有一个 band 窗口显示。
             BOOL visible = (header->flags & SHARED_FLAG_VISIBLE) != 0;
             BOOL forMe = (header->targetInstanceId == _instanceId);
             if (!visible || !forMe)

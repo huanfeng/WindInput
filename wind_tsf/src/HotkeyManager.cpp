@@ -52,11 +52,8 @@ void CHotkeyManager::UpdateHotkeys(const std::vector<uint32_t>& keyDownHotkeys,
     }
 
     // Add KeyUp hotkeys (for toggle mode keys like Shift, Ctrl, CapsLock)
-    //
-    // ⚠ 必须剥 policy 位：查询侧（IsKeyUpHotkey）传的是 CalcKeyHash 算出的裸 hash。
-    // keyup 侧原本不剥，是因为当时所有 keyup 登记都不带 policy 位；`keys.session_actions`
-    // 的绑定带 SESSION 位，不剥就会静默查不到——现象是「CapsLock 绑定配了没反应」，
-    // 而这类失配没有任何报错。
+    // 必须剥 policy 位：查询侧（IsKeyUpHotkey）传的是裸 hash，`keys.session_actions` 的绑定
+    // 带 SESSION 位，不剥会静默查不到。
     for (uint32_t hash : keyUpHotkeys)
     {
         uint32_t rawHash = hash & ~HOTKEY_POLICY_MASK;
@@ -146,7 +143,7 @@ HotkeyType CHotkeyManager::ClassifyInputKey(WPARAM vk, uint32_t modifiers)
     {
         // Shift+number produces punctuation characters (!, @, #, $, etc.)
         // Classify as Punctuation so OnTestKeyDown always eats them in Chinese mode,
-        // allowing Go service to convert to Chinese punctuation.
+        // allowing the service to convert to Chinese punctuation.
         if (modifiers & KEYMOD_SHIFT)
         {
             return HotkeyType::Punctuation;
@@ -154,11 +151,8 @@ HotkeyType CHotkeyManager::ClassifyInputKey(WPARAM vk, uint32_t modifiers)
         return HotkeyType::Number;
     }
 
-    // Numpad 0-9: classify as Number so they reach Go when there's an active
-    // input session (e.g., quick input mode for number/amount/date conversion).
-    // Without input session, Number type passes through — same as before.
-    // Numpad operators (+,-,*,/,.) are also classified as Number so they can
-    // participate in quick input calculations, but only during active sessions.
+    // 小键盘数字与运算符（+,-,*,/,.）归为 Number：有输入会话时送服务端（如快捷输入的计算），
+    // 无会话时照常透传。
     if ((vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9) ||
         vk == VK_MULTIPLY || vk == VK_ADD || vk == VK_SUBTRACT ||
         vk == VK_DECIMAL || vk == VK_DIVIDE)
@@ -252,11 +246,8 @@ uint32_t CHotkeyManager::CalcKeyHash(uint32_t modifiers, uint32_t keyCode)
 }
 
 // Static method: Get current modifier state from system
-// Uses both GetAsyncKeyState (hardware state) and GetKeyState (message queue state)
-// to avoid missing modifiers from simulated input (e.g. AHK SendInput).
-// GetAsyncKeyState can lag behind injected key events, while GetKeyState is
-// synchronized with the thread's message queue and reflects the correct state
-// when processing a queued keystroke.
+// GetAsyncKeyState 与 GetKeyState 并用：前者可能落后于注入的按键（如 AHK SendInput），
+// 后者与线程消息队列同步，处理排队按键时才准。
 uint32_t CHotkeyManager::GetCurrentModifiers()
 {
     uint32_t modifiers = 0;
@@ -279,11 +270,8 @@ uint32_t CHotkeyManager::GetCurrentModifiers()
     if ((GetAsyncKeyState(VK_RCONTROL) & 0x8000) || (GetKeyState(VK_RCONTROL) & 0x8000))
         modifiers |= KEYMOD_RCTRL;
 
-    // 注意：不并入 CapsLock 锁定态。CapsLock 不是组合修饰键——把它混进 modifiers 会让
-    // 大写锁定期间所有热键哈希与白名单失配（服务端编译的热键 hash 不含此位），表现为
-    // CapsLock 开着时 Shift 中英切换、Ctrl+Shift+E 切方案等全部失效（被当普通键透传）。
-    // 「CapsLock 配置为切换键」的匹配用显式 CalcKeyHash(KEYMOD_CAPSLOCK, VK_CAPITAL)
-    // （OnKeyUp 的 VK_CAPITAL 分支），与服务端 hotkey.rs 编译约定对应，不经本函数。
+    // 不并入 CapsLock 锁定态：服务端编译的热键 hash 不含此位，混进来会让大写锁定期间所有热键失配。
+    // 「CapsLock 作切换键」走显式 CalcKeyHash(KEYMOD_CAPSLOCK, VK_CAPITAL)（OnKeyUp 的 VK_CAPITAL 分支）。
 
     return modifiers;
 }

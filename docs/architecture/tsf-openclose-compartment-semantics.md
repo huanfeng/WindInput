@@ -96,6 +96,12 @@ not foreground 早退 → activate settle 窗 → CapsLock 抑制窗 → Ctrl+Sp
 | 用 `GetAsyncKeyState(VK_CONTROL)` 作兜底 | 与 gvim 的 `Ctrl+[`（代替 ESC 退出插入模式）无法区分 |
 | CONVERSION 联动抑制窗 | 基于错误假设——实测那些 `changed: 0` 间隔 2233ms，是用户按键而非联动（联动实测 119~490ms） |
 
+> 例外：系统 Ctrl+Space 热键实质失效的机器上，msctf 不消费该键、`OnKeyDown` 会被调用，而
+> compartment 永远不翻。所以 `OnKeyDown` 保留一条只凭 `_ctrlSpaceEatenInTest` 凭据执行的兜底切换
+> （`ctrl_space_toggle`）。缺了它时的日志指纹（QQ / Maxthon / Totalcmd）：`test_down eaten=1
+> decision=ctrl_space_intercept` 紧跟 `down eaten=0 decision=passthrough_not_handled`，且全程没有
+> `compat.openclose.onchange`、模式恒定不变。
+
 > 值语义之后，最后一项也自然消解：`_SetConversionMode` 的联动写 0 只在「值与模式已经一致」
 > 时到达，天然是 no-op。实测无自发回退。
 

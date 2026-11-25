@@ -83,3 +83,19 @@ DLL 日志全程显示成功（`InsertTextAtSelection` 返回 S_OK、事后读�
   `reload_app_compat` 时加载，没有文件监听，漏掉是**静默**的（`matched=false`）。
 - 目录大小显示 0 是假象，用 `Get-Content`/`Select-String` 读日志。
 - 改 DLL 后宿主进程要重启才加载新版。
+
+## 八、推送路径（直通 `ime.pair`）必须挪进按键上下文
+
+`ime.pair` 词条的上屏经 `WM_PAIR_COMMIT` 窗口消息到达（`CKeyEventSink::HandlePairCommitPush`），
+不在 `OnKeyDown` 调用栈里。在这里当场 `CommitText` 再注入 `VK_LEFT`，WPS 文字里文本位置正确，但
+随后的左移会把光标打到文档最开头：在宿主输入处理链路之外改文档，宿主自己的插入点没跟着更新，注入的
+方向键却走它的常规编辑路径。对照：直接敲「（」（整套动作在 `OnKeyDown` 里）、或关掉 auto_pair 让
+词条退化为纯上屏（走 `WM_COMMIT_TEXT` 的合成提交键）都正常。
+
+所以提交与左移一并排进合成提交键（`QueueAsyncCommitViaSyntheticKey`），在触发键的 `OnKeyDown` 里
+执行。合成键注入失败时才退回非按键上下文直接提交，此时左移可能抢在文本落定之前，是已知残留竞态。
+
+配对深度按「这一条是不是配对上屏」记，不按 `moveLeft > 0`：`ime.pair(..., jump="0")` 合法，core 侧
+照样压一层配对栈，按格数记会漏掉，depth 停在 0，中文模式下 Enter 不再转发，表现为「Tab 跳得出、
+Enter 毫无反应」。丢弃待提交队列里的配对条目同样会留下 DLL < core 的失配，这个方向没有自愈路径，
+所以 `_DropPendingAsyncCommits` 必须留 WARN。

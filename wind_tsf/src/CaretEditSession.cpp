@@ -34,8 +34,8 @@ CCaretEditSession::CCaretEditSession(ITfContext* pContext)
     }
     ZeroMemory(&_caretRect, sizeof(_caretRect));
     ZeroMemory(&_compositionStartRect, sizeof(_compositionStartRect));
-    // `result.compRect` 是**无条件**拷贝的（见 DoEditSession 末尾），`_hasCompositionRect`
-    // 为 FALSE 时拷的就是这块内存；二级降级让它成了降级链的承重件，更不能留未初始化值。
+    // `result.compRect` 无条件拷贝（见 DoEditSession 末尾），`_hasCompositionRect` 为 FALSE 时
+    // 拷的就是这块内存，不能留未初始化值。
     ZeroMemory(&_compositionRect, sizeof(_compositionRect));
 }
 
@@ -137,12 +137,8 @@ STDAPI CCaretEditSession::DoEditSession(TfEditCookie ec)
 
         sel[0].range->Release();
 
-        // If a composition is set, also get the start position of the composition range
-        //
-        // ⚠ 这里**不再受 _succeeded 守卫**（2026-08-01）：caret(selection) 取失败或退化时，
-        // 组合起点往往仍然有效——实测 shell 的临时输入小窗，selection 恒返回退化矩形
-        // (2559,1367,2560,1367) h=0，而 composition range 给出有效的 (473,189,473,217)。
-        // 那时它是手上唯一可信的坐标，原先却因为这个守卫压根不去取。
+        // 组合起点不受 _succeeded 守卫：selection 取失败或退化时（如 shell 临时输入小窗），
+        // 组合起点往往仍有效，是唯一可信的坐标。
         if (_pComposition != nullptr)
         {
             ITfRange* pCompRange = nullptr;
@@ -167,34 +163,24 @@ STDAPI CCaretEditSession::DoEditSession(TfEditCookie ec)
                     if (SUCCEEDED(hr))
                     {
                         _hasCompositionStart = TRUE;
-                        // 打全 4 值 + clipped：与上面 caret rect 同口径，便于直接比对两者差值
-                        // （caret 落在组合内容之后、compStart 锚在组合头部，两者之差 = 已插入的
-                        // 组合宽度）。只打 left/bottom 时看不出该 rect 是否退化（top==bottom），
-                        // 而退化正是宿主尚未 reflow 的信号。
+                        // 打全 4 值：与 caret rect 同口径便于比对，且能看出是否退化
+                        // （top==bottom 是宿主尚未 reflow 的信号）。
                         WIND_LOG_DEBUG_FMT(L"CaretEditSession: Composition start rect (%ld, %ld, %ld, %ld) clipped=%d\n",
                                   _compositionStartRect.left, _compositionStartRect.top,
                                   _compositionStartRect.right, _compositionStartRect.bottom, clippedComp);
                     }
                     else
                     {
-                        // 失败即 compStart=(0,0) 上报，Rust 侧据此判定「本轮 reflow 坐标未到」而继续
-                        // 等待。此前无日志，表现为「组合起点一直锁不上」却查不到原因。
+                        // 失败即上报 compStart=(0,0)，Rust 侧据此判定「本轮 reflow 坐标未到」继续等。
                         WIND_LOG_DEBUG_FMT(L"CaretEditSession: Composition start GetTextExt failed hr=0x%08X\n", hr);
                     }
                     pStartRange->Release();
                 }
 
-                // ★ 整个组合 range 的包围矩形——与上面那次的区别只有「折不折叠」，
-                // 但答的是完全不同的问题：折叠后答「组合从哪开始」，不折叠答「组合占了
-                // 多大一块」。组合换行后这两者分处不同行，只有后者能看出「跨行了」。
-                //
-                // ⚠ 这里**不做任何判断、不参与决策**（2026-09-05 探针阶段）：各宿主对跨行
-                // range 的 GetTextExt 行为尚未逐一验证，规范说返回包围矩形，实现可能只返回
-                // 首行、也可能失败。先如实上报 + 打日志，看清真实返回值再定锚点公式。
-                //
-                // ⚠ TS_E_NOLAYOUT 不是「这个宿主不支持」，而是「此刻布局还没算完」——
-                // 宿主随后会经 OnLayoutChange 通知，届时重查即可。日志必须把它与真失败分开，
-                // 否则会把一个暂时状态误读成宿主能力缺失。
+                // 整个组合 range 的包围矩形（不折叠）：答「组合占了多大一块」，换行后只有它能
+                // 看出跨行。这里只如实上报，取舍在服务端与下方降级里做；形态见
+                // docs/architecture/caret-position-host-compat-notes.md 的「组合矩形的三种形态」。
+                // TS_E_NOLAYOUT 是「此刻布局还没算完」（宿主随后发 OnLayoutChange），日志要与真失败分开。
                 BOOL clippedComp = FALSE;
                 HRESULT hrCompRect = pContextView->GetTextExt(ec, pCompRange, &_compositionRect,
                                                               &clippedComp);
@@ -223,22 +209,12 @@ STDAPI CCaretEditSession::DoEditSession(TfEditCookie ec)
             }
         }
 
-        // ── 两级锚点降级的共同前提：本 context 的显示区，用作越界校验 ──────────
+        // ── 降级的共同前提：本 context 的显示区（GetScreenExt），用作越界校验 ──
         //
-        // GetScreenExt 是 TSF 语义内的参照系，不依赖窗口层级与前台状态。2026-09-12 实测
-        // 它在游戏宿主上可靠：流放之路回 (273,216,2833,1656)，正是游戏窗口，而同一宿主给的
-        // 组合坐标恒为 (13,44)（落在窗外）——据此就能把「宿主给的是垃圾坐标」判出来。
-        //
-        // ⚠ 它自身可能退化：shell context 上实测返回 (0,1368,0,1368)。退化时**不校验**（放行），
-        //   否则会把正常宿主一并误杀。
-        // ⚠ 只在确实要降级时才取：GetScreenExt 有跨宿主成本，且每帧打日志会淹掉其它行。
-        //   （例外：Chromium 系组合期每帧都要查一次，见 IsOutsideViewExt。）
-        //
-        // ★ 与 `IsScreenPointOutsideAllMonitors`（TextService.cpp）**并存而非取代**。本注释
-        // 前身写的是「若实测可靠，将来可取代『所有显示器』做越界校验」——2026-09-12 实测证明
-        // 它确实可靠，但结论是两条都要留：那条问「这点落在任何一块屏上吗」，本条问「落在宿主
-        // 自己声明的显示区内吗」，后者严得多也精确得多；而 GetScreenExt 会退化（下方分支），
-        // 退化时只剩前者兜底，所以它独当不了一面。
+        // 宿主给的垃圾坐标（F 类游戏宿主）靠「落在自己声明的显示区外」判出来。GetScreenExt 自身
+        // 可能退化（shell context），退化时不校验，否则误杀正常宿主。只在要降级时才取（有跨进程成本），
+        // Chromium 系例外见 IsOutsideViewExt。与 TextService.cpp 的 `IsScreenPointOutsideAllMonitors`
+        // 并存：本条更严，但退化时只剩那条兜底。
         const auto caretUnusable = [&]() -> bool {
             return !_succeeded || (_caretRect.bottom - _caretRect.top) <= 0;
         };
@@ -272,15 +248,9 @@ STDAPI CCaretEditSession::DoEditSession(TfEditCookie ec)
                 && y >= rcScreenExt.top && y <= rcScreenExt.bottom;
         };
 
-        // 宿主没给高度时补的默认行高。二级降级与 IMM32 那一级共用。
-        //
-        // ★ 必须按**宿主视角**的 DPI 换算：GetTextExt / ClientToScreen 给的坐标就在宿主的感知
-        // 级别下，直接补 20 个设备像素，在 4K/高缩放的宿主上只有真实行高的一半，候选窗顶边会
-        // 落在正文行中段、压住正在输入的那一行——正是候选窗定位要消灭的症状。
-        // ⚠ 不要套用 LangBarItemButton 里 SetThreadDpiAwarenessContext 抬高感知级别那套：
-        // 那里要的是「主屏的物理真值」，这里要的是「与宿主坐标同参照系」，抬高反而错——
-        // 宿主 unaware 时它回 96，而那时坐标本就是虚拟化的 96dpi 坐标，正好不该缩放。
-        // 符号动态取（Win10 1607+），与本仓其余 DPI 调用同一惯例；取不到按 96 处理。
+        // 宿主没给高度时补的默认行高，二级降级与 IMM32 那一级共用。必须按宿主视角的 DPI 换算
+        // （坐标就在宿主的感知级别下），别套 LangBarItemButton 抬高线程感知级别那套：宿主 unaware
+        // 时回 96，坐标本就是虚拟化的 96dpi，正好不该缩放。符号动态取（Win10 1607+），取不到按 96。
         const auto hostDefaultCaretHeight = [&]() -> LONG {
             static auto pGetDpiForWindow = reinterpret_cast<UINT(WINAPI*)(HWND)>(
                 GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow"));
@@ -290,9 +260,8 @@ STDAPI CCaretEditSession::DoEditSession(TfEditCookie ec)
             return MulDiv(WIND_DEFAULT_CARET_HEIGHT, (int)dpi, 96);
         };
 
-        // 「宿主对本 context 没有插入点可报」的指纹：三次布局查询给出同一个退化矩形（判据与
-        // TextService 的 CARET_RETRY 判决共用 wind::caret::IsHostDefaultPosition）。必须在任何
-        // 一级降级改动这几个矩形**之前**取，下方二级降级与 IMM32 那一级都要用它。
+        // 「宿主对本 context 没有插入点可报」的指纹：三次布局查询给出同一个退化矩形（与 CARET_RETRY
+        // 判决共用 IsHostDefaultPosition）。必须在任何一级降级改动这几个矩形之前取。
         const bool hostDefaultPos =
             _succeeded
             && wind::caret::IsHostDefaultPosition(_caretRect, _hasCompositionStart != FALSE,
@@ -308,21 +277,14 @@ STDAPI CCaretEditSession::DoEditSession(TfEditCookie ec)
                                                        _compositionRect))
             wind::caret::NoteLaidOutCompositionForImm();
 
-        // ★ 一级降级：caret 无效而组合起点有效时，用组合起点当 caret。
-        //
-        // 候选窗本来就该跟随「正在编辑的那段文本」，而不是插入点——两者只差一个组合宽度。
-        // 原先的行为是让上层判定 caret 无效后下坠到 GUIThreadInfo，去取一个**属于别的窗口**
-        // 的系统光标（shell 场景实测取到任务栏残留的 (0,1388)，与真实位置差 1171px），
-        // 那才是真正的错位。手上既然有同一个 edit session、同一个 cookie 下语义精确的矩形，
-        // 就没有理由舍近求远。
+        // 一级降级：caret 无效而组合起点有效时，用组合起点当 caret。候选窗本就跟随正在编辑的文本，
+        // 否则上层会下坠到 GUIThreadInfo，取到属于别的窗口的系统光标。
         const LONG compStartHeight = _compositionStartRect.bottom - _compositionStartRect.top;
         if (caretUnusable() && _hasCompositionStart && compStartHeight > 0)
         {
             if (!insideScreenExt(_compositionStartRect.left, _compositionStartRect.top))
             {
-                // 宿主给的组合起点落在它自己声明的显示区之外 ⇒ 是垃圾坐标，不采信。
-                // 流放之路即此类：组合起点恒为 (13,44)，而显示区是 (273,216,2833,1656)。
-                // 采信了它候选窗就钉死在屏幕左上角，比没有坐标更糟。
+                // 组合起点落在宿主自己声明的显示区之外 ⇒ 垃圾坐标，采信了候选窗会钉死在屏幕角上。
                 WIND_LOG_DEBUG_FMT(L"CaretEditSession: 组合起点 (%ld, %ld) 落在 GetScreenExt "
                                    L"(%ld, %ld, %ld, %ld) 之外，判为垃圾坐标，不采信\n",
                                    _compositionStartRect.left, _compositionStartRect.top,
@@ -338,63 +300,20 @@ STDAPI CCaretEditSession::DoEditSession(TfEditCookie ec)
                 _succeeded = TRUE;
                 _usedCompStartAsCaret = TRUE;
 
-                // ★★★ 降级帧的组合矩形同样作废。
-                //
-                // 走到这里意味着 selection 的 GetTextExt 失败或退化——那是「宿主此刻还没算完
-                // 布局」（TS_E_NOLAYOUT 语义），而**同一次 edit session 里的其它布局查询同样
-                // 不可信**，不只是 selection。QQ 实测（2026-09-05 12:28:36）：降级帧的
-                // compRect=(2158,1498,2174,1532) w=16 h=34，是组合刚开始时那一个字符的旧矩形；
-                // 紧随其后的正常帧是 (2158,1498,2410,1572) w=252 h=74。两者交替上报，锚点就在
-                // 1532/1572 之间每秒抖十几次。
-                //
-                // ⚠ 服务端那条「caret 落在矩形内」的可信判据挡不住它：降级帧的 caret 与 rect
-                // 是**一致地陈旧**——自洽，但都是旧值。只有在这里、在知道「本次降级过」的地方
-                // 才判得了。
-                //
-                // 作废后服务端本帧取不到矩形，回退既有锚点逻辑；下一帧正常帧带着真矩形到达，
-                // 锚点随即回到正确值。实测这一去一回不产生位移：降级帧的 caret 恰是组合起点，
-                // 与已锁锚点的距离远不到逃生阀阈值。
+                // 降级帧的组合矩形同样作废：selection 退化说明宿主还没算完布局，同一 edit session
+                // 里的其它查询也是旧值，且 caret 与矩形一致地陈旧，服务端的「caret 落在矩形内」判据
+                // 挡不住，只有这里知道本帧降级过。见 caret-position-host-compat-notes.md 的 E 类。
                 _hasCompositionRect = FALSE;
             }
         }
 
-        // ★★ 二级降级：caret 与组合起点**都拿不到**，但「组合整体矩形」有效时，用它的左上角。
-        //
-        // 针对的是这样一类宿主：对**零长度** range 一律回 TS_E_NOLAYOUT，只有**非零长度**的
-        // range 才给矩形，而且只填水平信息、把 bottom 留成 top（高度 0）。虚幻引擎的洛克王国
-        // 实测即此形（2026-09-13，`wind_tsf.NRC-Win64-Shipping.*.log`）：
-        //
-        //     GetTextExt failed hr=0x80040505                       ← selection（零长度）
-        //     Composition start GetTextExt failed hr=0x80040505     ← 组合起点（零长度）
-        //     Composition rect (1353,1647,1399,1647) w=46 h=0       ← 组合整体，位置正确
-        //
-        // 宽度随编码串增长（16→19→25→28→46）、left/top 随输入移动，说明宿主**已经算完布局**，
-        // 只是不填高度——这与「退化矩形 = 布局没算完」那个前提正相反，不该一并丢弃。此前三条路
-        // 全断后退到兜底坐标 (640,332)，而真实位置 (1353,1647) 就摆在同一帧日志里没被用。
-        //
-        // ⚠ 必须与上面的越界校验配套，单独上会误伤：流放之路的组合矩形是 (3839,2063,3840,2063)，
-        //   w=1 也 > 0，只靠「宽度非零」会把候选窗从左上角挪到右下角，一样错。是越界校验把它挡住的。
-        //
-        // ⚠ **不支持顶码偏移**（`_compStartOffset`）：一级降级用的组合起点已按它平移过
-        //   （锚点跟随余码而非已顶出的文字），而整体矩形是一整块，无法按 wchar 偏移切分出
-        //   余码那一段。于是顶码场景下走到本级的宿主，锚点会落在整段组合的左边而非余码起点。
-        //   这是已知取舍而非遗漏：本级的前提本就是「零长度 range 一律拿不到矩形」，那种宿主
-        //   连组合起点都给不出，没有更精确的来源可选；锚在整段左边仍远好于退到兜底坐标。
-        // ⚠⚠ **失败关闭**：`hasScreenExt` 为假时本级直接不走（注意与一级降级相反——那级放行是
-        //   既有行为，收紧会造成回归）。二级降级是新增能力，两边的代价不对称：GetScreenExt 拿不到
-        //   时跳过它，只是退回没有本级时的行为（无损）；而放行则可能产出一个**自信的错坐标**——
-        //   流放之路那份 (3839,2063,3840,2063) 只有越界校验一个人挡着，一旦放行，它会以
-        //   CARET_SRC_TSF_COMPOSITION（TSF 权威域）的名义通过下游每一道闸（h>0、在显示器内、
-        //   caret_is_valid），把「我没拿到坐标」伪装成「我拿到了一个权威坐标」，正是本文件末尾
-        //   那段撤销记录要根除的谎报，且概率触发比必然触发更难查。
-        // ⚠⚠ **宿主默认位置指纹命中时不走**（`hostDefaultPos`，2026-09-30）：医疗 HIS/LIS 的
-        //   Java 客户端（CUAS 宿主）三次查询恒为工作区右下角 (1919,1039,1920,1039)，w=1 同样 > 0；
-        //   窗口一最大化，GetScreenExt=(0,23,1920,1040) 就把这个角点包了进去，越界校验失守，
-        //   本级把它补上高度以 TSF_COMPOSITION 送出，候选窗整场钉在屏幕右缘。流放之路那次靠的是
-        //   角点恰好在窗外，这次证明越界校验单独挡不住——「三者全同」才是它没在答位置的证据
-        //   （真在排版的宿主，组合矩形宽度随编码串增长，不会与零长度选区的矩形逐像素相同）。
-        //   命中后交给下方 IMM32 那一级；它也拿不到时，由 CARET_RETRY 判决按宿主默认位置采信，
-        //   与 Illustrator 同一条路，来源如实标成 TSF_DEFAULT_POS。
+        // 二级降级：caret 与组合起点都拿不到、但组合整体矩形有效时，用它的左上角。针对只对非零长度
+        // range 给矩形且不填高度的宿主（G 类），详见 caret-position-host-compat-notes.md。
+        // - 必须配越界校验：只靠「宽度非零」会采信 F 类宿主角落里 w=1 的垃圾矩形。
+        // - 失败关闭（无 GetScreenExt 就不走，与一级降级相反）：跳过只是退回无本级的行为，放行则可能
+        //   以 TSF_COMPOSITION 权威来源送出错坐标。
+        // - 宿主默认位置指纹命中时不走：最大化后显示区会包住那个角点，越界校验单独挡不住。
+        // - 不支持顶码偏移（整体矩形切不出余码段），已知取舍。
         if (caretUnusable() && hostDefaultPos && _hasCompositionRect)
         {
             WIND_LOG_DEBUG_FMT(L"CaretEditSession: 组合整体矩形 (%ld, %ld, %ld, %ld) 与选区、组合起点全同，"
@@ -413,16 +332,8 @@ STDAPI CCaretEditSession::DoEditSession(TfEditCookie ec)
             {
                 // 宿主没给高度。候选窗只拿它决定「落在文本下方多远」。
                 LONG bottom = _caretRect.top + hostDefaultCaretHeight();
-                // ★ 宿主自己声明的显示区下沿若比这更近，就用它——那才是这一行文本真正的底，
-                // 补出来的默认高度只是没有更好信息时的替代品。
-                //
-                // 洛克王国实测（2026-09-13，200% 缩放）：组合矩形 top=2004、默认高度换算后
-                // 40px ⇒ 2044，而 GetScreenExt=(1066,1948,2174,2008) 的 bottom=2008 才是输入框
-                // 下沿，候选窗因此比输入框低了 36px（肉眼可见地偏下）。取 min 后正好贴合。
-                //
-                // 两类宿主都不会更差：给**输入框**矩形的（如本例）取到真实行底；给**整个多行
-                // 文本框**矩形的，组合在中间行时框底远在下方，min 自然落回默认高度，行为不变。
-                // 守卫 `> _caretRect.top` 保证结果高度为正——退化矩形会被下游当「没拿到坐标」。
+                // 显示区下沿更近时取它，那才是这一行真正的底；给整个多行文本框矩形的宿主，min 自然
+                // 落回默认高度。守卫 `> _caretRect.top` 保证高度为正（退化矩形下游当「没拿到坐标」）。
                 if (hasScreenExt && rcScreenExt.bottom > _caretRect.top
                     && rcScreenExt.bottom < bottom)
                 {
@@ -434,11 +345,8 @@ STDAPI CCaretEditSession::DoEditSession(TfEditCookie ec)
             // 语义上锚点同样来自组合区（而非 selection），故沿用同一来源标记，
             // 让服务端继续按 CARET_SRC_TSF_COMPOSITION 处理。
             _usedCompStartAsCaret = TRUE;
-            // ★★ 与一级降级同样作废组合矩形——理由在这里更硬：协调器侧
-            // （message_handler.rs 的 `frame_layout_degenerate`）把 `bottom == top` 判成
-            // 「宿主连布局都没算出来」，会**整帧关闭逃生阀**；而本级的前提恰好相反（宿主算完了
-            // 布局、只是不填高度）。两侧前提相反却看同一份矩形，留着它就是让协调器按错误前提
-            // 永久关掉那个宿主的锚点纠错。矩形的信息已被吸收进 caret，重复上报不增加信息。
+            // 同样作废组合矩形：协调器的 `frame_layout_degenerate` 把 `bottom == top` 判成布局没算完、
+            // 整帧关闭逃生阀，与本级前提相反；矩形的信息已吸收进 caret。
             _hasCompositionRect = FALSE;
             WIND_LOG_DEBUG_FMT(L"CaretEditSession: caret 与组合起点均不可用，二级降级用组合整体矩形 "
                                L"(%ld, %ld, %ld, %ld)，补高度后 caret=(%ld, %ld, h=%ld)\n",
@@ -448,45 +356,14 @@ STDAPI CCaretEditSession::DoEditSession(TfEditCookie ec)
                                _caretRect.bottom - _caretRect.top);
         }
 
-        // ── 三级降级：宿主经 IMM32 设的候选窗位置（CANDIDATEFORM）─────────────────
-        //
-        // 走到这里说明上面两级都没能给出可用的 caret。探测只在两种帧上做（其余退化帧多是宿主
-        // 还没排完版，每帧都查 IMC、打一行日志只会淹掉别的行）：
-        //   - `hostDefaultPos`：宿主经 TSF 明说没有插入点——唯一**会采信**的情形；
-        //   - `!_succeeded`：GetTextExt 整个失败（游戏类宿主），只记日志、攒实测数据。
-        // ⚠ 旧探测的条件只有后者，而 Illustrator 与这批 Java 宿主都是「成功但退化」——它们的
-        //   IMM 数据此前一条都没有，是**结构上**就不会执行，不是宿主没设 CANDIDATEFORM。
-        //
-        // 走 IMM32→TSF 兼容层（CUAS）的宿主往往
-        // **根本不经 TSF 传坐标**：
-        //   - Java AWT/Swing：收到 IMN_OPENCANDIDATE / IMN_CHANGECANDIDATE 后按
-        //     `getTextLocation(leading(0))` 算出组合起点**下沿**，经 `ImmSetCandidateWindow`
-        //     写进 CANDIDATEFORM（客户区坐标）。GetTextExt 对它三次查询恒为工作区右下角
-        //     (1919,1039,1920,1039)——医疗 HIS/LIS 客户端实测（2026-09-30 用户日志）。微软拼音
-        //     在同一宿主上能跟随光标，靠的只能是这一份。
-        //   - SDL 的 `SDL_SetTextInputRect` 同样实现为 `ImmSetCandidateWindow`，多数自绘 UI 的
-        //     游戏同理。流放之路实测连 IMM32 也没设，那类宿主本级拿不到东西，行为不变。
-        //
-        // IMN_* 通知由 CUAS 在我们 BeginUIElement / UpdateUIElement 时发给宿主（日志里的
-        // host_reads=1 就是 IMM32 桥在读候选串）；AWT 还要投递到 EDT 再回来才写 CANDIDATEFORM。
-        // 所以组合的第一帧**通常**读到的是上一次组合留下的值，或者还没有值（退回原有路径：
-        // CARET_RETRY 判决 / GUI 回退）。
-        //
-        // ★ 只认 CANDIDATEFORM，不认 COMPOSITIONFORM：前者答「候选窗放哪」，后者答「组合窗放哪」，
-        //   不少宿主给后者的是输入框左上角。两者照旧一并打日志，供日后比对。
-        // ★★ 采信后**作废组合起点**（上报 (0,0)），不改写成同一个点：服务端对同一次组合只锁
-        //   首个有效组合起点，而首帧恰恰多半是上一次组合的旧值——连打时新旧起点只差已上屏那几个
-        //   字的宽度，落不到大偏移逃生阀的阈值（3 倍行高）里，锁上就整场修不回来。不报起点，
-        //   服务端锚点跟着逐帧的 caret 走，宿主写入新值的下一帧就跟上（AWT 的这个点在一次组合内
-        //   本就不动，锁不锁无所谓）。留着那个右下角像素则更糟：锚点直接锁在角落上。
-        //   组合整体矩形同样作废，理由同二级降级。
-        // ⚠ CANDIDATEFORM 的 ptCurrentPos 是**客户区**坐标，ClientToScreen 必须用宿主设它时的
-        //   那个窗口。hwndHost 取自 ITfContextView::GetWnd，CUAS context 下即 IMC 所属窗口；
-        //   若不是，换算结果会整体偏出显示区，被 AcceptCandidateFormPoint 的越界校验挡住。
-        //   ⚠ 已知缺口：AWT 按**顶层窗口**客户区原点换算（GetTopLevelParentForWindow），IMC 所属的
-        //   却可能是它的子窗口。Swing 的焦点代理窗口在框架 (0,0) 处，两者等价；纯 AWT 重量级
-        //   控件（java.awt.TextArea）会整体偏一个子窗口偏移，且多半仍在显示区内、挡不住。日志里
-        //   一并打出按 GA_ROOT 换算的值，等真机数据定夺。
+        // 三级降级：宿主经 IMM32 设的候选窗位置（CANDIDATEFORM）。走 CUAS 的宿主（Java AWT/Swing、
+        // SDL 游戏）往往只经 ImmSetCandidateWindow 声明位置，不反映到 GetTextExt。
+        // 只在两种帧上探测：`hostDefaultPos`（唯一会采信的情形）与 `!_succeeded`（只记日志）；
+        // 其余退化帧多是还没排完版，每帧查 IMC 只会淹日志。
+        // - 只认 CANDIDATEFORM，不认 COMPOSITIONFORM（不少宿主给后者的是输入框左上角）。
+        // - 采信后作废组合起点与组合矩形：宿主异步回写，首帧多是上次组合的旧值，锁成锚点就整场修不回。
+        // - ptCurrentPos 是客户区坐标，按 GetWnd 的窗口换算；AWT 子窗口偏移的已知缺口与日志里
+        //   viaRoot 的用途见 caret-position-host-compat-notes.md 的「第三条通道」。
         if (caretUnusable() && (hostDefaultPos || !_succeeded))
         {
             if (hwndHost != nullptr)
@@ -555,21 +432,9 @@ STDAPI CCaretEditSession::DoEditSession(TfEditCookie ec)
         // No selection, try to get the end of the document or use insertion point
         WIND_LOG_DEBUG(L"CaretEditSession: No selection available\n");
 
-        // ⚠ 这里曾用「GetScreenExt 左上角 + 20px」冒充插入点并置 _succeeded=TRUE
-        // （2026-08-01 撤销）。那是一条**以成功的形式失败**的路径：
-        //
-        // - 返回的根本不是插入点，而是整个显示区的左上角，除非碰巧否则必错；
-        // - `height` 恒为 20 > 0，躲过 GetCaretPositionFromTSF 的退化矩形判据；
-        // - 左上角通常落在某个显示器内，也躲过越界判据；
-        // - 于是它一路以 CARET_SRC_TSF_SELECTION 的名义流到定位逻辑，把「我没拿到坐标」
-        //   伪装成「我拿到了一个 TSF 权威坐标」——正是本轮要根除的那类谎报。
-        //
-        // 而且 GetScreenExt 在 shell context 上实测返回退化矩形 (0,1368,0,1368)，
-        // 占位值会直接落到屏幕边缘。
-        //
-        // 现在一律判失败。上层回退链会接手（GUI caret → last known），那些值虽然也不精确，
-        // 但**标着自己真实的来源**，消费端能据此决定要不要用。焦点路径尤其依赖这一点：
-        // 焦点刚到达时 selection 尚未建立是常态，这条分支在那里是主路径而非冷门分支。
+        // 一律判失败，交给标着真实来源的回退链（GUI caret → last known）。别拿 GetScreenExt
+        // 左上角冒充插入点报成功：它会躲过下游所有判据、伪装成 TSF 权威坐标。焦点刚到达时
+        // selection 未建立是常态，这条是主路径。见 caret-position-host-compat-notes.md「已否定的方向」。
         RECT rcScreenExt = {};
         if (SUCCEEDED(pContextView->GetScreenExt(&rcScreenExt)))
         {
@@ -584,10 +449,8 @@ STDAPI CCaretEditSession::DoEditSession(TfEditCookie ec)
 
     pContextView->Release();
 
-    // 补发 IMN_OPENCANDIDATE 的宿主：位置由宿主异步回写（AWT 经 EDT），组合首帧读到的多半是
-    // 上一次组合的旧值。不报组合起点，服务端锚点逐帧跟随 caret，回写一到就跟上；报了则旧值
-    // 被锁成整场组合的锚点（换输入框时新旧差不到大偏移逃生阀的 3 倍行高）。三级降级采信时
-    // 已自行作废，这里覆盖 CUAS 改答 CANDIDATEFORM 点、走 selection 路径的情形。
+    // 补发 IMN_OPENCANDIDATE 的宿主异步回写位置，组合首帧多是旧值，不报组合起点以免被锁成锚点。
+    // 三级降级采信时已自行作废，这里覆盖 CUAS 改答 CANDIDATEFORM 点、走 selection 路径的情形。
     if (_succeeded && wind::caret::IsImmOpenCandidateHost())
     {
         _hasCompositionStart = FALSE;

@@ -338,11 +338,8 @@ BOOL CIPCClient::_ReadWithTimeout(void* buffer, DWORD size, DWORD* bytesRead, DW
 // Service management
 // ============================================================================
 
-// 解析应用安装目录（返回值末尾不带反斜杠）。
-//
-// 实现已下沉到 `InstallPaths.cpp`：`CFileLogger::_BuildPaths` 也要判同一件事
-// （便携部署的日志得落在便携目录内），两处各写一份就会漂移出「服务从便携目录拉起、
-// 日志却写进 %LOCALAPPDATA%」这种半便携形态。理由与约束见 InstallPaths.h。
+// 解析应用安装目录（返回值末尾不带反斜杠）。实现在 `InstallPaths.cpp`，与
+// `CFileLogger::_BuildPaths` 共用，免得两处判据漂移成半便携形态。约束见 InstallPaths.h。
 static inline BOOL _ResolveAppBaseDir(WCHAR* outDir, DWORD cchOutDir)
 {
     return WindResolveInstallRoot(outDir, cchOutDir);
@@ -356,15 +353,9 @@ uint64_t FiletimeToU64(const FILETIME& ft)
     return (static_cast<uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
 }
 
-/// 立 `InstallerRunning` 的那个进程是否仍在运行。
-///
-/// 「拿不准就当它活着」是本函数一以贯之的取向：误判成死，会让闸门在真正的安装期间
-/// 失效——那正是它要防的事；误判成活，最多让用户多等到兜底生效。两种错的代价
-/// 不对称，所以每个取不到答案的分支都返回 true。
-///
-/// ⚠️ 正因为这些分支答的是「活着」，调用方**必须**另配一条与本函数无关的年龄硬兜底
-/// （`InstallerGuard::IsOwnerHardStale`）：跨用户、受保护进程、PID 被系统进程复用时
-/// 这里会永远答「活着」，只靠本函数的话那就是个没有出口的状态机。
+/// 立 `InstallerRunning` 的那个进程是否仍在运行。拿不准一律答「活着」：误判成死会让闸门在
+/// 真正安装期间失效，误判成活最多多等到兜底。所以调用方必须另配年龄硬兜底
+/// （`InstallerGuard::IsOwnerHardStale`），否则跨用户、受保护进程、PID 复用时永远出不来。
 bool IsOwnerAlive(const InstallerGuard::Owner& owner)
 {
     // PROCESS_QUERY_LIMITED_INFORMATION 是够用的最小权限：本 DLL 常跑在低权限宿主里，
@@ -408,7 +399,7 @@ bool CIPCClient::_InstallerGuardBlocks()
         return false;
     }
 
-    // ⚠️ 缓冲仍是 8 个 WCHAR，且这个值的内容**必须**保持 "1" —— 旧版 DLL 用的正是这个
+    // 缓冲是 8 个 WCHAR，且这个值的内容必须保持 "1"：旧版 DLL 用的正是这个
     // 定长缓冲，值一长就读成 ERROR_MORE_DATA、把「标记存在」看成「不存在」。
     // 身份信息因此另放 InstallerRunningOwner，详见 InstallerGuard.h。
     WCHAR flag[8] = {};
@@ -500,7 +491,7 @@ BOOL CIPCClient::_StartService()
 
     // Guard: installer running flag — 安装器在杀进程前立、装完清，防止本 DLL 在安装
     // 期间把主程序重新拉起来。判定逻辑（含「立标记的进程是否还活着」这条兜底）在
-    // InstallerGuard.h，那里有完整的来龙去脉与 issue #120 的实测记录。
+    // InstallerGuard.h。
     if (_InstallerGuardBlocks())
     {
         _LogInfo(L"InstallerRunning flag set, not starting service");
@@ -516,11 +507,9 @@ BOOL CIPCClient::_StartService()
     }
 
     // Guard: check portable mode marker file for stopped flag.
-    // 标记名以 portable_mode 为准（与安装器清单 config/app.toml 的 [app] portable_marker
-    // 及 wind-config variant.rs 的 PORTABLE_MARKER_NAME 一致）；wind_portable_mode 是旧名，
-    // 仅为存量便携包保留读取兼容，新写入不再使用。三处必须同步。
-    //
-    // ⚠️ 标记在**安装/便携目录**下，不在 DLL 所在目录——系统目录部署后两者已不是同一处。
+    // 标记名 portable_mode 须与 config/app.toml 的 [app] portable_marker、wind-config variant.rs 的
+    // PORTABLE_MARKER_NAME 同步；wind_portable_mode 是旧名，只为存量便携包保留读取。
+    // 标记在安装/便携目录下，不在 DLL 所在目录（系统目录部署后两者不同）。
     {
         static const WCHAR* const kMarkerNames[] = { L"portable_mode", L"wind_portable_mode" };
 
@@ -977,13 +966,9 @@ BOOL CIPCClient::SendFocusLost(uint8_t reason)
         return FALSE;
     }
 
-    // Carry the client token: the service discards a focus_lost whose token is no longer the
-    // active one. Without it, this message — which OnKillThreadFocus emits ~100ms after the
-    // DocMgr-level focus loss — lands after the *next* host's focus_gained and clears the
-    // activation that host just established (toolbar flashes on, then hides).
-    //
-    // reason 决定服务端清哪些状态：THREAD 清激活态、DOC_CHANGED 只清输入态、
-    // CTX_LOST 只隐工具栏（详见 BinaryProtocol.h 的 FOCUS_LOST_REASON_* 注释）。
+    // 带上 client token：服务端丢弃 token 已非当前的 focus_lost。否则这条（比 DocMgr 级失焦晚约
+    // 100ms）会落在下一个宿主的 focus_gained 之后，清掉它刚建立的激活态。
+    // reason 决定服务端清哪些状态，见 BinaryProtocol.h 的 FOCUS_LOST_REASON_*。
     FocusLostPayload payload;
     payload.clientToken = _clientToken;
     payload.reason = reason;
@@ -1093,21 +1078,16 @@ BOOL CIPCClient::SendFocusGained(int caretX, int caretY, int caretHeight, UINT64
     payload.disabled = disabled ? 1 : 0;
     payload.reason = reason;
     // CARET_SRC_* 值域 0~7，压进 1 字节。越界值（不该出现）钳到 UNKNOWN 而不是截断，
-    // 免得高位被切掉后恰好落在某个**有效**来源上，把「未知」伪装成「可信」。
-    // ⚠ 上界跟着枚举走：写死成某个中间值，新增来源就会被这里静默钳成 UNKNOWN。
+    // 免得高位被切掉后恰好落在某个有效来源上，把「未知」伪装成「可信」。
+    // 上界跟着枚举走：写死成某个中间值，新增来源就会被这里静默钳成 UNKNOWN。
     payload.caretSource = (caretSource >= 0 && caretSource <= CARET_SRC_PRE_REFLOW)
                               ? (uint8_t)caretSource
                               : (uint8_t)CARET_SRC_UNKNOWN;
 
-    // 同步发送（首次按键模式竞态根治，见 server_handler.go::CmdFocusGained 注释）：
-    // Go 端在响应里回传权威模式（仅读内存两字段，无等待 / 无回调进本进程 → 无死锁可能），
-    // 本调用在 OnSetFocus 内同步拿到模式并立即写入 _bChineseMode/_bFullWidth，使首个
-    // OnTestKeyDown 之前模式必然就绪，消除"切过来首键上屏英文"。
-    // 重型 HandleFocusGained 仍由 Go 在写响应之后异步执行，宿主 UI 线程不为重活阻塞。
-    // 拼上三个变长段：[定长 39][bundleIdLen=0][windowClassLen][windowClass][windowTitleLen][windowTitle]。
-    // bundleIdLen 的 0 是**必须发的占位**，不是冗余：服务端按顺序走段，少了它窗口类段
-    // 的偏移就与 macOS 不一致，而逐段兼容的解码不会报错、只会解出垃圾。
-    // 标题段同理恒发（未推开采集时 len=0）；旧服务端不认第三段，按长度兼容直接忽略。
+    // 同步发送：服务端在响应里回传权威模式（只读内存，无回调进本进程，不会死锁），首个
+    // OnTestKeyDown 之前模式必然就绪，否则切过来首键会上屏英文。重活由服务端在写响应后异步做。
+    // 变长段：[定长 39][bundleIdLen=0][windowClassLen][windowClass][windowTitleLen][windowTitle]。
+    // bundleIdLen=0 是必发的占位，少了它后续段偏移与 macOS 不一致、解码只会解出垃圾；标题段同理恒发。
     std::vector<uint8_t> frame(sizeof(payload));
     memcpy(frame.data(), &payload, sizeof(payload));
     const uint32_t kNoBundleId = 0;
@@ -1250,9 +1230,8 @@ BOOL CIPCClient::SendIMEActivated()
     IMEActivatedPayload payload = {};
     payload.clientToken = _clientToken;
     _LogInfo(L"Sending ime_activated (async): token=0x%016llX", (unsigned long long)_clientToken);
-    // 异步化（见 BinaryProtocol.h::CMD_ACTIVATION_STATUS_PUSH 注释）：
-    // Go 端 server.go::handleClient 收到 IME_ACTIVATED 立即回 Ack，HandleIMEActivated
-    // 在 Ack 之后才执行，结果通过 push pipe 回送 CMD_ACTIVATION_STATUS_PUSH。
+    // 异步：服务端收到 IME_ACTIVATED 立即回 Ack，处理结果经 push pipe 回送
+    // CMD_ACTIVATION_STATUS_PUSH（见 BinaryProtocol.h）。
     if (!_SendBinaryMessage(CMD_IME_ACTIVATED, &payload, sizeof(payload), true /* async */))
         return FALSE;
     _stateEstablished = TRUE;
@@ -1693,12 +1672,9 @@ BOOL CIPCClient::_ParseResponse(const IpcHeader& header, const std::vector<uint8
             }
 
             const StatusHeader* syncHeader = reinterpret_cast<const StatusHeader*>(payload.data());
-            // ⚠️ 本分支把 type 报成 StatusUpdate，而 `_HandleServiceResponse` 的那个分支
-            // 会据 statusFlags 镜像 STATUS_HOTKEY_SESSION —— 留 0 就是**无声误清**（把正
-            // 活着的热键模式会话清掉，Enter/Esc/Backspace 随即透传给宿主）。服务端本来就
-            // 在 StatusHeader 里发了 flags，如实填上。
-            // （本命令当前是 Go 时代遗留的死码：Rust 侧没有任何发送点。但既然 type 声明成
-            //   StatusUpdate，就得满足那个类型的契约，否则哪天复活是静默故障。）
+            // type 报成 StatusUpdate，`_HandleServiceResponse` 会据 statusFlags 镜像
+            // STATUS_HOTKEY_SESSION，留 0 会无声清掉活着的热键模式会话，所以如实填上。
+            // 服务端目前没有发送点，但声明了这个 type 就得守它的契约。
             response.statusFlags = syncHeader->flags;
 
             // Extract hotkeys（防溢出，同 CMD_STATUS_UPDATE 注释）
@@ -1786,7 +1762,7 @@ BOOL CIPCClient::_ParseResponse(const IpcHeader& header, const std::vector<uint8
 
     case CMD_STATE_PUSH:
         {
-            // State push from Go service (proactive state broadcast)
+            // State push from the service (proactive state broadcast)
             // Format is same as StatusUpdate
             response.type = ResponseType::StatusUpdate;
 
@@ -2446,7 +2422,7 @@ BOOL CIPCClient::StartAsyncReader()
             DWORD mode = PIPE_READMODE_MESSAGE;
             SetNamedPipeHandleState(_hReadPipe, &mode, nullptr, nullptr);
 
-            // Send token handshake so Go can map this push handle to our instance
+            // Send token handshake so the service can map this push handle to our instance
             {
                 uint8_t tokenBuf[8] = {
                     (uint8_t)(_clientToken & 0xFF),
@@ -2493,20 +2469,9 @@ BOOL CIPCClient::StartAsyncReader()
         }
     }
 
-    // 首连失败**绝不能在此 return**：重连逻辑活在下面这个 async reader 线程内部
-    // （_AsyncReaderLoop 每轮开头见 _hReadPipe == INVALID_HANDLE_VALUE 即重试，
-    // 失败则 continue 无限重试）。旧代码在这里 return FALSE，线程压根不创建，
-    // 于是「一次失手 = 终身失联」——连服务重启都感知不到，push 通道永久缺失。
-    // 对 host-render 白名单宿主（SearchHost）的后果是 HostRender 再不激活，
-    // 开始菜单候选窗永久压在菜单后方（2026-07-21 实测定位：SearchHost 自
-    // 某次首连失败起，跨三次服务重启 0/3 重连，而同期 23 个宿主每次都正常）。
-    //
-    // 首连之所以易失手：服务端 accept 循环原先把握手（写 SERVICE_READY + 读 token，
-    // 均为无超时阻塞）做在循环体内，握手期间管道名下零监听实例，开机/服务重启时
-    // 20+ 宿主 DLL 在数十毫秒内齐冲，必有输家。服务侧已并行修复（握手移出 accept
-    // 循环，见 wind-bridge/src/push.rs `serve_push_client`）。
-    // 两侧都修：服务端降低失手概率，DLL 侧保证失手可恢复——后者才是根治，
-    // 因为服务端再怎么改也无法保证客户端永不失手。
+    // 首连失败绝不能在此 return：重连逻辑在下面的 async reader 线程里（_AsyncReaderLoop 见
+    // _hReadPipe 无效即重试），不建线程就终身失联、连服务重启都感知不到。开机或服务重启时
+    // 大量宿主齐冲 push 管道，首连失手无法完全避免，可恢复性只能由这一侧保证。
     if (_hReadPipe == INVALID_HANDLE_VALUE)
     {
         _LogError(L"Failed to connect to push pipe on first attempt; "
@@ -2845,8 +2810,7 @@ void CIPCClient::_AsyncReaderLoop()
                 // TSF 侧在前台应用进程执行 ShellExecuteW（打开 URL / 启动程序）。
                 // 载荷：5 个 len(u32 LE)+bytes(UTF-8) 段，依次为
                 //     target / params / dir / verb / show
-                // dir 及其后的段都是后加的：**缺失即按空串处理**，不能因为读不到就
-                // 丢掉整条消息，否则新 DLL 配旧服务会让 proc.run / open 全部失效。
+                // dir 及其后的段缺失即按空串处理，不能丢整条消息，否则新 DLL 配旧服务会让 proc.run / open 失效。
                 const uint8_t* p = buffer.data() + sizeof(IpcHeader);
                 // 以 header.length 为权威边界，防止 bytesRead 与声明长度不一致。
                 size_t avail = (header.length <= bytesRead - sizeof(IpcHeader))
@@ -2895,7 +2859,7 @@ void CIPCClient::_AsyncReaderLoop()
             }
             else if (header.command == CMD_SERVICE_READY)
             {
-                // Go service connected push pipe — fire callback so TextService
+                // Service connected push pipe — fire callback so TextService
                 // posts to LangBarItemButton's message window and calls
                 // _DoFullStateSync() on the TSF thread.
                 _LogInfo(L"Async reader: CMD_SERVICE_READY received");
@@ -2907,7 +2871,7 @@ void CIPCClient::_AsyncReaderLoop()
             }
             else if (header.command == CMD_COMMIT_TEXT)
             {
-                // Parse commit text (from Go - mouse click on candidate)
+                // Parse commit text (from the service - mouse click on candidate)
                 std::vector<uint8_t> payload;
                 if (header.length > 0 && bytesRead >= sizeof(IpcHeader) + header.length)
                 {
@@ -2965,8 +2929,7 @@ void CIPCClient::_AsyncReaderLoop()
                 // 待跳出深度。载荷布局与按键响应形态一致，_ParseResponse 已填好
                 // text/cursorOffset。
                 //
-                // 这条 if/else 链是**逐命令**的：新推送命令不在此显式加分支就被静默丢弃，
-                // 症状是「词条执行了但屏幕上什么也没有」。
+                // 这条 if/else 链逐命令分派：新推送命令不在此加分支就被静默丢弃。
                 std::vector<uint8_t> payload;
                 if (header.length > 0 && bytesRead >= sizeof(IpcHeader) + header.length)
                 {
@@ -3007,7 +2970,7 @@ void CIPCClient::_AsyncReaderLoop()
             }
             else if (header.command == CMD_UPDATE_COMPOSITION)
             {
-                // Parse update composition (from Go - mouse click partial confirm)
+                // Parse update composition (from the service - mouse click partial confirm)
                 std::vector<uint8_t> payload;
                 if (header.length > 0 && bytesRead >= sizeof(IpcHeader) + header.length)
                 {

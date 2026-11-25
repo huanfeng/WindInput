@@ -8,13 +8,9 @@
 // CFileLogger implementation
 // ============================================================================
 
-// 逐级创建目录（`a\b\c` 里缺哪层建哪层）。
-//
-// 便携形态下日志目录是 `<安装根>\localdata\logs`，而 `localdata\` 这一层未必已经存在——
-// TSF DLL 由宿主加载、再由它去拉服务，本函数跑的时候服务可能还没建过任何目录。
-// `CreateDirectoryW` 只建最后一层，父目录缺失时直接失败，表现是便携版**一行日志都没有**。
-//
-// ⚠️ 跑在 loader lock 之下（`Init` ← `DllMain`），故只用 kernel32 的目录 API。
+// 逐级创建目录（`a\b\c` 里缺哪层建哪层）。便携形态下 `localdata\` 未必已存在（服务可能还没
+// 起过），而 `CreateDirectoryW` 只建最后一层，缺父目录时便携版会一行日志都没有。
+// 跑在 loader lock 之下（`Init` ← `DllMain`），只用 kernel32 的目录 API。
 static void _EnsureDirRecursive(const wchar_t* path)
 {
     wchar_t buf[MAX_PATH];
@@ -86,10 +82,8 @@ void CFileLogger::Init()
     if (_logDir[0] == L'\0')
         return;
 
-    // Ensure log directory exists（配置文件就在这一层；日志文件的子目录留到真要写时再建，
-    // 见 _OpenLogFile —— mode=none 时不该给每个宿主进程都平白造一个空目录）
-    //
-    // 逐级建：便携形态下 `<安装根>\localdata\` 这一层可能还不存在，见 _EnsureDirRecursive。
+    // 配置文件就在这一层，逐级建（见 _EnsureDirRecursive）。日志子目录留到 _OpenLogFile 再建，
+    // mode=none 时不给每个宿主进程平白造空目录。
     _EnsureDirRecursive(_logDir);
 
     // Read config (mode + level)
@@ -99,23 +93,12 @@ void CFileLogger::Init()
     if (_mode == LogMode::None)
         return;
 
-    // 打开**常开**的追加句柄。
-    //
-    // ⚠ 本函数跑在 `DllMain(DLL_PROCESS_ATTACH)` 里，即 loader lock 之下。这里只做内核
-    // 对象操作（开文件），**不能**加载别的 DLL、创建线程或等待同步对象——旧日志的清理
-    // 因此不放在 DLL 侧，交给 core 服务启动时做。
-    //
-    // 句柄常开是主要收益：此前每行日志都要开关一次文件，而 Defender 在每次文件打开时
-    // 插一次扫描，实测单次 CreateFile+CloseHandle 就是 203μs（详见 _WriteToFile 的实测表）。
-    //
-    // 顺带不再需要互斥锁：日志文件已按 pid 拆开（见 _BuildPaths），本进程独占该文件，
-    // 没有可竞争的对象。那把 `Local\WindInput*TSFLogMutex` 本身很便宜（无竞争 293ns），
-    // 它的害处是把上面那 246μs 的临界区跨进程串行化了。
+    // 打开常开的追加句柄（每行开关文件会让 Defender 每次插一次扫描，约 200μs/行）。
+    // 跑在 loader lock 之下：只做内核对象操作，不能加载 DLL、建线程或等待同步对象，
+    // 所以旧日志清理交给 core 服务启动时做。文件按 pid 拆开，无需跨进程锁。
     if (_mode == LogMode::File || _mode == LogMode::All)
     {
-        // 此刻本 DLL 还没有第二个线程（异步读线程要等 CIPCClient 起来才建），
-        // 持锁纯粹是为了让「碰 _hFile 必持 _fileLock」没有例外——例外正是日后
-        // 被人照抄的那一条。
+        // 此刻还没有第二个线程，持锁只为让「碰 _hFile 必持 _fileLock」没有例外。
         EnterCriticalSection(&_fileLock);
         _hFile = _OpenLogFile();
         LeaveCriticalSection(&_fileLock);
@@ -219,13 +202,8 @@ void CFileLogger::_WriteToFileLocked(const char* utf8Line, int utf8Len)
     if (_hFile == nullptr)
         return;
 
-    // 文件可能在我们眼皮底下被外部删除（手动清日志、core 回收过期日志）。Windows 删掉的
-    // 是**目录里的名字**，文件对象本身还被我们的句柄吊着，于是 WriteFile 照样返回成功，
-    // 每一行都静默写进一个谁也看不见的幽灵文件——不主动发现就永远发现不了。
-    //
-    // 节流用 GetTickCount：它读的是内核共享的用户页，**不是系统调用**，可以每行都问；
-    // 真正的查询每秒最多一次，与日志频率无关。安静的宿主同样能在一秒内接回来——而它恰恰
-    // 是最容易被 core 按修改时间当成过期文件删掉的那类。
+    // 文件可能被外部删除（手动清理、core 回收过期日志）：句柄仍吊着文件对象，WriteFile 照样成功，
+    // 内容静默写进看不见的幽灵文件。GetTickCount 不是系统调用，可每行问；真正的查询每秒最多一次。
     DWORD now = GetTickCount();
     if (now - _lastCheckTick >= FILE_CHECK_INTERVAL_MS)
     {
@@ -235,32 +213,13 @@ void CFileLogger::_WriteToFileLocked(const char* utf8Line, int utf8Len)
             return; // 重开失败，本行丢弃；下次写入会再试一次
     }
 
-    // 常规路径只剩**一次 WriteFile**。
-    //
-    // 此前这里是：抢跨进程互斥锁 → GetFileAttributesExW 查大小 → CreateFileW →
-    // WriteFile → CloseHandle → ReleaseMutex，全在 TSF 输入线程上。
-    //
-    // 实测各成分（Win11 + Defender 实时保护开启，单进程无竞争，ns/行）：
-    //     互斥锁 抢+放                 293
-    //     GetFileAttributesExW      43,167
-    //     CreateFileW + CloseHandle 203,426
-    //     合计                     230,695   →  现在 3,579
-    //
-    // ⚠ 别把账算在锁上：无竞争时它只占 0.1%。真正的开销是**每行开一次文件**——
-    // Defender 会在每次文件打开时插一次扫描，200μs 由此而来。那把**跨进程**互斥量的
-    // 害处是放大：246μs 的临界区被它跨进程串行化，N 个宿主同时写就是 N×246μs 的排队。
-    // 所以「拆文件」才是主要收益。
-    //
-    // ⚠⚠ 但「不需要跨进程锁」≠「不需要锁」：进程内仍有两个线程走这条路（见
-    // _fileLock 的注释）。现在这把 CRITICAL_SECTION 只在本进程内串行化 3.6μs 的
-    // 临界区，与被删掉的那把不是同一回事，别再顺手把它也当成历史包袱删掉。
+    // 常规路径只有一次 WriteFile，跑在 TSF 输入线程上，别在这里加打开文件或查大小之类的调用。
+    // 不需要跨进程锁 ≠ 不需要锁：进程内仍有两个线程写日志，_fileLock 不能删。
     DWORD written = 0;
     if (!WriteFile(_hFile, utf8Line, (DWORD)utf8Len, &written, nullptr))
         return;
 
-    // 轮转判定用**累计字节数**，不再查文件大小：本进程独占该文件，写了多少自己最清楚。
-    // 溢出保护：_written 是 DWORD，MAX_LOG_SIZE 只有 5MB，正常路径下轮转会先发生；
-    // 但若某次 WriteFile 异常地大，饱和累加可避免绕回后长期不轮转。
+    // 轮转按累计字节数判（本进程独占该文件）；饱和累加防绕回后长期不轮转。
     if (_written > MAXDWORD - written)
         _written = MAXDWORD;
     else
@@ -270,17 +229,12 @@ void CFileLogger::_WriteToFileLocked(const char* utf8Line, int utf8Len)
         _RotateNow();
 }
 
-// 打开常开的追加句柄。失败返回 nullptr（而非 INVALID_HANDLE_VALUE，省得每个调用点
-// 各判一次哨兵值）。**调用方须持 _fileLock**（会写 _written / _lastCheckTick）。
-//
-// FILE_APPEND_DATA 而非 GENERIC_WRITE：追加语义由内核保证，不必自己维护写指针。
-// FILE_SHARE_READ 让排查时能一边跑一边 tail 日志；FILE_SHARE_DELETE 让文件在被打开
-// 的状态下仍可被改名或删除——core 侧清理旧日志时不会因为某个宿主还开着而失败。
+// 打开常开的追加句柄，失败返回 nullptr。调用方须持 _fileLock（会写 _written / _lastCheckTick）。
+// FILE_APPEND_DATA 由内核保证追加；FILE_SHARE_DELETE 让 core 清理旧日志时不因宿主开着而失败。
 HANDLE CFileLogger::_OpenLogFile()
 {
-    // 目录可能还不存在：core 未必启动过，用户也可能刚清理过日志目录。
-    // CreateDirectoryW **不建中间层**，故父子各建一次；已存在时返回 FALSE，忽略即可。
-    // 放在这里而不是 Init：轮转重开也走这条路，删了目录仍能自愈。
+    // 目录可能不存在（core 未启动过、刚被清理）。CreateDirectoryW 不建中间层，故父子各建一次；
+    // 放在这里而非 Init，轮转重开与幽灵重开也能自愈。
     CreateDirectoryW(_logDir, nullptr);
     CreateDirectoryW(_fileDir, nullptr);
 
@@ -307,15 +261,9 @@ HANDLE CFileLogger::_OpenLogFile()
     return h;
 }
 
-// 与磁盘上的真实状态对一次表。**调用方须持 _fileLock**——本函数会 CloseHandle(_hFile)
-// 并重开，与别的线程的 WriteFile 撞上就是往已关闭（且可能已被复用）的句柄里写。
-//
-// 一次 GetFileInformationByHandleEx 同时办三件事：
-// 认出文件被删（重开）、认出文件被外部清空（校正累计字节数）、拿到真实大小。
-//
-// 判据实测（Win11/NTFS，见提交说明）：外部删除后 `NumberOfLinks` 归零 **且**
-// `DeletePending` 置位。前者对应现代的 POSIX 删除语义（名字立即从目录消失），后者对应
-// 经典语义（名字留到最后一个句柄关闭）；两个一起判，两种语义都盖住。
+// 与磁盘上的真实状态对一次表：认出被删（重开）与被外部清空（校正累计字节数）。
+// 调用方须持 _fileLock：这里会关句柄重开，撞上别的线程的 WriteFile 就是写已关闭的句柄。
+// `NumberOfLinks == 0` 对应 POSIX 删除语义，`DeletePending` 对应经典语义，两个都判。
 void CFileLogger::_ResyncFile()
 {
     FILE_STANDARD_INFO info;
@@ -324,28 +272,20 @@ void CFileLogger::_ResyncFile()
 
     if (info.NumberOfLinks == 0 || info.DeletePending)
     {
-        // 已成幽灵。丢掉旧句柄按原路径重开，顺带把可能被一起删掉的目录建回来
-        // （_OpenLogFile 里有父子两次 CreateDirectoryW）。幽灵里的内容找不回来，
-        // 但那本来就是被人主动删掉的。
+        // 已成幽灵：按原路径重开，_OpenLogFile 会顺带建回目录。
         CloseHandle(_hFile);
         _hFile = _OpenLogFile();
         return;
     }
 
-    // 没被删，但可能被**清空**——排查时截断日志是常规操作。追加句柄天然从新的文件末尾
-    // 写起（实测内容干净、无 NUL 空洞），不需要做什么；只有 _written 会停在旧的累计值上
-    // 导致轮转提前触发，所以这里以真实大小为准。
+    // 可能被清空：追加句柄自然从新末尾写起，只需把 _written 校正为真实大小，免得轮转提前。
     _written = info.EndOfFile.QuadPart < (LONGLONG)MAXDWORD
         ? (DWORD)info.EndOfFile.QuadPart
         : MAXDWORD;
 }
 
-// 立即轮转：关句柄 → 覆盖式改名到 .old → 重开。
-//
-// 只有本进程持有这个文件，所以不需要与**别的进程**协调——这正是「每进程一个文件」
-// 换来的简化。此前的 _RotateIfNeeded 要在共享文件上做，还得先靠跨进程互斥量排他。
-//
-// **调用方须持 _fileLock**：进程内的另一个日志线程仍要挡住，理由同 _ResyncFile。
+// 立即轮转：关句柄 → 覆盖式改名到 .old → 重开。文件只有本进程持有，无需跨进程协调。
+// 调用方须持 _fileLock，理由同 _ResyncFile。
 void CFileLogger::_RotateNow()
 {
     if (_hFile != nullptr)
@@ -362,13 +302,9 @@ void CFileLogger::_RotateNow()
 
 void CFileLogger::_BuildPaths()
 {
-    // ★ 便携部署的日志必须留在便携目录内（`<安装根>\localdata\logs`，与 Rust 侧
-    // `Config::log_dir()` 逐字对齐）。写 `%LOCALAPPDATA%` 会让便携版「拔盘走人不留痕」
-    // 这条承诺落空——用户以为带走了全部痕迹，机器上却留着一份带宿主名的输入法日志，
-    // 而这是全仓**唯一**漏掉便携分支的日志落点（core 与设置程序都走各自的 log_dir）。
-    //
-    // 判据顺序有意：便携在前，`SHGetFolderPathW` 只在非便携分支才调——那是 shell32 的
-    // 函数，而本函数跑在 loader lock 之下，能不调就不调。
+    // 便携部署的日志必须留在便携目录内（`<安装根>\localdata\logs`，与 Rust 侧 `Config::log_dir()`
+    // 逐字对齐），否则违背便携版不留痕的承诺。便携判据在前：`SHGetFolderPathW` 属 shell32，
+    // 本函数跑在 loader lock 之下，能不调就不调。
     wchar_t root[MAX_PATH];
     if (WindResolveInstallRoot(root, _countof(root)) && WindIsPortableRoot(root))
     {
@@ -389,16 +325,8 @@ void CFileLogger::_BuildPaths()
     _snwprintf_s(_fileDir, _countof(_fileDir), _TRUNCATE,
         L"%ls\\" WIND_LOG_SUBDIR_NAME, _logDir);
 
-    // 日志文件**每进程一个**：`wind_tsf.<宿主名>.<pid>.log`。
-    //
-    // TSF DLL 被每个宿主进程各加载一份，此前它们共写一个文件，于是既要靠一把跨进程互斥锁
-    // 串行化，也没法常开句柄（别人要写同一个文件）。拆开之后进程间没有共享资源，句柄可以
-    // 常开，**跨进程**那把锁不再需要——真正省下的是「每行开关文件」那 246μs，见
-    // _WriteToFile 的实测表。进程**内**的线程同步是另一回事，仍由 _fileLock 承担。
-    //
-    // 带宿主名是为了排查时一眼认出是谁（wind_tsf.feishu.12345.log）；**还要带 pid**，
-    // 因为同一个程序可以多开，Chrome 那类多进程宿主更是一开就是一串——只带名字会撞回
-    // 共享，跨进程那把锁也就白去了。
+    // 日志文件每进程一个：`wind_tsf.<宿主名>.<pid>.log`。进程间无共享才能常开句柄、免跨进程锁；
+    // 必须带 pid，同一程序多开或多进程宿主只带名字会撞回共享。
     wchar_t hostExe[MAX_PATH] = {};
     wchar_t hostName[HOST_NAME_MAX + 1];
     wcscpy_s(hostName, L"host");
@@ -407,8 +335,7 @@ void CFileLogger::_BuildPaths()
         const wchar_t* base = wcsrchr(hostExe, L'\\');
         base = base ? base + 1 : hostExe;
         size_t n = 0;
-        // 取文件名主干，且**逐字符白名单**：进程名要进文件路径，混进路径分隔符或通配符
-        // 会把日志写去别的目录，也会让 core 侧按前缀清理时匹配到意外的文件。
+        // 取文件名主干并逐字符白名单：混进路径分隔符或通配符会写去别的目录、让 core 按前缀清理时误匹配。
         for (const wchar_t* c = base; *c != L'\0' && *c != L'.' && n < HOST_NAME_MAX; ++c)
         {
             if ((*c >= L'a' && *c <= L'z') || (*c >= L'A' && *c <= L'Z') ||
@@ -434,9 +361,7 @@ void CFileLogger::_BuildPaths()
 void CFileLogger::_ReadConfig()
 {
     // Default: mode=none, level=info, dump_hotkey=off
-    //
-    // ⛔ _dumpHotkey 必须在这里也归零：本函数同时是 ReloadConfig 的实现，
-    // 用户删掉配置行后重读，开关要跟着落回关——「打开容易关不掉」的开关等于没有开关。
+    // 本函数也是 ReloadConfig 的实现，_dumpHotkey 必须一并归零，删掉配置行后重读才会落回关。
     _mode = LogMode::None;
     _level = LogLevel::Info;
     _dumpHotkey = false;
@@ -454,11 +379,8 @@ void CFileLogger::_ReadConfig()
     if (hFile == INVALID_HANDLE_VALUE)
         return; // No config file → mode=none
 
-    // ⚠️ 缓冲要足够大：本文件同时是**手工排查用的开关面板**，用户会往里写注释；设置页
-    // 写回时也逐行保留自己不认识的内容（不那样做会把用户的排查开关抹掉）。缓冲太小的
-    // 后果是「文件里写着 mode=file，日志却一行都没有」——被挤出缓冲的那几行**静默**
-    // 失效，没有任何报错，而这个文件本身就是用来排查故障的。
-    // 4KB 对一份几行 key=value 的配置绰绰有余，仍在栈上，DllMain 里用没有负担。
+    // 缓冲要够大：用户会往这份配置里写注释、设置页写回时也保留未知行，被挤出缓冲的行会静默失效。
+    // 4KB 仍在栈上，DllMain 里用没有负担。
     char buf[4096] = {};
     DWORD bytesRead = 0;
     ReadFile(hFile, buf, sizeof(buf) - 1, &bytesRead, nullptr);
@@ -553,7 +475,7 @@ const wchar_t* CFileLogger::_LevelStr(LogLevel level)
 }
 
 // ============================================================================
-// Ring Buffer (always active, no file system / debug string dependency)
+// Ring Buffer（仅 dump_hotkey 开启时记录，不依赖文件系统 / debug string）
 // ============================================================================
 
 void CFileLogger::WriteToRingBuffer(LogLevel level, const wchar_t* message)

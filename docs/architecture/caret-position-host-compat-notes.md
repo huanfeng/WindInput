@@ -141,6 +141,9 @@ QQ 的另外两个事实，决定了重锁判据的写法：
   会把锚点锁到组合末端，之后 guard 反而把这个错锚点钉住。
 - 组合区换行后 QQ 会补发一帧 `TSF_CACHED`，带着第一行行尾的陈旧坐标。只认
   `TSF_COMPOSITION → TSF_SELECTION` 帧对的判据管不到它。
+- 起点降级帧里的组合矩形同样陈旧（组合刚开始时首字的旧矩形，如 w=16 h=34，而正常帧是 w=252 h=74），
+  两种帧交替会让锚点在两个 bottom 之间抖。服务端「caret 落在矩形内」的判据挡不住，因为降级帧的
+  caret 与矩形一致地陈旧；所以 DLL 在一级降级时直接作废该帧的组合矩形。
 
 ### F 类：游戏宿主——`GetTextExt` 返回**固定**垃圾值
 
@@ -191,12 +194,40 @@ CaretEditSession: IMM32 probe hwnd=0x... cand=1 style=0x... client=(x,y) screen=
 `cand=1` 且坐标合理 ⇒ 该宿主有救，可把这条接进降级链；`cand=0` 或 `无 IMC` ⇒ 与流放之路同类，无解。
 ⚠ 注意 `ptCurrentPos` 是**客户区**坐标，比对时别和屏幕坐标混参照系。
 
+现已接为「三级降级」（`AcceptCandidateFormPoint`）：探测在 `tsf_default_pos` 指纹帧与 `GetTextExt`
+整体失败帧上做，只在前者采信，来源标 `imm_candidate_form`（见 §二·七）。要点：
+
+- 只认 `CANDIDATEFORM`，不认 `COMPOSITIONFORM`：不少宿主给后者的是输入框左上角，两者照旧都打日志。
+- 落点是文本行下沿；采信后作废组合起点与组合矩形（理由见 §二·七该条）。
+- `ClientToScreen` 用 `ITfContextView::GetWnd` 的窗口，CUAS 下即 IMC 所属窗口。已知缺口：AWT 按
+  顶层窗口客户区换算，IMC 却可能属于子窗口；Swing 焦点代理窗口在框架 (0,0) 处所以等价，纯 AWT 重量级
+  控件（`java.awt.TextArea`）会整体偏一个子窗口偏移且多半仍在显示区内。日志 `viaRoot=` 是按
+  `GA_ROOT` 换算的值，留作比对。
+
+**代 CUAS 补发 `IMN_OPENCANDIDATE`**（`wind_tsf/include/ImmOpenCandidateNudge.h`）。Java 7 AWT 宿主经
+TSF 报不出插入点，它写 `CANDIDATEFORM` 的唯一触发是收到 `IMN_OPENCANDIDATE`：
+
+- CUAS 对第三方候选 UIElement 从不发 OPEN / CLOSE：`BeginUIElement` 不发任何通知，`UpdateUIElement`
+  只翻成 `IMN_CHANGECANDIDATE`；微软拼音同条件下收得到 OPEN、SETCANDIDATEPOS、CLOSE。判据在 CUAS
+  内部，去掉 Begin 后那次立即 Update 也不改变。
+- JDK 7（修 JDK-8019990 之前，如 7u21、7u45）只认 OPEN；JDK 8 连 CHANGE 也认，所以 JDK 8 下正常、
+  JDK 7 下候选窗恒落右下角。补发 OPEN 后 AWT 按 `getTextLocation` 写 `CANDIDATEFORM`，CUAS 的
+  `GetTextExt` 随即也改答这个点，定位与微软拼音一致。
+- 只发给出现过 `tsf_default_pos` 指纹的线程：OPEN 会让自绘候选的 IMM32 宿主（不少游戏）弹出自己的
+  候选框，不能广播。结束时 OPEN 后紧跟 CLOSE，防这类宿主的框残留。
+- 每次组合开始与结束都要补发：AWT 只在收到 OPEN 时刷新 `CANDIDATEFORM`，只发一次则后续组合都停在
+  第一次的位置；结束时发是让下次组合首帧已是上屏后的位置。回写仍是异步的，故这类宿主不上报组合起点。
+- 判定按线程记，但 Edge 所有网页输入框共用浏览器 UI 线程：某个框出过一次指纹后整个进程不再报组合
+  起点、候选窗逐字抖动。故本线程出现正常排版的组合矩形（`ShowsLaidOutComposition`）时解除；Java 每帧
+  都给指纹，误解除也会在下次组合首帧重新置位。「不取 GUI caret」（`IsGuiCaretUnreliable`）不随之解除：
+  它管组合开始前那一刻，没有组合矩形可判，解除后切回 JTable / 画布首键会拿到窗口原点。
+
 ① **已实施**（2026-09-13）：降级采信坐标前做越界校验，不在 `GetScreenExt` 内即不采信，
 让 caret 保持无效——流放之路的 `(13,44)` 与 `(3839,2063)` 都由它挡住。实现与失败关闭的
 理由见 §G 类。
 
 **仍未实施**的方向，均需真机验证：
-② 把上述 IMM32 坐标接进降级链（取决于探测数据，目前只有流放之路一个样本且它没设）；
+② ~~把上述 IMM32 坐标接进降级链~~（已实施，见上；流放之路没设 `CANDIDATEFORM`，仍无解）；
 ③ 都拿不到时用窗口内兜底锚点（游戏聊天框多在下方，底部中央远比左上角合理），
 这需要把 `GetScreenExt` 经 IPC 传到服务端。
 
@@ -238,6 +269,12 @@ Composition rect (1353,1647,1399,1647) w=46 h=0    ← 组合整体（非零长�
 
 ⚠️ 二级降级**不支持顶码偏移**（`_compStartOffset`）：整体矩形无法按 wchar 切分出余码段。
 已知取舍——这类宿主连组合起点都给不出，没有更精确的来源。
+
+⚠️ 命中宿主默认位置指纹（选区、组合起点、组合矩形三者同值，`IsHostDefaultPosition`）时二级降级
+**不走**：走 CUAS 的 Java 客户端三次查询恒为工作区右下角 `(1919,1039,1920,1039)`，w=1 同样 > 0；
+窗口最大化后 `GetScreenExt=(0,23,1920,1040)` 把这个角点包了进去，越界校验单独挡不住。真在排版的
+宿主组合矩形宽度随编码串增长，不会与零长度选区逐像素相同。命中后交给 IMM32 三级降级，仍拿不到时
+由 `CARET_RETRY` 按 `tsf_default_pos` 采信。
 
 ### H 类：组合矩形是真范围，但 `left` 随组合变长而右移（**有解，已修**）
 
@@ -413,6 +450,22 @@ B 屏的任务栏。
   光标靠的也是它。它属 TSF 语义域（点就是组合起点下沿）。这类帧不带组合起点：宿主写 `CANDIDATEFORM`
   是异步的，组合首帧多是上次组合的旧值，带上会被锁成锚点、整场偏一截；不带则锚点跟逐帧 caret 走。
 
+## 二·七·五、DLL 侧取坐标的 edit session
+
+实现见 `wind_tsf/include/CaretEditSession.h`（`RequestCaretRectAsync`、`CaretProbeKind`）。
+
+- `TF_ES_SYNC` 只在按键处理期间可期待成功（MSDN："should only be used in documented situations
+  (such as keystroke handling)"）。`WM_TIMER`、`OnLayoutChange`、`OnSetFocus` 里宿主可合法返回
+  `TS_E_SYNCHRONOUS`，Word 在这类上下文里全部拒绝，须用 `TF_ES_ASYNCDONTCARE` 排队。
+- 异步请求的 `hrSession`：记事本返回 `S_OK`，即 manager 内联执行，回调在
+  `RequestEditSession` 返回前已跑完；Word 返回 `TF_S_ASYNC`，回调约 1～2ms 后到。焦点路径据此
+  决定坐标随 `focus_gained` 一起发还是补发 `caret_update`。
+- 回调的作废判据随用途不同：组合期间看组合还在不在；焦点路径没有组合，只能用焦点会话号判归属。
+  两者曾合用 `_pComposition == nullptr`，焦点回调被全部丢弃而日志一切正常。
+- `RetryDeadline` 与普通组合 probe 必须分开：存在只退化约 30ms、随后给出真实矩形的宿主，
+  `OnLayoutChange` 驱动的 probe 见到退化就当默认位置会多一次闪跳；只有等满重试窗口仍退化才采信
+  为 `tsf_default_pos`。
+
 ## 二·八、热键直达模式的占位 composition（`input.caret`，`CaretPlacementConfig`）
 
 加词、临拼、特殊模式、生僻字等由热键激活的模式，激活瞬间没有输入内容却要立刻显示候选窗 / 预览窗。
@@ -435,6 +488,23 @@ composition 的才准，所以不能一律关掉。
 - 出厂只关加词：报障场景就是 Ctrl+= 造词吃掉选中文字；加词弹的是预览窗，对坐标精度不敏感，靶机实测
   关掉后选中内容保住、记事本下预览窗位置仍正确。另几项弹候选列表，错位代价更大且缺实测数据，保持开，
   这也是做成逐模式开关的原因。
+
+## 二·九、首帧试探采样（probe）：前提与 DPI 归一
+
+DLL 在组合首帧 reflow 期间（`_compositionJustStarted`）每次 `OnLayoutChange` 取一次坐标发 `caret_probe`，
+不做任何判断，哪一帧可信由服务端按 per-app 策略决定。各宿主表现相反：EverEdit 第 1 次采样已是 reflow
+后的正确值；WPS 前两次仍是上一轮旧坐标，第 3 次才更新。限前 5 次：burst 长的宿主会刷 IPC，嵌套编辑会话
+也有触发额外 layout change 的风险。
+
+- **前提是宿主会发 `OnLayoutChange`，这远非普遍。** Word 连打 50 轮一次都没发过（记事本仅首轮 1 次），
+  它们的组合坐标只能靠 50ms timer 兜底 + 异步 `GetTextExt`，要 60~190ms（Word 的编辑会话排队）。
+  所以服务端 `fast` 档必须自带短兜底（`ui.candidate.fast_first_show_fallback_ms`），否则在这类宿主上退化成
+  `wait` 档。
+- **probe 要单独做 DPI 归一，但不走 `_EmitCaretUpdate` 出口。** 那个出口还会写 `_lastKnownCaret*`（权威兜底
+  缓存）并发 `CMD_CARET_UPDATE`（服务端当权威坐标），喂进试探值会让首显闸门失效。漏掉归一只在
+  DPI-unaware 宿主 + 缩放≠100% 的显示器上显形（双屏异缩放最常见）：`GetTextExt` 返回虚拟化 96-DPI 逻辑坐标，
+  200% 副屏上（QQ/TIM）probe 的 y/height 恰为权威值的 2 倍，候选窗被定位到屏幕外。症状是「第一个字正常、
+  后续字候选窗不显示、停顿一下又恢复」：第一个字走长等待只认权威坐标，后续字才吃错误采样。
 
 ## 三、必测矩阵
 
@@ -539,6 +609,15 @@ caret_probe → 拒绝: 该宿主 composition rect 恒陈旧，改用组合前�
   组合寿命仅约 128ms，兜底每次都被作废、永不到期，候选窗停在几百像素之外。微信的权威坐标要约
   190ms 才到，「等到正确坐标」与「在组合内显示」互斥，取一次性小抖动。
 - **靠单个宿主验证**：见第三节。
+- **无 selection 时拿 `GetScreenExt` 左上角 + 20px 冒充插入点并报成功**：那不是插入点；高度恒 > 0、
+  左上角又多半在某块屏内，躲过下游所有退化/越界判据，以 `CARET_SRC_TSF_SELECTION` 的名义把「没拿到」
+  伪装成权威坐标；shell context 上 `GetScreenExt` 还会退化成 `(0,1368,0,1368)`。现一律判失败，交给
+  标着真实来源的回退链（焦点刚到达时 selection 未建立是常态，这条是主路径）。
+- **把组合刚启动时的异步取坐标（`FirstShowProbe`）当普通 probe 发**：多数宿主内联执行这次「异步」请求
+  （inline 与 queued 约 4:1），等同同步取，拿到的是 reflow 前的坐标（Excel 差 16px）。它比 `OnLayoutChange`
+  的采样早约 19ms 到达，`fast` 档会抢先采信提前首显，随后真权威坐标的偏差又被 settle 容差吞掉，错位就此
+  固定。「某档位忽略它」不等于「所有档位都忽略它」：多消费者通道上新增生产者要逐个消费者过一遍。
+  现在它以 `CARET_SRC_PRE_REFLOW` 发出，只刷新缓存、当「未重排」的否决基准，不参与定位。
 
 ## 六、相关文件
 
