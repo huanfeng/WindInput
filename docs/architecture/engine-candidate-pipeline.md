@@ -1133,12 +1133,13 @@ merged_codes。**当前四个归并点**：`composite::merge_search`（跨词库
 筛选。文件：`wind-coordinator/src/handle_aux_code.rs` + `wind-aux-code/`（纯逻辑：三段式紧凑表
 + 纯筛选，不碰文件系统，路径由调用方解析）。
 
-- **配置（三层，同 `[schema.codetable]` 那套 tri-state，见 schema-config-layering.md §4）**：
-  全局基线 `[schema.pinyin.aux_code]`（`enabled` **出厂 false** / `max_phrase_len` / `direct`（§9.1，出厂 false））；
+- **配置（方案设置，见 `docs/design/scheme-settings-flatten.md`）**：
+  内置默认是出厂 `data/config.toml` 的 `[schema.pinyin.aux_code]`（`enabled` **出厂 false** /
+  `max_phrase_len` / `direct`（§9.1，出厂 false）），用户层不再读这一段；
   方案段 `[engine.aux_code]` 放 `files`（方案属性：全拼配笔画——出厂引用「笔画」码表方案
-  `schema:stroke`，双拼配小鹤形码文件 `aux_code/flypy_full.txt`），并可用
-  同名 `enabled` / `max_phrase_len` 逐字段覆盖全局；`schema_overrides/{id}.toml` 用**相同段名**
-  经 `read_schema` 的 `merge_toml` 深合并（设置页写入点）。折叠在
+  `schema:stroke`，双拼配小鹤形码文件 `aux_code/flypy_full.txt`），以及同名 `enabled` /
+  `max_phrase_len` / `direct`；`schema_overrides/{id}.toml` 用**相同段名**经 `read_schema` 的
+  `merge_toml` 深合并（设置页写入点，旧键 `schema.pinyin.aux_code.*` 按别名写到这里）。叠加在
   `AuxCodeGlobal::resolved`，取值出口只有 `EngineManager::aux_code_settings` 一个。
   ★ **`files` 非空 ≠ 功能开启**：方案配码表只是「这个方案推荐哪张表」。
 - **★ 为什么 `enabled` 必须能按方案覆盖**：全拼与双拼在这个功能上不是偏好不同，是**键位

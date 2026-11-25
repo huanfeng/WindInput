@@ -335,8 +335,8 @@ static REGISTRY: &[ConfigField] = &[
     // 落在 [schema.pinyin.shuangpin] 子段：它只对双拼有意义，不该混在「所有拼音方案共用」
     // 的顶层里（与 fuzzy/frequency/completion 同为子段）。
     f("schema.pinyin.shuangpin.allow_full_pinyin", Bool),
-    // 辅助码（字形二次筛选）的全局基线。**出厂关闭**；方案段 `[engine.aux_code]` 可用
-    // 同名字段 tri-state 覆盖（`AuxCodeGlobal::resolved`），故「双拼开、全拼关」表达得出
+    // 辅助码（字形二次筛选）的方案设置，旧键转到方案的 `[engine.aux_code]`。**出厂关闭**；
+    // 按方案各设（`AuxCodeGlobal::resolved` 叠到内置默认上），故「双拼开、全拼关」表达得出
     // ——全拼的反引号出厂已被音节分隔符占用，绑了也进不去，两个方案必须能分别开关。
     // `files`（码表清单）不在此：它是方案属性，只住在 `[engine.aux_code]` 里。
     f("schema.pinyin.aux_code.enabled", Bool),

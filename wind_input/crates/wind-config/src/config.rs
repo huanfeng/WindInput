@@ -1193,10 +1193,8 @@ pub struct AuxCodeGlobal {
 }
 
 impl AuxCodeGlobal {
-    /// 折叠方案 `[engine.aux_code]` 的内联/override 到全局基线：`Some` 覆盖、`None` 回落。
-    ///
-    /// 与 [`CodetableGlobal::resolved`] 同构——方案内联与 `schema_overrides` 已在
-    /// `read_schema` 经 `merge_toml` 合并成单个 `AuxCodeSpec`，此处只做一次折叠。
+    /// 把方案 `[engine.aux_code]`（方案文件 ⊕ `schema_overrides`，已在 `read_schema` 经
+    /// `merge_toml` 合并）叠到内置默认上：`Some` 取方案值、`None` 取内置默认。
     pub fn resolved(&self, ov: Option<&crate::schema::AuxCodeSpec>) -> AuxCodeGlobal {
         let mut out = self.clone();
         let Some(o) = ov else {
