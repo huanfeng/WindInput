@@ -140,9 +140,23 @@ final class SmartPunctDigitTrackerTests: XCTestCase {
         r.moveHostCursor = { _ in }
         r.digitTracker.noteKeyPassthrough(vk: 0x33, modifiers: 0)
         var d = Data(count: 4)
-        d.writeUInt32LE(1, at: 0)   // direction=1 右移
+        d.writeUInt32LE(1, at: 0)   // 右移 1 格
         _ = r.apply(Frame(cmd: DownstreamCmd.moveCursor, isAsync: false, payload: d), to: mock)
         XCTAssertEqual(r.digitTracker.prevChar, 0)
+    }
+
+    /// 载荷是右移格数：多字符右段要移 count 格，0 视同 1，超大值钳到 64。
+    func testRouterMoveCursor_MovesByCount() {
+        let r = BridgeResponseRouter()
+        let mock = BridgeResponseRouterTests.MockClient()
+        var moves: [BridgeResponseRouter.CursorMove] = []
+        r.moveHostCursor = { moves.append($0) }
+        for n: UInt32 in [3, 0, 0xFFFF_FFFF] {
+            var d = Data(count: 4)
+            d.writeUInt32LE(n, at: 0)
+            _ = r.apply(Frame(cmd: DownstreamCmd.moveCursor, isAsync: false, payload: d), to: mock)
+        }
+        XCTAssertEqual(moves, [.right(3), .right(1), .right(64)])
     }
 
     /// `ReplaceBackward{text: ""}` 是**纯删除**（命令直通车 `ime.undo_commit`）：文档确实

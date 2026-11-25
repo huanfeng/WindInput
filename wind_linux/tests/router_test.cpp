@@ -302,6 +302,15 @@ void TestReplaceBackwardAndCursor()
     r.apply(mk(CMD_MOVE_CURSOR, le32(1)), &s3);
     CHECK(s3.ops.back() == "move:1");
 
+    CASE("MoveCursor 载荷是右移格数：多字符右段移 count 格，0 视同 1，超大值钳到上限");
+    FakeSink s7;
+    r.apply(mk(CMD_MOVE_CURSOR, le32(3)), &s7);
+    CHECK(s7.ops.back() == "move:3");
+    r.apply(mk(CMD_MOVE_CURSOR, le32(0)), &s7);
+    CHECK(s7.ops.back() == "move:1");
+    r.apply(mk(CMD_MOVE_CURSOR, le32(0xFFFFFFFFu)), &s7);
+    CHECK(s7.ops.back() == "move:" + std::to_string(kMaxCursorMove));
+
     CASE("服务端给的计数巨大（> INT_MAX）：钳到上限再取负，不是未定义行为");
     FakeSink s5;
     Bytes big;

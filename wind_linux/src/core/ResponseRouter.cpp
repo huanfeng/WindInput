@@ -178,10 +178,11 @@ bool ResponseRouter::apply(const Frame& frame, TextSink* sink, bool hostShortcut
     }
 
     case CMD_MOVE_CURSOR:
-        // 智能跳过：输入右标点时跳过已自动补全的右标点。direction=1 右移。
-        if (auto dir = decodeMoveCursor(frame.payload); dir && *dir == 1) {
+        // 智能跳过：越过已自动补全的右段。载荷是右移格数（直通 ime.pair 的多字符右段不止一格），
+        // 0 视同 1，与 TSF 一致。
+        if (auto n = decodeMoveCursor(frame.payload)) {
             if (sink) {
-                sink->moveCursor(1);
+                sink->moveCursor(static_cast<int>(std::min(std::max(*n, 1u), kMaxCursorMove)));
             }
             // 光标跨过了那个右标点，光标前必是标点（恒非数字），清零即准确。
             digits_.reset();

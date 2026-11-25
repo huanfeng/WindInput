@@ -309,7 +309,7 @@ public enum BinaryCodec {
     }
 
     public struct MoveCursorPayload: Equatable {
-        public let direction: UInt32   // 1 = right, ...
+        public let count: UInt32   // 向右移动的格数；0 视同 1（与 TSF 一致）
     }
 
     /// 解 CmdMoveCursor payload (0x0107 downstream).
@@ -318,7 +318,7 @@ public enum BinaryCodec {
         guard buf.count >= 4 else {
             throw IPCError.payloadTooShort(expected: 4, got: buf.count)
         }
-        return MoveCursorPayload(direction: buf.readUInt32LE(at: 0))
+        return MoveCursorPayload(count: buf.readUInt32LE(at: 0))
     }
 
     public struct ReplaceBackwardPayload: Equatable {

@@ -150,8 +150,9 @@ public final class BridgeResponseRouter {
         case DownstreamCmd.moveCursor:
             // 智能跳过：右标点与栈顶匹配时跳过已自动补全的右标点。经 moveHostCursor 合成方向键，
             // 未注入则仅消费按键。
-            if let p = try? BinaryCodec.decodeMoveCursorPayload(frame.payload), p.direction == 1 {
-                moveHostCursor?(.right(1))
+            // 载荷是右移格数（直通 ime.pair 的多字符右段不止一格），0 视同 1，上限与左移同为 64。
+            if let p = try? BinaryCodec.decodeMoveCursorPayload(frame.payload) {
+                moveHostCursor?(.right(Int(min(max(p.count, 1), 64))))
                 // 光标跨过了右标点，这条路不经 insertText，须在此更新记账；光标前必是标点，清零即准确。
                 digitTracker.reset()
                 seqTracker.noteCursorCrossedSymbol()

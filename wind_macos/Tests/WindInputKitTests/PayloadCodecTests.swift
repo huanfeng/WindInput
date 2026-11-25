@@ -87,11 +87,11 @@ final class PayloadCodecTests: XCTestCase {
 
     // MARK: - CmdMoveCursor (0x0107)
 
-    func testDecodeMoveCursor_DirectionRight() throws {
+    func testDecodeMoveCursor_Count() throws {
         var buf = Data(count: 4)
-        buf.writeUInt32LE(1, at: 0)
+        buf.writeUInt32LE(3, at: 0)
         let p = try BinaryCodec.decodeMoveCursorPayload(buf)
-        XCTAssertEqual(p.direction, 1)
+        XCTAssertEqual(p.count, 3)
     }
 
     // MARK: - CmdStatePush (0x0206 push)
