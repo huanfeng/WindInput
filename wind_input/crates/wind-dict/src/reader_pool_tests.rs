@@ -269,8 +269,9 @@ fn different_paths_do_not_share() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// 池存 Weak 的核心契约：持有者全部释放后 mmap 必须解除，否则 Windows 上词库重建
-/// 的 rename 会永久失败。用「释放后能否覆写该文件」来验证映射确实断开了。
+/// 池存 Weak 的核心契约：持有者全部释放后条目随之失效，重新打开读到的是覆写后的新内容，
+/// 而不是复用旧映射。覆写本身不靠映射解除：Windows 上 rename 覆盖仍被映射的文件也能成功
+/// （见 `rebuilt_file_is_not_served_from_stale_entry`），所以本测试的判据是下面两条内容断言。
 #[test]
 fn dropping_all_holders_releases_the_mapping() {
     let dir = temp_dir("release");
@@ -280,7 +281,7 @@ fn dropping_all_holders_releases_the_mapping() {
     assert_eq!(Arc::strong_count(&r), 1);
     drop(r);
 
-    // 全部持有者已释放 → 文件不再被映射 → 可覆写（Windows 上映射未解除时这里会失败）
+    // 全部持有者已释放后覆写词库文件。
     let mut d = CodetableDict::empty();
     d.merge_single("dd".into(), "地".into(), 1, 0);
     let mut w = WdatWriter::new();

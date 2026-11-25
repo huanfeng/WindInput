@@ -88,13 +88,17 @@ fn engine_with_store(tag: &str, count: usize, s: Arc<Store>) -> PinyinEngine {
 }
 
 fn engine_with_store_dict(dict: CachedDict, s: Arc<Store>) -> PinyinEngine {
+    engine_with_store_cfg(dict, s, PyConfig::default())
+}
+
+fn engine_with_store_cfg(dict: CachedDict, s: Arc<Store>, cfg: PyConfig) -> PinyinEngine {
     let dm = wind_dict::manager::DictManager::new();
     dm.register_layer(Box::new(wind_store::StoreUserLayer::new(
         s.clone(),
         "pinyin",
     )));
     dm.register_layer(Box::new(wind_store::StoreTempLayer::new(s, "pinyin")));
-    PinyinEngine::new(PyConfig::default(), dict).with_store_layers(Arc::new(dm))
+    PinyinEngine::new(cfg, dict).with_store_layers(Arc::new(dm))
 }
 
 fn texts(e: &PinyinEngine, input: &str, max: usize) -> Vec<String> {
@@ -148,9 +152,11 @@ fn prefix_fallback_gives_store_layer_its_own_quota() {
     let s = store("fallback_quota");
     s.add_user_word("pinyin", "baichengxian", "拜城县", 1200, 0b100001001)
         .unwrap();
-    // 系统层 6 条（旧的单切点配额值）。出厂 `per_cut_long` 已是 50，这里已占不满配额，
-    // 用户词即使与系统层共享配额也进得来。
-    let e = engine_with_store("fallback_quota", 6, s);
+    // 配额调到 6、系统层放满 12 条：系统层 ①② 先占满 6 席，配额若共用，用户层 ③④ 一席不剩。
+    // 用出厂值（50）时系统层占不满，测不出共用。
+    let mut cfg = PyConfig::default();
+    cfg.abbrev_fallback.per_cut_long = 6;
+    let e = engine_with_store_cfg(sys_dict("fallback_quota", BCX_ENTRIES.len()), s, cfg);
 
     let long = texts(&e, "bcxrmzf", 300);
     assert!(
