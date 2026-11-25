@@ -259,7 +259,7 @@ fn run(
     let raw = backend
         .get(&manifest::meta_key())?
         .ok_or(SyncError::NotInitialized)?;
-    if !crypto::Meta::from_json(&raw)?.check_dek(root) {
+    if !crypto::Meta::from_json(&raw)?.verify(root) {
         return Err(crypto::CryptoError::BadKey.into());
     }
 

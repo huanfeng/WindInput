@@ -23,23 +23,46 @@ fn nonce_is_random() {
 }
 
 #[test]
-fn meta_unlock_and_wrong_pass() {
+fn meta_verify_right_and_wrong_key() {
     let d = Dek::generate();
-    let m = Meta::new(&d, "pw", KdfParams::FAST_TEST).unwrap();
-    let m2 = Meta::from_json(&m.to_json()).unwrap();
-    assert_eq!(m2.unlock("pw").unwrap(), d);
-    assert_eq!(m2.unlock("nope"), Err(CryptoError::BadPassphrase));
-    assert!(m2.check_dek(&d));
-    assert!(!m2.check_dek(&Dek::generate()));
+    let m = Meta::from_json(&Meta::new(&d).to_json()).unwrap();
+    assert_eq!(m.format, 2);
+    assert!(m.verify(&d));
+    assert!(!m.verify(&Dek::generate()));
 }
 
 #[test]
-fn same_pass_different_salt() {
+fn legacy_passphrase_meta_is_unsupported() {
+    let legacy = br#"{"format":1,"kdf_alg":"argon2id","kdf":{"m_kib":8,"t":1,"p":1},
+        "salt":"AA==","wrapped_dek":"AA==","check":"AA=="}"#;
+    assert_eq!(Meta::from_json(legacy), Err(CryptoError::UnsupportedMeta));
+    let v3 = br#"{"format":3,"check":"x"}"#;
+    assert_eq!(Meta::from_json(v3), Err(CryptoError::UnsupportedMeta));
+    assert_eq!(Meta::from_json(b"junk"), Err(CryptoError::UnsupportedMeta));
+}
+
+#[test]
+fn key_string_roundtrip_shape_and_tolerant_parse() {
     let d = Dek::generate();
-    let a = Meta::new(&d, "pw", KdfParams::FAST_TEST).unwrap();
-    let b = Meta::new(&d, "pw", KdfParams::FAST_TEST).unwrap();
-    assert_ne!(a.salt, b.salt);
-    assert_ne!(a.wrapped_dek, b.wrapped_dek);
+    let s = d.to_key_string();
+    assert_eq!(s.len(), 52 + 12);
+    assert!(s.split('-').all(|g| g.len() == 4));
+    assert_eq!(s, s.to_lowercase());
+    assert_eq!(Dek::from_key_string(&s).unwrap(), d);
+    let messy = format!("  {}\n--{} ", s.to_uppercase().replace('-', " - "), "");
+    assert_eq!(Dek::from_key_string(&messy).unwrap(), d);
+    assert_eq!(Dek::from_key_string(&s.replace('-', "")).unwrap(), d);
+}
+
+#[test]
+fn key_string_rejects_bad_length_and_alphabet() {
+    let s = Dek::generate().to_key_string();
+    assert!(Dek::from_key_string("").is_err());
+    assert!(Dek::from_key_string(&s[..s.len() - 5]).is_err());
+    assert!(Dek::from_key_string(&format!("{s}aaaa")).is_err());
+    // base32 字母表不含 1 8 9 0
+    assert!(Dek::from_key_string(&s.replacen(&s[..1], "1", 1)).is_err());
+    assert!(Dek::from_key_string(&"0".repeat(52)).is_err());
 }
 
 #[test]
@@ -53,14 +76,6 @@ fn dek_base64_roundtrip_and_blob_id_stable() {
         blob_id(&d.files_key(), &h),
         blob_id(&Dek::generate().files_key(), &h)
     );
-}
-
-#[test]
-fn hostile_kdf_params_rejected() {
-    let d = Dek::generate();
-    let mut m = Meta::new(&d, "pw", KdfParams::FAST_TEST).unwrap();
-    m.kdf.m_kib = u32::MAX;
-    assert!(Meta::from_json(&m.to_json()).is_err());
 }
 
 const ALL: [Purpose; 5] = [

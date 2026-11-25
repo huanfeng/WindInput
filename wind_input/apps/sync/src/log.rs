@@ -1,6 +1,6 @@
 //! 桌面：日志写 stderr，由 core 重定向并轮转到 `sync.log`。
 //! Android：在输入法进程内运行，stderr 无人接收，改走 `tracing`（宿主已接到 logcat）。
-//! 只记系统事件与错误，不记凭据、口令、密钥与文件内容。
+//! 只记系统事件与错误，不记凭据、同步密钥与文件内容。
 
 use std::time::{SystemTime, UNIX_EPOCH};
 

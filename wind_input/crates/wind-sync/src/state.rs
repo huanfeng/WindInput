@@ -19,7 +19,7 @@ pub struct RetryState {
     pub failures: u32,
     /// 下次允许自动重试的 unix 秒。
     pub next_at: u64,
-    /// 不可自动恢复的错误（认证/口令/格式）：停在这里等用户处理。
+    /// 不可自动恢复的错误（认证/同步密钥/格式）：停在这里等用户处理。
     pub halted: Option<String>,
     pub last_error: Option<String>,
 }
@@ -37,7 +37,7 @@ impl RetryState {
     pub fn record_success(&mut self) {
         *self = RetryState::default();
     }
-    /// 用户处理完（改了凭据/口令）后解除停止态。
+    /// 用户处理完（改了凭据/同步密钥）后解除停止态。
     pub fn clear_halt(&mut self) {
         self.halted = None;
         self.next_at = 0;

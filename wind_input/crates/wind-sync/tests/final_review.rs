@@ -1,7 +1,7 @@
 //! G2 终审修复的回归测试：一轮一次 apply、可执行位随写入落位、排除路径出清单、超大文件跳过。
 
 use wind_sync::backend::{Backend, MemBackend};
-use wind_sync::crypto::{Dek, KdfParams};
+use wind_sync::crypto::Dek;
 use wind_sync::engine::{MAX_FILE_BYTES, SyncCtx, SyncReport, sync_once};
 use wind_sync::local::{LocalError, LocalStore, MemLocal};
 use wind_sync::manifest::{self, Entry, Manifest};
@@ -23,7 +23,7 @@ fn run(b: &MemBackend, dek: &Dek, local: &mut dyn LocalStore, st: &mut SyncState
 
 fn setup() -> (MemBackend, Dek) {
     let b = MemBackend::new();
-    let dek = remote::init_remote(&b, "pw", KdfParams::FAST_TEST).unwrap();
+    let dek = remote::init_remote(&b).unwrap();
     (b, dek)
 }
 

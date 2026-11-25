@@ -1,7 +1,7 @@
 //! 多处共用同一设备号的检测（清单 nonce 链）。
 
 use wind_sync::backend::MemBackend;
-use wind_sync::crypto::{Dek, KdfParams};
+use wind_sync::crypto::Dek;
 use wind_sync::engine::{SyncCtx, SyncReport, sync_once};
 use wind_sync::error::SyncError;
 use wind_sync::local::MemLocal;
@@ -34,7 +34,7 @@ impl Dev {
 
 fn setup() -> (MemBackend, Dek) {
     let b = MemBackend::new();
-    let dek = remote::init_remote(&b, "pw", KdfParams::FAST_TEST).unwrap();
+    let dek = remote::init_remote(&b).unwrap();
     (b, dek)
 }
 

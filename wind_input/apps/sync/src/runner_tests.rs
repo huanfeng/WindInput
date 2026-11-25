@@ -1,8 +1,8 @@
 use super::*;
 use crate::secrets::{FileSecretStore, Secrets};
 use crate::testing::{FakeCore, MemFactory};
+use wind_sync::MemBackend;
 use wind_sync::backend::{BackendError, ObjMeta};
-use wind_sync::{KdfParams, MemBackend};
 
 fn runner_with(
     dir: &std::path::Path,
@@ -36,7 +36,6 @@ fn runner_with(
         link: Arc::new(FakeCore::default()),
         factory,
         timing: Timing::default(),
-        kdf: KdfParams::FAST_TEST,
         watch: false,
         class: DeviceClass::Desktop,
         portable: false,
@@ -135,22 +134,20 @@ fn device_info_carries_group() {
     assert_eq!(i.group, "pc");
 }
 
-fn initialized_remote() -> MemBackend {
+/// 已有同步库的远端与它的同步密钥。
+fn initialized_remote() -> (MemBackend, String) {
     let mem = MemBackend::new();
-    remote::init_remote(&mem, "p", KdfParams::FAST_TEST).unwrap();
-    mem
+    let key = remote::init_remote(&mem).unwrap().to_key_string();
+    (mem, key)
 }
 
-/// 用口令加入已有远端后不同步，确认身份后才发布清单。
+/// 用同步密钥加入已有远端后不同步，确认身份后才发布清单。
 #[test]
 fn joined_device_does_not_sync_until_identity_confirmed() {
     let d = tempfile::tempdir().unwrap();
-    let mem = initialized_remote();
+    let (mem, key) = initialized_remote();
     let (mut r, rx) = runner_with(d.path(), Box::new(MemFactory(mem.clone())), None, "pc");
-    let rep = r
-        .command(Op::SetPassphrase, &json!({"passphrase": "p"}))
-        .unwrap();
-    assert_eq!(rep["mode"], "join");
+    r.command(Op::ImportKey, &json!({"key": key})).unwrap();
     let st = r.status();
     assert!(st.needs_identity, "{st:?}");
     assert_eq!(st.device, "pc");
@@ -174,7 +171,7 @@ fn joined_device_does_not_sync_until_identity_confirmed() {
 fn confirm_identity_picks_a_free_suffix_when_id_is_taken() {
     let d = tempfile::tempdir().unwrap();
     let mem = MemBackend::new();
-    let dek = remote::init_remote(&mem, "p", KdfParams::FAST_TEST).unwrap();
+    let dek = remote::init_remote(&mem).unwrap();
     for id in ["pc", "pc-2"] {
         put_device_info(
             &mem,
@@ -185,7 +182,7 @@ fn confirm_identity_picks_a_free_suffix_when_id_is_taken() {
         .unwrap();
     }
     let (mut r, _rx) = runner_with(d.path(), Box::new(MemFactory(mem.clone())), None, "pc");
-    r.command(Op::SetPassphrase, &json!({"passphrase": "p"}))
+    r.command(Op::ImportKey, &json!({"key": dek.to_key_string()}))
         .unwrap();
     let rep = r.command(Op::ConfirmIdentity, &Value::Null).unwrap();
     assert_eq!(rep["device"], "pc-3");
@@ -239,10 +236,8 @@ fn renamed_device_removes_old_id_after_a_round_and_retries_on_failure() {
     };
     let mem = flaky.inner.clone();
     let (mut r, rx) = runner_with(d.path(), Box::new(FlakyFactory(flaky.clone())), None, "pc");
-    let rep = r
-        .command(Op::SetPassphrase, &json!({"passphrase": "p"}))
-        .unwrap();
-    assert_eq!(rep["mode"], "init");
+    let rep = r.command(Op::CreateKey, &Value::Null).unwrap();
+    assert!(rep["key"].as_str().is_some_and(|k| k.len() == 64));
     std::fs::write(d.path().join("user/config.toml"), "a = 1\n").unwrap();
     round(&mut r, &rx);
     assert!(mem.raw_get(&manifest::manifest_key("pc", 1)).is_some());
@@ -267,8 +262,7 @@ fn device_id_conflict_is_an_error_until_renamed() {
     let d = tempfile::tempdir().unwrap();
     let mem = MemBackend::new();
     let (mut r, _rx) = runner_with(d.path(), Box::new(MemFactory(mem)), None, "pc");
-    r.command(Op::SetPassphrase, &json!({"passphrase": "p"}))
-        .unwrap();
+    r.command(Op::CreateKey, &Value::Null).unwrap();
     let msg = sync_error(&SyncError::DeviceIdConflict("pc".into()));
     r.state.retry.halted = Some(msg.clone());
     r.state.retry.last_error = Some(msg.clone());
@@ -283,7 +277,7 @@ fn device_id_conflict_is_an_error_until_renamed() {
     assert!(r.state.retired_ids.is_empty(), "旧号仍属另一台设备");
 }
 
-/// 重新导入本机已持有的密钥不会让身份回到未确认。
+/// 重新导入本机已持有的同步密钥不会让身份回到未确认。
 #[test]
 fn reimporting_the_held_key_keeps_identity() {
     let d = tempfile::tempdir().unwrap();
@@ -293,8 +287,7 @@ fn reimporting_the_held_key_keeps_identity() {
         None,
         "pc",
     );
-    r.command(Op::SetPassphrase, &json!({"passphrase": "p"}))
-        .unwrap();
+    r.command(Op::CreateKey, &Value::Null).unwrap();
     let key = r.command(Op::ExportKey, &Value::Null).unwrap()["key"]
         .as_str()
         .unwrap()
@@ -317,12 +310,11 @@ fn claiming_another_id_retires_the_previous_one() {
     let mem = MemBackend::new();
     let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let (mut a, rxa) = runner_with(da.path(), Box::new(MemFactory(mem.clone())), None, "pc");
-    a.command(Op::SetPassphrase, &json!({"passphrase": "p"}))
-        .unwrap();
+    a.command(Op::CreateKey, &Value::Null).unwrap();
     round(&mut a, &rxa);
     let (mut b, rxb) = runner_with(db.path(), Box::new(MemFactory(mem.clone())), None, "lap");
-    b.command(Op::SetPassphrase, &json!({"passphrase": "p"}))
-        .unwrap();
+    let key = a.dek().unwrap().to_key_string();
+    b.command(Op::ImportKey, &json!({"key": key})).unwrap();
     b.command(Op::ConfirmIdentity, &Value::Null).unwrap();
     round(&mut b, &rxb);
     assert!(!mem.keys(&manifest::device_dir_prefix("lap")).is_empty());
@@ -339,40 +331,31 @@ fn assert_needs_identity(r: &mut Runner) {
     assert!(e.contains("请先确认本机身份"), "{e}");
 }
 
-/// 新设备凭旧口令改口令：密钥换成远端的，按加入处理，须先确认身份。
+/// 新设备粘贴同步密钥加入：按加入处理，须先确认身份。
 #[test]
-fn changing_passphrase_from_a_new_device_still_needs_identity() {
+fn importing_key_on_a_new_device_needs_identity() {
     let d = tempfile::tempdir().unwrap();
-    let mem = initialized_remote();
+    let (mem, key) = initialized_remote();
     let (mut r, _rx) = runner_with(d.path(), Box::new(MemFactory(mem)), None, "pc");
-    let rep = r
-        .command(
-            Op::SetPassphrase,
-            &json!({"passphrase": "q", "old_passphrase": "p"}),
-        )
-        .unwrap();
-    assert_eq!(rep["mode"], "change");
+    r.command(Op::ImportKey, &json!({"key": key})).unwrap();
     assert_needs_identity(&mut r);
 }
 
-/// 未确认身份时重输同一口令（走改口令）不会顺带确认身份。
+/// 未确认身份时再次粘贴同一密钥不会顺带确认身份。
 #[test]
-fn reentering_passphrase_while_unconfirmed_keeps_needing_identity() {
+fn reimporting_key_while_unconfirmed_keeps_needing_identity() {
     let d = tempfile::tempdir().unwrap();
-    let mem = initialized_remote();
+    let (mem, key) = initialized_remote();
     let (mut r, _rx) = runner_with(d.path(), Box::new(MemFactory(mem)), None, "pc");
-    r.command(Op::SetPassphrase, &json!({"passphrase": "p"}))
+    r.command(Op::ImportKey, &json!({"key": key.clone()}))
         .unwrap();
-    let rep = r
-        .command(Op::SetPassphrase, &json!({"passphrase": "p"}))
-        .unwrap();
-    assert_eq!(rep["mode"], "change");
+    r.command(Op::ImportKey, &json!({"key": key})).unwrap();
     assert_needs_identity(&mut r);
 }
 
-/// 已确认的设备改口令后仍是已确认。
+/// 空远端生成同步密钥：身份自动确认，可直接同步，导出的密钥与回执一致。
 #[test]
-fn confirmed_device_changing_passphrase_stays_confirmed() {
+fn create_key_on_empty_remote_confirms_identity() {
     let d = tempfile::tempdir().unwrap();
     let (mut r, _rx) = runner_with(
         d.path(),
@@ -380,14 +363,77 @@ fn confirmed_device_changing_passphrase_stays_confirmed() {
         None,
         "pc",
     );
-    r.command(Op::SetPassphrase, &json!({"passphrase": "p"}))
-        .unwrap();
-    let rep = r
-        .command(Op::SetPassphrase, &json!({"passphrase": "p2"}))
-        .unwrap();
-    assert_eq!(rep["mode"], "change");
+    let rep = r.command(Op::CreateKey, &Value::Null).unwrap();
+    let key = rep["key"].as_str().unwrap().to_string();
+    assert!(Dek::from_key_string(&key).is_ok());
     assert!(!r.status().needs_identity);
+    assert!(r.status().joined);
+    assert_eq!(
+        r.command(Op::ExportKey, &Value::Null).unwrap()["key"],
+        json!(key)
+    );
     r.command(Op::SyncNow, &Value::Null).unwrap();
+}
+
+/// 远端已有同步库时不能再生成密钥。
+#[test]
+fn create_key_on_existing_remote_is_rejected() {
+    let d = tempfile::tempdir().unwrap();
+    let (mem, _key) = initialized_remote();
+    let (mut r, _rx) = runner_with(d.path(), Box::new(MemFactory(mem)), None, "pc");
+    let e = r.command(Op::CreateKey, &Value::Null).unwrap_err();
+    assert_eq!(e, "远端已有同步库，请粘贴同步密钥加入");
+    assert!(!r.status().joined);
+}
+
+/// 同步密钥错、格式坏、远端没有同步库：各自的提示，且不动本机。
+#[test]
+fn import_key_rejects_wrong_malformed_and_missing_remote() {
+    let d = tempfile::tempdir().unwrap();
+    let (mem, key) = initialized_remote();
+    let (mut r, _rx) = runner_with(d.path(), Box::new(MemFactory(mem)), None, "pc");
+    for bad in [Dek::generate().to_key_string(), "AAAA".into(), "".into()] {
+        let e = r.command(Op::ImportKey, &json!({"key": bad})).unwrap_err();
+        assert_eq!(e, "同步密钥不对");
+    }
+    assert!(!r.status().joined);
+    r.command(Op::ImportKey, &json!({"key": key.to_uppercase()}))
+        .unwrap();
+    assert!(r.status().joined);
+
+    let d2 = tempfile::tempdir().unwrap();
+    let (mut empty, _rx2) = runner_with(
+        d2.path(),
+        Box::new(MemFactory(MemBackend::new())),
+        None,
+        "pc",
+    );
+    let e = empty
+        .command(Op::ImportKey, &json!({"key": key}))
+        .unwrap_err();
+    assert_eq!(e, "远端还没有同步库");
+}
+
+/// 重置远端：换新密钥并回执，旧密钥不能再加入，本机身份确认。
+#[test]
+fn reset_remote_issues_a_new_key_and_confirms_identity() {
+    let d = tempfile::tempdir().unwrap();
+    let (mem, old) = initialized_remote();
+    let (mut r, _rx) = runner_with(d.path(), Box::new(MemFactory(mem.clone())), None, "pc");
+    r.command(Op::ImportKey, &json!({"key": old.clone()}))
+        .unwrap();
+    assert!(r.status().needs_identity);
+    let e = r.command(Op::ResetRemote, &json!({})).unwrap_err();
+    assert!(e.contains("confirm"), "{e}");
+    let rep = r
+        .command(Op::ResetRemote, &json!({"confirm": true}))
+        .unwrap();
+    let fresh = rep["key"].as_str().unwrap().to_string();
+    assert_ne!(fresh, old);
+    assert!(!r.status().needs_identity);
+    let b = mem.clone();
+    assert!(remote::join_with_key(&b, &old).is_err());
+    assert!(remote::join_with_key(&b, &fresh).is_ok());
 }
 
 fn put_info(mem: &MemBackend, dek: &Dek, id: &str, group: &str, platform: &str) {
@@ -403,12 +449,12 @@ fn put_info(mem: &MemBackend, dek: &Dek, id: &str, group: &str, platform: &str) 
 fn join_group_rejects_missing_or_cross_class_groups() {
     let d = tempfile::tempdir().unwrap();
     let mem = MemBackend::new();
-    let dek = remote::init_remote(&mem, "p", KdfParams::FAST_TEST).unwrap();
+    let dek = remote::init_remote(&mem).unwrap();
     put_info(&mem, &dek, "phone", "phones", "android");
     put_info(&mem, &dek, "desk", "office", "linux");
     let (mut r, _rx) = runner_with(d.path(), Box::new(MemFactory(mem)), None, "pc");
     std::fs::write(d.path().join("user/config.toml"), "mine = 1\n").unwrap();
-    r.command(Op::SetPassphrase, &json!({"passphrase": "p"}))
+    r.command(Op::ImportKey, &json!({"key": dek.to_key_string()}))
         .unwrap();
     for g in ["nope", "phones"] {
         let e = r
@@ -435,8 +481,7 @@ fn retired_id_reused_elsewhere_is_not_deleted() {
     let d = tempfile::tempdir().unwrap();
     let mem = MemBackend::new();
     let (mut r, rx) = runner_with(d.path(), Box::new(MemFactory(mem.clone())), None, "pc");
-    r.command(Op::SetPassphrase, &json!({"passphrase": "p"}))
-        .unwrap();
+    r.command(Op::CreateKey, &Value::Null).unwrap();
     std::fs::write(d.path().join("user/config.toml"), "a = 1\n").unwrap();
     round(&mut r, &rx);
     let copy = r.state.clone();
@@ -466,8 +511,7 @@ fn claim_fallback_group_is_deduplicated() {
     let mem = MemBackend::new();
     let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let (mut a, rxa) = runner_with(da.path(), Box::new(MemFactory(mem.clone())), None, "c");
-    a.command(Op::SetPassphrase, &json!({"passphrase": "p"}))
-        .unwrap();
+    a.command(Op::CreateKey, &Value::Null).unwrap();
     std::fs::write(da.path().join("user/config.toml"), "a = 1\n").unwrap();
     round(&mut a, &rxa);
     let dek = a.dek().unwrap();
@@ -476,7 +520,7 @@ fn claim_fallback_group_is_deduplicated() {
 
     let (mut b, _rxb) = runner_with(db.path(), Box::new(MemFactory(mem.clone())), None, "lap");
     std::fs::write(db.path().join("user/config.toml"), "b = 1\n").unwrap();
-    b.command(Op::SetPassphrase, &json!({"passphrase": "p"}))
+    b.command(Op::ImportKey, &json!({"key": dek.to_key_string()}))
         .unwrap();
     let rep = b.command(Op::ClaimDevice, &json!({"dev": "c"})).unwrap();
     assert_eq!(rep["group"], "c-2");
@@ -493,8 +537,7 @@ fn claim_fallback_group_checks_own_roster_entry() {
     let mem = MemBackend::new();
     let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let (mut a, rxa) = runner_with(da.path(), Box::new(MemFactory(mem.clone())), None, "c");
-    a.command(Op::SetPassphrase, &json!({"passphrase": "p"}))
-        .unwrap();
+    a.command(Op::CreateKey, &Value::Null).unwrap();
     std::fs::write(da.path().join("user/config.toml"), "a = 1\n").unwrap();
     round(&mut a, &rxa);
     let dek = a.dek().unwrap();
@@ -502,7 +545,7 @@ fn claim_fallback_group_checks_own_roster_entry() {
     put_info(&mem, &dek, "lap", "c", "linux");
 
     let (mut b, _rxb) = runner_with(db.path(), Box::new(MemFactory(mem.clone())), None, "lap");
-    b.command(Op::SetPassphrase, &json!({"passphrase": "p"}))
+    b.command(Op::ImportKey, &json!({"key": dek.to_key_string()}))
         .unwrap();
     let rep = b.command(Op::ClaimDevice, &json!({"dev": "c"})).unwrap();
     assert_ne!(rep["group"], "c");
@@ -517,8 +560,7 @@ impl BackendFactory for FailFactory {
 }
 
 fn setup_pc(r: &mut Runner) {
-    r.command(Op::SetPassphrase, &json!({"passphrase": "p"}))
-        .unwrap();
+    r.command(Op::CreateKey, &Value::Null).unwrap();
     r.command(Op::ConfirmIdentity, &Value::Null).ok();
 }
 

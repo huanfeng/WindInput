@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use wind_sync::{DeviceClass, KdfParams, MemBackend, backend::BackendError};
+use wind_sync::{DeviceClass, MemBackend, backend::BackendError};
 use wind_sync_host::secrets::{FILE_NAME, FileSecretStore};
 use wind_sync_host::testing::{FakeCore, MemFactory};
 use wind_sync_host::{Config, Input, Runner, Timing};
@@ -39,6 +39,7 @@ struct Node {
     tx: Sender<Input>,
     handle: Option<JoinHandle<()>>,
     next_id: u64,
+    remote: MemBackend,
 }
 
 fn timing() -> Timing {
@@ -87,7 +88,6 @@ impl Node {
             link: core.clone(),
             factory: Box::new(MemFactory(remote.clone())),
             timing,
-            kdf: KdfParams::FAST_TEST,
             watch,
             class,
             portable: false,
@@ -101,6 +101,7 @@ impl Node {
             tx,
             handle: Some(handle),
             next_id: 1,
+            remote: remote.clone(),
         };
         n.wait_status("初始状态", |_| true);
         n
@@ -203,16 +204,26 @@ impl Node {
             .count()
     }
 
-    /// 设置凭据并用口令加入 / 初始化；加入已有远端时新建独立组（确认身份）。
-    fn setup(&mut self, pass: &str) -> Value {
+    /// 设置凭据，再生成同步密钥（空远端）或粘贴密钥加入（已有同步库，随后确认身份）。
+    /// 密钥由首台设备记在远端的测试专用键里，供后来的节点取用。
+    fn setup(&mut self) -> Value {
         self.cmd(Op::SetSecret, json!({"password": "pw"})).unwrap();
-        let r = self
-            .cmd(Op::SetPassphrase, json!({"passphrase": pass}))
-            .unwrap();
-        if r["mode"] == "join" {
+        if self.remote.raw_get(HARNESS_KEY).is_none() {
+            let r = self.cmd(Op::CreateKey, Value::Null).unwrap();
+            let key = r["key"].as_str().unwrap().as_bytes().to_vec();
+            self.remote.raw_put(HARNESS_KEY, key);
+            r
+        } else {
+            let r = self.join_existing();
             self.cmd(Op::ConfirmIdentity, Value::Null).unwrap();
+            r
         }
-        r
+    }
+
+    /// 已设凭据后用首台设备的同步密钥加入，不确认身份。
+    fn join_existing(&mut self) -> Value {
+        let key = String::from_utf8(self.remote.raw_get(HARNESS_KEY).unwrap()).unwrap();
+        self.cmd(Op::ImportKey, json!({"key": key})).unwrap()
     }
 
     /// 加入 `other` 所在的设备组，用组的设置覆盖本机。
@@ -233,6 +244,9 @@ impl Drop for Node {
     }
 }
 
+/// 首台设备把同步密钥记在这里（不在同步库目录内），供测试里后来的节点加入。
+const HARNESS_KEY: &str = "test-harness/key";
+
 const DICT_HEAD: &str = "---\nname: user\ncolumns: [code, text, weight]\n...\n";
 
 #[test]
@@ -251,11 +265,9 @@ fn two_devices_converge_with_core_requests() {
     assert!(r.is_ok());
     let t = a.cmd(Op::TestConnection, Value::Null).unwrap();
     assert_eq!(t["remote_initialized"], false);
-    assert_eq!(
-        a.cmd(Op::SetPassphrase, json!({"passphrase": "pass"}))
-            .unwrap()["mode"],
-        "init"
-    );
+    let created = a.cmd(Op::CreateKey, Value::Null).unwrap();
+    let key = created["key"].as_str().unwrap().to_string();
+    assert_eq!(key.len(), 64, "52 字符 + 12 个分隔符");
     assert_eq!(a.status().phase, "idle");
     assert!(a.status().has_secret);
 
@@ -266,23 +278,19 @@ fn two_devices_converge_with_core_requests() {
     assert_eq!(s.phase, "idle", "{s:?}");
     assert!(s.last_ok.is_some());
 
-    // B：口令错误 → 报「口令错误」；正确口令 → 加入
+    // B：同步密钥不对 → 报「同步密钥不对」；正确密钥 → 加入
     b.cmd(Op::SetSecret, json!({"password": "pw"})).unwrap();
     let t = b.cmd(Op::TestConnection, Value::Null).unwrap();
     assert_eq!(
         (t["remote_initialized"].as_bool(), t["joined"].as_bool()),
         (Some(true), Some(false))
     );
-    let e = b
-        .cmd(Op::SetPassphrase, json!({"passphrase": "wrong"}))
-        .unwrap_err();
-    assert!(e.contains("口令错误"), "{e}");
+    let e = b.cmd(Op::CreateKey, Value::Null).unwrap_err();
+    assert_eq!(e, "远端已有同步库，请粘贴同步密钥加入");
+    let e = b.cmd(Op::ImportKey, json!({"key": "AAAA"})).unwrap_err();
+    assert_eq!(e, "同步密钥不对");
     assert_eq!(b.status().phase, "needs_setup");
-    assert_eq!(
-        b.cmd(Op::SetPassphrase, json!({"passphrase": "pass"}))
-            .unwrap()["mode"],
-        "join"
-    );
+    b.cmd(Op::ImportKey, json!({"key": key})).unwrap();
     // 加入后先确认身份，此前不同步
     assert!(b.status().needs_identity);
     let e = b.cmd(Op::SyncNow, Value::Null).unwrap_err();
@@ -332,15 +340,13 @@ fn two_devices_converge_with_core_requests() {
         ]
     );
 
-    // 导出的密钥让第三台设备加入
-    let key = a.cmd(Op::ExportKey, Value::Null).unwrap()["key"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    // 查看到的同步密钥与生成时一致，让第三台设备加入
+    assert_eq!(
+        a.cmd(Op::ExportKey, Value::Null).unwrap()["key"],
+        json!(key)
+    );
     let mut c = Node::new(&remote, false);
     c.cmd(Op::SetSecret, json!({"password": "pw"})).unwrap();
-    let e = c.cmd(Op::ImportKey, json!({"key": "AAAA"})).unwrap_err();
-    assert!(e.starts_with("密钥格式不对"), "{e}");
     c.cmd(Op::ImportKey, json!({"key": key})).unwrap();
     assert!(c.status().needs_identity);
     c.join_group_of(&a);
@@ -353,11 +359,11 @@ fn begin_edit_refusal_blocks_the_batch_then_recovers() {
     let remote = MemBackend::new();
     let mut a = Node::new(&remote, false);
     let mut b = Node::new(&remote, false);
-    a.setup("p");
+    a.setup();
     a.put(SCHEMA, "a = 1\n");
     a.put(UD, &format!("{DICT_HEAD}x\tX\t1\n"));
     a.sync();
-    b.setup("p");
+    b.setup();
     // 本机已有这个词库（内容不同，会走合并写入）：写入前要开编辑会话
     let local_ud = format!("{DICT_HEAD}y\tY\t1\n");
     b.put(UD, &local_ud);
@@ -377,22 +383,17 @@ fn begin_edit_refusal_blocks_the_batch_then_recovers() {
 }
 
 #[test]
-fn joined_flag_and_passphrase_change_without_old_passphrase() {
+fn joined_flag_follows_create_and_import_key() {
     let remote = MemBackend::new();
     let mut a = Node::new(&remote, false);
     assert!(!a.status().joined);
-    a.setup("p1");
+    a.setup();
     a.sync();
     assert!(a.status().joined);
-    // 已持有 DEK：只给新口令即可修改
-    let r = a
-        .cmd(Op::SetPassphrase, json!({"passphrase": "p2"}))
-        .unwrap();
-    assert_eq!(r["mode"], "change");
     let mut b = Node::new(&remote, false);
     b.cmd(Op::SetSecret, json!({"password": "pw"})).unwrap();
-    b.cmd(Op::SetPassphrase, json!({"passphrase": "p2"}))
-        .unwrap();
+    assert!(!b.status().joined);
+    b.join_existing();
     assert!(b.status().joined);
 }
 
@@ -400,7 +401,7 @@ fn joined_flag_and_passphrase_change_without_old_passphrase() {
 fn conflict_paths_are_reported_capped_and_vanish_when_deleted() {
     let remote = MemBackend::new();
     let mut a = Node::new(&remote, false);
-    a.setup("p");
+    a.setup();
     a.put("config.toml", "a = 1\n");
     a.put("themes/t/x.conflict-d-1.toml", "x");
     let s = a.sync();
@@ -424,7 +425,7 @@ fn conflict_paths_are_reported_capped_and_vanish_when_deleted() {
 fn auth_failure_halts_until_user_acts() {
     let remote = MemBackend::new();
     let mut a = Node::new(&remote, false);
-    a.setup("p");
+    a.setup();
     a.put("config.toml", "a = 1\n");
     assert_eq!(a.sync().phase, "idle");
 
@@ -450,57 +451,45 @@ fn auth_failure_halts_until_user_acts() {
 }
 
 #[test]
-fn change_passphrase_and_reset_remote() {
+fn reset_remote_issues_a_new_key_and_old_one_stops_working() {
     let remote = MemBackend::new();
     let mut a = Node::new(&remote, false);
-    a.setup("old");
+    a.setup();
     a.put("config.toml", "a = 1\n");
     a.sync();
-
-    // 已加入：同一命令改口令（持有匹配的 DEK，不需旧口令）
-    assert_eq!(
-        a.cmd(Op::SetPassphrase, json!({"passphrase": "new"}))
-            .unwrap()["mode"],
-        "change"
-    );
+    let old = a.cmd(Op::ExportKey, Value::Null).unwrap()["key"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let mut b = Node::new(&remote, false);
-    b.cmd(Op::SetSecret, json!({"password": "pw"})).unwrap();
-    assert!(
-        b.cmd(Op::SetPassphrase, json!({"passphrase": "old"}))
-            .is_err()
-    );
-    b.cmd(Op::SetPassphrase, json!({"passphrase": "new"}))
-        .unwrap();
+    b.setup();
     b.join_group_of(&a);
     assert_eq!(b.sync().phase, "idle");
     assert_eq!(b.read("config.toml").as_deref(), Some("a = 1\n"));
 
     // 重置远端：缺确认标志拒绝；确认后清空，以本机为准重新上传
-    assert!(a.cmd(Op::ResetRemote, json!({"passphrase": "z"})).is_err());
-    assert!(
-        a.cmd(
-            Op::ResetRemote,
-            json!({"confirm": false, "passphrase": "z"})
-        )
-        .is_err()
-    );
-    assert!(
-        a.cmd(Op::ResetRemote, json!({"confirm": true})).is_err(),
-        "新口令必填"
-    );
+    assert!(a.cmd(Op::ResetRemote, json!({})).is_err());
+    assert!(a.cmd(Op::ResetRemote, json!({"confirm": false})).is_err());
     a.put("config.toml", "a = 9\n");
-    a.cmd(Op::ResetRemote, json!({"confirm": true, "passphrase": "z"}))
-        .unwrap();
+    let r = a.cmd(Op::ResetRemote, json!({"confirm": true})).unwrap();
+    let fresh = r["key"].as_str().unwrap().to_string();
+    assert_ne!(fresh, old);
     // 重置后立即写回本机设备信息，清单要等下一轮
     assert_eq!(remote.keys("windinput-sync/v2/devices/").len(), 1);
     assert_eq!(a.sync().phase, "idle");
     assert_eq!(remote.keys("windinput-sync/v2/devices/").len(), 2);
-    // 另一台用新口令重新加入（旧 DEK 沿用，已持有的也仍匹配）
+    // 旧密钥不能再加入，新密钥可以
+    let mut c = Node::new(&remote, false);
+    c.cmd(Op::SetSecret, json!({"password": "pw"})).unwrap();
     assert_eq!(
-        b.cmd(Op::SetPassphrase, json!({"passphrase": "z"}))
-            .unwrap()["mode"],
-        "change"
+        c.cmd(Op::ImportKey, json!({"key": old})).unwrap_err(),
+        "同步密钥不对"
     );
+    c.cmd(Op::ImportKey, json!({"key": fresh})).unwrap();
+    // 两设备：A 生成 → B 粘贴 → 确认身份 → 互通
+    c.join_group_of(&a);
+    assert_eq!(c.sync().phase, "idle");
+    assert_eq!(c.read("config.toml").as_deref(), Some("a = 9\n"));
 }
 
 #[test]
@@ -509,7 +498,6 @@ fn argument_errors_are_readable() {
     let mut a = Node::new(&remote, false);
     for (op, args) in [
         (Op::SetSecret, json!({})),
-        (Op::SetPassphrase, json!({"passphrase": ""})),
         (Op::ImportKey, json!({})),
         (Op::TestConnection, Value::Null), // 还没存凭据
     ] {
@@ -549,10 +537,10 @@ fn file_changes_trigger_sync_after_debounce_and_echo_is_suppressed() {
     let remote = MemBackend::new();
     let mut a = Node::new(&remote, true);
     let mut b = Node::new(&remote, true);
-    a.setup("p");
+    a.setup();
     a.put("config.toml", "a = 1\n");
     a.sync();
-    b.setup("p");
+    b.setup();
     b.join_group_of(&a);
     b.sync();
     assert_eq!(b.read("config.toml").as_deref(), Some("a = 1\n"));
@@ -591,7 +579,7 @@ fn send_settings(n: &Node, s: SyncSettings) {
 fn changing_backend_location_drops_saved_password_but_other_edits_keep_it() {
     let remote = MemBackend::new();
     let mut a = Node::new(&remote, false);
-    a.setup("p");
+    a.setup();
     assert!(a.status().has_secret);
 
     let mut s = settings();
@@ -644,10 +632,10 @@ fn block_begin_edit(core: &FakeCore) -> (Arc<AtomicBool>, Arc<AtomicBool>) {
 fn pair_with_local_dict(remote: &MemBackend) -> (Node, Node) {
     let mut a = Node::new(remote, false);
     let mut b = Node::new(remote, false);
-    a.setup("p");
+    a.setup();
     a.put(UD, &format!("{DICT_HEAD}x\tX\t1\n"));
     a.sync();
-    b.setup("p");
+    b.setup();
     b.put(UD, &format!("{DICT_HEAD}y\tY\t1\n"));
     (a, b)
 }
@@ -674,10 +662,10 @@ fn state_changing_commands_are_refused_during_a_round_but_reads_work() {
     spin_until("进入 beginEdit", || entered.load(Ordering::SeqCst));
 
     for (op, args) in [
-        (Op::SetPassphrase, json!({"passphrase": "new"})),
+        (Op::CreateKey, Value::Null),
         (Op::SetSecret, json!({"password": "x"})),
         (Op::ImportKey, json!({"key": "k"})),
-        (Op::ResetRemote, json!({"confirm": true, "passphrase": "n"})),
+        (Op::ResetRemote, json!({"confirm": true})),
         (Op::ConfirmMassDelete, Value::Null),
     ] {
         let e = b.cmd(op, args).unwrap_err();
@@ -693,7 +681,7 @@ fn state_changing_commands_are_refused_during_a_round_but_reads_work() {
         let st = b.status();
         st.phase == "idle" && st.last_ok.is_some()
     });
-    // 被拒的命令没有生效：口令仍是 p，密钥仍能导出
+    // 被拒的命令没有生效：同步密钥仍能导出
     assert!(b.cmd(Op::ExportKey, Value::Null).is_ok());
 }
 
@@ -756,7 +744,7 @@ fn user_opened_session_gives_a_hint_then_syncs_after_it_closes() {
 fn mass_deletion_halts_with_readable_message_until_confirmed() {
     let remote = MemBackend::new();
     let mut a = Node::new(&remote, false);
-    a.setup("p");
+    a.setup();
     for i in 0..25 {
         a.put(&format!("schemas/s{i}.schema.toml"), "x = 1\n");
     }
@@ -810,8 +798,8 @@ fn device_roster_lists_both_devices_with_self_marker() {
     let remote = MemBackend::new();
     let mut a = Node::with(&remote, false, named("办公室"));
     let mut b = Node::with(&remote, false, settings());
-    a.setup("p");
-    b.setup("p");
+    a.setup();
+    b.setup();
 
     let la = devices(&mut a);
     assert_eq!(la.len(), 2, "{la:?}");
@@ -843,8 +831,8 @@ fn renaming_is_published_immediately() {
     let remote = MemBackend::new();
     let mut a = Node::with(&remote, false, named("旧名"));
     let mut b = Node::with(&remote, false, named("乙"));
-    a.setup("p");
-    b.setup("p");
+    a.setup();
+    b.setup();
     assert!(find(&devices(&mut b), "旧名")["is_self"] == false);
 
     a.tx.send(Input::Core(ToSync::Settings(named("新名"))))
@@ -861,8 +849,8 @@ fn remove_device_requires_confirm_and_refuses_self() {
     let remote = MemBackend::new();
     let mut a = Node::with(&remote, false, named("甲"));
     let mut b = Node::with(&remote, false, named("乙"));
-    a.setup("p");
-    b.setup("p");
+    a.setup();
+    b.setup();
     let la = devices(&mut a);
     let self_id = find(&la, "甲")["id"].as_str().unwrap().to_string();
     let other_id = find(&la, "乙")["id"].as_str().unwrap().to_string();
@@ -892,8 +880,8 @@ fn removed_device_comes_back_readable_after_its_next_round() {
     let remote = MemBackend::new();
     let mut a = Node::with(&remote, false, named("甲"));
     let mut b = Node::with(&remote, false, named("乙"));
-    a.setup("p");
-    b.setup("p");
+    a.setup();
+    b.setup();
     a.put("config.toml", "a = 1\n");
     a.sync();
     b.sync();
@@ -944,9 +932,9 @@ fn mobile_and_desktop_share_dicts_but_not_config() {
         "---\nname: user\ncolumns: [code, text, weight]\n...\na\t啊\t1\n",
     );
     ph.put("config.toml", "who = \"phone\"\n");
-    pc.setup("pass");
+    pc.setup();
     pc.sync();
-    ph.setup("pass");
+    ph.setup();
     ph.sync();
     pc.sync();
     assert!(ph.read(UD).unwrap().contains("a\t啊"));
@@ -970,7 +958,7 @@ fn on_demand_runner_only_syncs_when_asked() {
         ..timing()
     };
     let mut n = Node::spawn(&remote, false, settings(), DeviceClass::Mobile, true, t);
-    n.setup("pass");
+    n.setup();
     std::thread::sleep(Duration::from_millis(600));
     assert_eq!(n.syncing_count(), 0, "未要求时不应同步");
     n.sync();
@@ -985,7 +973,7 @@ fn group_join_leave_and_group_name() {
     let remote = MemBackend::new();
     let mut a = Node::with(&remote, false, named("甲"));
     let mut b = Node::with(&remote, false, named("乙"));
-    a.setup("p");
+    a.setup();
     a.put("config.toml", "a = 1\n");
     a.sync();
     a.cmd(Op::SetGroupName, json!({"name": "家"})).unwrap();
@@ -993,8 +981,7 @@ fn group_join_leave_and_group_name() {
 
     b.put("config.toml", "b = 1\n");
     b.cmd(Op::SetSecret, json!({"password": "pw"})).unwrap();
-    b.cmd(Op::SetPassphrase, json!({"passphrase": "p"}))
-        .unwrap();
+    b.join_existing();
     let e = b
         .cmd(Op::JoinGroup, json!({"group": "x", "mode": "both"}))
         .unwrap_err();
@@ -1031,7 +1018,7 @@ fn group_join_leave_and_group_name() {
 fn claim_device_restores_identity_and_settings() {
     let remote = MemBackend::new();
     let mut a = Node::with(&remote, false, named("old-pc"));
-    a.setup("p");
+    a.setup();
     a.put("config.toml", "a = 1\n");
     a.put(UD, &format!("{DICT_HEAD}x\tX\t1\n"));
     a.sync();
@@ -1042,8 +1029,7 @@ fn claim_device_restores_identity_and_settings() {
     let mut n = Node::with(&remote, false, named("new-pc"));
     n.put("config.toml", "n = 1\n");
     n.cmd(Op::SetSecret, json!({"password": "pw"})).unwrap();
-    n.cmd(Op::SetPassphrase, json!({"passphrase": "p"}))
-        .unwrap();
+    n.join_existing();
     let r = n.cmd(Op::ClaimDevice, json!({"dev": a_id})).unwrap();
     assert_eq!(r["group"], a_group.as_str());
     let st = n.status();
@@ -1073,9 +1059,9 @@ fn same_default_id_gets_a_suffix_on_confirm() {
     let remote = MemBackend::new();
     let mut a = Node::with(&remote, false, named("Desk"));
     let mut b = Node::with(&remote, false, named("Desk"));
-    a.setup("p");
+    a.setup();
     assert_eq!(a.status().device, "desk");
-    b.setup("p");
+    b.setup();
     assert_eq!(b.status().device, "desk-2");
     assert_eq!(b.sync().phase, "idle");
     assert_eq!(a.sync().phase, "idle");
@@ -1086,7 +1072,7 @@ fn same_default_id_gets_a_suffix_on_confirm() {
 fn confirmed_group_does_not_collide_with_existing_groups() {
     let remote = MemBackend::new();
     let mut a = Node::with(&remote, false, named("pc"));
-    a.setup("p");
+    a.setup();
     let r = a.cmd(Op::LeaveGroup, json!({})).unwrap();
     assert_eq!(r["group"], "pc-2");
     a.put("config.toml", "a = 1\n");
@@ -1094,7 +1080,7 @@ fn confirmed_group_does_not_collide_with_existing_groups() {
 
     let mut b = Node::with(&remote, false, named("pc"));
     b.put("config.toml", "b = 1\n");
-    b.setup("p");
+    b.setup();
     let st = b.status();
     assert_eq!(st.device, "pc-2");
     assert_ne!(st.group, "pc-2", "{st:?}");
@@ -1110,12 +1096,12 @@ fn half_finished_join_halts_until_retried() {
     use std::os::unix::fs::PermissionsExt;
     let remote = MemBackend::new();
     let mut a = Node::with(&remote, false, named("甲"));
-    a.setup("p");
+    a.setup();
     a.put("config.toml", "a = 1\n");
     a.sync();
     let mut b = Node::with(&remote, false, named("乙"));
     b.put("data/x/dicts.toml", "d = 1\n");
-    b.setup("p");
+    b.setup();
     b.sync();
     let old_group = b.status().group;
     let gen_keys = remote.keys("windinput-sync/v2/devices/").len();

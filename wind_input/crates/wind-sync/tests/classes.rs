@@ -1,7 +1,7 @@
 //! 类别与组命名空间：桌面与手机共用同一远端，设置按组、主题按类别。
 
 use wind_sync::backend::MemBackend;
-use wind_sync::crypto::{Dek, KdfParams};
+use wind_sync::crypto::Dek;
 use wind_sync::engine::{SyncCtx, SyncReport, sync_once};
 use wind_sync::local::MemLocal;
 use wind_sync::remote;
@@ -46,7 +46,7 @@ impl Dev {
 
 fn setup() -> (MemBackend, Dek) {
     let b = MemBackend::new();
-    let dek = remote::init_remote(&b, "pw", KdfParams::FAST_TEST).unwrap();
+    let dek = remote::init_remote(&b).unwrap();
     (b, dek)
 }
 

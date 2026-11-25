@@ -26,7 +26,6 @@ use std::io::{self, BufReader};
 use std::path::PathBuf;
 use std::sync::mpsc;
 
-use wind_sync::KdfParams;
 use wind_sync_ipc::{ToSync, read_frame};
 
 /// 进程入口：读 Hello、起读线程、跑主循环。返回退出码。
@@ -99,7 +98,6 @@ pub fn run_process() -> i32 {
         link,
         factory: Box::new(NetFactory),
         timing: Timing::default(),
-        kdf: KdfParams::DEFAULT,
         watch: true,
         class: wind_sync::DeviceClass::Desktop,
         portable,

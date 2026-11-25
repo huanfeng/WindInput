@@ -1,7 +1,7 @@
 //! 多设备模拟：多个 LocalStore + SyncState 共享一个 MemBackend。
 
 use wind_sync::backend::{BackendError, MemBackend};
-use wind_sync::crypto::{Dek, KdfParams};
+use wind_sync::crypto::Dek;
 use wind_sync::engine::{SyncCtx, SyncReport, sync_once};
 use wind_sync::error::SyncError;
 use wind_sync::local::MemLocal;
@@ -41,7 +41,7 @@ impl Dev {
 
 fn setup(n: usize) -> (MemBackend, Vec<Dev>) {
     let b = MemBackend::new();
-    let dek = remote::init_remote(&b, "pw", KdfParams::FAST_TEST).unwrap();
+    let dek = remote::init_remote(&b).unwrap();
     let devs = (0..n).map(|i| Dev::new(&format!("dev{i}"), &dek)).collect();
     (b, devs)
 }
@@ -325,23 +325,17 @@ fn manifest_retention_keeps_two_gens() {
 }
 
 #[test]
-fn wrong_passphrase_rejected_and_key_import_joins() {
+fn wrong_key_rejected_and_key_import_joins() {
     let b = MemBackend::new();
-    let dek = remote::init_remote(&b, "right", KdfParams::FAST_TEST).unwrap();
+    let dek = remote::init_remote(&b).unwrap();
     assert!(matches!(
-        remote::init_remote(&b, "x", KdfParams::FAST_TEST),
+        remote::init_remote(&b),
         Err(SyncError::AlreadyInitialized)
     ));
-    assert!(matches!(
-        remote::join_with_passphrase(&b, "wrong"),
-        Err(SyncError::Crypto(
-            wind_sync::crypto::CryptoError::BadPassphrase
-        ))
-    ));
-    assert_eq!(remote::join_with_passphrase(&b, "right").unwrap(), dek);
-    // 导出密钥 → 新设备导入
-    let exported = dek.to_base64();
-    let dek2 = remote::join_with_key(&b, &exported).unwrap();
+    // 同步密钥 → 新设备导入（容错：大写）
+    let key = dek.to_key_string();
+    let dek2 = remote::join_with_key(&b, &key.to_uppercase()).unwrap();
+    assert_eq!(dek2, dek);
     let mut a = Dev::new("a", &dek);
     a.local.set("config.toml", "k = 1\n");
     a.ok(&b);
@@ -349,29 +343,13 @@ fn wrong_passphrase_rejected_and_key_import_joins() {
     c.ok(&b);
     assert_eq!(c.local.text("config.toml").unwrap(), "k = 1\n");
     // 错密钥
-    assert!(remote::join_with_key(&b, &Dek::generate().to_base64()).is_err());
+    assert!(matches!(
+        remote::join_with_key(&b, &Dek::generate().to_key_string()),
+        Err(SyncError::Crypto(wind_sync::crypto::CryptoError::BadKey))
+    ));
     let mut bad = Dev::new("bad", &Dek::generate());
     let e = bad.sync(&b).unwrap_err();
     assert!(!e.retryable());
-}
-
-#[test]
-fn change_passphrase_keeps_old_exported_key_valid() {
-    let b = MemBackend::new();
-    let dek = remote::init_remote(&b, "old", KdfParams::FAST_TEST).unwrap();
-    let exported = dek.to_base64();
-    let mut a = Dev::new("a", &dek);
-    a.local.set("config.toml", "k = 1\n");
-    a.ok(&b);
-    assert!(remote::change_passphrase(&b, "nope", "new", KdfParams::FAST_TEST).is_err());
-    remote::change_passphrase(&b, "old", "new", KdfParams::FAST_TEST).unwrap();
-    assert!(remote::join_with_passphrase(&b, "old").is_err());
-    assert_eq!(remote::join_with_passphrase(&b, "new").unwrap(), dek);
-    let dek2 = remote::join_with_key(&b, &exported).unwrap();
-    let mut c = Dev::new("c", &dek2);
-    c.ok(&b);
-    assert_eq!(c.local.text("config.toml").unwrap(), "k = 1\n");
-    a.ok(&b); // 原设备不受影响
 }
 
 #[test]

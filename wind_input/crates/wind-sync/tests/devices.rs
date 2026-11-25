@@ -1,7 +1,7 @@
 //! 设备名册：多设备经同一个 MemBackend 互相可见（设计 sync-messaging §3.2）。
 
 use wind_sync::backend::MemBackend;
-use wind_sync::crypto::{Dek, KdfParams};
+use wind_sync::crypto::Dek;
 use wind_sync::devices::{DeviceInfo, list_devices, put_device_info, remove_device};
 use wind_sync::engine::{SyncCtx, sync_once};
 use wind_sync::local::MemLocal;
@@ -30,7 +30,7 @@ fn info(name: &str, last_seen: u64) -> DeviceInfo {
 
 fn setup() -> (MemBackend, Dek) {
     let b = MemBackend::new();
-    let dek = remote::init_remote(&b, "pw", KdfParams::FAST_TEST).unwrap();
+    let dek = remote::init_remote(&b).unwrap();
     (b, dek)
 }
 

@@ -1,7 +1,7 @@
 //! 代码审查问题的回归测试（多设备模拟）。
 
 use wind_sync::backend::{Backend, BackendError, MemBackend, ObjMeta};
-use wind_sync::crypto::{Dek, KdfParams};
+use wind_sync::crypto::Dek;
 use wind_sync::engine::{SyncCtx, SyncReport, sync_once};
 use wind_sync::error::SyncError;
 use wind_sync::local::{LocalError, LocalStore, MemLocal};
@@ -44,7 +44,7 @@ impl Dev {
 
 fn setup(n: usize) -> (MemBackend, Vec<Dev>) {
     let b = MemBackend::new();
-    let dek = remote::init_remote(&b, "pw", KdfParams::FAST_TEST).unwrap();
+    let dek = remote::init_remote(&b).unwrap();
     let devs = (0..n).map(|i| Dev::new(&format!("dev{i}"), &dek)).collect();
     (b, devs)
 }
@@ -176,10 +176,7 @@ impl Backend for RacingMeta {
     fn put(&self, k: &str, v: &[u8]) -> Result<(), BackendError> {
         self.inner.put(k, v)?;
         if k == manifest::meta_key() {
-            let other =
-                wind_sync::crypto::Meta::new(&Dek::generate(), "other", KdfParams::FAST_TEST)
-                    .unwrap()
-                    .to_json();
+            let other = wind_sync::crypto::Meta::new(&Dek::generate()).to_json();
             self.inner.put(k, &other)?;
         }
         Ok(())
@@ -194,7 +191,7 @@ fn concurrent_init_loser_gets_error() {
     let b = RacingMeta {
         inner: MemBackend::new(),
     };
-    let r = remote::init_remote(&b, "pw", KdfParams::FAST_TEST);
+    let r = remote::init_remote(&b);
     assert_eq!(r.unwrap_err(), SyncError::AlreadyInitialized);
 }
 
@@ -347,10 +344,10 @@ fn absorbed_is_transitive_across_later_edits() {
 #[test]
 fn reset_skips_traversal_keys() {
     let b = MemBackend::new();
-    let dek = remote::init_remote(&b, "p", KdfParams::FAST_TEST).unwrap();
+    remote::init_remote(&b).unwrap();
     b.raw_put("windinput-sync/v2/../keep", vec![1]);
     b.raw_put("windinput-sync/v2/blobs/ok", vec![1]);
-    remote::reset_remote(&b, &dek, "p2", KdfParams::FAST_TEST).unwrap();
+    remote::reset_remote(&b).unwrap();
     assert!(b.raw_get("windinput-sync/v2/../keep").is_some());
     assert!(b.raw_get("windinput-sync/v2/blobs/ok").is_none());
 }

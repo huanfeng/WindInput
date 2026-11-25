@@ -7,7 +7,6 @@
 #![cfg(feature = "net")]
 
 use wind_sync::backend::{Backend, BackendError};
-use wind_sync::crypto::KdfParams;
 use wind_sync::devices::{DeviceInfo, list_devices, put_device_info, remove_device};
 use wind_sync::engine::{SyncCtx, sync_once};
 use wind_sync::local::MemLocal;
@@ -112,7 +111,7 @@ fn crud(b: &dyn Backend) {
 }
 
 fn sync_roundtrip(b: &dyn Backend) {
-    let dek = remote::init_remote(b, "pw", KdfParams::FAST_TEST).unwrap();
+    let dek = remote::init_remote(b).unwrap();
     let mut la = MemLocal::new();
     let mut lb = MemLocal::new();
     let (mut sa, mut sb) = (SyncState::new("devA"), SyncState::new("devB"));

@@ -567,8 +567,7 @@ struct Remote {
 impl Remote {
     fn new() -> Remote {
         let b = wind_sync::MemBackend::new();
-        let dek =
-            wind_sync::remote::init_remote(&b, "pw", wind_sync::KdfParams::FAST_TEST).unwrap();
+        let dek = wind_sync::remote::init_remote(&b).unwrap();
         Remote {
             b,
             dek,

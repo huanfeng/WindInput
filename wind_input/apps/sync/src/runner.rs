@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use wind_sync::crypto::{Dek, KdfParams, Meta, content_hash};
+use wind_sync::crypto::{Dek, Meta, content_hash};
 use wind_sync::devices::{
     DeviceEntry, DeviceInfo, id_taken, list_devices, put_device_info, remove_device,
 };
@@ -116,7 +116,6 @@ pub struct Config {
     pub secrets: Box<dyn SecretStore>,
     pub factory: Box<dyn BackendFactory>,
     pub timing: Timing,
-    pub kdf: KdfParams,
     /// 是否监听文件变化（测试可关；进程内运行的手机端不监听）。
     pub watch: bool,
     /// 本机设备类别：平台相关文件在远端的命名空间。
@@ -875,7 +874,7 @@ impl Runner {
         let mutating = matches!(
             op,
             Op::SetSecret
-                | Op::SetPassphrase
+                | Op::CreateKey
                 | Op::ImportKey
                 | Op::ResetRemote
                 | Op::ConfirmMassDelete
@@ -894,7 +893,7 @@ impl Runner {
             Op::ConfirmMassDelete => self.cmd_confirm_mass_delete(),
             Op::SetSecret => self.cmd_set_secret(args),
             Op::TestConnection => self.cmd_test_connection(args),
-            Op::SetPassphrase => self.cmd_set_passphrase(args),
+            Op::CreateKey => self.cmd_create_key(),
             Op::ImportKey => self.cmd_import_key(args),
             Op::ExportKey => self.cmd_export_key(),
             Op::SyncNow => self.cmd_sync_now(),
@@ -910,7 +909,7 @@ impl Runner {
         }
     }
 
-    /// 用户处理完问题（改凭据 / 口令 / 密钥）后：解除停止态、丢旧连接、稍后同步。
+    /// 用户处理完问题（改凭据 / 同步密钥）后：解除停止态、丢旧连接、稍后同步。
     fn after_user_fix(&mut self) {
         self.clear_halt();
         self.save_state();
@@ -928,7 +927,7 @@ impl Runner {
         Ok(json!({ "ok": true }))
     }
 
-    /// 不经缓存、可带临时密码地建后端：测试连接与改口令都用它。
+    /// 不经缓存、可带临时密码地建后端：测试连接与同步密钥命令都用它。
     fn fresh_backend(&self, password: Option<&str>) -> Result<Box<dyn Backend>, String> {
         if self.settings.backend.is_none() {
             return Err("尚未配置存储后端".into());
@@ -957,7 +956,7 @@ impl Runner {
         b.test_connection().map_err(|e| backend_error(&e))?;
         let meta = Self::read_meta(&*b)?;
         let joined = match (&meta, self.dek()) {
-            (Some(m), Ok(d)) => m.check_dek(&d),
+            (Some(m), Ok(d)) => m.verify(&d),
             _ => false,
         };
         Ok(json!({ "ok": true, "remote_initialized": meta.is_some(), "joined": joined }))
@@ -982,53 +981,25 @@ impl Runner {
         Ok(())
     }
 
-    /// 远端无 meta → 初始化；有 meta：已加入（持有匹配的 DEK 或给了旧口令）→ 改口令，否则用口令加入。
-    fn cmd_set_passphrase(&mut self, args: &Value) -> Result<Value, String> {
-        let pass = str_arg(args, "passphrase").unwrap_or_default();
-        if pass.is_empty() {
-            return Err("口令不能为空".into());
-        }
+    /// 远端还没有同步库：生成同步密钥并建库，本机身份自动确认；远端已有则拒绝。
+    fn cmd_create_key(&mut self) -> Result<Value, String> {
         let b = self.fresh_backend(None)?;
-        let kdf = self.cfg.kdf;
-        let se = |e: SyncError| sync_error(&e);
-        let (dek, mode) = match Self::read_meta(&*b)? {
-            None => (remote::init_remote(&*b, pass, kdf).map_err(se)?, "init"),
-            Some(meta) => {
-                let old = str_arg(args, "old_passphrase").filter(|s| !s.is_empty());
-                let held = self.dek().ok().filter(|d| meta.check_dek(d));
-                if let Some(old) = old {
-                    remote::change_passphrase(&*b, old, pass, kdf).map_err(se)?;
-                    (
-                        remote::join_with_passphrase(&*b, pass).map_err(se)?,
-                        "change",
-                    )
-                } else if let Some(d) = held {
-                    remote::rewrap_passphrase(&*b, &d, pass, kdf).map_err(se)?;
-                    (d, "change")
-                } else {
-                    (remote::join_with_passphrase(&*b, pass).map_err(se)?, "join")
-                }
-            }
-        };
-        self.adopt_dek(&dek, mode == "init")?;
-        log!("口令设置完成（{mode}）");
-        Ok(json!({ "ok": true, "mode": mode }))
+        if Self::read_meta(&*b)?.is_some() {
+            return Err(sync_error(&SyncError::AlreadyInitialized));
+        }
+        let dek = remote::init_remote(&*b).map_err(|e| sync_error(&e))?;
+        self.adopt_dek(&dek, true)?;
+        log!("已生成同步密钥");
+        Ok(json!({ "ok": true, "key": dek.to_key_string() }))
     }
 
+    /// 粘贴同步密钥加入已有同步库；身份待确认。
     fn cmd_import_key(&mut self, args: &Value) -> Result<Value, String> {
         let key = str_arg(args, "key").unwrap_or_default();
-        if key.trim().is_empty() {
-            return Err("密钥不能为空".into());
-        }
-        // 先在本地校验格式，免得被说成「远端格式不认识」
-        wind_sync::crypto::Dek::from_base64(key).map_err(|e| {
-            let d = match e {
-                wind_sync::crypto::CryptoError::Format(d) => d,
-                e => e.to_string(),
-            };
-            format!("密钥格式不对（{d}），请粘贴完整的导出密钥")
-        })?;
         let b = self.fresh_backend(None)?;
+        if Self::read_meta(&*b)?.is_none() {
+            return Err(sync_error(&SyncError::NotInitialized));
+        }
         let dek = remote::join_with_key(&*b, key).map_err(|e| sync_error(&e))?;
         self.adopt_dek(&dek, false)?;
         Ok(json!({ "ok": true }))
@@ -1037,8 +1008,8 @@ impl Runner {
     fn cmd_export_key(&self) -> Result<Value, String> {
         let dek = self
             .dek()
-            .map_err(|_| "本机尚未加入加密同步，没有可导出的密钥".to_string())?;
-        Ok(json!({ "key": dek.to_base64() }))
+            .map_err(|_| "本机尚未加入加密同步，没有可导出的同步密钥".to_string())?;
+        Ok(json!({ "key": dek.to_key_string() }))
     }
 
     fn cmd_sync_now(&mut self) -> Result<Value, String> {
@@ -1049,7 +1020,7 @@ impl Runner {
             return Err("尚未保存存储凭据".into());
         }
         if self.secrets.dek.is_none() {
-            return Err("尚未设置同步口令或导入密钥".into());
+            return Err("尚未生成或粘贴同步密钥".into());
         }
         if !self.state.identity_confirmed {
             return Err(IDENTITY_MSG.into());
@@ -1423,18 +1394,13 @@ impl Runner {
         Ok(json!({ "ok": true, "device": dev, "group": group }))
     }
 
-    /// 清空远端后以本机为准重新上传。需 `confirm: true` 与新口令；本机有 DEK 则沿用（已导出的密钥仍有效）。
+    /// 清空远端后以本机为准重新上传。需 `confirm: true`；生成新的同步密钥并回执，其他设备须用新密钥重新加入。
     fn cmd_reset_remote(&mut self, args: &Value) -> Result<Value, String> {
         if args.get("confirm").and_then(Value::as_bool) != Some(true) {
             return Err("重置远端会清空其中全部同步数据，须明确确认（confirm=true）".into());
         }
-        let pass = str_arg(args, "passphrase").unwrap_or_default();
-        if pass.is_empty() {
-            return Err("重置后需要设置新口令".into());
-        }
         let b = self.fresh_backend(None)?;
-        let dek = self.dek().unwrap_or_else(|_| Dek::generate());
-        remote::reset_remote(&*b, &dek, pass, self.cfg.kdf).map_err(|e| sync_error(&e))?;
+        let dek = remote::reset_remote(&*b).map_err(|e| sync_error(&e))?;
         self.secrets.dek = Some(dek.to_base64());
         self.save_secrets()?;
         // 远端已空：旧基线作废，所有本地文件当作新增上传；本机就是新库的首台设备
@@ -1448,7 +1414,7 @@ impl Runner {
         self.after_user_fix();
         self.publish_info(false);
         log!("远端已重置");
-        Ok(json!({ "ok": true }))
+        Ok(json!({ "ok": true, "key": dek.to_key_string() }))
     }
 }
 

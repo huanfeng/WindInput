@@ -153,7 +153,7 @@ fn process_protocol_smoke() {
     assert!(
         p.cmd(Op::ExportKey, Value::Null)
             .unwrap_err()
-            .contains("没有可导出的密钥")
+            .contains("没有可导出的同步密钥")
     );
     assert!(p.shutdown().success());
 }
@@ -237,21 +237,16 @@ fn two_processes_sync_over_webdav() {
         let t = p.cmd(Op::TestConnection, Value::Null).unwrap();
         assert_eq!(t["ok"], true);
     }
-    assert_eq!(
-        a.cmd(Op::SetPassphrase, json!({"passphrase": "pw1"}))
-            .unwrap()["mode"],
-        "init"
-    );
+    let key = a.cmd(Op::CreateKey, Value::Null).unwrap()["key"]
+        .as_str()
+        .unwrap()
+        .to_string();
     assert!(
-        b.cmd(Op::SetPassphrase, json!({"passphrase": "bad"}))
+        b.cmd(Op::ImportKey, json!({"key": "AAAA"}))
             .unwrap_err()
-            .contains("口令错误")
+            .contains("同步密钥不对")
     );
-    assert_eq!(
-        b.cmd(Op::SetPassphrase, json!({"passphrase": "pw1"}))
-            .unwrap()["mode"],
-        "join"
-    );
+    b.cmd(Op::ImportKey, json!({"key": key})).unwrap();
     // b 加入 a 的设备组（两进程同机，默认号相同，b 会自动改用带序号的号）
     let roster = a.cmd(Op::ListDevices, Value::Null).unwrap();
     let a_group = roster["devices"]

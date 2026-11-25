@@ -1,7 +1,7 @@
 //! 可执行位随清单条目同步。
 
 use wind_sync::backend::MemBackend;
-use wind_sync::crypto::{Dek, KdfParams};
+use wind_sync::crypto::Dek;
 use wind_sync::engine::{SyncCtx, sync_once};
 use wind_sync::local::{LocalStore, MemLocal};
 use wind_sync::remote;
@@ -19,7 +19,7 @@ fn run(b: &MemBackend, dek: &Dek, local: &mut MemLocal, st: &mut SyncState) {
 #[test]
 fn exec_flag_roundtrips() {
     let b = MemBackend::new();
-    let dek: Dek = remote::init_remote(&b, "pw", KdfParams::FAST_TEST).unwrap();
+    let dek: Dek = remote::init_remote(&b).unwrap();
     let (mut la, mut sa) = (MemLocal::new(), SyncState::new("a"));
     let (mut lb, mut sb) = (MemLocal::new(), SyncState::new("b"));
     la.set("extensions/k/run", "bin");

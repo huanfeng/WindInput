@@ -1,6 +1,5 @@
-//! 端到端加密（设计 §5）：DEK、口令封装、对象加解密、密钥校验、blob id。
+//! 端到端加密（设计 §5）：DEK（即同步密钥）、对象加解密、密钥校验、blob id。
 
-use argon2::{Algorithm, Argon2, Params, Version};
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
@@ -11,17 +10,17 @@ use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CryptoError {
-    #[error("口令错误")]
-    BadPassphrase,
-    #[error("密钥与远端不匹配")]
+    #[error("同步密钥不对")]
     BadKey,
+    #[error("远端同步库格式不受支持，请重置远端")]
+    UnsupportedMeta,
     #[error("对象解密失败（损坏或被调换）")]
     Decrypt,
     #[error("格式错误: {0}")]
     Format(String),
 }
 
-pub const META_FORMAT: u32 = 1;
+pub const META_FORMAT: u32 = 2;
 const OBJ_VERSION: u8 = 1;
 const NONCE_LEN: usize = 24;
 
@@ -45,10 +44,35 @@ impl Dek {
     pub fn generate() -> Self {
         Dek(random_bytes::<32>())
     }
-    /// 导出为 base64 字符串（用户自行备份）。
+    /// 本机保存用的 base64（密钥库内部格式，不面向用户）。
     pub fn to_base64(&self) -> String {
         B64.encode(self.0)
     }
+    /// 同步密钥：base32 小写无填充（52 字符），每 4 字符一组用 `-` 连接。
+    pub fn to_key_string(&self) -> String {
+        let raw = data_encoding::BASE32_NOPAD.encode(&self.0).to_lowercase();
+        raw.as_bytes()
+            .chunks(4)
+            .map(|c| std::str::from_utf8(c).expect("base32 为 ASCII"))
+            .collect::<Vec<_>>()
+            .join("-")
+    }
+    /// 解析同步密钥：忽略大小写、空白与 `-`。
+    pub fn from_key_string(s: &str) -> Result<Self, CryptoError> {
+        let norm: String = s
+            .chars()
+            .filter(|c| !c.is_whitespace() && *c != '-')
+            .map(|c| c.to_ascii_uppercase())
+            .collect();
+        let v = data_encoding::BASE32_NOPAD
+            .decode(norm.as_bytes())
+            .map_err(|_| CryptoError::Format("同步密钥含非法字符".into()))?;
+        let a: [u8; 32] = v
+            .try_into()
+            .map_err(|_| CryptoError::Format("同步密钥长度不对".into()))?;
+        Ok(Dek(a))
+    }
+    /// 本机保存用的 base64（密钥库内部格式，不面向用户）。
     pub fn from_base64(s: &str) -> Result<Self, CryptoError> {
         let v = B64
             .decode(s.trim())
@@ -192,52 +216,6 @@ impl Dek {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct KdfParams {
-    pub m_kib: u32,
-    pub t: u32,
-    pub p: u32,
-}
-
-impl KdfParams {
-    /// 出厂参数。
-    pub const DEFAULT: KdfParams = KdfParams {
-        m_kib: 65536,
-        t: 3,
-        p: 1,
-    };
-    /// 仅测试用，快。
-    pub const FAST_TEST: KdfParams = KdfParams {
-        m_kib: 8,
-        t: 1,
-        p: 1,
-    };
-    /// 远端 meta 是不可信输入：参数过大会被用来耗尽本机资源。
-    fn validate(&self) -> Result<(), CryptoError> {
-        if self.m_kib < 8
-            || self.m_kib > 1 << 20
-            || self.t == 0
-            || self.t > 16
-            || self.p == 0
-            || self.p > 16
-        {
-            return Err(CryptoError::Format("KDF 参数越界".into()));
-        }
-        Ok(())
-    }
-}
-
-fn derive_kek(pass: &str, salt: &[u8], kdf: &KdfParams) -> Result<[u8; 32], CryptoError> {
-    kdf.validate()?;
-    let params = Params::new(kdf.m_kib, kdf.t, kdf.p, Some(32))
-        .map_err(|e| CryptoError::Format(format!("KDF 参数: {e}")))?;
-    let mut out = [0u8; 32];
-    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
-        .hash_password_into(pass.as_bytes(), salt, &mut out)
-        .map_err(|e| CryptoError::Format(format!("KDF: {e}")))?;
-    Ok(out)
-}
-
 fn seal_with(key: &[u8; 32], aad: &[u8], plain: &[u8]) -> Vec<u8> {
     let c = XChaCha20Poly1305::new(key.into());
     let nonce: [u8; NONCE_LEN] = random_bytes();
@@ -323,52 +301,22 @@ fn key_check(dek: &Dek) -> String {
     B64.encode(hmac(&dek.0, b"windinput-sync/v1/key-check"))
 }
 
-/// `meta.json`：明文，含 KDF 参数、盐、口令封装的 DEK、密钥校验值。
+/// `meta.json`：明文，只含格式版本与同步密钥的校验值（密钥本身不上传）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Meta {
     pub format: u32,
-    pub kdf_alg: String,
-    pub kdf: KdfParams,
-    pub salt: String,
-    pub wrapped_dek: String,
     pub check: String,
 }
 
-const WRAP_AAD: &[u8] = b"windinput-sync/v1/wrap";
-
 impl Meta {
-    /// 用口令封装 DEK（随机新盐）。改口令也走这里。
-    pub fn new(dek: &Dek, pass: &str, kdf: KdfParams) -> Result<Meta, CryptoError> {
-        let salt: [u8; 16] = random_bytes();
-        let kek = derive_kek(pass, &salt, &kdf)?;
-        Ok(Meta {
+    pub fn new(dek: &Dek) -> Meta {
+        Meta {
             format: META_FORMAT,
-            kdf_alg: "argon2id".into(),
-            kdf,
-            salt: B64.encode(salt),
-            wrapped_dek: B64.encode(seal_with(&kek, WRAP_AAD, &dek.0)),
             check: key_check(dek),
-        })
-    }
-
-    pub fn unlock(&self, pass: &str) -> Result<Dek, CryptoError> {
-        let salt = B64
-            .decode(&self.salt)
-            .map_err(|_| CryptoError::Format("盐".into()))?;
-        let kek = derive_kek(pass, &salt, &self.kdf)?;
-        let wrapped = B64
-            .decode(&self.wrapped_dek)
-            .map_err(|_| CryptoError::Format("wrapped_dek".into()))?;
-        let raw = open_with(&kek, WRAP_AAD, &wrapped).map_err(|_| CryptoError::BadPassphrase)?;
-        let a: [u8; 32] = raw.try_into().map_err(|_| CryptoError::BadPassphrase)?;
-        let dek = Dek(a);
-        if !self.check_dek(&dek) {
-            return Err(CryptoError::BadKey);
         }
-        Ok(dek)
     }
 
-    pub fn check_dek(&self, dek: &Dek) -> bool {
+    pub fn verify(&self, dek: &Dek) -> bool {
         self.check == key_check(dek)
     }
 
@@ -376,19 +324,12 @@ impl Meta {
         serde_json::to_vec_pretty(self).expect("Meta 可序列化")
     }
 
+    /// 旧口令格式（含 `kdf_alg` 等）或未知版本一律报「不受支持」。
     pub fn from_json(b: &[u8]) -> Result<Meta, CryptoError> {
-        let m: Meta = serde_json::from_slice(b)
-            .map_err(|e| CryptoError::Format(format!("meta.json: {e}")))?;
+        let m: Meta = serde_json::from_slice(b).map_err(|_| CryptoError::UnsupportedMeta)?;
         if m.format != META_FORMAT {
-            return Err(CryptoError::Format(format!(
-                "不认识的格式版本 {}",
-                m.format
-            )));
+            return Err(CryptoError::UnsupportedMeta);
         }
-        if m.kdf_alg != "argon2id" {
-            return Err(CryptoError::Format("不认识的 KDF".into()));
-        }
-        m.kdf.validate()?;
         Ok(m)
     }
 }

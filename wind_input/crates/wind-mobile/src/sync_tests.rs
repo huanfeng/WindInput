@@ -49,7 +49,6 @@ fn mobile(tag: &str, remote: &MemBackend) -> (Arc<MobileSync>, Arc<MobileCore>, 
         &state,
         core.clone(),
         Box::new(MemFactory(remote.clone())),
-        KdfParams::FAST_TEST,
     );
     (sync, core, user)
 }
@@ -70,11 +69,16 @@ fn wait(what: &str, s: &MobileSync, f: impl Fn(&Value) -> bool) -> Value {
     }
 }
 
-fn join(s: &MobileSync, pass: &str) {
+/// `key` 为 `None` 时在空远端生成同步密钥，否则粘贴该密钥加入。
+fn join(s: &MobileSync, key: Option<&str>) {
     s.set_settings(&settings_json()).unwrap();
     s.command("set_secret", r#"{"password":"pw"}"#).unwrap();
-    s.command("set_passphrase", &json!({ "passphrase": pass }).to_string())
-        .unwrap();
+    match key {
+        None => s.command("create_key", "").unwrap(),
+        Some(k) => s
+            .command("import_key", &json!({ "key": k }).to_string())
+            .unwrap(),
+    };
 }
 
 /// 跑一轮并等它结束（先见 syncing 或 last_ok 前进）。
@@ -91,14 +95,17 @@ struct Desktop {
     local: MemLocal,
     state: SyncState,
     dek: wind_sync::Dek,
+    key: String,
 }
 
 impl Desktop {
-    fn new(remote: &MemBackend, pass: &str) -> Desktop {
+    fn new(remote: &MemBackend) -> Desktop {
+        let dek = remote::init_remote(remote).unwrap();
         Desktop {
             local: MemLocal::new(),
             state: SyncState::new("desk0"),
-            dek: remote::init_remote(remote, pass, KdfParams::FAST_TEST).unwrap(),
+            key: dek.to_key_string(),
+            dek,
         }
     }
     fn sync(&mut self, remote: &MemBackend) {
@@ -121,14 +128,14 @@ fn dict_text_with(word_code: &str, word: &str) -> String {
 #[test]
 fn desktop_dict_reaches_mobile_core_and_config_stays_apart() {
     let remote = MemBackend::new();
-    let mut desk = Desktop::new(&remote, "pass");
+    let mut desk = Desktop::new(&remote);
     desk.local.set(UD, &dict_text_with("ni hao", "你好"));
     desk.local.set("config.toml", "[ui]\nfont_size = 99\n");
     desk.sync(&remote);
 
     let (sync, core, user) = mobile("join", &remote);
     assert_eq!(phase(&sync)["phase"], "disabled");
-    join(&sync, "pass");
+    join(&sync, Some(&desk.key));
     // 加入后自动确认身份、新建独立组（状态帧晚于回执到达）
     wait("确认身份", &sync, |v| {
         v["joined"] == true && v["needs_identity"] == false && v["group"] == v["device"]
@@ -153,11 +160,11 @@ fn desktop_dict_reaches_mobile_core_and_config_stays_apart() {
 #[test]
 fn mobile_config_is_not_applied_on_desktop() {
     let remote = MemBackend::new();
-    let mut desk = Desktop::new(&remote, "pass");
+    let mut desk = Desktop::new(&remote);
     desk.sync(&remote);
     let (sync, _core, user) = mobile("cfg", &remote);
     std::fs::write(user.join("config.toml"), "[ui]\nfont_size = 7\n").unwrap();
-    join(&sync, "pass");
+    join(&sync, Some(&desk.key));
     sync_now(&sync);
     desk.sync(&remote);
     assert!(desk.local.text("config.toml").is_none());
@@ -174,7 +181,7 @@ fn sync_if_due_respects_interval_and_configuration() {
     let remote = MemBackend::new();
     let (sync, _core, user) = mobile("due", &remote);
     assert!(!sync.sync_if_due(0), "未启用不同步");
-    join(&sync, "pass");
+    join(&sync, None);
     let v = sync_now(&sync);
     let last = v["last_ok"].as_i64().unwrap();
     assert!(!sync.sync_if_due(600), "刚成功过，间隔未到");
@@ -212,13 +219,13 @@ fn settings_round_trip_and_validation() {
 #[test]
 fn sync_if_due_confirms_identity_first() {
     let remote = MemBackend::new();
-    let mut desk = Desktop::new(&remote, "pass");
+    let mut desk = Desktop::new(&remote);
     desk.sync(&remote);
     let (sync, _core, user) = mobile("idn", &remote);
     sync.set_settings(&settings_json()).unwrap();
     sync.command("set_secret", r#"{"password":"pw"}"#).unwrap();
     // 绕过 command 的自动确认，造出未确认状态
-    sync.send_command(Op::SetPassphrase, json!({ "passphrase": "pass" }))
+    sync.send_command(Op::ImportKey, json!({ "key": desk.key }))
         .unwrap();
     wait("未确认", &sync, |v| v["needs_identity"] == true);
     assert!(sync.sync_if_due(0));

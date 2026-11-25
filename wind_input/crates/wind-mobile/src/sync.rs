@@ -18,14 +18,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use wind_coordinator::external_files;
-use wind_sync::{DeviceClass, KdfParams};
+use wind_sync::DeviceClass;
 use wind_sync_host::secrets;
 use wind_sync_host::{BackendFactory, Config, CoreLink, Input, NetFactory, Runner, Timing};
 use wind_sync_ipc::{FromSync, Op, Status, SyncSettings, ToSync};
 
 use crate::MobileCore;
 
-/// 命令等回执的上限：口令加入含 KDF 与网络往返。
+/// 命令等回执的上限：加入同步库含网络往返。
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -165,22 +165,15 @@ impl MobileSync {
     /// - `user_dir`：用户目录（与构造 [`MobileCore`] 的 `user_root` 同一个）
     /// - `state_dir`：本地状态目录；同步文件放在其下 `sync/`
     pub fn new(user_dir: &Path, state_dir: &Path, core: Arc<MobileCore>) -> Arc<MobileSync> {
-        Self::with_parts(
-            user_dir,
-            state_dir,
-            core,
-            Box::new(NetFactory),
-            KdfParams::DEFAULT,
-        )
+        Self::with_parts(user_dir, state_dir, core, Box::new(NetFactory))
     }
 
-    /// 可替换存储后端与 KDF 强度（测试用内存后端与快速 KDF）。
+    /// 可替换存储后端（测试用内存后端）。
     pub fn with_parts(
         user_dir: &Path,
         state_dir: &Path,
         core: Arc<MobileCore>,
         factory: Box<dyn BackendFactory>,
-        kdf: KdfParams,
     ) -> Arc<MobileSync> {
         let sync_dir = state_dir.join("sync");
         let settings_file = sync_dir.join("settings.toml");
@@ -202,7 +195,6 @@ impl MobileSync {
             link,
             factory,
             timing: Timing::default(),
-            kdf,
             watch: false,
             class: DeviceClass::Mobile,
             portable: false,
@@ -285,10 +277,10 @@ impl MobileSync {
         .to_string()
     }
 
-    /// 同桌面 `sync.command`：`op` 为 `sync_now` / `test_connection` / `set_passphrase` / `import_key` /
+    /// 同桌面 `sync.command`：`op` 为 `sync_now` / `test_connection` / `create_key` / `import_key` /
     /// `export_key` / `reset_remote` / `set_secret` / `confirm_mass_delete` / `list_devices` /
     /// `remove_device`，`args_json` 为参数对象（空串当无参数）。阻塞到有回执（最多 60 秒），
-    /// 宿主应在后台线程调用。回执 JSON 可能含密钥（`export_key`），不要记日志。
+    /// 宿主应在后台线程调用。回执 JSON 可能含同步密钥（`create_key` / `export_key` / `reset_remote`），不要记日志。
     pub fn command(&self, op: &str, args_json: &str) -> Result<String, String> {
         let op = Op::parse(op).ok_or_else(|| format!("未知的同步命令: {op}"))?;
         let args = if args_json.trim().is_empty() {
@@ -297,13 +289,8 @@ impl MobileSync {
             serde_json::from_str(args_json).map_err(|e| format!("命令参数不是 JSON: {e}"))?
         };
         let r = self.send_command(op, args)?;
-        let joined = match op {
-            // 换了密钥的改口令也待确认；已确认时确认身份是空操作
-            Op::SetPassphrase => r["mode"] != "init",
-            Op::ImportKey => true,
-            _ => false,
-        };
-        if joined {
+        // 粘贴密钥加入后待确认身份；已确认时确认身份是空操作。生成密钥已自动确认。
+        if op == Op::ImportKey {
             self.send_command(Op::ConfirmIdentity, Value::Null)?;
         }
         Ok(r.to_string())

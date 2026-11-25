@@ -1,7 +1,7 @@
 //! 设备组身份操作：加入（两个方向）、退出、认领、改号。
 
 use wind_sync::backend::{Backend, MemBackend};
-use wind_sync::crypto::{Dek, KdfParams};
+use wind_sync::crypto::Dek;
 use wind_sync::devices::{DeviceInfo, put_device_info, remove_device};
 use wind_sync::engine::{SyncCtx, sync_once};
 use wind_sync::identity::{
@@ -69,7 +69,7 @@ fn round(devs: &mut [&mut Dev], b: &MemBackend) {
 /// a、b 在 home，c 在 office，各自先同步过。
 fn three() -> (MemBackend, Dek, Dev, Dev, Dev) {
     let b = MemBackend::new();
-    let dek = remote::init_remote(&b, "pw", KdfParams::FAST_TEST).unwrap();
+    let dek = remote::init_remote(&b).unwrap();
     let mut a = Dev::new("a", "home", &dek);
     let mut bb = Dev::new("b", "home", &dek);
     let mut c = Dev::new("c", "office", &dek);
@@ -285,7 +285,7 @@ fn join_lifts_lamport_above_group_entries() {
 #[test]
 fn claim_restores_data_only_held_by_claimed_device() {
     let b = MemBackend::new();
-    let dek = remote::init_remote(&b, "pw", KdfParams::FAST_TEST).unwrap();
+    let dek = remote::init_remote(&b).unwrap();
     let mut a = Dev::new("a", "a", &dek);
     a.local.set("config.toml", "a=1");
     a.local.set("data/pinyin/user.dict.yaml", "词\t1");

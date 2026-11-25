@@ -36,7 +36,7 @@ impl SyncError {
         matches!(self, SyncError::Halted(m) if m.starts_with(MASS_DELETION_PREFIX))
     }
 
-    /// 是否值得自动退避重试。认证失败、口令/密钥错误、远端格式不认识都要等用户处理。
+    /// 是否值得自动退避重试。认证失败、同步密钥错误、远端格式不认识都要等用户处理。
     pub fn retryable(&self) -> bool {
         match self {
             SyncError::Backend(e) => e.retryable(),

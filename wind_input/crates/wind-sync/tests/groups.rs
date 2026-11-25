@@ -1,7 +1,7 @@
 //! 设备组命名空间：数据全员共享，设置按组隔离。
 
 use wind_sync::backend::MemBackend;
-use wind_sync::crypto::{Dek, KdfParams};
+use wind_sync::crypto::Dek;
 use wind_sync::engine::{SyncCtx, sync_once};
 use wind_sync::local::MemLocal;
 use wind_sync::remote;
@@ -44,7 +44,7 @@ fn round(devs: &mut [&mut Dev], b: &MemBackend) {
 #[test]
 fn two_groups_share_data_isolate_settings() {
     let b = MemBackend::new();
-    let dek = remote::init_remote(&b, "pw", KdfParams::FAST_TEST).unwrap();
+    let dek = remote::init_remote(&b).unwrap();
     let mut a = Dev::new("a", "home", &dek);
     let mut bb = Dev::new("b", "home", &dek);
     let mut c = Dev::new("c", "office", &dek);
@@ -68,7 +68,7 @@ fn two_groups_share_data_isolate_settings() {
 fn setting_conflict_copies_are_written_locally() {
     for path in ["config.toml", "data/pinyin/dicts.toml"] {
         let b = MemBackend::new();
-        let dek = remote::init_remote(&b, "pw", KdfParams::FAST_TEST).unwrap();
+        let dek = remote::init_remote(&b).unwrap();
         let mut a = Dev::new("a", "home", &dek);
         let mut bb = Dev::new("b", "home", &dek);
         a.local.set(path, "x = 1\n");

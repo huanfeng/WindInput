@@ -2,7 +2,7 @@
 //! core 与同步进程（`wind_input_sync`）之间的匿名管道协议（设计 `docs/design/data-sync.md` §3.2、§3.3）。
 //!
 //! 只有类型与帧读写：4 字节大端长度 + JSON。core 依赖本 crate，因此**不得**引入网络 / 加密依赖。
-//! 机密（口令、S3 secret、密钥）不在 [`SyncSettings`] 里，只经 [`Op::SetSecret`] 等命令单向流向同步进程。
+//! 机密（同步密钥、S3 secret）不在 [`SyncSettings`] 里，只经 [`Op::SetSecret`] 等命令单向流向同步进程。
 
 use std::io::{self, Read, Write};
 
@@ -186,7 +186,9 @@ pub fn save_settings_file(path: &std::path::Path, s: &SyncSettings) -> Result<()
 pub enum Op {
     SyncNow,
     TestConnection,
-    SetPassphrase,
+    /// 远端还没有同步库时生成同步密钥并建库，回 `{ok, key}`。
+    CreateKey,
+    /// 粘贴同步密钥加入已有的同步库：`{key}`。
     ImportKey,
     ExportKey,
     ResetRemote,
@@ -285,7 +287,7 @@ pub struct Status {
     pub conflict_paths: Vec<String>,
     /// 本机是否已有机密（凭据与密钥）。
     pub has_secret: bool,
-    /// 本机已持有 DEK（已设置口令或导入密钥）。设置端据此区分「设置口令」与「修改口令」。
+    /// 本机已持有同步密钥（已生成或已粘贴加入）。
     pub joined: bool,
     /// 本机设备号。
     pub device: String,

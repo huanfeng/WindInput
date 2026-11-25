@@ -76,7 +76,6 @@ tracing-appender = "0.2"
 file-rotate = "0.8"
 # 同步（wind-sync）：加密与编码
 chacha20poly1305 = "0.10"
-argon2 = "0.5"
 sha2 = "0.10"
 hmac = "0.12"
 hkdf = "0.12"

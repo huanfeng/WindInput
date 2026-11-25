@@ -8,7 +8,7 @@
 //! - 同步进程发来的 `Request` 只放行白名单方法，经注入的执行器（即 ctrl RPC 的分发器）执行。
 //! - 设置端经 ctrl RPC `sync.*` 读写设置、查状态、发命令；命令同步等待同步进程的回执。
 //!
-//! 日志只记启停、崩溃与被拒的请求，不记命令参数（可能含口令）。
+//! 日志只记启停、崩溃与被拒的请求，不记命令参数（可能含同步密钥）。
 
 use std::collections::{BTreeSet, HashMap};
 use std::io::{Read, Write};
@@ -1018,7 +1018,7 @@ impl SyncHost {
         }
     }
 
-    /// 转发命令并同步等回执。不记 `args`（可能含口令）。
+    /// 转发命令并同步等回执。不记 `args`（可能含同步密钥）。
     fn command(&self, op: Op, args: Value) -> Result<Value, String> {
         if !self.wait_for_link() {
             return Err("同步进程未运行".into());

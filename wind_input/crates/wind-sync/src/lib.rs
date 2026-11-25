@@ -1,11 +1,11 @@
 //! 数据同步的纯逻辑（设计 docs/design/data-sync.md）：无网络、无异步、无文件监听。
 //!
 //! - [`backend`]：远端存储 trait 与带故障注入的内存后端
-//! - [`crypto`]：DEK、口令封装、对象加解密、blob id、`meta.json`
+//! - [`crypto`]：DEK（同步密钥）、对象加解密、blob id、`meta.json`
 //! - [`devices`]：设备名册（`devices/<dev>/info`）
 //! - [`manifest`]：每设备清单与远端布局
 //! - [`plan`]：逐文件裁决；[`merge`]：三方合并；[`scope`]：同步范围
-//! - [`engine`]：一次同步的编排；[`remote`]：初始化/加入/改口令/回收
+//! - [`engine`]：一次同步的编排；[`remote`]：初始化/加入/重置/回收
 //! - [`identity`]：加入/退出设备组、认领设备、改设备号
 //! - [`state`]：可序列化的本机状态与退避
 
@@ -27,7 +27,7 @@ pub mod scope;
 pub mod state;
 
 pub use backend::{Backend, BackendError, MemBackend, ObjMeta};
-pub use crypto::{Dek, KdfParams};
+pub use crypto::Dek;
 pub use engine::{SyncCtx, SyncReport, sync_once};
 pub use error::SyncError;
 pub use local::{LocalError, LocalStore, MemLocal};
