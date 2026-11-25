@@ -916,6 +916,55 @@ pub fn is_known_key(key: &str) -> bool {
     field(key).is_some()
 }
 
+/// 旧的类型级全局键属于哪类方案。见 [`scheme_alias`]。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchemeKind {
+    Codetable,
+    Pinyin,
+    Mixed,
+    English,
+}
+
+/// 一个旧全局键在方案文件里的落点。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchemeAlias {
+    pub kind: SchemeKind,
+    /// 方案文件（及 `schema_overrides/<id>.toml`）里的点分路径，如 `engine.codetable.wildcard`。
+    pub path: String,
+}
+
+/// 旧的类型级全局键（`schema.codetable.*` / `schema.pinyin.*` / `schema.mix.*` /
+/// `schema.english.*`）是「当前方案对应设置」的别名；返回它在方案文件里的落点，不是别名则 `None`。
+/// 指向哪个方案由 `EngineManager::scheme_alias_target` 定。
+///
+/// 模糊音是拼音族共用的真全局项，不在此列。设计见 `docs/design/scheme-settings-flatten.md` §4。
+pub fn scheme_alias(key: &str) -> Option<SchemeAlias> {
+    const MAP: [(&str, SchemeKind, &str); 5] = [
+        (
+            "schema.codetable.",
+            SchemeKind::Codetable,
+            "engine.codetable.",
+        ),
+        (
+            "schema.pinyin.aux_code.",
+            SchemeKind::Pinyin,
+            "engine.aux_code.",
+        ),
+        ("schema.pinyin.", SchemeKind::Pinyin, "engine.pinyin."),
+        ("schema.mix.", SchemeKind::Mixed, "engine.mixed."),
+        ("schema.english.", SchemeKind::English, "engine.english."),
+    ];
+    if key.starts_with("schema.pinyin.fuzzy.") || !is_known_key(key) {
+        return None;
+    }
+    MAP.iter().find_map(|(prefix, kind, section)| {
+        key.strip_prefix(prefix).map(|rest| SchemeAlias {
+            kind: *kind,
+            path: format!("{section}{rest}"),
+        })
+    })
+}
+
 /// 一条「这个全局项可被方案级配置覆盖」的登记。见 [`SCHEMA_OVERRIDES`]。
 #[derive(Debug, Clone, Copy)]
 pub struct SchemaOverride {

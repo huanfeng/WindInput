@@ -5561,6 +5561,96 @@ impl EngineManager {
         )
     }
 
+    /// 旧全局键此刻指向哪个方案：当前方案属于该类型就是它（混输取对应成员），否则是该类型的
+    /// 主方案。找不到返回 `None`。
+    pub fn scheme_alias_target(
+        &self,
+        kind: wind_config::config_schema::SchemeKind,
+    ) -> Option<String> {
+        use wind_config::config_schema::SchemeKind;
+        let active = self.active_schema_id();
+        let active_type = self.schema_engine_type(&active);
+        let id = match kind {
+            SchemeKind::Codetable => match active_type.as_deref() {
+                Some("codetable") => active,
+                Some("mixed") => self
+                    .mixed_primary_schema(&active)
+                    .unwrap_or_else(|| self.primary_codetable_id()),
+                _ => self.primary_codetable_id(),
+            },
+            SchemeKind::Pinyin => self.pinyin_scheme_in_effect(),
+            SchemeKind::Mixed => match active_type.as_deref() {
+                Some("mixed") => active,
+                _ => self
+                    .available_schemas()
+                    .into_iter()
+                    .find(|id| self.schema_engine_type(id).as_deref() == Some("mixed"))
+                    .unwrap_or_default(),
+            },
+            SchemeKind::English => self.english_scheme_in_effect(),
+        };
+        (!id.is_empty() && self.schema_def_cached(&id).is_some()).then_some(id)
+    }
+
+    /// 读一个旧全局键：取它所指方案的生效值。不是别名返回 `None`；没有可指的方案时取类型
+    /// 内置默认。
+    pub fn scheme_alias_get(&self, key: &str) -> Option<anyhow::Result<toml::Value>> {
+        use wind_config::config_schema::SchemeKind;
+        let alias = wind_config::config_schema::scheme_alias(key)?;
+        let target = self.scheme_alias_target(alias.kind).unwrap_or_default();
+        let tree = match alias.kind {
+            SchemeKind::Codetable => toml::Value::try_from(self.effective_codetable(&target)),
+            SchemeKind::Pinyin => {
+                let mut p = (*self.pinyin_settings_of(&target)).clone();
+                // 辅助码有自己的方案段，不经 `[engine.pinyin]` 折叠。
+                let def = self.schema_def_cached(&target);
+                p.aux_code = p
+                    .aux_code
+                    .resolved(def.as_ref().map(|d| &d.engine.aux_code));
+                toml::Value::try_from(p)
+            }
+            SchemeKind::Mixed => toml::Value::try_from(&*self.mix_settings_of(&target)),
+            SchemeKind::English => toml::Value::try_from(&*self.english_settings_of(&target)),
+        };
+        // `key` 形如 `schema.<类型>.<余下路径>`，余下路径即类型结构体里的路径。
+        let rest = key.splitn(3, '.').nth(2).unwrap_or("");
+        Some(tree.map_err(anyhow::Error::from).and_then(|t| {
+            rest.split('.')
+                .try_fold(&t, |cur, part| cur.get(part))
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("配置缺少键 {key}"))
+        }))
+    }
+
+    /// 写一个旧全局键：落到它所指方案的用户层（`schema_overrides/<id>.toml`）并让该方案失效
+    /// 重建。不是别名返回 `None`；成功返回写入的方案 id。值的类型由调用方按注册表校验。
+    pub fn scheme_alias_set(
+        &self,
+        key: &str,
+        value: toml::Value,
+    ) -> Option<anyhow::Result<String>> {
+        let alias = wind_config::config_schema::scheme_alias(key)?;
+        Some((|| {
+            let target = self
+                .scheme_alias_target(alias.kind)
+                .ok_or_else(|| anyhow::anyhow!("没有可应用 {key} 的方案"))?;
+            let path = self
+                .schema_override_path(&target)
+                .ok_or_else(|| anyhow::anyhow!("无 override 目录"))?;
+            // 文件在但解析不了时不能拿空表起步：写回会把里面其它内容整份冲掉。
+            let mut ov = match std::fs::read_to_string(&path) {
+                Ok(text) => toml::from_str::<toml::Table>(&text).map_err(|e| {
+                    anyhow::anyhow!("方案 {target} 的设置文件解析失败，未写入：{e}")
+                })?,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
+                Err(e) => return Err(e.into()),
+            };
+            set_toml_leaf(&mut ov, &alias.path, value);
+            self.write_schema_override(&target, &toml::Value::Table(ov))?;
+            Ok(target)
+        })())
+    }
+
     /// 此刻起作用的英文方案：活跃方案是英文类就是它，否则是出厂英文方案（临时英文、混入的
     /// 英文候选都用它）。
     pub fn english_scheme_in_effect(&self) -> String {
@@ -8596,5 +8686,25 @@ fn warn_scheme_problems(schema_id: &str, section: &str, problems: &[String]) {
             problems.len(),
             problems.join("；")
         );
+    }
+}
+
+/// 按点分路径写一个叶子，沿途缺的表补上、不是表的替换成表。
+fn set_toml_leaf(tree: &mut toml::Table, path: &str, value: toml::Value) {
+    match path.split_once('.') {
+        None => {
+            tree.insert(path.to_string(), value);
+        }
+        Some((head, rest)) => {
+            let child = tree
+                .entry(head.to_string())
+                .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+            if !child.is_table() {
+                *child = toml::Value::Table(toml::Table::new());
+            }
+            if let toml::Value::Table(t) = child {
+                set_toml_leaf(t, rest, value);
+            }
+        }
     }
 }

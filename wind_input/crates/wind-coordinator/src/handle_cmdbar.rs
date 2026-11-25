@@ -724,6 +724,14 @@ impl CoordConfig {
         use wind_config::config_schema::{parse_str_value, validate};
         let v = parse_str_value(key, value).map_err(|e| anyhow::anyhow!("{e}"))?;
         validate(key, &v).map_err(|e| anyhow::anyhow!("{e}"))?;
+        // 旧的类型级全局键是当前方案对应设置的别名：写进那个方案的设置，不进 config.toml。
+        if let Some(c) = this.0.upgrade()
+            && let Some(done) = c.engine_mgr.scheme_alias_set(key, v.clone())
+        {
+            done?;
+            c.reload_user_config_quiet(quiet);
+            return Ok(());
+        }
         let parts: Vec<&str> = key.split('.').collect();
         wind_config::Config::set_user_value(&parts, v)?;
         if let Some(c) = this.0.upgrade() {
@@ -760,8 +768,23 @@ impl CoordConfig {
     }
 }
 
+impl CoordConfig {
+    /// 旧的类型级全局键：取它所指方案的生效值。不是别名返回 `None`。
+    fn alias_value(&self, key: &str) -> Option<anyhow::Result<String>> {
+        let c = self.0.upgrade()?;
+        let v = c.engine_mgr.scheme_alias_get(key)?;
+        Some(v.map(|v| match v {
+            toml::Value::String(s) => s,
+            other => other.to_string(),
+        }))
+    }
+}
+
 impl ConfigService for CoordConfig {
     fn get(&self, key: &str) -> anyhow::Result<String> {
+        if let Some(v) = self.alias_value(key) {
+            return v;
+        }
         Self::load_value(key, false)
     }
 
@@ -777,7 +800,10 @@ impl ConfigService for CoordConfig {
         use wind_config::config_schema::{FieldType, addressable_field};
         let fld = addressable_field(key).ok_or_else(|| anyhow::anyhow!("未登记的配置键: {key}"))?;
         // 取当前值即取写回的种子，故必须过降级闸。
-        let cur = Self::load_value(key, true)?;
+        let cur = match self.alias_value(key) {
+            Some(v) => v?,
+            None => Self::load_value(key, true)?,
+        };
         let next: String = match fld.ty {
             FieldType::Bool => (cur != "true").to_string(),
             FieldType::Enum(vals) => {

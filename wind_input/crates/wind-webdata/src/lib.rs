@@ -359,6 +359,28 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
         // 全局页「已被 N 个方案覆盖」的反查：全局键 → 覆盖它的方案 id 列表（R8.6）。
         "schema.overrideSummary" => h.web_schema_override_summary(),
         "schema.saveConfig" => h.web_schema_save_config(params),
+        // 旧的类型级全局键（`schema.codetable.*` 等）的读写：转到它此刻所指的方案。
+        // 调用方（`config.getItem` / `config.setItems`）已按注册表校验过键与值。
+        "schema.aliasGet" => {
+            let key = str_param(params, "key")?;
+            let v = h
+                .engine_mgr()
+                .scheme_alias_get(key)
+                .ok_or_else(|| anyhow::anyhow!("{key} 不是方案设置的别名"))??;
+            Ok(json!({ "value": serde_json::to_value(v)? }))
+        }
+        "schema.aliasSet" => {
+            let key = str_param(params, "key")?;
+            let value = params
+                .get("value")
+                .ok_or_else(|| anyhow::anyhow!("缺少参数 value"))?;
+            let id = h
+                .engine_mgr()
+                .scheme_alias_set(key, json_to_toml(value))
+                .ok_or_else(|| anyhow::anyhow!("{key} 不是方案设置的别名"))??;
+            h.refresh_schema_derived_config();
+            Ok(json!({ "ok": true, "schema": id }))
+        }
         "schema.auxCodeSources" => h.web_schema_aux_code_sources(params),
         "schema.resetConfig" => h.web_schema_reset_config(params),
         "schema.setDictEnabled" => h.web_schema_set_dict_enabled(params),

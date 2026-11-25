@@ -19,9 +19,16 @@ fn mgr(tag: &str, active: &str, overrides: &[(&str, &str)]) -> EngineManager {
         std::fs::write(ov.join(format!("{id}.toml")), text).unwrap();
     }
     let mut cfg = Config::default();
-    cfg.schema.available = ["pinyin", "shuangpin", "wubi86", "wubi86_pinyin"]
-        .map(String::from)
-        .to_vec();
+    cfg.schema.available = [
+        "pinyin",
+        "shuangpin",
+        "wubi86",
+        "wubi86_pinyin",
+        "stroke",
+        "english",
+    ]
+    .map(String::from)
+    .to_vec();
     cfg.schema.active = active.to_string();
     cfg.schema.pinyin.frequency.enabled = true;
     EngineManager::with_store_override(&cfg, Some(&data_dir()), None, Some(ov))
@@ -139,4 +146,138 @@ fn mixed_english_and_auto_phrase_settings_come_from_their_scheme() {
     );
     // 笔画方案没写，不受五笔的设置影响。
     assert!(!m.effective_codetable("stroke").auto_phrase.enabled);
+}
+
+// ── 旧全局键别名 ──
+
+use wind_config::config_schema::SchemeKind;
+
+fn override_text(tag: &str, id: &str) -> String {
+    let p = std::env::temp_dir().join(format!(
+        "wind_pinyin_scheme_settings_{tag}/schema_overrides/{id}.toml"
+    ));
+    std::fs::read_to_string(p).unwrap_or_default()
+}
+
+/// 别名指向当前方案；当前方案不属于该类型时指主方案，混输取对应成员。
+#[test]
+fn alias_target_follows_active_scheme() {
+    let targets = |active: &str| {
+        let m = mgr(&format!("alias_target_{active}"), active, &[]);
+        [
+            SchemeKind::Codetable,
+            SchemeKind::Pinyin,
+            SchemeKind::Mixed,
+            SchemeKind::English,
+        ]
+        .map(|k| m.scheme_alias_target(k).unwrap_or_default())
+    };
+    assert_eq!(
+        targets("wubi86"),
+        ["wubi86", "pinyin", "wubi86_pinyin", "english"]
+    );
+    assert_eq!(
+        targets("shuangpin"),
+        ["wubi86", "shuangpin", "wubi86_pinyin", "english"]
+    );
+    assert_eq!(
+        targets("wubi86_pinyin"),
+        ["wubi86", "pinyin", "wubi86_pinyin", "english"]
+    );
+    assert_eq!(
+        targets("stroke"),
+        ["stroke", "pinyin", "wubi86_pinyin", "english"]
+    );
+}
+
+#[test]
+fn alias_set_lands_in_target_scheme_and_reads_back() {
+    let m = mgr("alias_set", "shuangpin", &[]);
+    let done = m
+        .scheme_alias_set("schema.pinyin.sentence_count", toml::Value::Integer(3))
+        .expect("是别名")
+        .expect("写入成功");
+    assert_eq!(done, "shuangpin");
+    assert_eq!(m.pinyin_settings_of("shuangpin").sentence_count, 3);
+    assert_eq!(
+        m.pinyin_settings_of("pinyin").sentence_count,
+        1,
+        "全拼不受影响"
+    );
+    let got = m
+        .scheme_alias_get("schema.pinyin.sentence_count")
+        .unwrap()
+        .unwrap();
+    assert_eq!(got, toml::Value::Integer(3));
+    assert!(override_text("alias_set", "shuangpin").contains("sentence_count = 3"));
+    assert_eq!(override_text("alias_set", "pinyin"), "");
+
+    // 码表键在拼音方案下指主码表方案；子段与辅助码各落各的段。
+    m.scheme_alias_set(
+        "schema.codetable.frequency.enabled",
+        toml::Value::Boolean(true),
+    )
+    .unwrap()
+    .unwrap();
+    m.scheme_alias_set("schema.pinyin.aux_code.enabled", toml::Value::Boolean(true))
+        .unwrap()
+        .unwrap();
+    assert!(m.effective_codetable("wubi86").frequency.enabled);
+    assert!(override_text("alias_set", "wubi86").contains("[engine.codetable.frequency]"));
+    assert!(override_text("alias_set", "shuangpin").contains("[engine.aux_code]"));
+    assert_eq!(
+        m.scheme_alias_get("schema.pinyin.aux_code.enabled")
+            .unwrap()
+            .unwrap(),
+        toml::Value::Boolean(true)
+    );
+}
+
+/// 写一项不能冲掉该方案设置文件里已有的其它内容。
+#[test]
+fn alias_set_keeps_existing_scheme_settings() {
+    let m = mgr(
+        "alias_keep",
+        "wubi86",
+        &[(
+            "wubi86",
+            "[engine.codetable]\nwildcard = true\n[key_actions]\nbacktick = \"temp_pinyin\"\n",
+        )],
+    );
+    m.scheme_alias_set("schema.codetable.single_char", toml::Value::Boolean(true))
+        .unwrap()
+        .unwrap();
+    let text = override_text("alias_keep", "wubi86");
+    assert!(
+        text.contains("wildcard = true") && text.contains("single_char = true"),
+        "{text}"
+    );
+    assert!(text.contains("backtick = \"temp_pinyin\""), "{text}");
+}
+
+/// 设置文件坏了就拒绝写，而不是拿空表覆盖它。
+#[test]
+fn alias_set_refuses_to_overwrite_unparsable_file() {
+    let m = mgr(
+        "alias_bad",
+        "wubi86",
+        &[("wubi86", "[engine.codetable\nwildcard = ")],
+    );
+    let before = override_text("alias_bad", "wubi86");
+    assert!(
+        m.scheme_alias_set("schema.codetable.single_char", toml::Value::Boolean(true))
+            .unwrap()
+            .is_err()
+    );
+    assert_eq!(override_text("alias_bad", "wubi86"), before);
+}
+
+#[test]
+fn non_alias_keys_are_not_intercepted() {
+    let m = mgr("alias_none", "wubi86", &[]);
+    assert!(m.scheme_alias_get("schema.pinyin.fuzzy.enabled").is_none());
+    assert!(
+        m.scheme_alias_set("ui.candidate.per_page", toml::Value::Integer(5))
+            .is_none()
+    );
 }

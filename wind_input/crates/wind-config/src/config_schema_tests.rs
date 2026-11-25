@@ -715,3 +715,46 @@ fn the_array_keys_that_bit_us_are_registered_as_whole_value() {
         );
     }
 }
+
+#[test]
+fn scheme_alias_maps_type_level_keys_to_scheme_paths() {
+    let a = scheme_alias("schema.codetable.wildcard").unwrap();
+    assert_eq!(
+        (a.kind, a.path.as_str()),
+        (SchemeKind::Codetable, "engine.codetable.wildcard")
+    );
+    let a = scheme_alias("schema.codetable.frequency.enabled").unwrap();
+    assert_eq!(a.path, "engine.codetable.frequency.enabled");
+    let a = scheme_alias("schema.pinyin.aux_code.enabled").unwrap();
+    assert_eq!(
+        (a.kind, a.path.as_str()),
+        (SchemeKind::Pinyin, "engine.aux_code.enabled")
+    );
+    assert_eq!(
+        scheme_alias("schema.pinyin.sentence_count").unwrap().path,
+        "engine.pinyin.sentence_count"
+    );
+    assert_eq!(
+        scheme_alias("schema.mix.enable_english").unwrap().path,
+        "engine.mixed.enable_english"
+    );
+    assert_eq!(
+        scheme_alias("schema.english.commit_space").unwrap().path,
+        "engine.english.commit_space"
+    );
+}
+
+#[test]
+fn scheme_alias_leaves_real_globals_alone() {
+    for key in [
+        "schema.pinyin.fuzzy.enabled",
+        "schema.active",
+        "schema.primary_pinyin",
+        "schema.mix_modes",
+        "schema.quick_input.decimal_places",
+        "schema.codetable.no_such_key",
+        "ui.candidate.per_page",
+    ] {
+        assert_eq!(scheme_alias(key), None, "{key}");
+    }
+}

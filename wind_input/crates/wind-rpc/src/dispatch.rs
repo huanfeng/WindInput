@@ -201,7 +201,7 @@ fn handle(state: &DispatchState, method: &str, params: &Value) -> anyhow::Result
         // 配置字段注册表（key+type+enum options）：CLI/设置端据此校验与补全。
         "config.schema" => Ok(schema_json()),
         // 单字段当前值（含四层合并）：补 config.get 只能整份的缺口。
-        "config.getItem" => get_item(params),
+        "config.getItem" => get_item(state, params),
         "config.reload" => {
             // 手改 `config.toml` 或被别的工具改过之后，请求核心重读并应用（core 不监听文件）；
             // 随后广播变更事件，供订阅者（TSF/UI）刷新。
@@ -355,6 +355,14 @@ fn apply_writes(
     reason: &str,
 ) -> anyhow::Result<bool> {
     for (key, toml_val) in writes {
+        // 旧的类型级全局键写进当前方案的设置，不进 config.toml。
+        if wind_config::config_schema::scheme_alias(&key).is_some() {
+            state.core.data_rpc(
+                "schema.aliasSet",
+                &json!({ "key": key, "value": serde_json::to_value(&toml_val)? }),
+            )?;
+            continue;
+        }
         let parts: Vec<&str> = key.split('.').collect();
         Config::set_user_value(&parts, toml_val)?;
     }
@@ -484,13 +492,20 @@ fn schema_json() -> Value {
 }
 
 /// `config.getItem`：返回单个已登记键的当前值（四层合并后）。
-fn get_item(params: &Value) -> anyhow::Result<Value> {
+fn get_item(state: &DispatchState, params: &Value) -> anyhow::Result<Value> {
     let key = params
         .get("key")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("invalid_params: key missing"))?;
     if !wind_config::config_schema::is_known_key(key) {
         anyhow::bail!("invalid_config: 键 '{}' 未登记", key);
+    }
+    // 旧的类型级全局键是当前方案对应设置的别名，值在方案那边。
+    if wind_config::config_schema::scheme_alias(key).is_some() {
+        let out = state
+            .core
+            .data_rpc("schema.aliasGet", &json!({ "key": key }))?;
+        return Ok(json!({ "key": key, "value": out.get("value").cloned() }));
     }
     let cfg = Config::load(Config::data_dir().as_deref())?;
     let full = cfg.to_json_value()?;

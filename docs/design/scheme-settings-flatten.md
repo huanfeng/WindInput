@@ -96,7 +96,10 @@
 |---|---|
 | 命令栏 `config.get` / `config.set` / `config.toggle` | `wind-coordinator/src/handle_cmdbar.rs` |
 | RPC `config.getItem` / `config.setItems` | `wind-rpc/src/dispatch.rs` |
-| 移动端 | `wind-mobile/src/config_api.rs` |
+| 移动端（阶段 5 接入） | `wind-mobile/src/config_api.rs` |
+
+RPC 一侧经内部方法 `schema.aliasGet` / `schema.aliasSet` 转到宿主（`wind-webdata`），映射在
+`config_schema::scheme_alias`，目标方案在 `EngineManager::scheme_alias_target`。
 
 整份配置的读取不含这些段——避免「方案值被当成用户全局值写回」。
 
@@ -114,7 +117,8 @@
 | | 其它 | `primary_pinyin`（空 = `pinyin`） |
 | `schema.mix.` | 混输 | 活跃方案 |
 | | 其它 | `available` 里第一个混输方案 |
-| `schema.english.` | 任意 | `english` |
+| `schema.english.` | 英文类方案 | 活跃方案 |
+| | 其它 | `english` |
 | `schema.pinyin.fuzzy.` | 任意 | `input.fuzzy.`（静态改名，不看方案） |
 
 找不到目标方案时，写返回错误、读返回类型内置默认。
