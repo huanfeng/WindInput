@@ -44,6 +44,9 @@ fn every_known_layout_entry_is_classified() {
             Class::Excluded,
             &[
                 "meta.toml",
+                "desktop/x",
+                "mobile/x",
+                "groups/x",
                 "screenshots/a.png",
                 "charsets/pinyin.toml",
                 "data/.backup/x",

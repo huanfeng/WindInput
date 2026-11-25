@@ -76,6 +76,8 @@ pub fn classify(local: &str) -> Class {
     }
     match segs.as_slice() {
         ["meta.toml", ..] | ["screenshots", ..] | ["charsets", ..] => return Class::Excluded,
+        // 与远端命名空间前缀同名：能上传却映射不回来
+        ["desktop" | "mobile" | "groups", ..] => return Class::Excluded,
         ["data", "stats", ..] => return Class::Excluded,
         ["data", ..]
             if matches!(
