@@ -207,3 +207,25 @@ fn settings_round_trip_and_validation() {
     sync.shutdown();
     let _ = std::fs::remove_dir_all(user);
 }
+
+/// 已加入但身份未确认（加入时补确认失败）：sync_if_due 先补确认身份再同步。
+#[test]
+fn sync_if_due_confirms_identity_first() {
+    let remote = MemBackend::new();
+    let mut desk = Desktop::new(&remote, "pass");
+    desk.sync(&remote);
+    let (sync, _core, user) = mobile("idn", &remote);
+    sync.set_settings(&settings_json()).unwrap();
+    sync.command("set_secret", r#"{"password":"pw"}"#).unwrap();
+    // 绕过 command 的自动确认，造出未确认状态
+    sync.send_command(Op::SetPassphrase, json!({ "passphrase": "pass" }))
+        .unwrap();
+    wait("未确认", &sync, |v| v["needs_identity"] == true);
+    assert!(sync.sync_if_due(0));
+    let v = wait("确认并同步", &sync, |v| {
+        v["needs_identity"] == false && v["last_ok"].is_i64()
+    });
+    assert_eq!(v["phase"], "idle", "{v}");
+    sync.shutdown();
+    let _ = std::fs::remove_dir_all(user);
+}

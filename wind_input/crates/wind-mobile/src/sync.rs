@@ -347,6 +347,15 @@ impl MobileSync {
         if now.saturating_sub(last) < min_interval_secs as i64 {
             return false;
         }
+        // 身份未确认（加入时补确认失败等）：先排一条确认身份，同一线程按序处理，确认后再同步
+        if st.needs_identity {
+            let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+            let _ = self.tx.send(Input::Core(ToSync::Command {
+                id,
+                op: Op::ConfirmIdentity,
+                args: Value::Null,
+            }));
+        }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         // 不等回执：被拒（缺机密等）会体现在状态里
         let sent = self
