@@ -1,25 +1,14 @@
 import Foundation
 
-// BridgeResponseRouter — 把 Go bridge 返回的 Frame 路由到 TextInputClient 调用.
-//
-// 从 InputController 抽出, 因为:
-//   1. 单测需要在不依赖 IMKInputController/IMKServer 的情况下驱动 (后者构造极重)
-//   2. 复用方便: smoke CLI / 未来其它客户端也能用同一套 dispatch
-//
-// 用法:
-//   let router = BridgeResponseRouter()
-//   let consumed = router.apply(frame, to: mockClient)
-//   XCTAssertEqual(mockClient.insertedTexts, ["你好"])
+// BridgeResponseRouter — 把服务端返回的 Frame 路由到 TextInputClient 调用。
+// 从 InputController 抽出，单测可以不依赖构造极重的 IMKInputController/IMKServer 来驱动。
 public final class BridgeResponseRouter {
 
     /// 当前 IME 端 composition 状态, applyXxx 内部维护.
     public private(set) var composition = CompositionState()
 
-    /// host 文本光标移动意图. 由 app 层用 CGEvent 合成方向键实现 —— 智能配对
-    /// (插入 `（）` 后回退到中间、输入右标点时跳过) 在 IMKit 无标准 API 移动宿主
-    /// 光标, 只能合成方向键。kit 不直接依赖 CGEvent/Accessibility (保持可在 swift
-    /// test 无 IMKit 环境驱动), 故以闭包把副作用上抛 app 层。nil 时静默降级 (不移动
-    /// 光标, 退化为旧行为)。
+    /// host 文本光标移动意图。智能配对（插入 `（）` 后回到中间、右标点跳过）在 IMKit 无标准 API
+    /// 移动宿主光标，只能由 app 层合成方向键；kit 不依赖 CGEvent，故以闭包上抛。nil 时不移动光标。
     public enum CursorMove: Equatable {
         case left(Int)
         case right(Int)
@@ -28,40 +17,30 @@ public final class BridgeResponseRouter {
     /// app 层注入: 执行 host 光标移动。见 CursorMove。
     public var moveHostCursor: ((CursorMove) -> Void)?
 
-    /// 智能符号 HoldComposition 挂着的待定标点 (作为组合预览显示, 语义 = **待提交**)。
+    /// 智能符号 HoldComposition 挂着的待定标点（作为组合预览显示，语义是待提交）。
     ///
-    /// 服务端在下发 PassThrough / UpdateComposition 时会同步清掉自己的 `held_text`
-    /// (`coordinator.rs::handle_key_event_policed`), 因为它假定客户端此刻已经把这个符号
-    /// 收口了 —— Windows 侧确实在这两个分支各调了 `FlushHoldCompositionIfActive` /
-    /// `AbsorbHeldIntoPrefix`。macOS 侧一度什么都没做, 于是:
-    ///   输入 `，` 再输入 `n` → UpdateComposition{"n"} 直接 setMarkedText("n") 覆盖掉
-    ///   marked 的 `，`, **符号凭空消失**, 而服务端已经按上屏记过账。
+    /// 服务端下发 PassThrough / UpdateComposition 时会清掉自己的 held_text，假定客户端已把这个
+    /// 符号收口（对位 Windows 的 FlushHoldCompositionIfActive / AbsorbHeldIntoPrefix）。不收口的话
+    /// UpdateComposition 会直接覆盖 marked 的符号，而服务端已按上屏记过账。
     private var heldSymbol: String?
 
-    /// 已「定格」但尚未真正 insertText 的前缀 (对位 Windows 的 `_pendingCommitPrefix`)。
+    /// 已「定格」但尚未真正 insertText 的前缀（对位 Windows 的 `_pendingCommitPrefix`）。
     ///
-    /// 新组合到来时**不是** commit 旧符号 + 重开组合, 而是把符号并进同一段 marked text,
-    /// 最终由一次 CommitText 收口。Windows 那边试过 commit+重开, 结果在 WPS/微信下被
-    /// 误读成「替换」, 符号被新输入顶掉 —— 同一个坑没必要在 macOS 再踩一遍。
+    /// 新组合到来时把符号并进同一段 marked text、最终由一次 CommitText 收口，而不是 commit 后重开
+    /// 组合：后者在部分宿主下会被误读成「替换」，符号被新输入顶掉。
     private var pendingCommitPrefix: String = ""
 
-    /// 待定标点的自动落定计时器 + 它对应的"这一代"状态。
+    /// 待定标点的自动落定计时器。
     ///
-    /// Windows 侧有同名计时器，但那是 TSF 的刚需（组合必须「吃了再吐」）；IMKit 没有那个
-    /// 约束，故这里**只做一件事**：到点把已是 marked text 的符号**定稿成正文**。文字内容
-    /// 前后完全一样，变的只是它还带不带 marked 的下划线——不加这个计时器，用户打完一个
-    /// 「，」就会看到它一直带着下划线待在文档里，直到下一次按键或失焦才收掉。
-    ///
-    /// 语义上的时限判定不在这里：press2 能否替换由**服务端**的 `smart_symbol_timeout` 说了算
-    /// （见 `handle_punct.rs` 的 `arm.at.elapsed()` 守卫）。这边到点不改变任何可替换性，
-    /// 只收下划线，故两者不会打架。
+    /// 只做一件事：到点把已是 marked text 的符号定稿成正文（去掉下划线），否则「，」会一直带着
+    /// 下划线待到下一次按键或失焦。press2 能否替换由服务端的 smart_symbol_timeout 决定，这边到点
+    /// 不改变可替换性，两者不打架。
     private var holdTimer: Timer?
     /// 每次状态变化自增；计时器只在"代"没变时才动手，避免过期回调误伤新一轮输入。
     private var holdGeneration: UInt64 = 0
 
-    /// 数字后智能标点的 prevChar 记账（macOS 无主路径，全靠它）。见
-    /// [`SmartPunctDigitTracker`]。**上屏侧**的喂食统一收口在 `insertCommitted`，
-    /// 按键侧由 app 层 (`InputController.handle`) 在透传时喂。
+    /// 数字后智能标点的 prevChar 记账（macOS 无主路径，全靠它），见 [`SmartPunctDigitTracker`]。
+    /// 上屏侧的喂食统一收口在 `insertCommitted`，按键侧由 `InputController.passThroughToHost` 喂。
     public let digitTracker = SmartPunctDigitTracker()
     /// `seqChar` 记账（中英间补空格 / 英文后智能标点）。与 `digitTracker` 分开的理由见
     /// [`InputSequenceTracker`]：组字更新不动它，只在真写进文档时更新。
@@ -71,10 +50,8 @@ public final class BridgeResponseRouter {
 
     /// 真写进文档的唯一出口：`insertText` + 记账。
     ///
-    /// ⚠️ router 里**任何**上屏都必须走这里，绕过去就是漏一条记录点——症状是「某条
-    /// 路径打出的数字后面标点仍出中文」，且只在那条路径上复现，看着像随机。
-    /// `client == nil`（宿主已销毁/测试桩未提供）时什么都没写进文档，**也就不记账** ——
-    /// 记了就是凭空捏造一个光标前字符。与 `applyMarkedText` 的 `guard` 同一条理。
+    /// router 里任何上屏都必须走这里，绕过去就漏一条记录点（某条路径打出的数字后标点仍出中文）。
+    /// `client == nil` 时没写进文档，也就不记账，否则凭空捏造一个光标前字符。
     private func insertCommitted(_ text: String,
                                  replacementRange: NSRange,
                                  client: TextInputClient?) {
@@ -93,7 +70,7 @@ public final class BridgeResponseRouter {
         cancelHoldTimer()
     }
 
-    /// 停表并作废在途回调。**任何**改动 heldSymbol / pendingCommitPrefix 的路径都要调它，
+    /// 停表并作废在途回调。任何改动 heldSymbol / pendingCommitPrefix 的路径都要调它，
     /// 否则旧计时器会对着新一轮输入的状态动手。
     private func cancelHoldTimer() {
         holdTimer?.invalidate()
@@ -117,22 +94,17 @@ public final class BridgeResponseRouter {
         return pendingCommitPrefix
     }
 
-    /// 路由一个 bridge 响应帧到 client. 返回值同 IMKInputController.handle 的
-    /// Bool 语义: true 表示按键已被 IME 消费, IMKit 不再传给系统; false 表示
-    /// PassThrough.
+    /// 路由一个 bridge 响应帧到 client。返回值同 IMKInputController.handle：true 表示按键已被
+    /// IME 消费，false 表示 PassThrough。
     ///
-    /// `hostShortcut`: 触发本帧的按键是**宿主快捷键组合** (⌘/⌃/⌥ + 键)。此时
-    /// `ClearComposition` 只表示「把组合清掉」, **不表示这个键归输入法** —— 宿主仍须
-    /// 收到它去执行复制/粘贴。Windows 靠 TSF `OnTestKeyDown` 根本不转发这类键来保证
-    /// 这点; macOS 没有那层前置闸门 (IMKit 把每个 keyDown 都给我们), 判据只能落在这里。
-    /// 不这么做的现象: 组字过程中按 ⌘C/⌃C, 组合清了、键也被吞, 网页里复制粘贴失灵
-    /// (issue #64)。命中热键的组合走 Consumed/StatusUpdate/InsertText, 不受影响。
+    /// `hostShortcut`：触发本帧的按键是宿主快捷键组合（⌘/⌃/⌥ + 键）。此时 ClearComposition 只表示
+    /// 清组合，键仍须交给宿主执行复制/粘贴。Windows 靠 OnTestKeyDown 根本不转发这类键；macOS 的
+    /// IMKit 把每个 keyDown 都给我们，判据只能落在这里，否则组字中按 ⌘C 会被吞。
     public func apply(_ frame: Frame, to client: TextInputClient?, hostShortcut: Bool = false) -> Bool {
         switch frame.cmd {
         case DownstreamCmd.passThrough:
-            // 按键要交回系统 → 待定标点必须**先真上屏**, 否则它挂在 marked text 里没人再管:
-            // 服务端已经清掉 held_text 并按上屏记了账。对位 Windows PassThrough 分支的
-            // FlushHoldCompositionIfActive。
+            // 按键要交回系统，待定标点必须先真上屏，否则挂在 marked text 里没人管
+            // （服务端已按上屏记账）。对位 Windows 的 FlushHoldCompositionIfActive。
             flushPendingPrefix(client: client)
             return false
 
@@ -163,14 +135,12 @@ public final class BridgeResponseRouter {
             return !hostShortcut
 
         case DownstreamCmd.clearThenPassThrough:
-            // 联想态回车/退格透传: 组合要收掉, 键要交还宿主 —— 两件事都做。
-            // 与上一条的区别是**服务端显式声明**要交还, 与是不是快捷键组合无关。
+            // 联想态回车/退格透传：组合收掉、键交还宿主。与上一条不同，这是服务端显式要求交还。
             applyClearComposition(client: client)
             return false
 
         case DownstreamCmd.keyType:
-            // 命令直通车 key.type / clip.paste 文本上屏: 整段 UTF-8, 直接 insertText
-            // (不经 composition, 与 commitText 一样落到当前光标处)。
+            // 命令直通车 key.type / clip.paste 文本上屏：整段直接 insertText（不经 composition）。
             if let text = try? BinaryCodec.decodeKeyTypePayload(frame.payload), !text.isEmpty {
                 let notFound = NSRange(location: NSNotFound, length: NSNotFound)
                 insertCommitted(text, replacementRange: notFound, client: client)
@@ -178,32 +148,28 @@ public final class BridgeResponseRouter {
             return true
 
         case DownstreamCmd.moveCursor:
-            // 智能跳过: 输入右标点时栈顶匹配 → 跳过已自动补全的右标点。direction=1 右移。
-            // 经合成方向键实现 (moveHostCursor); 未注入则降级为仅消费按键 (旧行为)。
+            // 智能跳过：右标点与栈顶匹配时跳过已自动补全的右标点。经 moveHostCursor 合成方向键，
+            // 未注入则仅消费按键。
             if let p = try? BinaryCodec.decodeMoveCursorPayload(frame.payload), p.direction == 1 {
                 moveHostCursor?(.right(1))
-                // 光标跨过了那个已补全的右标点 → 光标前字符换人了，且这条路**不经
-                // insertText**，`insertCommitted` 收口不到。跳过后光标前必是标点（恒非
-                // 数字），清零即准确，不是保守近似。
+                // 光标跨过了右标点，这条路不经 insertText，须在此更新记账；光标前必是标点，清零即准确。
                 digitTracker.reset()
                 seqTracker.noteCursorCrossedSymbol()
             }
             return true
 
         case DownstreamCmd.deletePair:
-            // 预留: coordinator 当前未生成此响应 (Windows/macOS 均未实装成对删除)。
-            // 收到则仅消费按键, 待将来需要时经 moveHostCursor + 删除键合成。
+            // 预留：coordinator 当前不生成此响应，收到仅消费按键。
             return true
 
         case DownstreamCmd.replaceBackward:
-            // 智能符号: 删除光标前 count 个字符并插入替换文本。用 IMKit selectedRange
-            // 定位光标, insertText(replacementRange:) 一步原子替换 (无需合成退格, 规避
-            // 时序与修饰键问题)。无法取得光标时降级为仅插入 (不删除), 保证不误删。
+            // 智能符号：删除光标前 count 个字符并插入替换文本。用 selectedRange 定位，
+            // insertText(replacementRange:) 一步原子替换，免去合成退格的时序问题。
+            // 取不到光标时只插入不删除，保证不误删。
             if let p = try? BinaryCodec.decodeReplaceBackwardPayload(frame.payload), let client = client {
                 let count = Int(p.count)
-                // `text` 为空 = **纯删除**（命令直通车 `ime.undo_commit` 走这条）。
-                // `noteCommittedText` 的「空串不动状态」对普通上屏是对的（没写东西进文档），
-                // 在这里却会让被删掉的那个数字幸存下来 —— 文档确实变了。
+                // `text` 为空 = 纯删除（ime.undo_commit）。文档确实变了，不能沿用
+                // noteCommittedText「空串不动状态」的规则，否则被删的数字会残留在记账里。
                 if p.text.isEmpty && count > 0 {
                     digitTracker.reset()
                     seqTracker.reset()
@@ -231,10 +197,8 @@ public final class BridgeResponseRouter {
             return true
 
         case DownstreamCmd.commitAndHold, DownstreamCmd.commitThenDefer:
-            // 先真上屏 commitText, 再把余码/待定文本开成新组合。
-            // commitThenDefer 是码表顶码 direct_commit 的正常通路 (非 Windows 专有),
-            // 早先落在 default 分支 → 顶码上屏的字被吞。Win 侧的「延迟到触发键 keyup
-            // 才开组合」是 TSF 组合边界的规避手段, IMKit 无此约束, 立即开即可。
+            // 先真上屏 commitText，再把余码/待定文本开成新组合。commitThenDefer 是码表顶码的
+            // 正常通路；Windows「延迟到 keyup 才开组合」是 TSF 的规避手段，IMKit 立即开即可。
             if let p = try? BinaryCodec.decodeCommitAndHoldPayload(frame.payload) {
                 applyCommitText(
                     BinaryCodec.CommitTextPayload(
@@ -242,10 +206,8 @@ public final class BridgeResponseRouter {
                         text: p.commitText,
                         newComposition: p.holdText),
                     client: client)
-                // commitAndHold 的 holdText 是**待定标点**(智能符号 press1 撞上活跃编码：
-                // 先顶屏候选再挂标点)，须登记成 held，否则下一次 UpdateComposition 照样把它
-                // 覆盖掉——与直接 HoldComposition 那条路是同一个坑。
-                // commitThenDefer 的 holdText 是码表顶码后的**余码**，是普通组合，不登记。
+                // commitAndHold 的 holdText 是待定标点，须登记成 held，否则下一次 UpdateComposition
+                // 会覆盖它；commitThenDefer 的 holdText 是顶码余码，是普通组合，不登记。
                 if frame.cmd == DownstreamCmd.commitAndHold, !p.holdText.isEmpty {
                     heldSymbol = p.holdText
                 }
@@ -261,14 +223,10 @@ public final class BridgeResponseRouter {
 
     public func applyCommitText(_ p: BinaryCodec.CommitTextPayload, client: TextInputClient?) {
         let notFound = NSRange(location: NSNotFound, length: NSNotFound)
-        // hold 预览态活跃时, 本次提交必须交代那个待定符号的去向 —— 下面的 insertText 会把
-        // marked text 换掉, 而 marked 里此刻显示的正是它, 不处置就被静默覆盖。规则逐字对齐
-        // Windows `CTextService::CommitText`:
-        //   replacingHeld=true (press2): 本就是要拿英文符号换掉它 → 丢弃。
-        //   replacingHeld=false (其余一切): 并入前缀, 与本次文本一起上屏 (追加语义)。
-        // 默认取追加是刻意的: hold 期间能触发提交的路径远不止一处 (全角空格/数字、临时英文、
-        // 各独占模式出字…), 把安全的一侧设为默认, 新增路径自动正确。Windows 那边曾默认丢弃,
-        // 表现为全角下「。」+空格 → 符号消失、只剩全角空格。
+        // hold 预览态活跃时，本次提交必须交代待定符号的去向（insertText 会换掉显示它的 marked
+        // text），规则对齐 Windows CTextService::CommitText：replacingHeld（press2）丢弃，其余并入
+        // 前缀一起上屏。默认追加是刻意的：hold 期间能触发提交的路径很多，安全一侧做默认，
+        // 新增路径自动正确。
         if p.flags & BinaryCodec.commitFlagReplacingHeld != 0 {
             heldSymbol = nil
         } else {
@@ -276,9 +234,8 @@ public final class BridgeResponseRouter {
         }
         let prefix = pendingCommitPrefix
         pendingCommitPrefix = ""
-        // replacingHeld: 这次上屏是在替换先前 HoldComposition 挂着的组合预览 (智能符号
-        // press2)。宿主对「marked 未清就 insertText」的处理不统一, 先显式清一次再插,
-        // 免得待定标点与替换结果同时留在文本里。仅在本端确实还挂着 marked 时才清。
+        // replacingHeld：宿主对「marked 未清就 insertText」处理不一，先显式清一次再插，免得待定
+        // 标点与替换结果同时留下。
         if p.flags & BinaryCodec.commitFlagReplacingHeld != 0, !composition.text.isEmpty {
             client?.setMarkedText("",
                                   selectionRange: NSRange(location: 0, length: 0),
@@ -305,9 +262,8 @@ public final class BridgeResponseRouter {
         // 同 applyCommitText: 待定符号并入前缀一起上屏, 否则智能配对插入时它会被吃掉。
         insertCommitted(takePendingPrefix() + p.text, replacementRange: notFound, client: client)
         composition.clear()
-        // 自动配对插入 `（）` 后, cursorOffset 是从文本末尾向左偏移的字符数 (通常 1),
-        // 把光标退回到配对中间。IMKit 无移动宿主光标的标准 API → 经 moveHostCursor
-        // 合成左方向键; 未注入则降级为不回退 (光标停在配对右侧, 旧行为)。
+        // 自动配对插入 `（）` 后，cursorOffset 是从末尾向左的字符数，经 moveHostCursor 合成左方向键
+        // 把光标退回配对中间；未注入则光标停在右侧。
         if p.cursorOffset > 0 {
             moveHostCursor?(.left(Int(p.cursorOffset)))
         }
@@ -315,30 +271,26 @@ public final class BridgeResponseRouter {
 
     public func applyUpdateComposition(_ p: BinaryCodec.UpdateCompositionPayload,
                                        client: TextInputClient?) {
-        // 待定标点定格进前缀, 与新组合内容显示在**同一段** marked text 里 (对位 Windows
-        // UpdateComposition 分支的 AbsorbHeldIntoPrefix)。光标位置随之右移前缀长度,
-        // 否则光标会落在符号里面。
+        // 待定标点定格进前缀，与新组合显示在同一段 marked text（对位 Windows 的
+        // AbsorbHeldIntoPrefix），光标随之右移前缀长度。
         absorbHeldIntoPrefix()
         let text = pendingCommitPrefix + p.text
-        // 前缀长度须与 `p.caretPos` 同单位 (UTF-16), 用 `.count` (字符数) 会在前缀含
-        // 非 BMP 字符时偏移——中文标点都在 BMP, 故只有直通 `ime.pair` 压入的生僻符号
-        // 才碰得到, 但错就是错。
+        // 前缀长度须与 `p.caretPos` 同为 UTF-16 单位，用 `.count` 在前缀含非 BMP 字符时会偏。
         let caret = pendingCommitPrefix.utf16.count + Int(p.caretPos)
         composition.text = text
         composition.caretUTF16 = caret
         applyMarkedText(text: text, caretUTF16InText: caret, client: client)
     }
 
-    /// 直接摆一段 marked text, **不叠加**待定前缀。供 HoldComposition 自己用:
-    /// 那时符号本身就是组合内容, 走 `applyUpdateComposition` 会把它叠进前缀再显示一遍。
+    /// 直接摆一段 marked text，不叠加待定前缀。供 HoldComposition 用：那时符号本身就是组合内容。
     private func setCompositionRaw(_ text: String, client: TextInputClient?) {
         composition.text = text
         composition.caretUTF16 = utf16Len(text)
         applyMarkedText(text: text, caretUTF16InText: composition.caretUTF16, client: client)
     }
 
-    /// 结束组合。**待定标点转为提交而非丢弃** —— 失焦/切窗口时符号应直接上屏, 与标准输入
-    /// 流程一致 (Windows EndComposition 同此), 何况服务端已按上屏记过账, 丢了就是凭空少字。
+    /// 结束组合。待定标点转为提交而非丢弃：失焦/切窗口时符号应直接上屏（同 Windows
+    /// EndComposition），服务端也已按上屏记过账。
     public func applyClearComposition(client: TextInputClient?) {
         let prefix = takePendingPrefix()
         let notFound = NSRange(location: NSNotFound, length: NSNotFound)
@@ -353,11 +305,8 @@ public final class BridgeResponseRouter {
 
     // MARK: - Helpers
 
-    /// 把待定前缀真上屏并清掉 marked text。用于「按键交回系统 / 组合被主动结束」——
-    /// 这两种情况下没有后续的 CommitText 来收口前缀了。
-    ///
-    /// 对位 Windows 的 `OnHoldTimerExpired`(Flush 路径) 与 `EndComposition` 里那段
-    /// 「主动结束组合时转为提交而非放弃, 模拟标准输入流程——切换窗口时符号应直接上屏」。
+    /// 把待定前缀真上屏并清掉 marked text。用于按键交回系统、组合被主动结束这两种没有后续
+    /// CommitText 收口的情况（对位 Windows 的 OnHoldTimerExpired 与 EndComposition）。
     private func flushPendingPrefix(client: TextInputClient?) {
         let prefix = takePendingPrefix()
         guard !prefix.isEmpty else { return }
@@ -373,8 +322,7 @@ public final class BridgeResponseRouter {
 
     /// 到点把待定标点定稿成正文（内容不变，只收掉 marked 的下划线）。
     ///
-    /// `client` 弱持有: 计时器活得比一次按键长，强持有会把宿主的输入上下文吊住。
-    /// client 已销毁 → 只清本端状态，不去动一个不存在的文本框。
+    /// `client` 弱持有：计时器活得比一次按键长，强持有会吊住宿主的输入上下文。
     private func armHoldTimer(ms: UInt32, client: TextInputClient?) {
         cancelHoldTimer()
         guard ms > 0 else { return }   // 0 = 不自动落定
@@ -391,28 +339,18 @@ public final class BridgeResponseRouter {
 
     /// 摆一段 marked text, 光标落在 `caretUTF16InText`。
     ///
-    /// # `length` 恒为 0, 不要改成「整串选中」
-    ///
-    /// IMKit 语境里 `selectionRange` 表达的是**「活动分句」**(日文分节转换要高亮正在转换
-    /// 的那一节), 而我们要表达的是**插入点**, 故 `length` 必须是 0 —— 宿主
-    /// (`NSTextInputClient`) 见 `length > 0` 会把整段当选中分句、把光标画在段首。
-    /// 与之配套的另一半在 `IMKClientAdapter.setMarkedText`: 必须传带分句属性的
-    /// `NSAttributedString`, 否则本处传的值到不了宿主 (详见那边的注释)。
+    /// `length` 恒为 0，不要改成整串选中：IMKit 里 selectionRange 表达的是活动分句，宿主见
+    /// `length > 0` 会把整段当选中分句、光标画在段首。配套的另一半在 IMKClientAdapter.setMarkedText
+    /// （必须传带分句属性的 NSAttributedString）。
     private func applyMarkedText(text: String, caretUTF16InText: Int, client: TextInputClient?) {
         guard let client = client else { return }
         let notFound = NSRange(location: NSNotFound, length: NSNotFound)
         let caret = CompositionState(text: text, caretUTF16: caretUTF16InText).caretInUTF16()
         let selRange = NSRange(location: caret, length: 0)
         client.setMarkedText(text, selectionRange: selRange, replacementRange: notFound)
-        // marked text 也是**看得见地摆在光标前**的东西，同样要记账。漏掉它会咬两处：
-        //   1. 组字中: 打完 "3" 再打拼音, 光标前其实是编码末位, 却仍报着 '3'。
-        //   2. 智能符号 press1 走 HoldComposition (符号只进 marked、不 insertText):
-        //      tracker 残留 '3' → press2 时服务端拿 prev_char 与武装串末位比对失配,
-        //      第二次按键被当成全新 press1, 连按替换静默失效。prev_char==0 那条容错
-        //      (见 docs/architecture/smart-symbol-compat-notes.md) 正是靠这里清零才够得着。
-        // 取串尾**仅当光标确实在串尾**。组字中把光标移到编码串中间时，串尾那个字符
-        // 不再是「光标前字符」——码表方案可以把 `0-9` 配成码元（`a-z0-9` 打 `Win10`，
-        // 见 message_handler 的非字母码元闸门），所以这不是纯理论。拿不准就清零。
+        // marked text 也摆在光标前，同样要记账：否则组字中仍报着之前的 '3'，智能符号 press1 走
+        // HoldComposition 时 press2 的 prev_char 比对会失配，连按替换静默失效。
+        // 只在光标确实在串尾时取串尾；光标在编码中间（码表可把 0-9 配成码元）就清零。
         if caretUTF16InText >= utf16Len(text) {
             digitTracker.noteCommittedText(text)
         } else {

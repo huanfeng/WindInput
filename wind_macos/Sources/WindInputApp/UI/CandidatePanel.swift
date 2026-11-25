@@ -1,7 +1,7 @@
 import Cocoa
 import WindInputKit
 
-// CandidatePanel — IMKit `.app` 候选框浮窗 (PR-A.5 Phase 1 + M5 鼠标点选).
+// CandidatePanel — IMKit `.app` 候选框浮窗 (含鼠标点选).
 //
 // 设计要点 (与 rime/squirrel SquirrelPanel.m 对齐):
 //   - styleMask: [.borderless, .nonactivatingPanel] — 无标题栏, 不抢键盘焦点
@@ -37,9 +37,8 @@ final class CandidateContentView: NSView {
     /// 记锚点差值而不是每次跟随光标当前点，是为了不把「按下点在窗口内的偏移」丢掉。
     private var dragAnchor: NSPoint?
     private var dragOrigin: NSPoint?
-    /// 本次按下是否已越过位移阈值。**没越过就不算拖动**：空白区(编码栏/内边距)的一次普通
-    /// 点击否则会被当成拖动完成——跟随光标模式下窗口被就地冻结一整轮组合，固定位置模式下
-    /// 每次点击还白搭一次 IPC 往返 + 一次配置写盘。
+    /// 本次按下是否已越过位移阈值。没越过就不算拖动, 否则空白区
+    /// 的普通点击会冻结跟随光标的窗口, 固定位置模式下还白搭一次 IPC + 配置写盘。
     private var dragMoved = false
     /// 阈值取 3pt：小于手指/鼠标在点击瞬间的自然抖动即可，不必更大。
     private static let dragThreshold: CGFloat = 3
@@ -143,11 +142,8 @@ final class CandidateContentView: NSView {
 
     /// 选词在松开时发, 不在按下时 (与 Squirrel 一致)。
     ///
-    /// 按下就选的后果 (macOS 27 实测): 上屏 + 收起候选窗在松开前就做完了, 约 50~130ms 后
-    /// 窗口又被摆回屏幕 —— 本进程没有任何 order 调用, 只见 WindowServer 把它从 none 改回
-    /// visible, 成了停在原地、点了没反应的残影, 直到下一次收起才消失。键盘上屏没有这一下。
-    /// 是系统处理这次点击的哪一步把它摆回来的没有查明 (拦掉推迟到松开的窗口排序无效);
-    /// 改成整个点击结束再选之后, 收起后的窗口不再回来。
+    /// 按下就选的话, 上屏并收起的候选窗会在几十毫秒后被 WindowServer 摆回屏幕, 成为点了没反应的
+    /// 残影 (成因未查明, 推迟窗口排序无效); 整个点击结束再选则不复现。
     override func mouseUp(with event: NSEvent) {
         defer { dragAnchor = nil; dragOrigin = nil; dragMoved = false; pressedDecor = nil }
         if let d = pressedDecor, !dragMoved {
@@ -188,11 +184,8 @@ final class CandidateContentView: NSView {
 
     /// 滚轮 → 上报 delta，服务端解释成「上下键调整高亮项」(到页边界翻到相邻页)。
     ///
-    /// **必须攒够一格再发**：触控板的一次轻扫会来几十个 `scrollingDeltaY` 极小的事件
-    /// (`hasPreciseScrollingDeltas`)，逐个上报等于让高亮一口气飞过整页。鼠标滚轮一格
-    /// 通常是 ±1 行，直接够阈值。
-    ///
-    /// wire 单位沿用 Win32 的 `WHEEL_DELTA`(120)、正=上滚：那是既有约定，服务端只有一份实现。
+    /// 必须攒够一格再发: 触控板一次轻扫会来几十个极小的 `scrollingDeltaY`, 逐个上报会让高亮
+    /// 飞过整页; 鼠标滚轮一格通常直接够阈值。wire 单位沿用 Win32 `WHEEL_DELTA`(120)、正=上滚。
     override func scrollWheel(with event: NSEvent) {
         let dy = event.scrollingDeltaY
         guard dy != 0 else { return }
@@ -204,8 +197,8 @@ final class CandidateContentView: NSView {
         let notches = (scrollAccum / step).rounded(.towardZero)
         guard notches != 0 else { return }
         scrollAccum -= notches * step
-        // macOS 的 scrollingDeltaY 正值 = 内容向下走 = 视觉上向**上**滚，与 wire 的
-        // 「正=上滚」同向，直接乘 120。natural scrolling 关闭时系统已替我们翻好符号。
+        // scrollingDeltaY 正值 = 视觉上向上滚, 与 wire「正=上滚」同向, 直接乘 120
+        // (natural scrolling 的符号系统已处理)。
         onScroll?(Int32(notches) * 120)
     }
 
@@ -256,15 +249,11 @@ final class CandidatePanel: NSPanel {
     /// 服务端据当前定位方式决定落不落盘: 固定位置=重新摆放并写配置; 跟随光标=只是临时挪开。
     var onMoved: ((Int32, Int32) -> Void)?
 
-    /// 本次组合内用户拖动后的落点，**wire 左上角**。
+    /// 本次组合内用户拖动后的落点 (wire 左上角)。
     ///
-    /// 非 nil 时 `show()` 用它而不是服务端算出的位置 —— 对齐 Windows 的 `drag_pin`: 拖过之后
-    /// 窗口就钉在那儿, 候选内容刷新 (翻页/继续输入) 不会把它拽回光标处。`hidePanel()` 清除,
-    /// 即一次组合结束就恢复跟随光标。固定位置模式下服务端本来就一直发同一个坐标, 两者一致。
-    ///
-    /// 存**左上角**而非 Cocoa 的左下角是必须的（Windows 的 `drag_pin` 同样存内容左上）：
-    /// Cocoa 原点是左下角，直接拿它 `setFrameOrigin` 等于钉住**底边**，组合中窗口高度一变
-    /// （preedit 出现、竖排行数变化），用户看着的上沿就往上爬。
+    /// 非 nil 时 `show()` 用它而不是服务端算出的位置 (对齐 Windows 的 `drag_pin`), 候选刷新不会把
+    /// 窗口拽回光标处; `hidePanel()` 清除。存左上角而非 Cocoa 左下角: 钉底边的话组合中窗口高度
+    /// 一变, 用户看着的上沿就会往上爬。
     private var dragPin: (x: CGFloat, y: CGFloat)?
 
     /// 拆出的穿透装饰层 (设计 theme-skin-animation.md §17.3)：同原点同尺寸的子 panel，不接鼠标、
@@ -298,10 +287,9 @@ final class CandidatePanel: NSPanel {
         self.isOpaque = false
         self.backgroundColor = .clear
         self.hasShadow = true
-        // ⚠️ 不要再设 `isFloatingPanel = true`：它的 setter 会把 level 改回 floating(3)，
-        // 写在这行后面等于把 `.popUpMenu` 冲掉。3 只压得住普通窗口（layer 0），压不住
-        // Spotlight / 「应用程序」列表搜索（layer 23）、Alfred 这类高层宿主，候选窗画了却
-        // 被整个盖住（A2-53 / GH#158，26.5.1 实测）。Tooltip / StatusBubble / Toast 同理。
+        // 不要再设 `isFloatingPanel = true`: 它的 setter 会把 level 改回 floating(3), 冲掉
+        // `.popUpMenu`; floating 压不住 Spotlight / Alfred 这类高层宿主, 候选窗会被整个盖住。
+        // Tooltip / StatusBubble / Toast 同理。
         self.level = .popUpMenu
         self.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         self.hidesOnDeactivate = false
@@ -360,15 +348,15 @@ final class CandidatePanel: NSPanel {
                 self.setFrameOrigin(origin)
             }
         } else if absolute {
-            // 固定位置: 服务端已算好绝对坐标, 照搬 + 边界钳制, **不做上下翻转** ——
-            // 窗口本来就不跟光标走, 翻转只会让靠近屏幕底边的固定点被莫名弹到顶上。
+            // 固定位置: 服务端已算好绝对坐标, 照搬 + 边界钳制, 不做上下翻转
+            // (靠近底边的固定点会被弹到顶上)。
             if let origin = PanelGeometry.cocoaOrigin(wireX: p.x, wireY: p.y, size: size) {
                 self.setFrameOrigin(origin)
             }
         } else {
-            // 内容框左上 = 光标底端下 2pt，按它所在的屏钳边界（GH#179：用主屏钳会把副屏上的候选窗拽回
-            // 主屏）。往上挪 4pt 回到光标行内：上下叠放的两块屏，光标贴在上屏底边时，内容框左上会越过
-            // 分界线落到下屏。皮肤装饰外扩时 wire 点是窗口左上、在内容框外，故按框的位置找屏。
+            // 内容框左上 = 光标底端下 2pt, 按它所在的屏钳边界 (用主屏钳会把副屏候选窗拽回主屏)。
+            // 先上挪 4pt 回到光标行内再找屏: 上下叠放的两块屏, 光标贴在上屏底边时会越界落到下屏。
+            // 皮肤装饰外扩时 wire 点在内容框外, 故按框的位置找屏。
             let probeX = p.x + (placeBox?.minX ?? 0), probeY = p.y + (placeBox?.minY ?? 0)
             let caretScreen = PanelGeometry.screen(wireX: probeX, wireY: probeY - 4) ?? screen
             let origin = WireGeometry.followCaretOrigin(

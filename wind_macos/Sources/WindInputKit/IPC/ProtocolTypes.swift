@@ -1,10 +1,7 @@
 import Foundation
 
-// 跨语言协议同步 (必读):
-//   Go SSOT     : wind_input/internal/ipc/binary_protocol.go
-//   Win 端镜像  : wind_tsf/include/BinaryProtocol.h
-//
-// 修改任何 cmd id / 帧布局时, 同步三处.
+// 跨语言协议同步: 与 wind_input/crates/wind-ipc/src/protocol.rs (权威) 及
+// wind_tsf/include/BinaryProtocol.h 互为镜像, 改任何 cmd id / 帧布局时三处同步.
 
 public enum WireProtocol {
     public static let version: UInt16 = 0x1001
@@ -13,7 +10,7 @@ public enum WireProtocol {
     public static let maxPayloadSize: UInt32 = 1024 * 1024
 }
 
-// MARK: - 上行 cmd (客户端 → Go)
+// MARK: - 上行 cmd (客户端 → 服务端)
 
 public enum UpstreamCmd {
     public static let keyEvent: UInt16        = 0x0101
@@ -45,7 +42,7 @@ public enum UpstreamCmd {
     public static let batchEvents: UInt16     = 0x0F01
 }
 
-// MARK: - 下行 cmd (Go → 客户端)
+// MARK: - 下行 cmd (服务端 → 客户端)
 
 public enum DownstreamCmd {
     public static let ack: UInt16              = 0x0001
@@ -53,9 +50,8 @@ public enum DownstreamCmd {
     public static let commitText: UInt16       = 0x0101
     public static let updateComposition: UInt16 = 0x0102
     public static let clearComposition: UInt16 = 0x0103
-    /// 收组合 + 把**当前这个键**交还宿主 (联想态回车/退格透传)。无载荷。
-    /// Win 侧要靠 SendInput 重放才能不丢键; IMKit 无前置闸门, 清完 marked text
-    /// `return false` 即可 —— 同一个意图, 两种手段。
+    /// 收组合 + 把当前这个键交还宿主 (联想态回车/退格透传)。无载荷。
+    /// IMKit 无前置闸门, 清完 marked text `return false` 即可 (Win 侧要靠 SendInput 重放)。
     public static let clearThenPassThrough: UInt16 = 0x010D
     public static let commitResult: UInt16     = 0x0105
     public static let commitTextWithCursor: UInt16 = 0x0106
@@ -63,11 +59,8 @@ public enum DownstreamCmd {
     public static let deletePair: UInt16       = 0x0108
     public static let replaceBackward: UInt16  = 0x0109   // 删除光标前 N 字符 + 插入文本 (智能符号)
     // ── 延迟组合三兄弟 (timeout_ms 前缀) ──
-    // 名字带 "hold/defer" 是 TSF 的说法: Win 侧 C++ 必须把组合「吃了再吐」, 故要计时器兜底。
-    // IMKit 无此约束 (insertText 后可立即 setMarkedText), 故 .app 侧只用文本、忽略 timeout。
-    // ⚠️ 这三条**不是** Windows 专有: commitThenDefer 由码表顶码 direct_commit 产生
-    // (handle_candidate.rs), 是跨平台通路 —— 早期 macOS 侧漏接, 顶码上屏的字被 router
-    // 的 default 分支静默吞掉 (返回 true 消费按键却不出字)。
+    // "hold/defer" 是 TSF 的说法 (Win 侧要计时器兜底); IMKit 无此约束, .app 只用文本、忽略 timeout。
+    // 三条都不是 Windows 专有: commitThenDefer 由码表顶码 direct_commit 产生, 漏接会吞字。
     public static let holdComposition: UInt16  = 0x010A   // timeout_ms u32 + textLen u32 + text
     public static let commitAndHold: UInt16    = 0x010B   // timeout_ms u32 + commitLen u32 + holdLen u32 + 两段文本
     public static let commitThenDefer: UInt16  = 0x010C   // timeout_ms u32 + commitLen u32 + deferLen u32 + 两段文本
@@ -98,13 +91,13 @@ public enum DownstreamCmd {
     public static let batchResponse: UInt16    = 0x0F02
 }
 
-/// 扩展信封的 kind 常量。**须与 Rust `wind_ipc::protocol::ext_kind` 逐字一致**——
-/// 两端拼写不一致的错误只会表现为「消息静默丢失」，没有任何报错。
+/// 扩展信封的 kind 常量。须与 Rust `wind_ipc::protocol::ext_kind` 逐字一致,
+/// 拼写不一致只会表现为消息静默丢失。
 public enum ExtKind {
     /// 下行：请求打开设置应用。body = `{"args":["--page=dict", …]}`。
     public static let settingsOpen = "settings.open"
     /// 上行：候选窗被拖动到新位置。body = `{"x":123,"y":456}`，wire 坐标系（屏幕左上为
-    /// 原点、y 向下）下的**内容左上角**，与配置里的 `ui.candidate.custom_x/y` 同义。
+    /// 原点、y 向下）下的内容左上角，与配置里的 `ui.candidate.custom_x/y` 同义。
     public static let posCandidate = "pos.candidate"
     /// 上行：状态提示气泡被拖动到新位置。body 同 `posCandidate`。
     public static let posStatusTip = "pos.status_tip"
@@ -113,9 +106,8 @@ public enum ExtKind {
     /// 下行：问 `.app` 状态气泡此刻在哪，答案走上行 `posStatusTip`。body 空。
     public static let posStatusTipQuery = "pos.status_tip.query"
     //
-    // 这两个「位置」要一问一答而不是由服务进程记账：浮窗落位在 `.app` 侧，服务端发下来的只是
-    // **建议落点**，这边还会按所在屏可见区钳制、在下方放不下时翻到光标上方、以及沿用用户本次
-    // 组合内拖出来的落位。用户点「固定位置」要以当前看到的位置落盘。
+    // 位置要一问一答而不由服务进程记账：服务端发的只是建议落点，`.app` 还会钳制、翻转、沿用
+    // 用户拖出的落位。「固定位置」要以当前看到的位置落盘。
     /// 上行：请求打开自绘菜单。body = `{"target":<页内下标>|-1 主菜单|-2 状态气泡|-3 悬停提示,
     /// "x":..,"y":..,"work":[左,上,右,下]}`，坐标为 wire 点；悬停提示另带 `"lx","ly"`（右键点在提示
     /// 位图内的像素坐标，含软阴影扩边）。
@@ -133,7 +125,7 @@ public enum ExtKind {
 /// 按键组合 (CmdKeyTap/Hold/Release 解码结果, 及 KeySeq 内单项)。
 /// key 为规范键名 (如 "a"/"enter"/"left"/"home"/"vk:0x5D"); modifiers 为
 /// {"ctrl","shift","alt","win"} 子集 (win 在 .app 侧映射为 Command)。
-/// 与 Go internal/uicmd.KeyCombo / KeyTapPayload 镜像。
+/// 与 Rust 侧 KeyCombo / KeyTapPayload 镜像。
 public struct KeyComboPayload {
     public let key: String
     public let modifiers: [String]
@@ -196,7 +188,7 @@ public struct ModeStatusPayload {
 }
 
 // CandidateHitRect — 单个候选在候选框 bitmap 内的命中矩形 (panel-local 像素).
-// 与 Go ipc.CandidateHitRect 镜像。
+// 与 Rust wind-ipc 的命中矩形布局镜像。
 public struct CandidateHitRect: Equatable {
     public let index: Int32
     public let x: Int32
@@ -244,11 +236,9 @@ public struct HostRenderFramePayload: Equatable {
     public var isVisible: Bool { flags & 0x1 != 0 }
     /// 位图内已画软件高斯阴影 → 关掉系统窗口阴影, 否则画布边缘出黑边。
     public var hasSoftwareShadow: Bool { flags & 0x4 != 0 }
-    /// `(x, y)` 是用户**固定位置**的绝对屏幕坐标, 不是按光标推算的落点
-    /// (SharedRenderHeader::FLAG_ABSOLUTE_POS)。
-    ///
-    /// 置位时 panel 只做屏幕边界钳制, 不套用「下方放不下就翻到光标上方」的兜底——窗口
-    /// 本来就不跟光标走, 固定点一旦靠近屏幕底边就会被那套逻辑莫名弹到顶上。
+    /// `(x, y)` 是用户固定位置的绝对屏幕坐标, 不是按光标推算的落点
+    /// (SharedRenderHeader::FLAG_ABSOLUTE_POS)。置位时 panel 只做屏幕边界钳制,
+    /// 不套用「下方放不下就翻到光标上方」, 否则靠近底边的固定点会被弹到顶上。
     public var isAbsolutePos: Bool { flags & 0x8 != 0 }
     /// 皮肤动画换帧 (SharedRenderHeader::FLAG_ANIM_FRAME)：内容与落位都没变，照原位贴图。
     public var isAnimFrame: Bool { flags & 0x10 != 0 }
@@ -434,9 +424,8 @@ public enum BridgeEndpoints {
     public static let requestStallCooldown: TimeInterval = 5
 
     /// 变体后缀: dev 变体的 .app (bundleID 以 "Dev" 结尾) 用 "Dev", 与 Rust
-    /// wind_config::variant::app_dir_name() 对齐 (release=WindInput, dev=WindInputDev),
-    /// 让 dev/release 两套 .app + 服务各用独立运行时目录 (socket/config) 共存 ——
-    /// 可同时注册为两个输入法, 日常用正式版、旁边测开发版。
+    /// wind_config::variant::app_dir_name() 对齐, 让 dev/release 两套 .app + 服务各用独立运行时
+    /// 目录共存, 可同时注册为两个输入法。
     public static var variantSuffix: String {
         (Bundle.main.bundleIdentifier?.hasSuffix("Dev") ?? false) ? "Dev" : ""
     }

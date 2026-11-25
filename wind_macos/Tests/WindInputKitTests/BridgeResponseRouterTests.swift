@@ -143,13 +143,8 @@ final class BridgeResponseRouterTests: XCTestCase {
         XCTAssertEqual(mock.setMarkedCalls[0].selectionRange.location, 1)
     }
 
-    /// `selectionRange.length` 必须恒为 0。
-    ///
-    /// IMKit 语境里这个 range 表达的是**「活动分句」**(日文分节转换要高亮正在转换的那一
-    /// 节), 而我们要表达的是**插入点**。宿主 (`NSTextInputClient`) 见 `length > 0` 会把
-    /// 整段当选中分句、把光标画到段首 —— 这正是 2026-09-02 那个「光标总在组合最前面」的
-    /// 形态 (当时是 IMKit 替我们写成了 `{0, 全长}`, 见 `MarkedTextAttributes`)。
-    /// 本仓自己更不能主动这么传。
+    /// `selectionRange.length` 必须恒为 0：IMKit 里它表达的是活动分句，宿主见 `length > 0`
+    /// 会把整段当选中分句、光标画到段首（见 `MarkedTextAttributes`）。
     func testApply_UpdateComposition_SelectionLengthIsAlwaysZero() {
         let r = BridgeResponseRouter()
         let mock = MockClient()
@@ -182,8 +177,7 @@ final class BridgeResponseRouterTests: XCTestCase {
         XCTAssertEqual(mock.setMarkedCalls.last?.text, "")
     }
 
-    /// issue #64: 宿主快捷键 (⌘C/⌃C…) 触发的清组合 —— 组合要清, 但按键必须交还宿主,
-    /// 否则网页版 WPS/GitHub 里组字期间复制粘贴失灵。
+    /// 宿主快捷键（⌘C/⌃C…）触发的清组合：组合要清，但按键必须交还宿主，否则组字期间复制粘贴失灵。
     func testApply_ClearComposition_HostShortcut_ReturnsFalseButStillClears() {
         let r = BridgeResponseRouter()
         let mock = MockClient()
@@ -198,8 +192,7 @@ final class BridgeResponseRouterTests: XCTestCase {
 
     // MARK: - ClearCompositionThenPassThrough
 
-    /// 联想态回车/退格透传: 组合要清干净, 键要交还宿主 —— 与 `clearComposition` 的区别是
-    /// **不看 hostShortcut**, 服务端已经显式声明了要交还。
+    /// 联想态回车/退格透传：组合清干净、键交还宿主；与 `clearComposition` 不同，不看 hostShortcut。
     func testApply_ClearThenPassThrough_ClearsAndReturnsFalse() {
         let r = BridgeResponseRouter()
         let mock = MockClient()
@@ -308,8 +301,7 @@ final class BridgeResponseRouterTests: XCTestCase {
         return d
     }
 
-    /// 顶码 direct_commit 走 commitThenDefer: 必须真上屏, 且余码开成新组合。
-    /// 回归钉子 —— 此前落在 router 的 default 分支, 按键被消费但一个字都不出。
+    /// 顶码 direct_commit 走 commitThenDefer：必须真上屏，且余码开成新组合（否则按键被消费却不出字）。
     func testApply_CommitThenDefer_CommitsAndOpensDeferredComposition() {
         let r = BridgeResponseRouter()
         let mock = MockClient()
@@ -412,11 +404,8 @@ final class BridgeResponseRouterTests: XCTestCase {
         return Frame(cmd: DownstreamCmd.commitText, isAsync: false, payload: c)
     }
 
-    /// **回归**: 待定标点后接着输入, 标点被新组合覆盖而凭空消失。
-    ///
-    /// 服务端在下发 UpdateComposition 时已同步清掉自己的 held_text 并按上屏记过账
-    /// (coordinator.rs::handle_key_event_policed), 它假定客户端此刻已把符号收口 ——
-    /// Windows 侧确实调了 AbsorbHeldIntoPrefix。这边一度什么都没做。
+    /// 待定标点后接着输入，标点不能被新组合覆盖：服务端下发 UpdateComposition 时已清掉 held_text
+    /// 并按上屏记账，假定客户端已把符号收口。
     func testHeldSymbol_SurvivesFollowingComposition() {
         let r = BridgeResponseRouter()
         let mock = MockClient()
@@ -430,9 +419,8 @@ final class BridgeResponseRouterTests: XCTestCase {
                        ("，n" as NSString).length)
     }
 
-    /// 组合最终上屏时, 定格的标点必须随之一起 insertText —— 一次收口, 不是两次。
-    /// (Windows 走 `full = _pendingCommitPrefix + text`, 刻意避开 commit+重开组合:
-    ///  那个模式在 WPS/微信下被误读成替换, 符号会被新输入顶掉。)
+    /// 组合最终上屏时，定格的标点随之一起 insertText，一次收口而不是 commit 后重开组合
+    /// （后者在部分宿主下会被误读成替换）。
     func testHeldSymbol_IsIncludedInFinalCommit() {
         let r = BridgeResponseRouter()
         let mock = MockClient()
@@ -444,8 +432,7 @@ final class BridgeResponseRouterTests: XCTestCase {
         XCTAssertTrue(r.composition.isEmpty)
     }
 
-    /// 按键交回系统前必须先把待定标点真上屏: 之后没有任何一帧会再管它,
-    /// 而服务端已经按上屏记了账。对位 Windows PassThrough 分支的 FlushHoldCompositionIfActive。
+    /// 按键交回系统前必须先把待定标点真上屏：之后没有帧会再管它，而服务端已按上屏记账。
     func testHeldSymbol_FlushedOnPassThrough() {
         let r = BridgeResponseRouter()
         let mock = MockClient()
@@ -459,8 +446,7 @@ final class BridgeResponseRouterTests: XCTestCase {
         XCTAssertEqual(mock.insertCalls.map { $0.text }, ["，"])
     }
 
-    /// 失焦 / 主动结束组合时**转为提交而非丢弃** —— 切窗口时符号应直接上屏, 与标准输入
-    /// 流程一致 (Windows EndComposition 同此)。丢了就是用户凭空少一个字。
+    /// 失焦 / 主动结束组合时待定标点转为提交而非丢弃（同 Windows EndComposition），否则凭空少字。
     func testHeldSymbol_CommittedOnClearComposition() {
         let r = BridgeResponseRouter()
         let mock = MockClient()
@@ -483,7 +469,7 @@ final class BridgeResponseRouterTests: XCTestCase {
         XCTAssertTrue(mock.insertCalls.isEmpty)
     }
 
-    /// press2 (replacingHeld) 要的是**替换**: 待定符号丢弃, 不许并进前缀跟着一起上屏。
+    /// press2（replacingHeld）要的是替换：待定符号丢弃，不许并进前缀一起上屏。
     func testReplacingHeld_DiscardsHeldInsteadOfPrefixing() {
         let r = BridgeResponseRouter()
         let mock = MockClient()
@@ -511,10 +497,7 @@ final class BridgeResponseRouterTests: XCTestCase {
         RunLoop.current.run(until: Date().addingTimeInterval(seconds))
     }
 
-    /// 待定标点到点自动定稿：内容不变，只是从 marked text 变成正文。
-    ///
-    /// 不加这个计时器，用户打完一个「，」就会看到它一直带着下划线待在文档里，直到下一次
-    /// 按键或失焦才收掉（Windows 侧靠同名计时器收；那边是 TSF 刚需，这边是观感）。
+    /// 待定标点到点自动定稿：内容不变，只从 marked text 变成正文（否则下划线一直留到下次按键）。
     func testHeldSymbol_AutoCommitsAfterTimeout() {
         let r = BridgeResponseRouter()
         let mock = MockClient()
@@ -527,8 +510,7 @@ final class BridgeResponseRouterTests: XCTestCase {
         XCTAssertTrue(r.composition.isEmpty)
     }
 
-    /// 期间有过按键 → 那条路自己已经处置过，过期计时器**不得**再动手。
-    /// 漏了这道「代」判据的话，会在新一轮输入里凭空多插一个符号。
+    /// 期间有过按键，那条路已处置过，过期计时器不得再动手，否则新一轮输入里会多插一个符号。
     func testHeldSymbol_TimerDoesNotFireAfterStateMoved() {
         let r = BridgeResponseRouter()
         let mock = MockClient()

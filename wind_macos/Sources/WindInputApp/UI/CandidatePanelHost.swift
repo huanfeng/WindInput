@@ -2,7 +2,7 @@ import Cocoa
 import os
 import WindInputKit
 
-// CandidatePanelHost — IMKit `.app` 内的候选框承载层 (PR-A.5 Phase 1 + M5 鼠标点选).
+// CandidatePanelHost — IMKit `.app` 内的候选框承载层 (含鼠标点选).
 //
 // 职责:
 //   1. 启动时 try open /WindInput_SHM, 启 PushClient 订阅 bridge_push.sock
@@ -10,7 +10,7 @@ import WindInputKit
 //   3. 收 CmdCandidateRects → 存命中矩形, 喂 panel 供鼠标 hit-test
 //   3b. 收 CmdCandidateSkin → 皮肤区域 (系统阴影开关、不拖动区); 穿透装饰层 (OVERLAY_KIND_DECOR)
 //       贴在候选窗的子 panel 上 (设计 theme-skin-animation.md §17.3)
-//   4. NSPanel 鼠标点选 → 发 CmdCandidateSelect 回 Go (经独立 request 连接)
+//   4. NSPanel 鼠标点选 → 发 CmdCandidateSelect 回服务端 (经独立 request 连接)
 //   4b. 收 CmdOverlayFrame → 交 OverlayHost (悬停提示 / 状态气泡 / Toast / 自绘菜单, 同样是
 //       服务端光栅化后经 SHM 贴图); 候选悬停与悬停提示的保持 / 宽限在这里协调
 //   5. 收 push 通道的 commit/composition (鼠标选词结果走 push) → 路由到当前
@@ -25,8 +25,7 @@ public protocol PushResponder: AnyObject {
 
     /// 作废「光标前一字符」的记账（数字后智能标点用，见 `SmartPunctDigitTracker`）。
     ///
-    /// 供**绕过 router 直接改文档**的路径调用：合成按键往宿主打字符/退格，文档变了而
-    /// 我们的记账一无所知。这类路径拿不到「改成了什么」，只能作废，回落默认行为。
+    /// 供绕过 router 直接改文档的路径调用 (合成按键打字符/退格): 拿不到改成了什么, 只能作废。
     func invalidateDigitTracking()
 }
 
@@ -127,8 +126,7 @@ public final class CandidatePanelHost {
 
     /// 上报浮窗拖动落点 (wire top-left)。服务端据当前定位方式决定落不落盘。
     ///
-    /// 走扩展信封而非专用码位: 拖动是低频动作 (用户偶尔摆一次窗口), JSON 的解析开销与
-    /// 加一个协议常量的三处同步成本相比不值一提。见 ext_kind 的两档划分。
+    /// 走扩展信封而非专用码位: 拖动是低频动作, 见 ext_kind 的两档划分。
     private func reportPos(_ kind: String, _ x: Int32, _ y: Int32) {
         // 显式转 Int：JSONSerialization 只认 NSNumber，Int32 虽能桥接但没必要赌桥接细节。
         guard let body = try? JSONSerialization.data(withJSONObject: ["x": Int(x), "y": Int(y)])
@@ -381,10 +379,9 @@ public final class CandidatePanelHost {
 
     private func openSHMIfNeeded() {
         if reader != nil { return }
-        // SHM 名按变体后缀与 Rust wind_bridge::endpoint::shm_name 对齐
-        // (release: /WindInput_SHM; dev: /WindInput_SHMDev)。否则两变体抢同一段,
-        // 开机后候选框渲染坏掉; 名字与服务端不一致则整个 dev 变体拿不到帧。
-        // 注: 服务端内部传的是管道后缀 "_dev", 由 endpoint.rs 的 variant_suffix 映射成 "Dev"。
+        // SHM 名按变体后缀与 Rust wind_bridge::endpoint::shm_name 对齐 (release: /WindInput_SHM;
+        // dev: /WindInput_SHMDev), 否则两变体抢同一段或 dev 拿不到帧。服务端内部的管道后缀
+        // "_dev" 由 endpoint.rs 的 variant_suffix 映射成 "Dev"。
         let shmName = "/WindInput_SHM\(BridgeEndpoints.variantSuffix)"
         do {
             reader = try SharedMemoryReader(name: shmName, size: 4 * 1024 * 1024)
@@ -409,13 +406,10 @@ public final class CandidatePanelHost {
     }
 
     /// 在持久 request 连接上做一次「发一帧 + 读一帧响应」, 连接陈旧时重建并重试一次。
-    /// **仅供幂等 (只读) 请求复用** —— 重试会重发同一帧, 非幂等操作 (选词/翻页/菜单动作)
-    /// 不可用本助手, 以免「服务端已处理但 ack 丢失」时被重发双重执行。
-    ///
-    /// 必要性: sendClient 是长连接, 服务侧可能因空闲回收/重启把它关掉, 而本端半开连接
-    /// 察觉不到 —— 首次 send 看似成功但 readFrame 立即 EOF。单次尝试会让「切换应用后首次
-    /// 打开菜单」偶发取不到菜单树 (退回兜底/只读)。重试一次 (重建连接) 即可对用户透明自愈。
-    /// 两次都失败 (服务真的不可达) 返回 nil。主线程调用 (鼠标/菜单事件, 主线程串行化)。
+    /// 仅供幂等 (只读) 请求复用: 重试会重发同一帧, 非幂等操作 (选词/翻页/菜单动作) 在
+    /// 「服务端已处理但 ack 丢失」时会被双重执行。
+    /// sendClient 是长连接, 服务侧可能已关掉而本端察觉不到 (首次 send 成功、readFrame 立即 EOF),
+    /// 重建重试一次即可自愈。两次都失败返回 nil。主线程调用。
     private func requestResponseIdempotent(_ frame: Data) -> Frame? {
         for attempt in 0..<2 {
             lock.lock()
@@ -439,7 +433,7 @@ public final class CandidatePanelHost {
         return nil
     }
 
-    /// 空白处右键 / 菜单栏指示器 / 系统输入菜单: 向 Go 请求统一菜单树
+    /// 空白处右键 / 菜单栏指示器 / 系统输入菜单: 向服务端请求统一菜单树
     /// (CmdShowContextMenu → CmdMenuShow 响应)。只读查询, 连接陈旧自动重试一次; 失败返回 nil。
     private func requestUnifiedMenu(simplified: Bool = false) -> [MenuItemData]? {
         // simplified=true 仅 IMK 输入源菜单用(精简树)；候选框右键/菜单栏指示器用完整树(默认 false)。
@@ -479,10 +473,8 @@ public final class CandidatePanelHost {
     private func handlePushFrame(_ frame: Frame) {
         switch frame.cmd {
         case DownstreamCmd.serviceReady:
-            // 服务（重）连：服务进程重启会 shm_unlink + 重建 SHM 段（新 inode），本进程旧 mmap
-            // 变成孤立旧段 → 候选窗卡在旧帧不刷新。收到 SERVICE_READY 即强制重开 SHM reader，
-            // 下一帧按名重开拿到新段，无需重装/重启 .app。
-            // 皮肤区域与穿透装饰层也是旧服务的：复位，新服务的第一帧之前自会再推。
+            // 服务（重）连：服务重启会重建 SHM 段，旧 mmap 卡在旧帧。收到 SERVICE_READY 即强制重开
+            // SHM reader；皮肤区域与穿透装饰层也属旧服务，一并复位。
             lock.lock(); reader?.closeReader(); reader = nil; latestSkin = CandidateSkin(); lock.unlock()
             // 请求连接也是连着旧服务的：在主线程 (请求都在主线程发) 关掉，免得与进行中的请求并发碰
             // 同一个 fd；随后排在主线程上的上报按需重建连接。
@@ -534,9 +526,8 @@ public final class CandidatePanelHost {
                 let argv = (args?["args"] as? [String]) ?? []
                 ModeStatusController.shared.openSettings(arguments: argv)
             case ExtKind.posCandidateQuery, ExtKind.posStatusTipQuery:
-                // 服务端问「你现在在哪」(用户点了菜单里的「固定位置」)。浮窗不可见时**不答**:
-                // 那种情况下没有"当前位置"可言, 沉默让服务端保留旧值, 好过报一个上次残留的
-                // 坐标把配置写坏。
+                // 服务端问「你现在在哪」(菜单里的「固定位置」)。浮窗不可见时不答: 沉默让服务端
+                // 保留旧值, 好过报一个残留坐标把配置写坏。
                 let isCandidate = (kind == ExtKind.posCandidateQuery)
                 DispatchQueue.main.async { [weak self] in
                     guard let self = self else { return }
@@ -547,9 +538,8 @@ public final class CandidatePanelHost {
             default:
                 NSLog("WindInput[ext] 未处理的 kind=\(kind)")
             }
-        // 合成按键四路: 往宿主打任意键 (含数字、退格), 文档被改而 router 完全不经手 ——
-        // 「光标前一字符」的记账够不到这里, 只能作废。用户自定义宏才触发, 量级小于按键/
-        // 上屏两条主路, 但漏了就是「打完宏再打标点出错形」这种查无可查的偶发。
+        // 合成按键四路往宿主打任意键 (含数字、退格), router 不经手, 「光标前一字符」的记账
+        // 只能作废, 否则打完宏再打标点会出错形。
         case DownstreamCmd.keyTap:
             if let p = try? BinaryCodec.decodeKeyComboPayload(frame.payload) {
                 let responder = activeResponder
@@ -676,9 +666,8 @@ public final class CandidatePanelHost {
             shouldInterpolate: false, intent: .defaultIntent
         ) else { return nil }
         let logical = NSSize(width: CGFloat(f.width) / scale, height: CGFloat(f.height) / scale)
-        // NSImage(cgImage:size:) 不会把 cgImage 注册为高分辨率 representation，AppKit 把它当
-        // 1x 图放大到 logical 尺寸 → Retina 下模糊。改用 NSBitmapImageRep 显式声明逻辑尺寸，
-        // AppKit 即可以 1 device-px : 1 image-px 的精度直接绘制，保持清晰。
+        // NSImage(cgImage:size:) 不把 cgImage 注册为高分辨率 representation, Retina 下会被当 1x
+        // 放大而模糊; 用 NSBitmapImageRep 显式声明逻辑尺寸, 保持 1 device-px : 1 image-px。
         let rep = NSBitmapImageRep(cgImage: cg)
         rep.size = logical
         let img = NSImage(size: logical)

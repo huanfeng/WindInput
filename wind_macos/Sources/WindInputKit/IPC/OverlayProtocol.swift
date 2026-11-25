@@ -8,8 +8,8 @@ import CoreGraphics
 // addon 同构：本文件逐项对位 `wind_linux` 的 `placeOverlay` / `OverlayInput`，布局见 Rust
 // `wind_ipc::codec::encode_overlay_frame`。
 //
-// **坐标单位**：与候选窗一致，x/y/alt/margin 是 wire 点（原点在主屏左上、y 向下）；
-// 位图尺寸与内容盒偏移 / 尺寸是**位图像素**，换算成点要除以帧里带的 `scale`。
+// 坐标单位：与候选窗一致，x/y/alt/margin 是 wire 点（原点在主屏左上、y 向下）；
+// 位图尺寸与内容盒偏移 / 尺寸是位图像素，换算成点要除以帧里带的 `scale`。
 // 本文件只做纯几何（不碰 NSScreen），故可在 `swift test` 里测；取屏幕的部分在 App 层。
 
 public enum OverlayKind {

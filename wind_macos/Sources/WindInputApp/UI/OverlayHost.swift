@@ -8,7 +8,7 @@ import WindInputKit
 // 读像素、按屏幕几何落位、管自动隐藏计时、把鼠标事件转成服务端认得的上行消息。与 Linux
 // Fcitx5 addon 同构，行为逐项对位 `wind_linux`（落位见 `OverlayPlacer`，交互见 `OverlayInput`）。
 //
-// 线程：**只在主线程使用**（AppKit 窗口、Timer）。`CandidatePanelHost` 收到 push 帧后
+// 线程：只在主线程使用（AppKit 窗口、Timer）。`CandidatePanelHost` 收到 push 帧后
 // `DispatchQueue.main.async` 再调进来，同一队列保序——悬停提示的 `followCandidate` 落位依赖
 // 「候选窗帧先于提示帧生效」。
 

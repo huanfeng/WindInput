@@ -1,14 +1,14 @@
 import Cocoa
 
 
-// KeyHandler — 把 NSEvent 翻译成 Go bridge 期望的 KeyEvent payload.
+// KeyHandler — 把 NSEvent 翻译成服务端期望的 KeyEvent payload.
 //
 // 设计要点:
-//   - Go 服务把按键当 Windows VK 编码处理 (跨平台镜像), 因此 macOS 这边需要把
+//   - 服务端把按键当 Windows VK 编码处理 (跨平台镜像), 因此 macOS 这边需要把
 //     NSEvent.keyCode (Carbon kVK_*) 映射到 Win VK_*.
 //   - Modifier 也按 Win 端 ModShift/ModCtrl/ModAlt/ModWin 的 bit 位编码.
 //   - macOS 上 Cmd ↔ Win 端 ModWin (Apple 物理 Cmd 键 ≈ Win 键的角色).
-//   - 不在这一层做任何"中英判定"逻辑; 让 Go 服务决定怎么处理.
+//   - 不在这一层做任何"中英判定"逻辑; 让服务端决定怎么处理.
 public enum KeyHandler {
 
     /// 把 NSEvent.keyCode (Carbon kVK_*) 翻译为 Win VK_*.
@@ -89,13 +89,9 @@ public enum KeyHandler {
         case 0x1E: return 0xDD // VK_OEM_6   ]}
         case 0x27: return 0xDE // VK_OEM_7   '"
 
-        // 小键盘 (kVK_ANSI_Keypad*)。**必须映射成 VK_NUMPAD* 而不是主键盘数字**:
-        // 「数字小键盘功能」(input.numpad_behavior) 的归一化在服务端做 —— `numpad_to_main`
-        // 只认 0x60..0x69 这些码, 在这里就地折算成主键盘数字等于把那个开关架空成恒 follow_main。
-        //
-        // 这些键此前一个都没映射, `toWindowsVK` 返回 0 → 整个键不上报 → IMKit 透传。
-        // 后果不止是那个开关无效: 小键盘也无法选候选、无法参与热键。
-        // macOS 没有 NumLock (小键盘恒出数字), 故不像 Windows 那样还要分 VK_HOME/VK_END 一路。
+        // 小键盘 (kVK_ANSI_Keypad*) 必须映射成 VK_NUMPAD* 而不是主键盘数字: input.numpad_behavior
+        // 的归一化在服务端 (`numpad_to_main` 只认 0x60..0x69), 就地折算等于把那个开关架空。
+        // macOS 没有 NumLock (小键盘恒出数字), 不像 Windows 还要分 VK_HOME/VK_END 一路。
         case 0x52: return 0x60 // VK_NUMPAD0
         case 0x53: return 0x61 // VK_NUMPAD1
         case 0x54: return 0x62 // VK_NUMPAD2
@@ -112,16 +108,15 @@ public enum KeyHandler {
         case 0x41: return 0x6E // VK_DECIMAL  .
         case 0x4B: return 0x6F // VK_DIVIDE   /
         case 0x4C: return 0x0D // 小键盘 Enter → VK_RETURN (与 Windows 同, 那边也不单列)
-        // 刻意不映射的两个: kVK_ANSI_KeypadClear(0x47) 在 Windows 对位 NumLock，而 macOS
-        // 没有 NumLock 语义; kVK_ANSI_KeypadEquals(0x51) 在 Windows 小键盘上根本没有对应键。
-        // 两者保持 VK=0 透传, 好过映射到一个语义不同的键上。
+        // 刻意不映射: KeypadClear(0x47) 在 Windows 对位 NumLock, macOS 无此语义;
+        // KeypadEquals(0x51) 在 Windows 没有对应键。保持 VK=0 透传, 好过映射到语义不同的键。
 
         default:
             return 0
         }
     }
 
-    /// 把 NSEvent.modifierFlags 编码为 Go 端 Win 风格 modifier bit 位.
+    /// 把 NSEvent.modifierFlags 编码为服务端的 Win 风格 modifier bit 位.
     /// macOS Cmd 映射为 Win ModWin (与 Win 端 ModWin 0x0008 一致).
     public static func toModifiers(_ flags: NSEvent.ModifierFlags) -> UInt32 {
         var m: UInt32 = 0
@@ -135,13 +130,11 @@ public enum KeyHandler {
         return m
     }
 
-    /// 这一键是否带**宿主快捷键修饰键** (⌘ Command / ⌃ Control / ⌥ Option)。
+    /// 这一键是否带宿主快捷键修饰键 (⌘ / ⌃ / ⌥)。
     ///
-    /// 这类键一律先问服务 (热键表在那边: ctrl+shift+e 切方案、ctrl+数字 置顶候选…),
-    /// 但**未命中热键时必须交还宿主** —— macOS 上 ⌘C/⌘V 是复制粘贴, ⌃/⌥ 组合也归宿主。
-    /// 判定在 `BridgeResponseRouter.apply(hostShortcut:)` 落地; 见那里的说明与 issue #64。
-    ///
-    /// Shift 不算: Shift+字母是大写、Shift+标点是另一个标点, 都是正经输入。
+    /// 这类键先问服务 (热键表在那边), 但未命中热键时必须交还宿主 (⌘C/⌘V 等),
+    /// 判定在 `BridgeResponseRouter.apply(hostShortcut:)` 落地。
+    /// Shift 不算: Shift+字母/标点都是正经输入。
     public static func isHostShortcut(_ flags: NSEvent.ModifierFlags) -> Bool {
         return flags.contains(.command) || flags.contains(.control) || flags.contains(.option)
     }
@@ -150,9 +143,8 @@ public enum KeyHandler {
     /// `seq` 由调用方维护自增, 用于服务端 stale 检测.
     ///
     /// `prevChar`: 光标前一字符 (UTF-16, 0 = 不可用), 服务端据此判「数字后智能标点」。
-    /// macOS 没有 TSF 那样的现读文档通路, 值由 [`SmartPunctDigitTracker`] 记账得出 ——
-    /// 调用方传 `router.digitTracker.prevChar` 即可, **不要**在这里去读宿主文档
-    /// (跨进程同步调用, 每键都读会压在按键延迟上)。
+    /// 传 `router.digitTracker.prevChar` (见 [`SmartPunctDigitTracker`]); 不要在这里读宿主文档,
+    /// 跨进程同步调用每键都读会压在按键延迟上。
     ///
     /// `seqChar`: 输入序列末字符代表值, 传 `router.seqTracker.seqChar`（见 [`InputSequenceTracker`]）。
     public static func encodeKeyEvent(_ event: NSEvent, seq: UInt16, prevChar: UInt16 = 0,

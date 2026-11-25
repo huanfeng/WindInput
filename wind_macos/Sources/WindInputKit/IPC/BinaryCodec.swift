@@ -1,10 +1,10 @@
 import Foundation
 
-// BinaryCodec — wind_input/internal/ipc/binary_codec.go 的 Swift 镜像.
+// BinaryCodec — wind-ipc codec.rs 的 Swift 镜像.
 //
 // 字节布局 (all little-endian):
 //   Header (8 bytes): u16 version | u16 cmd | u32 length
-//   KeyEvent payload (18 bytes): u32 keyCode | u32 scanCode | u32 modifiers
+//   KeyEvent payload (20 bytes): u32 keyCode | u32 scanCode | u32 modifiers
 //                                | u8 type | u8 toggles | u16 seq | u16 prevChar | u16 seqChar
 //
 // version 字段:
@@ -54,7 +54,7 @@ public enum BinaryCodec {
     ///   x:i32 (4) + y:i32 (4) + height:i32 (4)
     ///   [+ compositionStartX:i32 (4) + compositionStartY:i32 (4)]   // 可选 20 字节版
     /// }
-    /// 坐标系: top-left 原点 (与 Go/Win 端一致, 与 Cocoa NSRect 的 bottom-left 不同,
+    /// 坐标系: top-left 原点 (与服务端/Win 端一致, 与 Cocoa NSRect 的 bottom-left 不同,
     /// 调用方必须先转换好再传入).
     public static func encodeCaretUpdateFrame(x: Int32, y: Int32, height: Int32,
                                               compositionStartX: Int32? = nil,
@@ -125,10 +125,8 @@ public enum BinaryCodec {
     }
 
     /// 编码只带 clientToken(u64 LE) 的帧，用于 CMD_IME_ACTIVATED / CMD_IME_DEACTIVATED。
-    ///
-    /// 布局与 Windows TSF 端一致：payload 就是 8 字节 token。macOS 以前只发
-    /// focusGained / focusLost，服务端的 `handle_ime_activated` 从未被调用，于是
-    /// `input.default.remember_last_state = false` 的「每次激活重置中英」不生效。
+    /// 布局与 Windows TSF 端一致：payload 就是 8 字节 token。不发 IME_ACTIVATED 的话服务端
+    /// `handle_ime_activated` 不会执行（如 remember_last_state = false 的激活重置）。
     public static func encodeTokenFrame(cmd: UInt16, clientToken: UInt64, async: Bool = false) -> Data {
         var payload = Data(count: 8)
         payload.writeUInt32LE(UInt32(truncatingIfNeeded: clientToken), at: 0)
@@ -149,8 +147,8 @@ public enum BinaryCodec {
         return out
     }
 
-    /// 编码 CmdFocusGained (0x0201 upstream) 帧。布局与 Windows TSF 端**同构**, 尾部追加
-    /// darwin 专属的 bundleID 段:
+    /// 编码 CmdFocusGained (0x0201 upstream) 帧。布局与 Windows TSF 端同构, 尾部追加
+    /// darwin 专属的 bundleID 段 (Windows 在该位置发 len=0, 其后还有窗口类/标题段, macOS 不发):
     /// ```
     ///   caret:20            // x/y/height/compositionStartX/Y (i32 ×5)
     ///   clientToken:u64     // 高 32 位 = 宿主 pid, 低 32 位 = client 实例标识
@@ -161,13 +159,10 @@ public enum BinaryCodec {
     ///   bundleIdLen:u32 + bundleId  // darwin 追加段, Windows DLL 不发
     /// ```
     ///
-    /// ⚠️ **必须发满 39 字节**。此前只发 12 字节 (pid 占位 + mask), 而 Rust
-    /// `FocusGainedPayload::from_bytes` 的下限是 36 —— 解码恒失败, 于是 FOCUS_GAINED 的
-    /// **整个重型段从未在 macOS 上执行过**: 按应用初始模式 / compat.toml 规则 / 焦点状态气泡 /
-    /// 密码框强制英文 全部静默失效 (那句"darwin 无 PID 概念"的注释是错的, macOS 有 pid)。
-    ///
+    /// 必须发满 39 字节定长段: Rust `FocusGainedPayload::from_bytes` 有长度下限, 不足则整段
+    /// 焦点处理 (初始模式 / compat.toml 规则 / 焦点气泡 / 密码框强制英文) 都不执行。
     /// caret 段全 0 是安全的: 服务端 `apply_focus_caret` 在 `height == 0` 时直接返回,
-    /// 不会污染坐标缓存 —— macOS 的插入点坐标另有 CmdCaretUpdate 通路。
+    /// macOS 的插入点坐标另走 CmdCaretUpdate。
     ///
     /// - Parameter bundleID: 宿主 app 的 bundle id (取自 IMKit `client.bundleIdentifier()`),
     ///   服务端小写后当作「进程名」用于 compat.toml 匹配与 per-app 记忆。空串 = 未知。
@@ -191,9 +186,9 @@ public enum BinaryCodec {
         return out
     }
 
-    // MARK: - Downstream payload decoders (Go → IME)
+    // MARK: - Downstream payload decoders (服务端 → IME)
 
-    // CommitText flags (与 ipc/binary_codec.go: CommitFlagXxx 对齐)
+    // CommitText flags (与 wind-ipc protocol.rs 的 COMMIT_FLAG_* 对齐)
     public static let commitFlagModeChanged: UInt32       = 0x0001
     public static let commitFlagHasNewComposition: UInt32 = 0x0002
     public static let commitFlagChineseMode: UInt32       = 0x0004
@@ -276,7 +271,7 @@ public enum BinaryCodec {
     }
 
     public struct UpdateCompositionPayload: Equatable {
-        public let caretPos: UInt32   // preedit 内光标位置 (UTF-16 unit 还是 rune, 看 Go 端约定; M2.2 阶段照 Go 端原样上送)
+        public let caretPos: UInt32   // preedit 内光标位置 (UTF-16 单元)
         public let text: String       // preedit 文本
     }
 
@@ -412,9 +407,8 @@ public enum BinaryCodec {
 
     /// 编码 CmdCandidateScroll (0x0211 upstream): payload = delta i32 LE。
     ///
-    /// `delta` 用 Win32 的 `WHEEL_DELTA`(120) 倍数、正=上滚 —— 这是既有的 wire 约定
-    /// (Windows 的 host-render DLL 原样转发系统滚轮消息)，macOS 侧折算成同一单位，
-    /// 服务端因此只需一份实现。
+    /// `delta` 用 Win32 `WHEEL_DELTA`(120) 倍数、正=上滚: Windows DLL 原样转发系统滚轮消息,
+    /// macOS 折算成同一单位, 服务端只需一份实现。
     public static func encodeCandidateScrollFrame(delta: Int32) -> Data {
         var payload = Data(count: 4)
         payload.writeUInt32LE(UInt32(bitPattern: delta), at: 0)
@@ -540,7 +534,7 @@ public enum BinaryCodec {
             children: children)
     }
 
-    /// 编码 CmdFrontContext (0x0211 upstream): appLen u32 + app + titleLen u32 + title + selLen u32 + sel。
+    /// 编码 CmdFrontContext (0x0215 upstream): appLen u32 + app + titleLen u32 + title + selLen u32 + sel。
     /// 均 UTF-8、LE 长度前缀。与 Rust `wind-bridge` server.rs 的 CMD_FRONT_CONTEXT 解码对齐。
     public static func encodeFrontContextFrame(app: String, title: String, sel: String) -> Data {
         var payload = Data()
@@ -558,10 +552,9 @@ public enum BinaryCodec {
 
     /// 解扩展信封 (0x0E01)：`kindLen u32 + kind + bodyLen u32 + body`。
     ///
-    /// 低频消息的统一入口，见 Rust `protocol.rs` 的 `CMD_EXT`。**未知 kind 一律安静忽略**
-    /// ——这是新旧版本互相兼容的根本，调用方不要把它升级成错误。
-    ///
-    /// 解不出（截断 / 非法 UTF-8 的 kind）返回 nil，同样按「忽略」处理。
+    /// 低频消息的统一入口，见 Rust `protocol.rs` 的 `CMD_EXT`。未知 kind 一律安静忽略，
+    /// 这是新旧版本互相兼容的根本，调用方不要把它升级成错误。解不出（截断 / 非法 UTF-8）返回 nil，
+    /// 同样按忽略处理。
     public static func decodeExt(_ buf: Data) -> (kind: String, body: Data)? {
         guard buf.count >= 4 else { return nil }
         let kindLen = Int(buf.readUInt32LE(at: 0))

@@ -3,20 +3,15 @@ import WindInputKit
 
 // ModeStatusController — 菜单栏输入模式指示器 (NSStatusItem)。
 //
-// 接收 Go 端经 push 通道发来的 CmdModeStatus (中英模式/全半角/标点/方案标签),
-// 在屏幕右上角菜单栏显示当前状态 (紧凑标题)。
+// 接收服务端经 push 通道发来的 CmdModeStatus, 在菜单栏显示紧凑状态标题。
 //
-// 下拉菜单与候选框空白处右键菜单保持一致: 打开时经 unifiedMenuProvider 同步向 Go
-// 拉取统一菜单树 (输入方案 / 检索范围 / 全角 / 中文标点 / 简入繁出 / 主题 / 设置…),
-// 用共享的 UnifiedMenuBuilder 构建为可点击的原生菜单, 点击经 onUnifiedAction 回发
-// CmdMenuAction。服务尚未就绪 (拉取失败) 时回退到只读状态展示 + 设置入口。
-//
-// 可见性由 Go 端 toolbar reducer 驱动: IME 激活且应显示时 visible=true, 失活/失焦
-// 时 visible=false → 隐藏菜单栏项。整个 .app 进程一个指示器 (单例)。
+// 下拉菜单与候选框空白处右键菜单一致: 打开时经 unifiedMenuProvider 同步拉取统一菜单树, 用共享的
+// UnifiedMenuBuilder 构建原生菜单, 点击经 onUnifiedAction 回发 CmdMenuAction; 拉取失败时回退到
+// 只读状态展示 + 设置入口。可见性由服务端 toolbar reducer 驱动, 整个进程一个指示器 (单例)。
 public final class ModeStatusController: NSObject, NSMenuDelegate {
     public static let shared = ModeStatusController()
 
-    /// 统一菜单树提供者 (同步向 Go 请求, 失败返回 nil)。由 CandidatePanelHost 注入,
+    /// 统一菜单树提供者 (同步向服务端请求, 失败返回 nil)。由 CandidatePanelHost 注入,
     /// 与候选框空白处右键菜单复用同一 IPC 请求路径。
     public var unifiedMenuProvider: (() -> [MenuItemData]?)?
     /// 统一菜单项点击回调 (menu item id → CmdMenuAction)。由 CandidatePanelHost 注入。
@@ -71,7 +66,7 @@ public final class ModeStatusController: NSObject, NSMenuDelegate {
 
     // MARK: - NSMenuDelegate
 
-    /// 菜单将要打开: 清空并重建。优先用 Go 下发的统一菜单树 (与候选框右键菜单一致);
+    /// 菜单将要打开: 清空并重建。优先用服务端下发的统一菜单树 (与候选框右键菜单一致);
     /// 拉取失败 (服务未就绪) 时回退到只读状态展示。
     public func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
@@ -125,11 +120,8 @@ public final class ModeStatusController: NSObject, NSMenuDelegate {
     /// `BinaryCodec.decodeOpenSettingsArguments`)。空数组 = 默认页。
     /// 经 LaunchServices 按 bundleID 启动/激活已有实例。线程安全 (切主线程)。
     ///
-    /// ⚠️ 已在运行时 LaunchServices **不重传 arguments**, 只激活窗口 —— 深链要在已开着的
-    /// 设置窗口上生效, 靠的是 windui 的单实例转发 (二次实例把 argv 发给首实例)。
-    /// 而转发的前提是**真有一个二次进程**: 默认的 openApplication 对已运行的 app 只做
-    /// activate、不 exec 新进程, 转发那条路一步都走不到 (页不动只是窗口闪一下)。故带参数
-    /// 时显式要求新实例 —— 它 acquire 失败后把 argv 经 socket 送给首实例, 随即自行退出。
+    /// 已在运行时 LaunchServices 不重传 arguments, 只激活窗口; 深链要靠 windui 的单实例转发
+    /// (二次实例把 argv 发给首实例), 故带参数时显式要求新实例 (它把 argv 转给首实例后自行退出)。
     /// 无参数 (托盘「设置…」) 仍走普通激活, 否则每点一次就多开一个窗口。
     public func openSettings(arguments: [String]) {
         if !Thread.isMainThread {
