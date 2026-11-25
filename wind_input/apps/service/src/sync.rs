@@ -24,7 +24,9 @@ use tracing::{error, info, warn};
 use wind_config::Config;
 use wind_supervise::backoff::Decision;
 use wind_supervise::{Event, Job, Supervisor};
-use wind_sync_ipc::{FromSync, Op, Status, SyncSettings, ToSync, read_frame, write_frame};
+use wind_sync_ipc::{
+    FromSync, Op, RoundStats, Status, SyncSettings, ToSync, read_frame, write_frame,
+};
 
 const TICK: Duration = Duration::from_millis(200);
 const STOP_GRACE: Duration = Duration::from_secs(3);
@@ -32,6 +34,62 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 /// 检查「期望态是否该变」（exe 装上 / 被删）的间隔。
 const RECONCILE_EVERY: Duration = Duration::from_secs(5);
 const LOG_MAX: u64 = 1024 * 1024;
+/// 主动同步的票等这么久还没结果就放弃。
+const TICKET_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+/// 同步结果提示（由接线处弹 toast）。
+#[derive(Debug, Clone, PartialEq)]
+pub enum SyncNotice {
+    Done(RoundStats),
+    Failed(String),
+    Busy,
+    Disabled,
+    BackgroundFailed(String),
+}
+
+#[allow(dead_code)] // 接线在主循环里另做
+pub fn notice_text(n: &SyncNotice) -> String {
+    match n {
+        SyncNotice::Done(s) => {
+            let mut parts = Vec::new();
+            if s.downloaded > 0 {
+                parts.push(format!("收到 {} 个文件", s.downloaded));
+            }
+            if s.uploaded > 0 {
+                parts.push(format!("上传 {} 个", s.uploaded));
+            }
+            let mut t = "同步完成".to_string();
+            if !parts.is_empty() {
+                t.push('：');
+                t.push_str(&parts.join("、"));
+            }
+            if s.conflicts > 0 {
+                t.push_str(&format!("，{} 个冲突", s.conflicts));
+            }
+            t
+        }
+        SyncNotice::Failed(r) => format!("同步失败：{r}"),
+        SyncNotice::Busy => "正在同步，完成后会提示".into(),
+        SyncNotice::Disabled => "数据同步未启用".into(),
+        SyncNotice::BackgroundFailed(r) => format!("数据同步出错：{r}"),
+    }
+}
+
+/// 一次主动同步在等什么。
+enum Active {
+    /// 同步进程还没连上，连上后发 `SyncNow`。
+    Pending { since: Instant },
+    /// 已拿到票号，等 `round >= ticket`。
+    Ticket { ticket: u64, since: Instant },
+}
+
+/// 提示判定的状态。
+#[derive(Default)]
+struct Track {
+    ticket: Option<Active>,
+    /// 上一次判定时 phase 是否为 `error`：只在「进入」时提示后台失败。
+    was_error: bool,
+}
 
 /// 同步进程能经 core 执行的方法。其余一律拒绝：同步进程持有凭据，被攻破时不能借 core 做别的事。
 pub const REQUEST_WHITELIST: &[&str] = &[
@@ -103,6 +161,9 @@ impl Paths {
 
 type Emit = Box<dyn Fn(Value) + Send + Sync>;
 type Exec = Box<dyn Fn(&str, &Value) -> Result<Value, String> + Send + Sync>;
+type Notify = Box<dyn Fn(SyncNotice) + Send + Sync>;
+type EnabledHook = Box<dyn Fn(bool) + Send + Sync>;
+type Clock = Box<dyn Fn() -> Instant + Send + Sync>;
 
 struct Hooks {
     /// 广播 `sync.statusChanged`。
@@ -124,6 +185,7 @@ struct Inner {
     status: Status,
     epoch: u64,
     last_reconcile: Option<Instant>,
+    track: Track,
 }
 
 pub struct SyncHost {
@@ -133,6 +195,10 @@ pub struct SyncHost {
     pending: Mutex<HashMap<u64, Sender<Result<Value, String>>>>,
     next_id: AtomicU64,
     hooks: OnceLock<Hooks>,
+    notify: OnceLock<Notify>,
+    enabled_hook: OnceLock<EnabledHook>,
+    /// 测试注入的时钟；生产用 `Instant::now`。
+    clock: OnceLock<Clock>,
     command_timeout: Duration,
     /// 经同步进程成功 `data.beginEdit`、尚未 `data.endEdit` 的 (进程代次, 路径)。
     /// 同步进程退出（含被强杀）时据此代为结束，否则 core 会一直暂停该文件的写回。
@@ -193,10 +259,14 @@ impl SyncHost {
                 status: Status::default(),
                 epoch: 0,
                 last_reconcile: None,
+                track: Track::default(),
             }),
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             hooks: OnceLock::new(),
+            notify: OnceLock::new(),
+            enabled_hook: OnceLock::new(),
+            clock: OnceLock::new(),
             command_timeout,
             held_edits: Mutex::new(BTreeSet::new()),
             held_suspends: Mutex::new(BTreeSet::new()),
@@ -208,6 +278,32 @@ impl SyncHost {
     /// 接上事件广播与请求执行器（RPC 服务建好之后才有，故晚于构造）。
     pub fn set_hooks(&self, emit: Emit, exec: Exec) {
         let _ = self.hooks.set(Hooks { emit, exec });
+    }
+
+    /// 接上同步结果提示（弹 toast 的接线处）。
+    #[allow(dead_code)]
+    pub fn set_notify(&self, f: Notify) {
+        let _ = self.notify.set(f);
+    }
+
+    /// 接上启用状态回调：设置时立即以当前值调一次，之后每次变化再调。
+    #[allow(dead_code)]
+    pub fn set_enabled_hook(&self, f: EnabledHook) {
+        let enabled = lock(&self.inner).settings.enabled;
+        if self.enabled_hook.set(f).is_ok() {
+            if let Some(h) = self.enabled_hook.get() {
+                h(enabled);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn set_clock(&self, f: Clock) {
+        let _ = self.clock.set(f);
+    }
+
+    fn now(&self) -> Instant {
+        self.clock.get().map_or_else(Instant::now, |c| c())
     }
 
     /// 服务即将重启或退出：通知同步进程收尾，等不到就强杀。
@@ -370,6 +466,8 @@ impl SyncHost {
         };
         if changed {
             self.emit_status();
+        } else {
+            self.pump();
         }
     }
 
@@ -415,6 +513,12 @@ impl SyncHost {
                     }
                 }
             });
+        if matches!(inner.track.ticket, Some(Active::Pending { .. })) {
+            let me = self.clone();
+            let _ = std::thread::Builder::new()
+                .name("sync-now".into())
+                .spawn(move || me.send_sync_now(true));
+        }
         let me = self.clone();
         let mut stdout = stdout;
         let _ = std::thread::Builder::new()
@@ -503,14 +607,12 @@ impl SyncHost {
 
     // ── 状态 ───────────────────────────────────────────────
 
-    fn view(&self, inner: &Inner) -> Value {
-        let installed = (self.installed)();
-        let running = inner.link.is_some();
-        let (phase, last_error) = if !installed {
+    fn phase_of(&self, inner: &Inner) -> (String, Option<String>) {
+        if !(self.installed)() {
             ("not_installed".to_string(), None)
         } else if !inner.settings.enabled {
             ("disabled".to_string(), None)
-        } else if running {
+        } else if inner.link.is_some() {
             let p = if inner.status.phase.is_empty() {
                 "starting".to_string()
             } else {
@@ -524,7 +626,13 @@ impl SyncHost {
             )
         } else {
             ("starting".to_string(), inner.status.last_error.clone())
-        };
+        }
+    }
+
+    fn view(&self, inner: &Inner) -> Value {
+        let installed = (self.installed)();
+        let running = inner.link.is_some();
+        let (phase, last_error) = self.phase_of(inner);
         json!({
             "installed": installed,
             "enabled": inner.settings.enabled,
@@ -549,6 +657,135 @@ impl SyncHost {
         if let Some(h) = self.hooks.get() {
             (h.emit)(v);
         }
+        self.pump();
+    }
+
+    // ── 同步结果提示 ───────────────────────────────────────
+
+    /// 按当前状态判定该弹哪些提示；回调放锁外。
+    fn pump(&self) {
+        let notices = self.evaluate(&mut lock(&self.inner));
+        if let Some(f) = self.notify.get() {
+            for n in notices {
+                f(n);
+            }
+        }
+    }
+
+    fn evaluate(&self, inner: &mut Inner) -> Vec<SyncNotice> {
+        let mut out = Vec::new();
+        let (phase, last_error) = self.phase_of(inner);
+        let linked = inner.link.is_some();
+        let reason = || {
+            last_error
+                .clone()
+                .or_else(|| {
+                    inner
+                        .status
+                        .last_round
+                        .as_ref()
+                        .and_then(|r| r.error.clone())
+                })
+                .unwrap_or_else(|| phase.clone())
+        };
+        match &inner.track.ticket {
+            Some(Active::Ticket { ticket, since }) => {
+                if linked && inner.status.round >= *ticket {
+                    out.push(match &inner.status.last_round {
+                        Some(r) if !r.ok => SyncNotice::Failed(
+                            r.error.clone().unwrap_or_else(|| "未知错误".to_string()),
+                        ),
+                        Some(r) => SyncNotice::Done(r.clone()),
+                        None => SyncNotice::Done(RoundStats {
+                            ok: true,
+                            ..Default::default()
+                        }),
+                    });
+                    inner.track.ticket = None;
+                } else if self.gave_up(inner, &phase, *since) {
+                    out.push(SyncNotice::Failed(reason()));
+                    inner.track.ticket = None;
+                } else if !linked {
+                    out.push(SyncNotice::Failed("同步进程已退出".into()));
+                    inner.track.ticket = None;
+                }
+            }
+            Some(Active::Pending { since }) => {
+                if self.gave_up(inner, &phase, *since) || (!linked && phase == "error") {
+                    out.push(SyncNotice::Failed(reason()));
+                    inner.track.ticket = None;
+                }
+            }
+            None => {}
+        }
+        // 有主动同步在等时，进入失败归它管，不当后台失败。
+        let entering = phase == "error" && !inner.track.was_error;
+        if entering && inner.track.ticket.is_none() && out.is_empty() {
+            out.push(SyncNotice::BackgroundFailed(reason()));
+        }
+        inner.track.was_error = phase == "error";
+        out
+    }
+
+    /// 等票期间同步已不可能出结果：停用 / 未安装 / 停摆 / 待确认身份 / 超时。
+    fn gave_up(&self, inner: &Inner, phase: &str, since: Instant) -> bool {
+        matches!(phase, "disabled" | "not_installed" | "halted")
+            || inner.status.needs_identity
+            || self.now().saturating_duration_since(since) >= TICKET_TIMEOUT
+    }
+
+    fn notify_now(&self, n: SyncNotice) {
+        if let Some(f) = self.notify.get() {
+            f(n);
+        }
+    }
+
+    /// 向同步进程发 `SyncNow` 并登记票号；`from_pending` 表示这是连上后补发的那张。
+    fn send_sync_now(&self, from_pending: bool) -> Value {
+        let since = self.now();
+        match self.command(Op::SyncNow, Value::Null) {
+            Ok(v) => {
+                let ticket = v.get("ticket").and_then(Value::as_u64).unwrap_or(0);
+                let busy = v.get("busy").and_then(Value::as_bool).unwrap_or(false);
+                if busy {
+                    self.notify_now(SyncNotice::Busy);
+                }
+                lock(&self.inner).track.ticket = Some(Active::Ticket { ticket, since });
+                // 回执可能比登记还晚到：登记后立即按当前状态判一次。
+                self.pump();
+                json!({ "outcome": if busy { "busy" } else { "queued" }, "ticket": ticket })
+            }
+            Err(e) => {
+                if from_pending {
+                    lock(&self.inner).track.ticket = None;
+                }
+                self.notify_now(SyncNotice::Failed(e.clone()));
+                json!({ "outcome": "failed", "error": e })
+            }
+        }
+    }
+
+    /// 用户主动「立即同步」。未启用不拉起进程；进程还在启动则连上后补发。
+    pub fn sync_now_active(&self) -> Value {
+        {
+            let mut inner = lock(&self.inner);
+            if !inner.settings.enabled {
+                drop(inner);
+                self.notify_now(SyncNotice::Disabled);
+                return json!({ "outcome": "disabled" });
+            }
+            if !(self.installed)() {
+                drop(inner);
+                let e = "同步组件未安装".to_string();
+                self.notify_now(SyncNotice::Failed(e.clone()));
+                return json!({ "outcome": "failed", "error": e });
+            }
+            if inner.link.is_none() {
+                inner.track.ticket = Some(Active::Pending { since: self.now() });
+                return json!({ "outcome": "starting" });
+            }
+        }
+        self.send_sync_now(false)
     }
 
     // ── ctrl RPC ───────────────────────────────────────────
@@ -572,6 +809,7 @@ impl SyncHost {
                 Ok(json!({ "ok": true }))
             }
             "sync.status" => Ok(self.view(&lock(&self.inner))),
+            "sync.now" => Ok(self.sync_now_active()),
             "sync.command" => {
                 let op = params
                     .get("op")
@@ -589,13 +827,21 @@ impl SyncHost {
         s.validate()?;
         let paths = self.paths.as_ref().ok_or("取不到同步状态目录")?;
         save_settings(&paths.settings_file, &s)?;
-        {
+        let now_enabled = s.enabled;
+        let was_enabled = {
             let mut inner = lock(&self.inner);
+            let was = inner.settings.enabled;
             inner.settings = s.clone();
             if let Some(l) = &inner.link {
                 let _ = l.tx.send(ToSync::Settings(s));
             }
             self.reconcile(&mut inner, Instant::now(), true);
+            was
+        };
+        if was_enabled != now_enabled {
+            if let Some(h) = self.enabled_hook.get() {
+                h(now_enabled);
+            }
         }
         self.emit_status();
         Ok(())

@@ -1,6 +1,6 @@
 use super::*;
 use std::io::{PipeReader, PipeWriter, pipe};
-use wind_sync_ipc::Backend;
+use wind_sync_ipc::{Backend, RoundStats};
 
 /// 桩同步进程：在测试里扮演管道另一头（不起真进程——测试二进制的 stdout 会混进
 /// libtest 的头部输出，污染帧流）。
@@ -25,6 +25,7 @@ struct Rig {
     stub: Stub,
     events: Arc<Mutex<Vec<Value>>>,
     executed: Arc<Mutex<Vec<String>>>,
+    notices: Arc<Mutex<Vec<SyncNotice>>>,
     dir: tempfile::TempDir,
 }
 
@@ -88,6 +89,11 @@ fn rig_with(pre: Option<SyncSettings>, timeout: Duration) -> Rig {
             })
         },
     );
+    let notices = Arc::new(Mutex::new(Vec::new()));
+    {
+        let notices = notices.clone();
+        host.set_notify(Box::new(move |n| lock(&notices).push(n)));
+    }
     let (child_stdin_r, child_stdin_w): (PipeReader, PipeWriter) = pipe().unwrap();
     let (child_stdout_r, child_stdout_w) = pipe().unwrap();
     let (tx, from_core) = mpsc::channel();
@@ -108,6 +114,7 @@ fn rig_with(pre: Option<SyncSettings>, timeout: Duration) -> Rig {
         },
         events,
         executed,
+        notices,
         dir,
     }
 }
@@ -546,4 +553,256 @@ fn stale_link_messages_are_ignored() {
     std::thread::sleep(Duration::from_millis(150));
     assert_ne!(phase(&r.host), "old");
     let _ = &r.dir;
+}
+
+// ── 立即同步与提示 ─────────────────────────────────────
+
+fn round_status(phase: &str, round: u64, last: Option<RoundStats>) -> Status {
+    Status {
+        phase: phase.into(),
+        round,
+        last_round: last,
+        ..Default::default()
+    }
+}
+
+fn ok_round(downloaded: u32, uploaded: u32) -> Option<RoundStats> {
+    Some(RoundStats {
+        ok: true,
+        downloaded,
+        uploaded,
+        ..Default::default()
+    })
+}
+
+fn fail_round(why: &str) -> Option<RoundStats> {
+    Some(RoundStats {
+        ok: false,
+        error: Some(why.into()),
+        ..Default::default()
+    })
+}
+
+fn notices(r: &Rig) -> Vec<SyncNotice> {
+    lock(&r.notices).clone()
+}
+
+/// 主动同步一次：桩收下 `SyncNow` 命令并按 `reply` 回执，返回调用结果。
+fn run_active(r: &mut Rig, reply: Result<Value, String>) -> Value {
+    let host = r.host.clone();
+    let call = std::thread::spawn(move || host.sync_now_active());
+    loop {
+        if let ToSync::Command { id, op, .. } = r.stub.next() {
+            assert_eq!(op, Op::SyncNow);
+            r.stub.send(FromSync::command_reply(id, reply));
+            break;
+        }
+    }
+    call.join().unwrap()
+}
+
+fn send_status(r: &mut Rig, s: Status) {
+    r.stub.send(FromSync::Status(s.clone()));
+    wait_for(|| lock(&r.host.inner).status == s);
+    // 通知在状态写入之后才发，再等一拍让 pump 跑完。
+    std::thread::sleep(Duration::from_millis(30));
+}
+
+#[test]
+fn sync_now_when_disabled_does_not_launch() {
+    let dir = tempfile::tempdir().unwrap();
+    let launched = Arc::new(AtomicU64::new(0));
+    let sup = {
+        let launched = launched.clone();
+        Supervisor::new(move || {
+            launched.fetch_add(1, Ordering::SeqCst);
+            Err("测试不拉起真进程".into())
+        })
+    };
+    let paths = Paths {
+        settings_file: dir.path().join("state/sync/settings.toml"),
+        state_dir: dir.path().join("state/sync"),
+        userdata_dir: dir.path().join("user"),
+        suffix: "_t".into(),
+    };
+    let host = Arc::new(SyncHost::new(
+        Some(paths),
+        sup,
+        Box::new(|| true),
+        COMMAND_TIMEOUT,
+    ));
+    let got = Arc::new(Mutex::new(Vec::new()));
+    {
+        let got = got.clone();
+        host.set_notify(Box::new(move |n| lock(&got).push(n)));
+    }
+    let v = host.sync_now_active();
+    host.tick(Instant::now());
+    assert_eq!(v["outcome"], "disabled");
+    assert_eq!(*lock(&got), vec![SyncNotice::Disabled]);
+    assert_eq!(launched.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn active_sync_notifies_done_once() {
+    let mut r = rig();
+    let _hello = r.stub.next();
+    let v = run_active(&mut r, Ok(json!({ "queued": true, "ticket": 3 })));
+    assert_eq!(v, json!({ "outcome": "queued", "ticket": 3 }));
+    send_status(&mut r, round_status("idle", 2, ok_round(1, 1)));
+    assert!(notices(&r).is_empty(), "round 2 早于票号");
+    send_status(&mut r, round_status("idle", 3, ok_round(2, 0)));
+    send_status(&mut r, round_status("idle", 4, ok_round(5, 5)));
+    assert_eq!(notices(&r), vec![SyncNotice::Done(ok_round(2, 0).unwrap())]);
+}
+
+#[test]
+fn busy_then_done() {
+    let mut r = rig();
+    let _hello = r.stub.next();
+    let v = run_active(
+        &mut r,
+        Ok(json!({ "queued": false, "busy": true, "ticket": 5 })),
+    );
+    assert_eq!(v, json!({ "outcome": "busy", "ticket": 5 }));
+    assert_eq!(notices(&r), vec![SyncNotice::Busy]);
+    send_status(&mut r, round_status("idle", 5, ok_round(0, 0)));
+    assert_eq!(
+        notices(&r),
+        vec![SyncNotice::Busy, SyncNotice::Done(ok_round(0, 0).unwrap())]
+    );
+}
+
+#[test]
+fn command_error_is_reported_as_failed() {
+    let mut r = rig();
+    let _hello = r.stub.next();
+    let v = run_active(&mut r, Err("口令错误".into()));
+    assert_eq!(v["outcome"], "failed");
+    assert_eq!(v["error"], "口令错误");
+    assert_eq!(notices(&r), vec![SyncNotice::Failed("口令错误".into())]);
+}
+
+#[test]
+fn background_failure_notifies_once_until_recovered() {
+    let mut r = rig();
+    send_status(&mut r, round_status("error", 1, fail_round("网络不通")));
+    send_status(&mut r, round_status("error", 2, fail_round("网络不通")));
+    assert_eq!(
+        notices(&r),
+        vec![SyncNotice::BackgroundFailed("网络不通".into())]
+    );
+    send_status(&mut r, round_status("idle", 3, ok_round(0, 0)));
+    send_status(&mut r, round_status("error", 4, fail_round("又断了")));
+    assert_eq!(
+        notices(&r),
+        vec![
+            SyncNotice::BackgroundFailed("网络不通".into()),
+            SyncNotice::BackgroundFailed("又断了".into()),
+        ]
+    );
+}
+
+#[test]
+fn active_failure_is_not_double_reported() {
+    let mut r = rig();
+    let _hello = r.stub.next();
+    run_active(&mut r, Ok(json!({ "queued": true, "ticket": 1 })));
+    let mut s = round_status("error", 1, fail_round("服务器 500"));
+    s.last_error = Some("服务器 500".into());
+    send_status(&mut r, s);
+    send_status(&mut r, round_status("error", 2, fail_round("服务器 500")));
+    assert_eq!(notices(&r), vec![SyncNotice::Failed("服务器 500".into())]);
+}
+
+#[test]
+fn ticket_abandoned_when_sync_disabled() {
+    let mut r = rig();
+    let _hello = r.stub.next();
+    run_active(&mut r, Ok(json!({ "queued": true, "ticket": 9 })));
+    r.host
+        .rpc("sync.setSettings", &json!({ "settings": webdav(false) }))
+        .unwrap();
+    r.host.tick(Instant::now());
+    r.host.tick(Instant::now());
+    assert_eq!(notices(&r), vec![SyncNotice::Failed("disabled".into())]);
+    assert!(lock(&r.host.inner).track.ticket.is_none());
+}
+
+#[test]
+fn ticket_abandoned_when_halted() {
+    let mut r = rig();
+    let _hello = r.stub.next();
+    run_active(&mut r, Ok(json!({ "queued": true, "ticket": 9 })));
+    let mut s = round_status("halted", 1, None);
+    s.last_error = Some("设备号被占用".into());
+    send_status(&mut r, s);
+    assert_eq!(notices(&r), vec![SyncNotice::Failed("设备号被占用".into())]);
+}
+
+#[test]
+fn ticket_times_out() {
+    let mut r = rig();
+    let _hello = r.stub.next();
+    let base = Instant::now();
+    let offset = Arc::new(Mutex::new(Duration::ZERO));
+    {
+        let offset = offset.clone();
+        r.host.set_clock(Box::new(move || base + *lock(&offset)));
+    }
+    run_active(&mut r, Ok(json!({ "queued": true, "ticket": 9 })));
+    *lock(&offset) = Duration::from_secs(9 * 60);
+    r.host.pump();
+    assert!(notices(&r).is_empty(), "{:?}", notices(&r));
+    *lock(&offset) = Duration::from_secs(11 * 60);
+    r.host.pump();
+    r.host.pump();
+    assert_eq!(notices(&r), vec![SyncNotice::Failed("starting".into())]);
+}
+
+#[test]
+fn enabled_hook_fires_initially_and_on_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = host_in(dir.path(), true, COMMAND_TIMEOUT);
+    let got = Arc::new(Mutex::new(Vec::new()));
+    {
+        let got = got.clone();
+        host.set_enabled_hook(Box::new(move |e| lock(&got).push(e)));
+    }
+    host.rpc("sync.setSettings", &json!({ "settings": webdav(true) }))
+        .unwrap();
+    host.rpc("sync.setSettings", &json!({ "settings": webdav(true) }))
+        .unwrap();
+    host.rpc("sync.setSettings", &json!({ "settings": webdav(false) }))
+        .unwrap();
+    assert_eq!(*lock(&got), vec![false, true, false]);
+}
+
+#[test]
+fn notice_text_formats() {
+    let done = |d, u, c| {
+        notice_text(&SyncNotice::Done(RoundStats {
+            ok: true,
+            downloaded: d,
+            uploaded: u,
+            conflicts: c,
+            ..Default::default()
+        }))
+    };
+    assert_eq!(done(0, 0, 0), "同步完成");
+    assert_eq!(done(2, 3, 0), "同步完成：收到 2 个文件、上传 3 个");
+    assert_eq!(done(0, 3, 0), "同步完成：上传 3 个");
+    assert_eq!(done(2, 0, 0), "同步完成：收到 2 个文件");
+    assert_eq!(
+        done(2, 3, 1),
+        "同步完成：收到 2 个文件、上传 3 个，1 个冲突"
+    );
+    assert_eq!(done(0, 0, 2), "同步完成，2 个冲突");
+    assert_eq!(notice_text(&SyncNotice::Failed("x".into())), "同步失败：x");
+    assert_eq!(notice_text(&SyncNotice::Busy), "正在同步，完成后会提示");
+    assert_eq!(notice_text(&SyncNotice::Disabled), "数据同步未启用");
+    assert_eq!(
+        notice_text(&SyncNotice::BackgroundFailed("y".into())),
+        "数据同步出错：y"
+    );
 }

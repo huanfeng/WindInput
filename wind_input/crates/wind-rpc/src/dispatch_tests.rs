@@ -159,7 +159,12 @@ fn unknown_method_returns_error() {
 
 #[test]
 fn untrusted_caller_cannot_reach_sync_methods() {
-    for m in ["sync.command", "sync.setSettings", "sync.status"] {
+    for m in [
+        "sync.command",
+        "sync.setSettings",
+        "sync.status",
+        "sync.now",
+    ] {
         let r = dispatch_as(&state(), req(m, json!({})), false);
         assert_eq!(r.error.as_deref(), Some(DENY_UNTRUSTED), "{m}");
     }

@@ -13,7 +13,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::process::{ChildStdin, ChildStdout, Command};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use tracing::{error, info, warn};
@@ -53,6 +53,8 @@ pub struct Extensions {
     on_hook_changed: Box<dyn Fn() + Send + Sync>,
     state: Mutex<State>,
     status: Arc<Mutex<Vec<ExtensionStatus>>>,
+    /// 扩展首次从同组设备到达并启用时的提示（弹 toast 的接线处）。
+    notify: OnceLock<Box<dyn Fn(String) + Send + Sync>>,
 }
 
 struct State {
@@ -65,6 +67,10 @@ struct State {
     cfg: ExtensionsConfig,
     /// 被同步临时暂停的扩展（文件正在被替换）：不在期望集里。
     suspended: BTreeSet<String>,
+    /// 暂停时磁盘上还没有 `extension.toml` 的扩展：恢复后出现即视为首次到达。
+    absent_at_suspend: BTreeSet<String>,
+    /// 扩展目录。
+    root: Option<PathBuf>,
 }
 
 struct Host {
@@ -103,8 +109,11 @@ impl Extensions {
                 sup,
                 cfg: ExtensionsConfig::default(),
                 suspended: BTreeSet::new(),
+                absent_at_suspend: BTreeSet::new(),
+                root: extensions_dir(),
             }),
             status: Arc::new(Mutex::new(Vec::new())),
+            notify: OnceLock::new(),
         });
         {
             let p = p.clone();
@@ -159,19 +168,55 @@ impl Extensions {
 
     /// 暂停这些扩展（同步要替换它们的文件）：移出期望集，宿主随之停掉它们。
     pub fn suspend(&self, ids: &[String]) {
-        lock(&self.state).suspended.extend(ids.iter().cloned());
+        {
+            let mut st = lock(&self.state);
+            let root = st.root.clone();
+            for id in ids {
+                let present = root
+                    .as_ref()
+                    .is_some_and(|r| r.join(id).join("extension.toml").is_file());
+                if !present {
+                    st.absent_at_suspend.insert(id.clone());
+                }
+            }
+            st.suspended.extend(ids.iter().cloned());
+        }
         self.reapply();
+    }
+
+    /// 接上「扩展首次到达」提示。
+    #[allow(dead_code)] // 接线在主循环里另做
+    pub fn set_notify(&self, f: Box<dyn Fn(String) + Send + Sync>) {
+        let _ = self.notify.set(f);
     }
 
     /// 恢复被暂停的扩展，按当前配置重配。
     pub fn resume(&self, ids: &[String]) {
+        let mut arrived = Vec::new();
         {
             let mut st = lock(&self.state);
             for id in ids {
                 st.suspended.remove(id);
+                if !st.absent_at_suspend.remove(id) {
+                    continue;
+                }
+                let enabled =
+                    st.cfg.enabled && st.cfg.list.iter().any(|e| e.enabled && e.id == *id);
+                let dir = st.root.as_ref().map(|r| r.join(id));
+                if let Some(dir) = dir.filter(|d| enabled && d.join("extension.toml").is_file()) {
+                    let name = wind_hook::manifest::load(&dir)
+                        .map(|m| m.name)
+                        .unwrap_or_else(|_| id.clone());
+                    arrived.push(name);
+                }
             }
         }
         self.reapply();
+        if let Some(f) = self.notify.get() {
+            for name in arrived {
+                f(format!("扩展 {name} 已从同组设备同步并启用"));
+            }
+        }
     }
 
     /// 当前期望集里的扩展 id（测试用）。
@@ -519,5 +564,69 @@ mod tests {
         assert_eq!(list[1]["want"], serde_json::json!(["key.detail"]));
         assert_eq!(list[1]["options"][0]["type"], "number");
         assert_eq!(list[1]["status"]["state"], "running");
+    }
+
+    fn manifest(dir: &std::path::Path, name: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("run"), "").unwrap();
+        std::fs::write(
+            dir.join("extension.toml"),
+            format!("name = \"{name}\"\nexe = \"run\"\nwant = [\"key.detail\"]\n"),
+        )
+        .unwrap();
+    }
+
+    fn with_root(ids: &[&str]) -> (Arc<Extensions>, tempfile::TempDir, Arc<Mutex<Vec<String>>>) {
+        let ext = started(ids);
+        let t = tempfile::tempdir().unwrap();
+        lock(&ext.state).root = Some(t.path().to_path_buf());
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let g = got.clone();
+        ext.set_notify(Box::new(move |m| lock(&g).push(m)));
+        (ext, t, got)
+    }
+
+    #[test]
+    fn extension_arriving_during_suspend_is_announced_once() {
+        let (ext, t, got) = with_root(&["a"]);
+        let ids = ["a".to_string()];
+        ext.suspend(&ids);
+        manifest(&t.path().join("a"), "按键音");
+        ext.resume(&ids);
+        assert_eq!(*lock(&got), ["扩展 按键音 已从同组设备同步并启用"]);
+        ext.suspend(&ids);
+        ext.resume(&ids);
+        assert_eq!(lock(&got).len(), 1, "再次暂停恢复不重复提示");
+    }
+
+    #[test]
+    fn extension_already_present_is_not_announced() {
+        let (ext, t, got) = with_root(&["a"]);
+        manifest(&t.path().join("a"), "按键音");
+        let ids = ["a".to_string()];
+        ext.suspend(&ids);
+        ext.resume(&ids);
+        assert!(lock(&got).is_empty());
+    }
+
+    #[test]
+    fn arriving_extension_not_enabled_in_config_is_not_announced() {
+        let (ext, t, got) = with_root(&[]);
+        let ids = ["a".to_string()];
+        ext.suspend(&ids);
+        manifest(&t.path().join("a"), "按键音");
+        ext.resume(&ids);
+        assert!(lock(&got).is_empty());
+    }
+
+    #[test]
+    fn arriving_extension_without_readable_name_falls_back_to_id() {
+        let (ext, t, got) = with_root(&["a"]);
+        let ids = ["a".to_string()];
+        ext.suspend(&ids);
+        std::fs::create_dir_all(t.path().join("a")).unwrap();
+        std::fs::write(t.path().join("a/extension.toml"), "坏的 = [").unwrap();
+        ext.resume(&ids);
+        assert_eq!(*lock(&got), ["扩展 a 已从同组设备同步并启用"]);
     }
 }
