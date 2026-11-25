@@ -928,3 +928,41 @@ fn free_retry_phase_flapping_never_notifies_until_a_round_fails() {
         vec![SyncNotice::BackgroundFailed("断网".into())]
     );
 }
+
+#[test]
+fn supervisor_trip_notifies_once() {
+    use wind_supervise::backoff::Backoff;
+    let dir = tempfile::tempdir().unwrap();
+    save_settings(&dir.path().join("state/sync/settings.toml"), &webdav(true)).unwrap();
+    let sup = Supervisor::new(|| Err("起不来".into())).with_backoff(Backoff::new(
+        Duration::from_millis(1),
+        Duration::from_secs(60),
+        1,
+    ));
+    let paths = Paths {
+        settings_file: dir.path().join("state/sync/settings.toml"),
+        state_dir: dir.path().join("state/sync"),
+        userdata_dir: dir.path().join("user"),
+        suffix: "_t".into(),
+    };
+    let host = SyncHost::new(Some(paths), sup, Box::new(|| true), COMMAND_TIMEOUT);
+    let got = Arc::new(Mutex::new(Vec::new()));
+    {
+        let got = got.clone();
+        host.set_notify(Box::new(move |n| lock(&got).push(n)));
+    }
+    for _ in 0..5 {
+        host.tick(Instant::now());
+    }
+    assert_eq!(phase(&host), "error");
+    assert_eq!(
+        *lock(&got),
+        vec![SyncNotice::BackgroundFailed(
+            "同步进程反复退出，已停止自动同步".into()
+        )]
+    );
+    for _ in 0..5 {
+        host.tick(Instant::now());
+    }
+    assert_eq!(lock(&got).len(), 1, "保持熔断不再提示");
+}

@@ -100,6 +100,8 @@ struct Track {
     was_error: bool,
     /// 已判定过的最大轮次：后台失败只看轮次推进，phase 抖动（稍后重试等）不算。
     last_seen_round: u64,
+    /// 上次判定时同步进程是否处于熔断（反复退出、已停止重启）。
+    was_tripped: bool,
 }
 
 /// 同步进程能经 core 执行的方法。其余一律拒绝：同步进程持有凭据，被攻破时不能借 core 做别的事。
@@ -752,6 +754,17 @@ impl SyncHost {
                 }
             }
         }
+        // 同步进程反复退出被熔断：进入熔断提示一次，复位仍等之后成功的一轮。
+        let tripped = inner.link.is_none() && phase == "error" && inner.sup.is_tripped();
+        if tripped && !inner.track.was_tripped {
+            if !inner.track.was_error {
+                out.push(SyncNotice::BackgroundFailed(
+                    "同步进程反复退出，已停止自动同步".into(),
+                ));
+            }
+            inner.track.was_error = true;
+        }
+        inner.track.was_tripped = tripped;
         out
     }
 
