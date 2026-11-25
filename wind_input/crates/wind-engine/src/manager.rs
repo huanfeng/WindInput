@@ -5692,34 +5692,168 @@ impl EngineManager {
         (!id.is_empty() && self.schema_def_cached(&id).is_some()).then_some(id)
     }
 
+    /// 方案属于哪一类（按 `[engine] type`）；不是这四类返回 `None`。
+    pub fn scheme_kind_of(
+        &self,
+        schema_id: &str,
+    ) -> Option<wind_config::config_schema::SchemeKind> {
+        use wind_config::config_schema::SchemeKind;
+        match self.schema_engine_type(schema_id)?.as_str() {
+            "codetable" => Some(SchemeKind::Codetable),
+            "pinyin" => Some(SchemeKind::Pinyin),
+            "mixed" => Some(SchemeKind::Mixed),
+            "english" => Some(SchemeKind::English),
+            _ => None,
+        }
+    }
+
+    /// 一份方案定义下某类设置的全实值，结构同类型结构体（`schema.<类型>` 之下的那棵树）。
+    /// `def = None` 即类型内置默认。
+    fn scheme_settings_tree(
+        &self,
+        kind: wind_config::config_schema::SchemeKind,
+        def: Option<&Schema>,
+    ) -> anyhow::Result<toml::Value> {
+        use wind_config::config_schema::SchemeKind;
+        Ok(match kind {
+            SchemeKind::Codetable => {
+                let global = self
+                    .codetable
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                toml::Value::try_from(
+                    Self::codetable_baseline(def, &global)
+                        .resolved(def.map(|d| &d.engine.codetable)),
+                )?
+            }
+            SchemeKind::Pinyin => {
+                let base = self.pinyin_global();
+                let mut p = match def {
+                    Some(d) => base.for_scheme(&d.engine.pinyin).0,
+                    None => base,
+                };
+                // 辅助码有自己的方案段，不经 `[engine.pinyin]` 折叠。
+                p.aux_code = p.aux_code.resolved(def.map(|d| &d.engine.aux_code));
+                toml::Value::try_from(p)?
+            }
+            SchemeKind::Mixed => {
+                let base = self.mix.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                toml::Value::try_from(match def {
+                    Some(d) => base.for_scheme(&d.engine.mixed).0,
+                    None => base,
+                })?
+            }
+            SchemeKind::English => {
+                let base = self
+                    .english
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                toml::Value::try_from(match def {
+                    Some(d) => base.for_scheme(&d.engine.english).0,
+                    None => base,
+                })?
+            }
+        })
+    }
+
+    /// 某方案的全部设置项，按旧全局键名（`schema.<类型>.<项>`）拍平：`(生效值, 方案默认值)`。
+    /// 方案默认值 = 不看用户设置层时的值，「恢复方案默认」回到它。方案不属于四类时返回 `None`。
+    pub fn scheme_settings_snapshot(
+        &self,
+        schema_id: &str,
+    ) -> Option<anyhow::Result<(toml::Table, toml::Table)>> {
+        use wind_config::config_schema::SchemeKind;
+        let kind = self.scheme_kind_of(schema_id)?;
+        let section = match kind {
+            SchemeKind::Codetable => "codetable",
+            SchemeKind::Pinyin => "pinyin",
+            SchemeKind::Mixed => "mix",
+            SchemeKind::English => "english",
+        };
+        let flat = |def: Option<&Schema>| -> anyhow::Result<toml::Table> {
+            let tree = self.scheme_settings_tree(kind, def)?;
+            Ok(wind_config::config_schema::leaf_entries(&tree)
+                .into_iter()
+                .map(|(leaf, v)| (format!("schema.{section}.{leaf}"), v))
+                .filter(|(k, _)| wind_config::config_schema::is_known_key(k))
+                .collect())
+        };
+        Some((|| {
+            let merged = self.schema_def_cached(schema_id);
+            let base = self.schema_base(schema_id);
+            Ok((flat(merged.as_deref())?, flat(base.as_ref())?))
+        })())
+    }
+
+    /// 改某方案的设置：`sets` 逐项写入、`resets` 逐项恢复方案默认，键用旧全局键名。一次读改写。
+    ///
+    /// 写入值等于方案默认值时改为删掉那一项：用户层只留与方案默认不同的值，方案文件日后改了
+    /// 默认，没动过的项跟着走。值的类型由调用方按注册表校验。
+    pub fn scheme_settings_apply(
+        &self,
+        schema_id: &str,
+        sets: Vec<(String, toml::Value)>,
+        resets: &[String],
+    ) -> anyhow::Result<()> {
+        let kind = self
+            .scheme_kind_of(schema_id)
+            .ok_or_else(|| anyhow::anyhow!("方案 {schema_id} 不存在或没有可设置的项"))?;
+        let path_of = |key: &str| -> anyhow::Result<String> {
+            match wind_config::config_schema::scheme_alias(key) {
+                Some(a) if a.kind == kind => Ok(a.path),
+                _ => anyhow::bail!("{key} 不是方案 {schema_id} 的设置项"),
+            }
+        };
+        let (_, defaults) = self
+            .scheme_settings_snapshot(schema_id)
+            .ok_or_else(|| anyhow::anyhow!("方案 {schema_id} 不存在"))??;
+        let file = self
+            .schema_override_path(schema_id)
+            .ok_or_else(|| anyhow::anyhow!("无 override 目录"))?;
+        // 文件在但解析不了时不能拿空表起步：写回会把里面其它内容整份冲掉。
+        let mut ov = match std::fs::read_to_string(&file) {
+            Ok(text) => toml::from_str::<toml::Table>(&text)
+                .map_err(|e| anyhow::anyhow!("方案 {schema_id} 的设置文件解析失败，未写入：{e}"))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
+            Err(e) => return Err(e.into()),
+        };
+        for key in resets {
+            remove_toml_leaf(&mut ov, &path_of(key)?);
+        }
+        for (key, value) in sets {
+            let path = path_of(&key)?;
+            if defaults
+                .get(&key)
+                .is_some_and(|d| toml_scalar_eq(d, &value))
+            {
+                remove_toml_leaf(&mut ov, &path);
+            } else {
+                set_toml_leaf(&mut ov, &path, value);
+            }
+        }
+        self.write_schema_override(schema_id, &toml::Value::Table(ov))
+    }
+
     /// 读一个旧全局键：取它所指方案的生效值。不是别名返回 `None`；没有可指的方案时取类型
     /// 内置默认。
     pub fn scheme_alias_get(&self, key: &str) -> Option<anyhow::Result<toml::Value>> {
-        use wind_config::config_schema::SchemeKind;
         let alias = wind_config::config_schema::scheme_alias(key)?;
-        let target = self.scheme_alias_target(alias.kind).unwrap_or_default();
-        let tree = match alias.kind {
-            SchemeKind::Codetable => toml::Value::try_from(self.effective_codetable(&target)),
-            SchemeKind::Pinyin => {
-                let mut p = (*self.pinyin_settings_of(&target)).clone();
-                // 辅助码有自己的方案段，不经 `[engine.pinyin]` 折叠。
-                let def = self.schema_def_cached(&target);
-                p.aux_code = p
-                    .aux_code
-                    .resolved(def.as_ref().map(|d| &d.engine.aux_code));
-                toml::Value::try_from(p)
-            }
-            SchemeKind::Mixed => toml::Value::try_from(&*self.mix_settings_of(&target)),
-            SchemeKind::English => toml::Value::try_from(&*self.english_settings_of(&target)),
-        };
+        let def = self
+            .scheme_alias_target(alias.kind)
+            .and_then(|id| self.schema_def_cached(&id));
         // `key` 形如 `schema.<类型>.<余下路径>`，余下路径即类型结构体里的路径。
         let rest = key.splitn(3, '.').nth(2).unwrap_or("");
-        Some(tree.map_err(anyhow::Error::from).and_then(|t| {
-            rest.split('.')
-                .try_fold(&t, |cur, part| cur.get(part))
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("配置缺少键 {key}"))
-        }))
+        Some(
+            self.scheme_settings_tree(alias.kind, def.as_deref())
+                .and_then(|t| {
+                    rest.split('.')
+                        .try_fold(&t, |cur, part| cur.get(part))
+                        .cloned()
+                        .ok_or_else(|| anyhow::anyhow!("配置缺少键 {key}"))
+                }),
+        )
     }
 
     /// 写一个旧全局键：落到它所指方案的用户层（`schema_overrides/<id>.toml`）并让该方案失效
@@ -5734,19 +5868,7 @@ impl EngineManager {
             let target = self
                 .scheme_alias_target(alias.kind)
                 .ok_or_else(|| anyhow::anyhow!("没有可应用 {key} 的方案"))?;
-            let path = self
-                .schema_override_path(&target)
-                .ok_or_else(|| anyhow::anyhow!("无 override 目录"))?;
-            // 文件在但解析不了时不能拿空表起步：写回会把里面其它内容整份冲掉。
-            let mut ov = match std::fs::read_to_string(&path) {
-                Ok(text) => toml::from_str::<toml::Table>(&text).map_err(|e| {
-                    anyhow::anyhow!("方案 {target} 的设置文件解析失败，未写入：{e}")
-                })?,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
-                Err(e) => return Err(e.into()),
-            };
-            set_toml_leaf(&mut ov, &alias.path, value);
-            self.write_schema_override(&target, &toml::Value::Table(ov))?;
+            self.scheme_settings_apply(&target, vec![(key.to_string(), value)], &[])?;
             Ok(target)
         })())
     }
@@ -8806,5 +8928,32 @@ fn set_toml_leaf(tree: &mut toml::Table, path: &str, value: toml::Value) {
                 set_toml_leaf(t, rest, value);
             }
         }
+    }
+}
+
+/// 按点分路径删一个叶子，顺带回收因此变空的父表。
+fn remove_toml_leaf(tree: &mut toml::Table, path: &str) {
+    match path.split_once('.') {
+        None => {
+            tree.remove(path);
+        }
+        Some((head, rest)) => {
+            let Some(toml::Value::Table(t)) = tree.get_mut(head) else {
+                return;
+            };
+            remove_toml_leaf(t, rest);
+            if t.is_empty() {
+                tree.remove(head);
+            }
+        }
+    }
+}
+
+/// 两个配置值是否相同；整数与浮点按数值比（`half_life = 48` 与 `48.0` 是同一个值）。
+fn toml_scalar_eq(a: &toml::Value, b: &toml::Value) -> bool {
+    match (a, b) {
+        (toml::Value::Integer(i), toml::Value::Float(f))
+        | (toml::Value::Float(f), toml::Value::Integer(i)) => *i as f64 == *f,
+        _ => a == b,
     }
 }

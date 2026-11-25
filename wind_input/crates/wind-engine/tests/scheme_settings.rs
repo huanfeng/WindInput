@@ -350,3 +350,84 @@ fn legacy_settings_skip_what_the_scheme_already_sets() {
         .is_empty()
     );
 }
+
+// ── 按方案 id 读写设置（设置页走这条）──
+
+#[test]
+fn snapshot_lists_effective_and_default_under_old_key_names() {
+    let m = mgr(
+        "snapshot",
+        "wubi86",
+        &[(
+            "shuangpin",
+            "[engine.pinyin]\nsentence_count = 3\n[engine.aux_code]\nenabled = true\n",
+        )],
+    );
+    let (eff, def) = m.scheme_settings_snapshot("shuangpin").unwrap().unwrap();
+    assert_eq!(eff["schema.pinyin.sentence_count"].as_integer(), Some(3));
+    assert_eq!(def["schema.pinyin.sentence_count"].as_integer(), Some(1));
+    assert_eq!(eff["schema.pinyin.aux_code.enabled"].as_bool(), Some(true));
+    assert_eq!(def["schema.pinyin.aux_code.enabled"].as_bool(), Some(false));
+    assert!(
+        eff.keys().all(|k| k.starts_with("schema.pinyin.")),
+        "只含本类的键"
+    );
+    assert!(
+        !eff.contains_key("schema.pinyin.fuzzy.enabled"),
+        "模糊音不是方案设置"
+    );
+    // 方案文件自己声明的值算方案默认（笔画的 z_key_repeat = false）。
+    let (_, def) = m.scheme_settings_snapshot("stroke").unwrap().unwrap();
+    assert_eq!(def["schema.codetable.z_key_repeat"].as_bool(), Some(false));
+}
+
+#[test]
+fn apply_writes_only_differences_and_reset_restores_default() {
+    let m = mgr("apply", "wubi86", &[]);
+    m.scheme_settings_apply(
+        "pinyin",
+        vec![
+            (
+                "schema.pinyin.sentence_count".into(),
+                toml::Value::Integer(4),
+            ),
+            (
+                "schema.pinyin.frequency.half_life".into(),
+                toml::Value::Float(48.0),
+            ),
+        ],
+        &[],
+    )
+    .unwrap();
+    assert_eq!(m.pinyin_settings_of("pinyin").sentence_count, 4);
+    assert_eq!(m.pinyin_settings_of("pinyin").frequency.half_life, 48.0);
+    // 写回方案默认值 = 删掉那一项；恢复默认同理。文件里不留空表。
+    m.scheme_settings_apply(
+        "pinyin",
+        vec![(
+            "schema.pinyin.sentence_count".into(),
+            toml::Value::Integer(1),
+        )],
+        &["schema.pinyin.frequency.half_life".to_string()],
+    )
+    .unwrap();
+    assert_eq!(override_text("apply", "pinyin").trim(), "");
+    assert_eq!(m.pinyin_settings_of("pinyin").sentence_count, 1);
+}
+
+#[test]
+fn apply_rejects_keys_of_another_kind() {
+    let m = mgr("apply_kind", "wubi86", &[]);
+    assert!(
+        m.scheme_settings_apply(
+            "pinyin",
+            vec![(
+                "schema.codetable.wildcard".into(),
+                toml::Value::Boolean(true)
+            )],
+            &[],
+        )
+        .is_err()
+    );
+    assert_eq!(override_text("apply_kind", "pinyin"), "");
+}

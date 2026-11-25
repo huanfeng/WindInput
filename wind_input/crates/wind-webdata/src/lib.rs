@@ -369,6 +369,51 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
                 .ok_or_else(|| anyhow::anyhow!("{key} 不是方案设置的别名"))??;
             Ok(json!({ "value": serde_json::to_value(v)? }))
         }
+        // 某方案的全部设置项（键用旧全局键名）：生效值与方案默认值。设置页据此画控件、
+        // 标出改过的项。
+        "schema.getSettings" => {
+            let id = str_param(params, "id")?;
+            let (effective, default) = h
+                .engine_mgr()
+                .scheme_settings_snapshot(id)
+                .ok_or_else(|| anyhow::anyhow!("方案不存在或没有可设置的项: {id}"))??;
+            Ok(json!({
+                "id": id,
+                "effective": serde_json::to_value(effective)?,
+                "default": serde_json::to_value(default)?,
+            }))
+        }
+        // 改某方案的设置：`items` = [{key, value}] 写入，`reset` = [key] 恢复方案默认。
+        // 值按注册表校验，有一项不合格整批不写。
+        "schema.setSettings" => {
+            let id = str_param(params, "id")?;
+            let mut sets = Vec::new();
+            for it in params
+                .get("items")
+                .and_then(|v| v.as_array())
+                .into_iter()
+                .flatten()
+            {
+                let key = it
+                    .get("key")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("items 缺少 key"))?;
+                let value = json_to_toml(it.get("value").unwrap_or(&Value::Null));
+                wind_config::config_schema::validate(key, &value)
+                    .map_err(|e| anyhow::anyhow!("{key}: {e}"))?;
+                sets.push((key.to_string(), value));
+            }
+            let resets: Vec<String> = params
+                .get("reset")
+                .and_then(|v| v.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
+            h.engine_mgr().scheme_settings_apply(id, sets, &resets)?;
+            h.refresh_schema_derived_config();
+            Ok(json!({ "ok": true }))
+        }
         "schema.aliasSet" => {
             let key = str_param(params, "key")?;
             let value = params
