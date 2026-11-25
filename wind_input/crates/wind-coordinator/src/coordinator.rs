@@ -2980,6 +2980,21 @@ impl Coordinator {
         self.rt.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
+    /// 「上屏原码」（回车、空码空格）上屏的文字：用户所打的形态（Shift 大写存在影子串里）。
+    ///
+    /// 九宫格下缓冲是数字，原样上屏毫无意义：改上首选读法的拼音字母（`64426` → `nihao`），
+    /// 解不出拼音时为空串（这段放弃）。
+    pub(crate) fn raw_code_to_commit(&self, state: &State) -> String {
+        if self.engine_mgr.active_keypad().is_some() {
+            return self
+                .engine_mgr
+                .keypad_spelling(&state.input_buffer)
+                .unwrap_or_default();
+        }
+        crate::preedit_cursor::cased_or_buffer(&state.input_buffer, &state.input_buffer_cased)
+            .to_string()
+    }
+
     /// 回车键是否配置为「清空编码」（`input.enter_behavior = "clear"`）。
     ///
     /// 回车有五条独立处理路径（主输入 / 临拼 / 临英 / 混输 / 特殊模式），共用此判据；各自内联

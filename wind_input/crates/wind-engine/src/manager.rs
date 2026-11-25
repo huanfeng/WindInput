@@ -3109,6 +3109,20 @@ impl EngineManager {
         *self.keypad.write().unwrap_or_else(|e| e.into_inner()) = keypad;
     }
 
+    /// 九宫格下击键串的拼音字母（首选读法的全拼，去掉分词符），如 `64426` → `nihao`。
+    /// 回车「上屏原码」在九宫格下上屏它，数字对用户没有意义。九宫格未生效或解不出时 `None`。
+    pub fn keypad_spelling(&self, input: &str) -> Option<String> {
+        self.active_keypad()?;
+        let r = self.convert(input, 1);
+        let spelled: String = r
+            .preedit_display
+            .chars()
+            .filter(|&c| c != crate::pinyin::t9::SEPARATOR as char)
+            .collect();
+        // 预编辑里还留着数字 = 尾部没解出来的键；那部分没有拼音，整串放弃
+        (!spelled.is_empty() && spelled.chars().all(|c| c.is_ascii_lowercase())).then_some(spelled)
+    }
+
     /// 指定方案能否用九宫格输入（宿主据此在键盘列表里给不给「九宫格」那一格）。
     ///
     /// 读方案文件判断，不加载引擎：全拼恒可；双拼限纯字母布局（同 [`Engine::keypad_supported`]）；

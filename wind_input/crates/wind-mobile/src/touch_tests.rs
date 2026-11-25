@@ -801,3 +801,16 @@ fn keypad_supported_by_schema() {
     assert!(!m.keypad_supported("wubi86"));
     assert!(!m.keypad_supported("english"));
 }
+
+/// 九宫格下回车上屏首选读法的拼音字母，不上屏数字。
+#[test]
+fn keypad_enter_commits_pinyin_letters() {
+    let Some((m, _rx)) = core("kp_enter", "pinyin", no_assoc) else {
+        return;
+    };
+    let _ = m.set_keypad(true);
+    keypad(&m, "64426");
+    let out = m.press(PressKey::Enter, KeySource::Touch);
+    assert!(out.ops.contains(&commit("nihao")), "{out:?}");
+    assert!(!m.coord.is_composing());
+}

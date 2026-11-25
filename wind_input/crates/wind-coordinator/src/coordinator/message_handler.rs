@@ -1798,11 +1798,7 @@ impl MessageHandler for Coordinator {
                     }
                     let prefix = self.take_committed(&mut state);
                     // 上屏的是用户所打的形态：Shift+字母的大写存在影子串里，缓冲恒小写。
-                    let raw_code = preedit_cursor::cased_or_buffer(
-                        &state.input_buffer,
-                        &state.input_buffer_cased,
-                    )
-                    .to_string();
+                    let raw_code = self.raw_code_to_commit(&state);
                     // 上屏剩余拼音原码：prefix(committed) 段已在选词时记过，此处只记 input_buffer 避免重复。
                     self.record_commit(
                         &raw_code,
@@ -1870,11 +1866,7 @@ impl MessageHandler for Coordinator {
                     }
                     let prefix = self.take_committed(&mut state);
                     // 上屏的是用户所打的形态：Shift+字母的大写存在影子串里，缓冲恒小写。
-                    let raw_code = preedit_cursor::cased_or_buffer(
-                        &state.input_buffer,
-                        &state.input_buffer_cased,
-                    )
-                    .to_string();
+                    let raw_code = self.raw_code_to_commit(&state);
                     // 上屏剩余拼音原码：prefix(committed) 段已在选词时记过，此处只记 input_buffer 避免重复。
                     self.record_commit(
                         &raw_code,
