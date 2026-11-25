@@ -133,6 +133,7 @@ fn hello_comes_first_with_paths_and_settings() {
             userdata_dir,
             state_dir,
             settings,
+            portable: _,
         } => {
             assert_eq!(suffix, "_t");
             assert!(userdata_dir.ends_with("user"));
@@ -146,7 +147,7 @@ fn hello_comes_first_with_paths_and_settings() {
 #[test]
 fn status_is_cached_and_broadcast_without_secrets() {
     let mut r = rig();
-    r.stub.send(FromSync::Status(Status {
+    let status = Status {
         phase: "idle".into(),
         last_ok: Some(100),
         pending: 2,
@@ -154,10 +155,24 @@ fn status_is_cached_and_broadcast_without_secrets() {
         conflict_paths: vec!["config.conflict-a-1.toml".into()],
         has_secret: true,
         joined: true,
+        device: "pc".into(),
+        group: "home".into(),
+        group_name: "家".into(),
+        needs_identity: true,
         ..Default::default()
-    }));
+    };
+    r.stub.send(FromSync::Status(status.clone()));
     wait_for(|| phase(&r.host) == "idle");
     let st = r.host.rpc("sync.status", &Value::Null).unwrap();
+    assert_eq!(
+        (
+            &st["device"],
+            &st["group"],
+            &st["group_name"],
+            &st["needs_identity"]
+        ),
+        (&json!("pc"), &json!("home"), &json!("家"), &json!(true))
+    );
     assert_eq!(st["pending"], 2);
     assert_eq!(st["conflicts"], 1);
     assert_eq!(st["joined"], true);
@@ -175,16 +190,7 @@ fn status_is_cached_and_broadcast_without_secrets() {
 
     // 同样的状态再发一次不重复广播。
     let n = lock(&r.events).len();
-    r.stub.send(FromSync::Status(Status {
-        phase: "idle".into(),
-        last_ok: Some(100),
-        pending: 2,
-        conflicts: 1,
-        conflict_paths: vec!["config.conflict-a-1.toml".into()],
-        has_secret: true,
-        joined: true,
-        ..Default::default()
-    }));
+    r.stub.send(FromSync::Status(status));
     std::thread::sleep(Duration::from_millis(100));
     assert_eq!(lock(&r.events).len(), n);
 }

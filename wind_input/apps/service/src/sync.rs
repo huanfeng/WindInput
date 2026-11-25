@@ -350,6 +350,7 @@ impl SyncHost {
                 userdata_dir: p.userdata_dir.to_string_lossy().into_owned(),
                 state_dir: p.state_dir.to_string_lossy().into_owned(),
                 settings: inner.settings.clone(),
+                portable: wind_config::variant::is_portable(),
             });
         }
         inner.link = Some(Link { tx, epoch });
@@ -486,6 +487,10 @@ impl SyncHost {
             "conflict_paths": inner.status.conflict_paths,
             "has_secret": inner.status.has_secret,
             "joined": inner.status.joined,
+            "device": inner.status.device,
+            "group": inner.status.group,
+            "group_name": inner.status.group_name,
+            "needs_identity": inner.status.needs_identity,
         })
     }
 

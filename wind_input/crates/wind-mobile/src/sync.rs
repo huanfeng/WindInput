@@ -4,7 +4,8 @@
 //!
 //! - 设置文件、同步状态、机密都在 `<状态目录>/sync/`（机密为 0600 文件，由宿主排除出系统备份）。
 //! - 不监听文件、不按间隔自行调度（`on_demand`）：何时同步由宿主定，见 [`MobileSync::sync_if_due`]。
-//! - 设备类别固定为 `mobile`：配置、主题、兼容规则只与别的手机互通，词库与方案与桌面共用。
+//! - 设备类别固定为 `mobile`：主题只与别的手机互通，词库与方案与桌面共用；设置按设备组同步。
+//! - 还没有身份界面：加入已有同步库后自动确认身份（新建独立组）。
 //! - 同步写入文件后的重载走 [`InProcLink`]，直接调核心（与桌面 RPC 共用 `external_files`）。
 
 use std::collections::HashMap;
@@ -200,6 +201,7 @@ impl MobileSync {
             kdf,
             watch: false,
             class: DeviceClass::Mobile,
+            portable: false,
             on_demand: true,
         };
         let mut runner = Runner::new(cfg, tx.clone());
@@ -271,6 +273,10 @@ impl MobileSync {
             "conflict_paths": st.conflict_paths,
             "has_secret": st.has_secret,
             "joined": st.joined,
+            "device": st.device,
+            "group": st.group,
+            "group_name": st.group_name,
+            "needs_identity": st.needs_identity,
         })
         .to_string()
     }
@@ -286,6 +292,19 @@ impl MobileSync {
         } else {
             serde_json::from_str(args_json).map_err(|e| format!("命令参数不是 JSON: {e}"))?
         };
+        let r = self.send_command(op, args)?;
+        let joined = match op {
+            Op::SetPassphrase => r["mode"] == "join",
+            Op::ImportKey => true,
+            _ => false,
+        };
+        if joined {
+            self.send_command(Op::ConfirmIdentity, Value::Null)?;
+        }
+        Ok(r.to_string())
+    }
+
+    fn send_command(&self, op: Op, args: Value) -> Result<Value, String> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel();
         // 先登记再发送：回执可能比 send 返回得还早。
@@ -299,7 +318,7 @@ impl MobileSync {
             return Err(CLOSED.into());
         }
         match rx.recv_timeout(COMMAND_TIMEOUT) {
-            Ok(r) => r.map(|v| v.to_string()),
+            Ok(r) => r,
             Err(_) => {
                 lock(&self.shared.pending).remove(&id);
                 Err("等待同步回应超时".into())

@@ -129,7 +129,10 @@ fn desktop_dict_reaches_mobile_core_and_config_stays_apart() {
     let (sync, core, user) = mobile("join", &remote);
     assert_eq!(phase(&sync)["phase"], "disabled");
     join(&sync, "pass");
-    assert_eq!(phase(&sync)["joined"], true);
+    // 加入后自动确认身份、新建独立组（状态帧晚于回执到达）
+    wait("确认身份", &sync, |v| {
+        v["joined"] == true && v["needs_identity"] == false && v["group"] == v["device"]
+    });
     let v = sync_now(&sync);
     assert_eq!(v["phase"], "idle", "{v}");
 

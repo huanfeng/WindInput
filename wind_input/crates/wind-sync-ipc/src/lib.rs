@@ -220,6 +220,18 @@ pub enum Op {
     ListDevices,
     /// 移除某个设备的远端数据（清单与设备信息），不能是本机；需 `confirm: true`。
     RemoveDevice,
+    /// 改本机设备号：`{id}`。
+    RenameDevice,
+    /// 改本机所在组的组名：`{name}`。
+    SetGroupName,
+    /// 加入设备组：`{group, mode: "theirs" | "mine"}`，theirs 用组的设置覆盖本机。
+    JoinGroup,
+    /// 退出当前组，以本机设置新建单机组：`{name?}`。
+    LeaveGroup,
+    /// 认领已有设备（沿用它的号与组，用组的设置覆盖本机）：`{dev}`。
+    ClaimDevice,
+    /// 加入同步后确认身份：以当前设备号新建单机组。
+    ConfirmIdentity,
 }
 
 impl Op {
@@ -238,6 +250,9 @@ pub enum ToSync {
         userdata_dir: String,
         state_dir: String,
         settings: SyncSettings,
+        /// 绿色版：默认设备号加 `-portable`。
+        #[serde(default)]
+        portable: bool,
     },
     /// 设置变更。
     Settings(SyncSettings),
@@ -295,6 +310,13 @@ pub struct Status {
     pub has_secret: bool,
     /// 本机已持有 DEK（已设置口令或导入密钥）。设置端据此区分「设置口令」与「修改口令」。
     pub joined: bool,
+    /// 本机设备号。
+    pub device: String,
+    /// 本机所在设备组号。
+    pub group: String,
+    pub group_name: String,
+    /// 已加入同步库但尚未确认身份（恢复设备 / 加入组 / 新建独立组），确认前不同步。
+    pub needs_identity: bool,
 }
 
 /// 同步进程 → core。

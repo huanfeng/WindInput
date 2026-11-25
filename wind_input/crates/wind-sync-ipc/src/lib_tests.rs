@@ -30,6 +30,7 @@ fn messages_roundtrip() {
         userdata_dir: "/u".into(),
         state_dir: "/s".into(),
         settings: s3(),
+        portable: true,
     });
     roundtrip(ToSync::Settings(SyncSettings::default()));
     roundtrip(ToSync::Command {
@@ -207,4 +208,58 @@ fn device_name_defaults_empty_and_is_length_limited() {
     assert!(s.validate().is_ok(), "按字符计数，64 个汉字可以");
     s.device_name.push('x');
     assert!(s.validate().is_err());
+}
+
+#[test]
+fn group_ops_wire_names() {
+    for (name, op) in [
+        ("rename_device", Op::RenameDevice),
+        ("set_group_name", Op::SetGroupName),
+        ("join_group", Op::JoinGroup),
+        ("leave_group", Op::LeaveGroup),
+        ("claim_device", Op::ClaimDevice),
+        ("confirm_identity", Op::ConfirmIdentity),
+    ] {
+        assert_eq!(Op::parse(name), Some(op), "{name}");
+        assert_eq!(serde_json::to_value(op).unwrap(), json!(name));
+    }
+}
+
+#[test]
+fn hello_without_portable_decodes_as_false() {
+    let m: ToSync = serde_json::from_value(json!({
+        "type": "hello", "suffix": "", "userdata_dir": "/u", "state_dir": "/s", "settings": {},
+    }))
+    .unwrap();
+    assert!(
+        matches!(
+            m,
+            ToSync::Hello {
+                portable: false,
+                ..
+            }
+        ),
+        "{m:?}"
+    );
+}
+
+#[test]
+fn status_carries_identity_fields() {
+    let v = serde_json::to_value(Status {
+        device: "pc".into(),
+        group: "home".into(),
+        group_name: "家".into(),
+        needs_identity: true,
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(
+        (
+            &v["device"],
+            &v["group"],
+            &v["group_name"],
+            &v["needs_identity"]
+        ),
+        (&json!("pc"), &json!("home"), &json!("家"), &json!(true))
+    );
 }

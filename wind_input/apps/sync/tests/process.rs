@@ -79,6 +79,7 @@ impl Proc {
             userdata_dir: p.user.to_string_lossy().into_owned(),
             state_dir: p._dir.path().join("state").to_string_lossy().into_owned(),
             settings,
+            portable: false,
         });
         p
     }
@@ -188,6 +189,7 @@ fn stdin_eof_exits_cleanly() {
             userdata_dir: dir.path().join("u").to_string_lossy().into_owned(),
             state_dir: dir.path().join("s").to_string_lossy().into_owned(),
             settings: SyncSettings::default(),
+            portable: false,
         },
     )
     .unwrap();
@@ -250,6 +252,17 @@ fn two_processes_sync_over_webdav() {
             .unwrap()["mode"],
         "join"
     );
+    // b 加入 a 的设备组（两进程同机，默认号相同，b 会自动改用带序号的号）
+    let roster = a.cmd(Op::ListDevices, Value::Null).unwrap();
+    let a_group = roster["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["is_self"] == true)
+        .unwrap()["group"]
+        .clone();
+    b.cmd(Op::JoinGroup, json!({"group": a_group, "mode": "theirs"}))
+        .unwrap();
 
     write(&a.user, "config.toml", "k = 1\n");
     write(

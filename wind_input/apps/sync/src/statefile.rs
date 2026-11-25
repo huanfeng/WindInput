@@ -12,8 +12,8 @@ pub fn path(state_dir: &Path) -> PathBuf {
     state_dir.join(FILE_NAME)
 }
 
-/// 缺失 → 新建（随机设备号）；损坏 → 改名留档后新建。
-pub fn load(state_dir: &Path) -> SyncState {
+/// 缺失 → 以默认号新建（组号同号）；损坏 → 改名留档后新建。
+pub fn load(state_dir: &Path, default_id: &str) -> SyncState {
     let p = path(state_dir);
     match std::fs::read(&p) {
         Ok(b) => match serde_json::from_slice::<SyncState>(&b) {
@@ -26,7 +26,9 @@ pub fn load(state_dir: &Path) -> SyncState {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => log!("读取同步状态失败: {e}"),
     }
-    SyncState::new(wind_sync::ids::random_id())
+    let mut s = SyncState::new(default_id);
+    s.group = default_id.to_string();
+    s
 }
 
 pub fn save(state_dir: &Path, s: &SyncState) -> Result<(), String> {
@@ -54,13 +56,21 @@ mod tests {
     #[test]
     fn roundtrip_and_corrupt_recovery() {
         let d = tempfile::tempdir().unwrap();
-        let s = load(d.path());
-        assert!(!s.device.is_empty());
+        let mut s = load(d.path(), "pc");
+        s.device = "kept".into();
         save(d.path(), &s).unwrap();
-        assert_eq!(load(d.path()), s, "设备号持久");
+        assert_eq!(load(d.path(), "pc"), s, "设备号持久");
         std::fs::write(path(d.path()), "{oops").unwrap();
-        let fresh = load(d.path());
-        assert_ne!(fresh.device, s.device);
+        let fresh = load(d.path(), "pc");
+        assert_eq!(fresh.device, "pc");
         assert!(d.path().join("state.json.bad").exists());
+    }
+
+    #[test]
+    fn missing_state_uses_default_id_as_device_and_group() {
+        let d = tempfile::tempdir().unwrap();
+        let s = load(d.path(), "desk-1");
+        assert_eq!((s.device.as_str(), s.group.as_str()), ("desk-1", "desk-1"));
+        assert!(!s.identity_confirmed);
     }
 }

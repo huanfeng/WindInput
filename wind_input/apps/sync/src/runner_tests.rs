@@ -1,13 +1,20 @@
 use super::*;
 use crate::secrets::{FileSecretStore, Secrets};
 use crate::testing::{FakeCore, MemFactory};
+use wind_sync::backend::{BackendError, ObjMeta};
 use wind_sync::{KdfParams, MemBackend};
 
-fn runner(dir: &std::path::Path) -> (Runner, Receiver<Input>) {
+fn runner_with(
+    dir: &std::path::Path,
+    factory: Box<dyn BackendFactory>,
+    dek: Option<Dek>,
+    device_name: &str,
+) -> (Runner, Receiver<Input>) {
+    std::fs::create_dir_all(dir.join("user")).unwrap();
     let state_dir = dir.join("state");
     let store = FileSecretStore::new(state_dir.join(crate::secrets::FILE_NAME));
     Secrets {
-        dek: Some(Dek::generate().to_base64()),
+        dek: dek.map(|d| d.to_base64()),
         password: Some("pw".into()),
     }
     .save(&store)
@@ -23,32 +30,53 @@ fn runner(dir: &std::path::Path) -> (Runner, Receiver<Input>) {
                 url: "http://127.0.0.1/x".into(),
                 user: "u".into(),
             }),
+            device_name: device_name.into(),
             ..Default::default()
         },
         link: Arc::new(FakeCore::default()),
-        factory: Box::new(MemFactory(MemBackend::new())),
+        factory,
         timing: Timing::default(),
         kdf: KdfParams::FAST_TEST,
         watch: false,
         class: DeviceClass::Desktop,
+        portable: false,
         on_demand: false,
     };
     (Runner::new(cfg, tx), rx)
+}
+
+fn runner(dir: &std::path::Path) -> (Runner, Receiver<Input>) {
+    runner_with(
+        dir,
+        Box::new(MemFactory(MemBackend::new())),
+        Some(Dek::generate()),
+        "",
+    )
+}
+
+fn wait_round(rx: &Receiver<Input>) -> Box<Round> {
+    loop {
+        if let Input::RoundDone(x) = rx.recv_timeout(Duration::from_secs(10)).unwrap() {
+            return x;
+        }
+    }
+}
+
+/// 跑完整一轮（起工作线程、等结果、收尾）。
+fn round(r: &mut Runner, rx: &Receiver<Input>) {
+    r.start_round();
+    let x = wait_round(rx);
+    r.finish_round(*x);
 }
 
 /// 回声记录在下一轮扫描之后清掉，本轮重新写过的保留。
 #[test]
 fn echo_entries_from_earlier_rounds_are_dropped_after_the_next_scan() {
     let d = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(d.path().join("user")).unwrap();
     let (mut r, rx) = runner(d.path());
     lock(&r.echo).insert("config.toml".into(), "h1".into());
     r.start_round();
-    let round = loop {
-        if let Input::RoundDone(x) = rx.recv_timeout(Duration::from_secs(10)).unwrap() {
-            break x;
-        }
-    };
+    let round = wait_round(&rx);
     // 工作线程里改写了的条目（模拟本轮写入）不得被清
     lock(&r.echo).insert("themes/t/a.toml".into(), "h2".into());
     r.finish_round(*round);
@@ -58,7 +86,7 @@ fn echo_entries_from_earlier_rounds_are_dropped_after_the_next_scan() {
 }
 
 fn info_at(t: u64) -> DeviceInfo {
-    local_info(&SyncSettings::default(), t)
+    local_info(&SyncSettings::default(), &SyncState::new("pc"), t)
 }
 
 /// 设备信息：没写过必写；同一 UTC 日不重写；跨日才刷新；改名随时写。
@@ -84,4 +112,219 @@ fn device_info_refresh_rules() {
     let mut caps = info_at(d0 + 200);
     caps.caps.push("clip".into());
     assert!(info_stale(Some(&written), &caps, false));
+}
+
+/// 名册条目带上本机的组号与组名。
+#[test]
+fn device_info_carries_group() {
+    let mut st = SyncState::new("pc");
+    st.group = "home".into();
+    st.group_name = "家".into();
+    st.group_name_at = 7;
+    let i = local_info(&SyncSettings::default(), &st, 1);
+    assert_eq!(
+        (i.group.as_str(), i.group_name.as_str(), i.group_name_at),
+        ("home", "家", 7)
+    );
+    // 组号为空时按单机组（= 设备号）
+    let i = local_info(&SyncSettings::default(), &SyncState::new("pc"), 1);
+    assert_eq!(i.group, "pc");
+}
+
+fn initialized_remote() -> MemBackend {
+    let mem = MemBackend::new();
+    remote::init_remote(&mem, "p", KdfParams::FAST_TEST).unwrap();
+    mem
+}
+
+/// 用口令加入已有远端后不同步，确认身份后才发布清单。
+#[test]
+fn joined_device_does_not_sync_until_identity_confirmed() {
+    let d = tempfile::tempdir().unwrap();
+    let mem = initialized_remote();
+    let (mut r, rx) = runner_with(d.path(), Box::new(MemFactory(mem.clone())), None, "pc");
+    let rep = r
+        .command(Op::SetPassphrase, &json!({"passphrase": "p"}))
+        .unwrap();
+    assert_eq!(rep["mode"], "join");
+    let st = r.status();
+    assert!(st.needs_identity, "{st:?}");
+    assert_eq!(st.device, "pc");
+    let e = r.command(Op::SyncNow, &Value::Null).unwrap_err();
+    assert!(e.contains("请先确认本机身份"), "{e}");
+    assert!(r.next_wake(Instant::now()).is_none(), "未确认不自动调度");
+    assert!(mem.keys(&manifest::device_dir_prefix("pc")).is_empty());
+
+    let rep = r.command(Op::ConfirmIdentity, &Value::Null).unwrap();
+    assert_eq!(rep["device"], "pc");
+    let st = r.status();
+    assert!(!st.needs_identity);
+    assert_eq!(st.group, "pc");
+    r.command(Op::SyncNow, &Value::Null).unwrap();
+    round(&mut r, &rx);
+    assert!(mem.raw_get(&manifest::manifest_key("pc", 1)).is_some());
+}
+
+/// 确认身份时号已被别的设备占用：取首个空闲的带序号的号，且不把别人的号当旧号删除。
+#[test]
+fn confirm_identity_picks_a_free_suffix_when_id_is_taken() {
+    let d = tempfile::tempdir().unwrap();
+    let mem = MemBackend::new();
+    let dek = remote::init_remote(&mem, "p", KdfParams::FAST_TEST).unwrap();
+    for id in ["pc", "pc-2"] {
+        put_device_info(
+            &mem,
+            &dek.devinfo_key(),
+            id,
+            &local_info(&SyncSettings::default(), &SyncState::new(id), 1),
+        )
+        .unwrap();
+    }
+    let (mut r, _rx) = runner_with(d.path(), Box::new(MemFactory(mem.clone())), None, "pc");
+    r.command(Op::SetPassphrase, &json!({"passphrase": "p"}))
+        .unwrap();
+    let rep = r.command(Op::ConfirmIdentity, &Value::Null).unwrap();
+    assert_eq!(rep["device"], "pc-3");
+    assert_eq!(r.status().device, "pc-3");
+    assert_eq!(r.status().group, "pc-3");
+    assert!(r.state.retired_ids.is_empty(), "{:?}", r.state.retired_ids);
+}
+
+/// 内存后端，可让某个键片段下的删除失败。
+#[derive(Clone)]
+struct Flaky {
+    inner: MemBackend,
+    fail_delete: Arc<Mutex<Option<String>>>,
+}
+
+impl Backend for Flaky {
+    fn list(&self, prefix: &str) -> Result<Vec<ObjMeta>, BackendError> {
+        self.inner.list(prefix)
+    }
+    fn get(&self, key: &str) -> Result<Option<Vec<u8>>, BackendError> {
+        self.inner.get(key)
+    }
+    fn put(&self, key: &str, bytes: &[u8]) -> Result<(), BackendError> {
+        self.inner.put(key, bytes)
+    }
+    fn delete(&self, key: &str) -> Result<(), BackendError> {
+        if let Some(f) = lock(&self.fail_delete).as_deref()
+            && key.contains(f)
+        {
+            return Err(BackendError::Transient("删除失败（桩）".into()));
+        }
+        self.inner.delete(key)
+    }
+}
+
+struct FlakyFactory(Flaky);
+
+impl BackendFactory for FlakyFactory {
+    fn build(&self, _: &SyncSettings, _: &str) -> Result<Box<dyn Backend>, String> {
+        Ok(Box::new(self.0.clone()))
+    }
+}
+
+/// 改号后的一轮删掉远端旧号目录；删除失败则旧号留在待删列表，下一轮再删。
+#[test]
+fn renamed_device_removes_old_id_after_a_round_and_retries_on_failure() {
+    let d = tempfile::tempdir().unwrap();
+    let flaky = Flaky {
+        inner: MemBackend::new(),
+        fail_delete: Arc::new(Mutex::new(None)),
+    };
+    let mem = flaky.inner.clone();
+    let (mut r, rx) = runner_with(d.path(), Box::new(FlakyFactory(flaky.clone())), None, "pc");
+    let rep = r
+        .command(Op::SetPassphrase, &json!({"passphrase": "p"}))
+        .unwrap();
+    assert_eq!(rep["mode"], "init");
+    std::fs::write(d.path().join("user/config.toml"), "a = 1\n").unwrap();
+    round(&mut r, &rx);
+    assert!(mem.raw_get(&manifest::manifest_key("pc", 1)).is_some());
+
+    *lock(&flaky.fail_delete) = Some("/devices/pc/".into());
+    r.command(Op::RenameDevice, &json!({"id": "home"})).unwrap();
+    assert_eq!(r.status().device, "home");
+    round(&mut r, &rx);
+    assert_eq!(r.state.retired_ids, ["pc"]);
+    assert!(!mem.keys(&manifest::device_dir_prefix("pc")).is_empty());
+    assert!(mem.raw_get(&manifest::manifest_key("home", 1)).is_some());
+
+    *lock(&flaky.fail_delete) = None;
+    round(&mut r, &rx);
+    assert!(r.state.retired_ids.is_empty());
+    assert!(mem.keys(&manifest::device_dir_prefix("pc")).is_empty());
+}
+
+/// 撞号停止显示为错误态；改号后解除，且不删除与别人共用的旧号。
+#[test]
+fn device_id_conflict_is_an_error_until_renamed() {
+    let d = tempfile::tempdir().unwrap();
+    let mem = MemBackend::new();
+    let (mut r, _rx) = runner_with(d.path(), Box::new(MemFactory(mem)), None, "pc");
+    r.command(Op::SetPassphrase, &json!({"passphrase": "p"}))
+        .unwrap();
+    let msg = sync_error(&SyncError::DeviceIdConflict("pc".into()));
+    r.state.retry.halted = Some(msg.clone());
+    r.state.retry.last_error = Some(msg.clone());
+    let st = r.status();
+    assert_eq!(st.phase, "error");
+    assert_eq!(st.last_error.as_deref(), Some(msg.as_str()));
+    assert!(r.next_wake(Instant::now()).is_none());
+
+    r.command(Op::RenameDevice, &json!({"id": "pc-b"})).unwrap();
+    assert!(r.state.retry.halted.is_none());
+    assert!(r.next_wake(Instant::now()).is_some());
+    assert!(r.state.retired_ids.is_empty(), "旧号仍属另一台设备");
+}
+
+/// 重新导入本机已持有的密钥不会让身份回到未确认。
+#[test]
+fn reimporting_the_held_key_keeps_identity() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, _rx) = runner_with(
+        d.path(),
+        Box::new(MemFactory(MemBackend::new())),
+        None,
+        "pc",
+    );
+    r.command(Op::SetPassphrase, &json!({"passphrase": "p"}))
+        .unwrap();
+    let key = r.command(Op::ExportKey, &Value::Null).unwrap()["key"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    r.command(Op::ImportKey, &json!({"key": key})).unwrap();
+    assert!(!r.status().needs_identity);
+    assert_eq!(r.status().device, "pc");
+    // 已确认时再确认是空操作，不改组
+    r.state.group = "home".into();
+    let rep = r.command(Op::ConfirmIdentity, &Value::Null).unwrap();
+    assert_eq!(
+        (&rep["device"], &rep["group"]),
+        (&json!("pc"), &json!("home"))
+    );
+}
+
+/// 已确认身份的设备认领别的号后，原号在下一轮从远端删除。
+#[test]
+fn claiming_another_id_retires_the_previous_one() {
+    let mem = MemBackend::new();
+    let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (mut a, rxa) = runner_with(da.path(), Box::new(MemFactory(mem.clone())), None, "pc");
+    a.command(Op::SetPassphrase, &json!({"passphrase": "p"}))
+        .unwrap();
+    round(&mut a, &rxa);
+    let (mut b, rxb) = runner_with(db.path(), Box::new(MemFactory(mem.clone())), None, "lap");
+    b.command(Op::SetPassphrase, &json!({"passphrase": "p"}))
+        .unwrap();
+    b.command(Op::ConfirmIdentity, &Value::Null).unwrap();
+    round(&mut b, &rxb);
+    assert!(!mem.keys(&manifest::device_dir_prefix("lap")).is_empty());
+
+    b.command(Op::ClaimDevice, &json!({"dev": "pc"})).unwrap();
+    assert_eq!(b.state.retired_ids, ["lap"]);
+    round(&mut b, &rxb);
+    assert!(mem.keys(&manifest::device_dir_prefix("lap")).is_empty());
 }

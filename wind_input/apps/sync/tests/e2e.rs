@@ -19,6 +19,8 @@ use wind_sync_ipc::{Backend, FromSync, Op, Status, SyncSettings, ToSync};
 
 const WAIT: Duration = Duration::from_secs(15);
 const UD: &str = "data/pinyin/user.dict.yaml";
+/// 所有设备共享的资源文件（设置类文件按组同步，跨组断言用它）。
+const SCHEMA: &str = "schemas/s.schema.toml";
 
 fn settings() -> SyncSettings {
     SyncSettings {
@@ -88,6 +90,7 @@ impl Node {
             kdf: KdfParams::FAST_TEST,
             watch,
             class,
+            portable: false,
             on_demand,
         };
         let tx2 = tx.clone();
@@ -200,10 +203,23 @@ impl Node {
             .count()
     }
 
-    /// 设置凭据并用口令加入 / 初始化。
+    /// 设置凭据并用口令加入 / 初始化；加入已有远端时新建独立组（确认身份）。
     fn setup(&mut self, pass: &str) -> Value {
         self.cmd(Op::SetSecret, json!({"password": "pw"})).unwrap();
-        self.cmd(Op::SetPassphrase, json!({"passphrase": pass}))
+        let r = self
+            .cmd(Op::SetPassphrase, json!({"passphrase": pass}))
+            .unwrap();
+        if r["mode"] == "join" {
+            self.cmd(Op::ConfirmIdentity, Value::Null).unwrap();
+        }
+        r
+    }
+
+    /// 加入 `other` 所在的设备组，用组的设置覆盖本机。
+    fn join_group_of(&mut self, other: &Node) -> Value {
+        let group = other.status().group;
+        assert!(!group.is_empty());
+        self.cmd(Op::JoinGroup, json!({"group": group, "mode": "theirs"}))
             .unwrap()
     }
 }
@@ -267,6 +283,12 @@ fn two_devices_converge_with_core_requests() {
             .unwrap()["mode"],
         "join"
     );
+    // 加入后先确认身份，此前不同步
+    assert!(b.status().needs_identity);
+    let e = b.cmd(Op::SyncNow, Value::Null).unwrap_err();
+    assert!(e.contains("确认本机身份"), "{e}");
+    b.join_group_of(&a);
+    assert!(!b.status().needs_identity);
 
     let s = b.sync();
     assert_eq!(s.phase, "idle", "{s:?}");
@@ -320,6 +342,8 @@ fn two_devices_converge_with_core_requests() {
     let e = c.cmd(Op::ImportKey, json!({"key": "AAAA"})).unwrap_err();
     assert!(e.starts_with("密钥格式不对"), "{e}");
     c.cmd(Op::ImportKey, json!({"key": key})).unwrap();
+    assert!(c.status().needs_identity);
+    c.join_group_of(&a);
     assert_eq!(c.sync().phase, "idle");
     assert_eq!(c.read("config.toml").as_deref(), Some("a = 2\n"));
 }
@@ -330,7 +354,7 @@ fn begin_edit_refusal_blocks_the_batch_then_recovers() {
     let mut a = Node::new(&remote, false);
     let mut b = Node::new(&remote, false);
     a.setup("p");
-    a.put("config.toml", "a = 1\n");
+    a.put(SCHEMA, "a = 1\n");
     a.put(UD, &format!("{DICT_HEAD}x\tX\t1\n"));
     a.sync();
     b.setup("p");
@@ -342,13 +366,13 @@ fn begin_edit_refusal_blocks_the_batch_then_recovers() {
     let s = b.sync();
     assert_eq!(s.phase, "error", "{s:?}");
     assert!(s.last_error.unwrap().contains("拒绝开始编辑"));
-    assert!(b.read("config.toml").is_none(), "本批一个文件都不写");
+    assert!(b.read(SCHEMA).is_none(), "本批一个文件都不写");
     assert_eq!(b.read(UD).as_deref(), Some(local_ud.as_str()));
 
     b.core.fail.lock().unwrap().clear();
     let s = b.sync();
     assert_eq!(s.phase, "idle", "{s:?}");
-    assert_eq!(b.read("config.toml").as_deref(), Some("a = 1\n"));
+    assert_eq!(b.read(SCHEMA).as_deref(), Some("a = 1\n"));
     assert!(s.last_error.is_none());
 }
 
@@ -447,6 +471,7 @@ fn change_passphrase_and_reset_remote() {
     );
     b.cmd(Op::SetPassphrase, json!({"passphrase": "new"}))
         .unwrap();
+    b.join_group_of(&a);
     assert_eq!(b.sync().phase, "idle");
     assert_eq!(b.read("config.toml").as_deref(), Some("a = 1\n"));
 
@@ -528,6 +553,7 @@ fn file_changes_trigger_sync_after_debounce_and_echo_is_suppressed() {
     a.put("config.toml", "a = 1\n");
     a.sync();
     b.setup("p");
+    b.join_group_of(&a);
     b.sync();
     assert_eq!(b.read("config.toml").as_deref(), Some("a = 1\n"));
 
@@ -949,4 +975,108 @@ fn on_demand_runner_only_syncs_when_asked() {
     assert_eq!(n.syncing_count(), 0, "未要求时不应同步");
     n.sync();
     assert_eq!(n.syncing_count(), 1);
+}
+
+// ── 设备组 ──────────────────────────────────────────────
+
+/// 组内互通设置，退出后各自为政；组名经名册传给组员。
+#[test]
+fn group_join_leave_and_group_name() {
+    let remote = MemBackend::new();
+    let mut a = Node::with(&remote, false, named("甲"));
+    let mut b = Node::with(&remote, false, named("乙"));
+    a.setup("p");
+    a.put("config.toml", "a = 1\n");
+    a.sync();
+    a.cmd(Op::SetGroupName, json!({"name": "家"})).unwrap();
+    assert_eq!(a.status().group_name, "家");
+
+    b.put("config.toml", "b = 1\n");
+    b.cmd(Op::SetSecret, json!({"password": "pw"})).unwrap();
+    b.cmd(Op::SetPassphrase, json!({"passphrase": "p"}))
+        .unwrap();
+    let e = b
+        .cmd(Op::JoinGroup, json!({"group": "x", "mode": "both"}))
+        .unwrap_err();
+    assert!(e.contains("mode"), "{e}");
+    b.join_group_of(&a);
+    assert_eq!(b.read("config.toml").as_deref(), Some("a = 1\n"));
+    let st = b.status();
+    assert_eq!(st.group, a.status().group);
+    assert_eq!(st.group_name, "家");
+    assert!(!st.needs_identity);
+    let backups: Vec<_> = std::fs::read_dir(b.user().join("data/.backup/sync"))
+        .unwrap()
+        .collect();
+    assert_eq!(backups.len(), 1, "覆盖前备份本机设置");
+    assert_eq!(b.sync().phase, "idle");
+
+    let l = devices(&mut a);
+    let b_in_a = find(&l, "乙");
+    assert_eq!(b_in_a["group"], st.group.as_str());
+    assert_eq!(b_in_a["group_name"], "家");
+
+    // 退出后新建单机组：组号不同，改设置互不影响
+    let r = b.cmd(Op::LeaveGroup, json!({"name": "乙的组"})).unwrap();
+    assert_ne!(r["group"], st.group.as_str());
+    assert_eq!(b.status().group_name, "乙的组");
+    b.put("config.toml", "b = 2\n");
+    b.sync();
+    a.sync();
+    assert_eq!(a.read("config.toml").as_deref(), Some("a = 1\n"));
+}
+
+/// 认领已有设备：沿用其号与组，组的设置覆盖本机（先备份），随后照常同步。
+#[test]
+fn claim_device_restores_identity_and_settings() {
+    let remote = MemBackend::new();
+    let mut a = Node::with(&remote, false, named("old-pc"));
+    a.setup("p");
+    a.put("config.toml", "a = 1\n");
+    a.put(UD, &format!("{DICT_HEAD}x\tX\t1\n"));
+    a.sync();
+    let a_id = a.status().device;
+    let a_group = a.status().group;
+    drop(a);
+
+    let mut n = Node::with(&remote, false, named("new-pc"));
+    n.put("config.toml", "n = 1\n");
+    n.cmd(Op::SetSecret, json!({"password": "pw"})).unwrap();
+    n.cmd(Op::SetPassphrase, json!({"passphrase": "p"}))
+        .unwrap();
+    let r = n.cmd(Op::ClaimDevice, json!({"dev": a_id})).unwrap();
+    assert_eq!(r["group"], a_group.as_str());
+    let st = n.status();
+    assert_eq!(
+        (st.device.as_str(), st.group.as_str()),
+        (a_id.as_str(), a_group.as_str())
+    );
+    assert!(!st.needs_identity);
+    assert_eq!(n.read("config.toml").as_deref(), Some("a = 1\n"));
+    assert_eq!(n.sync().phase, "idle");
+    assert!(n.read(UD).unwrap().contains("X"));
+    let backup = std::fs::read_dir(n.user().join("data/.backup/sync"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert_eq!(
+        std::fs::read_to_string(backup.join("config.toml")).unwrap(),
+        "n = 1\n"
+    );
+}
+
+/// 两台同名设备：后加入的那台确认身份时自动改用带序号的号。
+#[test]
+fn same_default_id_gets_a_suffix_on_confirm() {
+    let remote = MemBackend::new();
+    let mut a = Node::with(&remote, false, named("Desk"));
+    let mut b = Node::with(&remote, false, named("Desk"));
+    a.setup("p");
+    assert_eq!(a.status().device, "desk");
+    b.setup("p");
+    assert_eq!(b.status().device, "desk-2");
+    assert_eq!(b.sync().phase, "idle");
+    assert_eq!(a.sync().phase, "idle");
 }

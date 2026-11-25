@@ -16,13 +16,20 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use wind_sync::crypto::{Dek, KdfParams, Meta, content_hash};
-use wind_sync::devices::{DeviceInfo, list_devices, put_device_info, remove_device};
+use wind_sync::devices::{
+    DeviceEntry, DeviceInfo, id_taken, list_devices, put_device_info, remove_device,
+};
+use wind_sync::identity::{self, Overwrite};
+use wind_sync::ids;
 use wind_sync::scope::{DeviceClass, Namespace, ScopeFlags, in_scope, to_remote};
 use wind_sync::state::backoff_secs;
-use wind_sync::{Backend, SyncCtx, SyncError, SyncReport, SyncState, manifest, remote, sync_once};
+use wind_sync::{
+    Backend, LocalStore, SyncCtx, SyncError, SyncReport, SyncState, manifest, remote, sync_once,
+};
 use wind_sync_ipc::{Backend as Target, FromSync, Op, Scope, Status, SyncSettings, ToSync};
 
 use crate::backends::BackendFactory;
+use crate::backup;
 use crate::errors::{backend_error, crypto_error, sync_error};
 use crate::link::CoreLink;
 use crate::local::{Echo, FsLocal, RETRY_TAG, lock};
@@ -67,6 +74,8 @@ impl std::fmt::Debug for Round {
 
 /// 同步中拒绝会改状态的命令时的提示。
 const BUSY_MSG: &str = "正在同步，请稍后再试";
+/// 加入同步库后、确认身份前拒绝同步的提示。
+const IDENTITY_MSG: &str = "请先确认本机身份";
 /// 大批量删除护栏停止时 `halted` / `last_error` 里的识别标记。
 const MASS_MARK: &str = "为防误删已暂停";
 /// 连续这么多次「稍后重试」类的轮次后，改按普通失败退避。
@@ -110,6 +119,8 @@ pub struct Config {
     pub watch: bool,
     /// 本机设备类别：平台相关文件在远端的命名空间。
     pub class: DeviceClass,
+    /// 绿色版：默认设备号加 `-portable`。
+    pub portable: bool,
     /// 只在被要求时（`sync_now` / 确认大批量删除）才跑一轮，不按间隔与设置变更自行调度。
     /// 进程内运行的手机端由宿主决定何时同步。
     pub on_demand: bool,
@@ -212,22 +223,51 @@ fn platform() -> &'static str {
     }
 }
 
-/// 本机要写进名册的信息。
-fn local_info(settings: &SyncSettings, now: u64) -> DeviceInfo {
+/// 本机显示名：设置里填了用它，否则取主机名。
+fn display_name(settings: &SyncSettings) -> String {
     let name = settings.device_name.trim();
+    if name.is_empty() {
+        crate::hostname::host_name()
+    } else {
+        name.to_string()
+    }
+}
+
+/// 本机所在组号；状态里为空按单机组（= 设备号）。
+fn group_of(state: &SyncState) -> &str {
+    if state.group.is_empty() {
+        &state.device
+    } else {
+        &state.group
+    }
+}
+
+/// 本机要写进名册的信息。
+fn local_info(settings: &SyncSettings, state: &SyncState, now: u64) -> DeviceInfo {
     DeviceInfo {
-        name: if name.is_empty() {
-            crate::hostname::host_name()
-        } else {
-            name.to_string()
-        },
+        name: display_name(settings),
         platform: platform().into(),
         app_version: env!("WIND_APP_VERSION").into(),
         caps: vec!["files".into()],
         last_seen: now,
-        group: String::new(),
-        group_name: String::new(),
-        group_name_at: 0,
+        group: group_of(state).to_string(),
+        group_name: state.group_name.clone(),
+        group_name_at: state.group_name_at,
+    }
+}
+
+/// 名册里同组他人的组名比本机新则采用（只改本机状态）。
+fn adopt_group_name(state: &mut SyncState, roster: &[DeviceEntry]) {
+    let group = group_of(state).to_string();
+    let newest = roster
+        .iter()
+        .filter(|(dev, _)| *dev != state.device)
+        .filter_map(|(_, r)| r.as_ref().ok())
+        .filter(|i| i.group == group && i.group_name_at > state.group_name_at)
+        .max_by_key(|i| i.group_name_at);
+    if let Some(i) = newest {
+        state.group_name = i.group_name.clone();
+        state.group_name_at = i.group_name_at;
     }
 }
 
@@ -241,14 +281,29 @@ fn info_stale(written: Option<&DeviceInfo>, want: &DeviceInfo, daily: bool) -> b
     !same || (daily && w.last_seen / DAY_SECS != want.last_seen / DAY_SECS)
 }
 
-/// 过渡用的设备组：同类别设备共享设置，后续改为取自同步状态。
-const INTERIM_GROUP: &str = "default";
+/// 删除改号前的旧号目录：删成功的移出待删列表，失败的留待下一轮。
+fn retire_old_ids(b: &dyn Backend, state: &mut SyncState) {
+    let device = state.device.clone();
+    state.retired_ids.retain(|id| {
+        if *id == device {
+            return false;
+        }
+        match remove_device(b, id) {
+            Ok(n) => {
+                log!("已删除旧设备号 {id}（{n} 个对象）");
+                false
+            }
+            Err(e) => {
+                log!("删除旧设备号 {id} 失败: {}", sync_error(&e));
+                true
+            }
+        }
+    });
+}
 
 impl Runner {
     fn ns(&self) -> Namespace {
-        // 按类别分组，保持改动前「桌面与手机设置互不相见」的行为。
-        let group = format!("{INTERIM_GROUP}-{}", self.cfg.class.as_str());
-        Namespace::new(self.cfg.class, group)
+        Namespace::new(self.cfg.class, group_of(&self.state))
     }
 
     pub fn new(mut cfg: Config, tx: Sender<Input>) -> Runner {
@@ -259,7 +314,8 @@ impl Runner {
                 (Secrets::default(), Some(e))
             }
         };
-        let state = statefile::load(&cfg.state_dir);
+        let default_id = ids::default_device_id(&display_name(&cfg.settings), cfg.portable);
+        let state = statefile::load(&cfg.state_dir, &default_id);
         let settings = cfg.settings.clone();
         let scope = SharedScope::new(flags_of(&settings.scope));
         let watch = cfg.watch.then(|| {
@@ -307,9 +363,23 @@ impl Runner {
         self.secrets.password.is_some() && self.secrets.dek.is_some()
     }
 
-    /// 能自动调度：已配置、机密齐全、没停在错误态。
+    /// 能自动调度：已配置、机密齐全、身份已确认、没停在错误态。
     fn runnable(&self) -> bool {
-        self.configured() && self.ready() && self.state.retry.halted.is_none()
+        self.configured()
+            && self.ready()
+            && self.state.identity_confirmed
+            && self.state.retry.halted.is_none()
+    }
+
+    /// 已加入同步库但尚未确认身份。
+    fn needs_identity(&self) -> bool {
+        self.secrets.dek.is_some() && !self.state.identity_confirmed
+    }
+
+    /// 停在「另一台设备在用本机号」上。
+    fn id_conflict(&self) -> bool {
+        let msg = sync_error(&SyncError::DeviceIdConflict(self.state.device.clone()));
+        self.state.retry.halted.as_deref() == Some(msg.as_str())
     }
 
     pub fn status(&self) -> Status {
@@ -319,6 +389,8 @@ impl Runner {
             "needs_setup"
         } else if self.syncing {
             "syncing"
+        } else if self.id_conflict() {
+            "error"
         } else if self.state.retry.halted.is_some() {
             "halted"
         } else if self.state.retry.last_error.is_some() {
@@ -343,6 +415,10 @@ impl Runner {
                 .collect(),
             has_secret: self.ready(),
             joined: self.secrets.dek.is_some(),
+            device: self.state.device.clone(),
+            group: group_of(&self.state).to_string(),
+            group_name: self.state.group_name.clone(),
+            needs_identity: self.needs_identity(),
         }
     }
 
@@ -529,7 +605,7 @@ impl Runner {
         ctx.gc = true;
         ctx.allow_mass_delete = allow_mass;
         let echo_before = lock(&self.echo).clone();
-        let want = local_info(&self.settings, now);
+        let want = local_info(&self.settings, &self.state, now);
         let info_stale_now = info_stale(self.info_written.as_ref(), &want, true);
         let mut state = self.state.clone();
         let failures_before = state.retry.failures;
@@ -554,6 +630,11 @@ impl Runner {
                     Err(m) => Err(m),
                     Ok(backend) => {
                         let r = sync_once(&*backend, &mut local, &mut state, &dek, &ctx);
+                        if let Ok(rep) = &r
+                            && !rep.skipped
+                        {
+                            retire_old_ids(&*backend, &mut state);
+                        }
                         // 本机 info 被其他设备「移除」后清单可能重新出现，info 却要等跨日才写回，
                         // 期间别人看到的是「无法解密」：每轮 stat 一次，缺了就补写。
                         let missing = || {
@@ -657,10 +738,11 @@ impl Runner {
 
     /// 把本机信息写进远端名册。`daily` 为假时只在内容变了（改名等）才写；失败只记日志，下一轮会重试。
     fn publish_info(&mut self, daily: bool) {
-        if self.syncing || !self.configured() || !self.ready() {
+        // 未确认身份时本机号可能是别人的，不写名册
+        if self.syncing || !self.configured() || !self.ready() || !self.state.identity_confirmed {
             return;
         }
-        let want = local_info(&self.settings, now_unix());
+        let want = local_info(&self.settings, &self.state, now_unix());
         if !info_stale(self.info_written.as_ref(), &want, daily) {
             return;
         }
@@ -722,6 +804,12 @@ impl Runner {
                 | Op::ResetRemote
                 | Op::ConfirmMassDelete
                 | Op::RemoveDevice
+                | Op::RenameDevice
+                | Op::SetGroupName
+                | Op::JoinGroup
+                | Op::LeaveGroup
+                | Op::ClaimDevice
+                | Op::ConfirmIdentity
         );
         if self.syncing && mutating {
             return Err(BUSY_MSG.into());
@@ -737,6 +825,12 @@ impl Runner {
             Op::ResetRemote => self.cmd_reset_remote(args),
             Op::ListDevices => self.cmd_list_devices(),
             Op::RemoveDevice => self.cmd_remove_device(args),
+            Op::RenameDevice => self.cmd_rename_device(args),
+            Op::SetGroupName => self.cmd_set_group_name(args),
+            Op::JoinGroup => self.cmd_join_group(args),
+            Op::LeaveGroup => self.cmd_leave_group(args),
+            Op::ClaimDevice => self.cmd_claim_device(args),
+            Op::ConfirmIdentity => self.cmd_confirm_identity(),
         }
     }
 
@@ -793,15 +887,22 @@ impl Runner {
         Ok(json!({ "ok": true, "remote_initialized": meta.is_some(), "joined": joined }))
     }
 
-    /// DEK 变了说明换了同步库：旧的清单基线对新远端没有意义，重建（设备号也换新）。
-    fn adopt_dek(&mut self, dek: &Dek) -> Result<(), String> {
+    /// DEK 变了说明换了同步库：旧的清单基线对新远端没有意义，重建（沿用设备号，回到单机组）。
+    /// `confirmed` 为本机身份是否就此确定（初始化、改口令是；加入已有远端否）；
+    /// 密钥没变（重新导入同一把）则保持原有身份。
+    fn adopt_dek(&mut self, dek: &Dek, confirmed: bool) -> Result<(), String> {
         let b64 = dek.to_base64();
         let changed = self.secrets.dek.as_deref() != Some(b64.as_str());
         self.secrets.dek = Some(b64);
         self.save_secrets()?;
         if changed {
-            self.state = SyncState::new(self.state.device.clone());
+            let device = self.state.device.clone();
+            self.state = SyncState::new(device.clone());
+            self.state.group = device;
+            self.state.identity_confirmed = confirmed;
             self.info_written = None;
+        } else if confirmed {
+            self.state.identity_confirmed = true;
         }
         self.after_user_fix();
         self.publish_info(false);
@@ -836,7 +937,7 @@ impl Runner {
                 }
             }
         };
-        self.adopt_dek(&dek)?;
+        self.adopt_dek(&dek, mode != "join")?;
         log!("口令设置完成（{mode}）");
         Ok(json!({ "ok": true, "mode": mode }))
     }
@@ -856,7 +957,7 @@ impl Runner {
         })?;
         let b = self.fresh_backend(None)?;
         let dek = remote::join_with_key(&*b, key).map_err(|e| sync_error(&e))?;
-        self.adopt_dek(&dek)?;
+        self.adopt_dek(&dek, false)?;
         Ok(json!({ "ok": true }))
     }
 
@@ -876,6 +977,9 @@ impl Runner {
         }
         if self.secrets.dek.is_none() {
             return Err("尚未设置同步口令或导入密钥".into());
+        }
+        if !self.state.identity_confirmed {
+            return Err(IDENTITY_MSG.into());
         }
         if self.syncing {
             // 进行中的这一轮跑完后再来一轮
@@ -902,23 +1006,32 @@ impl Runner {
         Ok(json!({ "queued": true }))
     }
 
-    fn cmd_list_devices(&self) -> Result<Value, String> {
+    fn cmd_list_devices(&mut self) -> Result<Value, String> {
         let dek = self.dek().map_err(|_| "本机尚未加入加密同步".to_string())?;
         let b = self.fresh_backend(None)?;
         let list = list_devices(&*b, &dek.devinfo_key()).map_err(|e| sync_error(&e))?;
+        let before = self.state.group_name_at;
+        adopt_group_name(&mut self.state, &list);
+        if self.state.group_name_at != before {
+            self.save_state();
+        }
         let devices: Vec<Value> = list
-            .into_iter()
+            .iter()
             .map(|(id, info)| {
-                let is_self = id == self.state.device;
+                let is_self = *id == self.state.device;
                 match info {
                     Ok(i) => json!({
                         "id": id, "name": i.name, "platform": i.platform,
                         "app_version": i.app_version, "caps": i.caps,
                         "last_seen": i.last_seen, "is_self": is_self, "readable": true,
+                        "group": i.group,
+                        "group_name": wind_sync::devices::group_name_of(&list, &i.group)
+                            .unwrap_or_default(),
                     }),
                     Err(_) => json!({
                         "id": id, "name": "", "platform": "", "app_version": "",
                         "caps": [], "last_seen": 0, "is_self": is_self, "readable": false,
+                        "group": "", "group_name": "",
                     }),
                 }
             })
@@ -943,6 +1056,224 @@ impl Runner {
         Ok(json!({ "ok": true, "removed": removed }))
     }
 
+    // ── 设备组与身份 ───────────────────────────────────────
+
+    /// 身份操作的前提：已持有密钥与存储凭据。
+    fn identity_ctx(&self) -> Result<(Dek, Box<dyn Backend>), String> {
+        let dek = self.dek().map_err(|_| "本机尚未加入加密同步".to_string())?;
+        Ok((dek, self.fresh_backend(None)?))
+    }
+
+    /// 身份变更之后：存状态、重写名册、解除停止态、稍后同步。
+    fn after_identity_change(&mut self) {
+        self.info_written = None;
+        self.after_user_fix();
+        self.publish_info(false);
+    }
+
+    /// 覆盖本机设置用的本地存储：不受同步范围开关限制（与 `join_group` 一致）。
+    fn local_all(&self) -> FsLocal {
+        FsLocal::new(
+            self.cfg.userdata_dir.clone(),
+            ScopeFlags::ALL,
+            self.cfg.link.clone(),
+            self.echo.clone(),
+        )
+    }
+
+    /// 用组的设置覆盖本机前备份本机设置。
+    fn backup_local(&self, local: &FsLocal) -> Result<std::path::PathBuf, String> {
+        let paths = local.list().map_err(|e| e.0)?;
+        let dir = backup::backup_settings(&self.cfg.userdata_dir, &paths, now_unix())?;
+        log!("已备份本机设置");
+        Ok(dir)
+    }
+
+    /// 本机号已被远端他人占用时改用首个空闲的 `<号>-<n>`。只用于未确认身份时：本机从未以这个号发布过。
+    fn ensure_free_id(&mut self, b: &dyn Backend) -> Result<(), String> {
+        let se = |e: SyncError| sync_error(&e);
+        let base = self.state.device.clone();
+        if !id_taken(b, &base).map_err(se)? {
+            return Ok(());
+        }
+        for n in 2..1000 {
+            let id = ids::with_suffix(&base, n);
+            if !id_taken(b, &id).map_err(se)? {
+                identity::rename_device(b, &mut self.state, &id).map_err(se)?;
+                // 旧号属于别的设备，不能当本机旧号删除
+                self.state.retired_ids.retain(|x| *x != base);
+                log!("设备号 {base} 已被占用，本机改用 {id}");
+                return Ok(());
+            }
+        }
+        Err(format!("找不到空闲的设备号（{base}-n）"))
+    }
+
+    /// 以当前设备号新建单机组并确认身份。
+    fn cmd_confirm_identity(&mut self) -> Result<Value, String> {
+        // 已确认则不动（不把已在组里的设备拉回单机组）
+        if self.state.identity_confirmed {
+            let (device, group) = (self.state.device.clone(), group_of(&self.state));
+            return Ok(json!({ "ok": true, "device": device, "group": group }));
+        }
+        let (_, b) = self.identity_ctx()?;
+        self.ensure_free_id(&*b)?;
+        let device = self.state.device.clone();
+        identity::leave_group(&mut self.state, &device);
+        self.state.group_name.clear();
+        self.state.group_name_at = 0;
+        self.state.identity_confirmed = true;
+        self.after_identity_change();
+        log!("已确认本机身份（单机组）");
+        Ok(json!({ "ok": true, "device": device, "group": device }))
+    }
+
+    fn cmd_rename_device(&mut self, args: &Value) -> Result<Value, String> {
+        let id = str_arg(args, "id")
+            .filter(|s| !s.is_empty())
+            .ok_or("缺少参数 id")?;
+        if id == self.state.device {
+            return Err("新设备号与当前相同".into());
+        }
+        let (_, b) = self.identity_ctx()?;
+        let old = self.state.device.clone();
+        // 撞号时旧号另有主人，未确认身份时本机从未以旧号发布过：这两种情况旧号都不能删
+        let retire = self.state.identity_confirmed && !self.id_conflict();
+        if self.state.group.is_empty() {
+            self.state.group = old.clone();
+        }
+        identity::rename_device(&*b, &mut self.state, id).map_err(|e| sync_error(&e))?;
+        if !retire {
+            self.state.retired_ids.retain(|x| *x != old);
+        }
+        self.after_identity_change();
+        log!("设备号已改为 {id}");
+        Ok(json!({ "ok": true, "device": id }))
+    }
+
+    fn cmd_set_group_name(&mut self, args: &Value) -> Result<Value, String> {
+        let name = str_arg(args, "name").ok_or("缺少参数 name")?.trim();
+        if name.chars().count() > wind_sync_ipc::MAX_DEVICE_NAME_CHARS {
+            return Err(format!(
+                "组名不能超过 {} 个字符",
+                wind_sync_ipc::MAX_DEVICE_NAME_CHARS
+            ));
+        }
+        if self.state.group.is_empty() {
+            self.state.group = self.state.device.clone();
+        }
+        self.state.group_name = name.to_string();
+        // 时钟回拨时也要比本机旧值新，才能在名册里胜出
+        self.state.group_name_at = now_unix().max(self.state.group_name_at + 1);
+        self.save_state();
+        self.publish_info(false);
+        Ok(json!({ "ok": true }))
+    }
+
+    fn cmd_join_group(&mut self, args: &Value) -> Result<Value, String> {
+        let group = str_arg(args, "group").unwrap_or_default();
+        if !ids::valid_id(group) {
+            return Err(format!("组号 {group} 不可用"));
+        }
+        let mode = match str_arg(args, "mode") {
+            Some("theirs") => Overwrite::Theirs,
+            Some("mine") => Overwrite::Mine,
+            _ => return Err("参数 mode 须为 theirs 或 mine".into()),
+        };
+        let (dek, b) = self.identity_ctx()?;
+        if !self.state.identity_confirmed {
+            self.ensure_free_id(&*b)?;
+        }
+        let mut local = self.local_all();
+        if mode == Overwrite::Theirs {
+            self.backup_local(&local)?;
+        }
+        let ns = Namespace::new(self.cfg.class, group);
+        let mut state = self.state.clone();
+        let rep = identity::join_group(&*b, &mut local, &mut state, &dek, &ns, mode)
+            .map_err(|e| sync_error(&e))?;
+        state.group_name.clear();
+        state.group_name_at = 0;
+        if let Ok(roster) = list_devices(&*b, &dek.devinfo_key()) {
+            adopt_group_name(&mut state, &roster);
+        }
+        state.identity_confirmed = true;
+        self.state = state;
+        self.after_identity_change();
+        log!(
+            "已加入设备组 {group}：写入 {}，删除 {}",
+            rep.written.len(),
+            rep.deleted.len()
+        );
+        Ok(json!({
+            "ok": true, "group": group,
+            "written": rep.written.len(), "deleted": rep.deleted.len(),
+        }))
+    }
+
+    /// 以本机设置新建单机组；组号取设备号，已被占用（含当前组）则加序号。
+    fn cmd_leave_group(&mut self, args: &Value) -> Result<Value, String> {
+        if !self.state.identity_confirmed {
+            return Err(IDENTITY_MSG.into());
+        }
+        let name = str_arg(args, "name").map(str::trim).unwrap_or_default();
+        if name.chars().count() > wind_sync_ipc::MAX_DEVICE_NAME_CHARS {
+            return Err(format!(
+                "组名不能超过 {} 个字符",
+                wind_sync_ipc::MAX_DEVICE_NAME_CHARS
+            ));
+        }
+        let (dek, b) = self.identity_ctx()?;
+        let roster = list_devices(&*b, &dek.devinfo_key()).map_err(|e| sync_error(&e))?;
+        let device = self.state.device.clone();
+        let current = group_of(&self.state).to_string();
+        let used = |g: &str| {
+            g == current
+                || roster
+                    .iter()
+                    .any(|(d, r)| *d != device && r.as_ref().is_ok_and(|i| i.group == g))
+        };
+        let group = (1..1000)
+            .map(|n| ids::with_suffix(&device, n))
+            .find(|g| !used(g))
+            .ok_or("找不到可用的组号")?;
+        identity::leave_group(&mut self.state, &group);
+        self.state.group_name = name.to_string();
+        self.state.group_name_at = if name.is_empty() { 0 } else { now_unix() };
+        self.after_identity_change();
+        log!("已退出设备组 {current}，新建单机组 {group}");
+        Ok(json!({ "ok": true, "group": group }))
+    }
+
+    /// 认领已有设备：沿用它的号与组，用组的设置覆盖本机（先备份）。
+    fn cmd_claim_device(&mut self, args: &Value) -> Result<Value, String> {
+        let dev = str_arg(args, "dev")
+            .filter(|d| !d.is_empty())
+            .ok_or("缺少参数 dev")?;
+        if self.state.identity_confirmed && dev == self.state.device {
+            return Err("不能认领本机".into());
+        }
+        let (dek, b) = self.identity_ctx()?;
+        let se = |e: SyncError| sync_error(&e);
+        let mut local = self.local_all();
+        self.backup_local(&local)?;
+        let mut state = self.state.clone();
+        let group = identity::claim_device(&*b, &mut state, &dek, dev).map_err(se)?;
+        let ns = Namespace::new(self.cfg.class, group.clone());
+        identity::join_group(&*b, &mut local, &mut state, &dek, &ns, Overwrite::Theirs)
+            .map_err(se)?;
+        state.identity_confirmed = true;
+        // 已确认过身份的设备改认领别的号：原号与待删旧号都归入待删（撞号时原号另有主人，不删）
+        if self.state.identity_confirmed && !self.id_conflict() {
+            state.retired_ids = std::mem::take(&mut self.state.retired_ids);
+            state.retired_ids.push(self.state.device.clone());
+        }
+        self.state = state;
+        self.after_identity_change();
+        log!("已认领设备 {dev}（组 {group}）");
+        Ok(json!({ "ok": true, "device": dev, "group": group }))
+    }
+
     /// 清空远端后以本机为准重新上传。需 `confirm: true` 与新口令；本机有 DEK 则沿用（已导出的密钥仍有效）。
     fn cmd_reset_remote(&mut self, args: &Value) -> Result<Value, String> {
         if args.get("confirm").and_then(Value::as_bool) != Some(true) {
@@ -957,8 +1288,13 @@ impl Runner {
         remote::reset_remote(&*b, &dek, pass, self.cfg.kdf).map_err(|e| sync_error(&e))?;
         self.secrets.dek = Some(dek.to_base64());
         self.save_secrets()?;
-        // 远端已空：旧基线作废，所有本地文件当作新增上传
-        self.state = SyncState::new(self.state.device.clone());
+        // 远端已空：旧基线作废，所有本地文件当作新增上传；本机就是新库的首台设备
+        let mut fresh = SyncState::new(self.state.device.clone());
+        fresh.group = group_of(&self.state).to_string();
+        fresh.group_name = std::mem::take(&mut self.state.group_name);
+        fresh.group_name_at = self.state.group_name_at;
+        fresh.identity_confirmed = true;
+        self.state = fresh;
         self.info_written = None;
         self.after_user_fix();
         self.publish_info(false);

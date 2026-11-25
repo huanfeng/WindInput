@@ -4,6 +4,7 @@
 //! stdin EOF 或 `Shutdown` 即退出。日志写 stderr，由 core 轮转收集。
 
 mod backends;
+mod backup;
 mod errors;
 mod fsutil;
 mod hostname;
@@ -39,9 +40,10 @@ pub fn run_process() -> i32 {
             state_dir,
             settings,
             suffix,
+            portable,
         })) => {
             log::log!("启动（变体后缀 {suffix:?}）");
-            (userdata_dir, state_dir, settings)
+            (userdata_dir, state_dir, settings, portable)
         }
         Ok(None) => return 0,
         Ok(Some(_)) | Err(_) => {
@@ -49,7 +51,7 @@ pub fn run_process() -> i32 {
             return 2;
         }
     };
-    let (userdata_dir, state_dir, settings) = hello;
+    let (userdata_dir, state_dir, settings, portable) = hello;
     let state_dir = PathBuf::from(state_dir);
     let link = PipeLink::new(Box::new(io::stdout()), REQUEST_TIMEOUT);
     let (tx, rx) = mpsc::channel::<Input>();
@@ -100,6 +102,7 @@ pub fn run_process() -> i32 {
         kdf: KdfParams::DEFAULT,
         watch: true,
         class: wind_sync::DeviceClass::Desktop,
+        portable,
         on_demand: false,
     };
     Runner::new(cfg, tx).run(rx);
