@@ -35,6 +35,15 @@ const LAYER_BUDGET: usize = 512;
 /// 取值见 `tests/pinyin_eval.rs` 的 `pinyin_eval_t9`。
 const NODE_PENALTY: f64 = 3.0;
 
+/// 九宫格简拼最多几个键：每键 1–4 个声母，组合数按键数指数增长。
+const ABBREV_MAX_KEYS: usize = 4;
+
+/// 每个简拼串从索引取的全拼码条数（同一串的码按权重降序）。
+const ABBREV_CODES_PER_STROKE: usize = 4;
+
+/// 能作简拼的首字母：声母（zh/ch/sh 取首字母）与零声母音节的开头 a/e/o。i/u/v 不打头。
+const ABBREV_LETTERS: &[u8] = b"abcdefghjklmnopqrstwxyz";
+
 /// 不从开头起的节点（只进整句）每个音节码保留的条数。
 const INNER_NODE_LIMIT: usize = 16;
 
@@ -509,6 +518,9 @@ impl PinyinEngine {
             s.is_sentence_demoted = true;
         }
         cands.extend(words);
+        if self.shuangpin.is_none() {
+            self.add_keypad_abbrevs(&keys, map, max_candidates, &mut cands);
+        }
         cands.truncate(max_candidates);
 
         // 预编辑：读得出的部分显示拼音，读不出的尾键显示该键的首字母——任何时候都不出数字。
@@ -519,6 +531,15 @@ impl PinyinEngine {
             .min_by(|a, b| wind_candidate::candidate_display_order(a, b, false, false, keys.raw));
         let (read, covered) = match (shown, &preedit_source) {
             (None, Some(p)) => (p.clone(), n),
+            // 简拼首选：每键一个声母，显示声母（`w'm`）而不是整个词的全拼
+            (Some(top), _) if top.is_abbrev => (
+                top.pinyin
+                    .split(SEPARATOR as char)
+                    .filter_map(|syl| syl.get(..1))
+                    .collect::<Vec<_>>()
+                    .join("'"),
+                n,
+            ),
             (Some(top), _) => {
                 let covered = keys.raw_start[..n]
                     .iter()
@@ -535,6 +556,93 @@ impl PinyinEngine {
             preedit_pinyin: preedit.clone(),
             preedit_display: preedit,
             ..Default::default()
+        }
+    }
+
+    /// 简拼（全拼九宫格）：整串 2..=[`ABBREV_MAX_KEYS`] 个键、每键读作一个声母时的词，
+    /// 如 `96` → w'm → 我们。
+    ///
+    /// 每个键取它能代表的声母首字母（`9` → w/x/y/z），组合后查简拼索引（同 26 键的纯简拼
+    /// step5：索引给全拼码，回主表装配，音节数必须等于键数）。候选标 `is_abbrev`、吃满整串：
+    /// 显示排序里排在同长度的全拼读法之后、只吃一部分的单字之前。带分词键或锁定字母的串不走这里。
+    fn add_keypad_abbrevs(
+        &self,
+        keys: &Keys,
+        map: &KeypadMap,
+        max_candidates: usize,
+        cands: &mut Vec<Candidate>,
+    ) {
+        let n = keys.len();
+        if !self.config.enable_abbrev
+            || !(2..=ABBREV_MAX_KEYS).contains(&n)
+            || keys.raw.len() != n
+            || keys.clean.iter().any(u8::is_ascii_lowercase)
+        {
+            return;
+        }
+        let per_key: Vec<Vec<u8>> = keys
+            .clean
+            .iter()
+            .map(|&k| {
+                map.letters(k)
+                    .into_iter()
+                    .filter(|l| ABBREV_LETTERS.contains(l))
+                    .collect()
+            })
+            .collect();
+        if per_key.iter().any(Vec::is_empty) {
+            return;
+        }
+        let dict = &self.dict;
+        let all_syllables = (1u64 << n) - 1;
+        let mut seen: HashSet<String> = cands.iter().map(|c| c.text.clone()).collect();
+        let mut found: Vec<Candidate> = Vec::new();
+        let mut combo = vec![0usize; n];
+        loop {
+            let stroke: String = combo
+                .iter()
+                .zip(&per_key)
+                .map(|(&i, ls)| ls[i] as char)
+                .collect();
+            for code in dict.search_abbrev(&stroke, ABBREV_CODES_PER_STROKE) {
+                for h in dict.search_with_boundary(&code) {
+                    let eb = super::effective_boundary(&code, h.boundary, &self.trie);
+                    if eb.count_ones() as usize != n || !seen.insert(h.text.clone()) {
+                        continue;
+                    }
+                    found.push(Candidate {
+                        pinyin: split_pinyin(&code, eb),
+                        text: h.text,
+                        code: keys.raw.to_string(),
+                        weight: h.weight,
+                        source: CandidateSource::Pinyin,
+                        is_abbrev: true,
+                        boundary: keys.raw_mask(0, all_syllables),
+                        consumed_length: keys.raw.len(),
+                        meta: CandidateMeta {
+                            learn_code: Some((code.clone(), eb)),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    });
+                }
+            }
+            // 下一个组合（逐位进位）
+            let mut i = 0;
+            loop {
+                if i == n {
+                    found.sort_by(|a, b| b.weight.cmp(&a.weight).then(a.text.cmp(&b.text)));
+                    found.truncate(max_candidates);
+                    cands.extend(found);
+                    return;
+                }
+                combo[i] += 1;
+                if combo[i] < per_key[i].len() {
+                    break;
+                }
+                combo[i] = 0;
+                i += 1;
+            }
         }
     }
 

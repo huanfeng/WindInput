@@ -832,3 +832,30 @@ fn keypad_composition_never_shows_digits() {
         assert_eq!(comp, want, "{keys}");
     }
 }
+
+/// 全拼九宫格的简拼：全是声母的串（`99` 读不成完整音节）出简拼词，编码栏显示声母。
+#[test]
+fn keypad_all_initials_enter_abbreviation() {
+    let Some((m, _rx)) = core("kp_abbr", "pinyin", no_assoc) else {
+        return;
+    };
+    let _ = m.set_keypad(true);
+    let comp = composition(&keypad(&m, "99")).unwrap_or_default();
+    let win = m.candidates(0, 10);
+    assert!(win.items.iter().any(|t| t == "因为"), "{:?}", win.items);
+    assert_eq!(comp, "y'w");
+}
+
+/// 读得成完整音节的串照旧以全拼读法为先，简拼词排在后面。
+#[test]
+fn keypad_full_reading_outranks_abbreviation() {
+    let Some((m, _rx)) = core("kp_abbr2", "pinyin", no_assoc) else {
+        return;
+    };
+    let _ = m.set_keypad(true);
+    keypad(&m, "96");
+    assert_eq!(
+        m.candidates(0, 1).items.first().map(String::as_str),
+        Some("我")
+    );
+}
