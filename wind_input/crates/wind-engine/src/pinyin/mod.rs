@@ -4987,6 +4987,10 @@ impl Engine for PinyinEngine {
     fn shuangpin_full_syllable_count(&self, keys: &str) -> Option<usize> {
         self.shuangpin.as_ref()?.full_syllable_count(keys)
     }
+
+    fn keypad_supported(&self) -> bool {
+        PinyinEngine::keypad_supported(self)
+    }
 }
 
 #[cfg(test)]

@@ -1158,6 +1158,18 @@ impl Coordinator {
         self.engine_mgr.shuangpin_layouts()
     }
 
+    /// 手机九宫格形态开关：开 = 拼音类方案按电话键盘（`2`-`9`）解码。宿主切换布局时调用，
+    /// 正在组的编码由调用方先清掉。电脑端从不调用。
+    pub fn set_keypad(&self, on: bool) {
+        self.engine_mgr
+            .set_keypad(on.then(|| std::sync::Arc::new(wind_engine::pinyin::t9::KeypadMap::t9())));
+    }
+
+    /// 九宫格解码此刻是否生效（开了且活跃方案是拼音类）。
+    pub fn keypad_active(&self) -> bool {
+        self.engine_mgr.active_keypad().is_some()
+    }
+
     /// `shuangpin` 方案当前生效的布局 id（非双拼方案返回空串）。
     pub fn active_shuangpin_layout(&self) -> String {
         self.engine_mgr.shuangpin_layout_of("shuangpin")

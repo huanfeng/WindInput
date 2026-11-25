@@ -29,6 +29,11 @@ pub enum PressKey {
     Space,
     Backspace,
     Enter,
+    /// 九宫格的编码键（`2`-`9`、分词键 `'`）。与触摸数字（`Char`）在类型上分开：
+    /// 编码键进缓冲，不走「首选上屏再出数字」。九宫格没生效时退化成触摸字符键。
+    Keypad {
+        key: char,
+    },
 }
 
 /// 英文词后补的空格，遇到这些句末标点时挪到标点后面（`word ` + `.` → `word. `）
@@ -106,6 +111,16 @@ impl MobileCore {
     /// 返回的 `ops` 已包含补的空格与标点换位，宿主只管按序执行；`consumed == false`
     /// 时执行 `ops`（通常为空）后走默认行为。
     pub fn press(&self, key: PressKey, source: KeySource) -> KeyOutcome {
+        if let PressKey::Keypad { key } = key {
+            let as_char = PressKey::Char {
+                ch: key,
+                shifted: false,
+            };
+            if !self.coord.keypad_active() {
+                return self.press(as_char, source);
+            }
+            return self.engine_press(as_char, Some(key), source);
+        }
         let ch = match key {
             PressKey::Char { ch, .. } => Some(ch),
             _ => None,
@@ -246,6 +261,8 @@ fn to_vk(key: PressKey) -> Option<(u32, u32)> {
         PressKey::Space => Some((keymap::VK_SPACE, 0)),
         PressKey::Backspace => Some((keymap::VK_BACK, 0)),
         PressKey::Enter => Some((keymap::VK_RETURN, 0)),
+        // `press` 已把它换成 `Char`，走不到这里
+        PressKey::Keypad { key } => us_layout_vk(key).map(|(vk, _)| (vk, 0)),
         PressKey::Char { ch, shifted } => match ch {
             'a'..='z' if !shifted => Some((0x41 + (ch as u32 - 'a' as u32), 0)),
             // Shift 态字母一律进引擎：英文方案里进组合（句首自动大写后补全不能断）；

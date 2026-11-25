@@ -706,7 +706,28 @@ impl MobileCore {
     /// 首单元的几种读法（展开页左栏画它）：同一串字母的不同切分、模糊音兄弟、只取声母。
     /// 没得选 / 非全拼 / 无编码 → 空。不改编码，只影响候选。
     pub fn leading_readings(&self) -> Vec<LeadingReading> {
+        // 九宫格的逐段读法尚未接入：数字串按全拼切会给出错的读法，先不给
+        if self.coord.keypad_active() {
+            return Vec::new();
+        }
         self.coord.leading_readings()
+    }
+
+    /// 切换九宫格形态（宿主换到 / 换离九宫格布局时调用）。正在组的编码先清掉，
+    /// 返回清空产生的编辑指令（与 [`Self::key_down`] 同形，无编码时为空）。
+    pub fn set_keypad(&self, on: bool) -> KeyOutcome {
+        let outcome = if self.coord.is_composing() {
+            self.key_down(wind_keys::keymap::VK_ESCAPE, 0)
+        } else {
+            KeyOutcome::default()
+        };
+        self.coord.set_keypad(on);
+        outcome
+    }
+
+    /// 九宫格解码此刻是否生效（开了且活跃方案是拼音类）。
+    pub fn keypad_active(&self) -> bool {
+        self.coord.keypad_active()
     }
 
     /// 选定首单元的一种读法，候选按它重算（选回默认读法 = 清除）。返回值与

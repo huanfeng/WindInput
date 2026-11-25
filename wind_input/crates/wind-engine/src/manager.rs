@@ -627,6 +627,11 @@ pub struct EngineManager {
     /// 测试钩子：上面那份事实被真正重算的次数。
     #[cfg(test)]
     data_facts_builds: std::sync::atomic::AtomicUsize,
+    /// 手机九宫格形态的键面映射；`None` = 26 键（电脑端恒为 `None`）。
+    ///
+    /// 是宿主的运行时状态，不进配置：只在活跃方案是拼音类时生效（[`Self::active_keypad`]），
+    /// 码表方案照旧按字母解码。
+    keypad: std::sync::RwLock<Option<Arc<crate::pinyin::t9::KeypadMap>>>,
 }
 
 /// 诊断：[`EngineManager::memory_report`] 的结果。字节数都按容量估、不含分配器开销。
@@ -963,6 +968,7 @@ impl EngineManager {
             data_facts_gen: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]
             data_facts_builds: std::sync::atomic::AtomicUsize::new(0),
+            keypad: std::sync::RwLock::new(None),
         };
         // 仅同步构建活跃方案；其余方案由 Coordinator 启动后台预热（prewarm_schema）提前构建，
         // 避免首次切换时同步重熔大词库卡顿。单飞构建锁保证预热与切换不重复构建。
@@ -3098,8 +3104,29 @@ impl EngineManager {
             .unwrap_or_else(wind_config::CodeCharSet::default_alpha)
     }
 
+    /// 设置九宫格键面映射（`None` 回到 26 键）。调用方负责先清掉正在组的编码。
+    pub fn set_keypad(&self, keypad: Option<Arc<crate::pinyin::t9::KeypadMap>>) {
+        *self.keypad.write().unwrap_or_else(|e| e.into_inner()) = keypad;
+    }
+
+    /// 当前生效的九宫格映射：设置了映射且活跃引擎能按九宫格解码时才有（全拼；双拼限纯字母
+    /// 布局，见 [`Engine::keypad_supported`]）。其余方案照旧按 26 键，宿主据此换回 26 键。
+    pub fn active_keypad(&self) -> Option<Arc<crate::pinyin::t9::KeypadMap>> {
+        let km = self
+            .keypad
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()?;
+        self.active_engine()?.keypad_supported().then_some(km)
+    }
+
     /// 该字符在活跃方案下是否为码元（可进输入缓冲）。按键热路径上每键调用，故不克隆整张位图。
+    ///
+    /// 九宫格形态下改按键面映射判（`2`-`9`、字母、分词键）。
     pub fn active_is_code_char(&self, ch: char) -> bool {
+        if let Some(km) = self.active_keypad() {
+            return km.is_code_char(ch);
+        }
         match self.active_engine().as_ref().and_then(|e| e.input_chars()) {
             Some(cs) => cs.contains(ch),
             None => wind_config::CodeCharSet::default_contains(ch),
@@ -3111,6 +3138,9 @@ impl EngineManager {
     /// 典型用途：数字是码元（打得出 `Win10`）但不是首码——空缓冲下的数字键仍须是
     /// 选词/透传，否则用户既选不了「第 1 个候选」也拿不回原生数字输入。
     pub fn active_is_leading_char(&self, ch: char) -> bool {
+        if let Some(km) = self.active_keypad() {
+            return ch != crate::pinyin::t9::SEPARATOR as char && km.is_code_char(ch);
+        }
         match self.active_engine().as_ref().and_then(|e| e.input_chars()) {
             Some(cs) => cs.contains_leading(ch),
             None => wind_config::CodeCharSet::default_contains(ch),
@@ -4389,6 +4419,19 @@ impl EngineManager {
             return ConvertResult::default();
         };
         self.push_blocked_words(engine.as_ref());
+        // 九宫格：数字串只有拼音引擎的九宫格入口认得，英文混入对数字无意义，一并跳过。
+        if let Some(keypad) = self.active_keypad() {
+            let opts = ConvertOptions {
+                keypad: Some(keypad),
+                ..opts.unwrap_or_default()
+            };
+            return engine
+                .convert_with_opts(input, max_candidates, opts)
+                .unwrap_or_else(|e| {
+                    warn!("convert error: {}", e);
+                    ConvertResult::default()
+                });
+        }
         let r = match opts {
             None => self.convert_unblocked(
                 engine.as_ref(),

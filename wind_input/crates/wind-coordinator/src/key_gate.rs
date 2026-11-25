@@ -168,6 +168,10 @@ impl Coordinator {
         if mods & MOD_SHIFT != 0 && is_digit(probe.vk) {
             return true;
         }
+        // 手机九宫格：`2`-`9` 是编码键，空缓冲时也要吃（起头）。电脑端不开九宫格，走不到。
+        if is_digit(probe.vk) && self.keypad_active() {
+            return true;
+        }
         if is_session_only_key(probe.vk) {
             return session;
         }

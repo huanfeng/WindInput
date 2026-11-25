@@ -495,6 +495,12 @@ pub trait Engine: Send + Sync {
         None
     }
 
+    /// 本引擎能否按九宫格（[`ConvertOptions::keypad`]）解码。拼音引擎实现（全拼恒可，双拼限
+    /// 纯字母布局）；其余默认不能。
+    fn keypad_supported(&self) -> bool {
+        false
+    }
+
     /// 把一个标准拼音音节按当前模糊音配置展开成等价读音（`fang` → `fan`、`zi` → `zhi`）。
     /// 没开模糊音 / 非拼音引擎 → 空。只返回标准音节表里真实存在的读音（纠错用的错误拼写不算）。
     /// 手机端展开页「首单元读法」列模糊兄弟用。

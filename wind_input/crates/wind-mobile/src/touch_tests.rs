@@ -653,3 +653,139 @@ fn literal_keys_pass_through_outside_text_buffer() {
     let out = m.press_literal("()");
     assert!(!out.consumed && out.ops.is_empty(), "{out:?}");
 }
+
+fn keypad(m: &MobileCore, keys: &str) -> KeyOutcome {
+    let mut last = KeyOutcome::default();
+    for k in keys.chars() {
+        last = m.press(PressKey::Keypad { key: k }, KeySource::Touch);
+    }
+    last
+}
+
+/// 九宫格：编码键进缓冲，出全拼候选，组合区显示拼音而不是数字。
+#[test]
+fn keypad_keys_compose_pinyin() {
+    let Some((m, _rx)) = core("kp_compose", "pinyin", no_assoc) else {
+        return;
+    };
+    let _ = m.set_keypad(true);
+    assert!(m.keypad_active());
+    let out = keypad(&m, "64426");
+    assert!(m.coord.is_composing(), "{out:?}");
+    let win = m.candidates(0, 10);
+    assert_eq!(
+        win.items.first().map(String::as_str),
+        Some("你好"),
+        "{:?}",
+        win.items
+    );
+    let comp = composition(&out).unwrap_or_default();
+    assert!(!comp.contains('6'), "组合区不该是数字：{comp:?}");
+    let out = m.press(PressKey::Space, KeySource::Touch);
+    assert!(out.ops.contains(&commit("你好")), "{out:?}");
+}
+
+/// 九宫格下首键就能起头（空缓冲），分词键不能起头。
+#[test]
+fn keypad_digit_leads_but_separator_does_not() {
+    let Some((m, _rx)) = core("kp_lead", "pinyin", no_assoc) else {
+        return;
+    };
+    let _ = m.set_keypad(true);
+    keypad(&m, "9");
+    assert!(m.coord.is_composing());
+    assert!(m.candidates(0, 1).total > 0);
+}
+
+/// 关掉九宫格后编码键退化成触摸数字：空闲时直接是数字，不进缓冲。
+#[test]
+fn keypad_off_keys_are_plain_digits() {
+    let Some((m, _rx)) = core("kp_off", "pinyin", no_assoc) else {
+        return;
+    };
+    let _ = m.set_keypad(true);
+    let _ = m.set_keypad(false);
+    assert!(!m.keypad_active());
+    keypad(&m, "6");
+    assert!(!m.coord.is_composing());
+}
+
+/// 码表方案不受九宫格开关影响。
+#[test]
+fn keypad_ignored_for_codetable() {
+    let Some((m, _rx)) = core("kp_wubi", "wubi86", no_assoc) else {
+        return;
+    };
+    let _ = m.set_keypad(true);
+    assert!(!m.keypad_active());
+}
+
+/// 退格逐键删，删空后不在组码。
+#[test]
+fn keypad_backspace_deletes_keys() {
+    let Some((m, _rx)) = core("kp_bs", "pinyin", no_assoc) else {
+        return;
+    };
+    let _ = m.set_keypad(true);
+    keypad(&m, "64");
+    m.press(PressKey::Backspace, KeySource::Touch);
+    assert!(m.coord.is_composing());
+    m.press(PressKey::Backspace, KeySource::Touch);
+    assert!(!m.coord.is_composing());
+}
+
+/// 分词键把 `9426` 钉成两个两键音节（`xi|an`、`yi|bo`…），不再出单音节的 `xian`。
+#[test]
+fn keypad_separator_splits_syllables() {
+    let Some((m, _rx)) = core("kp_sep", "pinyin", no_assoc) else {
+        return;
+    };
+    let _ = m.set_keypad(true);
+    let out = keypad(&m, "94'26");
+    let comp = composition(&out).unwrap_or_default();
+    assert_eq!(comp.find('\''), Some(2), "{comp:?}");
+    let win = m.candidates(0, 30);
+    assert!(win.items.iter().any(|t| t == "西安"), "{:?}", win.items);
+    assert!(!win.items.iter().any(|t| t == "先"), "{:?}", win.items);
+}
+
+/// 选只吃前半串的单字：剩下的键留在缓冲继续组。
+#[test]
+fn keypad_partial_commit_keeps_rest() {
+    let Some((m, _rx)) = core("kp_part", "pinyin", no_assoc) else {
+        return;
+    };
+    let _ = m.set_keypad(true);
+    keypad(&m, "64426");
+    let win = m.candidates(0, 50);
+    let idx = win
+        .items
+        .iter()
+        .position(|t| t == "你")
+        .expect("有单字「你」");
+    let out = m.select_candidate(idx);
+    assert!(m.coord.is_composing(), "{out:?}");
+    let comp = composition(&out).unwrap_or_default();
+    assert!(comp.starts_with('你'), "{comp:?}");
+    let win = m.candidates(0, 5);
+    assert_eq!(
+        win.items.first().map(String::as_str),
+        Some("好"),
+        "{:?}",
+        win.items
+    );
+}
+
+/// 双拼（出厂小鹤，纯字母布局）也走九宫格：两键一个音节。
+#[test]
+fn keypad_active_for_letter_only_shuangpin() {
+    let Some((m, _rx)) = core("kp_sp", "shuangpin", no_assoc) else {
+        return;
+    };
+    let _ = m.set_keypad(true);
+    assert!(m.keypad_active());
+    // 小鹤 ni = ni（64），hao = hc（42）
+    keypad(&m, "6442");
+    let win = m.candidates(0, 10);
+    assert!(win.items.iter().any(|t| t == "你好"), "{:?}", win.items);
+}
