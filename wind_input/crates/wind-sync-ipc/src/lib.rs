@@ -42,6 +42,41 @@ fn default_interval() -> u32 {
     DEFAULT_INTERVAL_MIN
 }
 
+fn on() -> bool {
+    true
+}
+
+/// 同步内容开关：各类内容是否参与同步，缺省全开。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SyncContent {
+    /// 学习数据（用户词频、造词等）。
+    #[serde(default = "on")]
+    pub learned: bool,
+    /// 补全数据。
+    #[serde(default = "on")]
+    pub completion: bool,
+    /// 输入统计。
+    #[serde(default = "on")]
+    pub stats: bool,
+}
+
+impl Default for SyncContent {
+    fn default() -> Self {
+        SyncContent {
+            learned: true,
+            completion: true,
+            stats: true,
+        }
+    }
+}
+
+impl SyncContent {
+    fn is_all_on(&self) -> bool {
+        *self == SyncContent::default()
+    }
+}
+
 /// 同步设置（设备本地，不进 config.toml）。**不含任何密码 / secret。**
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -57,6 +92,9 @@ pub struct SyncSettings {
     /// 不算换存储：切换它不影响已保存的密码。
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub skip_cert_verify: bool,
+    /// 同步哪些内容；全开时不写出。
+    #[serde(skip_serializing_if = "SyncContent::is_all_on")]
+    pub content: SyncContent,
 }
 
 impl Default for SyncSettings {
@@ -67,6 +105,7 @@ impl Default for SyncSettings {
             interval_min: DEFAULT_INTERVAL_MIN,
             device_name: String::new(),
             skip_cert_verify: false,
+            content: SyncContent::default(),
         }
     }
 }

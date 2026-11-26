@@ -69,6 +69,8 @@ pub struct Round {
     library_id: Option<String>,
     /// 本轮成功写出的设备信息。
     info_written: Option<DeviceInfo>,
+    /// 学习数据同步结果：None = 本轮没跑。
+    learn: Option<Result<(), String>>,
 }
 
 impl std::fmt::Debug for Round {
@@ -76,6 +78,9 @@ impl std::fmt::Debug for Round {
         f.write_str("Round")
     }
 }
+
+/// 学习数据同步的最短间隔（强制轮次不受限）。
+pub const LEARN_INTERVAL_SECS: u64 = 1800;
 
 /// 同步中拒绝会改状态的命令时的提示。
 const BUSY_MSG: &str = "正在同步，请稍后再试";
@@ -160,6 +165,8 @@ pub struct Runner {
     last_sent: Option<Status>,
     /// 最近一次写到远端名册的本机信息；换远端、进程重启后为空（下次必写）。
     info_written: Option<DeviceInfo>,
+    /// 学习数据上次同步成功的时间（unix 秒）。
+    learn_last_ok: u64,
     _watch: Option<watch::Watch>,
 }
 
@@ -415,6 +422,7 @@ impl Runner {
             conflicts: Vec::new(),
             last_sent: None,
             info_written: None,
+            learn_last_ok: 0,
             _watch: watch.flatten(),
         }
     }
@@ -692,6 +700,11 @@ impl Runner {
     // ── 同步 ───────────────────────────────────────────────
 
     /// 起工作线程跑一轮；结果经 `Input::RoundDone` 回主循环。
+    /// 本轮是否该同步学习数据：强制，或距上次成功已满 30 分钟。
+    fn learn_due(&self, now: u64, force: bool) -> bool {
+        force || now >= self.learn_last_ok + LEARN_INTERVAL_SECS
+    }
+
     fn start_round(&mut self) {
         let force = std::mem::take(&mut self.force_now);
         self.round_forced |= force;
@@ -711,6 +724,7 @@ impl Runner {
         ctx.force = force;
         ctx.gc = true;
         ctx.allow_mass_delete = allow_mass;
+        let learn_due = self.settings.content.learned && self.learn_due(now, force);
         let echo_before = lock(&self.echo).clone();
         let want = local_info(&self.settings, &self.state, now);
         let info_stale_now = info_stale(self.info_written.as_ref(), &want, true);
@@ -733,6 +747,10 @@ impl Runner {
             .name("sync-round".into())
             .spawn(move || {
                 let mut info_written = None;
+                // 学习数据同步的接入点（Task 9）：learn_due 为真时在此用 backend 跑一轮，
+                // 结果写入 learn。目前尚未接入，恒为 None。
+                let _ = learn_due;
+                let learn: Option<Result<(), String>> = None;
                 let result = match factory.build(&settings, &password) {
                     Err(m) => Err(m),
                     Ok(backend) => {
@@ -777,6 +795,7 @@ impl Runner {
                     echo_before,
                     failures_before,
                     library_id,
+                    learn,
                 };
                 let _ = tx.send(Input::RoundDone(Box::new(round)));
             });
@@ -822,6 +841,11 @@ impl Runner {
             self.clear_halt();
         }
         self.conflicts = r.conflicts;
+        match &r.learn {
+            Some(Ok(())) => self.learn_last_ok = r.now,
+            Some(Err(e)) => log!("学习数据同步失败: {e}"),
+            None => {}
+        }
         // 本轮扫描已完成：上一轮写下的回声记录用完，清掉（本轮重新写过的保留）
         lock(&self.echo).retain(|k, v| r.echo_before.get(k) != Some(v));
         let now = Instant::now();

@@ -309,3 +309,28 @@ fn status_without_round_fields_still_decodes() {
         ..Default::default()
     });
 }
+
+#[test]
+fn content_defaults_all_on() {
+    let s: SyncSettings = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
+    assert_eq!(s.content, SyncContent::default());
+    assert!(s.content.learned && s.content.completion && s.content.stats);
+    let s: SyncSettings = serde_json::from_str(r#"{"content":{"stats":false}}"#).unwrap();
+    assert!(s.content.learned && s.content.completion && !s.content.stats);
+}
+
+#[test]
+fn content_all_on_is_omitted_when_serialized() {
+    let v = serde_json::to_value(SyncSettings::default()).unwrap();
+    assert!(v.get("content").is_none());
+    let s = SyncSettings {
+        content: SyncContent {
+            learned: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let v = serde_json::to_value(&s).unwrap();
+    assert_eq!(v["content"]["learned"], false);
+    assert_eq!(serde_json::from_value::<SyncSettings>(v).unwrap(), s);
+}

@@ -1023,3 +1023,53 @@ fn verified_flag_is_invalidated_by_missing_or_foreign_remote() {
     assert!(!r2.joined());
     let _ = rx;
 }
+
+fn empty_round(r: &Runner, learn: Option<Result<(), String>>, now: u64) -> Round {
+    Round {
+        state: r.state.clone(),
+        result: Err("x".into()),
+        conflicts: Vec::new(),
+        now,
+        echo_before: HashMap::new(),
+        failures_before: 0,
+        library_id: None,
+        info_written: None,
+        learn,
+    }
+}
+
+#[test]
+fn learn_skipped_within_30min() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, _rx) = runner(d.path());
+    r.learn_last_ok = 10_000;
+    assert!(!r.learn_due(10_000 + LEARN_INTERVAL_SECS - 1, false));
+    assert!(r.learn_due(10_000 + LEARN_INTERVAL_SECS, false));
+}
+
+#[test]
+fn forced_round_runs_learn() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, _rx) = runner(d.path());
+    r.learn_last_ok = 10_000;
+    assert!(r.learn_due(10_001, true));
+}
+
+#[test]
+fn failed_learn_does_not_advance_last_ok() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, _rx) = runner(d.path());
+    r.learn_last_ok = 5;
+    let x = empty_round(&r, Some(Err("boom".into())), 9_999);
+    r.finish_round(x);
+    assert_eq!(r.learn_last_ok, 5);
+}
+
+#[test]
+fn ok_learn_advances_last_ok() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, _rx) = runner(d.path());
+    let x = empty_round(&r, Some(Ok(())), 9_999);
+    r.finish_round(x);
+    assert_eq!(r.learn_last_ok, 9_999);
+}
