@@ -1078,7 +1078,7 @@ fn ok_learn_advances_last_ok() {
 fn learn_round_runs_when_any_content_on() {
     let d = tempfile::tempdir().unwrap();
     let (mut r, _rx) = runner(d.path());
-    r.settings.content = SyncContent {
+    r.settings.content = wind_sync_ipc::SyncContent {
         learned: false,
         completion: true,
         stats: false,
@@ -1090,7 +1090,7 @@ fn learn_round_runs_when_any_content_on() {
 fn learn_round_never_runs_when_all_content_off() {
     let d = tempfile::tempdir().unwrap();
     let (mut r, _rx) = runner(d.path());
-    r.settings.content = SyncContent {
+    r.settings.content = wind_sync_ipc::SyncContent {
         learned: false,
         completion: false,
         stats: false,
