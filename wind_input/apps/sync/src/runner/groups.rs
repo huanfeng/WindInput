@@ -242,9 +242,20 @@ impl Runner {
         }
         let (dek, b) = self.identity_ctx()?;
         let se = |e: SyncError| sync_error(&e);
+        let roster = list_devices(&*b, &dek.devinfo_key()).map_err(se)?;
+        // 跨类别认领会把对方那一类的设置组带过来（手机拿到电脑的设置），界面已过滤，这里兜底
+        let class = self.cfg.class;
+        if roster.iter().any(|(d, r)| {
+            d == dev
+                && r.as_ref()
+                    .is_ok_and(|i| class_of_platform(&i.platform) != class)
+        }) {
+            return Err(format!(
+                "{dev} 与本机不是同一类设备（桌面与手机），不能恢复为它"
+            ));
+        }
         let mut local = self.local_all();
         self.backup_local(&local)?;
-        let roster = list_devices(&*b, &dek.devinfo_key()).map_err(se)?;
         let mut state = self.state.clone();
         let mut group = identity::claim_device(&*b, &mut state, &dek, dev).map_err(se)?;
         let from_roster = roster

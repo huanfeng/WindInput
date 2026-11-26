@@ -467,6 +467,24 @@ fn put_info(mem: &MemBackend, dek: &Dek, id: &str, group: &str, platform: &str) 
     put_device_info(mem, &dek.devinfo_key(), id, &info).unwrap();
 }
 
+/// 不能恢复为另一类设备（桌面认领手机）：报错、不备份、不动本机。
+#[test]
+fn claim_rejects_cross_class_device() {
+    let d = tempfile::tempdir().unwrap();
+    let mem = MemBackend::new();
+    let dek = remote::init_remote(&mem).unwrap();
+    put_info(&mem, &dek, "phone", "phones", "android");
+    let (mut r, _rx) = runner_with(d.path(), Box::new(MemFactory(mem)), None, "pc");
+    r.command(Op::ImportKey, &json!({"key": dek.to_key_string()}))
+        .unwrap();
+    let e = r
+        .command(Op::ClaimDevice, &json!({"dev": "phone"}))
+        .unwrap_err();
+    assert!(e.contains("不是同一类设备"), "{e}");
+    assert!(r.status().needs_identity);
+    assert!(!d.path().join("user/data/.backup").exists());
+}
+
 /// 加入不存在或跨类别的组：报错且不动本机。
 #[test]
 fn join_group_rejects_missing_or_cross_class_groups() {
