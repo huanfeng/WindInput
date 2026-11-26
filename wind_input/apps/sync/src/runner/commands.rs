@@ -20,17 +20,21 @@ impl Runner {
         Some(f(&ctx))
     }
 
-    /// 进入新库后按 `how` 初始化学习数据私有状态。失败只记日志：状态缺失时下一轮会重新判定。
-    pub(super) fn learn_join(&self, how: Joined, b: &dyn Backend) {
-        let Ok(dek) = self.dek() else {
-            return;
-        };
-        let r = self.with_learn(|c| {
+    /// 按 `how` 初始化当前库（按本机现持密钥）的学习数据私有状态。
+    pub(super) fn learn_join(&self, how: Joined, b: &dyn Backend) -> Result<(), String> {
+        let dek = self.dek()?;
+        self.with_learn(|c| {
             let mut st = Default::default();
             learn_round::init_for_library(c, &mut st, how, b, &dek.files_key())
-        });
-        if let Some(Err(e)) = r {
-            log!("初始化学习数据状态失败: {e}");
+        })
+        .unwrap_or(Ok(()))
+        .map_err(|e| format!("初始化学习数据状态失败: {e}"))
+    }
+
+    /// 删除当前库的学习数据私有状态（建库 / 重置远端失败时撤销预写的状态）。
+    pub(super) fn drop_learn_state(&self) {
+        if let Some(lib) = learn_library(&self.settings, &self.secrets) {
+            learn_round::drop_state(&self.cfg.state_dir, &lib);
         }
     }
 
@@ -159,6 +163,12 @@ impl Runner {
         let dek = Dek::generate();
         // 先存本机再发布：本机存不下就不建库，免得远端有库而用户没拿到密钥
         let prev = self.store_dek(&dek)?;
+        // 学习数据状态也先落盘：建库后若写不下，下一轮会被误判为重新加入
+        if let Err(e) = self.learn_join(Joined::ResetByMe, &*b) {
+            self.drop_learn_state();
+            self.rollback_dek(prev);
+            return Err(e);
+        }
         let published = remote::init_remote_with(&*b, &dek).map_err(|e| sync_error(&e));
         // 已知局限：回读与此处复核之间仍有极小的并发创建窗口
         let verified = published.and_then(|_| match Self::read_meta(&*b)? {
@@ -166,12 +176,12 @@ impl Runner {
             _ => Err(sync_error(&SyncError::AlreadyInitialized)),
         });
         if let Err(e) = verified {
+            self.drop_learn_state();
             self.rollback_dek(prev);
             return Err(e);
         }
         let changed = prev.as_deref() != Some(dek.to_base64().as_str());
         self.finish_adopt(changed, true);
-        self.learn_join(Joined::ResetByMe, &*b);
         log!("已生成同步密钥");
         Ok(json!({ "ok": true, "key": dek.to_key_string() }))
     }
@@ -185,12 +195,7 @@ impl Runner {
         }
         let dek = remote::join_with_key(&*b, key).map_err(|e| sync_error(&e))?;
         self.adopt_dek(&dek, false)?;
-        // 已有该库的私有状态则沿用
-        if let Some(how) = learn_library(&self.settings, &self.secrets)
-            .and_then(|lib| learn_round::import_joined(&self.cfg.state_dir, &lib))
-        {
-            self.learn_join(how, &*b);
-        }
+        // 学习数据私有状态交给首轮 ensure_state 判定（届时身份已确认，可查远端本机贡献）
         Ok(json!({ "ok": true }))
     }
 
@@ -308,7 +313,13 @@ impl Runner {
         let b = self.fresh_backend(None)?;
         let dek = Dek::generate();
         let prev = self.store_dek(&dek)?;
+        if let Err(e) = self.learn_join(Joined::ResetByMe, &*b) {
+            self.drop_learn_state();
+            self.rollback_dek(prev);
+            return Err(e);
+        }
         if let Err(e) = remote::reset_remote_with(&*b, &dek) {
+            self.drop_learn_state();
             self.rollback_dek(prev);
             return Err(sync_error(&e));
         }
@@ -324,7 +335,6 @@ impl Runner {
         self.mark_verified(library_id(self.settings.backend.as_ref()));
         self.after_user_fix();
         self.publish_info(false);
-        self.learn_join(Joined::ResetByMe, &*b);
         log!("远端已重置");
         Ok(json!({ "ok": true, "key": dek.to_key_string() }))
     }

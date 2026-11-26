@@ -64,16 +64,25 @@ impl Runner {
         format!("{JOIN_INCOMPLETE}（{msg}）")
     }
 
+    /// 号已被占用：名册里有，或学习通道下有数据（已移除设备的贡献仍在计入，占它的号会把两份当成一台）。
+    pub(super) fn id_used(b: &dyn Backend, id: &str) -> Result<bool, String> {
+        let se = |e: SyncError| sync_error(&e);
+        Ok(id_taken(b, id).map_err(se)?
+            || wind_sync::learn::lane::learn_devices(b)
+                .map_err(se)?
+                .contains(id))
+    }
+
     /// 本机号已被远端他人占用时改用首个空闲的 `<号>-<n>`。只用于未确认身份时：本机从未以这个号发布过。
     pub(super) fn ensure_free_id(&mut self, b: &dyn Backend) -> Result<(), String> {
         let se = |e: SyncError| sync_error(&e);
         let base = self.state.device.clone();
-        if !id_taken(b, &base).map_err(se)? {
+        if !Self::id_used(b, &base)? {
             return Ok(());
         }
         for n in 2..1000 {
             let id = ids::with_suffix(&base, n);
-            if !id_taken(b, &id).map_err(se)? {
+            if !Self::id_used(b, &id)? {
                 identity::rename_device(b, &mut self.state, &id).map_err(se)?;
                 // 旧号属于别的设备，不能当本机旧号删除
                 self.state.retired_ids.retain(|x| x.id != base);
@@ -113,6 +122,9 @@ impl Runner {
             return Err("新设备号与当前相同".into());
         }
         let (_, b) = self.identity_ctx()?;
+        if Self::id_used(&*b, id)? {
+            return Err(format!("设备号 {id} 不可用"));
+        }
         let old = self.state.device.clone();
         // 撞号时旧号另有主人，未确认身份时本机从未以旧号发布过：这两种情况旧号都不能删
         let retire = self.state.identity_confirmed && !self.id_conflict();
@@ -304,9 +316,12 @@ impl Runner {
             });
         }
         self.state = state;
-        self.learn_join(learn_round::Joined::Claim { dev: dev.into() }, &*b);
+        // 原号作为他机继续计入（其学习数据保留），本机贡献换成认领号的；初始化失败时状态已删，
+        // 下一轮 ensure_state 按「远端有本机贡献」重新认领
+        let learned = self.learn_join(learn_round::Joined::Claim { dev: dev.into() }, &*b);
         self.after_identity_change();
         log!("已认领设备 {dev}（组 {group}）");
+        learned.map_err(|e| format!("已认领设备 {dev}，但{e}（下一轮重试）"))?;
         Ok(json!({ "ok": true, "device": dev, "group": group }))
     }
 }

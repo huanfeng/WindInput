@@ -806,6 +806,7 @@ impl Runner {
                             && !rep.skipped
                             && !cancel.load(Ordering::SeqCst)
                         {
+                            let mut devs = None;
                             learn = Some(
                                 learn_round::exchange_and_materialize(
                                     c,
@@ -817,15 +818,18 @@ impl Runner {
                                     for w in &rep.warnings {
                                         log!("学习数据: {w}");
                                     }
+                                    devs = Some(rep.devices);
                                 }),
                             );
-                            if matches!(learn, Some(Ok(()))) {
-                                match list_devices(&*backend, &dek.devinfo_key()).and_then(|r| {
-                                    learn_round::removed_devices_with_data(&*backend, &r)
-                                }) {
-                                    Ok(v) => {
-                                        removed_with_data =
-                                            Some(v.into_iter().filter(|d| *d != device).collect())
+                            if let Some(devs) = devs {
+                                match list_devices(&*backend, &dek.devinfo_key()) {
+                                    Ok(r) => {
+                                        removed_with_data = Some(
+                                            learn_round::removed_devices_in(&devs, &r)
+                                                .into_iter()
+                                                .filter(|d| *d != device)
+                                                .collect(),
+                                        )
                                     }
                                     Err(e) => log!("查询已移除设备失败: {}", sync_error(&e)),
                                 }

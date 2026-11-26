@@ -308,3 +308,21 @@ fn fetch_device_fails_on_missing_object() {
     }
     assert!(fetch_device(&b, &k, "a").is_err());
 }
+
+#[test]
+fn publish_from_scratch_rejected_when_prefix_has_index() {
+    let (b, k) = (MemBackend::new(), fk());
+    publish(&b, &k, "a", None, &objs(&[("x", "1")])).unwrap();
+    assert!(publish(&b, &k, "a", None, &objs(&[("x", "2")])).is_err());
+}
+
+#[test]
+fn publish_reuploads_all_when_prev_index_vanished() {
+    let (b, k) = (MemBackend::new(), fk());
+    let i1 = publish(&b, &k, "a", None, &objs(&[("x", "1"), ("y", "2")])).unwrap();
+    purge_device(&b, "a").unwrap();
+    let i2 = publish(&b, &k, "a", Some(&i1), &objs(&[("x", "1"), ("y", "2")])).unwrap();
+    assert!(i2.gen_ > i1.gen_);
+    let (_, got) = fetch_device(&b, &k, "a").unwrap().unwrap();
+    assert_eq!(got, objs(&[("x", "1"), ("y", "2")]));
+}

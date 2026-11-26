@@ -3,6 +3,7 @@ use crate::testing::FakeCore;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use wind_sync::backend::{BackendError, ObjMeta};
 use wind_sync::learn::{Key, norm_key};
 use wind_sync::{Dek, MemBackend};
 
@@ -66,7 +67,7 @@ impl Dev {
         c
     }
 
-    fn round_with(&mut self, b: &MemBackend, fail_at: Option<FailPoint>) -> Result<(), String> {
+    fn round_with(&mut self, b: &dyn Backend, fail_at: Option<FailPoint>) -> Result<(), String> {
         self.now += 60;
         let ctx = self.ctx(fail_at);
         let mut st = ensure_state(&ctx, b, &key())?;
@@ -74,11 +75,11 @@ impl Dev {
         exchange_and_materialize(&ctx, b, &key(), &mut st).map(|_| ())
     }
 
-    fn round(&mut self, b: &MemBackend) {
+    fn round(&mut self, b: &dyn Backend) {
         self.round_with(b, None).unwrap();
     }
 
-    fn init(&mut self, b: &MemBackend, how: Joined) {
+    fn init(&mut self, b: &dyn Backend, how: Joined) {
         self.now += 60;
         let ctx = self.ctx(None);
         let mut st = load_state(&ctx).unwrap();
@@ -680,4 +681,102 @@ fn purged_peer_is_dropped_by_other_devices() {
     let st = load_state(&ctx).unwrap();
     assert!(!st.peer_seen.contains_key("pc-a"));
     assert!(!private_dir(&ctx).join("peers/pc-a").exists());
+}
+
+/// 列表可漏掉含某串的键、写入可对含某串的键失败；stat 不受影响（真实后端是单对象请求）。
+struct Faulty {
+    inner: MemBackend,
+    hide: Option<String>,
+    fail_put: Option<String>,
+}
+
+impl Backend for Faulty {
+    fn list(&self, prefix: &str) -> Result<Vec<ObjMeta>, BackendError> {
+        let mut v = self.inner.list(prefix)?;
+        if let Some(h) = &self.hide {
+            v.retain(|o| !o.key.contains(h.as_str()));
+        }
+        Ok(v)
+    }
+    fn get(&self, key: &str) -> Result<Option<Vec<u8>>, BackendError> {
+        self.inner.get(key)
+    }
+    fn put(&self, key: &str, bytes: &[u8]) -> Result<(), BackendError> {
+        if self.fail_put.as_deref().is_some_and(|f| key.contains(f)) {
+            return Err(BackendError::Transient("写入失败（桩）".into()));
+        }
+        self.inner.put(key, bytes)
+    }
+    fn delete(&self, key: &str) -> Result<(), BackendError> {
+        self.inner.delete(key)
+    }
+    fn stat(&self, key: &str) -> Result<Option<ObjMeta>, BackendError> {
+        self.inner.stat(key)
+    }
+}
+
+#[test]
+fn transient_list_omission_keeps_peer() {
+    let b = MemBackend::new();
+    let (mut a, mut bb) = (Dev::new("pc-a"), Dev::new("pc-b"));
+    set_freq(&a, 3);
+    set_comp(&a, 2);
+    set_freq(&bb, 4);
+    for _ in 0..2 {
+        a.round(&b);
+        bb.round(&b);
+    }
+    // b 删词立标记；a 的镜像里还有该词的旧世代行，标记不该回收
+    clear_freq(&bb);
+    bb.round(&b);
+    assert!(
+        own_contrib(&bb, "pinyin/freq", LearnKind::Freq)
+            .tombs
+            .contains_key(&w_key())
+    );
+    bb.now += wind_sync::learn::model::TOMB_MIN_AGE_SECS + 60;
+    let hiding = Faulty {
+        inner: b.clone(),
+        hide: Some("/learn/pc-a/".into()),
+        fail_put: None,
+    };
+    bb.round(&hiding);
+    assert_eq!(comp(&bb), Some(2), "列表漏掉 pc-a 不应让它的次数消失");
+    assert!(
+        own_contrib(&bb, "pinyin/freq", LearnKind::Freq)
+            .tombs
+            .contains_key(&w_key())
+    );
+    let ctx = bb.ctx(None);
+    assert!(load_state(&ctx).unwrap().peer_seen.contains_key("pc-a"));
+}
+
+#[test]
+fn own_prefix_purged_is_republished() {
+    let b = MemBackend::new();
+    let (mut a, _bb) = synced_pair(&b);
+    wind_sync::learn::lane::purge_device(&b, "pc-a").unwrap();
+    a.round(&b);
+    let mut c = Dev::new("pc-c");
+    c.round(&b);
+    assert_eq!(freq(&c), Some(7));
+}
+
+#[test]
+fn rename_publish_failure_heals_next_round() {
+    let b = MemBackend::new();
+    let (mut a, mut bb) = synced_pair(&b);
+    a.id = "pc-x".into();
+    let failing = Faulty {
+        inner: b.clone(),
+        hide: None,
+        fail_put: Some("/learn/pc-x/".into()),
+    };
+    assert!(rename_own(&a.ctx(None), &failing, &key(), true).is_err());
+    let has = |dev: &str| !b.keys(&wind_sync::manifest::learn_prefix(dev)).is_empty();
+    assert!(has("pc-a"), "发布失败时旧号前缀保留");
+    a.round(&b);
+    assert!(has("pc-x") && !has("pc-a"));
+    bb.round(&b);
+    assert_eq!(freq(&bb), Some(7), "不重复计入");
 }

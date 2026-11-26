@@ -86,6 +86,9 @@ fn list_indexes(b: &dyn Backend, prefix: &str) -> Result<Vec<(String, u64, Strin
 
 /// 发布本机的对象集合：只上传哈希相对 `prev` 变化的对象，全部成功后写新目录，
 /// 再删除新编号 − 2 及更早的旧目录。
+///
+/// `prev` 那一代目录在远端已不存在（本机前缀被清除）时按全新发布整份重传；
+/// `prev` 为 None 而远端已有该号的目录时拒绝——那是别的设备（或已移除设备）的数据。
 pub fn publish(
     b: &dyn Backend,
     key: &FilesKey,
@@ -106,7 +109,14 @@ pub fn publish(
         .map(|(_, n, _)| *n)
         .max()
         .unwrap_or(0);
+    if prev.is_none() && remote_max > 0 {
+        return Err(SyncError::Local(format!(
+            "设备号 {dev} 在学习通道下已有数据，不能从头发布"
+        )));
+    }
     let new_gen = prev.map_or(0, |p| p.gen_).max(remote_max) + 1;
+    let alive = |p: &&Index| own.iter().any(|(d, n, _)| d == dev && *n == p.gen_);
+    let prev = prev.filter(alive);
 
     let mut index = Index {
         gen_: new_gen,
@@ -137,6 +147,32 @@ pub fn publish(
     Ok(index)
 }
 
+/// 列出学习通道下的全部键（一轮只列一次，供 [`fetch_peers_in`]、[`devices_in`] 复用）。
+pub fn list_learn(b: &dyn Backend) -> Result<Vec<String>, SyncError> {
+    Ok(b.list(&learn_root())?
+        .into_iter()
+        .map(|o| o.key)
+        .filter(|k| safe_key(k))
+        .collect())
+}
+
+/// 已列键里有对象的合法设备号。
+pub fn devices_in(keys: &[String]) -> BTreeSet<String> {
+    let root = learn_root();
+    keys.iter()
+        .filter_map(|k| {
+            let (dev, _) = k.strip_prefix(&root)?.split_once('/')?;
+            valid_device_id(dev).then(|| dev.to_string())
+        })
+        .collect()
+}
+
+/// 已列键里是否有 `dev` 的第 `n` 代目录。
+pub fn has_index_in(keys: &[String], dev: &str, n: u64) -> bool {
+    let k = learn_index_key(dev, n);
+    keys.contains(&k)
+}
+
 /// 取各他机的最新目录与变化的对象。`known` = 设备 → 本地已应用的那份目录。
 pub fn fetch_peers(
     b: &dyn Backend,
@@ -144,8 +180,22 @@ pub fn fetch_peers(
     me: &str,
     known: &BTreeMap<String, Index>,
 ) -> Result<Vec<PeerUpdate>, SyncError> {
+    fetch_peers_in(b, key, me, known, &list_learn(b)?)
+}
+
+/// 同 [`fetch_peers`]，用已列出的学习通道键。
+pub fn fetch_peers_in(
+    b: &dyn Backend,
+    key: &FilesKey,
+    me: &str,
+    known: &BTreeMap<String, Index>,
+    keys: &[String],
+) -> Result<Vec<PeerUpdate>, SyncError> {
     let mut latest: BTreeMap<String, u64> = BTreeMap::new();
-    for (d, n, _) in list_indexes(b, &learn_root())? {
+    let indexes = keys
+        .iter()
+        .filter_map(|k| parse_learn_index_key(k).map(|(d, n)| (d, n, k)));
+    for (d, n, _) in indexes {
         if d != me {
             let e = latest.entry(d).or_insert(n);
             *e = (*e).max(n);
@@ -265,15 +315,7 @@ pub fn fetch_device(
 
 /// 学习通道下有对象的设备号。
 pub fn learn_devices(b: &dyn Backend) -> Result<BTreeSet<String>, SyncError> {
-    let root = learn_root();
-    Ok(b.list(&root)?
-        .into_iter()
-        .filter(|o| safe_key(&o.key))
-        .filter_map(|o| {
-            let (dev, _) = o.key.strip_prefix(&root)?.split_once('/')?;
-            valid_device_id(dev).then(|| dev.to_string())
-        })
-        .collect())
+    Ok(devices_in(&list_learn(b)?))
 }
 
 fn decode_object(key: &FilesKey, id: &str, hash: &str, raw: &[u8]) -> Result<Vec<u8>, String> {

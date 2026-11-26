@@ -1270,3 +1270,60 @@ fn reset_remote_then_rejoin_keeps_totals() {
     assert_eq!(read_freq(p.da.path()), Some(9));
     assert_eq!(read_freq(p.db.path()), Some(9));
 }
+
+#[test]
+fn create_key_fails_when_learn_state_cannot_be_written() {
+    let d = tempfile::tempdir().unwrap();
+    let mem = MemBackend::new();
+    let (mut r, _rx) = runner_with(d.path(), Box::new(MemFactory(mem.clone())), None, "pc");
+    std::fs::write(d.path().join("state/learn"), "x").unwrap();
+    let e = r.command(Op::CreateKey, &Value::Null).unwrap_err();
+    assert!(e.contains("学习数据"), "{e}");
+    assert!(mem.raw_get(&manifest::meta_key()).is_none(), "不建库");
+    assert!(r.secrets.dek.is_none(), "本机密钥回滚");
+}
+
+#[test]
+fn reset_failure_leaves_no_new_library_state() {
+    let d = tempfile::tempdir().unwrap();
+    let flaky = Flaky {
+        inner: MemBackend::new(),
+        fail_delete: Arc::new(Mutex::new(None)),
+    };
+    let (mut r, rx) = runner_with(d.path(), Box::new(FlakyFactory(flaky.clone())), None, "pc");
+    setup_pc(&mut r);
+    write_freq(d.path(), 3);
+    forced_round(&mut r, &rx);
+    let dirs = || -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(d.path().join("state/learn"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    };
+    let before = dirs();
+    *lock(&flaky.fail_delete) = Some("windinput-sync/".into());
+    assert!(
+        r.command(Op::ResetRemote, &json!({"confirm": true}))
+            .is_err()
+    );
+    assert_eq!(dirs(), before);
+}
+
+#[test]
+fn ids_with_learn_data_count_as_taken() {
+    let mut p = learn_pair();
+    p.b.command(Op::RemoveDevice, &json!({"dev": "pc", "confirm": true}))
+        .unwrap();
+    let e =
+        p.b.command(Op::RenameDevice, &json!({"id": "pc"}))
+            .unwrap_err();
+    assert!(e.contains("不可用"), "{e}");
+    let dc = tempfile::tempdir().unwrap();
+    let (mut c, _rxc) = runner_with(dc.path(), Box::new(MemFactory(p.mem.clone())), None, "pc");
+    let key = p.b.dek().unwrap().to_key_string();
+    c.command(Op::ImportKey, &json!({"key": key})).unwrap();
+    c.command(Op::ConfirmIdentity, &Value::Null).unwrap();
+    assert_eq!(c.status().device, "pc-2");
+}

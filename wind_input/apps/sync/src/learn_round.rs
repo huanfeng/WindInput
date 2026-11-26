@@ -12,7 +12,8 @@ use wind_sync::crypto::{FilesKey, content_hash, random_bytes};
 use wind_sync::devices::DeviceEntry;
 use wind_sync::learn::format::{decode, encode, needs_rebase, overlay, should_compact, split};
 use wind_sync::learn::lane::{
-    fetch_device, fetch_peers, gc_own, learn_devices, publish, purge_device,
+    devices_in, fetch_device, fetch_peers_in, gc_own, has_index_in, learn_devices, list_learn,
+    publish, purge_device,
 };
 use wind_sync::learn::model::{absorb_peer_deletes, diff, gc_tombs, materialize};
 use wind_sync::learn::state::{GroupState, LearnState, Pending};
@@ -91,6 +92,8 @@ impl<'a> LearnCtx<'a> {
 pub struct LearnReport {
     pub groups_written: usize,
     pub warnings: Vec<String>,
+    /// 本轮列出的学习通道里有数据的设备（不含本轮删掉的本机旧号）
+    pub devices: BTreeSet<String>,
 }
 
 /// 库标识 = 后端位置与 `meta.check` 拼接；换位置、换密钥、重置远端都是新库。
@@ -557,6 +560,7 @@ fn publish_own(
     b: &dyn Backend,
     key: &FilesKey,
     st: &mut LearnState,
+    keys: &[String],
     warnings: &mut Vec<String>,
 ) -> Result<(), String> {
     // 改号时没能搬完：以新号整份重发，旧号前缀随后删除
@@ -605,8 +609,9 @@ fn publish_own(
         .iter()
         .map(|(n, p)| (n.clone(), content_hash(p)))
         .collect();
+    // 本机目录在远端没了（被清除）也要重发：publish 会按全新发布整份重传
     let unchanged = match &st.own_index {
-        Some(i) => i.objects == hashes,
+        Some(i) => i.objects == hashes && has_index_in(keys, ctx.dev, i.gen_),
         None => hashes.is_empty(),
     };
     if unchanged {
@@ -632,6 +637,7 @@ fn publish_own(
 }
 
 /// 以 `ctx.dev` 从头发布本机全部对象（底稿 = 当前贡献），原发布号记入待删并尝试删除。
+/// 新号发布成功到旧号删除之间，他机会把两份各计一次；旧号删掉后的下一轮即恢复。
 fn republish_as(
     ctx: &LearnCtx,
     b: &dyn Backend,
@@ -671,10 +677,19 @@ fn republish_as(
 }
 
 /// 删除改号前的本机旧号前缀；失败的留到下一轮。
-fn purge_retired(ctx: &LearnCtx, b: &dyn Backend, st: &mut LearnState, warnings: &mut Vec<String>) {
+fn purge_retired(
+    ctx: &LearnCtx,
+    b: &dyn Backend,
+    st: &mut LearnState,
+    warnings: &mut Vec<String>,
+) -> Vec<String> {
     let before = st.retire.len();
+    let mut purged = Vec::new();
     st.retire.retain(|d| match purge_device(b, d) {
-        Ok(_) => false,
+        Ok(_) => {
+            purged.push(d.clone());
+            false
+        }
         Err(e) => {
             warnings.push(format!("删除旧号 {d} 的学习数据失败: {}", sync_error(&e)));
             true
@@ -685,6 +700,7 @@ fn purge_retired(ctx: &LearnCtx, b: &dyn Backend, st: &mut LearnState, warnings:
     {
         warnings.push(e);
     }
+    purged
 }
 
 /// 不再计入某设备：从各处依据编号里去掉，删除它的镜像。
@@ -703,31 +719,72 @@ fn forget_peer(dir: &Path, st: &mut LearnState, dev: &str) {
     }
 }
 
+/// 已计入、但确已被清除的设备：本轮列表里没有、名册里没有，且已知那一代目录 stat 确认不存在。
+/// 只凭一次列表缺席就丢弃，后端列表偶发漏项会让次数下降、删除标记被提前回收。
+fn purged_peers(b: &dyn Backend, st: &LearnState, keys: &[String]) -> Result<Vec<String>, String> {
+    let se = |e: SyncError| sync_error(&e);
+    let present = devices_in(keys);
+    let absent: BTreeSet<&String> = st
+        .peer_seen
+        .keys()
+        .chain(st.peer_index.keys())
+        .filter(|d| !present.contains(*d))
+        .collect();
+    if absent.is_empty() {
+        return Ok(Vec::new());
+    }
+    let roster = roster_ids(b).map_err(se)?;
+    let mut out = Vec::new();
+    for d in absent {
+        if roster.contains(d) {
+            continue;
+        }
+        let known = st
+            .peer_seen
+            .get(d)
+            .copied()
+            .max(st.peer_index.get(d).map(|i| i.gen_))
+            .unwrap_or(0);
+        let gone = known == 0
+            || b.stat(&wind_sync::manifest::learn_index_key(d, known))
+                .map_err(|e| se(e.into()))?
+                .is_none();
+        if gone {
+            out.push(d.clone());
+        }
+    }
+    Ok(out)
+}
+
+/// 名册（`devices/` 下）出现的设备号。
+fn roster_ids(b: &dyn Backend) -> Result<BTreeSet<String>, SyncError> {
+    let prefix = wind_sync::manifest::devices_prefix();
+    Ok(b.list(&prefix)?
+        .iter()
+        .filter_map(|o| {
+            let (dev, _) = o.key.strip_prefix(&prefix)?.split_once('/')?;
+            valid_device_id(dev).then(|| dev.to_string())
+        })
+        .collect())
+}
+
 /// 把他机新目录拉进镜像 `peers/<dev>/<编号>/`；只在目录与对象全部取到时推进该设备。
 fn fetch_mirrors(
     ctx: &LearnCtx,
     b: &dyn Backend,
     key: &FilesKey,
     st: &mut LearnState,
+    keys: &[String],
     warnings: &mut Vec<String>,
 ) -> Result<(), String> {
     let dir = private_dir(ctx);
     let mut changed = false;
-    // 前缀已被清除的设备不再计入
-    let present = learn_devices(b).map_err(|e| sync_error(&e))?;
-    let gone: BTreeSet<String> = st
-        .peer_seen
-        .keys()
-        .chain(st.peer_index.keys())
-        .filter(|d| !present.contains(*d))
-        .cloned()
-        .collect();
-    for d in gone {
+    for d in purged_peers(b, st, keys)? {
         log!("设备 {d} 的学习数据已从远端清除，不再计入");
         forget_peer(&dir, st, &d);
         changed = true;
     }
-    let ups = fetch_peers(b, key, ctx.dev, &st.peer_index).map_err(|e| sync_error(&e))?;
+    let ups = fetch_peers_in(b, key, ctx.dev, &st.peer_index, keys).map_err(|e| sync_error(&e))?;
     for u in ups {
         if !u.complete() {
             warnings.extend(u.warnings);
@@ -994,9 +1051,14 @@ pub fn exchange_and_materialize(
     st: &mut LearnState,
 ) -> Result<LearnReport, String> {
     let mut rep = LearnReport::default();
-    publish_own(ctx, b, key, st, &mut rep.warnings)?;
-    purge_retired(ctx, b, st, &mut rep.warnings);
-    fetch_mirrors(ctx, b, key, st, &mut rep.warnings)?;
+    let keys = list_learn(b).map_err(|e| sync_error(&e))?;
+    publish_own(ctx, b, key, st, &keys, &mut rep.warnings)?;
+    let purged = purge_retired(ctx, b, st, &mut rep.warnings);
+    fetch_mirrors(ctx, b, key, st, &keys, &mut rep.warnings)?;
+    rep.devices = devices_in(&keys);
+    for d in purged {
+        rep.devices.remove(&d);
+    }
     rep.groups_written = materialize_all(ctx, st, &mut rep.warnings)?;
     prune_mirrors(ctx, st);
     st.last_ok = ctx.now;
@@ -1169,6 +1231,7 @@ pub fn init_for_library(
 }
 
 /// 认领：远端 `learn/<dev>/` 的最新目录作为本机贡献与已发布底稿。
+/// 远端对象缺失或损坏时整体失败（不认领残缺的贡献），远端修好前会一直失败。
 fn adopt_remote(
     ctx: &LearnCtx,
     b: &dyn Backend,
@@ -1239,11 +1302,27 @@ pub fn removed_devices_with_data(
     b: &dyn Backend,
     roster: &[DeviceEntry],
 ) -> Result<Vec<String>, SyncError> {
+    Ok(removed_devices_in(&learn_devices(b)?, roster))
+}
+
+/// 同 [`removed_devices_with_data`]，用已列出的设备集合。
+pub fn removed_devices_in(devices: &BTreeSet<String>, roster: &[DeviceEntry]) -> Vec<String> {
     let listed: BTreeSet<&str> = roster.iter().map(|(d, _)| d.as_str()).collect();
-    Ok(learn_devices(b)?
-        .into_iter()
+    devices
+        .iter()
         .filter(|d| !listed.contains(d.as_str()))
-        .collect())
+        .cloned()
+        .collect()
+}
+
+/// 删除该库的私有目录（预写的状态作废时）。
+pub fn drop_state(state_dir: &Path, library: &str) {
+    let d = private_dir_for(state_dir, library);
+    if let Err(e) = std::fs::remove_dir_all(&d)
+        && e.kind() != io::ErrorKind::NotFound
+    {
+        log!("删除学习数据状态 {} 失败: {e}", d.display());
+    }
 }
 
 /// 清除已移除设备 `dev` 的远端学习数据，本地不再计入它（下一轮物化时次数随之减去）。
