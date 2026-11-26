@@ -21,9 +21,13 @@ fn has_data() -> bool {
 
 /// 前后鼻音 + 平翘舌全开、按 `equal_rank` 取值，敲入 `input` 后的全部候选文字（界面序）。
 fn run(input: &str, fuzzy: bool, equal_rank: bool) -> Vec<String> {
+    run_in("pinyin", input, fuzzy, equal_rank)
+}
+
+fn run_in(schema: &str, input: &str, fuzzy: bool, equal_rank: bool) -> Vec<String> {
     let mut c = Config::default();
-    c.schema.available = vec!["pinyin".into()];
-    c.schema.active = "pinyin".into();
+    c.schema.available = vec![schema.into()];
+    c.schema.active = schema.into();
     c.input.default.chinese_mode = true;
     c.input.fuzzy.enabled = fuzzy;
     c.input.fuzzy.in_ing = true;
@@ -130,5 +134,22 @@ fn on_keeps_correction_penalty() {
         "纠错输入的首位不变：{:?} / {:?}",
         &off[..5],
         &on[..5]
+    );
+}
+
+/// 混输（五笔拼音）：拼音精确档整体先于其余来源，模糊命中原先进不去，开关开着时要一视同仁。
+#[test]
+fn mixed_on_ranks_fuzzy_with_exact_pinyin() {
+    if !has_data() {
+        return;
+    }
+    let on = run_in("wubi86_pinyin", "jinxin", true, true);
+    assert_eq!(on[0], "进行", "混输里高频「进行」也居首：{:?}", &on[..8]);
+    let off = run_in("wubi86_pinyin", "jinxin", true, false);
+    assert_eq!(
+        off[0],
+        "尽心",
+        "关着时精确拼音仍先于模糊命中：{:?}",
+        &off[..8]
     );
 }

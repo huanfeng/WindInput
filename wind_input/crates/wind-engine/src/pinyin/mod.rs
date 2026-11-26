@@ -4715,7 +4715,10 @@ impl Engine for PinyinEngine {
         // 必须在截断之后置位、再稳定重排：截断前置位的话，腾位时从尾部先挤掉的就是它们，词频
         // 重排救不回来。位置也须在下方 preedit 读 `candidates.first()` 之前。
         let mut any_zero_weight = false;
+        // 统一词频：模糊命中（纠错除外）不被混输的来源分档挡在拼音精确档外。
+        let equal_rank = self.fuzzy_config.equal_rank;
         for c in candidates.iter_mut() {
+            c.meta.fuzzy_equal_rank = equal_rank && c.is_fuzzy && !c.is_corrected;
             c.is_zero_weight_reading = c.weight == 0
                 && c.code == completed
                 && c.text.chars().count() == 1

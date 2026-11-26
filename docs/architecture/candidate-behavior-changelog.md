@@ -32,6 +32,7 @@
 - 变化：`jinxin`（in↔ing 开）前：金星、精心、尽心、进行… → 后：进行、金星、精心、惊醒、警醒、静心、尽兴、尽心…。
   此前模糊命中的整句被降到最强精确整词 −1，高频的「进行」被压到权重 293，而同文的普通词典词只受 ×0.5；
   现在模糊命中不计惩罚，精确与模糊的词按原词频竞争。`sijian` 同理，「时间」升到首位。
+  混输（五笔拼音）里同样生效：模糊命中不再被挡在「拼音精确档」之外（`jinxin` 前：尽心、尽信、进行… → 后：进行、金星…）。
 - 触发条件：需开 `input.fuzzy.equal_rank` 且模糊音总开关开着；纠错（错拼）的罚分与让位不受影响。
 - 回退旧行为：`input.fuzzy.equal_rank = false`（出厂值）。
 - 钉住的测试：`wind-coordinator/tests/pinyin_fuzzy_equal_rank.rs`、`wind-engine` `fuzzy_tests.rs::penalty_edits_*`。
