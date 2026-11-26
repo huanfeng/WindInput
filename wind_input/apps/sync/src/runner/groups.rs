@@ -123,6 +123,13 @@ impl Runner {
         if !retire {
             self.state.retired_ids.retain(|x| x.id != old);
         }
+        if let Ok(dek) = self.dek() {
+            match self.with_learn(|c| learn_round::rename_own(c, &*b, &dek.files_key(), retire)) {
+                Some(Ok(ws)) => ws.iter().for_each(|w| log!("学习数据: {w}")),
+                Some(Err(e)) => log!("学习数据改号未完成，下一轮重试: {e}"),
+                None => {}
+            }
+        }
         self.after_identity_change();
         log!("设备号已改为 {id}");
         Ok(json!({ "ok": true, "device": id }))
@@ -297,6 +304,7 @@ impl Runner {
             });
         }
         self.state = state;
+        self.learn_join(learn_round::Joined::Claim { dev: dev.into() }, &*b);
         self.after_identity_change();
         log!("已认领设备 {dev}（组 {group}）");
         Ok(json!({ "ok": true, "device": dev, "group": group }))

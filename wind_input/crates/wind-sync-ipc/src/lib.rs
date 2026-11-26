@@ -274,6 +274,8 @@ pub enum Op {
     ClaimDevice,
     /// 加入同步后确认身份：以当前设备号新建单机组。
     ConfirmIdentity,
+    /// 清除已移除设备留在远端的学习数据：`{device}`，须不在名册里。
+    PurgeDevice,
 }
 
 impl Op {
@@ -363,6 +365,9 @@ pub struct Status {
     pub round: u64,
     /// 最近一轮的结果。
     pub last_round: Option<RoundStats>,
+    /// 已移除（不在名册里）但远端仍有学习数据的设备号。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub removed_with_data: Vec<String>,
 }
 
 /// 一轮同步的结果统计。

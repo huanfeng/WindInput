@@ -72,6 +72,8 @@ pub struct Round {
     info_written: Option<DeviceInfo>,
     /// 学习数据同步结果：None = 本轮没跑。
     learn: Option<Result<(), String>>,
+    /// 学习数据同步成功后查到的已移除但仍有学习数据的设备。
+    removed_with_data: Option<Vec<String>>,
 }
 
 impl std::fmt::Debug for Round {
@@ -168,6 +170,8 @@ pub struct Runner {
     info_written: Option<DeviceInfo>,
     /// 学习数据上次同步成功的时间（unix 秒）。
     learn_last_ok: u64,
+    /// 已移除但远端仍有学习数据的设备号。
+    removed_with_data: Vec<String>,
     _watch: Option<watch::Watch>,
 }
 
@@ -433,6 +437,7 @@ impl Runner {
             last_sent: None,
             info_written: None,
             learn_last_ok,
+            removed_with_data: Vec::new(),
             _watch: watch.flatten(),
         }
     }
@@ -546,6 +551,7 @@ impl Runner {
             needs_identity: self.needs_identity(),
             round: self.round_no,
             last_round: self.last_round.clone(),
+            removed_with_data: self.removed_with_data.clone(),
         }
     }
 
@@ -774,25 +780,26 @@ impl Runner {
             .spawn(move || {
                 let mut info_written = None;
                 let mut learn: Option<Result<(), String>> = None;
+                let mut removed_with_data = None;
                 let device = state.device.clone();
                 let lctx = learn_lib.as_deref().map(|lib| {
                     learn_round::LearnCtx::new(
                         &userdata, &state_dir, &*link, &device, now, content, lib,
                     )
                 });
-                // 第 2 步在文件同步之前
-                let mut lstate = None;
-                if let Some(c) = &lctx {
-                    match learn_round::load_state(c)
-                        .and_then(|mut st| learn_round::count_in(c, &mut st).map(|()| st))
-                    {
-                        Ok(st) => lstate = Some(st),
-                        Err(e) => learn = Some(Err(e)),
-                    }
-                }
                 let result = match factory.build(&settings, &password) {
                     Err(m) => Err(m),
                     Ok(backend) => {
+                        // 第 2 步在文件同步之前；私有状态缺失时先按 §4.7 初始化
+                        let mut lstate = None;
+                        if let Some(c) = &lctx {
+                            match learn_round::ensure_state(c, &*backend, &dek.files_key())
+                                .and_then(|mut st| learn_round::count_in(c, &mut st).map(|()| st))
+                            {
+                                Ok(st) => lstate = Some(st),
+                                Err(e) => learn = Some(Err(e)),
+                            }
+                        }
                         let r = sync_once(&*backend, &mut local, &mut state, &dek, &ctx);
                         // 第 3、5 步在文件同步成功之后
                         if let (Some(c), Some(st), Ok(rep)) = (&lctx, lstate.as_mut(), &r)
@@ -812,6 +819,17 @@ impl Runner {
                                     }
                                 }),
                             );
+                            if matches!(learn, Some(Ok(()))) {
+                                match list_devices(&*backend, &dek.devinfo_key()).and_then(|r| {
+                                    learn_round::removed_devices_with_data(&*backend, &r)
+                                }) {
+                                    Ok(v) => {
+                                        removed_with_data =
+                                            Some(v.into_iter().filter(|d| *d != device).collect())
+                                    }
+                                    Err(e) => log!("查询已移除设备失败: {}", sync_error(&e)),
+                                }
+                            }
                         }
                         if let Ok(rep) = &r
                             && !rep.skipped
@@ -854,6 +872,7 @@ impl Runner {
                     failures_before,
                     library_id,
                     learn,
+                    removed_with_data,
                 };
                 let _ = tx.send(Input::RoundDone(Box::new(round)));
             });
@@ -899,6 +918,9 @@ impl Runner {
             self.clear_halt();
         }
         self.conflicts = r.conflicts;
+        if let Some(v) = r.removed_with_data {
+            self.removed_with_data = v;
+        }
         match &r.learn {
             Some(Ok(())) => self.learn_last_ok = r.now,
             Some(Err(e)) => log!("学习数据同步失败: {e}"),
@@ -1038,6 +1060,7 @@ impl Runner {
                 | Op::LeaveGroup
                 | Op::ClaimDevice
                 | Op::ConfirmIdentity
+                | Op::PurgeDevice
         );
         if self.syncing && mutating {
             return Err(BUSY_MSG.into());
@@ -1059,6 +1082,7 @@ impl Runner {
             Op::LeaveGroup => self.cmd_leave_group(args),
             Op::ClaimDevice => self.cmd_claim_device(args),
             Op::ConfirmIdentity => self.cmd_confirm_identity(),
+            Op::PurgeDevice => self.cmd_purge_device(args),
         }
     }
 }

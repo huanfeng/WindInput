@@ -9,7 +9,8 @@ use wind_sync::{Dek, MemBackend};
 const FREQ_HEAD: &str = "---\ncolumns: [code, text, count, last_used]\nwind:\n  kind: freq\n  code_spacing: syllable\n  escape: true\n...\n# no comment\n";
 const TEMP_HEAD: &str = "---\ncolumns: [code, text, weight, count, created_at]\nwind:\n  kind: temp\n  escape: true\n...\n# no comment\n";
 const COMP_HEAD: &str = "---\ncolumns: [kind, text, count, last_used]\nwind: {kind: completion, escape: true}\n...\n# no comment\n";
-const LIB: &str = "lib-1";
+const LIB: &str = "loc\nk1";
+const LIB2: &str = "loc\nk2";
 const FREQ: &str = "pinyin/freq.table.yaml";
 const COMP: &str = "completion.table.yaml";
 
@@ -21,6 +22,7 @@ struct Dev {
     id: String,
     content: SyncContent,
     now: u64,
+    lib: String,
 }
 
 impl Dev {
@@ -36,6 +38,7 @@ impl Dev {
             id: id.into(),
             content: SyncContent::default(),
             now: 1_000_000,
+            lib: LIB.into(),
         }
     }
 
@@ -57,7 +60,7 @@ impl Dev {
             &self.id,
             self.now,
             self.content,
-            LIB,
+            &self.lib,
         );
         c.fail_at = fail_at;
         c
@@ -66,13 +69,20 @@ impl Dev {
     fn round_with(&mut self, b: &MemBackend, fail_at: Option<FailPoint>) -> Result<(), String> {
         self.now += 60;
         let ctx = self.ctx(fail_at);
-        let mut st = load_state(&ctx)?;
+        let mut st = ensure_state(&ctx, b, &key())?;
         count_in(&ctx, &mut st)?;
         exchange_and_materialize(&ctx, b, &key(), &mut st).map(|_| ())
     }
 
     fn round(&mut self, b: &MemBackend) {
         self.round_with(b, None).unwrap();
+    }
+
+    fn init(&mut self, b: &MemBackend, how: Joined) {
+        self.now += 60;
+        let ctx = self.ctx(None);
+        let mut st = load_state(&ctx).unwrap();
+        init_for_library(&ctx, &mut st, how, b, &key()).unwrap();
     }
 }
 
@@ -519,4 +529,155 @@ fn two_groups_one_written_adopts_per_group() {
     a.round(&b);
     assert_eq!((freq(&a), comp(&a)), (Some(8), Some(3)));
     assert_eq!((freq(&bb), comp(&bb)), (Some(8), Some(3)));
+}
+
+// ── 加入、重置、认领 ───────────────────────────────────
+
+fn own_count(d: &Dev) -> Option<u64> {
+    own_contrib(d, "pinyin/freq", LearnKind::Freq)
+        .rows
+        .get(&w_key())
+        .map(|(_, r)| r.count)
+}
+
+/// a 3、b 4 同步到 7。
+fn synced_pair(b: &MemBackend) -> (Dev, Dev) {
+    let (mut a, mut bb) = (Dev::new("pc-a"), Dev::new("pc-b"));
+    set_freq(&a, 3);
+    set_freq(&bb, 4);
+    for _ in 0..2 {
+        a.round(b);
+        bb.round(b);
+    }
+    assert_eq!((freq(&a), freq(&bb)), (Some(7), Some(7)));
+    (a, bb)
+}
+
+#[test]
+fn fresh_join_contributes_local_file() {
+    let b = MemBackend::new();
+    let (mut a, mut bb) = (Dev::new("pc-a"), Dev::new("pc-b"));
+    set_freq(&a, 3);
+    set_freq(&bb, 4);
+    bb.round(&b);
+    assert_eq!(import_joined(&a.state, &a.lib), Some(Joined::Fresh));
+    a.init(&b, Joined::Fresh);
+    assert_eq!(import_joined(&a.state, &a.lib), None, "已有该库状态则沿用");
+    a.round(&b);
+    assert_eq!(own_count(&a), Some(3), "当前文件全部计入");
+    bb.round(&b);
+    assert_eq!((freq(&a), freq(&bb)), (Some(7), Some(7)));
+}
+
+/// a 重置远端（新库）：贡献 = 当前文件全部（已含 b 的那部分）。
+fn reset_by_a(a: &mut Dev) -> MemBackend {
+    let b2 = MemBackend::new();
+    a.lib = LIB2.into();
+    a.init(&b2, Joined::ResetByMe);
+    b2
+}
+
+#[test]
+fn reset_by_me_absorbs_totals() {
+    let b = MemBackend::new();
+    let (mut a, _bb) = synced_pair(&b);
+    let b2 = reset_by_a(&mut a);
+    a.round(&b2);
+    assert_eq!(own_count(&a), Some(7));
+    let mut c = Dev::new("pc-c");
+    c.lib = LIB2.into();
+    c.round(&b2);
+    assert_eq!(freq(&c), Some(7));
+    assert_eq!(freq(&a), Some(7));
+}
+
+#[test]
+fn rejoin_after_peer_reset_adds_only_new() {
+    let b = MemBackend::new();
+    let (mut a, mut bb) = synced_pair(&b);
+    let b2 = reset_by_a(&mut a);
+    a.round(&b2);
+    // b 在旧库最后一次同步之后又学了 2 次，再用新密钥加入
+    set_freq(&bb, 9);
+    bb.lib = LIB2.into();
+    assert_eq!(import_joined(&bb.state, &bb.lib), Some(Joined::Rejoin));
+    bb.init(&b2, Joined::Rejoin);
+    assert_eq!(own_count(&bb), Some(2));
+    bb.round(&b2);
+    a.round(&b2);
+    assert_eq!((freq(&a), freq(&bb)), (Some(9), Some(9)));
+}
+
+#[test]
+fn rejoin_drops_lowered_and_deleted_keys() {
+    let b = MemBackend::new();
+    let (mut a, mut bb) = synced_pair(&b);
+    let b2 = reset_by_a(&mut a);
+    a.round(&b2);
+    set_freq(&bb, 5);
+    bb.lib = LIB2.into();
+    bb.init(&b2, Joined::Rejoin);
+    let c = own_contrib(&bb, "pinyin/freq", LearnKind::Freq);
+    assert!(c.rows.is_empty() && c.tombs.is_empty(), "{c:?}");
+    assert_eq!(c.epoch, Gen::initial());
+}
+
+#[test]
+fn claim_adopts_remote_contribution() {
+    let b = MemBackend::new();
+    let (_a, mut bb) = synced_pair(&b);
+    // 新装的机器恢复为 pc-a；本机原有的学习数据视为已计入
+    let mut c = Dev::new("pc-a");
+    set_freq(&c, 10);
+    c.init(&b, Joined::Claim { dev: "pc-a".into() });
+    assert_eq!(own_count(&c), Some(3));
+    c.round(&b);
+    bb.round(&b);
+    assert_eq!((freq(&c), freq(&bb)), (Some(7), Some(7)));
+}
+
+#[test]
+fn state_lost_but_remote_has_mine_redownloads() {
+    let b = MemBackend::new();
+    let (mut a, mut bb) = synced_pair(&b);
+    std::fs::remove_dir_all(a.state.join("learn")).unwrap();
+    a.round(&b);
+    assert_eq!(
+        own_count(&a),
+        Some(3),
+        "沿用远端的本机贡献，不按新设备计入 7"
+    );
+    bb.round(&b);
+    assert_eq!((freq(&a), freq(&bb)), (Some(7), Some(7)));
+}
+
+#[test]
+fn private_dirs_of_same_location_share_prefix() {
+    let s = Path::new("/s");
+    let (d1, d2) = (private_dir_for(s, LIB), private_dir_for(s, LIB2));
+    let n = |p: &Path| p.file_name().unwrap().to_string_lossy().into_owned();
+    let (n1, n2) = (n(&d1), n(&d2));
+    assert_ne!(n1, n2);
+    assert_eq!(n1.split_once('-').unwrap().0, n2.split_once('-').unwrap().0);
+    assert_ne!(
+        n(&private_dir_for(s, "elsewhere\nk1"))
+            .split_once('-')
+            .unwrap()
+            .0,
+        n1.split_once('-').unwrap().0
+    );
+}
+
+#[test]
+fn purged_peer_is_dropped_by_other_devices() {
+    let b = MemBackend::new();
+    let (_a, mut bb) = synced_pair(&b);
+    // 另一台设备清除了 pc-a 的学习数据
+    wind_sync::learn::lane::purge_device(&b, "pc-a").unwrap();
+    bb.round(&b);
+    assert_eq!(freq(&bb), Some(4));
+    let ctx = bb.ctx(None);
+    let st = load_state(&ctx).unwrap();
+    assert!(!st.peer_seen.contains_key("pc-a"));
+    assert!(!private_dir(&ctx).join("peers/pc-a").exists());
 }

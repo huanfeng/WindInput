@@ -1,8 +1,50 @@
-//! 密钥与存储相关的命令：凭据、测试连接、同步密钥（生成 / 导入 / 查看）、立即同步、设备列表、重置远端。
+//! 密钥与存储相关的命令：凭据、测试连接、同步密钥（生成 / 导入 / 查看）、立即同步、设备列表、重置远端、
+//! 清除已移除设备的学习数据。
 
 use super::*;
+use learn_round::{Joined, LearnCtx};
 
 impl Runner {
+    /// 以当前库与本机号构造学习数据上下文执行 `f`；没有库标识（未配置或无密钥）返回 None。
+    pub(super) fn with_learn<T>(&self, f: impl FnOnce(&LearnCtx) -> T) -> Option<T> {
+        let lib = learn_library(&self.settings, &self.secrets)?;
+        let ctx = LearnCtx::new(
+            &self.cfg.userdata_dir,
+            &self.cfg.state_dir,
+            &*self.cfg.link,
+            &self.state.device,
+            now_unix(),
+            self.settings.content,
+            &lib,
+        );
+        Some(f(&ctx))
+    }
+
+    /// 进入新库后按 `how` 初始化学习数据私有状态。失败只记日志：状态缺失时下一轮会重新判定。
+    pub(super) fn learn_join(&self, how: Joined, b: &dyn Backend) {
+        let Ok(dek) = self.dek() else {
+            return;
+        };
+        let r = self.with_learn(|c| {
+            let mut st = Default::default();
+            learn_round::init_for_library(c, &mut st, how, b, &dek.files_key())
+        });
+        if let Some(Err(e)) = r {
+            log!("初始化学习数据状态失败: {e}");
+        }
+    }
+
+    /// 由名册与学习通道重算「已移除但仍有学习数据」的设备（不含本机）。
+    pub(super) fn refresh_removed(&mut self, b: &dyn Backend, roster: &[DeviceEntry]) {
+        match learn_round::removed_devices_with_data(b, roster) {
+            Ok(v) => {
+                let me = self.state.device.clone();
+                self.removed_with_data = v.into_iter().filter(|d| *d != me).collect();
+            }
+            Err(e) => log!("查询已移除设备失败: {}", sync_error(&e)),
+        }
+    }
+
     /// 用户处理完问题（改凭据 / 同步密钥）后：解除停止态、丢旧连接、稍后同步。
     pub(super) fn after_user_fix(&mut self) {
         self.clear_halt();
@@ -94,6 +136,7 @@ impl Runner {
             self.state.group = device;
             self.state.identity_confirmed = init;
             self.info_written = None;
+            self.removed_with_data.clear();
         }
         self.mark_verified(library_id(self.settings.backend.as_ref()));
         self.after_user_fix();
@@ -128,6 +171,7 @@ impl Runner {
         }
         let changed = prev.as_deref() != Some(dek.to_base64().as_str());
         self.finish_adopt(changed, true);
+        self.learn_join(Joined::ResetByMe, &*b);
         log!("已生成同步密钥");
         Ok(json!({ "ok": true, "key": dek.to_key_string() }))
     }
@@ -141,6 +185,12 @@ impl Runner {
         }
         let dek = remote::join_with_key(&*b, key).map_err(|e| sync_error(&e))?;
         self.adopt_dek(&dek, false)?;
+        // 已有该库的私有状态则沿用
+        if let Some(how) = learn_library(&self.settings, &self.secrets)
+            .and_then(|lib| learn_round::import_joined(&self.cfg.state_dir, &lib))
+        {
+            self.learn_join(how, &*b);
+        }
         Ok(json!({ "ok": true }))
     }
 
@@ -197,6 +247,7 @@ impl Runner {
         let dek = self.dek().map_err(|_| "本机尚未加入加密同步".to_string())?;
         let b = self.fresh_backend(None)?;
         let list = list_devices(&*b, &dek.devinfo_key()).map_err(|e| sync_error(&e))?;
+        self.refresh_removed(&*b, &list);
         let before = self.state.group_name_at;
         adopt_group_name(&mut self.state, &list);
         if self.state.group_name_at != before {
@@ -226,7 +277,7 @@ impl Runner {
         Ok(json!({ "devices": devices }))
     }
 
-    /// 删除某设备在远端的清单与设备信息。它若仍在运行，下次同步会重新出现。
+    /// 删除某设备在远端的清单与设备信息（学习数据保留、继续计入）。它若仍在运行，下次同步会重新出现。
     pub(super) fn cmd_remove_device(&mut self, args: &Value) -> Result<Value, String> {
         if args.get("confirm").and_then(Value::as_bool) != Some(true) {
             return Err("移除设备须明确确认（confirm=true）".into());
@@ -240,6 +291,12 @@ impl Runner {
         let b = self.fresh_backend(None)?;
         let removed = remove_device(&*b, dev).map_err(|e| sync_error(&e))?;
         log!("已移除设备 {dev}（{removed} 个对象）");
+        if let Ok(dek) = self.dek() {
+            match list_devices(&*b, &dek.devinfo_key()) {
+                Ok(roster) => self.refresh_removed(&*b, &roster),
+                Err(e) => log!("查询设备名册失败: {}", sync_error(&e)),
+            }
+        }
         Ok(json!({ "ok": true, "removed": removed }))
     }
 
@@ -263,10 +320,37 @@ impl Runner {
         fresh.identity_confirmed = true;
         self.state = fresh;
         self.info_written = None;
+        self.removed_with_data.clear();
         self.mark_verified(library_id(self.settings.backend.as_ref()));
         self.after_user_fix();
         self.publish_info(false);
+        self.learn_join(Joined::ResetByMe, &*b);
         log!("远端已重置");
         Ok(json!({ "ok": true, "key": dek.to_key_string() }))
+    }
+
+    /// 清除已移除设备在远端的学习数据，各设备次数随之减去它那部分。只允许不在名册里的设备。
+    pub(super) fn cmd_purge_device(&mut self, args: &Value) -> Result<Value, String> {
+        let dev = str_arg(args, "device")
+            .filter(|d| !d.is_empty())
+            .ok_or("缺少参数 device")?;
+        if dev == self.state.device {
+            return Err("不能清除本机的学习数据".into());
+        }
+        let (dek, b) = self.identity_ctx()?;
+        let roster = list_devices(&*b, &dek.devinfo_key()).map_err(|e| sync_error(&e))?;
+        if roster.iter().any(|(d, _)| d == dev) {
+            return Err(format!("设备 {dev} 仍在名册里，须先移除"));
+        }
+        let n = match self.with_learn(|c| learn_round::purge_peer(c, &*b, dev)) {
+            Some(r) => r?,
+            None => wind_sync::learn::lane::purge_device(&*b, dev).map_err(|e| sync_error(&e))?,
+        };
+        self.refresh_removed(&*b, &roster);
+        // 尽快跑一轮学习数据，把它的贡献从本地合计里去掉
+        self.learn_last_ok = 0;
+        self.kick();
+        log!("已清除设备 {dev} 的学习数据（{n} 个对象）");
+        Ok(json!({ "ok": true, "removed": n }))
     }
 }

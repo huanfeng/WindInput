@@ -1035,6 +1035,7 @@ fn empty_round(r: &Runner, learn: Option<Result<(), String>>, now: u64) -> Round
         library_id: None,
         info_written: None,
         learn,
+        removed_with_data: None,
     }
 }
 
@@ -1126,4 +1127,146 @@ fn round_publishes_learned_data_and_restart_loads_last_ok() {
     drop(r);
     let (r2, _rx2) = runner_with(d.path(), Box::new(MemFactory(mem)), Some(dek), "pc");
     assert_eq!(r2.learn_last_ok, last_ok);
+}
+
+// ── 学习数据：改号、移除、清除 ─────────────────────────
+
+const FREQ_FILE: &str = "user/data/pinyin/freq.table.yaml";
+
+fn write_freq(dir: &std::path::Path, n: u64) {
+    let p = dir.join(FREQ_FILE);
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(
+        &p,
+        format!("---\ncolumns: [code, text, count, last_used]\nwind:\n  kind: freq\n  escape: true\n...\n# no comment\nni\t你\t{n}\t1\n"),
+    )
+    .unwrap();
+}
+
+fn read_freq(dir: &std::path::Path) -> Option<u64> {
+    use wind_sync::learn::{Key, LearnKind, norm_key, table};
+    let b = std::fs::read(dir.join(FREQ_FILE)).ok()?;
+    let f = table::parse(LearnKind::Freq, Some(&b)).unwrap();
+    let nk = norm_key(LearnKind::Freq, &Key("ni".into(), "你".into()));
+    f.rows.get(&nk).map(|r| r.1)
+}
+
+fn forced_round(r: &mut Runner, rx: &Receiver<Input>) {
+    r.command(Op::SyncNow, &Value::Null).unwrap();
+    round(r, rx);
+}
+
+fn has_learn(mem: &MemBackend, dev: &str) -> bool {
+    !mem.keys(&wind_sync::manifest::learn_prefix(dev)).is_empty()
+}
+
+#[test]
+fn rename_moves_prefix() {
+    let d = tempfile::tempdir().unwrap();
+    let mem = MemBackend::new();
+    let (mut r, rx) = runner_with(d.path(), Box::new(MemFactory(mem.clone())), None, "pc");
+    setup_pc(&mut r);
+    write_freq(d.path(), 3);
+    forced_round(&mut r, &rx);
+    assert!(has_learn(&mem, "pc"));
+    r.command(Op::RenameDevice, &json!({"id": "home"})).unwrap();
+    assert!(
+        !has_learn(&mem, "pc"),
+        "{:?}",
+        mem.keys("windinput-sync/v1/learn/")
+    );
+    assert!(has_learn(&mem, "home"));
+    forced_round(&mut r, &rx);
+    assert!(!has_learn(&mem, "pc"));
+    assert_eq!(read_freq(d.path()), Some(3));
+}
+
+/// pc 3、lap 4 同步到 7。
+struct Pair {
+    da: tempfile::TempDir,
+    a: Runner,
+    rxa: Receiver<Input>,
+    db: tempfile::TempDir,
+    mem: MemBackend,
+    b: Runner,
+    rxb: Receiver<Input>,
+}
+
+fn learn_pair() -> Pair {
+    let mem = MemBackend::new();
+    let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (mut a, rxa) = runner_with(da.path(), Box::new(MemFactory(mem.clone())), None, "pc");
+    setup_pc(&mut a);
+    write_freq(da.path(), 3);
+    forced_round(&mut a, &rxa);
+    let (mut b, rxb) = runner_with(db.path(), Box::new(MemFactory(mem.clone())), None, "lap");
+    let key = a.dek().unwrap().to_key_string();
+    b.command(Op::ImportKey, &json!({"key": key})).unwrap();
+    b.command(Op::ConfirmIdentity, &Value::Null).unwrap();
+    write_freq(db.path(), 4);
+    forced_round(&mut b, &rxb);
+    forced_round(&mut a, &rxa);
+    assert_eq!(read_freq(da.path()), Some(7));
+    assert_eq!(read_freq(db.path()), Some(7));
+    Pair {
+        da,
+        a,
+        rxa,
+        db,
+        mem,
+        b,
+        rxb,
+    }
+}
+
+#[test]
+fn remove_keeps_learn_data_and_counts() {
+    let mut p = learn_pair();
+    p.b.command(Op::RemoveDevice, &json!({"dev": "pc", "confirm": true}))
+        .unwrap();
+    assert!(has_learn(&p.mem, "pc"));
+    assert_eq!(p.b.status().removed_with_data, ["pc"]);
+    forced_round(&mut p.b, &p.rxb);
+    assert_eq!(read_freq(p.db.path()), Some(7));
+    assert_eq!(p.b.status().removed_with_data, ["pc"]);
+}
+
+#[test]
+fn purge_drops_device_and_counts_fall() {
+    let mut p = learn_pair();
+    let e =
+        p.b.command(Op::PurgeDevice, &json!({"device": "pc"}))
+            .unwrap_err();
+    assert!(e.contains("名册"), "{e}");
+    p.b.command(Op::RemoveDevice, &json!({"dev": "pc", "confirm": true}))
+        .unwrap();
+    assert!(
+        p.b.command(Op::PurgeDevice, &json!({"device": "lap"}))
+            .is_err()
+    );
+    p.b.command(Op::PurgeDevice, &json!({"device": "pc"}))
+        .unwrap();
+    assert!(!has_learn(&p.mem, "pc"));
+    assert!(p.b.status().removed_with_data.is_empty());
+    forced_round(&mut p.b, &p.rxb);
+    assert_eq!(read_freq(p.db.path()), Some(4));
+}
+
+#[test]
+fn reset_remote_then_rejoin_keeps_totals() {
+    let mut p = learn_pair();
+    let key =
+        p.a.command(Op::ResetRemote, &json!({"confirm": true}))
+            .unwrap()["key"]
+            .as_str()
+            .unwrap()
+            .to_string();
+    forced_round(&mut p.a, &p.rxa);
+    write_freq(p.db.path(), 9);
+    p.b.command(Op::ImportKey, &json!({"key": key})).unwrap();
+    p.b.command(Op::ConfirmIdentity, &Value::Null).unwrap();
+    forced_round(&mut p.b, &p.rxb);
+    forced_round(&mut p.a, &p.rxa);
+    assert_eq!(read_freq(p.da.path()), Some(9));
+    assert_eq!(read_freq(p.db.path()), Some(9));
 }

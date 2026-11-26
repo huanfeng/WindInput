@@ -8,15 +8,18 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
-use wind_sync::Backend;
 use wind_sync::crypto::{FilesKey, content_hash, random_bytes};
+use wind_sync::devices::DeviceEntry;
 use wind_sync::learn::format::{decode, encode, needs_rebase, overlay, should_compact, split};
-use wind_sync::learn::lane::{fetch_peers, gc_own, publish};
+use wind_sync::learn::lane::{
+    fetch_device, fetch_peers, gc_own, learn_devices, publish, purge_device,
+};
 use wind_sync::learn::model::{absorb_peer_deletes, diff, gc_tombs, materialize};
 use wind_sync::learn::state::{GroupState, LearnState, Pending};
 use wind_sync::learn::table::{self, LearnedFile};
 use wind_sync::learn::{Contribution, Gen, LearnKind};
 use wind_sync::manifest::valid_device_id;
+use wind_sync::{Backend, SyncError};
 use wind_sync_ipc::SyncContent;
 
 use crate::errors::sync_error;
@@ -95,9 +98,21 @@ pub fn library_key(location: &str, check: &str) -> String {
     format!("{location}\n{check}")
 }
 
+/// (后端位置, `meta.check`)；没有分隔符时整串当位置。
+fn split_library(library: &str) -> (&str, &str) {
+    library.rsplit_once('\n').unwrap_or((library, ""))
+}
+
+fn short_hash(s: &str) -> String {
+    content_hash(s.as_bytes())[..12].to_string()
+}
+
+/// `<位置短哈希>-<check 短哈希>`：同一位置的各库共用前缀。
 fn private_dir_for(state_dir: &Path, library: &str) -> PathBuf {
-    let h = content_hash(library.as_bytes());
-    state_dir.join("learn").join(&h[..16.min(h.len())])
+    let (loc, check) = split_library(library);
+    state_dir
+        .join("learn")
+        .join(format!("{}-{}", short_hash(loc), short_hash(check)))
 }
 
 pub fn private_dir(ctx: &LearnCtx) -> PathBuf {
@@ -456,16 +471,19 @@ fn read_learned(
     Ok(Some((f, text)))
 }
 
+/// 学习文件头里的物化令牌。
+fn disk_token(userdata: &Path, name: &str) -> Option<String> {
+    let (_, rel) = group_file(name)?;
+    let b = std::fs::read(data_abs(userdata, &rel)).ok()?;
+    table::token_of(&b)
+}
+
 // ── 第 2 步：计入 ─────────────────────────────────────
 
 /// 采用或丢弃上一轮的待定记录，再把各组 `F − M` 计入本机贡献并原子保存 `{C, M = F}`。
 pub fn count_in(ctx: &LearnCtx, st: &mut LearnState) -> Result<(), String> {
     if st.pending.is_some() {
-        let r = st.resolve_pending(|name| {
-            let (_, rel) = group_file(name)?;
-            let b = std::fs::read(data_abs(ctx.userdata, &rel)).ok()?;
-            table::token_of(&b)
-        });
+        let r = st.resolve_pending(|name| disk_token(ctx.userdata, name));
         if !r.dropped.is_empty() {
             log!("上次物化未写成，沿用已提交状态: {}", r.dropped.join("、"));
         }
@@ -541,6 +559,10 @@ fn publish_own(
     st: &mut LearnState,
     warnings: &mut Vec<String>,
 ) -> Result<(), String> {
+    // 改号时没能搬完：以新号整份重发，旧号前缀随后删除
+    if st.own_index.is_some() && !st.device.is_empty() && st.device != ctx.dev {
+        return republish_as(ctx, b, key, st, warnings);
+    }
     let mut objects: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     let mut rebased: Vec<(String, String)> = Vec::new();
     for (name, gs) in &st.groups {
@@ -600,12 +622,85 @@ fn publish_own(
     }
     st.index_gen = idx.gen_;
     st.own_index = Some(idx.clone());
+    st.device = ctx.dev.to_string();
     save(ctx, st)?;
     let keep: Vec<_> = std::iter::once(&idx).chain(prev.as_ref()).collect();
     if let Err(e) = gc_own(b, key, ctx.dev, &keep, ctx.now) {
         warnings.push(format!("回收本机学习数据对象失败: {}", sync_error(&e)));
     }
     Ok(())
+}
+
+/// 以 `ctx.dev` 从头发布本机全部对象（底稿 = 当前贡献），原发布号记入待删并尝试删除。
+fn republish_as(
+    ctx: &LearnCtx,
+    b: &dyn Backend,
+    key: &FilesKey,
+    st: &mut LearnState,
+    warnings: &mut Vec<String>,
+) -> Result<(), String> {
+    let mut objects: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let mut bases = Vec::new();
+    for (name, gs) in &st.groups {
+        let Some((kind, _)) = group_file(name) else {
+            continue;
+        };
+        let full = contrib_of(kind, &gs.contrib)?;
+        if !gs.last_base.is_empty() || (kind_on(ctx.content, kind) && !is_empty(&full)) {
+            let text = encode(&full);
+            objects.insert(format!("{name}.base"), text.clone().into_bytes());
+            bases.push((name.clone(), text));
+        }
+    }
+    let idx = publish(b, key, ctx.dev, None, &objects).map_err(|e| sync_error(&e))?;
+    for (name, text) in bases {
+        if let Some(g) = st.groups.get_mut(&name) {
+            g.last_base = text;
+            g.base_at = ctx.now;
+        }
+    }
+    let old = std::mem::replace(&mut st.device, ctx.dev.to_string());
+    if !old.is_empty() && old != ctx.dev && !st.retire.contains(&old) {
+        st.retire.push(old);
+    }
+    st.index_gen = idx.gen_;
+    st.own_index = Some(idx);
+    save(ctx, st)?;
+    purge_retired(ctx, b, st, warnings);
+    Ok(())
+}
+
+/// 删除改号前的本机旧号前缀；失败的留到下一轮。
+fn purge_retired(ctx: &LearnCtx, b: &dyn Backend, st: &mut LearnState, warnings: &mut Vec<String>) {
+    let before = st.retire.len();
+    st.retire.retain(|d| match purge_device(b, d) {
+        Ok(_) => false,
+        Err(e) => {
+            warnings.push(format!("删除旧号 {d} 的学习数据失败: {}", sync_error(&e)));
+            true
+        }
+    });
+    if st.retire.len() != before
+        && let Err(e) = save(ctx, st)
+    {
+        warnings.push(e);
+    }
+}
+
+/// 不再计入某设备：从各处依据编号里去掉，删除它的镜像。
+fn forget_peer(dir: &Path, st: &mut LearnState, dev: &str) {
+    st.peer_seen.remove(dev);
+    st.peer_index.remove(dev);
+    let pending = st.pending.iter_mut().flat_map(|p| p.groups.values_mut());
+    for g in st.groups.values_mut().chain(pending) {
+        g.peer_seen.remove(dev);
+    }
+    let p = dir.join("peers").join(dev);
+    if let Err(e) = std::fs::remove_dir_all(&p)
+        && e.kind() != io::ErrorKind::NotFound
+    {
+        log!("删除镜像 {} 失败: {e}", p.display());
+    }
 }
 
 /// 把他机新目录拉进镜像 `peers/<dev>/<编号>/`；只在目录与对象全部取到时推进该设备。
@@ -617,8 +712,22 @@ fn fetch_mirrors(
     warnings: &mut Vec<String>,
 ) -> Result<(), String> {
     let dir = private_dir(ctx);
-    let ups = fetch_peers(b, key, ctx.dev, &st.peer_index).map_err(|e| sync_error(&e))?;
     let mut changed = false;
+    // 前缀已被清除的设备不再计入
+    let present = learn_devices(b).map_err(|e| sync_error(&e))?;
+    let gone: BTreeSet<String> = st
+        .peer_seen
+        .keys()
+        .chain(st.peer_index.keys())
+        .filter(|d| !present.contains(*d))
+        .cloned()
+        .collect();
+    for d in gone {
+        log!("设备 {d} 的学习数据已从远端清除，不再计入");
+        forget_peer(&dir, st, &d);
+        changed = true;
+    }
+    let ups = fetch_peers(b, key, ctx.dev, &st.peer_index).map_err(|e| sync_error(&e))?;
     for u in ups {
         if !u.complete() {
             warnings.extend(u.warnings);
@@ -886,12 +995,266 @@ pub fn exchange_and_materialize(
 ) -> Result<LearnReport, String> {
     let mut rep = LearnReport::default();
     publish_own(ctx, b, key, st, &mut rep.warnings)?;
+    purge_retired(ctx, b, st, &mut rep.warnings);
     fetch_mirrors(ctx, b, key, st, &mut rep.warnings)?;
     rep.groups_written = materialize_all(ctx, st, &mut rep.warnings)?;
     prune_mirrors(ctx, st);
     st.last_ok = ctx.now;
     save(ctx, st)?;
     Ok(rep)
+}
+
+// ── 加入、重置、认领、改号、清除 ───────────────────────
+
+/// 本机以何种方式进入一个同步库（设计 §4.7）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Joined {
+    /// 首次加入：贡献 = 当前文件全部。
+    Fresh,
+    /// 本机重置远端或在新位置建库：贡献 = 当前文件全部（已含旧库各设备合计）。
+    ResetByMe,
+    /// 别的设备重置后用新密钥加入：贡献 = 当前文件相对旧库基线的新增。
+    Rejoin,
+    /// 认领设备号 `dev`：贡献 = 远端 `learn/<dev>/`，本机现有数据视为已计入。
+    Claim { dev: String },
+}
+
+/// 该库的私有状态是否存在。
+pub fn has_state(state_dir: &Path, library: &str) -> bool {
+    private_dir_for(state_dir, library)
+        .join(STATE_FILE)
+        .is_file()
+}
+
+/// 同一后端位置下、`meta.check` 不同的库里最近更新的那份私有状态。
+fn old_library(state_dir: &Path, library: &str) -> Option<LearnState> {
+    let me = private_dir_for(state_dir, library);
+    let (loc, _) = split_library(library);
+    let prefix = format!("{}-", short_hash(loc));
+    let mut best: Option<(std::time::SystemTime, LearnState)> = None;
+    for e in std::fs::read_dir(state_dir.join("learn")).ok()?.flatten() {
+        let p = e.path();
+        if p == me || !e.file_name().to_string_lossy().starts_with(&prefix) {
+            continue;
+        }
+        let sf = p.join(STATE_FILE);
+        let Ok(t) = std::fs::metadata(&sf).and_then(|m| m.modified()) else {
+            continue;
+        };
+        let Ok(st) = LearnState::load(&sf) else {
+            continue;
+        };
+        if split_library(&st.library).0 != loc || st.library == library {
+            continue;
+        }
+        if best.as_ref().is_none_or(|(bt, _)| t > *bt) {
+            best = Some((t, st));
+        }
+    }
+    best.map(|(_, s)| s)
+}
+
+/// 用同步密钥加入 `library` 时的处理：已有该库状态返回 None（沿用），同位置有旧库为 `Rejoin`，否则 `Fresh`。
+pub fn import_joined(state_dir: &Path, library: &str) -> Option<Joined> {
+    if has_state(state_dir, library) {
+        None
+    } else if old_library(state_dir, library).is_some() {
+        Some(Joined::Rejoin)
+    } else {
+        Some(Joined::Fresh)
+    }
+}
+
+/// 读私有状态；没有时先初始化：远端有本机贡献则重新下载（不按新设备计入），否则按加入规则。
+pub fn ensure_state(ctx: &LearnCtx, b: &dyn Backend, key: &FilesKey) -> Result<LearnState, String> {
+    let mut st = load_state(ctx)?;
+    if has_state(ctx.state_dir, ctx.library) {
+        return Ok(st);
+    }
+    let mine = learn_devices(b)
+        .map_err(|e| sync_error(&e))?
+        .contains(ctx.dev);
+    let how = if mine {
+        Joined::Claim {
+            dev: ctx.dev.to_string(),
+        }
+    } else {
+        import_joined(ctx.state_dir, ctx.library).unwrap_or(Joined::Fresh)
+    };
+    log!("学习数据私有状态不存在，按 {how:?} 初始化");
+    init_for_library(ctx, &mut st, how, b, key)?;
+    Ok(st)
+}
+
+/// 只留新增：去掉被调低、删除的键与纪元，世代归初始（新库里还没有任何删除标记）。
+fn keep_additions(me: &mut Contribution) {
+    let tombs = std::mem::take(&mut me.tombs);
+    me.rows
+        .retain(|nk, (_, r)| !tombs.contains_key(nk) && r.count > 0);
+    for (_, r) in me.rows.values_mut() {
+        r.gen_ = Gen::initial();
+    }
+    me.epoch = Gen::initial();
+}
+
+/// 按 §4.7 重建该库的私有状态，保存后写回 `st`。`Rejoin`/`Claim` 不论同步内容开关，
+/// 全部学习文件都记基线 M = 当前文件。
+pub fn init_for_library(
+    ctx: &LearnCtx,
+    st: &mut LearnState,
+    how: Joined,
+    b: &dyn Backend,
+    key: &FilesKey,
+) -> Result<(), String> {
+    // 先删旧状态：中途失败时状态缺失，下一轮重新判定，而不是沿用另一身份下的状态
+    let sf = private_dir(ctx).join(STATE_FILE);
+    if let Err(e) = std::fs::remove_file(&sf)
+        && e.kind() != io::ErrorKind::NotFound
+    {
+        return Err(format!("删除旧的学习数据状态失败: {e}"));
+    }
+    let mut ns = LearnState {
+        library: ctx.library.to_string(),
+        ..Default::default()
+    };
+    let mut old = match how {
+        Joined::Rejoin => old_library(ctx.state_dir, ctx.library),
+        _ => None,
+    };
+    if let Some(o) = old.as_mut() {
+        o.resolve_pending(|name| disk_token(ctx.userdata, name));
+    }
+    let mut warnings = Vec::new();
+    // 首次加入与本机重置：空状态即可，首轮计入时 M 为空、当前文件全部计入（且照常避开用户正编辑的文件）
+    let snapshot = matches!(how, Joined::Rejoin | Joined::Claim { .. });
+    let groups = if snapshot {
+        learned_groups(ctx.userdata, SyncContent::default())
+    } else {
+        Vec::new()
+    };
+    for (name, kind, abs) in groups {
+        if !abs.is_file() {
+            continue;
+        }
+        let Some((f, text)) = read_learned(&name, kind, &abs, &mut warnings)? else {
+            continue;
+        };
+        let mut me = empty_contrib(kind);
+        if how == Joined::Rejoin {
+            let m = old
+                .as_ref()
+                .and_then(|o| o.groups.get(&name))
+                .map_or("", |g| g.base.as_str());
+            diff(&mut me, &f, &base_of(kind, m)?, ctx.now_ms(), ctx.dev, &[]);
+            keep_additions(&mut me);
+        }
+        ns.groups.insert(
+            name,
+            GroupState {
+                contrib: encode(&me),
+                base: text,
+                ..Default::default()
+            },
+        );
+    }
+    if let Joined::Claim { dev } = &how {
+        adopt_remote(ctx, b, key, dev, &mut ns)?;
+    }
+    for w in &warnings {
+        log!("{w}");
+    }
+    save(ctx, &ns)?;
+    *st = ns;
+    Ok(())
+}
+
+/// 认领：远端 `learn/<dev>/` 的最新目录作为本机贡献与已发布底稿。
+fn adopt_remote(
+    ctx: &LearnCtx,
+    b: &dyn Backend,
+    key: &FilesKey,
+    dev: &str,
+    ns: &mut LearnState,
+) -> Result<(), String> {
+    let Some((idx, objs)) = fetch_device(b, key, dev).map_err(|e| sync_error(&e))? else {
+        return Ok(());
+    };
+    let text = |name: &str| -> Result<Option<String>, String> {
+        objs.get(name)
+            .map(|b| {
+                String::from_utf8(b.clone()).map_err(|_| format!("设备 {dev} 的 {name} 不是 UTF-8"))
+            })
+            .transpose()
+    };
+    for name in objs.keys() {
+        let Some(group) = name.strip_suffix(".base") else {
+            continue;
+        };
+        let Some((kind, _)) = group_file(group) else {
+            continue;
+        };
+        let bad = |e| format!("设备 {dev} 的 {group} 不可用: {e}");
+        let base_text = text(name)?.unwrap_or_default();
+        let base = decode(kind, &base_text).map_err(bad)?;
+        let full = match text(&format!("{group}.delta"))? {
+            Some(d) => overlay(&base, &decode(kind, &d).map_err(bad)?),
+            None => base,
+        };
+        let gs = ns.groups.entry(group.to_string()).or_default();
+        gs.contrib = encode(&full);
+        gs.last_base = base_text;
+        gs.base_at = ctx.now;
+    }
+    ns.index_gen = idx.gen_;
+    ns.own_index = Some(idx);
+    ns.device = dev.to_string();
+    Ok(())
+}
+
+/// 改号后（`ctx.dev` 已是新号）：`retire_old` 时以新号重发全部对象并删除旧号前缀；
+/// 否则（旧号另有主人或从未属于本机）不删旧号，下一轮以新号从头发布。
+pub fn rename_own(
+    ctx: &LearnCtx,
+    b: &dyn Backend,
+    key: &FilesKey,
+    retire_old: bool,
+) -> Result<Vec<String>, String> {
+    let mut warnings = Vec::new();
+    if !has_state(ctx.state_dir, ctx.library) {
+        return Ok(warnings);
+    }
+    let mut st = load_state(ctx)?;
+    if st.own_index.is_none() || !retire_old {
+        st.own_index = None;
+        st.device = ctx.dev.to_string();
+        save(ctx, &st)?;
+        return Ok(warnings);
+    }
+    republish_as(ctx, b, key, &mut st, &mut warnings)?;
+    Ok(warnings)
+}
+
+/// 学习通道下有数据、名册里没有的设备号。
+pub fn removed_devices_with_data(
+    b: &dyn Backend,
+    roster: &[DeviceEntry],
+) -> Result<Vec<String>, SyncError> {
+    let listed: BTreeSet<&str> = roster.iter().map(|(d, _)| d.as_str()).collect();
+    Ok(learn_devices(b)?
+        .into_iter()
+        .filter(|d| !listed.contains(d.as_str()))
+        .collect())
+}
+
+/// 清除已移除设备 `dev` 的远端学习数据，本地不再计入它（下一轮物化时次数随之减去）。
+pub fn purge_peer(ctx: &LearnCtx, b: &dyn Backend, dev: &str) -> Result<usize, String> {
+    let n = purge_device(b, dev).map_err(|e| sync_error(&e))?;
+    if has_state(ctx.state_dir, ctx.library) {
+        let mut st = load_state(ctx)?;
+        forget_peer(&private_dir(ctx), &mut st, dev);
+        save(ctx, &st)?;
+    }
+    Ok(n)
 }
 
 #[cfg(test)]

@@ -222,6 +222,60 @@ pub fn fetch_peers(
     Ok(out)
 }
 
+/// 某设备的最新目录与它引用的全部对象明文。
+pub type DeviceSnapshot = (Index, BTreeMap<String, Vec<u8>>);
+
+/// 取某设备最新目录与它引用的全部对象明文；该设备没有目录为 None。目录或任一对象取不到即失败。
+pub fn fetch_device(
+    b: &dyn Backend,
+    key: &FilesKey,
+    dev: &str,
+) -> Result<Option<DeviceSnapshot>, SyncError> {
+    if !valid_device_id(dev) {
+        return Err(SyncError::Local(format!("设备号不合法: {dev}")));
+    }
+    let Some(n) = list_indexes(b, &learn_prefix(dev))?
+        .into_iter()
+        .filter(|(d, ..)| d == dev)
+        .map(|(_, n, _)| n)
+        .max()
+    else {
+        return Ok(None);
+    };
+    let fail = |m: String| SyncError::Local(format!("设备 {dev} 的学习数据不可用: {m}"));
+    let raw = b
+        .get(&learn_index_key(dev, n))?
+        .ok_or_else(|| fail(format!("目录 {n} 已不存在")))?;
+    let idx = open_index(key, dev, n, &raw).map_err(fail)?;
+    let mut objects = BTreeMap::new();
+    for (name, hash) in &idx.objects {
+        if !valid_object_name(name) {
+            return Err(fail(format!("对象名不合法: {name}")));
+        }
+        let id = blob_id(key, hash);
+        let raw = b
+            .get(&learn_obj_key(dev, &id))?
+            .ok_or_else(|| fail(format!("对象 {name} 不存在")))?;
+        let plain =
+            decode_object(key, &id, hash, &raw).map_err(|e| fail(format!("{name}: {e}")))?;
+        objects.insert(name.clone(), plain);
+    }
+    Ok(Some((idx, objects)))
+}
+
+/// 学习通道下有对象的设备号。
+pub fn learn_devices(b: &dyn Backend) -> Result<BTreeSet<String>, SyncError> {
+    let root = learn_root();
+    Ok(b.list(&root)?
+        .into_iter()
+        .filter(|o| safe_key(&o.key))
+        .filter_map(|o| {
+            let (dev, _) = o.key.strip_prefix(&root)?.split_once('/')?;
+            valid_device_id(dev).then(|| dev.to_string())
+        })
+        .collect())
+}
+
 fn decode_object(key: &FilesKey, id: &str, hash: &str, raw: &[u8]) -> Result<Vec<u8>, String> {
     let packed = crypto::open(key, ObjKind::Learn, id, raw).map_err(|e| e.to_string())?;
     let plain = inflate(&packed).map_err(|e| e.to_string())?;

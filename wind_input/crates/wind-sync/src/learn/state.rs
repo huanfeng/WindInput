@@ -51,6 +51,12 @@ pub struct LearnState {
     /// 设备 → 已下载到本地的那份目录（`fetch_peers` 的 known）
     #[serde(default)]
     pub peer_index: BTreeMap<String, Index>,
+    /// `own_index` 发布在哪个设备号下
+    #[serde(default)]
+    pub device: String,
+    /// 改号后待删除的本机旧号前缀
+    #[serde(default)]
+    pub retire: Vec<String>,
 }
 
 impl Default for LearnState {
@@ -65,6 +71,8 @@ impl Default for LearnState {
             peer_seen: BTreeMap::new(),
             own_index: None,
             peer_index: BTreeMap::new(),
+            device: String::new(),
+            retire: Vec::new(),
         }
     }
 }

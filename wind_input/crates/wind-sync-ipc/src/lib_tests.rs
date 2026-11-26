@@ -246,6 +246,7 @@ fn group_ops_wire_names() {
         ("leave_group", Op::LeaveGroup),
         ("claim_device", Op::ClaimDevice),
         ("confirm_identity", Op::ConfirmIdentity),
+        ("purge_device", Op::PurgeDevice),
     ] {
         assert_eq!(Op::parse(name), Some(op), "{name}");
         assert_eq!(serde_json::to_value(op).unwrap(), json!(name));
@@ -333,4 +334,17 @@ fn content_all_on_is_omitted_when_serialized() {
     let v = serde_json::to_value(&s).unwrap();
     assert_eq!(v["content"]["learned"], false);
     assert_eq!(serde_json::from_value::<SyncSettings>(v).unwrap(), s);
+}
+
+#[test]
+fn status_omits_empty_removed_with_data() {
+    let v = serde_json::to_value(Status::default()).unwrap();
+    assert!(v.get("removed_with_data").is_none(), "{v}");
+    let s = Status {
+        removed_with_data: vec!["pc".into()],
+        ..Default::default()
+    };
+    let v = serde_json::to_value(&s).unwrap();
+    assert_eq!(v["removed_with_data"], json!(["pc"]));
+    assert_eq!(serde_json::from_value::<Status>(v).unwrap(), s);
 }

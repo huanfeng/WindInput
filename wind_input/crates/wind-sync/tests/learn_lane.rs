@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 use wind_sync::backend::{Backend, MemBackend};
 use wind_sync::crypto::{Dek, FilesKey};
-use wind_sync::learn::lane::{GC_MIN_AGE_SECS, Index, fetch_peers, gc_own, publish, purge_device};
+use wind_sync::learn::lane::{
+    GC_MIN_AGE_SECS, Index, fetch_device, fetch_peers, gc_own, learn_devices, publish, purge_device,
+};
 use wind_sync::manifest::{learn_index_key, learn_prefix};
 
 fn fk() -> FilesKey {
@@ -273,4 +275,36 @@ fn complete_requires_index_ok_and_no_warnings() {
     let key = b.keys(&format!("{}obj/", learn_prefix("b"))).remove(0);
     b.raw_put(&key, b"x".to_vec());
     assert!(!fetch_peers(&b, &k, "a", &BTreeMap::new()).unwrap()[0].complete());
+}
+
+#[test]
+fn learn_devices_lists_devices_with_objects() {
+    let (b, k) = (MemBackend::new(), fk());
+    publish(&b, &k, "a", None, &objs(&[("x", "1")])).unwrap();
+    publish(&b, &k, "c", None, &objs(&[])).unwrap();
+    b.put("windinput-sync/v1/learn/bad..id/obj/z", b"1")
+        .unwrap();
+    let devs: Vec<String> = learn_devices(&b).unwrap().into_iter().collect();
+    assert_eq!(devs, ["a", "c"]);
+}
+
+#[test]
+fn fetch_device_returns_latest_index_and_all_objects() {
+    let (b, k) = (MemBackend::new(), fk());
+    assert_eq!(fetch_device(&b, &k, "a").unwrap(), None);
+    let i1 = publish(&b, &k, "a", None, &objs(&[("x", "1"), ("y", "2")])).unwrap();
+    let i2 = publish(&b, &k, "a", Some(&i1), &objs(&[("x", "1"), ("y", "3")])).unwrap();
+    let (idx, got) = fetch_device(&b, &k, "a").unwrap().unwrap();
+    assert_eq!(idx, i2);
+    assert_eq!(got, objs(&[("x", "1"), ("y", "3")]));
+}
+
+#[test]
+fn fetch_device_fails_on_missing_object() {
+    let (b, k) = (MemBackend::new(), fk());
+    publish(&b, &k, "a", None, &objs(&[("x", "1")])).unwrap();
+    for key in b.keys(&format!("{}obj/", learn_prefix("a"))) {
+        b.delete(&key).unwrap();
+    }
+    assert!(fetch_device(&b, &k, "a").is_err());
 }
