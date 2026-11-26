@@ -56,7 +56,7 @@ fn all_without_devices_equals_legacy() {
 
 #[test]
 fn no_devices_dir_equals_old_behavior() {
-    // 与改动前 summary 的固定期望值对照（本机 meta 即结果）
+    // 本机 meta 即结果
     let s = store("old");
     s.put_daily_stat("2020-01-01", &day(10)).unwrap();
     s.put_daily_stat("2020-01-03", &day(20)).unwrap();
@@ -143,4 +143,25 @@ fn max_speed_takes_max() {
     s.put_stats_meta(&m).unwrap();
     let c2 = StatCollector::new(s.clone(), 1.0);
     assert_eq!(summary_for(&s, &c2, &StatsScope::All).max_speed, 500);
+}
+
+#[test]
+fn all_not_less_than_self_after_local_prune() {
+    let s = store("prune");
+    for d in ["2020-01-01", "2020-01-02", "2020-01-03", "2020-01-04"] {
+        s.put_daily_stat(d, &day(10)).unwrap();
+    }
+    let c = collector(&s);
+    // 本机清掉早期历史，meta 仍记着连续 4 天与首日
+    s.prune_stats_before("2020-01-04").unwrap();
+    let mut m = c.get_meta();
+    m.first_day = "2020-01-01".into();
+    m.streak_max = 4;
+    s.put_stats_meta(&m).unwrap();
+    let c = StatCollector::new(s.clone(), 1.0);
+    put_device(&s, "phone", "2020-02-01", "chinese = 5");
+    let me = summary_for(&s, &c, &StatsScope::SelfOnly);
+    let all = summary_for(&s, &c, &StatsScope::All);
+    assert!(all.streak_max >= me.streak_max);
+    assert_eq!(all.streak_max, 4);
 }

@@ -195,12 +195,7 @@ impl DailyStats {
         self.active_seconds = self.active_seconds.saturating_add(*active_seconds);
         // 按方案：按键求和
         for (k, v) in by_schema {
-            let e = self.by_schema.entry(k.clone()).or_default();
-            e.total_chars = e.total_chars.saturating_add(v.total_chars);
-            e.commit_count = e.commit_count.saturating_add(v.commit_count);
-            e.code_len_sum = e.code_len_sum.saturating_add(v.code_len_sum);
-            e.code_len_count = e.code_len_count.saturating_add(v.code_len_count);
-            add_arrays(&mut e.cand_pos_dist, &v.cand_pos_dist);
+            self.by_schema.entry(k.clone()).or_default().merge_from(v);
         }
         // 按来源：按下标求和，长度取较长者（旧记录数组较短）
         if self.by_source.len() < by_source.len() {
@@ -209,6 +204,24 @@ impl DailyStats {
         for (i, v) in by_source.iter().enumerate() {
             self.by_source[i] = self.by_source[i].saturating_add(*v);
         }
+    }
+}
+
+impl SchemaStats {
+    /// 解构 other 全部字段：加字段忘了合并会编译不过。各量均为求和。
+    fn merge_from(&mut self, other: &SchemaStats) {
+        let SchemaStats {
+            total_chars,
+            commit_count,
+            code_len_sum,
+            code_len_count,
+            cand_pos_dist,
+        } = other;
+        self.total_chars = self.total_chars.saturating_add(*total_chars);
+        self.commit_count = self.commit_count.saturating_add(*commit_count);
+        self.code_len_sum = self.code_len_sum.saturating_add(*code_len_sum);
+        self.code_len_count = self.code_len_count.saturating_add(*code_len_count);
+        add_arrays(&mut self.cand_pos_dist, cand_pos_dist);
     }
 }
 
@@ -771,9 +784,17 @@ impl Store {
     }
 }
 
-/// 设备目录名是否合法：ASCII 字母数字与 `-`，长 1–32（与同步侧设备号规则兼容的超集）。
+/// 设备目录名是否合法：规则同 wind-sync `ids::valid_id`（`[a-z0-9-]`，长 1–24，首尾不为 `-`，
+/// wind-store 不依赖 wind-sync 故复制于此），另排除 RPC 保留字 `all`、`self`。
 pub(crate) fn valid_device_dir(s: &str) -> bool {
-    !s.is_empty() && s.len() <= 32 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    !s.is_empty()
+        && s.len() <= 24
+        && !s.starts_with('-')
+        && !s.ends_with('-')
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && s != "all"
+        && s != "self"
 }
 
 /// 某目录下的月表月份（`YYYY-MM`，升序）。

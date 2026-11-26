@@ -578,7 +578,7 @@ fn speed_is_total_chars_over_total_time() {
     let mut m = fast.clone();
     m.merge_from(&slow);
     let (c, ms) = m.speed_parts();
-    // 700 字 / 2 分钟 = 350，而不是 (600+100)/2 的平均巧合——换权重再验一次
+    // 700 字 / 2 分钟
     assert_eq!(speed_per_minute_ms(c as u64, ms, 1.0), 350);
     let mut m2 = fast.clone();
     m2.merge_from(&DailyStats {
@@ -588,7 +588,7 @@ fn speed_is_total_chars_over_total_time() {
         ..Default::default()
     });
     let (c, ms) = m2.speed_parts();
-    assert_eq!(speed_per_minute_ms(c as u64, ms, 1.0), 175); // 700 / 4 分钟；平均速度会得 350
+    assert_eq!(speed_per_minute_ms(c as u64, ms, 1.0), 175); // 700 字 / 4 分钟
 }
 
 #[test]
@@ -621,7 +621,18 @@ fn merge_mixed_speed_models_keeps_both_parts() {
 fn invalid_device_dir_ignored() {
     let s = Store::open(&tmp("wind_st_devdir.redb")).unwrap();
     let day = "version = 1\n[days.2026-01-02]\nchinese = 5\n";
-    for name in ["pc", "Phone-2", "bad name", "a.b", &"x".repeat(33)] {
+    for name in [
+        "pc",
+        "phone-2",
+        "Phone-2",
+        "-ab",
+        "ab-",
+        "all",
+        "self",
+        "bad name",
+        "a.b",
+        &"x".repeat(33),
+    ] {
         let d = s.stats_dir().join("devices").join(name);
         std::fs::create_dir_all(&d).unwrap();
         std::fs::write(d.join("2026-01.toml"), day).unwrap();
@@ -629,7 +640,7 @@ fn invalid_device_dir_ignored() {
     // 空目录与散落的文件也不算设备
     std::fs::create_dir_all(s.stats_dir().join("devices/empty")).unwrap();
     std::fs::write(s.stats_dir().join("devices/stray.toml"), day).unwrap();
-    assert_eq!(s.list_device_stats(), vec!["Phone-2", "pc"]);
+    assert_eq!(s.list_device_stats(), vec!["pc", "phone-2"]);
     assert!(
         s.device_daily_stats("bad name", "2026-01-01", "2026-01-31")
             .is_empty()

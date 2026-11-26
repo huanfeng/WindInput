@@ -148,9 +148,23 @@ fn scoped_meta(
     dates.dedup();
     let (cur, mx, last) = calculate_streaks(&dates);
     meta.streak_current = cur;
-    meta.streak_max = mx;
+    // All 不小于本机：本机 meta 可能含已清理的历史，按天数据推不回来。
+    meta.streak_max = if *scope == StatsScope::All {
+        mx.max(local.streak_max)
+    } else {
+        mx
+    };
     meta.streak_last_day = last;
-    meta.first_day = dates.first().cloned().unwrap_or_default();
+    let recomputed = dates.first().cloned().unwrap_or_default();
+    meta.first_day = if *scope == StatsScope::All {
+        [local.first_day.clone(), recomputed]
+            .into_iter()
+            .filter(|d| !d.is_empty())
+            .min()
+            .unwrap_or_default()
+    } else {
+        recomputed
+    };
     // 最高速度：各设备取最大。他机只有按天数据，逐设备逐日按「够格」口径推；
     // 本机用落库的成品值（它可能来自已被清理的历史，按天数据推不回来）。
     // 合并后的同日记录是多机时长相加，不能当作单人速度，所以逐设备算再取最大。
@@ -296,7 +310,7 @@ pub fn daily_range_for(
     from: &str,
     to: &str,
 ) -> anyhow::Result<Vec<(String, DailyStats)>> {
-    // 本机月表读不了时报错（与改动前一致）；他机的坏文件跳过。
+    // 本机月表读不了时报错；他机的坏文件跳过。
     let mut by_date: std::collections::HashMap<String, DailyStats> = match scope {
         StatsScope::SelfOnly | StatsScope::All => {
             let mut days = store.daily_stats(from, to)?;
