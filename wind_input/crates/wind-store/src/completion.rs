@@ -370,6 +370,10 @@ impl Store {
         let (map, sync) = self.read_completion_file()?;
         let fp = file_fp(&self.completion_path());
         let mut g = self.completions.lock().unwrap_or_else(|e| e.into_inner());
+        // 读文件期间租约已结束（release 已把增量交给写回）⇒ 放弃本次重载
+        if !g.held {
+            return Ok(false);
+        }
         g.map = map;
         g.sync = sync;
         g.fp = fp;
