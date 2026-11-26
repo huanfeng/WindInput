@@ -860,3 +860,189 @@ fn retired_own_id_not_counted_while_purge_fails() {
     bb.round(&b);
     assert_eq!(freq(&bb), Some(8));
 }
+
+// ── 打字统计 ───────────────────────────────────────────
+
+fn stats_file(days: &[(&str, u32)]) -> String {
+    let mut s = String::from("version = 1\n");
+    for (d, n) in days {
+        s += &format!("\n[days.\"{d}\"]\nchinese = {n}\n");
+    }
+    s
+}
+
+fn set_stats(d: &Dev, name: &str, days: &[(&str, u32)]) {
+    let p = d.path(&format!("stats/{name}"));
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(p, stats_file(days)).unwrap();
+}
+
+fn peer_stats(d: &Dev, dev: &str, name: &str) -> Option<String> {
+    std::fs::read_to_string(d.path(&format!("stats/devices/{dev}/{name}"))).ok()
+}
+
+/// 远端某设备目录里的对象名。
+fn remote_objects(b: &MemBackend, dev: &str) -> BTreeMap<String, String> {
+    let (idx, _) = wind_sync::learn::lane::fetch_device(b, &key(), dev)
+        .unwrap()
+        .unwrap();
+    idx.objects
+}
+
+#[test]
+fn own_stats_uploaded_not_meta() {
+    let b = MemBackend::new();
+    let mut a = Dev::new("pc-a");
+    set_stats(&a, "2026-11.toml", &[("2026-11-01", 5)]);
+    std::fs::write(a.path("stats/meta.toml"), "x = 1\n").unwrap();
+    std::fs::write(a.path("stats/2026-11.toml.bak"), "x").unwrap();
+    std::fs::create_dir_all(a.path("stats/devices/pc-z")).unwrap();
+    std::fs::write(a.path("stats/devices/pc-z/2026-10.toml"), "x").unwrap();
+    a.round(&b);
+    let objs = remote_objects(&b, "pc-a");
+    assert_eq!(
+        objs.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["stats/2026-11.toml"]
+    );
+    // 没变化不再上传；本机删除月份后对象消失
+    let puts = b.put_count();
+    a.round(&b);
+    assert_eq!(b.put_count(), puts);
+    std::fs::remove_file(a.path("stats/2026-11.toml")).unwrap();
+    a.round(&b);
+    assert!(remote_objects(&b, "pc-a").is_empty());
+}
+
+#[test]
+fn peer_stats_written_under_devices() {
+    let b = MemBackend::new();
+    let (mut a, mut bb) = (Dev::new("pc-a"), Dev::new("pc-b"));
+    set_stats(&a, "2026-11.toml", &[("2026-11-01", 5)]);
+    a.round(&b);
+    bb.round(&b);
+    assert_eq!(
+        peer_stats(&bb, "pc-a", "2026-11.toml").unwrap(),
+        stats_file(&[("2026-11-01", 5)])
+    );
+    assert!(peer_stats(&a, "pc-b", "2026-11.toml").is_none());
+    // 没变化不重写
+    let p = bb.path("stats/devices/pc-a/2026-11.toml");
+    let m = std::fs::metadata(&p).unwrap().modified().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    bb.round(&b);
+    assert_eq!(std::fs::metadata(&p).unwrap().modified().unwrap(), m);
+    // 内容变化会更新
+    set_stats(&a, "2026-11.toml", &[("2026-11-01", 6)]);
+    a.round(&b);
+    bb.round(&b);
+    assert_eq!(
+        peer_stats(&bb, "pc-a", "2026-11.toml").unwrap(),
+        stats_file(&[("2026-11-01", 6)])
+    );
+}
+
+#[test]
+fn peer_month_deleted_removes_local() {
+    let b = MemBackend::new();
+    let (mut a, mut bb) = (Dev::new("pc-a"), Dev::new("pc-b"));
+    set_stats(&a, "2026-10.toml", &[("2026-10-01", 1)]);
+    set_stats(&a, "2026-11.toml", &[("2026-11-01", 5)]);
+    a.round(&b);
+    bb.round(&b);
+    assert!(peer_stats(&bb, "pc-a", "2026-10.toml").is_some());
+    std::fs::remove_file(a.path("stats/2026-10.toml")).unwrap();
+    a.round(&b);
+    bb.round(&b);
+    assert!(peer_stats(&bb, "pc-a", "2026-10.toml").is_none());
+    assert!(peer_stats(&bb, "pc-a", "2026-11.toml").is_some());
+}
+
+#[test]
+fn purged_device_stats_removed() {
+    let b = MemBackend::new();
+    let (mut a, mut bb) = (Dev::new("pc-a"), Dev::new("pc-b"));
+    set_stats(&a, "2026-11.toml", &[("2026-11-01", 5)]);
+    a.round(&b);
+    bb.round(&b);
+    assert!(peer_stats(&bb, "pc-a", "2026-11.toml").is_some());
+    wind_sync::learn::lane::purge_device(&b, "pc-a").unwrap();
+    bb.round(&b);
+    assert!(!bb.path("stats/devices/pc-a").exists());
+}
+
+#[test]
+fn stats_switch_off_keeps_remote_and_local() {
+    let b = MemBackend::new();
+    let (mut a, mut bb) = (Dev::new("pc-a"), Dev::new("pc-b"));
+    set_stats(&a, "2026-11.toml", &[("2026-11-01", 5)]);
+    set_stats(&bb, "2026-11.toml", &[("2026-11-02", 7)]);
+    a.round(&b);
+    bb.round(&b);
+    a.round(&b);
+    assert!(peer_stats(&bb, "pc-a", "2026-11.toml").is_some());
+    // a 关闭统计：远端保留旧对象，不上传新内容；b 的统计也不再写入 a
+    a.content.stats = false;
+    set_stats(&a, "2026-11.toml", &[("2026-11-01", 99)]);
+    set_stats(&a, "2026-12.toml", &[("2026-12-01", 1)]);
+    set_stats(&bb, "2026-11.toml", &[("2026-11-02", 8)]);
+    bb.round(&b);
+    a.round(&b);
+    bb.round(&b);
+    assert_eq!(
+        remote_objects(&b, "pc-a").keys().collect::<Vec<_>>(),
+        ["stats/2026-11.toml"]
+    );
+    assert_eq!(
+        peer_stats(&bb, "pc-a", "2026-11.toml").unwrap(),
+        stats_file(&[("2026-11-01", 5)])
+    );
+    assert_eq!(
+        peer_stats(&a, "pc-b", "2026-11.toml").unwrap(),
+        stats_file(&[("2026-11-02", 7)])
+    );
+    // 关闭期间学习数据照常同步
+    set_freq(&a, 3);
+    a.round(&b);
+    assert!(remote_objects(&b, "pc-a").contains_key("stats/2026-11.toml"));
+    assert!(remote_objects(&b, "pc-a").contains_key("pinyin/freq.base"));
+}
+
+#[test]
+fn claim_merges_stats_by_day() {
+    let b = MemBackend::new();
+    let mut a = Dev::new("pc-a");
+    set_stats(&a, "2026-11.toml", &[("2026-11-01", 5), ("2026-11-02", 6)]);
+    set_stats(&a, "2026-10.toml", &[("2026-10-01", 1)]);
+    a.round(&b);
+    // 新装的机器认领 pc-a：同一天取本地，远端独有的天加入
+    let mut c = Dev::new("pc-a");
+    set_stats(&c, "2026-11.toml", &[("2026-11-02", 60), ("2026-11-03", 7)]);
+    c.init(&b, Joined::Claim { dev: "pc-a".into() });
+    let got = std::fs::read_to_string(c.path("stats/2026-11.toml")).unwrap();
+    let t: toml::Table = got.parse().unwrap();
+    let days = t["days"].as_table().unwrap();
+    let chinese = |d: &str| days[d]["chinese"].as_integer().unwrap();
+    assert_eq!(days.len(), 3);
+    assert_eq!(
+        (
+            chinese("2026-11-01"),
+            chinese("2026-11-02"),
+            chinese("2026-11-03")
+        ),
+        (5, 60, 7)
+    );
+    assert!(
+        c.path("stats/2026-10.toml").is_file(),
+        "本地没有的月份直接落盘"
+    );
+    // 合并结果在下一轮上传
+    c.round(&b);
+    let (_, objs) = wind_sync::learn::lane::fetch_device(&b, &key(), "pc-a")
+        .unwrap()
+        .unwrap();
+    let up: toml::Table = String::from_utf8(objs["stats/2026-11.toml"].clone())
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(up["days"].as_table().unwrap().len(), 3);
+}

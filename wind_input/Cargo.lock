@@ -3524,6 +3524,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "toml 0.8.23",
  "tracing",
  "wind-supervise",
  "wind-sync",

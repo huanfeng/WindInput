@@ -13,7 +13,7 @@ use wind_sync::devices::DeviceEntry;
 use wind_sync::learn::format::{decode, encode, needs_rebase, overlay, should_compact, split};
 use wind_sync::learn::lane::{
     devices_in, fetch_device, fetch_peers_in, gc_own, has_index_in, learn_devices, list_learn,
-    publish, purge_device,
+    publish_keeping, purge_device,
 };
 use wind_sync::learn::model::{absorb_peer_deletes, diff, gc_tombs, materialize};
 use wind_sync::learn::state::{GroupState, LearnState, Pending};
@@ -481,6 +481,141 @@ fn disk_token(userdata: &Path, name: &str) -> Option<String> {
     table::token_of(&b)
 }
 
+// ── 打字统计 ───────────────────────────────────────────
+
+const STATS_PREFIX: &str = "stats/";
+
+/// `YYYY-MM.toml`（严格匹配）。
+fn stats_month_file(name: &str) -> bool {
+    let b = name.as_bytes();
+    b.len() == 12
+        && b[..4].iter().all(u8::is_ascii_digit)
+        && b[4] == b'-'
+        && b[5..7].iter().all(u8::is_ascii_digit)
+        && &name[7..] == ".toml"
+}
+
+/// 对象名 `stats/YYYY-MM.toml` 里的文件名部分。
+fn stats_object_file(name: &str) -> Option<&str> {
+    name.strip_prefix(STATS_PREFIX)
+        .filter(|f| stats_month_file(f))
+}
+
+fn stats_dir(userdata: &Path) -> PathBuf {
+    userdata.join("data").join("stats")
+}
+
+/// 本机 `data/stats/` 下的月表，对象名 `stats/YYYY-MM.toml`；`meta.toml`、子目录等一概不取。
+fn own_stats(ctx: &LearnCtx) -> Result<BTreeMap<String, Vec<u8>>, String> {
+    let mut out = BTreeMap::new();
+    let Ok(rd) = std::fs::read_dir(stats_dir(ctx.userdata)) else {
+        return Ok(out);
+    };
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if !stats_month_file(&name) {
+            continue;
+        }
+        if let Some(b) = read_opt(&e.path())? {
+            out.insert(format!("{STATS_PREFIX}{name}"), b);
+        }
+    }
+    Ok(out)
+}
+
+/// 只在内容变化时写（原子）。
+fn write_if_changed(p: &Path, bytes: &[u8]) -> io::Result<()> {
+    if std::fs::read(p).is_ok_and(|old| old == bytes) {
+        return Ok(());
+    }
+    write_atomic(p, bytes)
+}
+
+/// 他机最新镜像里的统计写到 `data/stats/devices/<dev>/`；镜像里没有的月份与不再计入的设备目录删掉。
+/// 统计开关关闭时不动。
+fn write_peer_stats(ctx: &LearnCtx, st: &LearnState, warnings: &mut Vec<String>) {
+    if !ctx.content.stats {
+        return;
+    }
+    let root = stats_dir(ctx.userdata).join("devices");
+    let dir = private_dir(ctx);
+    for (dev, n) in &st.peer_seen {
+        if !valid_device_id(dev) {
+            continue;
+        }
+        let mirror = obj_path(&mirror_dir(&dir, dev, *n), "stats");
+        let mut want = BTreeSet::new();
+        if let Ok(rd) = std::fs::read_dir(&mirror) {
+            for e in rd.flatten() {
+                let f = e.file_name().to_string_lossy().into_owned();
+                if !stats_month_file(&f) {
+                    continue;
+                }
+                let r = std::fs::read(e.path())
+                    .and_then(|b| write_if_changed(&root.join(dev).join(&f), &b));
+                if let Err(err) = r {
+                    warnings.push(format!("写入设备 {dev} 的统计 {f} 失败: {err}"));
+                }
+                want.insert(f);
+            }
+        }
+        if let Ok(rd) = std::fs::read_dir(root.join(dev)) {
+            for e in rd.flatten() {
+                let f = e.file_name().to_string_lossy().into_owned();
+                if !want.contains(&f) {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
+        if want.is_empty() {
+            let _ = std::fs::remove_dir(root.join(dev));
+        }
+    }
+    // 不再计入的设备（被清除、被丢弃）
+    if let Ok(rd) = std::fs::read_dir(&root) {
+        for e in rd.flatten() {
+            let dev = e.file_name().to_string_lossy().into_owned();
+            if !st.peer_seen.contains_key(&dev) {
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+        }
+    }
+}
+
+/// 把远端月表合并进本机：按天逐日，同一天取本地，只有远端有的天加入；其余顶层键取本地。
+fn merge_stats_month(local: Option<&[u8]>, remote: &[u8]) -> Result<Vec<u8>, String> {
+    let parse = |b: &[u8]| -> Result<toml::Table, String> {
+        std::str::from_utf8(b)
+            .map_err(|_| "不是 UTF-8".to_string())?
+            .parse::<toml::Table>()
+            .map_err(|e| e.to_string())
+    };
+    let remote = parse(remote)?;
+    let mut me = match local {
+        Some(b) => parse(b)?,
+        None => remote.clone(),
+    };
+    if local.is_some() {
+        let Some(toml::Value::Table(rdays)) = remote.get("days") else {
+            return Ok(toml::to_string(&me)
+                .map_err(|e| e.to_string())?
+                .into_bytes());
+        };
+        let days = me
+            .entry("days")
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        let toml::Value::Table(days) = days else {
+            return Err("days 不是表".into());
+        };
+        for (d, v) in rdays {
+            days.entry(d.clone()).or_insert_with(|| v.clone());
+        }
+    }
+    Ok(toml::to_string(&me)
+        .map_err(|e| e.to_string())?
+        .into_bytes())
+}
+
 // ── 第 2 步：计入 ─────────────────────────────────────
 
 /// 采用或丢弃上一轮的待定记录，再把各组 `F − M` 计入本机贡献并原子保存 `{C, M = F}`。
@@ -605,10 +740,23 @@ fn publish_own(
             }
         }
     }
-    let hashes: BTreeMap<String, String> = objects
+    // 统计整对象发布；关闭时沿用上次发布的，不新增也不删除
+    let mut kept = BTreeMap::new();
+    if ctx.content.stats {
+        objects.extend(own_stats(ctx)?);
+    } else if let Some(i) = &st.own_index {
+        kept.extend(
+            i.objects
+                .iter()
+                .filter(|(n, _)| n.starts_with(STATS_PREFIX))
+                .map(|(n, h)| (n.clone(), h.clone())),
+        );
+    }
+    let mut hashes: BTreeMap<String, String> = objects
         .iter()
         .map(|(n, p)| (n.clone(), content_hash(p)))
         .collect();
+    hashes.extend(kept.iter().map(|(n, h)| (n.clone(), h.clone())));
     // 本机目录在远端没了（被清除）也要重发：publish 会按全新发布整份重传
     let unchanged = match &st.own_index {
         Some(i) => i.objects == hashes && has_index_in(keys, ctx.dev, i.gen_),
@@ -619,8 +767,8 @@ fn publish_own(
     }
     let prev = st.own_index.clone();
     let owner = ensure_owner(ctx, st)?;
-    let idx =
-        publish(b, key, ctx.dev, &owner, prev.as_ref(), &objects).map_err(|e| sync_error(&e))?;
+    let idx = publish_keeping(b, key, ctx.dev, &owner, prev.as_ref(), &objects, &kept)
+        .map_err(|e| sync_error(&e))?;
     for (name, text) in rebased {
         if let Some(g) = st.groups.get_mut(&name) {
             g.last_base = text;
@@ -671,8 +819,12 @@ fn republish_as(
             bases.push((name.clone(), text));
         }
     }
+    if ctx.content.stats {
+        objects.extend(own_stats(ctx)?);
+    }
     let owner = ensure_owner(ctx, st)?;
-    let idx = publish(b, key, ctx.dev, &owner, None, &objects).map_err(|e| sync_error(&e))?;
+    let idx = publish_keeping(b, key, ctx.dev, &owner, None, &objects, &BTreeMap::new())
+        .map_err(|e| sync_error(&e))?;
     for (name, text) in bases {
         if let Some(g) = st.groups.get_mut(&name) {
             g.last_base = text;
@@ -1076,6 +1228,7 @@ pub fn exchange_and_materialize(
         rep.devices.remove(&d);
     }
     rep.groups_written = materialize_all(ctx, st, &mut rep.warnings)?;
+    write_peer_stats(ctx, st, &mut rep.warnings);
     prune_mirrors(ctx, st);
     st.last_ok = ctx.now;
     save(ctx, st)?;
@@ -1265,6 +1418,18 @@ fn adopt_remote(
             })
             .transpose()
     };
+    for (name, remote) in &objs {
+        if let Some(f) = stats_object_file(name) {
+            let p = stats_dir(ctx.userdata).join(f);
+            let merged = read_opt(&p)?
+                .map_or_else(
+                    || merge_stats_month(None, remote),
+                    |l| merge_stats_month(Some(&l), remote),
+                )
+                .map_err(|e| format!("设备 {dev} 的 {name} 不可用: {e}"))?;
+            write_atomic(&p, &merged).map_err(|e| format!("写入 {} 失败: {e}", p.display()))?;
+        }
+    }
     for name in objs.keys() {
         let Some(group) = name.strip_suffix(".base") else {
             continue;

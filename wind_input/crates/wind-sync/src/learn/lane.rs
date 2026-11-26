@@ -101,6 +101,20 @@ pub fn publish(
     prev: Option<&Index>,
     objects: &BTreeMap<String, Vec<u8>>,
 ) -> Result<Index, SyncError> {
+    publish_keeping(b, key, dev, owner, prev, objects, &BTreeMap::new())
+}
+
+/// 同 [`publish`]，另把 `kept`（对象名 → 哈希）原样带进新目录而不重传：只对 `prev` 里哈希相同
+/// 且 `prev` 仍在远端的条目生效，其余忽略；`objects` 里同名的以 `objects` 为准。
+pub fn publish_keeping(
+    b: &dyn Backend,
+    key: &FilesKey,
+    dev: &str,
+    owner: &str,
+    prev: Option<&Index>,
+    objects: &BTreeMap<String, Vec<u8>>,
+    kept: &BTreeMap<String, String>,
+) -> Result<Index, SyncError> {
     if !valid_device_id(dev) {
         return Err(SyncError::Local(format!("设备号不合法: {dev}")));
     }
@@ -156,6 +170,16 @@ pub fn publish(
             }
         }
         index.objects.insert(name.clone(), hash);
+    }
+    if let Some(p) = prev {
+        for (name, hash) in kept {
+            if p.objects.get(name) == Some(hash) {
+                index
+                    .objects
+                    .entry(name.clone())
+                    .or_insert_with(|| hash.clone());
+            }
+        }
     }
     b.put(
         &learn_index_key(dev, new_gen),

@@ -263,6 +263,7 @@ mod tests {
             "data/phrases.sys_hash",
             "data/pinyin/temp.dict.yaml",
             "data/stats/a.toml",
+            "data/stats/devices/x/2026-11.toml",
             "schemas/.x.tmp",
             "themes/a.tmp",
             "config.conflict-a-2026-11-24.toml",
