@@ -3678,26 +3678,57 @@ impl Engine for PinyinEngine {
         // 下面按权重排序目前与上游返回序重复，但「名额按权重发」是本逻辑的要求，不寄存在上游
         // 的实现细节上。
         // 单音节整音节输入下本步注定只剩精确匹配（step 1 已给），整段跳过，见该函数。
+        // 双拼里 z/c/s 键只管 z/c/s 声母，是封闭声母，zh/ch/sh 另占 v/i/u 键。全拼的尾部 `z` 可能续成
+        // `zh`，query 域里却写成同一个 `z`，按字符前缀查会把 zh* 一并扫进来。这里把封闭声母展开成
+        // 「声母 + 元音」五个前缀（z 后只能接 a/e/i/o/u），天然不含 zh*。开了对应模糊音则 zh 本就算 z，
+        // 照常按单前缀查。以引擎解出的 `partial_initial` 为准，不从 query 上切尾巴。
+        let closed_initial = trailing_partial
+            && sp_result
+                .as_ref()
+                .filter(|r| r.has_partial)
+                .and_then(|r| r.partial_initial.as_deref())
+                .is_some_and(|init| match init {
+                    "z" => !self.fuzzy_config.zh_z,
+                    "c" => !self.fuzzy_config.ch_c,
+                    "s" => !self.fuzzy_config.sh_s,
+                    _ => false,
+                });
         let prefix_hits: Vec<_> = if prefix_completion_is_exact_only(trailing_partial, syllable_cap)
         {
             Vec::new()
         } else {
             #[cfg(test)]
             test_hooks::note_step4_prefix_scan();
-            dict.search_prefix_with_boundary_syllable_capped(
-                query,
-                completion_limit,
-                syllable_cap,
-                completed_len,
-            )
-            .into_iter()
-            .map(|h| {
-                let distance = effective_boundary(&h.code, h.boundary, trie)
-                    .count_ones()
-                    .saturating_sub(completed_syls);
-                (h, distance)
-            })
-            .collect()
+            let mut raw = if closed_initial {
+                let mut all = Vec::new();
+                for v in ["a", "e", "i", "o", "u"] {
+                    all.extend(dict.search_prefix_with_boundary_syllable_capped(
+                        &format!("{query}{v}"),
+                        completion_limit,
+                        syllable_cap,
+                        completed_len,
+                    ));
+                }
+                // 五路前缀互不相交；合并后按权重发名额，与单路返回序一致。
+                all.sort_by_key(|h| std::cmp::Reverse(h.weight));
+                all.truncate(completion_limit);
+                all
+            } else {
+                dict.search_prefix_with_boundary_syllable_capped(
+                    query,
+                    completion_limit,
+                    syllable_cap,
+                    completed_len,
+                )
+            };
+            raw.drain(..)
+                .map(|h| {
+                    let distance = effective_boundary(&h.code, h.boundary, trie)
+                        .count_ones()
+                        .saturating_sub(completed_syls);
+                    (h, distance)
+                })
+                .collect()
         };
         // 够得着无条件上浮的那批（`w > 0` 那条门槛见下方 `demote_to_prefix_layer`），
         // 按权重降序取前 N 个名额；其余沉回前缀层。
