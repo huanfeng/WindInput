@@ -483,23 +483,31 @@ impl Coordinator {
             } else {
                 cand.code.clone()
             };
-            self.record_selection_cased_in(None, &code, cand.freq_text(), &cand.text, cand.source);
+            self.record_selection_shown_in(
+                None,
+                &code,
+                cand.freq_text(),
+                &cand.text,
+                cand.s2t_override.as_deref(),
+                cand.source,
+            );
             return;
         }
         if !matches!(state.active, Some(ModeKind::RareChar)) {
             let code = state.special_buffer.clone();
             // 词频记 `freq_text`（模板词为源文本，与 `update_special_candidates` 的重排读端
             // 同键），历史记实际上屏的 `text`。
-            self.record_selection_cased_in(
+            self.record_selection_shown_in(
                 self.effective_data_schema(state).as_deref(),
                 &code,
                 cand.freq_text(),
                 &cand.text,
+                cand.s2t_override.as_deref(),
                 cand.source,
             );
         } else {
             // 上屏历史是 `record_selection_in` 的一部分，跳过词频时须单独补上。
-            self.push_commit_history(&cand.text);
+            self.push_commit_history_cand(cand);
         }
     }
 

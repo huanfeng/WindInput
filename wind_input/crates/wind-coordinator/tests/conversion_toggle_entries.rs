@@ -165,3 +165,130 @@ fn missing_data_keeps_conversion_off_on_both_entries() {
         "热键：数据缺失不切"
     );
 }
+
+/// 命令栏 `last()` 要的是「实际上屏的文本」：简入繁出时屏幕上是繁体，`last()` 就该是繁体，
+/// 否则汉典搜索 / 反查拿到的是另一个字（「发」≠「發」）。
+fn last_text(c: &Coordinator, n: u32) -> String {
+    c.debug_eval_cc_text(&format!("$CC(\"x\", type(last({n})))"))
+        .expect("前提：纯文本命令应能同步求值")
+}
+
+#[test]
+fn last_returns_converted_text_when_s2t_on() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if !has_data() {
+        eprintln!("跳过：缺 build_dev 词库 / opencc 数据");
+        return;
+    }
+    let c = open(&data_dir());
+    c.debug_run_menu_cmd(MenuCmd::ToggleS2t);
+    assert_eq!(commit_hanzi(&c), "漢字", "前提：简入繁出已生效");
+    assert_eq!(last_text(&c, 1), "漢字", "last() 应是屏幕上实际上屏的繁体");
+}
+
+/// 上屏当时是什么样，历史就记什么样：事后关掉转换，`last()` 不跟着变回简体。
+#[test]
+fn last_keeps_committed_form_after_conversion_turned_off() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if !has_data() {
+        eprintln!("跳过：缺 build_dev 词库 / opencc 数据");
+        return;
+    }
+    let c = open(&data_dir());
+    c.debug_run_menu_cmd(MenuCmd::ToggleS2t);
+    assert_eq!(commit_hanzi(&c), "漢字");
+    c.debug_run_menu_cmd(MenuCmd::ToggleS2t);
+    assert_eq!(last_text(&c, 1), "漢字");
+}
+
+/// 转换关着时 `last()` 与上屏一致（回归护栏，现状即满足）。
+#[test]
+fn last_is_plain_when_conversion_off() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if !has_data() {
+        eprintln!("跳过：缺 build_dev 词库 / opencc 数据");
+        return;
+    }
+    let c = open(&data_dir());
+    assert_eq!(commit_hanzi(&c), "汉字");
+    assert_eq!(last_text(&c, 1), "汉字");
+}
+
+/// 重复上屏的事实源仍是转换前的简体：它上屏时会再过一次转换，记转换后的形态会二次转换。
+#[test]
+fn repeat_candidate_still_uses_unconverted_text() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if !has_data() {
+        eprintln!("跳过：缺 build_dev 词库 / opencc 数据");
+        return;
+    }
+    let c = open(&data_dir());
+    c.debug_run_menu_cmd(MenuCmd::ToggleS2t);
+    assert_eq!(commit_hanzi(&c), "漢字");
+    c.handle_key_event(&key(0xBA, 0)); // `;` 进快捷输入，空缓冲注入重复上屏候选
+    assert_eq!(c.debug_active_mode(), Some("mix"), "前提：`;` 进快捷输入");
+    assert_eq!(
+        c.debug_page_texts().first().map(String::as_str),
+        Some("汉字"),
+        "重复上屏候选取转换前的简体"
+    );
+}
+
+/// 配置里本来就开着简入繁出（启动即生效，没有经过开关切换）：上屏后 `last()` 也要是繁体，
+/// 事后切回简体不改变它。
+#[test]
+fn last_is_converted_when_s2t_on_from_config_at_startup() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if !has_data() {
+        eprintln!("跳过：缺 build_dev 词库 / opencc 数据");
+        return;
+    }
+    let _ = std::fs::remove_file(root().join("userdata/config.toml"));
+    let mut cfg = Config::default();
+    cfg.schema.active = "pinyin".into();
+    cfg.schema.available = vec!["pinyin".into()];
+    cfg.input.default.chinese_mode = true;
+    cfg.input.s2t.enabled = true;
+    let c = Coordinator::new_headless(cfg, Some(&data_dir()));
+    assert_eq!(
+        c.debug_conversion().0,
+        (true, false),
+        "前提：启动即开简入繁出"
+    );
+    assert_eq!(commit_hanzi(&c), "漢字", "前提：上屏为繁体");
+    assert_eq!(last_text(&c, 1), "漢字", "启动即开时 last() 也应是繁体");
+    c.debug_run_menu_cmd(MenuCmd::ToggleS2t); // 切回简体
+    assert_eq!(last_text(&c, 1), "漢字", "切回简体不改变已上屏的 last()");
+}
+
+/// `cozd` 的提示文本（`汉典:{last(1)}`）显示实际上屏的形态：先上屏「漢字」再切回简体，
+/// 提示仍是「漢字」，与执行时搜索的字一致。
+#[test]
+fn cozd_label_shows_committed_form() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if !has_data() {
+        eprintln!("跳过：缺 build_dev 词库 / opencc 数据");
+        return;
+    }
+    let c = open(&data_dir());
+    c.debug_run_menu_cmd(MenuCmd::ToggleS2t);
+    assert_eq!(commit_hanzi(&c), "漢字", "前提：繁体上屏");
+    c.debug_run_menu_cmd(MenuCmd::ToggleS2t); // 切回简体
+    // 出厂 `cozd`（system.phrases.toml）：该环境不加载短语层，原样装一条进来。
+    c.debug_install_phrases(vec![wind_phrase::PhraseSeed {
+        code: "cozd".into(),
+        text: r#"$CC("汉典:{last(1)}", open("https://www.zdic.net/hans/{url(last(1))}"))"#.into(),
+        weight: 2000,
+        position: 0,
+        is_system: true,
+        category: String::new(),
+    }]);
+    for ch in "cozd".chars() {
+        c.handle_key_event(&key((ch.to_ascii_uppercase() as u32) & 0xFF, 0));
+    }
+    let shown = c.debug_page_display_texts();
+    assert!(
+        shown.iter().any(|t| t == "汉典:漢字"),
+        "提示应是上屏形态「汉典:漢字」: {shown:?}"
+    );
+}

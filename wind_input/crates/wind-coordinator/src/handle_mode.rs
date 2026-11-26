@@ -160,6 +160,7 @@ impl Coordinator {
         if on {
             s.t2s_enabled = false; // 互斥，同 toggle_conversion_direction
         }
+        self.sync_conv_dir_mirror(s.s2t_enabled, s.t2s_enabled);
         true
     }
 
@@ -173,6 +174,7 @@ impl Coordinator {
         if on {
             s.s2t_enabled = false;
         }
+        self.sync_conv_dir_mirror(s.s2t_enabled, s.t2s_enabled);
         true
     }
 
@@ -2086,7 +2088,7 @@ impl Coordinator {
                         let owner = self.mix_candidate_owner(state, &freq_cand);
                         self.record_selection_cand_in(owner.as_deref(), &freq_code, &freq_cand);
                     }
-                    None => self.push_commit_history(&cand.text),
+                    None => self.push_commit_history_cand(&cand),
                 }
                 let mix_member_owner = self.mix_candidate_owner(state, &cand);
                 // emoji 候选不进分段、不参与造词：它与 `mix_buffer` 没有编码对应关系，放进
@@ -2130,7 +2132,7 @@ impl Coordinator {
             } else {
                 // 数字透镜（计算/日期/金额）与自由输入原文无编码可记词频，但同样是一次上屏：
                 // 单独记历史，使「算完再按 ; 空格」能重复刚上屏的结果。
-                self.push_commit_history(&cand.text);
+                self.push_commit_history_cand(&cand);
             }
             // 选中的是原文（非词库词）：记进快捷输入历史。须在 `exit_mix_mode` 之前。
             if self.mix_cand_is_literal(state, &cand) {
@@ -2172,7 +2174,7 @@ impl Coordinator {
                 let owner = self.mix_candidate_owner(state, &freq_cand);
                 self.record_selection_cand_in(owner.as_deref(), &freq_code, &freq_cand);
             }
-            None => self.push_commit_history(&cand.text),
+            None => self.push_commit_history_cand(cand),
         }
     }
 
@@ -3094,14 +3096,14 @@ impl Coordinator {
                             // 历史候选没有编码：只记历史本身，跳过下面整条词频链，否则会落到活跃方案记一条
                             // 垃圾词频（同 `mix_select_at` 那道提前返回）。
                             self.learn_quick_history(state, &cand.text);
-                            self.push_commit_history(&cand.text);
+                            self.push_commit_history_cand(&cand);
                             0
                         } else if lens == MixLens::English {
                             // 大写英文词：专用记账（小写化码），同 `mix_select_at`。
                             self.record_mix_english_word(state, &cand);
                             0
                         } else if !lens.has_code() {
-                            self.push_commit_history(&cand.text);
+                            self.push_commit_history_cand(&cand);
                             0
                         } else {
                             // 英文头部候选按对应词库词记，同 `mix_select_at`。
@@ -3115,7 +3117,7 @@ impl Coordinator {
                                         &freq_cand,
                                     );
                                 }
-                                None => self.push_commit_history(&cand.text),
+                                None => self.push_commit_history_cand(&cand),
                             }
                             // 造词 / 6b：归属按成员方案（同 `mix_select_at`），归不到成员不学。
                             if let Some(owner) = self.mix_candidate_owner(state, &cand) {

@@ -126,6 +126,8 @@ fn every_record_selection_call_goes_through_freq_code() {
             // 就等于给记账码开了一扇后门——本守卫是按调用点扫的，扫不到的名字
             // 可以随便传一个没过 `freq_code` 的串。
             ".record_selection_cased_in(",
+            // 再带实际上屏形态（变体覆盖文本）的版本，参数布局同上。
+            ".record_selection_shown_in(",
         ];
         let sites = calls
             .iter()
@@ -136,7 +138,8 @@ fn every_record_selection_call_goes_through_freq_code() {
             let code_pos = usize::from(
                 pat == ".record_selection_in("
                     || pat == ".record_selection_cand_in("
-                    || pat == ".record_selection_cased_in(",
+                    || pat == ".record_selection_cased_in("
+                    || pat == ".record_selection_shown_in(",
             );
             // 按括号深度切顶层逗号，取第 `code_pos` 个实参（实参可能是 `self.freq_code(a, b)`）。
             let mut depth = 0i32;
@@ -230,6 +233,7 @@ fn schema_scoped_reads_writes_and_debug_share_one_source() {
         ".record_selection_cand_in(",
         // 大小写投影版：首个实参同样是归属方案。
         ".record_selection_cased_in(",
+        ".record_selection_shown_in(",
         ".apply_freq_rerank_in(",
         ".apply_shadow_in(",
         ".build_debug_schema_ctx(",

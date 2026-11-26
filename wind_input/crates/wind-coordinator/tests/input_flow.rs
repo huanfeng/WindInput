@@ -4503,6 +4503,35 @@ fn test_s2t_one_to_many_variant_expansion() {
     }
 }
 
+/// 选了 1 对多变体「齣」，命令栏 `last()` 要的是屏幕上那个「齣」，不是默认转换的「出」。
+#[test]
+fn test_last_follows_chosen_s2t_variant() {
+    if !has_schemas() {
+        return;
+    }
+    let coord = Coordinator::new_headless(config_with("pinyin"), Some(&data_dir()));
+    if !coord.debug_set_s2t(true) {
+        eprintln!("跳过：缺少 opencc 数据");
+        return;
+    }
+    for c in "chu".chars() {
+        press_letter(&coord, c);
+    }
+    let display = coord.debug_page_display_texts();
+    let p = display.iter().position(|t| t == "出").expect("应含「出」");
+    match coord.handle_key_event(&key_event(0x31 + (p + 1) as u32, EVENT_KEY_DOWN)) {
+        KeyAction::InsertText { text, .. } => assert_eq!(text, "齣", "前提：选中变体上屏「齣」"),
+        other => panic!("应上屏 InsertText，实际: {:?}", other),
+    }
+    assert_eq!(
+        coord
+            .debug_eval_cc_text("$CC(\"x\", type(last()))")
+            .as_deref(),
+        Some("齣"),
+        "last() 应是实际上屏的变体"
+    );
+}
+
 #[test]
 fn test_s2t_variant_absent_when_disabled() {
     if !has_schemas() {

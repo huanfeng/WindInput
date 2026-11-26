@@ -75,7 +75,7 @@ impl Coordinator {
         let ctx = CmdbarCtx {
             input: input.to_string(),
             now: Local::now(),
-            last: self.recent_commits_snapshot(),
+            last: self.recent_shown_snapshot(),
             front_app,
             front_title,
             front_sel,
@@ -213,7 +213,7 @@ impl Coordinator {
         let ctx = CmdbarCtx {
             input: input.to_string(),
             now: Local::now(),
-            last: self.recent_commits_snapshot(),
+            last: self.recent_shown_snapshot(),
             front_app,
             front_title,
             front_sel,

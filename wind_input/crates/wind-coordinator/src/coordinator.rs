@@ -1722,6 +1722,12 @@ pub struct Coordinator {
     pub(crate) self_weak: std::sync::OnceLock<std::sync::Weak<Coordinator>>,
     /// 上屏历史环形缓冲（index 0 = 最近）：供命令栏 `last(n)` 取最近上屏文本。
     pub(crate) recent_commits: Mutex<std::collections::VecDeque<String>>,
+    /// 与 `recent_commits` 逐条对齐的「实际上屏形态」（简繁转换后）。`recent_commits` 记转换前
+    /// 的简体，供重复上屏 / 加词 / 联想再过一次转换；命令栏 `last(n)` 要的是屏幕上那个字，读这份。
+    pub(crate) recent_shown: Mutex<std::collections::VecDeque<String>>,
+    /// 简繁方向的无锁镜像（0 无 / 1 简入繁出 / 2 繁入简出），随 `State` 里两个开关同步写。
+    /// 上屏历史在持 state 锁的出口里记账，不能回头再取 state 锁判方向。
+    pub(crate) conv_dir_mirror: std::sync::atomic::AtomicU8,
     /// 下一词学习的上文：最近一次选词整体上屏的词（简体）。默认断开：任何上屏记账
     /// （`record_commit`）、焦点变化、宿主自行出字 / 挪光标、取消、撤销上屏都清空，只有
     /// `commit_selected` 接得上——只记真正相邻的两个词，见 [`Self::learn_next_word`]。
@@ -2842,6 +2848,10 @@ impl Coordinator {
             host_services: std::sync::OnceLock::new(),
             self_weak: std::sync::OnceLock::new(),
             recent_commits: Mutex::new(std::collections::VecDeque::new()),
+            recent_shown: Mutex::new(std::collections::VecDeque::new()),
+            conv_dir_mirror: std::sync::atomic::AtomicU8::new(Self::conv_dir_code(
+                conv_s2t, conv_t2s,
+            )),
             next_word_prev: Mutex::new(None),
             preceding_text: Mutex::new(String::new()),
             last_commit_len: std::sync::atomic::AtomicUsize::new(1),
@@ -2965,6 +2975,39 @@ impl Coordinator {
             .iter()
             .cloned()
             .collect()
+    }
+
+    /// 上屏历史的「实际上屏形态」快照（index 0 = 最近），供命令栏 `last(n)`。
+    /// 与 `recent_commits` 条数对不上时（只有测试会直接改后者）退回转换前形态。
+    pub(crate) fn recent_shown_snapshot(&self) -> Vec<String> {
+        let raw = self.recent_commits_snapshot();
+        let shown: Vec<String> = self
+            .recent_shown
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .cloned()
+            .collect();
+        if shown.len() == raw.len() { shown } else { raw }
+    }
+
+    /// 把 `State` 里的简繁开关同步到无锁镜像；改动两个开关的地方都要调。
+    pub(crate) fn sync_conv_dir_mirror(&self, s2t: bool, t2s: bool) {
+        self.conv_dir_mirror.store(
+            Self::conv_dir_code(s2t, t2s),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    /// 镜像编码：0 无 / 1 简入繁出 / 2 繁入简出。构造与同步共用，初值与后续写入口径一致。
+    pub(crate) fn conv_dir_code(s2t: bool, t2s: bool) -> u8 {
+        if s2t {
+            1
+        } else if t2s {
+            2
+        } else {
+            0
+        }
     }
 
     /// 前台上下文快照 `(app, title, sel)`，供命令栏 `app()/title()/sel()` 读取。
@@ -4719,6 +4762,7 @@ impl Coordinator {
                     s.toolbar_visible = new_cfg.ui.toolbar.visible;
                     s.s2t_enabled = s2t_on;
                     s.t2s_enabled = t2s_on;
+                    self.sync_conv_dir_mirror(s.s2t_enabled, s.t2s_enabled);
                     let new_mode =
                         wind_candidate::FilterMode::from_config(&new_cfg.input.filter_mode);
                     let changed = s.filter_mode != new_mode;
@@ -7677,6 +7721,7 @@ impl Coordinator {
                 if s.s2t_enabled {
                     s.t2s_enabled = false;
                 }
+                self.sync_conv_dir_mirror(s.s2t_enabled, s.t2s_enabled);
                 (s.s2t_enabled, other_off)
             } else {
                 s.t2s_enabled = !s.t2s_enabled;
@@ -7684,6 +7729,7 @@ impl Coordinator {
                 if s.t2s_enabled {
                     s.s2t_enabled = false;
                 }
+                self.sync_conv_dir_mirror(s.s2t_enabled, s.t2s_enabled);
                 (s.t2s_enabled, other_off)
             }
         };
