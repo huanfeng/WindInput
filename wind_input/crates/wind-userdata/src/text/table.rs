@@ -138,7 +138,8 @@ pub fn parse_table(bytes: &[u8], _path: &Path) -> Result<TableDoc, ParseError> {
 /// 生成，不得含 `,`、`}`（流映射按它们切分）。
 pub fn sync_token(bytes: &[u8]) -> Option<String> {
     let s = std::str::from_utf8(bytes).ok()?;
-    let s = s.strip_prefix('\u{feff}').unwrap_or(s);
+    let normalized = wind_utils::text::normalize_input(s);
+    let s = normalized.as_ref();
     let (body_offset, _) = wind_dict::rime_body_layout(s)?;
     let mut lines = s[..body_offset].lines();
     while let Some(line) = lines.next() {

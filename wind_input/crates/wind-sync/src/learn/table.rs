@@ -105,7 +105,9 @@ pub fn parse(kind: LearnKind, bytes: Option<&[u8]>) -> Result<LearnedFile, Forma
         });
     }
     let s = std::str::from_utf8(bytes).map_err(|_| FormatError::Parse("不是 UTF-8".into()))?;
-    let s = s.strip_prefix('\u{feff}').unwrap_or(s);
+    // 与 core 读学习文件一致：孤立 \r 当换行、去 BOM
+    let normalized = wind_utils::text::normalize_input(s);
+    let s = normalized.as_ref();
     let (end, has_marker) = head_end(s)?;
     let head = &s[..end];
     let columns = parse_columns(head)?;
@@ -324,7 +326,8 @@ pub fn render(kind: LearnKind, f: &LearnedFile, token: Option<&str>, syllable: b
 /// 读头部 `wind:` 映射里的 sync 值（块/流映射均可）。
 pub fn token_of(bytes: &[u8]) -> Option<String> {
     let s = std::str::from_utf8(bytes).ok()?;
-    let s = s.strip_prefix('\u{feff}').unwrap_or(s);
+    let normalized = wind_utils::text::normalize_input(s);
+    let s = normalized.as_ref();
     let (end, _) = head_end(s).ok()?;
     let mut in_wind = false;
     for line in s[..end].lines() {

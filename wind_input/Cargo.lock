@@ -3301,6 +3301,7 @@ dependencies = [
  "toml 0.8.23",
  "ureq",
  "url",
+ "wind-utils",
 ]
 
 [[package]]

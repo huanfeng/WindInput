@@ -120,3 +120,20 @@ fn bad_lines_and_comments_survive_render_and_materialize() {
     let again = parse(LearnKind::Freq, Some(out.as_bytes())).unwrap();
     assert_eq!(again.bad_lines, 2);
 }
+
+#[test]
+fn lone_cr_line_endings_parse_like_lf() {
+    let f = parse(LearnKind::Freq, Some(FREQ.replace('\n', "\r").as_bytes())).unwrap();
+    assert_eq!(f.rows.len(), 2);
+    let t = render(LearnKind::Freq, &f, Some("t"), false);
+    assert_eq!(
+        token_of(
+            &String::from_utf8(t)
+                .unwrap()
+                .replace('\n', "\r")
+                .into_bytes()
+        )
+        .as_deref(),
+        Some("t")
+    );
+}
