@@ -6,8 +6,8 @@
 //! 代理按目标主机决定：localhost/回环一律直连，并遵守 `NO_PROXY`（`*`、域名后缀、IP、CIDR，忽略端口）；
 //! 私网地址不强制直连，需要的话写进 `NO_PROXY`。
 //!
-//! 证书：默认按系统内置根证书校验；`skip_cert_verify` 打开时不校验服务器证书（自建服务用自签名证书时由用户
-//! 显式打开），握手签名照常校验。证书校验失败报 `Fatal`，不当作临时故障反复重试。
+//! 证书：默认按 webpki-roots 内置的根证书校验（不读系统证书库）；`skip_cert_verify` 打开时不校验服务器证书
+//! （自建服务用自签名证书时由用户显式打开），握手签名照常校验。证书校验失败报 `Fatal`，不当作临时故障反复重试。
 
 mod s3;
 mod webdav;
@@ -413,9 +413,22 @@ pub(crate) fn map_status(code: u16, what: &str) -> BackendError {
     }
 }
 
+/// 传输错误的文字：只取种类、说明与底层原因，不带 URL（S3 预签名 URL 的查询串里有凭据与签名）。
+fn transport_text(t: &ureq::Transport) -> String {
+    let mut s = t.kind().to_string();
+    if let Some(m) = t.message() {
+        s.push_str(": ");
+        s.push_str(m);
+    }
+    if let Some(e) = std::error::Error::source(t) {
+        s.push_str(&format!(": {e}"));
+    }
+    s
+}
+
 pub(crate) fn map_transport(t: &ureq::Transport, what: &str) -> BackendError {
     use ureq::ErrorKind::*;
-    let msg = format!("{what}: {t}");
+    let msg = format!("{what}: {}", transport_text(t));
     if is_cert_error(t) {
         return BackendError::Fatal(format!("{CERT_ERROR_HINT}（{msg}）"));
     }
@@ -523,6 +536,19 @@ mod tests {
         for c in [400, 405, 409, 412, 301, 507] {
             assert!(matches!(map_status(c, "x"), BackendError::Fatal(_)), "{c}");
         }
+    }
+
+    /// 错误文本里不带 URL：S3 预签名 URL 的查询串里有凭据与签名。
+    #[test]
+    fn transport_error_text_has_no_url() {
+        let url = "http://127.0.0.1:1/b/k?X-Amz-Credential=AKID%2F2026&X-Amz-Signature=deadbeef";
+        let Err(ureq::Error::Transport(t)) = ureq::get(url).call() else {
+            panic!("应连不上");
+        };
+        let text = map_transport(&t, "下载 k").to_string();
+        assert!(!text.contains("X-Amz-"), "{text}");
+        assert!(!text.contains("127.0.0.1"), "{text}");
+        assert!(text.contains("下载 k"), "{text}");
     }
 
     #[test]
