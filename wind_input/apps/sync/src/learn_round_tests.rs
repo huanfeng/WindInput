@@ -1,5 +1,6 @@
 use super::*;
 use crate::testing::FakeCore;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use wind_sync::learn::{Key, norm_key};
@@ -361,4 +362,161 @@ fn learned_groups_filter_by_content() {
         ..Default::default()
     };
     assert_eq!(names(off), ["completion"]);
+}
+
+fn clear_freq(d: &Dev) {
+    let p = d.path(FREQ);
+    let f = table::parse(LearnKind::Freq, Some(&std::fs::read(&p).unwrap())).unwrap();
+    std::fs::write(p, f.head).unwrap();
+}
+
+fn own_contrib(d: &Dev, group: &str, kind: LearnKind) -> Contribution {
+    let ctx = d.ctx(None);
+    let st = load_state(&ctx).unwrap();
+    contrib_of(kind, &st.groups[group].contrib).unwrap()
+}
+
+fn w_key() -> wind_sync::learn::NormKey {
+    norm_key(LearnKind::Freq, &Key("ni hao".into(), "你好".into()))
+}
+
+/// B 删词后，A 在不知情时（两段之间）又学了一次：删除优先，两边都没有该词，A 的贡献里也没有。
+#[test]
+fn deleted_word_not_resurrected_across_devices() {
+    let b = MemBackend::new();
+    let (mut a, mut bb) = (Dev::new("pc-a"), Dev::new("pc-b"));
+    set_freq(&bb, 2);
+    bb.round(&b);
+    a.round(&b);
+    assert_eq!(freq(&a), Some(2));
+
+    clear_freq(&bb);
+    bb.round(&b);
+    let begins = Arc::new(AtomicUsize::new(0));
+    let path = a.path(FREQ);
+    {
+        let begins = begins.clone();
+        *a.core.on_call.lock().unwrap() = Some(Box::new(move |m, p| {
+            if m == "data.beginEdit"
+                && p.get("path").and_then(|v| v.as_str()) == Some(FREQ)
+                && begins.fetch_add(1, Ordering::SeqCst) == 1
+            {
+                let s = std::fs::read_to_string(&path).unwrap();
+                std::fs::write(&path, s.replace("\t2\t", "\t3\t")).unwrap();
+            }
+        }));
+    }
+    a.round(&b);
+    assert_eq!(begins.load(Ordering::SeqCst), 2);
+    *a.core.on_call.lock().unwrap() = None;
+    bb.round(&b);
+    a.round(&b);
+    assert_eq!(freq(&a), None);
+    assert_eq!(freq(&bb), None);
+    assert!(
+        !own_contrib(&a, "pinyin/freq", LearnKind::Freq)
+            .rows
+            .contains_key(&w_key())
+    );
+}
+
+/// 学习数据关闭期间收到删除、本机又学了该词；重新打开后删除仍优先。
+#[test]
+fn deleted_word_stays_deleted_after_reenable() {
+    let b = MemBackend::new();
+    let (mut a, mut bb) = (Dev::new("pc-a"), Dev::new("pc-b"));
+    set_freq(&bb, 2);
+    bb.round(&b);
+    a.round(&b);
+    a.content.learned = false;
+    clear_freq(&bb);
+    bb.round(&b);
+    a.round(&b);
+    set_freq(&a, 3);
+    a.content.learned = true;
+    a.round(&b);
+    bb.round(&b);
+    a.round(&b);
+    assert_eq!(freq(&a), None);
+    assert_eq!(freq(&bb), None);
+}
+
+/// 某设备的新镜像解不开：本组改用它的旧镜像，本组对它的依据编号不推进，其他设备照常物化。
+#[test]
+fn undecodable_peer_does_not_block_group() {
+    let b = MemBackend::new();
+    let (mut a, mut bb, mut c) = (Dev::new("pc-a"), Dev::new("pc-b"), Dev::new("pc-c"));
+    set_freq(&bb, 2);
+    set_freq(&c, 3);
+    bb.round(&b);
+    c.round(&b);
+    a.round(&b);
+    assert_eq!(freq(&a), Some(5));
+    let old_b = load_state(&a.ctx(None)).unwrap().peer_seen["pc-b"];
+
+    // B 发布一份更高版本的贡献（本程序解不开）
+    let bst = load_state(&bb.ctx(None)).unwrap();
+    let mut objs = BTreeMap::new();
+    objs.insert(
+        "pinyin/freq.base".to_string(),
+        b"#wind-learn 99 freq epoch=0\n".to_vec(),
+    );
+    wind_sync::learn::lane::publish(&b, &key(), "pc-b", bst.own_index.as_ref(), &objs).unwrap();
+    assert_eq!(freq(&c), Some(5));
+    set_freq(&c, 6);
+    c.round(&b);
+    a.round(&b);
+    assert_eq!(freq(&a), Some(6));
+    let st = load_state(&a.ctx(None)).unwrap();
+    assert!(st.peer_seen["pc-b"] > old_b);
+    assert_eq!(st.groups["pinyin/freq"].peer_seen["pc-b"], old_b);
+    assert_eq!(
+        st.groups["pinyin/freq"].peer_seen["pc-c"],
+        st.peer_seen["pc-c"]
+    );
+}
+
+/// 发布失败：本机增量留在贡献里，下一轮照常上传，次数不丢不重。
+#[test]
+fn publish_failure_keeps_increments() {
+    let b = MemBackend::new();
+    let (mut a, mut bb) = (Dev::new("pc-a"), Dev::new("pc-b"));
+    set_freq(&a, 3);
+    a.round(&b);
+    set_freq(&a, 5);
+    b.fail_all(Some(wind_sync::BackendError::Transient("断网".into())));
+    assert!(a.round_with(&b, None).is_err());
+    b.fail_all(None);
+    set_freq(&a, 6);
+    a.round(&b);
+    bb.round(&b);
+    a.round(&b);
+    assert_eq!(freq(&a), Some(6));
+    assert_eq!(freq(&bb), Some(6));
+}
+
+/// 两组里只有一组要写文件时崩在提交前：写了的组按令牌采用待定，没写的组已直接提交，均不重复计数。
+#[test]
+fn two_groups_one_written_adopts_per_group() {
+    let b = MemBackend::new();
+    let (mut a, mut bb) = (Dev::new("pc-a"), Dev::new("pc-b"));
+    set_freq(&bb, 4);
+    bb.round(&b);
+    set_freq(&a, 3);
+    set_comp(&a, 2);
+    assert!(a.round_with(&b, Some(FailPoint::AfterWrite)).is_err());
+    assert_eq!(freq(&a), Some(7));
+    {
+        let st = load_state(&a.ctx(None)).unwrap();
+        let p = st.pending.as_ref().unwrap();
+        assert_eq!(p.groups.keys().collect::<Vec<_>>(), ["pinyin/freq"]);
+        assert!(st.groups.contains_key("completion"));
+    }
+    set_freq(&a, 8);
+    set_comp(&a, 3);
+    a.round(&b);
+    bb.round(&b);
+    a.round(&b);
+    assert_eq!((freq(&a), comp(&a)), (Some(8), Some(3)));
+    assert_eq!((freq(&bb), comp(&bb)), (Some(8), Some(3)));
 }

@@ -307,6 +307,37 @@ fn peers_of(
     Ok(out)
 }
 
+/// 各设备的新镜像；某设备解不开时本组沿用它的旧镜像（依据编号不推进），没有旧镜像则本组暂不计它。
+/// 返回贡献与本组实际依据的编号。
+fn latest_peers(
+    dir: &Path,
+    latest: &BTreeMap<String, u64>,
+    old_seen: &BTreeMap<String, u64>,
+    name: &str,
+    kind: LearnKind,
+    warnings: &mut Vec<String>,
+) -> Result<(Vec<Contribution>, BTreeMap<String, u64>), String> {
+    let mut out = Vec::new();
+    let mut seen = BTreeMap::new();
+    for (dev, n) in latest {
+        let (c, used) = match mirror_contrib(dir, dev, *n, name, kind) {
+            Ok(c) => (c, Some(*n)),
+            Err(e) => {
+                warnings.push(format!("{e}；本组沿用该设备上次的镜像"));
+                match old_seen.get(dev) {
+                    Some(o) => (mirror_contrib(dir, dev, *o, name, kind)?, Some(*o)),
+                    None => (None, None),
+                }
+            }
+        };
+        if let Some(u) = used {
+            seen.insert(dev.clone(), u);
+        }
+        out.extend(c);
+    }
+    Ok((out, seen))
+}
+
 fn peers_have(dir: &Path, seen: &BTreeMap<String, u64>, name: &str) -> bool {
     seen.iter()
         .any(|(dev, n)| obj_path(&mirror_dir(dir, dev, *n), &format!("{name}.base")).is_file())
@@ -361,7 +392,9 @@ fn begin_all(
             if e == TIMEOUT_MSG {
                 begun.push(rel.clone());
             }
-            end_all(ctx, &begun);
+            for w in end_all(ctx, &begun) {
+                log!("{w}");
+            }
             return Err(format!("核心拒绝开始编辑 {rel}: {e}"));
         }
         begun.push(rel);
@@ -369,7 +402,9 @@ fn begin_all(
     Ok(begun)
 }
 
-fn end_all(ctx: &LearnCtx, begun: &[String]) {
+/// 逐个 `data.endEdit`；返回两次都失败的警告（带路径）。
+fn end_all(ctx: &LearnCtx, begun: &[String]) -> Vec<String> {
+    let mut warnings = Vec::new();
     for p in begun {
         // 失败重试一次：会话留着会让 core 一直暂停该文件的写回
         let r = ctx
@@ -377,20 +412,22 @@ fn end_all(ctx: &LearnCtx, begun: &[String]) {
             .request("data.endEdit", json!({ "path": p }))
             .or_else(|_| ctx.link.request("data.endEdit", json!({ "path": p })));
         if let Err(e) = r {
-            log!("data.endEdit {p} 失败: {e}");
+            warnings.push(format!("结束编辑 {p} 失败: {e}"));
         }
     }
+    warnings
 }
 
-/// 在租约内跑 `f`，无论成败都结束租约。
+/// 在租约内跑 `f`，无论成败都结束租约；结束失败的警告记入 `ended`。
 fn leased<T>(
     ctx: &LearnCtx,
     groups: &[(String, LearnKind, PathBuf)],
+    ended: &mut Vec<String>,
     f: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
     let begun = begin_all(ctx, groups)?;
     let r = f();
-    end_all(ctx, &begun);
+    ended.extend(end_all(ctx, &begun));
     r
 }
 
@@ -443,7 +480,8 @@ pub fn count_in(ctx: &LearnCtx, st: &mut LearnState) -> Result<(), String> {
         return Ok(());
     }
     let dir = private_dir(ctx);
-    leased(ctx, &groups, || {
+    let mut ended = Vec::new();
+    let r = leased(ctx, &groups, &mut ended, || {
         let mut warnings = Vec::new();
         let mut changed = false;
         for (name, kind, abs) in &groups {
@@ -486,7 +524,11 @@ pub fn count_in(ctx: &LearnCtx, st: &mut LearnState) -> Result<(), String> {
             save(ctx, st)?;
         }
         Ok(())
-    })
+    });
+    for w in &ended {
+        log!("{w}");
+    }
+    r
 }
 
 // ── 第 3 步：交换 ─────────────────────────────────────
@@ -518,9 +560,10 @@ fn publish_own(
         let lb = contrib_of(kind, &gs.last_base)?;
         let delta = split(&full, &lb);
         let delta_text = encode(&delta);
-        let compact = on
-            && (needs_rebase(&full, &lb)
-                || should_compact(
+        // 底稿表达不了时关闭的组也得压实；按量、按龄的压实只给开着的组
+        let compact = needs_rebase(&full, &lb)
+            || (on
+                && should_compact(
                     lb.rows.len() + lb.tombs.len(),
                     delta.rows.len() + delta.tombs.len(),
                     delta_text.len(),
@@ -667,9 +710,20 @@ fn plan_group(
         return Ok(None);
     };
     let gs = st.groups.get(name).cloned().unwrap_or_default();
-    let peers = peers_of(dir, &gs.peer_seen, name, kind)
-        .and_then(|old| Ok((old, peers_of(dir, &st.peer_seen, name, kind)?)));
-    let (old, new) = match peers {
+    let mut peer_warn = Vec::new();
+    let peers = peers_of(dir, &gs.peer_seen, name, kind).and_then(|old| {
+        let (new, seen) = latest_peers(
+            dir,
+            &st.peer_seen,
+            &gs.peer_seen,
+            name,
+            kind,
+            &mut peer_warn,
+        )?;
+        Ok((old, new, seen))
+    });
+    warnings.append(&mut peer_warn);
+    let (old, new, seen) = match peers {
         Ok(p) => p,
         Err(e) => {
             warnings.push(format!("{name} 的镜像不可用，本轮跳过: {e}"));
@@ -694,7 +748,7 @@ fn plan_group(
     let fp = materialize(kind, &all, &f2);
     let mut ng = GroupState {
         contrib: encode(&me),
-        peer_seen: st.peer_seen.clone(),
+        peer_seen: seen,
         ..gs
     };
     let write = if fp.rows != f2.rows {
@@ -730,7 +784,8 @@ fn materialize_all(
     if groups.is_empty() {
         return Ok(0);
     }
-    leased(ctx, &groups, || {
+    let mut ended = Vec::new();
+    let r = leased(ctx, &groups, &mut ended, || {
         let token: String = random_bytes::<8>()
             .iter()
             .map(|b| format!("{b:02x}"))
@@ -780,7 +835,9 @@ fn materialize_all(
         }
         save(ctx, st)?;
         Ok(writes.len())
-    })
+    });
+    warnings.extend(ended);
+    r
 }
 
 /// 删除不再被任何组（及最新下载）引用的镜像目录。
