@@ -202,3 +202,23 @@ impl Backend for MemBackend {
         Ok(())
     }
 }
+
+/// 列举时无视前缀、把全部对象都返回的后端（测试用）：模拟实现有误或被篡改的服务端。
+#[cfg(test)]
+pub struct ListIgnoresPrefix(pub MemBackend);
+
+#[cfg(test)]
+impl Backend for ListIgnoresPrefix {
+    fn list(&self, _prefix: &str) -> Result<Vec<ObjMeta>, BackendError> {
+        self.0.list("")
+    }
+    fn get(&self, key: &str) -> Result<Option<Vec<u8>>, BackendError> {
+        self.0.get(key)
+    }
+    fn put(&self, key: &str, bytes: &[u8]) -> Result<(), BackendError> {
+        self.0.put(key, bytes)
+    }
+    fn delete(&self, key: &str) -> Result<(), BackendError> {
+        self.0.delete(key)
+    }
+}

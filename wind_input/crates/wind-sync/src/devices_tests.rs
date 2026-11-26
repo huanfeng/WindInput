@@ -130,3 +130,15 @@ fn id_taken_reflects_remote_objects() {
     assert!(!id_taken(&b, "d2").unwrap());
     assert!(!id_taken(&b, "d").unwrap());
 }
+
+#[test]
+fn remove_skips_keys_outside_the_device_dir() {
+    let b = MemBackend::new();
+    put_device_info(&b, &Dek::generate().devinfo_key(), "ab", &sample()).unwrap();
+    b.raw_put(&manifest::blob_key("x"), vec![1]);
+    b.raw_put(&manifest::manifest_key("abc", 1), vec![1]);
+    let sloppy = crate::backend::ListIgnoresPrefix(b.clone());
+    assert_eq!(remove_device(&sloppy, "ab").unwrap(), 1);
+    assert_eq!(b.keys(&manifest::blobs_prefix()).len(), 1);
+    assert_eq!(b.keys(&manifest::device_dir_prefix("abc")).len(), 1);
+}

@@ -44,6 +44,15 @@ pub fn safe_key(key: &str) -> bool {
             .all(|seg| !seg.is_empty() && seg != "." && seg != "..")
 }
 
+/// 列举结果里的键确实在 `prefix` 之下且安全：后端不按前缀过滤时也不误删别处的对象。
+pub fn listed_within(key: &str, prefix: &str) -> bool {
+    if key.starts_with(prefix) && safe_key(key) {
+        return true;
+    }
+    eprintln!("[wind-sync] 列举 {prefix} 返回了范围外的键 {key:?}，已跳过");
+    false
+}
+
 /// 设备号规则见 [`crate::ids::valid_id`]：它会拼进远端键。
 pub fn valid_device_id(s: &str) -> bool {
     crate::ids::valid_id(s)

@@ -59,8 +59,9 @@ pub fn reset_remote_with(b: &dyn Backend, dek: &Dek) -> Result<(), SyncError> {
     // 先删 meta：中途失败时远端是「未初始化」，旧库各设备的同步轮就此停下，不会在半毁的远端上
     // 把已删的设备当作清除；新 meta 最后写，重试即可
     b.delete(&manifest::meta_key())?;
-    for o in b.list(&format!("{}/", manifest::ROOT))? {
-        if !manifest::safe_key(&o.key) || o.key == manifest::meta_key() {
+    let root = format!("{}/", manifest::ROOT);
+    for o in b.list(&root)? {
+        if !manifest::listed_within(&o.key, &root) || o.key == manifest::meta_key() {
             continue;
         }
         b.delete(&o.key)?;
@@ -140,5 +141,18 @@ mod tests {
         assert_ne!(old, fresh);
         assert!(join_with_key(&b, &old.to_key_string()).is_err());
         assert_eq!(join_with_key(&b, &fresh.to_key_string()).unwrap(), fresh);
+    }
+
+    #[test]
+    fn reset_skips_keys_outside_the_sync_root() {
+        let b = MemBackend::new();
+        init_remote(&b).unwrap();
+        b.raw_put("windinput-sync/v1/blobs/x", vec![1]);
+        b.raw_put("other/keep", vec![1]);
+        b.raw_put("windinput-sync/v10/keep", vec![1]);
+        reset_remote(&crate::backend::ListIgnoresPrefix(b.clone())).unwrap();
+        assert_eq!(b.keys("windinput-sync/v1/"), vec![manifest::meta_key()]);
+        assert_eq!(b.keys("other/").len(), 1);
+        assert_eq!(b.keys("windinput-sync/v10/").len(), 1);
     }
 }
