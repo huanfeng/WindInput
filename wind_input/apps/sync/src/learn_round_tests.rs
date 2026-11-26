@@ -75,6 +75,17 @@ impl Dev {
         exchange_and_materialize(&ctx, b, &key(), &mut st).map(|_| ())
     }
 
+    /// 跑一轮，返回本轮写入他机统计文件的数量。
+    fn round_stats_written(&mut self, b: &dyn Backend) -> usize {
+        self.now += 60;
+        let ctx = self.ctx(None);
+        let mut st = ensure_state(&ctx, b, &key()).unwrap();
+        count_in(&ctx, &mut st).unwrap();
+        exchange_and_materialize(&ctx, b, &key(), &mut st)
+            .unwrap()
+            .stats_written
+    }
+
     fn round(&mut self, b: &dyn Backend) {
         self.round_with(b, None).unwrap();
     }
@@ -925,16 +936,11 @@ fn peer_stats_written_under_devices() {
         stats_file(&[("2026-11-01", 5)])
     );
     assert!(peer_stats(&a, "pc-b", "2026-11.toml").is_none());
-    // 没变化不重写
-    let p = bb.path("stats/devices/pc-a/2026-11.toml");
-    let m = std::fs::metadata(&p).unwrap().modified().unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(20));
-    bb.round(&b);
-    assert_eq!(std::fs::metadata(&p).unwrap().modified().unwrap(), m);
-    // 内容变化会更新
+    // 没变化不重写；内容变化写一次
+    assert_eq!(bb.round_stats_written(&b), 0);
     set_stats(&a, "2026-11.toml", &[("2026-11-01", 6)]);
     a.round(&b);
-    bb.round(&b);
+    assert_eq!(bb.round_stats_written(&b), 1);
     assert_eq!(
         peer_stats(&bb, "pc-a", "2026-11.toml").unwrap(),
         stats_file(&[("2026-11-01", 6)])
@@ -1045,4 +1051,31 @@ fn claim_merges_stats_by_day() {
         .parse()
         .unwrap();
     assert_eq!(up["days"].as_table().unwrap().len(), 3);
+}
+
+#[test]
+fn claim_with_bad_stats_month_still_adopts() {
+    let b = MemBackend::new();
+    let mut a = Dev::new("pc-a");
+    set_freq(&a, 3);
+    set_stats(&a, "2026-10.toml", &[("2026-10-01", 1)]);
+    set_stats(&a, "2026-11.toml", &[("2026-11-01", 5)]);
+    a.round(&b);
+    let mut c = Dev::new("pc-a");
+    // 本地 10 月损坏；11 月带首部注释
+    std::fs::create_dir_all(c.path("stats")).unwrap();
+    std::fs::write(c.path("stats/2026-10.toml"), "not = [toml").unwrap();
+    let local = format!("# 注释\n{}", stats_file(&[("2026-11-02", 6)]));
+    std::fs::write(c.path("stats/2026-11.toml"), &local).unwrap();
+    c.init(&b, Joined::Claim { dev: "pc-a".into() });
+    assert_eq!(own_count(&c), Some(3), "学习数据照常认领");
+    assert_eq!(
+        std::fs::read_to_string(c.path("stats/2026-10.toml")).unwrap(),
+        "not = [toml",
+        "损坏的月表原样保留"
+    );
+    let got = std::fs::read_to_string(c.path("stats/2026-11.toml")).unwrap();
+    assert!(got.starts_with("# 注释\n"), "{got}");
+    let t: toml::Table = got.parse().unwrap();
+    assert_eq!(t["days"].as_table().unwrap().len(), 2);
 }

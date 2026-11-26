@@ -91,6 +91,8 @@ impl<'a> LearnCtx<'a> {
 #[derive(Debug, Default)]
 pub struct LearnReport {
     pub groups_written: usize,
+    /// 本轮实际写入 `data/stats/devices/` 的文件数
+    pub stats_written: usize,
     pub warnings: Vec<String>,
     /// 本轮列出的学习通道里有数据的设备（不含本轮删掉的本机旧号）
     pub devices: BTreeSet<String>,
@@ -523,19 +525,20 @@ fn own_stats(ctx: &LearnCtx) -> Result<BTreeMap<String, Vec<u8>>, String> {
     Ok(out)
 }
 
-/// 只在内容变化时写（原子）。
-fn write_if_changed(p: &Path, bytes: &[u8]) -> io::Result<()> {
+/// 只在内容变化时写（原子）；返回是否真的写了。
+fn write_if_changed(p: &Path, bytes: &[u8]) -> io::Result<bool> {
     if std::fs::read(p).is_ok_and(|old| old == bytes) {
-        return Ok(());
+        return Ok(false);
     }
-    write_atomic(p, bytes)
+    write_atomic(p, bytes).map(|()| true)
 }
 
 /// 他机最新镜像里的统计写到 `data/stats/devices/<dev>/`；镜像里没有的月份与不再计入的设备目录删掉。
-/// 统计开关关闭时不动。
-fn write_peer_stats(ctx: &LearnCtx, st: &LearnState, warnings: &mut Vec<String>) {
+/// 统计开关关闭时不动。返回写入的文件数。
+fn write_peer_stats(ctx: &LearnCtx, st: &LearnState, warnings: &mut Vec<String>) -> usize {
+    let mut written = 0;
     if !ctx.content.stats {
-        return;
+        return written;
     }
     let root = stats_dir(ctx.userdata).join("devices");
     let dir = private_dir(ctx);
@@ -553,8 +556,9 @@ fn write_peer_stats(ctx: &LearnCtx, st: &LearnState, warnings: &mut Vec<String>)
                 }
                 let r = std::fs::read(e.path())
                     .and_then(|b| write_if_changed(&root.join(dev).join(&f), &b));
-                if let Err(err) = r {
-                    warnings.push(format!("写入设备 {dev} 的统计 {f} 失败: {err}"));
+                match r {
+                    Ok(w) => written += usize::from(w),
+                    Err(err) => warnings.push(format!("写入设备 {dev} 的统计 {f} 失败: {err}")),
                 }
                 want.insert(f);
             }
@@ -580,10 +584,26 @@ fn write_peer_stats(ctx: &LearnCtx, st: &LearnState, warnings: &mut Vec<String>)
             }
         }
     }
+    written
 }
 
 /// 把远端月表合并进本机：按天逐日，同一天取本地，只有远端有的天加入；其余顶层键取本地。
+/// 本地文件开头以 `#` 起的注释行原样保留。
 fn merge_stats_month(local: Option<&[u8]>, remote: &[u8]) -> Result<Vec<u8>, String> {
+    let header: String = local
+        .and_then(|b| std::str::from_utf8(b).ok())
+        .map(|t| {
+            t.lines()
+                .take_while(|l| l.trim_start().starts_with('#'))
+                .map(|l| format!("{l}\n"))
+                .collect()
+        })
+        .unwrap_or_default();
+    let body = merge_stats_tables(local, remote)?;
+    Ok([header.into_bytes(), body].concat())
+}
+
+fn merge_stats_tables(local: Option<&[u8]>, remote: &[u8]) -> Result<Vec<u8>, String> {
     let parse = |b: &[u8]| -> Result<toml::Table, String> {
         std::str::from_utf8(b)
             .map_err(|_| "不是 UTF-8".to_string())?
@@ -819,6 +839,8 @@ fn republish_as(
             bases.push((name.clone(), text));
         }
     }
+    // 统计关闭时旧号下已发布的统计对象不带到新号（对象在旧号前缀下、无明文可搬）；
+    // 重新开启后由本机月表整份重传，他机相应期间看不到本机统计。
     if ctx.content.stats {
         objects.extend(own_stats(ctx)?);
     }
@@ -1228,7 +1250,7 @@ pub fn exchange_and_materialize(
         rep.devices.remove(&d);
     }
     rep.groups_written = materialize_all(ctx, st, &mut rep.warnings)?;
-    write_peer_stats(ctx, st, &mut rep.warnings);
+    rep.stats_written = write_peer_stats(ctx, st, &mut rep.warnings);
     prune_mirrors(ctx, st);
     st.last_ok = ctx.now;
     save(ctx, st)?;
@@ -1418,16 +1440,19 @@ fn adopt_remote(
             })
             .transpose()
     };
+    // 认领的是自己的历史：不看 content.stats 开关。统计出错只告警跳过该月，不影响学习数据认领
     for (name, remote) in &objs {
-        if let Some(f) = stats_object_file(name) {
-            let p = stats_dir(ctx.userdata).join(f);
-            let merged = read_opt(&p)?
-                .map_or_else(
-                    || merge_stats_month(None, remote),
-                    |l| merge_stats_month(Some(&l), remote),
-                )
-                .map_err(|e| format!("设备 {dev} 的 {name} 不可用: {e}"))?;
-            write_atomic(&p, &merged).map_err(|e| format!("写入 {} 失败: {e}", p.display()))?;
+        let Some(f) = stats_object_file(name) else {
+            continue;
+        };
+        let p = stats_dir(ctx.userdata).join(f);
+        let r = read_opt(&p).and_then(|local| {
+            let merged = merge_stats_month(local.as_deref(), remote)
+                .map_err(|e| format!("设备 {dev} 的 {name} 或本地月表不可用: {e}"))?;
+            write_atomic(&p, &merged).map_err(|e| format!("写入 {} 失败: {e}", p.display()))
+        });
+        if let Err(e) = r {
+            log!("认领时跳过统计月表 {f}: {e}");
         }
     }
     for name in objs.keys() {
