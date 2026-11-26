@@ -4233,9 +4233,14 @@ impl Engine for PinyinEngine {
         // 的顶部锚定据此豁免，否则本处降权会被整个顶回去。
         let mut demote_targets: Vec<String> = synthesized_sentence.iter().cloned().collect();
         for c in candidates.iter() {
-            // `equal_rank`：模糊整句与精确整词统一词频，不让位；纠错整句照旧让位。
-            let yields = c.is_corrected || !self.fuzzy_config.equal_rank;
-            if c.is_sentence && c.is_fuzzy && yields && !demote_targets.contains(&c.text) {
+            // `equal_rank`：模糊整句与精确整词统一词频，不让位。此处还分不出纠错整句（`is_corrected` 要到
+            // 正确拼音对齐才置位，晚于本步），所以纠错整句也一并不让位；它的罚分不受影响，且要求键入串
+            // 同时是某个精确整词的码，真实输入下极少。
+            if c.is_sentence
+                && c.is_fuzzy
+                && !self.fuzzy_config.equal_rank
+                && !demote_targets.contains(&c.text)
+            {
                 demote_targets.push(c.text.clone());
             }
         }
