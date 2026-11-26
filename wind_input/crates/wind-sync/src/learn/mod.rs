@@ -72,6 +72,9 @@ impl Gen {
             return Some(Gen::initial());
         }
         let (ms, dev) = s.split_once(':')?;
+        if dev.is_empty() {
+            return None;
+        }
         Some(Gen {
             ms: ms.parse().ok()?,
             dev: dev.to_string(),
@@ -106,7 +109,7 @@ pub fn norm_key(kind: LearnKind, k: &Key) -> NormKey {
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Row {
-    pub r#gen: Gen,
+    pub gen_: Gen,
     pub count: u64,
     /// 顺序同 [`LearnKind::field_cols`]。
     pub fields: Vec<String>,

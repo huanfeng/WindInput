@@ -33,6 +33,8 @@ fn render_parse_roundtrip() {
     assert_eq!(Gen::parse(&x.render()), Some(x));
     assert_eq!(Gen::parse("abc"), None);
     assert_eq!(Gen::parse("x:pc"), None);
+    assert_eq!(Gen::parse("5:"), None);
+    assert_eq!(Gen::parse("0:"), None);
 }
 
 #[test]
