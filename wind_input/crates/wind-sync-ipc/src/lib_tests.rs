@@ -360,7 +360,7 @@ fn status_carries_usage() {
             computed_at: 1_795_000_000,
             total: 3000,
             blobs: 2000,
-            blobs_unreferenced: 100,
+            blobs_unreferenced: Some(100),
             devices: vec![DeviceUsage {
                 id: "pc".into(),
                 learned: 700,
@@ -369,6 +369,7 @@ fn status_carries_usage() {
             other: 100,
             provider: Some(ProviderUsage {
                 used: 5000,
+                available: Some(10),
                 quota: None,
             }),
         }),
@@ -381,5 +382,8 @@ fn status_carries_usage() {
     assert_eq!(v["usage"]["devices"][0]["stats"], 200);
     assert_eq!(v["usage"]["provider"]["used"], 5000);
     assert_eq!(v["usage_busy"], true);
+    let unknown = Usage::default();
+    let v = serde_json::to_value(&unknown).unwrap();
+    assert!(v.get("blobs_unreferenced").is_none(), "无法确定时省略: {v}");
     assert_eq!(Op::parse("refresh_usage"), Some(Op::RefreshUsage));
 }

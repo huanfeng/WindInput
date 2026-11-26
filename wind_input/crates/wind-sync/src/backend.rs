@@ -36,8 +36,11 @@ pub struct ObjMeta {
 /// 服务端给出的空间用量（WebDAV 配额、官方服务的计费口径）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderUsage {
+    /// 服务端口径的已用（WebDAV 是同步目录的 `quota-used-bytes`）。
     pub used: u64,
-    /// 总容量；服务端不给或不限量为 None。
+    /// 剩余可用；服务端不给或不限量为 None。
+    pub available: Option<u64>,
+    /// 总容量；只有能给出账户配额的服务（官方同步服务）才填。
     pub quota: Option<u64>,
 }
 

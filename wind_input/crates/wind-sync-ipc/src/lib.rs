@@ -391,11 +391,12 @@ pub struct Usage {
     pub total: u64,
     /// 文件数据：各设备共用、按内容去重。
     pub blobs: u64,
-    /// 其中已不被任何设备清单引用、等待回收的旧版本。
-    pub blobs_unreferenced: u64,
+    /// 其中已不被任何设备最新两代清单引用的旧版本；有清单解不开时无法确定，为 None。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blobs_unreferenced: Option<u64>,
     /// 各设备的学习数据与打字统计，按设备号排序。
     pub devices: Vec<DeviceUsage>,
-    /// 其余：设备清单、设备信息、`meta.json`。
+    /// 其余：`meta.json`、设备清单与设备信息，以及同步根下不认识的对象。
     pub other: u64,
     /// 服务端给出的用量与配额（WebDAV RFC 4331、官方服务的计费口径）；给不出为 None。
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -413,8 +414,11 @@ pub struct DeviceUsage {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProviderUsage {
+    /// 服务端口径的已用（WebDAV 只是同步目录的用量）。
     pub used: u64,
-    /// 总容量；不限量或给不出为 None。
+    /// 剩余可用；不限量或给不出为 None。
+    pub available: Option<u64>,
+    /// 总容量；只有能给出账户配额的服务（官方同步服务）才有。
     pub quota: Option<u64>,
 }
 
@@ -435,7 +439,7 @@ pub struct RoundStats {
 /// 同步进程 → core。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-#[allow(clippy::large_enum_variant)] // 逐帧收发即用即弃，不值得 Box
+#[allow(clippy::large_enum_variant)] // 逐帧收发即用即弃；只 Box 用量仍超阈值，不值得
 pub enum FromSync {
     Status(Status),
     Request {

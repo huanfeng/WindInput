@@ -937,13 +937,6 @@ impl Runner {
                         {
                             retire_old_ids(&*backend, &dek, &mut state);
                         }
-                        // 空间占用在本轮写完之后统计，不影响本轮成败
-                        if let (Some(lib), Ok(rep)) = (usage_lib, &r)
-                            && !rep.skipped
-                            && !cancel.load(Ordering::SeqCst)
-                        {
-                            usage = Some((lib, usage::measure(&*backend, &dek)));
-                        }
                         // 本机 info 被其他设备「移除」后清单可能重新出现，info 却要等跨日才写回，
                         // 期间别人看到的是「无法解密」：每轮 stat 一次，缺了就补写。
                         let missing = || {
@@ -966,6 +959,14 @@ impl Runner {
                                 Ok(()) => info_written = Some(info),
                                 Err(e) => log!("写设备信息失败: {}", sync_error(&e)),
                             }
+                        }
+                        // 空间占用放在本轮全部写入之后，不影响本轮成败；中途可被取消
+                        if let (Some(lib), Ok(rep)) = (usage_lib, &r)
+                            && !rep.skipped
+                            && !cancel.load(Ordering::SeqCst)
+                        {
+                            let stop = || cancel.load(Ordering::SeqCst);
+                            usage = Some((lib, usage::measure(&*backend, &dek, &stop)));
                         }
                         Ok(r)
                     }

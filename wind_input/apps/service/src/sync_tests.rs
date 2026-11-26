@@ -249,7 +249,7 @@ fn status_carries_usage() {
         computed_at: 1_795_000_000,
         total: 3000,
         blobs: 2000,
-        blobs_unreferenced: 100,
+        blobs_unreferenced: Some(100),
         devices: vec![wind_sync_ipc::DeviceUsage {
             id: "pc".into(),
             learned: 700,
@@ -258,7 +258,8 @@ fn status_carries_usage() {
         other: 100,
         provider: Some(wind_sync_ipc::ProviderUsage {
             used: 9000,
-            quota: Some(10_000),
+            available: Some(1000),
+            quota: None,
         }),
     };
     r.stub.send(FromSync::Status(Status {

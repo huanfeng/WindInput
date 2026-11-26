@@ -388,18 +388,42 @@ impl Runner {
             .ok_or("本机尚未加入加密同步".to_string())?;
         let dek = self.dek()?;
         let password = self.secrets.password.clone().ok_or("尚未保存存储凭据")?;
-        let (factory, settings, tx) =
-            (self.factory.clone(), self.settings.clone(), self.tx.clone());
+        let (factory, settings) = (self.factory.clone(), self.settings.clone());
+        let cancel = self.cancel.clone();
+        let reply = UsageReply(Some((self.tx.clone(), lib)));
         std::thread::Builder::new()
             .name("sync-usage".into())
             .spawn(move || {
+                let stop = || cancel.load(Ordering::SeqCst);
                 let r = factory
                     .build(&settings, &password)
-                    .and_then(|b| crate::usage::measure(&*b, &dek));
-                let _ = tx.send(Input::UsageDone(Box::new((lib, r))));
+                    .and_then(|b| crate::usage::measure(&*b, &dek, &stop));
+                reply.send(r);
             })
             .map_err(|e| format!("无法启动统计线程: {e}"))?;
         self.usage_busy = true;
         Ok(json!({ "queued": true }))
+    }
+}
+
+/// 统计线程异常退出时的错误文案。
+pub(super) const USAGE_ABORTED: &str = "统计异常中止";
+
+/// 手动统计的回执：线程 panic 展开时也回一条失败，主循环才会清掉「统计中」。
+struct UsageReply(Option<(Sender<Input>, String)>);
+
+impl UsageReply {
+    fn send(mut self, r: Result<wind_sync_ipc::Usage, String>) {
+        if let Some((tx, lib)) = self.0.take() {
+            let _ = tx.send(Input::UsageDone(Box::new((lib, r))));
+        }
+    }
+}
+
+impl Drop for UsageReply {
+    fn drop(&mut self) {
+        if let Some((tx, lib)) = self.0.take() {
+            let _ = tx.send(Input::UsageDone(Box::new((lib, Err(USAGE_ABORTED.into())))));
+        }
     }
 }

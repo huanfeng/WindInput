@@ -180,8 +180,9 @@ const PROPFIND_BODY: &str = r#"<?xml version="1.0" encoding="utf-8"?><propfind x
 
 const QUOTA_BODY: &str = r#"<?xml version="1.0" encoding="utf-8"?><propfind xmlns="DAV:"><prop><quota-available-bytes/><quota-used-bytes/></prop></propfind>"#;
 
-/// RFC 4331 配额：`quota-used-bytes` 必须有；`quota-available-bytes` 为负（Nextcloud 的「不限 / 未知」）
-/// 或缺失时总量为 None。不支持的服务端回 404 propstat（空元素），得 None。
+/// RFC 4331：`quota-used-bytes` 必须有；`quota-available-bytes` 为负（Nextcloud 的「不限 / 未知」）、
+/// 超出 u64 或缺失时剩余为 None。总容量不合成（`used` 只是此目录的，与可用相加不是账户配额）。
+/// 不支持的服务端回 404 propstat（空元素），得 None。
 fn parse_quota(xml: &str) -> Option<ProviderUsage> {
     let mut rd = Reader::from_str(xml);
     let (mut used, mut avail): (Option<String>, Option<String>) = (None, None);
@@ -205,11 +206,13 @@ fn parse_quota(xml: &str) -> Option<ProviderUsage> {
         }
     }
     let used: u64 = used?.parse().ok()?;
-    let quota = avail
-        .and_then(|a| a.parse::<i64>().ok())
-        .and_then(|a| u64::try_from(a).ok())
-        .map(|a| used.saturating_add(a));
-    Some(ProviderUsage { used, quota })
+    // 先按 u64 解析：负数（-1/-2/-3）与超大值都解析失败，即「不限 / 未知」
+    let available = avail.and_then(|a| a.parse::<u64>().ok());
+    Some(ProviderUsage {
+        used,
+        available,
+        quota: None,
+    })
 }
 
 impl WebDavBackend {
@@ -497,18 +500,18 @@ mod tests {
             parse_quota(x),
             Some(ProviderUsage {
                 used: 100,
-                quota: Some(1000)
-            })
+                available: Some(900),
+                quota: None,
+            }),
+            "不合成总容量"
         );
-        // Nextcloud 不限量：可用为负
-        let unlimited = x.replace(">900<", ">-3<");
-        assert_eq!(
-            parse_quota(&unlimited),
-            Some(ProviderUsage {
-                used: 100,
-                quota: None
-            })
-        );
+        // Nextcloud 不限量为负；超出 u64 的也当不知道
+        for bad in [">-3<", ">99999999999999999999999<"] {
+            let v = parse_quota(&x.replace(">900<", bad)).unwrap();
+            assert_eq!((v.used, v.available, v.quota), (100, None, None), "{bad}");
+        }
+        let max = parse_quota(&x.replace(">900<", ">18446744073709551615<")).unwrap();
+        assert_eq!(max.available, Some(u64::MAX));
     }
 
     #[test]

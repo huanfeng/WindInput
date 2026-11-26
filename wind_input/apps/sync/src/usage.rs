@@ -44,18 +44,21 @@ pub fn due(cached: Option<&Cached>, library: &str, now: u64, retry_at: u64) -> b
     }
     match cached {
         Some(c) if c.library == library => {
-            now >= (c.usage.computed_at.max(0) as u64).saturating_add(INTERVAL_SECS)
+            let at = c.usage.computed_at.max(0) as u64;
+            // 统计时间在未来（时钟回拨过）：当作到期，免得一直不再统计
+            at > now || now >= at.saturating_add(INTERVAL_SECS)
         }
         _ => true,
     }
 }
 
-/// 统计一次。服务端配额取不到只记日志，不算失败。
-pub fn measure(b: &dyn Backend, dek: &Dek) -> Result<Usage, String> {
-    let r = wind_sync::usage::compute(b, dek).map_err(|e| sync_error(&e))?;
+/// 统计一次，`cancelled` 为真时中途放弃。服务端配额取不到只记日志，不算失败。
+pub fn measure(b: &dyn Backend, dek: &Dek, cancelled: &dyn Fn() -> bool) -> Result<Usage, String> {
+    let r = wind_sync::usage::compute_with(b, dek, cancelled).map_err(|e| sync_error(&e))?;
     let provider = match b.usage() {
         Ok(p) => p.map(|p| ProviderUsage {
             used: p.used,
+            available: p.available,
             quota: p.quota,
         }),
         Err(e) => {
@@ -85,6 +88,19 @@ pub fn measure(b: &dyn Backend, dek: &Dek) -> Result<Usage, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn computed_at_in_the_future_is_due() {
+        let c = Cached {
+            library: "lib".into(),
+            usage: Usage {
+                computed_at: 5_000,
+                ..Default::default()
+            },
+        };
+        assert!(!due(Some(&c), "lib", 5_001, 0));
+        assert!(due(Some(&c), "lib", 4_000, 0), "时钟回拨后要能再统计");
+    }
 
     #[test]
     fn cache_roundtrip_and_corrupt_file() {

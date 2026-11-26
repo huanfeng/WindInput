@@ -1499,7 +1499,8 @@ fn round_computes_usage_once_a_day_and_caches_it() {
     let mem = MemBackend::new();
     mem.set_provider_usage(Some(wind_sync::ProviderUsage {
         used: 4096,
-        quota: Some(8192),
+        available: Some(1024),
+        quota: None,
     }));
     let (mut r, rx) = usage_runner(d.path(), &mem);
     std::fs::write(d.path().join("user/config.toml"), "a = 1\n").unwrap();
@@ -1512,7 +1513,8 @@ fn round_computes_usage_once_a_day_and_caches_it() {
         u.provider,
         Some(wind_sync_ipc::ProviderUsage {
             used: 4096,
-            quota: Some(8192)
+            available: Some(1024),
+            quota: None,
         })
     );
     assert!(!r.status().usage_busy);
@@ -1639,4 +1641,29 @@ fn usage_of_another_library_is_hidden() {
     c.library = "旧库".into();
     r.usage = Some(c);
     assert_eq!(r.status().usage, None);
+}
+
+struct PanicFactory;
+
+impl BackendFactory for PanicFactory {
+    fn build(&self, _: &SyncSettings, _: &str) -> Result<Box<dyn Backend>, String> {
+        panic!("统计线程里出错");
+    }
+}
+
+/// 手动统计线程 panic：仍回一条失败，「统计中」清掉，同步轮照常能起。
+#[test]
+fn panicking_refresh_still_clears_busy() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, rx) = usage_runner(d.path(), &MemBackend::new());
+    r.factory = Arc::new(PanicFactory);
+    r.command(Op::RefreshUsage, &Value::Null).unwrap();
+    assert!(r.usage_busy);
+    let done = wait_usage(&rx);
+    r.handle(done);
+    let st = r.status();
+    assert!(!st.usage_busy);
+    assert_eq!(st.usage_error.as_deref(), Some(commands::USAGE_ABORTED));
+    r.force_now = true;
+    assert!(r.next_wake(Instant::now()).is_some(), "同步不停摆");
 }

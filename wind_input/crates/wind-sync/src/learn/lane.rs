@@ -362,7 +362,7 @@ pub fn fetch_device(
 /// 打字统计的对象名前缀；其余对象名都是学习数据。
 pub const STATS_PREFIX: &str = "stats/";
 
-/// `dev` 的第 `gens` 代目录里统计对象（[`STATS_PREFIX`]）的远端键。
+/// `dev` 的目录里统计对象（[`STATS_PREFIX`]）的远端键，只看 `gens` 里最新的保留代数。
 /// 缺失或解不开的目录跳过（它的对象按学习数据算）；后端错误向上传。
 pub fn stats_object_keys(
     b: &dyn Backend,
@@ -370,8 +370,11 @@ pub fn stats_object_keys(
     dev: &str,
     gens: &[u64],
 ) -> Result<BTreeSet<String>, SyncError> {
+    let mut gens = gens.to_vec();
+    gens.sort_unstable_by(|a, b| b.cmp(a));
+    gens.dedup();
     let mut out = BTreeSet::new();
-    for &n in gens {
+    for n in gens.into_iter().take(KEEP_INDEXES as usize) {
         let Some(raw) = b.get(&learn_index_key(dev, n))? else {
             continue;
         };

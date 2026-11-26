@@ -72,7 +72,7 @@ fn sums_by_prefix_and_splits_learned_from_stats() {
     let root = format!("{ROOT}/");
     assert_eq!(u.total, size_of(&b, &root), "只算同步根之内");
     assert_eq!(u.blobs, size_of(&b, &manifest::blobs_prefix()));
-    assert_eq!(u.blobs_unreferenced, 100, "孤儿 blob 等待回收");
+    assert_eq!(u.blobs_unreferenced, Some(100), "孤儿 blob 等待回收");
 
     let stats_key =
         manifest::learn_obj_key("pc", &blob_id(&fk, &content_hash(stats_body.as_bytes())));
@@ -107,7 +107,7 @@ fn old_versions_beyond_kept_manifests_are_unreferenced() {
     let first = manifest::blob_key(&blob_id(&dek.files_key(), &content_hash(b"a = 1\n")));
     let first_size = b.stat(&first).unwrap().unwrap().size;
     let u = compute(&b, &dek).unwrap();
-    assert_eq!(u.blobs_unreferenced, first_size);
+    assert_eq!(u.blobs_unreferenced, Some(first_size));
     assert!(u.blobs > first_size);
 }
 
@@ -149,13 +149,59 @@ fn provider_usage_defaults_to_none() {
     assert_eq!(b.usage().unwrap(), None);
     b.set_provider_usage(Some(ProviderUsage {
         used: 10,
+        available: Some(90),
         quota: Some(100),
     }));
     assert_eq!(
         b.usage().unwrap(),
         Some(ProviderUsage {
             used: 10,
+            available: Some(90),
             quota: Some(100)
         })
     );
+}
+
+/// 清单解不开（别的密钥写的残留）：等待回收记为无法确定，其余照常统计。
+#[test]
+fn unreadable_manifest_leaves_unreferenced_unknown() {
+    let b = MemBackend::new();
+    let dek = remote::init_remote(&b).unwrap();
+    let (mut local, mut state) = (MemLocal::new(), SyncState::new("pc"));
+    local.set("config.toml", "a = 1\n");
+    sync(&b, &mut local, &mut state, &dek);
+    b.raw_put(&manifest::manifest_key("old", 3), vec![7; 64]);
+    let u = compute(&b, &dek).unwrap();
+    assert_eq!(u.blobs_unreferenced, None);
+    assert_eq!(u.total, size_of(&b, &format!("{ROOT}/")));
+    assert!(u.blobs > 0);
+}
+
+/// 只认最新两代目录：更早一代里的统计对象（若还残留）按学习数据算。
+#[test]
+fn stats_split_uses_latest_two_indexes_only() {
+    let b = MemBackend::new();
+    let dek = remote::init_remote(&b).unwrap();
+    let fk = dek.files_key();
+    let gen1 = objs(&[("stats/2026-09.toml", "old-stats")]);
+    let i1 = publish(&b, &fk, "pc", "", None, &gen1).unwrap();
+    let i2 = publish(&b, &fk, "pc", "", Some(&i1), &objs(&[("a", "1")])).unwrap();
+    // 伪造残留的第 1 代目录（发布第 3 代时本应删掉）
+    let idx1 = b.raw_get(&manifest::learn_index_key("pc", 1));
+    publish(&b, &fk, "pc", "", Some(&i2), &objs(&[("a", "2")])).unwrap();
+    if let Some(raw) = idx1 {
+        b.raw_put(&manifest::learn_index_key("pc", 1), raw);
+    }
+    let old_obj = manifest::learn_obj_key("pc", &blob_id(&fk, &content_hash(b"old-stats")));
+    assert!(b.stat(&old_obj).unwrap().is_some(), "旧对象尚未回收");
+    let u = compute(&b, &dek).unwrap();
+    assert_eq!(u.devices[0].stats, 0, "第 1 代不在最新两代里");
+}
+
+#[test]
+fn cancel_stops_the_scan() {
+    let b = MemBackend::new();
+    let dek = remote::init_remote(&b).unwrap();
+    let e = wind_sync::usage::compute_with(&b, &dek, &|| true).unwrap_err();
+    assert!(e.to_string().contains(wind_sync::usage::CANCELLED));
 }
