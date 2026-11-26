@@ -71,8 +71,8 @@ impl Dev {
         self.now += 60;
         let ctx = self.ctx(fail_at);
         let mut st = ensure_state(&ctx, b, &key())?;
-        count_in(&ctx, &mut st)?;
-        exchange_and_materialize(&ctx, b, &key(), &mut st).map(|_| ())
+        let skip = count_in(&ctx, &mut st)?;
+        exchange_and_materialize(&ctx, b, &key(), &mut st, &skip).map(|_| ())
     }
 
     /// 跑一轮，返回本轮写入他机统计文件的数量。
@@ -80,8 +80,8 @@ impl Dev {
         self.now += 60;
         let ctx = self.ctx(None);
         let mut st = ensure_state(&ctx, b, &key()).unwrap();
-        count_in(&ctx, &mut st).unwrap();
-        exchange_and_materialize(&ctx, b, &key(), &mut st)
+        let skip = count_in(&ctx, &mut st).unwrap();
+        exchange_and_materialize(&ctx, b, &key(), &mut st, &skip)
             .unwrap()
             .stats_written
     }
@@ -1257,4 +1257,33 @@ fn claim_id_without_lane_keeps_old_lane_as_the_count() {
     a.round(&b);
     assert_eq!(own_count(&a), None, "本机数据已在 pc-a 计入，不再算一份");
     assert_eq!(freq(&a), Some(5));
+}
+
+#[test]
+fn group_that_cannot_begin_edit_is_skipped_others_sync() {
+    let b = MemBackend::new();
+    let (mut a, mut bb) = (Dev::new("pc-a"), Dev::new("pc-b"));
+    set_freq(&a, 3);
+    set_comp(&a, 2);
+    set_freq(&bb, 4);
+    set_comp(&bb, 5);
+    // a 的补全历史进不了编辑（core 只读、读历史失败等）
+    a.core.fail_on(&format!("data.beginEdit {COMP}"));
+    for _ in 0..2 {
+        a.round(&b);
+        bb.round(&b);
+    }
+    assert_eq!((freq(&a), freq(&bb)), (Some(7), Some(7)), "其他组照常");
+    assert_eq!(comp(&a), Some(2), "跳过的组不物化写回");
+    assert_eq!(comp(&bb), Some(5), "跳过的组不发布变更");
+    assert!(
+        !a.core.methods().contains(&format!("data.endEdit {COMP}")),
+        "没开成的不结束"
+    );
+    a.core.fail.lock().unwrap().clear();
+    for _ in 0..2 {
+        a.round(&b);
+        bb.round(&b);
+    }
+    assert_eq!((comp(&a), comp(&bb)), (Some(7), Some(7)));
 }

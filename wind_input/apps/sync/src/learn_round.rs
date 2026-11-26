@@ -397,29 +397,35 @@ fn drop_busy(
         .collect())
 }
 
-/// 逐个 `data.beginEdit`；任何一个失败则结束已开的并报错。
+/// 逐个 `data.beginEdit`。进不了编辑的组（core 只读、读文件失败等）本轮跳过并告警，组名记入 `skipped`。
+/// 返回开成的组与要结束的路径（超时的请求 core 可能仍会处理，也结束它）。
+#[allow(clippy::type_complexity)]
 fn begin_all(
     ctx: &LearnCtx,
     groups: &[(String, LearnKind, PathBuf)],
-) -> Result<Vec<String>, String> {
+    skipped: &mut BTreeSet<String>,
+) -> (Vec<(String, LearnKind, PathBuf)>, Vec<String>) {
+    let mut open = Vec::new();
     let mut begun = Vec::new();
-    for (n, ..) in groups {
-        let Some((_, rel)) = group_file(n) else {
+    for g in groups {
+        let Some((_, rel)) = group_file(&g.0) else {
             continue;
         };
-        if let Err(e) = ctx.link.request("data.beginEdit", json!({ "path": rel })) {
-            // 超时的请求 core 可能仍会处理：也释放这一条
-            if e == TIMEOUT_MSG {
-                begun.push(rel.clone());
+        match ctx.link.request("data.beginEdit", json!({ "path": rel })) {
+            Ok(_) => {
+                open.push(g.clone());
+                begun.push(rel);
             }
-            for w in end_all(ctx, &begun) {
-                log!("{w}");
+            Err(e) => {
+                log!("核心拒绝开始编辑 {rel}，本轮跳过该组: {e}");
+                if e == TIMEOUT_MSG {
+                    begun.push(rel);
+                }
+                skipped.insert(g.0.clone());
             }
-            return Err(format!("核心拒绝开始编辑 {rel}: {e}"));
         }
-        begun.push(rel);
     }
-    Ok(begun)
+    (open, begun)
 }
 
 /// 逐个 `data.endEdit`；返回两次都失败的警告（带路径）。
@@ -438,15 +444,16 @@ fn end_all(ctx: &LearnCtx, begun: &[String]) -> Vec<String> {
     warnings
 }
 
-/// 在租约内跑 `f`，无论成败都结束租约；结束失败的警告记入 `ended`。
+/// 对开成编辑的组跑 `f`，无论成败都结束租约；进不了编辑的组记入 `skipped`，结束失败的警告记入 `ended`。
 fn leased<T>(
     ctx: &LearnCtx,
     groups: &[(String, LearnKind, PathBuf)],
+    skipped: &mut BTreeSet<String>,
     ended: &mut Vec<String>,
-    f: impl FnOnce() -> Result<T, String>,
+    f: impl FnOnce(&[(String, LearnKind, PathBuf)]) -> Result<T, String>,
 ) -> Result<T, String> {
-    let begun = begin_all(ctx, groups)?;
-    let r = f();
+    let (open, begun) = begin_all(ctx, groups, skipped);
+    let r = f(&open);
     ended.extend(end_all(ctx, &begun));
     r
 }
@@ -639,7 +646,8 @@ fn merge_stats_tables(local: Option<&[u8]>, remote: &[u8]) -> Result<Vec<u8>, St
 // ── 第 2 步：计入 ─────────────────────────────────────
 
 /// 采用或丢弃上一轮的待定记录，再把各组 `F − M` 计入本机贡献并原子保存 `{C, M = F}`。
-pub fn count_in(ctx: &LearnCtx, st: &mut LearnState) -> Result<(), String> {
+/// 返回进不了编辑、本轮跳过的组：它们本轮保持上次的贡献，也不物化写回。
+pub fn count_in(ctx: &LearnCtx, st: &mut LearnState) -> Result<BTreeSet<String>, String> {
     if st.pending.is_some() {
         let r = st.resolve_pending(|name| disk_token(ctx.userdata, name));
         if !r.dropped.is_empty() {
@@ -652,15 +660,16 @@ pub fn count_in(ctx: &LearnCtx, st: &mut LearnState) -> Result<(), String> {
         .filter(|(n, _, p)| p.is_file() || st.groups.contains_key(n))
         .collect();
     let groups = drop_busy(ctx, groups)?;
+    let mut skipped = BTreeSet::new();
     if groups.is_empty() {
-        return Ok(());
+        return Ok(skipped);
     }
     let dir = private_dir(ctx);
     let mut ended = Vec::new();
-    let r = leased(ctx, &groups, &mut ended, || {
+    let r = leased(ctx, &groups, &mut skipped, &mut ended, |open| {
         let mut warnings = Vec::new();
         let mut changed = false;
-        for (name, kind, abs) in &groups {
+        for (name, kind, abs) in open {
             let Some((f, text)) = read_learned(name, *kind, abs, &mut warnings)? else {
                 continue;
             };
@@ -704,7 +713,7 @@ pub fn count_in(ctx: &LearnCtx, st: &mut LearnState) -> Result<(), String> {
     for w in &ended {
         log!("{w}");
     }
-    r
+    r.map(|()| skipped)
 }
 
 // ── 第 3 步：交换 ─────────────────────────────────────
@@ -1127,13 +1136,15 @@ fn plan_group(
 fn materialize_all(
     ctx: &LearnCtx,
     st: &mut LearnState,
+    skip: &BTreeSet<String>,
     warnings: &mut Vec<String>,
 ) -> Result<usize, String> {
     let dir = private_dir(ctx);
     let groups: Vec<_> = learned_groups(ctx.userdata, ctx.content)
         .into_iter()
         .filter(|(n, _, p)| {
-            p.is_file() || st.groups.contains_key(n) || peers_have(&dir, &st.peer_seen, n)
+            !skip.contains(n)
+                && (p.is_file() || st.groups.contains_key(n) || peers_have(&dir, &st.peer_seen, n))
         })
         .collect();
     let groups = drop_busy(ctx, groups)?;
@@ -1141,13 +1152,14 @@ fn materialize_all(
         return Ok(0);
     }
     let mut ended = Vec::new();
-    let r = leased(ctx, &groups, &mut ended, || {
+    let mut skipped = BTreeSet::new();
+    let r = leased(ctx, &groups, &mut skipped, &mut ended, |open| {
         let token: String = random_bytes::<8>()
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect();
         let mut plans = Vec::new();
-        for g in &groups {
+        for g in open {
             if let Some(p) = plan_group(ctx, st, &dir, &token, g, warnings)? {
                 plans.push(p);
             }
@@ -1234,11 +1246,13 @@ fn prune_mirrors(ctx: &LearnCtx, st: &LearnState) {
 }
 
 /// 第 3、5 步：发布本机贡献、拉取他机镜像、物化各设备合计，最后回收旧镜像并记成功时间。
+/// `skip`：本轮计入时进不了编辑的组，不物化。
 pub fn exchange_and_materialize(
     ctx: &LearnCtx,
     b: &dyn Backend,
     key: &FilesKey,
     st: &mut LearnState,
+    skip: &BTreeSet<String>,
 ) -> Result<LearnReport, String> {
     let mut rep = LearnReport::default();
     let keys = list_learn(b).map_err(|e| sync_error(&e))?;
@@ -1249,7 +1263,7 @@ pub fn exchange_and_materialize(
     for d in purged {
         rep.devices.remove(&d);
     }
-    rep.groups_written = materialize_all(ctx, st, &mut rep.warnings)?;
+    rep.groups_written = materialize_all(ctx, st, skip, &mut rep.warnings)?;
     rep.stats_written = write_peer_stats(ctx, st, &mut rep.warnings);
     prune_mirrors(ctx, st);
     st.last_ok = ctx.now;

@@ -1067,6 +1067,26 @@ fn failed_learn_does_not_advance_last_ok() {
 }
 
 #[test]
+fn failed_learn_backs_off_instead_of_retrying_every_round() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, _rx) = runner(d.path());
+    let t = 100_000;
+    r.finish_round(empty_round(&r, Some(Err("boom".into())), t));
+    assert!(!r.learn_due(t + 1, false), "失败后不在下一轮立刻重跑");
+    assert!(r.learn_due(t + backoff_secs(1), false));
+    assert!(r.learn_due(t + 1, true), "强制不受退避限制");
+    let t2 = t + backoff_secs(1);
+    r.finish_round(empty_round(&r, Some(Err("boom".into())), t2));
+    assert!(
+        !r.learn_due(t2 + backoff_secs(1), false),
+        "连续失败退避加长"
+    );
+    assert!(r.learn_due(t2 + backoff_secs(2), false));
+    r.finish_round(empty_round(&r, Some(Ok(())), t2 + backoff_secs(2)));
+    assert_eq!((r.learn_failures, r.learn_retry_at), (0, 0));
+}
+
+#[test]
 fn ok_learn_advances_last_ok() {
     let d = tempfile::tempdir().unwrap();
     let (mut r, _rx) = runner(d.path());

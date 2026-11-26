@@ -170,6 +170,9 @@ pub struct Runner {
     info_written: Option<DeviceInfo>,
     /// 学习数据上次同步成功的时间（unix 秒）。
     learn_last_ok: u64,
+    /// 学习数据轮连续失败次数与下次允许自动重试的时间（unix 秒），退避同文件同步。
+    learn_failures: u32,
+    learn_retry_at: u64,
     /// 已移除但远端仍有学习数据的设备号。
     removed_with_data: Vec<String>,
     _watch: Option<watch::Watch>,
@@ -437,6 +440,8 @@ impl Runner {
             last_sent: None,
             info_written: None,
             learn_last_ok,
+            learn_failures: 0,
+            learn_retry_at: 0,
             removed_with_data: Vec::new(),
             _watch: watch.flatten(),
         }
@@ -715,9 +720,9 @@ impl Runner {
 
     // ── 同步 ───────────────────────────────────────────────
 
-    /// 本轮是否该同步学习数据：强制，或距上次成功已满 30 分钟。
+    /// 本轮是否该同步学习数据：强制，或距上次成功已满 30 分钟且不在失败退避期。
     fn learn_due(&self, now: u64, force: bool) -> bool {
-        force || now >= self.learn_last_ok + LEARN_INTERVAL_SECS
+        force || (now >= self.learn_last_ok + LEARN_INTERVAL_SECS && now >= self.learn_retry_at)
     }
 
     /// 学习数据轮的最终判定：三项内容任一开启，且到期。
@@ -794,15 +799,16 @@ impl Runner {
                         let mut lstate = None;
                         if let Some(c) = &lctx {
                             match learn_round::ensure_state(c, &*backend, &dek.files_key())
-                                .and_then(|mut st| learn_round::count_in(c, &mut st).map(|()| st))
-                            {
+                                .and_then(|mut st| {
+                                    learn_round::count_in(c, &mut st).map(|skip| (st, skip))
+                                }) {
                                 Ok(st) => lstate = Some(st),
                                 Err(e) => learn = Some(Err(e)),
                             }
                         }
                         let r = sync_once(&*backend, &mut local, &mut state, &dek, &ctx);
                         // 第 3、5 步在文件同步成功之后
-                        if let (Some(c), Some(st), Ok(rep)) = (&lctx, lstate.as_mut(), &r)
+                        if let (Some(c), Some((st, skip)), Ok(rep)) = (&lctx, lstate.as_mut(), &r)
                             && !rep.skipped
                             && !cancel.load(Ordering::SeqCst)
                         {
@@ -813,6 +819,7 @@ impl Runner {
                                     &*backend,
                                     &dek.files_key(),
                                     st,
+                                    skip,
                                 )
                                 .map(|rep| {
                                     for w in &rep.warnings {
@@ -926,8 +933,17 @@ impl Runner {
             self.removed_with_data = v;
         }
         match &r.learn {
-            Some(Ok(())) => self.learn_last_ok = r.now,
-            Some(Err(e)) => log!("学习数据同步失败: {e}"),
+            Some(Ok(())) => {
+                self.learn_last_ok = r.now;
+                self.learn_failures = 0;
+                self.learn_retry_at = 0;
+            }
+            Some(Err(e)) => {
+                self.learn_failures = self.learn_failures.saturating_add(1);
+                let wait = backoff_secs(self.learn_failures);
+                self.learn_retry_at = r.now.saturating_add(wait);
+                log!("学习数据同步失败（{wait} 秒后重试）: {e}");
+            }
             None => {}
         }
         // 本轮扫描已完成：上一轮写下的回声记录用完，清掉（本轮重新写过的保留）
