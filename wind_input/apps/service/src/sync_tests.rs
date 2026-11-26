@@ -211,6 +211,29 @@ fn status_is_cached_and_broadcast_without_secrets() {
 }
 
 #[test]
+fn status_carries_removed_devices_with_data() {
+    let mut r = rig();
+    r.stub.send(FromSync::Status(Status {
+        phase: "idle".into(),
+        ..Default::default()
+    }));
+    wait_for(|| phase(&r.host) == "idle");
+    let st = r.host.rpc("sync.status", &Value::Null).unwrap();
+    assert!(st.get("removed_with_data").is_none(), "空时省略: {st}");
+
+    r.stub.send(FromSync::Status(Status {
+        phase: "idle".into(),
+        removed_with_data: vec!["old-pc".into()],
+        ..Default::default()
+    }));
+    wait_for(|| {
+        r.host.rpc("sync.status", &Value::Null).unwrap()["removed_with_data"] == json!(["old-pc"])
+    });
+    let ev = lock(&r.events).clone();
+    assert_eq!(ev.last().unwrap()["removed_with_data"], json!(["old-pc"]));
+}
+
+#[test]
 fn requests_outside_whitelist_are_rejected() {
     let mut r = rig();
     let _hello = r.stub.next();

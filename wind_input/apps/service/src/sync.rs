@@ -696,7 +696,7 @@ impl SyncHost {
         let installed = (self.installed)();
         let running = inner.link.is_some();
         let (phase, last_error) = self.phase_of(inner);
-        json!({
+        let mut v = json!({
             "installed": installed,
             "enabled": inner.settings.enabled,
             "running": running,
@@ -712,7 +712,12 @@ impl SyncHost {
             "group": inner.status.group,
             "group_name": inner.status.group_name,
             "needs_identity": inner.status.needs_identity,
-        })
+        });
+        // 与 ipc 的序列化一致：空时省略
+        if !inner.status.removed_with_data.is_empty() {
+            v["removed_with_data"] = json!(inner.status.removed_with_data);
+        }
+        v
     }
 
     fn emit_status(&self) {
