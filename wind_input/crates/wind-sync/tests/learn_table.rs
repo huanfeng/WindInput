@@ -85,3 +85,21 @@ fn new_file_head_per_kind() {
     assert!(b.contains("columns: [code, text, weight, count, created_at]"));
     assert_eq!(token_of(b.as_bytes()), None);
 }
+
+#[test]
+fn count_trimmed_and_empty_is_zero() {
+    let src = "---\ncolumns: [code, text, count, last_used]\nwind:\n  escape: true\n...\n# no comment\na\tb\t 7 \t1\nc\td\t\t2\ne\tf\t-1\t3\n";
+    let f = parse(LearnKind::Freq, Some(src.as_bytes())).unwrap();
+    assert_eq!(f.bad_lines, 1);
+    let counts: Vec<u64> = f.rows.values().map(|r| r.1).collect();
+    assert_eq!(counts, vec![7, 0]);
+}
+
+#[test]
+fn empty_flow_mapping_token() {
+    let src = "---\ncolumns: [kind, text, count, last_used]\nwind: {}\n...\n# no comment\n";
+    let f = parse(LearnKind::Completion, Some(src.as_bytes())).unwrap();
+    let b = String::from_utf8(render(LearnKind::Completion, &f, Some("t"), false)).unwrap();
+    assert!(b.contains("wind: {sync: t}\n"), "{b}");
+    assert_eq!(token_of(b.as_bytes()).as_deref(), Some("t"));
+}

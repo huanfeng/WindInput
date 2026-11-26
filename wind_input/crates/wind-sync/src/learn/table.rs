@@ -135,7 +135,13 @@ pub fn parse(kind: LearnKind, bytes: Option<&[u8]>) -> Result<LearnedFile, Forma
             f.bad_lines += 1;
             continue;
         }
-        let Ok(count) = cols[ic].parse::<u64>() else {
+        let c = cols[ic].trim();
+        let count = if c.is_empty() {
+            Some(0)
+        } else {
+            c.parse::<i64>().ok().and_then(|n| u32::try_from(n).ok())
+        };
+        let Some(count) = count.map(u64::from) else {
             f.bad_lines += 1;
             continue;
         };
@@ -254,7 +260,16 @@ fn set_flow_token(line: &str, token: &str) -> String {
         format!("{} {token}{}", &line[..vs], &line[ve..])
     } else {
         let close = line.rfind('}').unwrap_or(line.len());
-        format!("{}, sync: {token}{}", &line[..close], &line[close..])
+        let sep = if line[open + 1..close].trim().is_empty() {
+            ""
+        } else {
+            ", "
+        };
+        format!(
+            "{}{sep}sync: {token}{}",
+            line[..close].trim_end(),
+            &line[close..]
+        )
     }
 }
 
