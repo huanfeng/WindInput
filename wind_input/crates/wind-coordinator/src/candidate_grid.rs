@@ -166,7 +166,8 @@ impl Coordinator {
     /// 收起态按翻页键：**只展开、不翻页**（高亮原地不动），下面几页直接出现在视野里。
     ///
     /// 不顺手翻到第 2 页，是因为展开后第 2 页本来就在眼前；翻过去等于让高亮跳过用户
-    /// 正要看的那一行（威注音同样如此）。返回是否展开了。
+    /// 正要看的那一行（威注音同样如此）。高亮是否顺势下移一行由 [`Self::expand_on_page_next`]
+    /// 按 `grid_expand_advance` 决定。返回是否展开了。
     pub(crate) fn try_expand_grid(&self, state: &mut State) -> bool {
         if Self::grid_active(state) || !self.grid_eligible(state) {
             return false;

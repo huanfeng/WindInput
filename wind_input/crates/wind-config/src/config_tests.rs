@@ -3209,7 +3209,6 @@ fn grid_expand_defaults_off_and_cell_truncation_takes_the_tighter_limit() {
     );
     assert_eq!(cfg.ui.candidate.grid_rows(), 5);
     assert!(cfg.ui.candidate.grid_pageupdown_screen);
-    assert!(cfg.ui.candidate.grid_expand_advance);
     let mut c = cfg.ui.candidate.clone();
     c.max_chars = 16;
     c.grid_cell_max_chars = 3;
@@ -3224,6 +3223,12 @@ fn grid_expand_defaults_off_and_cell_truncation_takes_the_tighter_limit() {
     );
     c.grid_rows = 99;
     assert_eq!(c.grid_rows(), 10, "可见行数夹进合法范围");
+}
+
+/// 首次翻页展开时高亮下移一行：出厂开。
+#[test]
+fn grid_expand_advance_defaults_on() {
+    assert!(Config::default().ui.candidate.grid_expand_advance);
 }
 
 #[test]
