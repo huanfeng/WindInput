@@ -699,12 +699,17 @@ impl Runner {
 
     // ── 同步 ───────────────────────────────────────────────
 
-    /// 起工作线程跑一轮；结果经 `Input::RoundDone` 回主循环。
     /// 本轮是否该同步学习数据：强制，或距上次成功已满 30 分钟。
     fn learn_due(&self, now: u64, force: bool) -> bool {
         force || now >= self.learn_last_ok + LEARN_INTERVAL_SECS
     }
 
+    /// 学习数据轮的最终判定：三项内容任一开启，且到期。
+    fn learn_wanted(&self, now: u64, force: bool) -> bool {
+        self.settings.content.any() && self.learn_due(now, force)
+    }
+
+    /// 起工作线程跑一轮；结果经 `Input::RoundDone` 回主循环。
     fn start_round(&mut self) {
         let force = std::mem::take(&mut self.force_now);
         self.round_forced |= force;
@@ -724,7 +729,7 @@ impl Runner {
         ctx.force = force;
         ctx.gc = true;
         ctx.allow_mass_delete = allow_mass;
-        let learn_due = self.settings.content.learned && self.learn_due(now, force);
+        let learn_due = self.learn_wanted(now, force);
         let echo_before = lock(&self.echo).clone();
         let want = local_info(&self.settings, &self.state, now);
         let info_stale_now = info_stale(self.info_written.as_ref(), &want, true);

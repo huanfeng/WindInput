@@ -1073,3 +1073,27 @@ fn ok_learn_advances_last_ok() {
     r.finish_round(x);
     assert_eq!(r.learn_last_ok, 9_999);
 }
+
+#[test]
+fn learn_round_runs_when_any_content_on() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, _rx) = runner(d.path());
+    r.settings.content = SyncContent {
+        learned: false,
+        completion: true,
+        stats: false,
+    };
+    assert!(r.learn_wanted(LEARN_INTERVAL_SECS, false));
+}
+
+#[test]
+fn learn_round_never_runs_when_all_content_off() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, _rx) = runner(d.path());
+    r.settings.content = SyncContent {
+        learned: false,
+        completion: false,
+        stats: false,
+    };
+    assert!(!r.learn_wanted(u64::MAX / 2, true));
+}

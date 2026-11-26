@@ -72,6 +72,11 @@ impl Default for SyncContent {
 }
 
 impl SyncContent {
+    /// 三项内容是否有任一开启。
+    pub fn any(&self) -> bool {
+        self.learned || self.completion || self.stats
+    }
+
     fn is_all_on(&self) -> bool {
         *self == SyncContent::default()
     }
