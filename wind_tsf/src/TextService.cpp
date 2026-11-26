@@ -3659,6 +3659,7 @@ STDAPI CTextService::OnChange(REFGUID rguid)
 
         EndComposition();
         ResetComposingState(TRUE);  // 中英切换保留配对状态：光标与已插入的右符号都没变
+        NotifyCandidatesVisibilityChanged(FALSE);  // 同 _ApplyModeSwitch：收口候选 UIElement
 
         BOOL newChineseMode = bWantChinese;
         if (_pIPCClient != nullptr && _pIPCClient->IsConnected())
@@ -6149,6 +6150,7 @@ void CTextService::ToggleInputMode()
 
     // 本地切换模式（服务端不可用时的兜底；正常切换走按键 → 服务端 → 状态推送）
     EndComposition();
+    NotifyCandidatesVisibilityChanged(FALSE);  // 同 _ApplyModeSwitch：收口候选 UIElement
     _SetChineseMode(!_bChineseMode);
 
     WIND_LOG_INFO_FMT(L"Switched to %s mode\n", _bChineseMode ? L"Chinese" : L"English");
