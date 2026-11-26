@@ -112,7 +112,8 @@ impl Coordinator {
 
     /// 焦点气泡挂起：置位并推进代际；兜底为锚点时登记 [`FOCUS_TIP_ANCHOR_TIMEOUT_MS`] 超时。
     ///
-    /// 作废靠两道：挂起位被清（TSF 坐标到达补显示 / 失焦 `hide_tip` / 下次焦点事件直接显示）
+    /// 作废靠两道：挂起位被清（TSF 坐标到达补显示 / 真正离开宿主时的 `hide_tip` / 下次焦点事件直接显示；
+    /// 临时模式下 docMgr 级失焦 DocChanged / NoEditCtx 不调 `hide_tip`，不作废挂起）
     /// 与代际变化（下次焦点事件重新挂起）。到期回调两道都校验，**不在同步路径上睡眠**。
     pub(crate) fn park_focus_tip(&self, fallback: StatusFallback) {
         let token = self

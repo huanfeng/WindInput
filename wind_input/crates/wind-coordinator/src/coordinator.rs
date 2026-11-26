@@ -8206,7 +8206,10 @@ impl Coordinator {
             .unwrap_or_else(|e| e.into_inner()) = text.to_string();
     }
 
-    /// 隐藏状态提示气泡（常驻模式失焦时调用）。
+    /// 隐藏状态提示气泡（常驻模式失焦、真正离开宿主、切模式时调用）。
+    ///
+    /// 临时模式下 docMgr 级失焦（DocChanged / NoEditCtx，Edge 切回时毫秒级连发）不走这里，
+    /// 见 `handle_focus_lost`：否则刚弹出或挂起中的焦点气泡会被立刻作废。
     pub(crate) fn hide_tip(&self) {
         // 挂起中的焦点气泡一并作废：焦点都走了，那次挂起等来的权威坐标也已经属于别的上下文，
         // 补显示出来就是「切走之后气泡才姗姗弹出」。
@@ -8262,11 +8265,17 @@ impl Coordinator {
                 drop(last);
                 // 上一次获焦挂起等权威坐标，这次获焦恰好带来了（Chrome 切回：先 GUI 坐标、
                 // 随后同宿主的获焦才带 TSF 坐标）：消费挂起并显示，不能被去重吞掉。
-                let source = {
+                // 坐标也要有效：`handle_caret_update` 先写来源再判有效性，(0,0) 哨兵的 TSF 更新会留下
+                // 「来源是 TSF、坐标无效」的缓存。
+                let (source, caret_ok) = {
                     let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                    s.caret_source
+                    (
+                        s.caret_source,
+                        Self::caret_is_valid(s.caret_x, s.caret_y, s.caret_height),
+                    )
                 };
-                if wind_ipc::protocol::caret_source::is_tsf(source)
+                if caret_ok
+                    && wind_ipc::protocol::caret_source::is_tsf(source)
                     && self
                         .pending_focus_tip
                         .compare_exchange(

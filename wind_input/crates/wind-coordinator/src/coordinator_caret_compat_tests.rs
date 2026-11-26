@@ -597,6 +597,32 @@ fn focus_tip_parked_then_deduped_gain_with_tsf_caret_shows() {
     assert!(!got_status_tip(&rx), "显示过之后同宿主仍不重复弹");
 }
 
+/// 同宿主再次获焦时，来源虽是 TSF 但坐标是无效的 (0,0) 哨兵：不能拿它定位气泡，挂起继续等。
+#[test]
+fn focus_tip_parked_stays_pending_when_tsf_caret_is_invalid() {
+    let (c, rx) = coord_focus_tip(true, "follow_caret");
+    set_caret(&c, 0, 0, wind_ipc::protocol::caret_source::GUI_CARET);
+    c.show_focus_status_if_enabled(TOKEN_A);
+    assert!(!got_status_tip(&rx), "非 TSF 坐标：挂起");
+    {
+        let mut st = c.state.lock().unwrap();
+        st.caret_x = 0;
+        st.caret_y = 0;
+        st.caret_height = 0;
+        st.caret_source = wind_ipc::protocol::caret_source::TSF_SELECTION;
+    }
+    c.show_focus_status_if_enabled(TOKEN_A);
+    assert!(!got_status_tip(&rx), "坐标无效不得显示");
+    set_caret(
+        &c,
+        363,
+        420,
+        wind_ipc::protocol::caret_source::TSF_SELECTION,
+    );
+    c.show_focus_status_if_enabled(TOKEN_A);
+    assert!(got_status_tip(&rx), "有效的 TSF 坐标到了才显示");
+}
+
 /// 离开宿主（Thread 级失焦）后再回来，应当重新提示。
 /// 只有 Thread 档清去重记录：CtxLost/DocChanged 是宿主内换 docMgr 的噪声，
 /// 若也清就等于按 docMgr 计数，Excel 下会退回「输入一次闪两下」。
