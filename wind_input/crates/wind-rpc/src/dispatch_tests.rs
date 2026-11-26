@@ -164,6 +164,7 @@ fn untrusted_caller_cannot_reach_sync_methods() {
         "sync.setSettings",
         "sync.status",
         "sync.now",
+        "stats.replaceMonths",
     ] {
         let r = dispatch_as(&state(), req(m, json!({})), false);
         assert_eq!(r.error.as_deref(), Some(DENY_UNTRUSTED), "{m}");
