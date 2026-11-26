@@ -5,7 +5,7 @@
 //! - 设置文件、同步状态、机密都在 `<状态目录>/sync/`（机密为 0600 文件，由宿主排除出系统备份）。
 //! - 不监听文件、不按间隔自行调度（`on_demand`）：何时同步由宿主定，见 [`MobileSync::sync_if_due`]。
 //! - 设备类别固定为 `mobile`：主题只与别的手机互通，词库与方案与桌面共用；设置按设备组同步。
-//! - 还没有身份界面：加入已有同步库后自动确认身份（新建独立组）。
+//! - 加入已有同步库后与桌面一样等宿主确认身份（`claim_device` / `join_group` / `confirm_identity`），确认前不同步。
 //! - 同步写入文件后的重载走 [`InProcLink`]，直接调核心（与桌面 RPC 共用 `external_files`）。
 
 use std::collections::HashMap;
@@ -279,7 +279,7 @@ impl MobileSync {
 
     /// 同桌面 `sync.command`：`op` 为 `sync_now` / `test_connection` / `create_key` / `import_key` /
     /// `export_key` / `reset_remote` / `set_secret` / `confirm_mass_delete` / `list_devices` /
-    /// `remove_device`，`args_json` 为参数对象（空串当无参数）。阻塞到有回执（最多 60 秒），
+    /// `remove_device` 与设备组、身份类命令，`args_json` 为参数对象（空串当无参数）。阻塞到有回执（最多 60 秒），
     /// 宿主应在后台线程调用。回执 JSON 可能含同步密钥（`create_key` / `export_key` / `reset_remote`），不要记日志。
     pub fn command(&self, op: &str, args_json: &str) -> Result<String, String> {
         let op = Op::parse(op).ok_or_else(|| format!("未知的同步命令: {op}"))?;
@@ -288,12 +288,7 @@ impl MobileSync {
         } else {
             serde_json::from_str(args_json).map_err(|e| format!("命令参数不是 JSON: {e}"))?
         };
-        let r = self.send_command(op, args)?;
-        // 粘贴密钥加入后待确认身份；已确认时确认身份是空操作。生成密钥已自动确认。
-        if op == Op::ImportKey {
-            self.send_command(Op::ConfirmIdentity, Value::Null)?;
-        }
-        Ok(r.to_string())
+        Ok(self.send_command(op, args)?.to_string())
     }
 
     fn send_command(&self, op: Op, args: Value) -> Result<Value, String> {
@@ -319,7 +314,7 @@ impl MobileSync {
     }
 
     /// 已启用并配置好、距上次成功或上次尝试已超过 `min_interval_secs` 时，起一轮后台同步并立即返回 `true`；
-    /// 其余情况（未配置、缺机密、正在同步、停在错误态、间隔未到）返回 `false`。
+    /// 其余情况（未配置、缺机密、身份未确认、正在同步、停在错误态、间隔未到）返回 `false`。
     /// 键盘弹出时调用，耗时可忽略。
     pub fn sync_if_due(&self, min_interval_secs: u64) -> bool {
         {
@@ -329,7 +324,7 @@ impl MobileSync {
             }
         }
         let st = lock(&self.shared.status).clone();
-        if !matches!(st.phase.as_str(), "idle" | "error") {
+        if st.needs_identity || !matches!(st.phase.as_str(), "idle" | "error") {
             return false;
         }
         let now = now_unix();
@@ -337,15 +332,6 @@ impl MobileSync {
         let last = st.last_ok.max(*attempt).unwrap_or(0);
         if now.saturating_sub(last) < min_interval_secs as i64 {
             return false;
-        }
-        // 身份未确认（加入时补确认失败等）：先排一条确认身份，同一线程按序处理，确认后再同步
-        if st.needs_identity {
-            let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-            let _ = self.tx.send(Input::Core(ToSync::Command {
-                id,
-                op: Op::ConfirmIdentity,
-                args: Value::Null,
-            }));
         }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         // 不等回执：被拒（缺机密等）会体现在状态里

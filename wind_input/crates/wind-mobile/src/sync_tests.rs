@@ -136,7 +136,9 @@ fn desktop_dict_reaches_mobile_core_and_config_stays_apart() {
     let (sync, core, user) = mobile("join", &remote);
     assert_eq!(phase(&sync)["phase"], "disabled");
     join(&sync, Some(&desk.key));
-    // 加入后自动确认身份、新建独立组（状态帧晚于回执到达）
+    wait("待确认身份", &sync, |v| v["needs_identity"] == true);
+    assert!(!sync.sync_if_due(0), "身份未确认不同步");
+    sync.command("confirm_identity", "{}").unwrap();
     wait("确认身份", &sync, |v| {
         v["joined"] == true && v["needs_identity"] == false && v["group"] == v["device"]
     });
@@ -165,6 +167,7 @@ fn mobile_config_is_not_applied_on_desktop() {
     let (sync, _core, user) = mobile("cfg", &remote);
     std::fs::write(user.join("config.toml"), "[ui]\nfont_size = 7\n").unwrap();
     join(&sync, Some(&desk.key));
+    sync.command("confirm_identity", "{}").unwrap();
     sync_now(&sync);
     desk.sync(&remote);
     assert!(desk.local.text("config.toml").is_none());
@@ -215,24 +218,38 @@ fn settings_round_trip_and_validation() {
     let _ = std::fs::remove_dir_all(user);
 }
 
-/// 已加入但身份未确认（加入时补确认失败）：sync_if_due 先补确认身份再同步。
+/// 粘贴密钥加入后不自动确认身份，确认前不同步；不能恢复为桌面设备。
 #[test]
-fn sync_if_due_confirms_identity_first() {
+fn joined_mobile_waits_for_identity_and_cannot_claim_desktop() {
     let remote = MemBackend::new();
     let mut desk = Desktop::new(&remote);
     desk.sync(&remote);
     let (sync, _core, user) = mobile("idn", &remote);
     sync.set_settings(&settings_json()).unwrap();
     sync.command("set_secret", r#"{"password":"pw"}"#).unwrap();
-    // 绕过 command 的自动确认，造出未确认状态
-    sync.send_command(Op::ImportKey, json!({ "key": desk.key }))
+    sync.command("import_key", &json!({ "key": desk.key }).to_string())
         .unwrap();
     wait("未确认", &sync, |v| v["needs_identity"] == true);
+    assert!(!sync.sync_if_due(0));
+    let desk_info = wind_sync::devices::DeviceInfo {
+        name: "台式机".into(),
+        platform: "linux".into(),
+        app_version: String::new(),
+        caps: Vec::new(),
+        last_seen: 0,
+        group: "desk0".into(),
+        group_name: String::new(),
+        group_name_at: 0,
+    };
+    wind_sync::devices::put_device_info(&remote, &desk.dek.devinfo_key(), "desk0", &desk_info)
+        .unwrap();
+    let e = sync
+        .command("claim_device", &json!({ "dev": "desk0" }).to_string())
+        .unwrap_err();
+    assert!(e.contains("不是同一类设备"), "{e}");
+    sync.command("confirm_identity", "{}").unwrap();
+    wait("已确认", &sync, |v| v["needs_identity"] == false);
     assert!(sync.sync_if_due(0));
-    let v = wait("确认并同步", &sync, |v| {
-        v["needs_identity"] == false && v["last_ok"].is_i64()
-    });
-    assert_eq!(v["phase"], "idle", "{v}");
     sync.shutdown();
     let _ = std::fs::remove_dir_all(user);
 }
