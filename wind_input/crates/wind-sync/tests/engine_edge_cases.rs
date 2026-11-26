@@ -1,4 +1,4 @@
-//! 代码审查问题的回归测试（多设备模拟）。
+//! 同步引擎的边界情况：大批删除需确认、列举失败不当作空、崩溃重跑的 lamport 单调、并发建库、blob 已存在时的刷新与存在性查询、同日第二份冲突副本、吸收关系的传递、重置时跳过越界键。
 
 use wind_sync::backend::{Backend, BackendError, MemBackend, ObjMeta};
 use wind_sync::crypto::Dek;

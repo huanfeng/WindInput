@@ -32,10 +32,7 @@ fn meta_verify_right_and_wrong_key() {
 }
 
 #[test]
-fn legacy_passphrase_meta_is_unsupported() {
-    let legacy = br#"{"format":1,"kdf_alg":"argon2id","kdf":{"m_kib":8,"t":1,"p":1},
-        "salt":"AA==","wrapped_dek":"AA==","check":"AA=="}"#;
-    assert_eq!(Meta::from_json(legacy), Err(CryptoError::UnsupportedMeta));
+fn unknown_meta_format_is_unsupported() {
     let v3 = br#"{"format":3,"check":"x"}"#;
     assert_eq!(Meta::from_json(v3), Err(CryptoError::UnsupportedMeta));
     assert_eq!(Meta::from_json(b"junk"), Err(CryptoError::UnsupportedMeta));

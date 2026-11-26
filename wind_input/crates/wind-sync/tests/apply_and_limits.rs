@@ -1,4 +1,4 @@
-//! G2 终审修复的回归测试：一轮一次 apply、可执行位随写入落位、排除路径出清单、超大文件跳过。
+//! 写入与限制：一轮只调一次 apply、可执行位随写入落位、排除路径移出清单、超大文件跳过不读。
 
 use wind_sync::backend::{Backend, MemBackend};
 use wind_sync::crypto::Dek;

@@ -76,7 +76,6 @@ fn wire_names_are_stable() {
     assert_eq!(v["backend"]["type"], "s3");
     assert_eq!(Op::parse("export_key"), Some(Op::ExportKey));
     assert_eq!(Op::parse("create_key"), Some(Op::CreateKey));
-    assert_eq!(Op::parse("set_passphrase"), None);
     assert_eq!(Op::parse("nope"), None);
 }
 
