@@ -45,7 +45,7 @@ pub fn join_with_key(b: &dyn Backend, key: &str) -> Result<Dek, SyncError> {
     Ok(dek)
 }
 
-/// 重置远端：删光 `windinput-sync/v2/` 下所有对象，再生成新同步密钥并写 meta。
+/// 重置远端：删光 `windinput-sync/v1/` 下所有对象，再生成新同步密钥并写 meta。
 /// 之后各设备以自己的本地内容为准重新上传。调用方负责取得用户的明确确认。
 pub fn reset_remote(b: &dyn Backend) -> Result<Dek, SyncError> {
     let dek = Dek::generate();
@@ -125,7 +125,7 @@ mod tests {
     fn reset_clears_everything_then_writes_new_key_meta() {
         let b = MemBackend::new();
         let old = init_remote(&b).unwrap();
-        b.raw_put("windinput-sync/v2/blobs/x", vec![1]);
+        b.raw_put("windinput-sync/v1/blobs/x", vec![1]);
         b.raw_put("other/keep", vec![1]);
         let fresh = reset_remote(&b).unwrap();
         assert_eq!(b.keys("windinput-sync/"), vec![manifest::meta_key()]);

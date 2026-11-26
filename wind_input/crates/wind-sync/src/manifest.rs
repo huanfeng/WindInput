@@ -4,7 +4,7 @@ use crate::crypto::{self, CryptoError, FilesKey, ObjKind};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const ROOT: &str = "windinput-sync/v2";
+pub const ROOT: &str = "windinput-sync/v1";
 /// 每设备保留的清单代数。
 pub const KEEP_GENS: u64 = 2;
 
@@ -177,11 +177,11 @@ mod tests {
             Some(("dev-1".into(), 7))
         );
         assert_eq!(
-            parse_manifest_key("windinput-sync/v2/devices/a/other"),
+            parse_manifest_key("windinput-sync/v1/devices/a/other"),
             None
         );
         assert_eq!(
-            parse_manifest_key("windinput-sync/v2/devices/a b/manifest.1"),
+            parse_manifest_key("windinput-sync/v1/devices/a b/manifest.1"),
             None
         );
     }

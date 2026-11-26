@@ -837,14 +837,14 @@ fn reset_remote_keeps_old_local_key_when_publish_fails() {
 fn reset_remote_does_not_touch_remote_when_local_save_fails() {
     let d = tempfile::tempdir().unwrap();
     let (mem, _key) = initialized_remote();
-    mem.raw_put("windinput-sync/v2/blobs/x", vec![1]);
+    mem.raw_put("windinput-sync/v1/blobs/x", vec![1]);
     let (mut r, _rx) = runner_with(d.path(), Box::new(MemFactory(mem.clone())), None, "pc");
     r.cfg.secrets = Box::new(FailingStore);
     assert!(
         r.command(Op::ResetRemote, &json!({"confirm": true}))
             .is_err()
     );
-    assert!(mem.raw_get("windinput-sync/v2/blobs/x").is_some());
+    assert!(mem.raw_get("windinput-sync/v1/blobs/x").is_some());
 }
 
 /// 停用期间改了存储地址：下次启动丢弃旧凭据，且不会拿它去连新地址；磁盘上也已清掉。

@@ -99,7 +99,7 @@
 
 ## 4. 远端格式
 
-根为用户给定的 URL/前缀下的 `windinput-sync/v2/`：
+根为用户给定的 URL/前缀下的 `windinput-sync/v1/`：
 
 ```
 meta.json                      明文：格式版本（2）、同步密钥校验值（不含密钥本身）

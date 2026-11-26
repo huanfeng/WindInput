@@ -149,7 +149,7 @@ fn crash_rerun_with_idle_observer_keeps_lamport_monotonic() {
     d[0].ok(&b);
     d[1].ok(&b); // Z 拉取，无本地改动
     // 抹掉 Z 的清单：只剩 A 自己的清单记录着已用过的 lamport
-    for k in b.keys("windinput-sync/v2/devices/dev1/") {
+    for k in b.keys("windinput-sync/v1/devices/dev1/") {
         b.delete(&k).unwrap();
     }
     d[0].state = snapshot;
@@ -345,9 +345,9 @@ fn absorbed_is_transitive_across_later_edits() {
 fn reset_skips_traversal_keys() {
     let b = MemBackend::new();
     remote::init_remote(&b).unwrap();
-    b.raw_put("windinput-sync/v2/../keep", vec![1]);
-    b.raw_put("windinput-sync/v2/blobs/ok", vec![1]);
+    b.raw_put("windinput-sync/v1/../keep", vec![1]);
+    b.raw_put("windinput-sync/v1/blobs/ok", vec![1]);
     remote::reset_remote(&b).unwrap();
-    assert!(b.raw_get("windinput-sync/v2/../keep").is_some());
-    assert!(b.raw_get("windinput-sync/v2/blobs/ok").is_none());
+    assert!(b.raw_get("windinput-sync/v1/../keep").is_some());
+    assert!(b.raw_get("windinput-sync/v1/blobs/ok").is_none());
 }
