@@ -1322,7 +1322,7 @@ impl PinyinEngine {
                             start,
                             h.text,
                             abbr_code.clone(),
-                            fuzzy_penalized(h.weight, edits),
+                            fuzzy_penalized(h.weight, self.fuzzy_config.penalty_edits(edits)),
                             h.boundary,
                             edits > 0,
                         );
@@ -1373,7 +1373,7 @@ impl PinyinEngine {
                             start,
                             h.text,
                             abbr_code.clone(),
-                            fuzzy_penalized(h.weight, edits),
+                            fuzzy_penalized(h.weight, self.fuzzy_config.penalty_edits(edits)),
                             h.boundary,
                             edits > 0,
                         );
@@ -1408,7 +1408,7 @@ impl PinyinEngine {
                 let Some(edits) = [plain_edits, mixed_edits].into_iter().flatten().min() else {
                     continue;
                 };
-                let w = fuzzy_penalized(c.weight, edits);
+                let w = fuzzy_penalized(c.weight, self.fuzzy_config.penalty_edits(edits));
                 // 同文已在（本切点或更早切点的系统词）：合并，不丢弃（见 merge_store_abbrev_hit）。
                 if let Some(existing) = cands.iter_mut().find(|x| x.text == c.text) {
                     merge_store_abbrev_hit(existing, &c, w, edits > 0);
@@ -2009,7 +2009,7 @@ impl PinyinEngine {
                         text: h.text,
                         // 按变体自带的改动处数罚：单音节也可能声母、韵母同时模糊
                         // （`sen`→`sheng` 计 2 处），多音节按各音节处数累加。
-                        weight: fuzzy_penalized(h.weight, edits),
+                        weight: fuzzy_penalized(h.weight, self.fuzzy_config.penalty_edits(edits)),
                         order: h.order,
                         // 双拼同键音节计 0 处：不罚、也不标模糊（各处「非模糊」准入照常放行）。
                         is_fuzzy: edits > 0,
@@ -2121,7 +2121,7 @@ impl PinyinEngine {
                 c.meta.learn_code = Some((std::mem::take(&mut c.code), c.boundary));
                 c.code = code.to_string();
                 c.boundary = 0;
-                c.weight = fuzzy_penalized(c.weight, edits);
+                c.weight = fuzzy_penalized(c.weight, self.fuzzy_config.penalty_edits(edits));
                 c.is_fuzzy = edits > 0;
                 out.push(c);
             }
@@ -3823,7 +3823,7 @@ impl Engine for PinyinEngine {
                             &mut candidates,
                             h.text,
                             abbr_code.clone(),
-                            fuzzy_penalized(h.weight, edits),
+                            fuzzy_penalized(h.weight, self.fuzzy_config.penalty_edits(edits)),
                             999999,
                             edits > 0,
                             // is_prefix=false：简拼不是前缀补全，层级由 is_abbrev 表达（见下）。
@@ -3891,7 +3891,7 @@ impl Engine for PinyinEngine {
                             &mut candidates,
                             h.text,
                             abbr_code.clone(),
-                            fuzzy_penalized(h.weight, edits),
+                            fuzzy_penalized(h.weight, self.fuzzy_config.penalty_edits(edits)),
                             999999,
                             edits > 0,
                             false,
@@ -4103,7 +4103,7 @@ impl Engine for PinyinEngine {
                     // 同文已在（系统简拼候选）：合并，不丢弃。判据要先过——没过判据的命中
                     // 不是这串击键的解释，不该给同文候选提权。
                     if let Some(existing) = candidates.iter_mut().find(|x| x.text == c.text) {
-                        let w = fuzzy_penalized(c.weight, edits);
+                        let w = fuzzy_penalized(c.weight, self.fuzzy_config.penalty_edits(edits));
                         merge_store_abbrev_hit(existing, &c, w, edits > 0);
                         continue;
                     }
@@ -4118,7 +4118,8 @@ impl Engine for PinyinEngine {
                     // 模糊命中的折扣与来源标记：纯简拼也可能是变体键命中，不罚会压过同一投影键下
                     // 精确命中的用户词。
                     if edits > 0 {
-                        c.weight = fuzzy_penalized(c.weight, edits);
+                        c.weight =
+                            fuzzy_penalized(c.weight, self.fuzzy_config.penalty_edits(edits));
                         c.is_fuzzy = true;
                     }
                     candidates.push(c);
@@ -4232,7 +4233,9 @@ impl Engine for PinyinEngine {
         // 的顶部锚定据此豁免，否则本处降权会被整个顶回去。
         let mut demote_targets: Vec<String> = synthesized_sentence.iter().cloned().collect();
         for c in candidates.iter() {
-            if c.is_sentence && c.is_fuzzy && !demote_targets.contains(&c.text) {
+            // `equal_rank`：模糊整句与精确整词统一词频，不让位；纠错整句照旧让位。
+            let yields = c.is_corrected || !self.fuzzy_config.equal_rank;
+            if c.is_sentence && c.is_fuzzy && yields && !demote_targets.contains(&c.text) {
                 demote_targets.push(c.text.clone());
             }
         }

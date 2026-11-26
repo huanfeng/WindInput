@@ -651,3 +651,34 @@ fn fuzzy_spellings_for_ong_groups() {
         "零声母 ong 不得注册，实际: {eng:?}"
     );
 }
+
+/// `equal_rank` 关着：处数原样参与惩罚；开着：模糊组的处数剥掉，只留纠错（每音节 5 处）。
+#[test]
+fn penalty_edits_strips_fuzzy_group_edits_only_when_equal_rank() {
+    use super::super::correction::CORRECTION_EDITS;
+    let off = FuzzyConfig::default();
+    let on = FuzzyConfig {
+        equal_rank: true,
+        ..FuzzyConfig::default()
+    };
+    for e in [0, 1, 2, 4, CORRECTION_EDITS, CORRECTION_EDITS + 2] {
+        assert_eq!(off.penalty_edits(e), e, "关着不动：{e}");
+    }
+    for e in 0..CORRECTION_EDITS {
+        assert_eq!(on.penalty_edits(e), 0, "模糊组的处数不罚：{e}");
+    }
+    assert_eq!(
+        on.penalty_edits(CORRECTION_EDITS),
+        CORRECTION_EDITS,
+        "纠错照罚"
+    );
+    assert_eq!(
+        on.penalty_edits(CORRECTION_EDITS + 2),
+        CORRECTION_EDITS,
+        "纠错叠模糊：只罚纠错那部分"
+    );
+    assert_eq!(
+        on.penalty_edits(2 * CORRECTION_EDITS + 1),
+        2 * CORRECTION_EDITS
+    );
+}

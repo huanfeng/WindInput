@@ -8913,6 +8913,7 @@ fn fuzzy_config_from_global(
         uan_uang: on && f.uan_uang,
         un_ong: on && f.un_ong,
         eng_ong: on && f.eng_ong,
+        equal_rank: on && f.equal_rank,
         hint: hint.clone(),
         correction: correction.clone(),
         misread: misread.cloned(),

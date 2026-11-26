@@ -2767,6 +2767,10 @@ pub struct PinyinFuzzy {
     pub un_ong: bool,
     #[serde(default)]
     pub eng_ong: bool,
+    /// 与精确拼音统一词频排序：模糊命中不再按处数打折，也不让模糊整句让位于精确整词，
+    /// 精确与模糊的词都按原词频竞争（出厂关：精确优先）。纠错（错拼）不受影响。
+    #[serde(default)]
+    pub equal_rank: bool,
 }
 
 /// 拼音纠错与正确拼音提示（`[input.correction]`）。

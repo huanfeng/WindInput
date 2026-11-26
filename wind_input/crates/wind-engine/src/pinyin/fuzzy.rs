@@ -46,6 +46,8 @@ pub struct FuzzyConfig {
     pub un_ong: bool,
     /// `eng ↔ ong`（`deng`↔`dong`、`zheng`↔`zhong`）。
     pub eng_ong: bool,
+    /// 与精确拼音统一词频排序（`input.fuzzy.equal_rank`）：模糊组的命中不计惩罚，见 [`Self::penalty_edits`]。
+    pub equal_rank: bool,
     /// 算不算正确拼音提示（见 [`HintSwitch`]；管理器按 `pinyin_hint_on` 置值）。
     /// 不影响展开/匹配，仅供上层消费。
     pub hint: HintSwitch,
@@ -67,6 +69,19 @@ pub struct FuzzyConfig {
 }
 
 impl FuzzyConfig {
+    /// 参与惩罚的改动处数。`equal_rank` 关着时就是 `edits`；开着时模糊组的处数不罚，只留纠错的
+    /// （每个纠错音节计 [`CORRECTION_EDITS`] 处，模糊组每音节至多 2 处，所以按它取整就能剥掉模糊部分）。
+    ///
+    /// 局限：同一词里模糊处数累计满 [`CORRECTION_EDITS`]（≥3 个音节都打成模糊读法）时，会被当成一处
+    /// 纠错照罚。词图的整句不走这里（整句里模糊音节各自计，罚的是路径总和），影响限于这类罕见的长串。
+    pub fn penalty_edits(&self, edits: usize) -> usize {
+        if self.equal_rank {
+            edits / CORRECTION_EDITS * CORRECTION_EDITS
+        } else {
+            edits
+        }
+    }
+
     /// 只留用户开的模糊组、去掉双拼同键音节的副本（双拼方案下的全拼降级支路用）。
     pub fn without_shared_key(&self) -> FuzzyConfig {
         FuzzyConfig {
