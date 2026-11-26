@@ -114,7 +114,7 @@ fn overlay_epoch_takes_larger() {
 fn split_then_overlay_is_identity() {
     let last = contrib(
         LearnKind::Freq,
-        "1:a",
+        "0",
         &[
             ("a", "甲", row("0", 1, &["1"])),
             ("b", "乙", row("2:a", 2, &["1"])),
@@ -125,7 +125,7 @@ fn split_then_overlay_is_identity() {
     // 甲不变；乙改数；丙被删（有标记）；丁新增；新增标记；旧标记保留
     let full = contrib(
         LearnKind::Freq,
-        "1:a",
+        "0",
         &[
             ("a", "甲", row("0", 1, &["1"])),
             ("b", "乙", row("5:b", 7, &["9"])),
@@ -184,4 +184,83 @@ fn deflate_roundtrip() {
     assert!(z.len() < data.len());
     assert_eq!(inflate(&z).unwrap(), data);
     assert_eq!(inflate(b"not deflate data"), Err(FormatError::Inflate));
+}
+
+#[test]
+fn epoch_raise_overlay_drops_old_rows() {
+    let base = contrib(
+        LearnKind::Freq,
+        "0",
+        &[
+            ("a", "甲", row("0", 1, &["1"])),
+            ("b", "乙", row("9:a", 2, &["1"])),
+        ],
+        &[("t", "旧", "3:a")],
+    );
+    let delta = contrib(LearnKind::Freq, "5:a", &[], &[]);
+    let o = overlay(&base, &delta);
+    assert_eq!(o.epoch, g("5:a"));
+    assert_eq!(o.rows.len(), 1);
+    assert!(o.tombs.is_empty());
+}
+
+#[test]
+fn needs_rebase_on_reclaimed_tomb() {
+    let last = contrib(LearnKind::Freq, "0", &[], &[("t", "旧", "3:a")]);
+    let full = contrib(LearnKind::Freq, "0", &[], &[]);
+    assert!(needs_rebase(&full, &last));
+    // 行消失且无标记、无纪元提升
+    let last2 = contrib(
+        LearnKind::Freq,
+        "0",
+        &[("a", "甲", row("1:a", 1, &["1"]))],
+        &[],
+    );
+    assert!(needs_rebase(&full, &last2));
+}
+
+#[test]
+fn needs_rebase_false_for_normal_changes() {
+    let last = contrib(
+        LearnKind::Freq,
+        "0",
+        &[
+            ("a", "甲", row("0", 1, &["1"])),
+            ("c", "丙", row("0", 3, &["1"])),
+        ],
+        &[("t", "旧", "2:a")],
+    );
+    let full = contrib(
+        LearnKind::Freq,
+        "0",
+        &[
+            ("a", "甲", row("5:b", 2, &["1"])),
+            ("d", "丁", row("6:b", 1, &["1"])),
+        ],
+        &[("t", "旧", "2:a"), ("c", "丙", "4:b")],
+    );
+    assert!(!needs_rebase(&full, &last));
+}
+
+#[test]
+fn split_then_overlay_identity_with_epoch_raise() {
+    let last = contrib(
+        LearnKind::Freq,
+        "0",
+        &[
+            ("a", "甲", row("0", 1, &["1"])),
+            ("b", "乙", row("2:a", 2, &["1"])),
+        ],
+        &[],
+    );
+    // 纪元提升到 5:a：甲、乙随之失效；丙是新行
+    let full = contrib(
+        LearnKind::Freq,
+        "5:a",
+        &[("c", "丙", row("6:b", 1, &["1"]))],
+        &[],
+    );
+    assert!(!needs_rebase(&full, &last));
+    let d = split(&full, &last);
+    assert_eq!(overlay(&last, &d), full);
 }

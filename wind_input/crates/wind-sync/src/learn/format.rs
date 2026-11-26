@@ -17,7 +17,20 @@ pub enum FormatError {
     Inflate,
 }
 
+/// 前提：键与字段不得含 `\t` `\n` `\r`（否则 decode 无法还原）。
 pub fn encode(c: &Contribution) -> String {
+    debug_assert!(
+        c.rows.values().all(|(k, r)| {
+            [&k.0, &k.1]
+                .into_iter()
+                .chain(&r.fields)
+                .all(|f| !f.contains(['\t', '\n', '\r']))
+        }) && c
+            .tombs
+            .values()
+            .all(|(k, _)| ![&k.0, &k.1].iter().any(|f| f.contains(['\t', '\n', '\r']))),
+        "键/字段含制表符或换行"
+    );
     let mut s = format!(
         "#wind-learn {VERSION} {} epoch={}\n",
         c.kind.as_str(),
@@ -113,7 +126,8 @@ pub fn decode(kind: LearnKind, s: &str) -> Result<Contribution, FormatError> {
     Ok(c)
 }
 
-/// 底稿叠加增量：`+` 行按键覆盖；`-` 行写入标记，世代不小于底稿行时同时去掉该行；epoch 取大。
+/// 底稿叠加增量：`+` 行按键覆盖；`-` 行写入标记，世代不小于底稿行时同时去掉该行；
+/// epoch 取大后，丢掉世代低于该 epoch 的 `+` 行与标记。
 pub fn overlay(base: &Contribution, delta: &Contribution) -> Contribution {
     let mut out = base.clone();
     for (nk, (k, r)) in &delta.rows {
@@ -128,18 +142,27 @@ pub fn overlay(base: &Contribution, delta: &Contribution) -> Contribution {
     if delta.epoch > out.epoch {
         out.epoch = delta.epoch.clone();
     }
+    let epoch = out.epoch.clone();
+    out.rows.retain(|_, (_, r)| r.gen_ >= epoch);
+    out.tombs.retain(|_, (_, g)| *g >= epoch);
     out
 }
 
+/// 底稿里有行或标记无法由 `full` 经增量表达时返回 true；此时应直接压实（新底稿 = full、增量清空），不用 [`split`]。
+/// 即：底稿有 `full` 中没有、且未被 `full` 同键标记（世代 ≥ 行 gen_）或 `full.epoch`（> 行 gen_）压制的 `+` 行，
+/// 或底稿有 `full` 中没有的标记。
+pub fn needs_rebase(full: &Contribution, last_base: &Contribution) -> bool {
+    let row_lost = last_base.rows.iter().any(|(k, (_, r))| {
+        !full.rows.contains_key(k)
+            && !full.tombs.get(k).is_some_and(|(_, g)| *g >= r.gen_)
+            && !(full.epoch > r.gen_)
+    });
+    row_lost || last_base.tombs.keys().any(|k| !full.tombs.contains_key(k))
+}
+
 /// `full` 相对 `last_base` 的增量：新增或变化的 `+` 行与 `-` 标记，epoch 取 `full` 的。
+/// 仅在 `!needs_rebase(full, last_base)` 时 `overlay(last_base, split(..))` 恒等于 `full`。
 pub fn split(full: &Contribution, last_base: &Contribution) -> Contribution {
-    // 底稿有而 full 没有的行，必须有标记或纪元提升相伴（Task 4 的 diff 保证）。
-    debug_assert!(
-        last_base.rows.keys().all(|k| full.rows.contains_key(k)
-            || full.tombs.contains_key(k)
-            || full.epoch > last_base.epoch),
-        "行消失却无标记"
-    );
     Contribution {
         kind: full.kind,
         epoch: full.epoch.clone(),
