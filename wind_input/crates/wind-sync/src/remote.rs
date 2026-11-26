@@ -97,9 +97,14 @@ pub fn gc_blobs(
         }
     }
     let mut removed = Vec::new();
-    for o in b.list(&manifest::blobs_prefix())? {
+    let blobs = manifest::blobs_prefix();
+    for o in b.list(&blobs)? {
         let old = o.modified.is_some_and(|t| t + min_age_secs <= now);
-        if old && manifest::safe_key(&o.key) && !referenced.contains(&o.key) {
+        if old
+            && o.key.starts_with(&blobs)
+            && manifest::safe_key(&o.key)
+            && !referenced.contains(&o.key)
+        {
             b.delete(&o.key)?;
             removed.push(o.key);
         }

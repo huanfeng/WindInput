@@ -180,7 +180,6 @@ fn purge_removes_only_that_device() {
     assert!(b.keys(&learn_prefix("ab")).is_empty());
     assert_eq!(b.keys(&learn_prefix("abc")).len(), 2);
     assert!(purge_device(&b, "").is_err());
-    let _ = b.list("");
 }
 
 #[test]
@@ -197,4 +196,81 @@ fn invalid_object_name_in_remote_index_skipped_with_warning() {
     assert!(!ups[0].objects.contains_key("../evil"));
     // ../evil 的名字警告 + ok 对象缺失警告
     assert_eq!(ups[0].warnings.len(), 2);
+}
+
+/// list 时夹带越界键、delete 只记录的后端。
+struct Evil {
+    inner: MemBackend,
+    deleted: std::sync::Mutex<Vec<String>>,
+}
+
+const FOREIGN: [&str; 3] = [
+    "windinput-sync/v1/devices/x/manifest.1",
+    "windinput-sync/v1/learn/other/obj/y",
+    "windinput-sync/v1/meta.json",
+];
+
+impl Backend for Evil {
+    fn list(&self, p: &str) -> Result<Vec<wind_sync::ObjMeta>, wind_sync::BackendError> {
+        let mut v = self.inner.list(p)?;
+        v.extend(FOREIGN.iter().map(|k| wind_sync::ObjMeta {
+            key: k.to_string(),
+            size: 1,
+            modified: Some(0),
+        }));
+        Ok(v)
+    }
+    fn get(&self, k: &str) -> Result<Option<Vec<u8>>, wind_sync::BackendError> {
+        self.inner.get(k)
+    }
+    fn put(&self, k: &str, v: &[u8]) -> Result<(), wind_sync::BackendError> {
+        self.inner.put(k, v)
+    }
+    fn delete(&self, k: &str) -> Result<(), wind_sync::BackendError> {
+        self.deleted.lock().unwrap().push(k.to_string());
+        self.inner.delete(k)
+    }
+}
+
+fn evil() -> Evil {
+    Evil {
+        inner: MemBackend::new(),
+        deleted: Default::default(),
+    }
+}
+
+fn assert_no_foreign(e: &Evil) {
+    let d = e.deleted.lock().unwrap();
+    assert!(d.iter().all(|k| !FOREIGN.contains(&k.as_str())), "{d:?}");
+}
+
+#[test]
+fn gc_own_ignores_out_of_prefix_keys() {
+    let (e, k) = (evil(), fk());
+    gc_own(&e, &k, "b", &[], u64::MAX / 2).unwrap();
+    assert_no_foreign(&e);
+}
+
+#[test]
+fn purge_ignores_out_of_prefix_keys() {
+    let e = evil();
+    purge_device(&e, "b").unwrap();
+    assert_no_foreign(&e);
+}
+
+#[test]
+fn gc_blobs_ignores_out_of_prefix_keys() {
+    let e = evil();
+    wind_sync::remote::gc_blobs(&e, &Dek::generate(), u64::MAX / 2, 0).unwrap();
+    assert_no_foreign(&e);
+}
+
+#[test]
+fn complete_requires_index_ok_and_no_warnings() {
+    let (b, k) = (MemBackend::new(), fk());
+    publish(&b, &k, "b", None, &objs(&[("a", "1")])).unwrap();
+    assert!(fetch_peers(&b, &k, "a", &BTreeMap::new()).unwrap()[0].complete());
+    let key = b.keys(&format!("{}obj/", learn_prefix("b"))).remove(0);
+    b.raw_put(&key, b"x".to_vec());
+    assert!(!fetch_peers(&b, &k, "a", &BTreeMap::new()).unwrap()[0].complete());
 }

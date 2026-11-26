@@ -41,6 +41,13 @@ pub struct PeerUpdate {
     pub warnings: Vec<String>,
 }
 
+impl PeerUpdate {
+    /// 目录与全部变化对象都取到了。仅 complete 时才推进 known，否则下轮会重试。
+    pub fn complete(&self) -> bool {
+        self.index_ok && self.warnings.is_empty()
+    }
+}
+
 fn valid_object_name(name: &str) -> bool {
     !name.is_empty()
         && !name.contains('\\')
@@ -242,7 +249,11 @@ pub fn gc_own(
         .map(|h| learn_obj_key(dev, &blob_id(key, h)))
         .collect();
     let mut n = 0;
-    for o in b.list(&learn_obj_key(dev, ""))? {
+    let obj_prefix = learn_obj_key(dev, "");
+    for o in b.list(&obj_prefix)? {
+        if !o.key.starts_with(&obj_prefix) {
+            continue;
+        }
         let old = o.modified.is_some_and(|t| t + GC_MIN_AGE_SECS <= now);
         if old && safe_key(&o.key) && !referenced.contains(&o.key) {
             b.delete(&o.key)?;
@@ -258,8 +269,9 @@ pub fn purge_device(b: &dyn Backend, dev: &str) -> Result<usize, SyncError> {
         return Err(SyncError::Local(format!("设备号不合法: {dev}")));
     }
     let mut n = 0;
-    for o in b.list(&learn_prefix(dev))? {
-        if safe_key(&o.key) {
+    let prefix = learn_prefix(dev);
+    for o in b.list(&prefix)? {
+        if o.key.starts_with(&prefix) && safe_key(&o.key) {
             b.delete(&o.key)?;
             n += 1;
         }
