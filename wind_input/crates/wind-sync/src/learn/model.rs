@@ -108,6 +108,9 @@ fn set_tomb(me: &mut Contribution, nk: &NormKey, key: &Key, gen_: Gen) {
 }
 
 /// 按 §4.4 把当前文件 `current` 相对基线 `base` 的变化计入本机贡献。
+///
+/// `peers` 必须是基线 `base` 物化时所依据的镜像（旧镜像）；新拉回的镜像只用于随后的
+/// [`absorb_peer_deletes`] 与 [`materialize`]，否则用户打字时尚不知道的删除会让被删的词以小计数复活。
 pub fn diff(
     me: &mut Contribution,
     current: &LearnedFile,
@@ -181,15 +184,16 @@ pub fn absorb_peer_deletes(me: &mut Contribution, peers: &[&Contribution]) {
     }
 }
 
-/// 字段按数值取大或取小，同值时取字符串较小者，保证与输入顺序无关。
+/// 字段按数值取大或取小，同值时取字符串较小者，保证与输入顺序无关；空字段不参与，全空才输出空。
 fn pick<'a>(vals: impl Iterator<Item = &'a str>, want_max: bool) -> String {
-    vals.min_by(|a, b| {
-        let o = num(a).cmp(&num(b));
-        let o = if want_max { o.reverse() } else { o };
-        o.then_with(|| a.cmp(b))
-    })
-    .unwrap_or("")
-    .to_string()
+    vals.filter(|v| !v.trim().is_empty())
+        .min_by(|a, b| {
+            let o = num(a).cmp(&num(b));
+            let o = if want_max { o.reverse() } else { o };
+            o.then_with(|| a.cmp(b))
+        })
+        .unwrap_or("")
+        .to_string()
 }
 
 /// 按 §4.3 物化全部设备贡献；头部、列序与已有键的写法取自 `template`。

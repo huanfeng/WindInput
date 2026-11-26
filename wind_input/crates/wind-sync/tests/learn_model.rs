@@ -328,6 +328,20 @@ fn fields_merge() {
 }
 
 #[test]
+fn materialize_skips_empty_fields() {
+    let t = LearnKind::Temp;
+    let mut a = empty_contrib(t);
+    put_row(&mut a, "ni", "你", "0", 1, &["", ""]);
+    let mut b = empty_contrib(t);
+    put_row(&mut b, "ni", "你", "0", 1, &["3", "50"]);
+    let f = materialize(t, &[&a, &b], &empty_file(t));
+    assert_eq!(f.rows[&nk(t, "ni", "你")].2, vec!["3", "50"]);
+
+    let only_empty = materialize(t, &[&a], &empty_file(t));
+    assert_eq!(only_empty.rows[&nk(t, "ni", "你")].2, vec!["", ""]);
+}
+
+#[test]
 fn temp_weight_lowered_bumps_generation() {
     let t = LearnKind::Temp;
     let mut b = empty_contrib(t);
@@ -413,7 +427,40 @@ fn few_rows_deleted_use_tombs_not_epoch() {
     assert_eq!(count_of(FREQ, &mat(&[&a.c, &b]), "y", "歪"), Some(3));
 }
 
-/// a、b 各 10 后 a 删除；返回已同步的两台设备。
+/// 只有 a 学过「你」，b 从 a 的贡献物化得到它；返回 (a, b, a 删除前的贡献)。
+fn b_sees_only_a_then_a_deletes() -> (Dev, Dev, Contribution) {
+    let (mut a, mut b) = (Dev::new("a"), Dev::new("b"));
+    a.learn("ni", "你", 10, 100);
+    a.commit(1000, &[]);
+    b.sync(&[&a.c]);
+    let old_a = a.c.clone();
+    a.remove("ni", "你");
+    a.commit(2000, &[&b.c]);
+    (a, b, old_a)
+}
+
+#[test]
+fn diff_with_stale_peers_then_absorb_drops_deleted() {
+    let (a, mut b, old_a) = b_sees_only_a_then_a_deletes();
+    // b 不知删除时打字：F 11 > M 10，本机无行
+    b.learn("ni", "你", 1, 300);
+    b.commit(2500, &[&old_a]);
+    b.sync(&[&a.c]);
+    assert_eq!(count_of(FREQ, &b.f, "ni", "你"), None);
+    assert!(b.c.rows.is_empty());
+}
+
+#[test]
+fn diff_with_fresh_peers_is_caller_error() {
+    // 契约钉子：diff 误用新镜像时，增量落在新世代上，被删的词以小计数复活
+    let (a, mut b, _) = b_sees_only_a_then_a_deletes();
+    b.learn("ni", "你", 1, 300);
+    b.commit(2500, &[&a.c]);
+    b.sync(&[&a.c]);
+    assert_eq!(count_of(FREQ, &b.f, "ni", "你"), Some(1));
+}
+
+/// a、b 各学 10 且已互相同步。
 fn deleted_by_a() -> (Dev, Dev) {
     let (mut a, mut b) = (Dev::new("a"), Dev::new("b"));
     a.learn("ni", "你", 10, 100);
@@ -506,6 +553,8 @@ struct Sim {
     remote_len: Vec<usize>,
     /// 参照：known[d][p] = d 已知的 p 的事件数（d 自己的永远全知）。
     known: Vec<Vec<usize>>,
+    /// 时间跳跃累计的毫秒，所有设备共享。
+    skew: u64,
 }
 
 /// 各设备时钟偏移：a 准、b 慢、c 快到「2099 年」。
@@ -527,6 +576,20 @@ impl Sim {
             events: vec![Vec::new(); 3],
             remote_len: vec![0; 3],
             known: vec![vec![0; 3]; 3],
+            skew: 0,
+        }
+    }
+
+    /// 三台设备全部互相同步后各自回收标记。参照模型的删除事件不回收：
+    /// 回收前人人都已吸收删除，没有「没见过标记的设备」，结果应与回放一致。
+    fn gc_all(&mut self, step: u64) {
+        self.sync_pair(0, 1);
+        self.sync_pair(1, 2);
+        self.sync_pair(0, 2);
+        for x in 0..3 {
+            let peers: Vec<&Contribution> = self.mirrors[x].values().collect();
+            let now = now_of(x, step) + self.skew;
+            gc_tombs(&mut self.devs[x].c, &peers, now);
         }
     }
 
@@ -634,7 +697,7 @@ fn run_random(seed: u64) {
     for step in 1..=200u64 {
         let t = step;
         let d = rng.below(3) as usize;
-        let now = now_of(d, step);
+        let now = now_of(d, step) + sim.skew;
         let present: Vec<usize> = (0..KEYS)
             .filter(|i| {
                 sim.devs[d]
@@ -644,7 +707,7 @@ fn run_random(seed: u64) {
             })
             .collect();
         let known = sim.known_events(d);
-        match rng.below(12) {
+        match rng.below(14) {
             0..=5 => {
                 let key = rng.below(KEYS as u64) as usize;
                 let n = 1 + rng.below(3);
@@ -698,6 +761,8 @@ fn run_random(seed: u64) {
                 }
                 sim.commit(d, now);
             }
+            12 => sim.skew += 31 * DAY_MS,
+            13 => sim.gc_all(step),
             _ => {
                 let j = (d + 1 + rng.below(2) as usize) % 3;
                 sim.sync_pair(d, j);
