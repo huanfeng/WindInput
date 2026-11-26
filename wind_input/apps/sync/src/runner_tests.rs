@@ -1327,3 +1327,36 @@ fn ids_with_learn_data_count_as_taken() {
     c.command(Op::ConfirmIdentity, &Value::Null).unwrap();
     assert_eq!(c.status().device, "pc-2");
 }
+
+#[test]
+fn interrupted_reset_does_not_drop_devices() {
+    let mem = MemBackend::new();
+    let flaky = Flaky {
+        inner: mem.clone(),
+        fail_delete: Arc::new(Mutex::new(None)),
+    };
+    let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (mut a, rxa) = runner_with(da.path(), Box::new(FlakyFactory(flaky.clone())), None, "pc");
+    setup_pc(&mut a);
+    write_freq(da.path(), 3);
+    forced_round(&mut a, &rxa);
+    let (mut b, rxb) = runner_with(db.path(), Box::new(MemFactory(mem.clone())), None, "lap");
+    let key = a.dek().unwrap().to_key_string();
+    b.command(Op::ImportKey, &json!({"key": key})).unwrap();
+    b.command(Op::ConfirmIdentity, &Value::Null).unwrap();
+    write_freq(db.path(), 4);
+    forced_round(&mut b, &rxb);
+    forced_round(&mut a, &rxa);
+    assert_eq!(read_freq(db.path()), Some(7));
+    // 重置删到 learn/pc 之后、meta 之前的某个对象时失败
+    mem.raw_put("windinput-sync/v1/learn/zz/obj/x", vec![1]);
+    *lock(&flaky.fail_delete) = Some("/learn/zz/".into());
+    assert!(
+        a.command(Op::ResetRemote, &json!({"confirm": true}))
+            .is_err()
+    );
+    assert!(!has_learn(&mem, "pc"));
+    b.command(Op::SyncNow, &Value::Null).unwrap();
+    round(&mut b, &rxb);
+    assert_eq!(read_freq(db.path()), Some(7), "半毁的远端上不应丢设备");
+}

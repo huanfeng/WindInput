@@ -56,9 +56,11 @@ pub fn reset_remote(b: &dyn Backend) -> Result<Dek, SyncError> {
 /// 同 [`reset_remote`]，但用调用方已生成（并已在本机保存）的密钥。
 pub fn reset_remote_with(b: &dyn Backend, dek: &Dek) -> Result<(), SyncError> {
     let meta = Meta::new(dek).to_json();
+    // 先删 meta：中途失败时远端是「未初始化」，旧库各设备的同步轮就此停下，不会在半毁的远端上
+    // 把已删的设备当作清除；新 meta 最后写，重试即可
+    b.delete(&manifest::meta_key())?;
     for o in b.list(&format!("{}/", manifest::ROOT))? {
-        // meta 最后写：中途失败时远端仍是「已清空但未初始化」，重试即可
-        if !manifest::safe_key(&o.key) {
+        if !manifest::safe_key(&o.key) || o.key == manifest::meta_key() {
             continue;
         }
         b.delete(&o.key)?;

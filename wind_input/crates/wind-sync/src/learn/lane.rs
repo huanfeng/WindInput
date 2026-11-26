@@ -25,6 +25,9 @@ pub struct Index {
     #[serde(rename = "gen")]
     pub gen_: u64,
     pub objects: BTreeMap<String, String>,
+    /// 发布者的私有随机标识：本地状态丢了最近一次发布时，据此认出远端目录是自己的
+    #[serde(default)]
+    pub owner: String,
 }
 
 /// 他机的一次更新。
@@ -88,11 +91,13 @@ fn list_indexes(b: &dyn Backend, prefix: &str) -> Result<Vec<(String, u64, Strin
 /// 再删除新编号 − 2 及更早的旧目录。
 ///
 /// `prev` 那一代目录在远端已不存在（本机前缀被清除）时按全新发布整份重传；
-/// `prev` 为 None 而远端已有该号的目录时拒绝——那是别的设备（或已移除设备）的数据。
+/// `prev` 为 None 而远端已有该号的目录时：最新目录的 `owner` 等于本机 `owner`（发布成功但本地状态
+/// 没存下）则以它为 prev 继续，否则拒绝——那是别的设备（或已移除设备）的数据。空 `owner` 从不匹配。
 pub fn publish(
     b: &dyn Backend,
     key: &FilesKey,
     dev: &str,
+    owner: &str,
     prev: Option<&Index>,
     objects: &BTreeMap<String, Vec<u8>>,
 ) -> Result<Index, SyncError> {
@@ -109,11 +114,27 @@ pub fn publish(
         .map(|(_, n, _)| *n)
         .max()
         .unwrap_or(0);
-    if prev.is_none() && remote_max > 0 {
-        return Err(SyncError::Local(format!(
-            "设备号 {dev} 在学习通道下已有数据，不能从头发布"
-        )));
-    }
+    let mine;
+    let prev = match prev {
+        None if remote_max > 0 => {
+            let latest = match b.get(&learn_index_key(dev, remote_max))? {
+                Some(raw) => open_index(key, dev, remote_max, &raw).ok(),
+                None => None,
+            };
+            match latest {
+                Some(i) if !owner.is_empty() && i.owner == owner => {
+                    mine = i;
+                    Some(&mine)
+                }
+                _ => {
+                    return Err(SyncError::Local(format!(
+                        "设备号 {dev} 在学习通道下已有别处的数据，不能从头发布"
+                    )));
+                }
+            }
+        }
+        p => p,
+    };
     let new_gen = prev.map_or(0, |p| p.gen_).max(remote_max) + 1;
     let alive = |p: &&Index| own.iter().any(|(d, n, _)| d == dev && *n == p.gen_);
     let prev = prev.filter(alive);
@@ -121,6 +142,7 @@ pub fn publish(
     let mut index = Index {
         gen_: new_gen,
         objects: BTreeMap::new(),
+        owner: owner.to_string(),
     };
     let mut uploaded = BTreeSet::new();
     for (name, plain) in objects {
@@ -213,7 +235,7 @@ pub fn fetch_peers_in(
             gen_: prev_gen,
             index: Index {
                 gen_: prev_gen,
-                objects: BTreeMap::new(),
+                ..Default::default()
             },
             index_ok: false,
             objects: BTreeMap::new(),

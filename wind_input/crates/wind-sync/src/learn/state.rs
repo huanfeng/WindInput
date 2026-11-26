@@ -57,6 +57,9 @@ pub struct LearnState {
     /// 改号后待删除的本机旧号前缀
     #[serde(default)]
     pub retire: Vec<String>,
+    /// 本机发布目录时写入的随机标识（发布前先落盘），见 `Index::owner`
+    #[serde(default)]
+    pub owner_nonce: String,
 }
 
 impl Default for LearnState {
@@ -73,6 +76,7 @@ impl Default for LearnState {
             peer_index: BTreeMap::new(),
             device: String::new(),
             retire: Vec::new(),
+            owner_nonce: String::new(),
         }
     }
 }

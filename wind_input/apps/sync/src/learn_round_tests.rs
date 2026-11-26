@@ -472,7 +472,15 @@ fn undecodable_peer_does_not_block_group() {
         "pinyin/freq.base".to_string(),
         b"#wind-learn 99 freq epoch=0\n".to_vec(),
     );
-    wind_sync::learn::lane::publish(&b, &key(), "pc-b", bst.own_index.as_ref(), &objs).unwrap();
+    wind_sync::learn::lane::publish(
+        &b,
+        &key(),
+        "pc-b",
+        &bst.owner_nonce,
+        bst.own_index.as_ref(),
+        &objs,
+    )
+    .unwrap();
     assert_eq!(freq(&c), Some(5));
     set_freq(&c, 6);
     c.round(&b);
@@ -688,6 +696,7 @@ struct Faulty {
     inner: MemBackend,
     hide: Option<String>,
     fail_put: Option<String>,
+    fail_delete: Option<String>,
 }
 
 impl Backend for Faulty {
@@ -708,6 +717,9 @@ impl Backend for Faulty {
         self.inner.put(key, bytes)
     }
     fn delete(&self, key: &str) -> Result<(), BackendError> {
+        if self.fail_delete.as_deref().is_some_and(|f| key.contains(f)) {
+            return Err(BackendError::Transient("删除失败（桩）".into()));
+        }
         self.inner.delete(key)
     }
     fn stat(&self, key: &str) -> Result<Option<ObjMeta>, BackendError> {
@@ -739,6 +751,7 @@ fn transient_list_omission_keeps_peer() {
         inner: b.clone(),
         hide: Some("/learn/pc-a/".into()),
         fail_put: None,
+        fail_delete: None,
     };
     bb.round(&hiding);
     assert_eq!(comp(&bb), Some(2), "列表漏掉 pc-a 不应让它的次数消失");
@@ -771,6 +784,7 @@ fn rename_publish_failure_heals_next_round() {
         inner: b.clone(),
         hide: None,
         fail_put: Some("/learn/pc-x/".into()),
+        fail_delete: None,
     };
     assert!(rename_own(&a.ctx(None), &failing, &key(), true).is_err());
     let has = |dev: &str| !b.keys(&wind_sync::manifest::learn_prefix(dev)).is_empty();
@@ -779,4 +793,70 @@ fn rename_publish_failure_heals_next_round() {
     assert!(has("pc-x") && !has("pc-a"));
     bb.round(&b);
     assert_eq!(freq(&bb), Some(7), "不重复计入");
+}
+
+/// 模拟「目录已写成功、本地状态没存下」：退回发布前的状态（发布者标识已先落盘，保留）。
+fn forget_last_publish(d: &Dev, owner: Option<&str>) {
+    let ctx = d.ctx(None);
+    let mut st = load_state(&ctx).unwrap();
+    st.own_index = None;
+    st.index_gen = 0;
+    st.device.clear();
+    for g in st.groups.values_mut() {
+        g.last_base.clear();
+    }
+    if let Some(o) = owner {
+        st.owner_nonce = o.into();
+    }
+    save(&ctx, &st).unwrap();
+}
+
+#[test]
+fn first_publish_lost_locally_heals_next_round() {
+    let b = MemBackend::new();
+    let (mut a, mut bb) = (Dev::new("pc-a"), Dev::new("pc-b"));
+    set_freq(&a, 3);
+    set_freq(&bb, 4);
+    a.round(&b);
+    forget_last_publish(&a, None);
+    a.round(&b);
+    bb.round(&b);
+    a.round(&b);
+    assert_eq!((freq(&a), freq(&bb)), (Some(7), Some(7)));
+}
+
+#[test]
+fn foreign_owner_on_my_prefix_is_rejected() {
+    let b = MemBackend::new();
+    let mut a = Dev::new("pc-a");
+    set_freq(&a, 3);
+    a.round(&b);
+    forget_last_publish(&a, Some("someone-else"));
+    let e = a.round_with(&b, None).unwrap_err();
+    assert!(e.contains("别处的数据"), "{e}");
+}
+
+#[test]
+fn retired_own_id_not_counted_while_purge_fails() {
+    let b = MemBackend::new();
+    let (mut a, mut bb) = synced_pair(&b);
+    a.id = "pc-x".into();
+    let failing = Faulty {
+        inner: b.clone(),
+        hide: None,
+        fail_put: None,
+        fail_delete: Some("/learn/pc-a/".into()),
+    };
+    let ws = rename_own(&a.ctx(None), &failing, &key(), true).unwrap();
+    assert!(!ws.is_empty(), "删除失败应有警告");
+    set_freq(&a, 8);
+    a.round(&failing);
+    assert_eq!(freq(&a), Some(8), "本机不把自己的旧号当他机计入");
+    a.round(&b);
+    assert!(
+        b.keys(&wind_sync::manifest::learn_prefix("pc-a"))
+            .is_empty()
+    );
+    bb.round(&b);
+    assert_eq!(freq(&bb), Some(8));
 }

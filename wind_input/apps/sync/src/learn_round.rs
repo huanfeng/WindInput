@@ -565,7 +565,7 @@ fn publish_own(
 ) -> Result<(), String> {
     // 改号时没能搬完：以新号整份重发，旧号前缀随后删除
     if st.own_index.is_some() && !st.device.is_empty() && st.device != ctx.dev {
-        return republish_as(ctx, b, key, st, warnings);
+        return republish_as(ctx, b, key, st);
     }
     let mut objects: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     let mut rebased: Vec<(String, String)> = Vec::new();
@@ -618,7 +618,9 @@ fn publish_own(
         return Ok(());
     }
     let prev = st.own_index.clone();
-    let idx = publish(b, key, ctx.dev, prev.as_ref(), &objects).map_err(|e| sync_error(&e))?;
+    let owner = ensure_owner(ctx, st)?;
+    let idx =
+        publish(b, key, ctx.dev, &owner, prev.as_ref(), &objects).map_err(|e| sync_error(&e))?;
     for (name, text) in rebased {
         if let Some(g) = st.groups.get_mut(&name) {
             g.last_base = text;
@@ -636,14 +638,25 @@ fn publish_own(
     Ok(())
 }
 
-/// 以 `ctx.dev` 从头发布本机全部对象（底稿 = 当前贡献），原发布号记入待删并尝试删除。
-/// 新号发布成功到旧号删除之间，他机会把两份各计一次；旧号删掉后的下一轮即恢复。
+/// 发布者标识：没有时随机生成并先落盘，保证远端目录里的 owner 本地一定记得。
+fn ensure_owner(ctx: &LearnCtx, st: &mut LearnState) -> Result<String, String> {
+    if st.owner_nonce.is_empty() {
+        st.owner_nonce = random_bytes::<16>()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        save(ctx, st)?;
+    }
+    Ok(st.owner_nonce.clone())
+}
+
+/// 以 `ctx.dev` 从头发布本机全部对象（底稿 = 当前贡献），原发布号记入待删（由 [`purge_retired`] 删除）。
+/// 新号发布成功到旧号删除之间，他机会把两份各计一次；旧号删掉后的下一轮即恢复。本机不计待删旧号。
 fn republish_as(
     ctx: &LearnCtx,
     b: &dyn Backend,
     key: &FilesKey,
     st: &mut LearnState,
-    warnings: &mut Vec<String>,
 ) -> Result<(), String> {
     let mut objects: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     let mut bases = Vec::new();
@@ -658,7 +671,8 @@ fn republish_as(
             bases.push((name.clone(), text));
         }
     }
-    let idx = publish(b, key, ctx.dev, None, &objects).map_err(|e| sync_error(&e))?;
+    let owner = ensure_owner(ctx, st)?;
+    let idx = publish(b, key, ctx.dev, &owner, None, &objects).map_err(|e| sync_error(&e))?;
     for (name, text) in bases {
         if let Some(g) = st.groups.get_mut(&name) {
             g.last_base = text;
@@ -671,9 +685,7 @@ fn republish_as(
     }
     st.index_gen = idx.gen_;
     st.own_index = Some(idx);
-    save(ctx, st)?;
-    purge_retired(ctx, b, st, warnings);
-    Ok(())
+    save(ctx, st)
 }
 
 /// 删除改号前的本机旧号前缀；失败的留到下一轮。
@@ -786,6 +798,10 @@ fn fetch_mirrors(
     }
     let ups = fetch_peers_in(b, key, ctx.dev, &st.peer_index, keys).map_err(|e| sync_error(&e))?;
     for u in ups {
+        // 本机改号前的旧号：删除失败期间仍在远端，不当他机计入
+        if st.retire.contains(&u.dev) {
+            continue;
+        }
         if !u.complete() {
             warnings.extend(u.warnings);
             continue;
@@ -1268,9 +1284,12 @@ fn adopt_remote(
         gs.last_base = base_text;
         gs.base_at = ctx.now;
     }
+    let idx_owner = idx.owner.clone();
     ns.index_gen = idx.gen_;
     ns.own_index = Some(idx);
     ns.device = dev.to_string();
+    // 接管该号：沿用其发布者标识，本地状态再丢时仍能续上
+    ns.owner_nonce = idx_owner;
     Ok(())
 }
 
@@ -1293,7 +1312,8 @@ pub fn rename_own(
         save(ctx, &st)?;
         return Ok(warnings);
     }
-    republish_as(ctx, b, key, &mut st, &mut warnings)?;
+    republish_as(ctx, b, key, &mut st)?;
+    purge_retired(ctx, b, &mut st, &mut warnings);
     Ok(warnings)
 }
 
