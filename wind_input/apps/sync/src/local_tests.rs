@@ -828,3 +828,56 @@ fn del_marker_outlives_locked_old_across_sweeps() {
         .count();
     assert_eq!(dels, 1, "同名 .old 还在时 .del 要留着");
 }
+
+#[test]
+fn list_skips_local_dirs_when_user_dir_is_local_dir() {
+    let (d, _c, l, _) = rig();
+    for p in [
+        "config.toml",
+        "state/sync/state.json",
+        "state/learn/pinyin.txt",
+        "logs/service.log",
+        "cache/pinyin.wdat",
+        "service/wind_input",
+        "service/data/pinyin.dict.yaml",
+    ] {
+        put(d.path(), p, "x");
+    }
+    assert_eq!(l.list().unwrap(), vec!["config.toml"]);
+}
+
+#[test]
+fn local_skips_cover_local_root_and_install_root_inside_user_dir() {
+    let u = Path::new("/u");
+    let skips = local_skips(u, &u.join("state").join("sync"), Some(&u.join("app")));
+    assert_eq!(skips, vec!["state", "cache", "logs", "app"]);
+    // 本机目录、安装目录都不在用户目录下（Windows 常态）：不排除任何东西
+    let none = local_skips(u, Path::new("/l/state/sync"), Some(Path::new("/p")));
+    assert!(none.is_empty(), "{none:?}");
+    // 安装目录就是用户目录本身：不能把整个用户目录排除掉
+    assert!(local_skips(u, Path::new("/l/state/sync"), Some(u)).is_empty());
+
+    let (d, _c, l, _) = rig();
+    let l = l.with_skips(vec!["app".into()]);
+    put(d.path(), "config.toml", "a");
+    put(d.path(), "app/wind_input_sync", "b");
+    put(d.path(), "apple.txt", "c");
+    assert_eq!(l.list().unwrap(), vec!["apple.txt", "config.toml"]);
+}
+
+#[test]
+fn watch_ignores_local_dirs() {
+    let root = Path::new("/u");
+    let skips = vec!["app".to_string()];
+    let rel = |p: &str| crate::watch::watched_rel(root, &skips, &root.join(p));
+    assert_eq!(rel("config.toml").as_deref(), Some("config.toml"));
+    for p in [
+        "state/sync/state.json",
+        "logs/sync.log",
+        "cache/x.wdat",
+        "service/wind_input",
+        "app/x",
+    ] {
+        assert_eq!(rel(p), None, "{p}");
+    }
+}

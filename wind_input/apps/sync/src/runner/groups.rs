@@ -23,6 +23,7 @@ impl Runner {
             self.cfg.link.clone(),
             self.echo.clone(),
         )
+        .with_skips(self.skips.clone())
     }
 
     /// 用组的设置覆盖本机前备份本机设置。

@@ -53,6 +53,35 @@ pub struct FsLocal {
     read_hashes: Mutex<HashMap<String, Option<String>>>,
     /// 置位后写入流程在各步之间收手（先释放已开的编辑会话）。
     cancel: Arc<AtomicBool>,
+    /// 用户目录下属于本机目录或安装目录的相对路径前缀，见 [`local_skips`]。
+    skips: Vec<String>,
+}
+
+/// 用户目录下要跳过的本机目录（`state`/`cache`/`logs`）与安装目录，相对用户目录。
+/// 本机根取 `state_dir`（`<本机根>/state/sync`）的祖父目录；不在用户目录下或就是用户目录本身的不算。
+pub fn local_skips(userdata: &Path, state_dir: &Path, exe_dir: Option<&Path>) -> Vec<String> {
+    let local_root = state_dir.parent().and_then(Path::parent);
+    let mut dirs: Vec<PathBuf> = local_root
+        .map(|r| ["state", "cache", "logs"].map(|n| r.join(n)).to_vec())
+        .unwrap_or_default();
+    dirs.extend(exe_dir.map(Path::to_path_buf));
+    let mut out = Vec::new();
+    for d in dirs {
+        if let Some(rel) = rel_of(userdata, &d)
+            && !out.contains(&rel)
+        {
+            out.push(rel);
+        }
+    }
+    out
+}
+
+/// `rel` 是否落在某个跳过前缀之内。
+pub fn skipped(skips: &[String], rel: &str) -> bool {
+    skips.iter().any(|s| {
+        rel.strip_prefix(s.as_str())
+            .is_some_and(|r| r.is_empty() || r.starts_with('/'))
+    })
 }
 
 /// 不含 `..`、绝对路径、反斜杠、空段：写入前的最后一道闸，冲突副本等范围外路径也要过它。
@@ -171,7 +200,13 @@ impl FsLocal {
             echo,
             read_hashes: Mutex::new(HashMap::new()),
             cancel: Arc::new(AtomicBool::new(false)),
+            skips: Vec::new(),
         }
+    }
+
+    pub fn with_skips(mut self, skips: Vec<String>) -> FsLocal {
+        self.skips = skips;
+        self
     }
 
     pub fn with_cancel(mut self, cancel: Arc<AtomicBool>) -> FsLocal {
@@ -626,7 +661,7 @@ impl LocalStore for FsLocal {
         let mut v: Vec<String> = self
             .all_files()
             .into_iter()
-            .filter(|p| in_scope(p))
+            .filter(|p| in_scope(p) && !skipped(&self.skips, p))
             .collect();
         v.sort();
         Ok(v)

@@ -58,6 +58,8 @@
 - `meta.toml`：本机目录的格式版本与 `dir_id`，后者用来识别目录被复制，同步过去会误判。
 - `screenshots/`、`data/.backup/`、`*.sys_hash`、旧版遗留的顶层 `charsets/`。
 - 隐藏文件、`*.tmp`、`*.bak-*`。
+- 顶层 `service/`、`state/`、`logs/`、`cache/`：macOS 的用户目录与本机目录是同一个，安装目录与本机状态会混进来。
+  同步进程另按实际路径跳过落在用户目录内的本机目录与安装目录。
 - 二期的学习数据：`temp.dict.yaml`、`freq.table.yaml`、`assoc.table.yaml`、`draft.dict.yaml`、`data/stats/`、`completion.table.yaml`。
 
 各类只在该平台的用户目录里有对应文件时才起作用。比如 Android 没有 `extensions/`，移动类别下就没有扩展条目。

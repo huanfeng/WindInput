@@ -9,6 +9,7 @@
 //! 同步进行中也要能收到回执，否则 `data.beginEdit` 会自己等死自己。
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -33,7 +34,7 @@ use crate::backup;
 use crate::errors::{backend_error, crypto_error, sync_error};
 use crate::learn_round;
 use crate::link::CoreLink;
-use crate::local::{Echo, FsLocal, RETRY_TAG, lock};
+use crate::local::{Echo, FsLocal, RETRY_TAG, local_skips, lock};
 use crate::log::{log, now_unix};
 use crate::secrets::{SecretStore, Secrets};
 use crate::statefile;
@@ -173,6 +174,8 @@ pub struct Runner {
     /// 学习数据轮连续失败次数与下次允许自动重试的时间（unix 秒），退避同文件同步。
     learn_failures: u32,
     learn_retry_at: u64,
+    /// 用户目录下属于本机目录或安装目录的前缀，扫描与监听都跳过。
+    skips: Vec<String>,
     /// 已移除但远端仍有学习数据的设备号。
     removed_with_data: Vec<String>,
     _watch: Option<watch::Watch>,
@@ -410,8 +413,15 @@ impl Runner {
         if !settings.content.stats {
             learn_round::clear_peer_stats(&cfg.userdata_dir);
         }
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(Path::to_path_buf));
+        let skips = local_skips(&cfg.userdata_dir, &cfg.state_dir, exe_dir.as_deref());
+        if !skips.is_empty() {
+            log!("用户目录下的本机目录不同步: {skips:?}");
+        }
         let watch = cfg.watch.then(|| {
-            watch::start(&cfg.userdata_dir, tx.clone())
+            watch::start(&cfg.userdata_dir, skips.clone(), tx.clone())
                 .map_err(|e| log!("{e}；仅靠定时同步"))
                 .ok()
         });
@@ -447,6 +457,7 @@ impl Runner {
             learn_failures: 0,
             learn_retry_at: 0,
             removed_with_data: Vec::new(),
+            skips,
             _watch: watch.flatten(),
         }
     }
@@ -779,7 +790,8 @@ impl Runner {
             self.cfg.link.clone(),
             self.echo.clone(),
         )
-        .with_cancel(self.cancel.clone());
+        .with_cancel(self.cancel.clone())
+        .with_skips(self.skips.clone());
         let library_id = library_id(self.settings.backend.as_ref());
         // 被退避跳过或停止态的轮次不跑学习数据（§4.5 第 1 步）
         let learn_lib = learn_library(&self.settings, &self.secrets).filter(|_| {

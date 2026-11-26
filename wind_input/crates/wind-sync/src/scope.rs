@@ -76,6 +76,8 @@ pub fn classify(local: &str) -> Class {
     }
     match segs.as_slice() {
         ["meta.toml", ..] | ["screenshots", ..] | ["charsets", ..] => return Class::Excluded,
+        // 本机目录的子目录与安装目录：macOS 上用户目录与本机目录是同一个，它们会混进来
+        ["service" | "state" | "logs" | "cache", ..] => return Class::Excluded,
         // 与远端命名空间前缀同名：能上传却映射不回来
         ["desktop" | "mobile" | "groups", ..] => return Class::Excluded,
         ["data", "stats", ..] => return Class::Excluded,
@@ -264,6 +266,10 @@ mod tests {
             "data/pinyin/temp.dict.yaml",
             "data/stats/a.toml",
             "data/stats/devices/x/2026-11.toml",
+            "service/wind_input",
+            "state/sync/state.json",
+            "logs/service.log",
+            "cache/pinyin.wdat",
             "schemas/.x.tmp",
             "themes/a.tmp",
             "config.conflict-a-2026-11-24.toml",
