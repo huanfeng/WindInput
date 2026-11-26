@@ -16,6 +16,7 @@ pub mod engine;
 pub mod error;
 pub mod identity;
 pub mod ids;
+pub mod learn;
 pub mod local;
 pub mod manifest;
 pub mod merge;
