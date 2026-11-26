@@ -119,6 +119,17 @@ impl CoreLink for InProcLink {
             "softkeyboard.reload" | "extensions.suspend" | "extensions.resume" => {
                 Ok(json!({ "ok": true }))
             }
+            "stats.replaceMonths" => {
+                use wind_coordinator::web_host::WebDataHost;
+                let months: std::collections::BTreeMap<String, String> =
+                    serde_json::from_value(params.get("months").cloned().unwrap_or_default())
+                        .map_err(|x| format!("months 须为「月份 → 月表原文」的对象：{x}"))?;
+                let store = c.user_store().ok_or("用户数据未就绪")?;
+                let n =
+                    wind_store::stats_report::replace_months(store, c.stat_collector(), &months)
+                        .map_err(|x| e(&x))?;
+                Ok(json!({ "written": n }))
+            }
             "schema.reloadFiles" => {
                 let ids = external_files::reload_schema_files(c, ids_param(&params)?);
                 Ok(json!({ "ok": true, "reloaded": ids }))

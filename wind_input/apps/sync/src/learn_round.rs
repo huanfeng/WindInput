@@ -1269,7 +1269,9 @@ pub enum Joined {
     /// 别的设备重置后用新密钥加入：贡献 = 当前文件相对旧库基线的新增。
     Rejoin,
     /// 认领设备号 `dev`：贡献 = 远端 `learn/<dev>/`，本机现有数据视为已计入。
-    Claim { dev: String },
+    /// `old_counted`：本机原号在远端已有学习通道、此后作为他机继续计入——本机现有数据与统计已在那里。
+    /// 远端没有 `dev` 的通道时：`old_counted` 则贡献为空（同上，已计入），否则按 `Fresh`。
+    Claim { dev: String, old_counted: bool },
 }
 
 /// 该库的私有状态是否存在。
@@ -1330,6 +1332,7 @@ pub fn ensure_state(ctx: &LearnCtx, b: &dyn Backend, key: &FilesKey) -> Result<L
     let how = if mine {
         Joined::Claim {
             dev: ctx.dev.to_string(),
+            old_counted: false,
         }
     } else {
         import_joined(ctx.state_dir, ctx.library).unwrap_or(Joined::Fresh)
@@ -1370,6 +1373,16 @@ pub fn init_for_library(
         library: ctx.library.to_string(),
         ..Default::default()
     };
+    // 认领：先取远端目录；没有可认领的贡献、本机数据又没在别处计入时按首次加入
+    let mut how = how;
+    let mut remote = None;
+    if let Joined::Claim { dev, old_counted } = &how {
+        remote = fetch_device(b, key, dev).map_err(|e| sync_error(&e))?;
+        if remote.is_none() && !old_counted {
+            log!("设备 {dev} 在远端没有学习数据，本机数据按首次加入计入");
+            how = Joined::Fresh;
+        }
+    }
     let mut old = match how {
         Joined::Rejoin => old_library(ctx.state_dir, ctx.library),
         _ => None,
@@ -1410,8 +1423,12 @@ pub fn init_for_library(
             },
         );
     }
-    if let Joined::Claim { dev } = &how {
-        adopt_remote(ctx, b, key, dev, &mut ns)?;
+    if let Joined::Claim { dev, old_counted } = &how {
+        let (idx, objs) = remote.map_or((None, BTreeMap::new()), |(i, o)| (Some(i), o));
+        if let Some(idx) = idx {
+            adopt_remote(ctx, dev, idx, &objs, &mut ns)?;
+        }
+        adopt_stats(ctx, dev, &objs, *old_counted);
     }
     for w in &warnings {
         log!("{w}");
@@ -1421,30 +1438,35 @@ pub fn init_for_library(
     Ok(())
 }
 
-/// 认领：远端 `learn/<dev>/` 的最新目录作为本机贡献与已发布底稿。
-/// 远端对象缺失或损坏时整体失败（不认领残缺的贡献），远端修好前会一直失败。
-fn adopt_remote(
-    ctx: &LearnCtx,
-    b: &dyn Backend,
-    key: &FilesKey,
-    dev: &str,
-    ns: &mut LearnState,
-) -> Result<(), String> {
-    let Some((idx, objs)) = fetch_device(b, key, dev).map_err(|e| sync_error(&e))? else {
-        return Ok(());
-    };
-    let text = |name: &str| -> Result<Option<String>, String> {
-        objs.get(name)
-            .map(|b| {
-                String::from_utf8(b.clone()).map_err(|_| format!("设备 {dev} 的 {name} 不是 UTF-8"))
-            })
-            .transpose()
-    };
-    // 认领的是自己的历史：不看 content.stats 开关。统计出错只告警跳过该月，不影响学习数据认领
-    for (name, remote) in &objs {
-        let Some(f) = stats_object_file(name) else {
-            continue;
-        };
+/// 认领时的统计：`replace` 时本机月表整体换成被认领号的（经 core 替换并重算累计；本机原有的
+/// 留在原号通道里作为他机计入），否则按天合并（同一天取本地）。认领的是自己的历史，不看
+/// `content.stats` 开关；出错只告警，不影响学习数据认领。
+fn adopt_stats(ctx: &LearnCtx, dev: &str, objs: &BTreeMap<String, Vec<u8>>, replace: bool) {
+    let months = objs
+        .iter()
+        .filter_map(|(name, b)| Some((stats_object_file(name)?, name, b)));
+    if replace {
+        let mut want = serde_json::Map::new();
+        for (f, name, b) in months {
+            match std::str::from_utf8(b) {
+                Ok(t) => {
+                    want.insert(f.trim_end_matches(".toml").to_string(), t.into());
+                }
+                Err(_) => {
+                    log!("认领时设备 {dev} 的 {name} 不是 UTF-8，本机统计不替换");
+                    return;
+                }
+            }
+        }
+        if let Err(e) = ctx
+            .link
+            .request("stats.replaceMonths", json!({ "months": want }))
+        {
+            log!("认领时替换本机统计失败，保留原样: {e}");
+        }
+        return;
+    }
+    for (f, name, remote) in months {
         let p = stats_dir(ctx.userdata).join(f);
         let r = read_opt(&p).and_then(|local| {
             let merged = merge_stats_month(local.as_deref(), remote)
@@ -1455,6 +1477,24 @@ fn adopt_remote(
             log!("认领时跳过统计月表 {f}: {e}");
         }
     }
+}
+
+/// 认领：远端 `learn/<dev>/` 的最新目录作为本机贡献与已发布底稿。
+/// 远端对象损坏时整体失败（不认领残缺的贡献），远端修好前会一直失败。
+fn adopt_remote(
+    ctx: &LearnCtx,
+    dev: &str,
+    idx: wind_sync::learn::lane::Index,
+    objs: &BTreeMap<String, Vec<u8>>,
+    ns: &mut LearnState,
+) -> Result<(), String> {
+    let text = |name: &str| -> Result<Option<String>, String> {
+        objs.get(name)
+            .map(|b| {
+                String::from_utf8(b.clone()).map_err(|_| format!("设备 {dev} 的 {name} 不是 UTF-8"))
+            })
+            .transpose()
+    };
     for name in objs.keys() {
         let Some(group) = name.strip_suffix(".base") else {
             continue;

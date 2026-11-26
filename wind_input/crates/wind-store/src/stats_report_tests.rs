@@ -165,3 +165,54 @@ fn all_not_less_than_self_after_local_prune() {
     assert!(all.streak_max >= me.streak_max);
     assert_eq!(all.streak_max, 4);
 }
+
+fn month_text(days: &[(&str, u32)]) -> String {
+    let mut s = "version = 1\n".to_string();
+    for (d, n) in days {
+        s += &format!("\n[days.\"{d}\"]\nchinese = {n}\n");
+    }
+    s
+}
+
+#[test]
+fn replace_months_swaps_history_and_recalculates_meta() {
+    let s = store("replace");
+    // 本机原有历史（会留在原号的同步通道里，作为他机计入）
+    s.put_daily_stat("2020-01-01", &day(100)).unwrap();
+    s.put_daily_stat("2020-02-01", &day(100)).unwrap();
+    let c = collector(&s);
+    assert_eq!(c.get_meta().total_chars, 200);
+    let months = std::collections::BTreeMap::from([(
+        "2020-01".to_string(),
+        month_text(&[("2020-01-05", 7)]),
+    )]);
+    assert_eq!(replace_months(&s, Some(&c), &months).unwrap(), 1);
+    assert_eq!(c.get_meta().total_chars, 7, "采集器重载重算后的元数据");
+    assert_eq!(s.get_stats_meta().unwrap().total_chars, 7);
+    assert!(
+        !s.stats_dir().join("2020-02.toml").exists(),
+        "被认领号没有的月份删除"
+    );
+    // 原号的历史作为他机计入：全部设备 = 认领号 + 原号，本机原有的不重复
+    put_device(&s, "old", "2020-01-01", "chinese = 100");
+    put_device(&s, "old", "2020-02-01", "chinese = 100");
+    let all = summary_for(&s, &c, &StatsScope::All);
+    assert_eq!(all.total_chars, 207);
+}
+
+#[test]
+fn replace_months_rejects_bad_input_without_writing() {
+    let s = store("replace_bad");
+    s.put_daily_stat("2020-01-01", &day(10)).unwrap();
+    let c = collector(&s);
+    for (ym, text) in [
+        ("2020-01", "not = [toml".to_string()),
+        ("2020-1", month_text(&[("2020-01-05", 7)])),
+        ("2020-02", month_text(&[("2020-01-05", 7)])),
+    ] {
+        let months = std::collections::BTreeMap::from([(ym.to_string(), text)]);
+        assert!(replace_months(&s, Some(&c), &months).is_err(), "{ym}");
+        assert_eq!(c.get_meta().total_chars, 10);
+        assert_eq!(s.get_daily_stat("2020-01-01").unwrap().chinese, 10);
+    }
+}

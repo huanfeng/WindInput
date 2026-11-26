@@ -763,6 +763,22 @@ impl Store {
         Ok(n)
     }
 
+    /// 用 [`parse_stat_months`] 校验过的月表整体替换本机每日统计：给出的月份覆盖，没给出的删除。
+    /// 不碰元数据，调用方随后重算（见 `stats_report::replace_months`）。返回写入的月数。
+    pub(crate) fn replace_stat_months(&self, months: ParsedMonths) -> anyhow::Result<usize> {
+        let _g = self.stats_lock();
+        for ym in self.stat_months() {
+            if !months.iter().any(|(m, _)| *m == ym) {
+                self.write_month(&ym, Default::default())?;
+            }
+        }
+        let n = months.len();
+        for (ym, days) in months {
+            self.write_month(&ym, days)?;
+        }
+        Ok(n)
+    }
+
     /// 旧 `STATS_DAILY` 表全部行与旧 META 里的 `stats_meta`（P4a 迁移用）。
     pub(crate) fn legacy_stats(&self) -> anyhow::Result<LegacyStats> {
         self.with_db(|db| {
@@ -782,6 +798,28 @@ impl Store {
             Ok((days, meta))
         })
     }
+}
+
+/// 校验过的月表：(`YYYY-MM`, 当月每日统计)。
+pub(crate) type ParsedMonths = Vec<(String, std::collections::BTreeMap<String, DailyStats>)>;
+
+/// 校验并解析月表原文（`YYYY-MM` → 月表 TOML）：月份格式、可解析、日期都在该月，有一个不对就报错。
+pub(crate) fn parse_stat_months(
+    months: &std::collections::BTreeMap<String, String>,
+) -> anyhow::Result<ParsedMonths> {
+    let mut out = Vec::with_capacity(months.len());
+    for (ym, text) in months {
+        if month_of(&format!("{ym}-01")) != Some(ym.as_str()) {
+            anyhow::bail!("月份格式不对：{ym}");
+        }
+        let f: MonthFile =
+            toml::from_str(text).map_err(|e| anyhow::anyhow!("{ym} 月表无法解析：{e}"))?;
+        if let Some(d) = f.days.keys().find(|d| month_of(d) != Some(ym.as_str())) {
+            anyhow::bail!("{ym} 月表里有别的月份的日期：{d}");
+        }
+        out.push((ym.clone(), f.days));
+    }
+    Ok(out)
 }
 
 /// 设备目录名是否合法：规则同 wind-sync `ids::valid_id`（`[a-z0-9-]`，长 1–24，首尾不为 `-`，

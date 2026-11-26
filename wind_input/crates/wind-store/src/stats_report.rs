@@ -357,6 +357,30 @@ pub fn clear(store: Option<&Store>, collector: Option<&StatCollector>) -> anyhow
     Ok(())
 }
 
+/// 用给定月表整体替换本机统计（同步认领另一台设备的身份时）：挂起采集器（今日先落盘、之后不写），
+/// 替换后由月表重算元数据，再让采集器重载今日与元数据——否则内存里的旧累计会被写回。
+/// 输入不合法时报错，什么都不动。返回写入的月数。
+pub fn replace_months(
+    store: &Store,
+    collector: Option<&StatCollector>,
+    months: &std::collections::BTreeMap<String, String>,
+) -> anyhow::Result<usize> {
+    let parsed = crate::stats::parse_stat_months(months)?;
+    if let Some(c) = collector {
+        c.suspend();
+    }
+    let r = store.replace_stat_months(parsed);
+    // 替换失败也重算：盘上可能已改了一部分
+    let factor = collector.map_or(1.0, StatCollector::speed_factor);
+    let meta = store.recalculate_stats_meta(factor);
+    if let Some(c) = collector {
+        c.resume();
+    }
+    let n = r?;
+    meta?;
+    Ok(n)
+}
+
 /// 取 [from, today] 的每日统计，今天用采集器内存值替换/追加（对齐 Go GetSummary 用内存今天）。
 fn with_today_mem(
     store: &Store,

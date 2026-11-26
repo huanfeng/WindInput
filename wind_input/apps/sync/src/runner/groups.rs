@@ -273,6 +273,12 @@ impl Runner {
                 "{dev} 与本机不是同一类设备（桌面与手机），不能恢复为它"
             ));
         }
+        // 本机原号在远端已有学习通道：认领后它作为他机继续计入，本机现有数据与统计都已在那里
+        let old_counted = self.state.identity_confirmed
+            && !self.id_conflict()
+            && wind_sync::learn::lane::learn_devices(&*b)
+                .map_err(se)?
+                .contains(&self.state.device);
         let mut local = self.local_all();
         self.backup_local(&local)?;
         let mut state = self.state.clone();
@@ -318,7 +324,11 @@ impl Runner {
         self.state = state;
         // 原号作为他机继续计入（其学习数据保留），本机贡献换成认领号的；初始化失败时状态已删，
         // 下一轮 ensure_state 按「远端有本机贡献」重新认领
-        let learned = self.learn_join(learn_round::Joined::Claim { dev: dev.into() }, &*b);
+        let how = learn_round::Joined::Claim {
+            dev: dev.into(),
+            old_counted,
+        };
+        let learned = self.learn_join(how, &*b);
         self.after_identity_change();
         log!("已认领设备 {dev}（组 {group}）");
         learned.map_err(|e| format!("已认领设备 {dev}，但{e}（下一轮重试）"))?;

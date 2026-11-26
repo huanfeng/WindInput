@@ -755,6 +755,8 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
         "stats.devices" => h.web_stats_devices(),
         "stats.clear" => h.web_stats_clear(),
         "stats.pruneBefore" => h.web_stats_prune(params),
+        // 同步认领另一台设备的身份时，本机统计换成那台设备的
+        "stats.replaceMonths" => h.web_stats_replace_months(params),
 
         // ── appearance.*（设置页预览，text-span-colors.md §11）──
         "appearance.previewTemplate" => h.web_appearance_preview_template(params),
@@ -3841,6 +3843,22 @@ pub trait WebDataRpc: WebDataHost {
     fn web_stats_clear(&self) -> anyhow::Result<Value> {
         wind_store::stats_report::clear(self.user_store().map(|s| &**s), self.stat_collector())?;
         Ok(json!({ "ok": true }))
+    }
+
+    /// 参数 `months`：`{"YYYY-MM": "月表原文", ...}`，整体替换本机每日统计（没给出的月份删除）。
+    fn web_stats_replace_months(&self, params: &Value) -> anyhow::Result<Value> {
+        let months: std::collections::BTreeMap<String, String> = serde_json::from_value(
+            params
+                .get("months")
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("缺少参数 months"))?,
+        )
+        .map_err(|e| anyhow::anyhow!("months 须为「月份 → 月表原文」的对象：{e}"))?;
+        let store = self
+            .user_store()
+            .ok_or_else(|| anyhow::anyhow!("用户数据未就绪"))?;
+        let n = wind_store::stats_report::replace_months(store, self.stat_collector(), &months)?;
+        Ok(json!({ "written": n }))
     }
 
     fn web_stats_prune(&self, params: &Value) -> anyhow::Result<Value> {

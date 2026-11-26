@@ -84,6 +84,8 @@ pub const REQUEST_WHITELIST: &[&str] = &[
     // 替换运行中的扩展文件前后：暂停 / 恢复这些扩展
     "extensions.suspend",
     "extensions.resume",
+    // 认领另一台设备的身份：本机统计换成它的
+    "stats.replaceMonths",
 ];
 
 /// 同步进程文件名随变体带后缀（`wind_input_sync_dev.exe`），理由同扩展宿主：

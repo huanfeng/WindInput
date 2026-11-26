@@ -649,7 +649,13 @@ fn claim_adopts_remote_contribution() {
     // 新装的机器恢复为 pc-a；本机原有的学习数据视为已计入
     let mut c = Dev::new("pc-a");
     set_freq(&c, 10);
-    c.init(&b, Joined::Claim { dev: "pc-a".into() });
+    c.init(
+        &b,
+        Joined::Claim {
+            dev: "pc-a".into(),
+            old_counted: false,
+        },
+    );
     assert_eq!(own_count(&c), Some(3));
     c.round(&b);
     bb.round(&b);
@@ -1023,7 +1029,13 @@ fn claim_merges_stats_by_day() {
     // 新装的机器认领 pc-a：同一天取本地，远端独有的天加入
     let mut c = Dev::new("pc-a");
     set_stats(&c, "2026-11.toml", &[("2026-11-02", 60), ("2026-11-03", 7)]);
-    c.init(&b, Joined::Claim { dev: "pc-a".into() });
+    c.init(
+        &b,
+        Joined::Claim {
+            dev: "pc-a".into(),
+            old_counted: false,
+        },
+    );
     let got = std::fs::read_to_string(c.path("stats/2026-11.toml")).unwrap();
     let t: toml::Table = got.parse().unwrap();
     let days = t["days"].as_table().unwrap();
@@ -1067,7 +1079,13 @@ fn claim_with_bad_stats_month_still_adopts() {
     std::fs::write(c.path("stats/2026-10.toml"), "not = [toml").unwrap();
     let local = format!("# 注释\n{}", stats_file(&[("2026-11-02", 6)]));
     std::fs::write(c.path("stats/2026-11.toml"), &local).unwrap();
-    c.init(&b, Joined::Claim { dev: "pc-a".into() });
+    c.init(
+        &b,
+        Joined::Claim {
+            dev: "pc-a".into(),
+            old_counted: false,
+        },
+    );
     assert_eq!(own_count(&c), Some(3), "学习数据照常认领");
     assert_eq!(
         std::fs::read_to_string(c.path("stats/2026-10.toml")).unwrap(),
@@ -1078,4 +1096,165 @@ fn claim_with_bad_stats_month_still_adopts() {
     assert!(got.starts_with("# 注释\n"), "{got}");
     let t: toml::Table = got.parse().unwrap();
     assert_eq!(t["days"].as_table().unwrap().len(), 2);
+}
+
+/// 假 core 照 `stats.replaceMonths` 替换本机月表（真实实现在 wind-store `stats_report::replace_months`）。
+fn core_replaces_stats(d: &Dev) {
+    let dir = d.path("stats");
+    *d.core.on_call.lock().unwrap() = Some(Box::new(move |m, p| {
+        if m != "stats.replaceMonths" {
+            return;
+        }
+        std::fs::create_dir_all(&dir).unwrap();
+        for e in std::fs::read_dir(&dir).unwrap().flatten() {
+            if stats_month_file(&e.file_name().to_string_lossy()) {
+                std::fs::remove_file(e.path()).unwrap();
+            }
+        }
+        for (ym, text) in p["months"].as_object().unwrap() {
+            std::fs::write(dir.join(format!("{ym}.toml")), text.as_str().unwrap()).unwrap();
+        }
+    }));
+}
+
+fn local_months(d: &Dev) -> BTreeMap<String, String> {
+    std::fs::read_dir(d.path("stats"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let f = e.file_name().to_string_lossy().into_owned();
+            stats_month_file(&f).then(|| (f, std::fs::read_to_string(e.path()).unwrap()))
+        })
+        .collect()
+}
+
+fn peer_months(d: &Dev, dev: &str) -> BTreeMap<String, String> {
+    std::fs::read_dir(d.path(&format!("stats/devices/{dev}")))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| {
+            let f = e.file_name().to_string_lossy().into_owned();
+            (f, std::fs::read_to_string(e.path()).unwrap())
+        })
+        .collect()
+}
+
+#[test]
+fn claim_with_old_lane_replaces_stats_without_double_count() {
+    let b = MemBackend::new();
+    let (mut a, mut bb) = (Dev::new("pc-a"), Dev::new("pc-b"));
+    let x10 = stats_file(&[("2026-10-01", 100)]);
+    let x11 = stats_file(&[("2026-11-01", 100)]);
+    set_stats(&a, "2026-10.toml", &[("2026-10-01", 100)]);
+    set_stats(&a, "2026-11.toml", &[("2026-11-01", 100)]);
+    set_stats(&bb, "2026-11.toml", &[("2026-11-05", 7)]);
+    a.round(&b);
+    bb.round(&b);
+    // a 已以 pc-a 发布过，改认领 pc-b：本机统计换成 pc-b 的，pc-a 的历史留在它的通道
+    core_replaces_stats(&a);
+    a.id = "pc-b".into();
+    a.init(
+        &b,
+        Joined::Claim {
+            dev: "pc-b".into(),
+            old_counted: true,
+        },
+    );
+    let sent: Vec<Value> = a
+        .core
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(m, _)| m == "stats.replaceMonths")
+        .map(|(_, p)| p.clone())
+        .collect();
+    assert_eq!(
+        sent,
+        [json!({ "months": { "2026-11": stats_file(&[("2026-11-05", 7)]) } })]
+    );
+    let b_months = BTreeMap::from([("2026-11.toml".to_string(), stats_file(&[("2026-11-05", 7)]))]);
+    assert_eq!(local_months(&a), b_months, "本机原有的月份不再留在本机");
+    a.round(&b);
+    // 本机上传的 = pc-b 的月表；pc-a 作为他机计入，二者合起来 X 的历史只有一份
+    assert_eq!(
+        peer_months(&a, "pc-a"),
+        BTreeMap::from([
+            ("2026-10.toml".to_string(), x10),
+            ("2026-11.toml".to_string(), x11),
+        ])
+    );
+    let (_, objs) = wind_sync::learn::lane::fetch_device(&b, &key(), "pc-b")
+        .unwrap()
+        .unwrap();
+    let up: Vec<_> = objs.keys().filter(|k| k.starts_with("stats/")).collect();
+    assert_eq!(up, ["stats/2026-11.toml"]);
+    assert_eq!(
+        objs["stats/2026-11.toml"],
+        stats_file(&[("2026-11-05", 7)]).into_bytes()
+    );
+}
+
+#[test]
+fn claim_without_old_lane_merges_stats() {
+    let b = MemBackend::new();
+    let mut bb = Dev::new("pc-b");
+    set_stats(&bb, "2026-11.toml", &[("2026-11-05", 7)]);
+    bb.round(&b);
+    let mut c = Dev::new("pc-b");
+    core_replaces_stats(&c);
+    set_stats(&c, "2026-10.toml", &[("2026-10-01", 1)]);
+    c.init(
+        &b,
+        Joined::Claim {
+            dev: "pc-b".into(),
+            old_counted: false,
+        },
+    );
+    assert!(!c.core.methods().iter().any(|m| m == "stats.replaceMonths"));
+    assert_eq!(local_months(&c).len(), 2, "按天合并，本机月份保留");
+}
+
+#[test]
+fn claim_id_without_lane_counts_local_as_fresh() {
+    let b = MemBackend::new();
+    let mut c = Dev::new("pc-z");
+    set_freq(&c, 5);
+    c.init(
+        &b,
+        Joined::Claim {
+            dev: "pc-z".into(),
+            old_counted: false,
+        },
+    );
+    c.round(&b);
+    assert_eq!(
+        own_count(&c),
+        Some(5),
+        "远端没有该号的数据：本机数据按首次加入计入"
+    );
+}
+
+#[test]
+fn claim_id_without_lane_keeps_old_lane_as_the_count() {
+    let b = MemBackend::new();
+    let mut a = Dev::new("pc-a");
+    set_freq(&a, 5);
+    set_stats(&a, "2026-11.toml", &[("2026-11-01", 100)]);
+    a.round(&b);
+    core_replaces_stats(&a);
+    a.id = "pc-z".into();
+    a.init(
+        &b,
+        Joined::Claim {
+            dev: "pc-z".into(),
+            old_counted: true,
+        },
+    );
+    assert!(local_months(&a).is_empty(), "统计换成 pc-z 的（没有）");
+    a.round(&b);
+    assert_eq!(own_count(&a), None, "本机数据已在 pc-a 计入，不再算一份");
+    assert_eq!(freq(&a), Some(5));
 }

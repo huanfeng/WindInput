@@ -1958,6 +1958,22 @@ fn stats_summary_daily_shape() {
     let sum2 = c.web_data_rpc("stats.summary", &json!({})).unwrap();
     assert_eq!(sum2["today_chars"], 0);
     assert_eq!(sum2["total_chars"], 0);
+
+    // replaceMonths：整体换成给定月表，累计随之重算；格式不对的拒绝
+    let months =
+        json!({ "months": { "2020-01": "version = 1\n[days.\"2020-01-05\"]\nchinese = 7\n" } });
+    let r = c.web_data_rpc("stats.replaceMonths", &months).unwrap();
+    assert_eq!(r["written"], 1);
+    let sum3 = c.web_data_rpc("stats.summary", &json!({})).unwrap();
+    assert_eq!(sum3["total_chars"], 7);
+    assert!(
+        c.web_data_rpc(
+            "stats.replaceMonths",
+            &json!({ "months": { "2020-1": "" } })
+        )
+        .is_err()
+    );
+    assert!(c.web_data_rpc("stats.replaceMonths", &json!({})).is_err());
 }
 
 #[test]

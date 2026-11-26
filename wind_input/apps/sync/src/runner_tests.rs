@@ -1360,3 +1360,31 @@ fn interrupted_reset_does_not_drop_devices() {
     round(&mut b, &rxb);
     assert_eq!(read_freq(db.path()), Some(7), "半毁的远端上不应丢设备");
 }
+
+fn replace_sent(core: &FakeCore) -> bool {
+    core.methods().iter().any(|m| m == "stats.replaceMonths")
+}
+
+/// 已确认身份、原号有学习通道的设备认领别的号：本机统计换成被认领号的（原号继续作为他机计入）。
+#[test]
+fn claim_by_device_with_learn_lane_replaces_stats() {
+    let mut p = learn_pair();
+    let core = Arc::new(FakeCore::default());
+    p.b.cfg.link = core.clone();
+    p.b.command(Op::ClaimDevice, &json!({"dev": "pc"})).unwrap();
+    assert!(replace_sent(&core));
+}
+
+/// 新装的设备（未确认身份）认领：本机统计按天合并，不整体替换。
+#[test]
+fn claim_by_new_device_merges_stats() {
+    let p = learn_pair();
+    let dc = tempfile::tempdir().unwrap();
+    let (mut c, _rxc) = runner_with(dc.path(), Box::new(MemFactory(p.mem.clone())), None, "new");
+    let core = Arc::new(FakeCore::default());
+    c.cfg.link = core.clone();
+    let key = p.a.dek().unwrap().to_key_string();
+    c.command(Op::ImportKey, &json!({"key": key})).unwrap();
+    c.command(Op::ClaimDevice, &json!({"dev": "pc"})).unwrap();
+    assert!(!replace_sent(&core));
+}

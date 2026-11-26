@@ -271,3 +271,25 @@ fn desktop_only_reload_requests_are_noops_on_mobile() {
     }
     let _ = std::fs::remove_dir_all(user);
 }
+
+/// 认领另一台设备时同步进程发 `stats.replaceMonths`：本机统计换成给定月表，累计随之重算。
+#[test]
+fn replace_months_request_swaps_stats() {
+    let (core, user) = core("stats_replace");
+    let link = InProcLink {
+        core: core.clone(),
+        shared: Arc::new(Shared::default()),
+    };
+    let months =
+        json!({ "months": { "2020-01": "version = 1\n[days.\"2020-01-05\"]\nchinese = 7\n" } });
+    assert_eq!(
+        link.request("stats.replaceMonths", months).unwrap()["written"],
+        1
+    );
+    assert_eq!(core.stats_summary().unwrap().total_chars, 7);
+    assert!(
+        link.request("stats.replaceMonths", json!({ "months": { "2020-1": "" } }))
+            .is_err()
+    );
+    let _ = std::fs::remove_dir_all(user);
+}
