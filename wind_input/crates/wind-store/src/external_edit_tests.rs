@@ -764,3 +764,37 @@ fn completion_removals_during_hold_are_replayed() {
         .unwrap();
     assert!(q.is_empty(), "清空作用在重载后的全表上：{q:?}");
 }
+
+/// 租约结束时文件读不了：end 失败、会话与暂停保留；修好后再 end 成功，补全历史照常写盘。
+#[test]
+fn completion_end_read_failure_is_retryable() {
+    use crate::completion::CompletionKind;
+    let s = open("completion_end_fail");
+    s.record_completion(CompletionKind::EmailSuffix, "qq.com")
+        .unwrap();
+    let sess = s.begin_edit("completion.table.yaml").unwrap();
+    let good = std::fs::read(&sess.path).unwrap();
+    std::fs::remove_file(&sess.path).unwrap();
+    std::fs::create_dir(&sess.path).unwrap();
+    s.record_completion(CompletionKind::EmailSuffix, "qq.com")
+        .unwrap();
+    assert!(s.end_edit("completion.table.yaml").is_err());
+    assert!(s.is_editing(&sess.path));
+    assert!(
+        s.held_edit_files()
+            .contains(&"completion.table.yaml".to_string())
+    );
+    std::fs::remove_dir(&sess.path).unwrap();
+    std::fs::write(&sess.path, &good).unwrap();
+    let r = s.end_edit("completion.table.yaml").unwrap();
+    assert!(r.changed);
+    assert!(s.held_edit_files().is_empty());
+    s.record_completion(CompletionKind::UrlHistory, "example.com")
+        .unwrap();
+    s.flush_completions().unwrap();
+    let txt = std::fs::read_to_string(&sess.path).unwrap();
+    assert!(
+        txt.contains("email_suffix\tqq.com\t2\t") && txt.contains("example.com"),
+        "{txt}"
+    );
+}

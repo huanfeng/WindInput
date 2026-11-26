@@ -258,38 +258,39 @@ impl Store {
         self.user_text_dir().join("completion.table.yaml")
     }
 
-    /// 取内存表（首次访问时从文件载入）。
+    /// 取内存表（首次访问时从文件载入；读不了 ⇒ 本次运行不写回）。
     fn completions(&self) -> std::sync::MutexGuard<'_, CompletionState> {
         let mut g = self.completions.lock().unwrap_or_else(|e| e.into_inner());
         if !g.loaded {
-            self.load_completions_into(&mut g);
+            g.loaded = true;
+            match self.read_completion_file() {
+                Ok((map, sync)) => {
+                    g.map = map;
+                    g.sync = sync;
+                }
+                Err(e) => {
+                    tracing::warn!("读不了补全历史文件：{e:#}（本次运行不写回）");
+                    g.unreadable = true;
+                }
+            }
+            g.fp = file_fp(&self.completion_path());
         }
         g
     }
 
-    /// 从文件载入内存表（表、令牌、指纹）。读不了 ⇒ 内存表不动、本次运行不写回，返回 false。
-    fn load_completions_into(&self, g: &mut CompletionState) -> bool {
-        g.loaded = true;
+    /// 读补全历史文件：(表, 文件头令牌)；不存在 ⇒ 空表。坏行登记问题，解析失败按机写文件自愈。
+    fn read_completion_file(&self) -> anyhow::Result<(CompletionMap, Option<String>)> {
         let path = self.completion_path();
         let parse = |b: &[u8]| parse_completion_table(b, &path);
-        match crate::machine_file::load_machine_file(&path, &parse) {
-            Ok(None) => {
-                g.map.clear();
-                g.sync = None;
-            }
-            Ok(Some((map, bad, sync))) => {
-                wind_userdata::issues::report_parse(&path, bad);
-                g.map = map;
-                g.sync = sync;
-            }
-            Err(e) => {
-                tracing::warn!("读不了补全历史文件：{e:#}（本次运行不写回）");
-                g.unreadable = true;
-                return false;
-            }
-        }
-        g.fp = file_fp(&path);
-        true
+        Ok(
+            match crate::machine_file::load_machine_file(&path, &parse)? {
+                Some((map, bad, sync)) => {
+                    wind_userdata::issues::report_parse(&path, bad);
+                    (map, sync)
+                }
+                None => Default::default(),
+            },
+        )
     }
 
     /// 开始外部编辑租约：先把内存表写盘（没有文件就建空表），再暂停写回。之后的改动照常进内存，
@@ -332,8 +333,8 @@ impl Store {
         }
     }
 
-    /// 结束租约：恢复写回。期间的改动此前已由 [`Self::reload_completions`] 重放进内存表，标脏
-    /// 后交给去抖写回。
+    /// 结束租约：恢复写回。期间的改动此前已由 [`Self::reload_held_completions`] 重放进内存表，
+    /// 标脏后交给去抖写回。
     pub(crate) fn release_completion_hold(&self) {
         let mut g = self.completions.lock().unwrap_or_else(|e| e.into_inner());
         if !g.held {
@@ -354,25 +355,59 @@ impl Store {
             .held
     }
 
+    /// 租约中按文件重载，再重放租约期间的改动（仍暂停写回）。不在租约中 ⇒ `Ok(false)`。
+    /// 读不了 ⇒ `Err`，内存表与状态都不动（不置「读不了」，之后还能再试、照常写回）。
+    pub(crate) fn reload_held_completions(&self) -> anyhow::Result<bool> {
+        let _io = self.completion_io.lock().unwrap_or_else(|e| e.into_inner());
+        self.reload_held_io()
+    }
+
+    /// 同 [`Self::reload_held_completions`]，调用方已持 `completion_io`。文件在数据锁外读。
+    fn reload_held_io(&self) -> anyhow::Result<bool> {
+        if !self.completion_held() {
+            return Ok(false);
+        }
+        let (map, sync) = self.read_completion_file()?;
+        let fp = file_fp(&self.completion_path());
+        let mut g = self.completions.lock().unwrap_or_else(|e| e.into_inner());
+        g.map = map;
+        g.sync = sync;
+        g.fp = fp;
+        let replay = g.replay.clone();
+        for c in &replay {
+            apply_change(&mut g.map, c);
+        }
+        g.dirty = !replay.is_empty();
+        g.generation += 1;
+        tracing::info!("补全历史按文件重载，重放租约期间的 {} 处改动", replay.len());
+        Ok(true)
+    }
+
+    /// `Store` 释放时仍在租约中：按文件重载、重放、写盘，租约期间的改动不随进程退出丢掉。
+    /// 读不了就放弃（WARN）。
+    pub(crate) fn settle_held_completions(&self) {
+        let _io = self.completion_io.lock().unwrap_or_else(|e| e.into_inner());
+        let r = self
+            .reload_held_io()
+            .and_then(|held| if held { self.flush_io(true) } else { Ok(()) });
+        if let Err(e) = r {
+            tracing::warn!("释放时补全历史租约期间的改动未能落盘：{e:#}");
+        }
+    }
+
     /// 文件被手改 / 换掉（`dict.reload` 指名）：丢掉内存表，下次访问重读。
     ///
     /// 文件被手改过（指纹与最近一次读写的不同）⇒ 以文件为准，内存里未落盘的改动丢弃，不先落盘
-    /// 盖掉手改。租约中 ⇒ 立即按文件重载，再把租约期间的改动重放上去（仍暂停写回）。
+    /// 盖掉手改。租约中 ⇒ 按文件重载并重放（[`Self::reload_held_completions`]），读不了返回 false。
+    /// 整段持 `completion_io`，与开始租约互斥。
     pub fn reload_completions(&self) -> bool {
-        {
-            let _io = self.completion_io.lock().unwrap_or_else(|e| e.into_inner());
-            let mut g = self.completions.lock().unwrap_or_else(|e| e.into_inner());
-            if g.held {
-                // 读不了时内存表原样保留（已含租约期间的改动），不再重放
-                if self.load_completions_into(&mut g) {
-                    let replay = g.replay.clone();
-                    for c in &replay {
-                        apply_change(&mut g.map, c);
-                    }
-                    g.dirty = !replay.is_empty();
-                    g.generation += 1;
-                }
-                return true;
+        let _io = self.completion_io.lock().unwrap_or_else(|e| e.into_inner());
+        match self.reload_held_io() {
+            Ok(true) => return true,
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!("租约中重载补全历史失败，内存表保留：{e:#}");
+                return false;
             }
         }
         let edited = {
@@ -381,7 +416,7 @@ impl Store {
         };
         if edited {
             tracing::info!("补全历史文件被改过，以文件为准重新载入");
-        } else if let Err(e) = self.flush_completions() {
+        } else if let Err(e) = self.flush_io(false) {
             tracing::warn!("补全历史落盘失败：{e:#}");
         }
         let mut g = self.completions.lock().unwrap_or_else(|e| e.into_inner());
@@ -395,9 +430,14 @@ impl Store {
     /// 读写不陪等。并发的两次落盘由 `completion_io` 串行。
     pub(crate) fn flush_completions(&self) -> anyhow::Result<()> {
         let _io = self.completion_io.lock().unwrap_or_else(|e| e.into_inner());
+        self.flush_io(false)
+    }
+
+    /// 落盘本体，调用方已持 `completion_io`。`through_hold`：租约中也写（仅释放时收尾用）。
+    fn flush_io(&self, through_hold: bool) -> anyhow::Result<()> {
         let (bytes, generation) = {
             let g = self.completions.lock().unwrap_or_else(|e| e.into_inner());
-            if !g.dirty || g.unreadable || g.held {
+            if !g.dirty || g.unreadable || (g.held && !through_hold) {
                 return Ok(());
             }
             (Self::completion_bytes(&g)?, g.generation)

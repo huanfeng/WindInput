@@ -619,3 +619,58 @@ fn completion_flush_keeps_sync_token() {
     assert!(txt.contains("sync: t-2}"), "{txt}");
     assert!(txt.contains("email_suffix\tqq.com\t4\t"), "{txt}");
 }
+
+fn email_count(s: &Store, text: &str) -> Option<u32> {
+    s.get_completion(CompletionKind::EmailSuffix, text)
+        .unwrap()
+        .map(|r| r.count)
+}
+
+/// 重载后、解除租约前又记一次：不丢也不重复。
+#[test]
+fn completion_use_between_reload_and_release_counts_once() {
+    let s = store("hold_between");
+    s.begin_completion_hold().unwrap();
+    let p = s.completion_path();
+    std::fs::write(&p, token_head("t")).unwrap();
+    s.record_completion(CompletionKind::EmailSuffix, "qq.com")
+        .unwrap();
+    s.reload_completions();
+    s.record_completion(CompletionKind::EmailSuffix, "qq.com")
+        .unwrap();
+    s.release_completion_hold();
+    assert_eq!(email_count(&s, "qq.com"), Some(5));
+    s.flush_completions().unwrap();
+    let s = reopen("hold_between", s);
+    assert_eq!(email_count(&s, "qq.com"), Some(5));
+}
+
+/// 租约中途按名重载两次：重放不重复计数。
+#[test]
+fn completion_double_reload_during_hold_counts_once() {
+    let s = store("hold_twice");
+    s.begin_completion_hold().unwrap();
+    std::fs::write(s.completion_path(), token_head("t")).unwrap();
+    s.record_completion(CompletionKind::EmailSuffix, "qq.com")
+        .unwrap();
+    assert!(s.reload_completions());
+    assert!(s.reload_completions());
+    s.release_completion_hold();
+    assert_eq!(email_count(&s, "qq.com"), Some(4));
+}
+
+/// 租约中直接释放 Store：按文件重载、重放后写盘，重开能看到文件值 + 期间增量。
+#[test]
+fn completion_hold_settles_on_drop() {
+    let s = store("hold_drop");
+    s.begin_completion_hold().unwrap();
+    std::fs::write(s.completion_path(), token_head("t")).unwrap();
+    s.record_completion(CompletionKind::EmailSuffix, "qq.com")
+        .unwrap();
+    s.record_completion(CompletionKind::EmailSuffix, "qq.com")
+        .unwrap();
+    let s = reopen("hold_drop", s);
+    assert_eq!(email_count(&s, "qq.com"), Some(5));
+    let txt = std::fs::read_to_string(s.completion_path()).unwrap();
+    assert!(txt.contains("sync: t}"), "{txt}");
+}

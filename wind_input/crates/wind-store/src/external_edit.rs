@@ -364,6 +364,8 @@ impl Store {
                     vec![format!("{}{ds}", crate::user_words::USER_DICTS_CHANGED)]
                 }
             }
+            // 租约中按文件重载失败 ⇒ end 失败，会话与暂停保留，留给重试 / 租约到期兜底
+            TextPath::Completion if self.reload_held_completions()? => vec!["completion".into()],
             _ => self.reload_user_text_paths(&[path.to_string_lossy().into_owned()])?,
         };
         let issues: Vec<_> = self

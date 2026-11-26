@@ -213,4 +213,9 @@ fn sync_token_reads_block_and_flow_heads() {
     let none = render_table(&["a", "b"], "completion", &[]);
     assert_eq!(sync_token(none.as_bytes()), None);
     assert_eq!(sync_token(b"---\ncolumns: [a]\nsync: x\n...\n"), None);
+    let nested =
+        "---\ncolumns: [a, b]\nwind:\n  kind: freq\n  extra:\n    sync: deep\n  sync: top\n...\n";
+    assert_eq!(sync_token(nested.as_bytes()).as_deref(), Some("top"));
+    let only_nested = "---\ncolumns: [a, b]\nwind:\n  kind: freq\n  extra:\n    sync: deep\n...\n";
+    assert_eq!(sync_token(only_nested.as_bytes()), None);
 }

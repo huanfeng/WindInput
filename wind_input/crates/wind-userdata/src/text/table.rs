@@ -134,31 +134,47 @@ pub fn parse_table(bytes: &[u8], _path: &Path) -> Result<TableDoc, ParseError> {
 }
 
 /// 文件头 `wind:` 映射里的同步令牌 `sync`（块 / 流映射均可）。按文本取、不经 YAML 类型转换，
-/// 写回时逐字一致。
+/// 写回时逐字一致。只认 `wind:` 下一层的 `sync:`（块映射里与首个键同缩进的行）；令牌由同步进程
+/// 生成，不得含 `,`、`}`（流映射按它们切分）。
 pub fn sync_token(bytes: &[u8]) -> Option<String> {
     let s = std::str::from_utf8(bytes).ok()?;
     let s = s.strip_prefix('\u{feff}').unwrap_or(s);
     let (body_offset, _) = wind_dict::rime_body_layout(s)?;
-    let mut in_wind = false;
-    for line in s[..body_offset].lines() {
-        if let Some(rest) = line.strip_prefix("wind:") {
-            let rest = rest.trim();
-            if let Some(inner) = rest.strip_prefix('{') {
-                let inner = inner.split('}').next().unwrap_or("");
-                return inner
-                    .split(',')
-                    .find_map(|kv| kv.trim().strip_prefix("sync:"))
-                    .map(|v| v.trim().to_string())
-                    .filter(|v| !v.is_empty());
+    let mut lines = s[..body_offset].lines();
+    while let Some(line) = lines.next() {
+        let Some(rest) = line.strip_prefix("wind:") else {
+            continue;
+        };
+        let rest = rest.trim();
+        if let Some(inner) = rest.strip_prefix('{') {
+            let inner = inner.split('}').next().unwrap_or("");
+            return inner
+                .split(',')
+                .find_map(|kv| kv.trim().strip_prefix("sync:"))
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty());
+        }
+        if !rest.is_empty() {
+            return None;
+        }
+        // 块映射：缩进以首个非空行为准，更深的是嵌套值
+        let mut indent: Option<&str> = None;
+        for l in lines.by_ref() {
+            if l.trim().is_empty() {
+                continue;
             }
-            in_wind = rest.is_empty();
-        } else if in_wind {
-            if !line.starts_with([' ', '\t']) {
-                in_wind = false;
-            } else if let Some(v) = line.trim_start().strip_prefix("sync:") {
+            let pad = &l[..l.len() - l.trim_start_matches([' ', '\t']).len()];
+            if pad.is_empty() {
+                return None;
+            }
+            if *indent.get_or_insert(pad) != pad {
+                continue;
+            }
+            if let Some(v) = l[pad.len()..].strip_prefix("sync:") {
                 return Some(v.trim().to_string()).filter(|v| !v.is_empty());
             }
         }
+        return None;
     }
     None
 }
