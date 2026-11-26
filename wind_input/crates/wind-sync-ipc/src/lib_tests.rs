@@ -99,6 +99,21 @@ fn old_settings_with_scope_key_still_load() {
 }
 
 #[test]
+fn skip_cert_verify_defaults_off_and_is_written_only_when_on() {
+    let s = SyncSettings::default();
+    assert!(!s.skip_cert_verify);
+    assert!(!toml::to_string(&s).unwrap().contains("skip_cert_verify"));
+    let on = SyncSettings {
+        skip_cert_verify: true,
+        ..Default::default()
+    };
+    let text = toml::to_string(&on).unwrap();
+    assert!(text.contains("skip_cert_verify = true"), "{text}");
+    let back: SyncSettings = toml::from_str(&text).unwrap();
+    assert!(back.skip_cert_verify);
+}
+
+#[test]
 fn validate_rejects_bad_settings() {
     assert!(SyncSettings::default().validate().is_ok());
     let mut s = SyncSettings {

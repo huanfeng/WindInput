@@ -3291,6 +3291,7 @@ dependencies = [
  "hmac",
  "percent-encoding",
  "quick-xml 0.37.5",
+ "rustls",
  "rusty-s3",
  "serde",
  "serde_json",

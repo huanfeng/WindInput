@@ -21,6 +21,8 @@ pub struct S3Config {
     /// 路径式寻址（`endpoint/bucket/key`）；MinIO 与部分国内服务需要
     pub path_style: bool,
     pub proxy_from_env: bool,
+    /// 不校验服务器证书（自签名证书的自建服务）。
+    pub skip_cert_verify: bool,
     /// ListObjectsV2 每页条数；None 用服务端默认（1000）。主要给测试验分页。
     pub list_page_size: Option<usize>,
 }
@@ -68,7 +70,11 @@ impl S3Backend {
             creds: Credentials::new(cfg.access_key_id.clone(), cfg.secret_access_key.clone()),
             prefix: normalize_prefix(&cfg.prefix),
             page: cfg.list_page_size,
-            agent: new_agent(cfg.proxy_from_env, &host_of(&cfg.endpoint)),
+            agent: new_agent(
+                cfg.proxy_from_env,
+                cfg.skip_cert_verify,
+                &host_of(&cfg.endpoint),
+            ),
         })
     }
 
@@ -200,6 +206,7 @@ mod tests {
             secret_access_key: "sk".into(),
             path_style,
             proxy_from_env: false,
+            skip_cert_verify: false,
             list_page_size: None,
         }
     }

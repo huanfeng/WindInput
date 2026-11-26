@@ -17,6 +17,8 @@ pub struct WebDavConfig {
     pub password: String,
     /// 是否读取环境代理（`HTTP_PROXY` / `HTTPS_PROXY`）。
     pub proxy_from_env: bool,
+    /// 不校验服务器证书（自签名证书的自建服务）。
+    pub skip_cert_verify: bool,
 }
 
 pub struct WebDavBackend {
@@ -182,7 +184,7 @@ impl WebDavBackend {
         if !(base.starts_with("http://") || base.starts_with("https://")) {
             return Err(BackendError::Fatal(format!("WebDAV 地址无效: {}", cfg.url)));
         }
-        let agent = new_agent(cfg.proxy_from_env, &host_of(&base));
+        let agent = new_agent(cfg.proxy_from_env, cfg.skip_cert_verify, &host_of(&base));
         let cred = format!("{}:{}", cfg.username, cfg.password);
         Ok(Self {
             base_path: decode(url_path(&base)).trim_matches('/').to_string(),
@@ -461,6 +463,7 @@ mod tests {
             username: "u".into(),
             password: "p".into(),
             proxy_from_env: false,
+            skip_cert_verify: false,
         })
         .unwrap();
         assert_eq!(b.base_path, "dav/wind input");
@@ -474,7 +477,8 @@ mod tests {
                 url: "ftp://x".into(),
                 username: "".into(),
                 password: "".into(),
-                proxy_from_env: false
+                proxy_from_env: false,
+                skip_cert_verify: false,
             })
             .is_err()
         );

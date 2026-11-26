@@ -22,6 +22,7 @@ impl BackendFactory for NetFactory {
                     username: user.clone(),
                     password: secret.to_string(),
                     proxy_from_env: true,
+                    skip_cert_verify: settings.skip_cert_verify,
                 })
                 .map_err(|e| backend_error(&e))?;
                 Ok(Box::new(b))
@@ -43,6 +44,7 @@ impl BackendFactory for NetFactory {
                     secret_access_key: secret.to_string(),
                     path_style: *path_style,
                     proxy_from_env: true,
+                    skip_cert_verify: settings.skip_cert_verify,
                     list_page_size: None,
                 })
                 .map_err(|e| backend_error(&e))?;

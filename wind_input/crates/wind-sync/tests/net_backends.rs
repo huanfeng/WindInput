@@ -4,6 +4,7 @@
 //! 环境变量：
 //! - WebDAV：`WD_URL` `WD_USER` `WD_PASS`
 //! - S3：`S3_ENDPOINT` `S3_BUCKET` `S3_AK` `S3_SK`（区域固定 us-east-1，路径式寻址）
+//! - 自签名证书的 WebDAV：`WD_TLS_URL`（账号同 `WD_USER` / `WD_PASS`）
 #![cfg(feature = "net")]
 
 use wind_sync::backend::{Backend, BackendError};
@@ -36,6 +37,7 @@ fn webdav(pass: Option<&str>, sub: &str) -> WebDavBackend {
         username: env("WD_USER"),
         password: pass.map_or_else(|| env("WD_PASS"), str::to_string),
         proxy_from_env: false,
+        skip_cert_verify: false,
     })
     .unwrap()
 }
@@ -50,6 +52,7 @@ fn s3(sk: Option<&str>, prefix: &str, page: Option<usize>) -> S3Backend {
         secret_access_key: sk.map_or_else(|| env("S3_SK"), str::to_string),
         path_style: true,
         proxy_from_env: false,
+        skip_cert_verify: false,
         list_page_size: page,
     })
     .unwrap()
@@ -114,7 +117,7 @@ fn sync_roundtrip(b: &dyn Backend) {
     let dek = remote::init_remote(b).unwrap();
     let mut la = MemLocal::new();
     let mut lb = MemLocal::new();
-    let (mut sa, mut sb) = (SyncState::new("devA"), SyncState::new("devB"));
+    let (mut sa, mut sb) = (SyncState::new("dev-a"), SyncState::new("dev-b"));
     let mut ctx = SyncCtx::new(1_795_478_400, test_ns());
     ctx.force = true;
     la.set("config.toml", "a = 1\n");
@@ -145,24 +148,45 @@ fn sync_roundtrip(b: &dyn Backend) {
         group_name: String::new(),
         group_name_at: 0,
     };
-    put_device_info(b, &dek.devinfo_key(), "devA", &info("甲")).unwrap();
-    put_device_info(b, &dek.devinfo_key(), "devB", &info("乙")).unwrap();
+    put_device_info(b, &dek.devinfo_key(), "dev-a", &info("甲")).unwrap();
+    put_device_info(b, &dek.devinfo_key(), "dev-b", &info("乙")).unwrap();
     let l = list_devices(b, &dek.devinfo_key()).unwrap();
     let got: Vec<_> = l
         .iter()
         .map(|(d, i)| (d.as_str(), i.as_ref().unwrap().name.as_str()))
         .collect();
-    assert_eq!(got, [("devA", "甲"), ("devB", "乙")]);
-    assert!(remove_device(b, "devB").unwrap() >= 2, "各代清单 + info");
+    assert_eq!(got, [("dev-a", "甲"), ("dev-b", "乙")]);
+    assert!(remove_device(b, "dev-b").unwrap() >= 2, "各代清单 + info");
     let l = list_devices(b, &dek.devinfo_key()).unwrap();
     assert_eq!(l.len(), 1);
-    assert_eq!(l[0].0, "devA");
+    assert_eq!(l[0].0, "dev-a");
 }
 
 #[test]
 #[ignore = "需要 WebDAV 服务，见 run_net_tests.sh"]
 fn webdav_crud_and_list() {
     crud(&webdav(None, &uniq()));
+}
+
+fn webdav_tls(skip_cert_verify: bool) -> WebDavBackend {
+    WebDavBackend::new(&WebDavConfig {
+        url: env("WD_TLS_URL"),
+        username: env("WD_USER"),
+        password: env("WD_PASS"),
+        proxy_from_env: false,
+        skip_cert_verify,
+    })
+    .unwrap()
+}
+
+#[test]
+#[ignore = "需要自签名证书的 WebDAV 服务，见 run_net_tests.sh"]
+fn self_signed_cert_is_fatal_with_hint_unless_skipped() {
+    match webdav_tls(false).get("x.bin") {
+        Err(BackendError::Fatal(m)) => assert!(m.contains("跳过证书验证"), "{m}"),
+        other => panic!("自签名证书应被拒绝且不当作临时故障：{other:?}"),
+    }
+    crud(&webdav_tls(true));
 }
 
 #[test]
@@ -222,6 +246,7 @@ fn unreachable_is_transient() {
         username: "u".into(),
         password: "p".into(),
         proxy_from_env: false,
+        skip_cert_verify: false,
     })
     .unwrap();
     assert!(matches!(

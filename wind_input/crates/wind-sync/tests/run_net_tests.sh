@@ -8,13 +8,18 @@ DUFS_IMAGE=${DUFS_IMAGE:-sigoden/dufs}
 S3_PORT=${S3_PORT:-19000}
 WD_PORT=${WD_PORT:-15000}
 here=$(cd "$(dirname "$0")" && pwd)
-names=(wind-sync-test-minio wind-sync-test-dufs)
+names=(wind-sync-test-minio wind-sync-test-dufs wind-sync-test-dufs-tls)
+WD_TLS_PORT=${WD_TLS_PORT:-15443}
+certs=
 
 cleanup() {
   docker rm -f "${names[@]}" >/dev/null 2>&1 || true
+  [ -n "$certs" ] && rm -rf "$certs"
+  true
 }
 trap cleanup EXIT
 cleanup
+certs=$(mktemp -d)
 
 # 数据放 tmpfs，不在宿主留 root 属主的文件；MinIO 的 /data 下一级目录即桶
 docker run -d --name wind-sync-test-minio -p "127.0.0.1:$S3_PORT:9000" \
@@ -23,6 +28,14 @@ docker run -d --name wind-sync-test-minio -p "127.0.0.1:$S3_PORT:9000" \
   -c 'mkdir -p /data/wind-test && exec minio server /data' >/dev/null
 docker run -d --name wind-sync-test-dufs -p "127.0.0.1:$WD_PORT:5000" \
   --tmpfs /data "$DUFS_IMAGE" -A -a 'wind:wind-pass@/:rw' /data >/dev/null
+# 自签名证书的 WebDAV：验「默认拒绝、跳过证书验证后可用」
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=localhost \
+  -keyout "$certs/key.pem" -out "$certs/cert.pem" 2>/dev/null
+chmod 755 "$certs"
+chmod 644 "$certs"/*.pem
+docker run -d --name wind-sync-test-dufs-tls -p "127.0.0.1:$WD_TLS_PORT:5000" \
+  -v "$certs:/certs:ro" --tmpfs /data "$DUFS_IMAGE" -A -a 'wind:wind-pass@/:rw' \
+  --tls-cert /certs/cert.pem --tls-key /certs/key.pem /data >/dev/null
 
 for i in $(seq 1 60); do
   curl -fs "http://127.0.0.1:$S3_PORT/minio/health/live" >/dev/null 2>&1 && break
@@ -33,8 +46,13 @@ for i in $(seq 1 30); do
   curl -s -o /dev/null "http://127.0.0.1:$WD_PORT/" && break
   sleep 1
 done
+for i in $(seq 1 30); do
+  curl -ks -o /dev/null "https://127.0.0.1:$WD_TLS_PORT/" && break
+  sleep 1
+done
 
 export WD_URL="http://127.0.0.1:$WD_PORT" WD_USER=wind WD_PASS=wind-pass
+export WD_TLS_URL="https://127.0.0.1:$WD_TLS_PORT"
 export S3_ENDPOINT="http://127.0.0.1:$S3_PORT" S3_BUCKET=wind-test S3_AK=minioadmin S3_SK=minioadmin
 # 容器在本机回环上，别走环境代理
 export NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost

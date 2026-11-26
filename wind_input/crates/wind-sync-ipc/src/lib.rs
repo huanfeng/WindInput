@@ -53,6 +53,10 @@ pub struct SyncSettings {
     pub interval_min: u32,
     /// 本机在设备名册里的名字；空则由同步进程取主机名。不随同步传播。
     pub device_name: String,
+    /// 不校验存储服务的 HTTPS 证书（自建服务用自签名证书时由用户显式打开）。
+    /// 不算换存储：切换它不影响已保存的密码。
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub skip_cert_verify: bool,
 }
 
 impl Default for SyncSettings {
@@ -62,6 +66,7 @@ impl Default for SyncSettings {
             backend: None,
             interval_min: DEFAULT_INTERVAL_MIN,
             device_name: String::new(),
+            skip_cert_verify: false,
         }
     }
 }

@@ -24,9 +24,18 @@ rusty-s3 = { version = "0.8", optional = true }
 quick-xml = { version = "0.37", optional = true }
 percent-encoding = { version = "2", optional = true }
 url = { version = "2", optional = true }
+# 与 ureq 同一份 rustls（同 ring 特性）：只为「跳过证书验证」构造 ClientConfig
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 
 [features]
-net = ["dep:ureq", "dep:rusty-s3", "dep:quick-xml", "dep:percent-encoding", "dep:url"]
+net = [
+    "dep:ureq",
+    "dep:rusty-s3",
+    "dep:quick-xml",
+    "dep:percent-encoding",
+    "dep:url",
+    "dep:rustls",
+]
 
 [lints]
 workspace = true

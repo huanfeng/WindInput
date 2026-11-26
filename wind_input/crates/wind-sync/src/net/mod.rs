@@ -5,6 +5,9 @@
 //! 支持 http、socks4/4a/5、socks5h），不支持的写法记警告后直连；配置里 `proxy_from_env = false` 可关闭。
 //! 代理按目标主机决定：localhost/回环一律直连，并遵守 `NO_PROXY`（`*`、域名后缀、IP、CIDR，忽略端口）；
 //! 私网地址不强制直连，需要的话写进 `NO_PROXY`。
+//!
+//! 证书：默认按系统内置根证书校验；`skip_cert_verify` 打开时不校验服务器证书（自建服务用自签名证书时由用户
+//! 显式打开），握手签名照常校验。证书校验失败报 `Fatal`，不当作临时故障反复重试。
 
 mod s3;
 mod webdav;
@@ -22,13 +25,16 @@ const MAX_BODY: u64 = 512 * 1024 * 1024;
 /// `host` 是目标主机（URL 的 host 部分）：回环地址与 `NO_PROXY` 命中的主机直连，不走代理。
 /// 私网地址（10/8、172.16/12、192.168/16、fc00::/7、169.254/16）不强制直连——用户可能就是要经代理访问，
 /// 只有写进 `NO_PROXY` 才直连。
-pub(crate) fn new_agent(proxy_from_env: bool, host: &str) -> ureq::Agent {
+pub(crate) fn new_agent(proxy_from_env: bool, skip_cert_verify: bool, host: &str) -> ureq::Agent {
     let mut b = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(15))
         .timeout(Duration::from_secs(60))
         .redirects(0)
         // 代理由下面自行解析：ureq 内置的环境读取会静默丢弃它不认的写法。
         .try_proxy_from_env(false);
+    if skip_cert_verify {
+        b = b.tls_config(insecure_tls());
+    }
     if proxy_from_env && !bypass_proxy(host, |k| std::env::var(k).ok()) {
         match proxy_from_vars(|k| std::env::var(k).ok()) {
             Ok(Some(p)) => b = b.proxy(p),
@@ -38,6 +44,97 @@ pub(crate) fn new_agent(proxy_from_env: bool, host: &str) -> ureq::Agent {
     }
     b.build()
 }
+
+/// 不校验服务器证书的 TLS 配置。只跳过证书链与主机名，握手签名仍按 ring 的算法表校验。
+fn insecure_tls() -> std::sync::Arc<rustls::ClientConfig> {
+    use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+    use rustls::crypto::{CryptoProvider, verify_tls12_signature, verify_tls13_signature};
+    use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+    use rustls::{DigitallySignedStruct, Error, SignatureScheme};
+    use std::sync::Arc;
+
+    #[derive(Debug)]
+    struct AcceptAnyCert(Arc<CryptoProvider>);
+
+    impl ServerCertVerifier for AcceptAnyCert {
+        fn verify_server_cert(
+            &self,
+            _: &CertificateDer<'_>,
+            _: &[CertificateDer<'_>],
+            _: &ServerName<'_>,
+            _: &[u8],
+            _: UnixTime,
+        ) -> Result<ServerCertVerified, Error> {
+            Ok(ServerCertVerified::assertion())
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, Error> {
+            verify_tls12_signature(
+                message,
+                cert,
+                dss,
+                &self.0.signature_verification_algorithms,
+            )
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, Error> {
+            verify_tls13_signature(
+                message,
+                cert,
+                dss,
+                &self.0.signature_verification_algorithms,
+            )
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+            self.0.signature_verification_algorithms.supported_schemes()
+        }
+    }
+
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let cfg = rustls::ClientConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()
+        .expect("ring 支持默认协议版本")
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(AcceptAnyCert(provider)))
+        .with_no_client_auth();
+    Arc::new(cfg)
+}
+
+/// 传输错误是否源于服务器证书校验失败（自签名、过期、主机名不符等）。
+fn is_cert_error(t: &ureq::Transport) -> bool {
+    let mut cur: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(t);
+    while let Some(e) = cur {
+        let inner = e
+            .downcast_ref::<std::io::Error>()
+            .and_then(|io| io.get_ref())
+            .map(|r| r as &(dyn std::error::Error + 'static));
+        for c in [Some(e), inner].into_iter().flatten() {
+            if matches!(
+                c.downcast_ref::<rustls::Error>(),
+                Some(rustls::Error::InvalidCertificate(_))
+            ) {
+                return true;
+            }
+        }
+        cur = e.source();
+    }
+    false
+}
+
+/// 证书校验失败时给用户看的说明。
+pub const CERT_ERROR_HINT: &str =
+    "服务器证书无法验证；自建服务用自签名证书时，可在存储设置里打开「跳过证书验证」";
 
 /// 从 URL 取主机（去掉 IPv6 方括号）；解析失败返回空串。
 pub(crate) fn host_of(url: &str) -> String {
@@ -319,6 +416,9 @@ pub(crate) fn map_status(code: u16, what: &str) -> BackendError {
 pub(crate) fn map_transport(t: &ureq::Transport, what: &str) -> BackendError {
     use ureq::ErrorKind::*;
     let msg = format!("{what}: {t}");
+    if is_cert_error(t) {
+        return BackendError::Fatal(format!("{CERT_ERROR_HINT}（{msg}）"));
+    }
     match t.kind() {
         InvalidUrl | UnknownScheme | InsecureRequestHttpsOnly => BackendError::Fatal(msg),
         _ => BackendError::Transient(msg),

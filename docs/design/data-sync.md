@@ -177,6 +177,10 @@ blobs/<id>                     密文：文件内容，id = HMAC(files 子密钥
 `rusty-s3`（不带 IO 的 S3 SigV4 签名，配 ureq 用）、WebDAV 自己实现（PROPFIND/GET/PUT/DELETE/MKCOL，量很小）、
 `chacha20poly1305`、`sha2`、`hmac`、`notify`、Windows `windows` crate 的 DPAPI、macOS `security-framework`。
 
+证书：默认按内置根证书校验。同步设置里的 `skip_cert_verify` 打开时换一个不校验服务器证书的 rustls 验证器
+（握手签名照常校验），给自签名证书的自建服务用，不算换存储、不丢已存密码。证书校验失败报 `Fatal` 并提示这个开关，
+不当作临时故障反复重试。
+
 ## 10. 分阶段
 
 | 阶段 | 内容 | 验收 |
