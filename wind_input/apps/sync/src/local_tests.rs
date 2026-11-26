@@ -863,6 +863,7 @@ fn local_skips_cover_local_root_and_install_root_inside_user_dir() {
     put(d.path(), "app/wind_input_sync", "b");
     put(d.path(), "apple.txt", "c");
     assert_eq!(l.list().unwrap(), vec!["apple.txt", "config.toml"]);
+    assert_eq!(l.skip_prefixes(), vec!["app"], "交给引擎当范围外处理");
 }
 
 #[test]

@@ -7,7 +7,7 @@
 use crate::backend::{Backend, ObjMeta};
 use crate::crypto::{self, Dek, FilesKey, ObjKind, content_hash};
 use crate::error::SyncError;
-use crate::local::{LocalError, LocalStore, NsLocal};
+use crate::local::{LocalError, LocalStore, NsLocal, under_skip};
 use crate::manifest::{self, Entry, Manifest};
 use crate::merge::{self, Conflict};
 use crate::plan::{Action, PlanInput, decide};
@@ -264,7 +264,11 @@ fn run(
     }
 
     // 1. 扫描本地
-    let in_scope = |p: &str| scope::in_scope_remote(p, &ctx.ns);
+    let skips = local.skip_prefixes();
+    let in_scope = |p: &str| {
+        scope::in_scope_remote(p, &ctx.ns)
+            && !scope::to_local(p, &ctx.ns).is_some_and(|l| under_skip(&skips, &l))
+    };
     let mut contents: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     let mut hashes: BTreeMap<String, String> = BTreeMap::new();
     // 超大文件本轮整条跳过（不读、不传、不删、不被远端覆盖），状态条目原样保留

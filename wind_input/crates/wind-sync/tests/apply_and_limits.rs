@@ -217,3 +217,69 @@ fn oversized_file_is_not_read() {
         vec!["文件过大未同步：emoji/big.txt".to_string()]
     );
 }
+
+/// 列举时滤掉跳过前缀的本地存储（同步进程里 FsLocal 对本机目录、安装目录就是这样）。
+struct Skipping {
+    inner: MemLocal,
+    skips: Vec<String>,
+}
+
+impl LocalStore for Skipping {
+    fn list(&self) -> Result<Vec<String>, LocalError> {
+        Ok(self
+            .inner
+            .list()?
+            .into_iter()
+            .filter(|p| !self.skips.iter().any(|s| p.starts_with(&format!("{s}/"))))
+            .collect())
+    }
+    fn read(&self, path: &str) -> Result<Option<Vec<u8>>, LocalError> {
+        self.inner.read(path)
+    }
+    fn write_batch(&mut self, files: &[(String, Vec<u8>)]) -> Result<(), LocalError> {
+        self.inner.write_batch(files)
+    }
+    fn delete(&mut self, paths: &[String]) -> Result<(), LocalError> {
+        self.inner.delete(paths)
+    }
+    fn skip_prefixes(&self) -> Vec<String> {
+        self.skips.clone()
+    }
+}
+
+#[test]
+fn skipped_prefix_is_neither_downloaded_nor_deleted_remotely() {
+    let (b, dek) = setup();
+    let (mut la, mut sa) = (MemLocal::new(), SyncState::new("a"));
+    la.set("app/bin", "a");
+    la.set("config.toml", "c");
+    run(&b, &dek, &mut la, &mut sa);
+
+    // 新设备：跳过前缀内的远端对象不下载。
+    let mut lb = Skipping {
+        inner: MemLocal::new(),
+        skips: vec!["app".into()],
+    };
+    let mut sb = SyncState::new("b");
+    run(&b, &dek, &mut lb, &mut sb);
+    assert_eq!(lb.inner.text("app/bin"), None);
+    assert_eq!(lb.inner.text("config.toml").as_deref(), Some("c"));
+
+    // 曾经同步过、后来落进跳过前缀：列举里没了也不当本地删除推给远端。
+    let (mut lc, mut sc) = (MemLocal::new(), SyncState::new("c"));
+    run(&b, &dek, &mut lc, &mut sc);
+    assert_eq!(lc.text("app/bin").as_deref(), Some("a"));
+    let mut lc = Skipping {
+        inner: lc,
+        skips: vec!["app".into()],
+    };
+    run(&b, &dek, &mut lc, &mut sc);
+    run(&b, &dek, &mut lb, &mut sb);
+    run(&b, &dek, &mut la, &mut sa);
+    assert_eq!(la.text("app/bin").as_deref(), Some("a"), "远端不应被删");
+    assert_eq!(
+        lc.inner.text("app/bin").as_deref(),
+        Some("a"),
+        "本机文件不动"
+    );
+}

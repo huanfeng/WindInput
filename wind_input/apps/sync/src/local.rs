@@ -76,13 +76,7 @@ pub fn local_skips(userdata: &Path, state_dir: &Path, exe_dir: Option<&Path>) ->
     out
 }
 
-/// `rel` 是否落在某个跳过前缀之内。
-pub fn skipped(skips: &[String], rel: &str) -> bool {
-    skips.iter().any(|s| {
-        rel.strip_prefix(s.as_str())
-            .is_some_and(|r| r.is_empty() || r.starts_with('/'))
-    })
-}
+pub use wind_sync::local::under_skip as skipped;
 
 /// 不含 `..`、绝对路径、反斜杠、空段：写入前的最后一道闸，冲突副本等范围外路径也要过它。
 fn safe_rel(path: &str) -> bool {
@@ -655,6 +649,9 @@ impl FsLocal {
 }
 
 impl LocalStore for FsLocal {
+    fn skip_prefixes(&self) -> Vec<String> {
+        self.skips.clone()
+    }
     fn list(&self) -> Result<Vec<String>, LocalError> {
         // 先还原崩溃留下的 .old：否则目标缺失会被判成本地删除并推给全组
         self.sweep_aside();
