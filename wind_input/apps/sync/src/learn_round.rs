@@ -540,11 +540,22 @@ fn write_if_changed(p: &Path, bytes: &[u8]) -> io::Result<bool> {
     write_atomic(p, bytes).map(|()| true)
 }
 
+/// 删除本地的他机统计 `data/stats/devices/`（关掉打字统计时：不再更新的他机数据不能当作当前合计）。
+pub fn clear_peer_stats(userdata: &Path) {
+    let p = stats_dir(userdata).join("devices");
+    match std::fs::remove_dir_all(&p) {
+        Ok(()) => log!("打字统计已关闭，删除本地的他机统计"),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => log!("删除他机统计 {} 失败: {e}", p.display()),
+    }
+}
+
 /// 他机最新镜像里的统计写到 `data/stats/devices/<dev>/`；镜像里没有的月份与不再计入的设备目录删掉。
-/// 统计开关关闭时不动。返回写入的文件数。
+/// 统计开关关闭时删掉整个 `devices/`。返回写入的文件数。
 fn write_peer_stats(ctx: &LearnCtx, st: &LearnState, warnings: &mut Vec<String>) -> usize {
     let mut written = 0;
     if !ctx.content.stats {
+        clear_peer_stats(ctx.userdata);
         return written;
     }
     let root = stats_dir(ctx.userdata).join("devices");
@@ -719,17 +730,19 @@ pub fn count_in(ctx: &LearnCtx, st: &mut LearnState) -> Result<BTreeSet<String>,
 // ── 第 3 步：交换 ─────────────────────────────────────
 
 /// 发布本机对象：底稿不能表达或该压实时写新底稿，否则底稿 + 增量。关闭的组沿用原底稿不压实。
+/// `owner` 由 [`ensure_owner`] 先行落盘。
 fn publish_own(
     ctx: &LearnCtx,
     b: &dyn Backend,
     key: &FilesKey,
     st: &mut LearnState,
+    owner: &str,
     keys: &[String],
     warnings: &mut Vec<String>,
 ) -> Result<(), String> {
     // 改号时没能搬完：以新号整份重发，旧号前缀随后删除
     if st.own_index.is_some() && !st.device.is_empty() && st.device != ctx.dev {
-        return republish_as(ctx, b, key, st);
+        return republish_as(ctx, b, key, st, owner);
     }
     let mut objects: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     let mut rebased: Vec<(String, String)> = Vec::new();
@@ -795,8 +808,7 @@ fn publish_own(
         return Ok(());
     }
     let prev = st.own_index.clone();
-    let owner = ensure_owner(ctx, st)?;
-    let idx = publish_keeping(b, key, ctx.dev, &owner, prev.as_ref(), &objects, &kept)
+    let idx = publish_keeping(b, key, ctx.dev, owner, prev.as_ref(), &objects, &kept)
         .map_err(|e| sync_error(&e))?;
     for (name, text) in rebased {
         if let Some(g) = st.groups.get_mut(&name) {
@@ -815,7 +827,7 @@ fn publish_own(
     Ok(())
 }
 
-/// 发布者标识：没有时随机生成并先落盘，保证远端目录里的 owner 本地一定记得。
+/// 发布者标识：没有时随机生成并先落盘，保证远端目录里的 owner 本地一定记得。发布前调用。
 fn ensure_owner(ctx: &LearnCtx, st: &mut LearnState) -> Result<String, String> {
     if st.owner_nonce.is_empty() {
         st.owner_nonce = random_bytes::<16>()
@@ -829,11 +841,13 @@ fn ensure_owner(ctx: &LearnCtx, st: &mut LearnState) -> Result<String, String> {
 
 /// 以 `ctx.dev` 从头发布本机全部对象（底稿 = 当前贡献），原发布号记入待删（由 [`purge_retired`] 删除）。
 /// 新号发布成功到旧号删除之间，他机会把两份各计一次；旧号删掉后的下一轮即恢复。本机不计待删旧号。
+/// `owner` 由 [`ensure_owner`] 先行落盘。
 fn republish_as(
     ctx: &LearnCtx,
     b: &dyn Backend,
     key: &FilesKey,
     st: &mut LearnState,
+    owner: &str,
 ) -> Result<(), String> {
     let mut objects: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     let mut bases = Vec::new();
@@ -853,8 +867,7 @@ fn republish_as(
     if ctx.content.stats {
         objects.extend(own_stats(ctx)?);
     }
-    let owner = ensure_owner(ctx, st)?;
-    let idx = publish_keeping(b, key, ctx.dev, &owner, None, &objects, &BTreeMap::new())
+    let idx = publish_keeping(b, key, ctx.dev, owner, None, &objects, &BTreeMap::new())
         .map_err(|e| sync_error(&e))?;
     for (name, text) in bases {
         if let Some(g) = st.groups.get_mut(&name) {
@@ -1256,7 +1269,8 @@ pub fn exchange_and_materialize(
 ) -> Result<LearnReport, String> {
     let mut rep = LearnReport::default();
     let keys = list_learn(b).map_err(|e| sync_error(&e))?;
-    publish_own(ctx, b, key, st, &keys, &mut rep.warnings)?;
+    let owner = ensure_owner(ctx, st)?;
+    publish_own(ctx, b, key, st, &owner, &keys, &mut rep.warnings)?;
     let purged = purge_retired(ctx, b, st, &mut rep.warnings);
     fetch_mirrors(ctx, b, key, st, &keys, &mut rep.warnings)?;
     rep.devices = devices_in(&keys);
@@ -1556,7 +1570,8 @@ pub fn rename_own(
         save(ctx, &st)?;
         return Ok(warnings);
     }
-    republish_as(ctx, b, key, &mut st)?;
+    let owner = ensure_owner(ctx, &mut st)?;
+    republish_as(ctx, b, key, &mut st, &owner)?;
     purge_retired(ctx, b, &mut st, &mut warnings);
     Ok(warnings)
 }

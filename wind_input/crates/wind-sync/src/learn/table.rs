@@ -16,6 +16,9 @@ pub struct LearnedFile {
     pub rows: BTreeMap<NormKey, (Key, u64, Vec<String>)>,
     /// 跳过的坏行数（列数不足、count 非整数）。
     pub bad_lines: usize,
+    /// 坏行与数据区注释的原文（不含换行，按原顺序）：写回时接在表尾，不丢用户手改的内容
+    /// （core 读到坏行也是跳过、原样留在文件里）。
+    pub kept: Vec<String>,
 }
 
 fn perr<T>(msg: impl Into<String>) -> Result<T, FormatError> {
@@ -127,12 +130,14 @@ pub fn parse(kind: LearnKind, bytes: Option<&[u8]>) -> Result<LearnedFile, Forma
             continue;
         }
         if line.starts_with('#') && (!has_marker || !line.contains('\t')) {
+            f.kept.push(line.to_string());
             continue;
         }
         let cols: Vec<&str> = line.split('\t').collect();
         let need = [i0, i1, ic].into_iter().max().unwrap();
         if cols.len() <= need {
             f.bad_lines += 1;
+            f.kept.push(line.to_string());
             continue;
         }
         let c = cols[ic].trim();
@@ -143,6 +148,7 @@ pub fn parse(kind: LearnKind, bytes: Option<&[u8]>) -> Result<LearnedFile, Forma
         };
         let Some(count) = count.map(u64::from) else {
             f.bad_lines += 1;
+            f.kept.push(line.to_string());
             continue;
         };
         let key = Key(cols[i0].to_string(), cols[i1].to_string());
@@ -306,6 +312,10 @@ pub fn render(kind: LearnKind, f: &LearnedFile, token: Option<&str>, syllable: b
             })
             .collect();
         s.push_str(&line.join("\t"));
+        s.push('\n');
+    }
+    for line in &f.kept {
+        s.push_str(line);
         s.push('\n');
     }
     s.into_bytes()

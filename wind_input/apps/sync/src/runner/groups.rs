@@ -329,6 +329,7 @@ impl Runner {
             old_counted,
         };
         let learned = self.learn_join(how, &*b);
+        self.reload_learn_clock();
         self.after_identity_change();
         log!("已认领设备 {dev}（组 {group}）");
         learned.map_err(|e| format!("已认领设备 {dev}，但{e}（下一轮重试）"))?;

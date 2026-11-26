@@ -406,6 +406,10 @@ impl Runner {
         let learn_last_ok = learn_library(&cfg.settings, &secrets)
             .map_or(0, |lib| learn_round::load_last_ok(&cfg.state_dir, &lib));
         let settings = cfg.settings.clone();
+        // 打字统计在本进程没运行时被关掉
+        if !settings.content.stats {
+            learn_round::clear_peer_stats(&cfg.userdata_dir);
+        }
         let watch = cfg.watch.then(|| {
             watch::start(&cfg.userdata_dir, tx.clone())
                 .map_err(|e| log!("{e}；仅靠定时同步"))
@@ -668,9 +672,18 @@ impl Runner {
             }
         }
         let moved = backend_changed(self.settings.backend.as_ref(), s.backend.as_ref());
+        let old_library = learn_library(&self.settings, &self.secrets);
+        let stats_off = self.settings.content.stats && !s.content.stats;
         self.settings = s;
         if moved {
             self.info_written = None;
+        }
+        if learn_library(&self.settings, &self.secrets) != old_library {
+            self.reload_learn_clock();
+        }
+        // 关掉打字统计：他机统计不再更新，删掉免得统计页把陈旧数据当作当前合计；重新打开后下一轮重新下载
+        if stats_off {
+            learn_round::clear_peer_stats(&self.cfg.userdata_dir);
         }
         // 用户改了设置：解除停止态，稍后按新设置跑一轮
         if self.syncing {

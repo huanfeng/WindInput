@@ -31,6 +31,16 @@ impl Runner {
         .map_err(|e| format!("初始化学习数据状态失败: {e}"))
     }
 
+    /// 换了库、重建了学习数据状态之后：按当前库的私有状态重载上次成功时间并清掉失败退避，
+    /// 新库的首轮学习数据同步不被旧库的节奏推迟。
+    pub(super) fn reload_learn_clock(&mut self) {
+        self.learn_last_ok = learn_library(&self.settings, &self.secrets).map_or(0, |lib| {
+            learn_round::load_last_ok(&self.cfg.state_dir, &lib)
+        });
+        self.learn_failures = 0;
+        self.learn_retry_at = 0;
+    }
+
     /// 删除当前库的学习数据私有状态（建库 / 重置远端失败时撤销预写的状态）。
     pub(super) fn drop_learn_state(&self) {
         if let Some(lib) = learn_library(&self.settings, &self.secrets) {
@@ -143,6 +153,7 @@ impl Runner {
             self.removed_with_data.clear();
         }
         self.mark_verified(library_id(self.settings.backend.as_ref()));
+        self.reload_learn_clock();
         self.after_user_fix();
         self.publish_info(false);
     }
@@ -333,6 +344,7 @@ impl Runner {
         self.info_written = None;
         self.removed_with_data.clear();
         self.mark_verified(library_id(self.settings.backend.as_ref()));
+        self.reload_learn_clock();
         self.after_user_fix();
         self.publish_info(false);
         log!("远端已重置");

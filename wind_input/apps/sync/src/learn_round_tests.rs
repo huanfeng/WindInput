@@ -983,7 +983,7 @@ fn purged_device_stats_removed() {
 }
 
 #[test]
-fn stats_switch_off_keeps_remote_and_local() {
+fn stats_switch_off_keeps_remote_drops_local_peers() {
     let b = MemBackend::new();
     let (mut a, mut bb) = (Dev::new("pc-a"), Dev::new("pc-b"));
     set_stats(&a, "2026-11.toml", &[("2026-11-01", 5)]);
@@ -992,7 +992,7 @@ fn stats_switch_off_keeps_remote_and_local() {
     bb.round(&b);
     a.round(&b);
     assert!(peer_stats(&bb, "pc-a", "2026-11.toml").is_some());
-    // a 关闭统计：远端保留旧对象，不上传新内容；b 的统计也不再写入 a
+    // a 关闭统计：远端保留旧对象，不上传新内容；本地的他机统计删除（不再更新，不能当作当前合计）
     a.content.stats = false;
     set_stats(&a, "2026-11.toml", &[("2026-11-01", 99)]);
     set_stats(&a, "2026-12.toml", &[("2026-12-01", 1)]);
@@ -1008,15 +1008,19 @@ fn stats_switch_off_keeps_remote_and_local() {
         peer_stats(&bb, "pc-a", "2026-11.toml").unwrap(),
         stats_file(&[("2026-11-01", 5)])
     );
-    assert_eq!(
-        peer_stats(&a, "pc-b", "2026-11.toml").unwrap(),
-        stats_file(&[("2026-11-02", 7)])
-    );
+    assert!(!a.path("stats/devices").exists());
     // 关闭期间学习数据照常同步
     set_freq(&a, 3);
     a.round(&b);
     assert!(remote_objects(&b, "pc-a").contains_key("stats/2026-11.toml"));
     assert!(remote_objects(&b, "pc-a").contains_key("pinyin/freq.base"));
+    // 重新打开：下一轮重新下载
+    a.content.stats = true;
+    a.round(&b);
+    assert_eq!(
+        peer_stats(&a, "pc-b", "2026-11.toml").unwrap(),
+        stats_file(&[("2026-11-02", 8)])
+    );
 }
 
 #[test]

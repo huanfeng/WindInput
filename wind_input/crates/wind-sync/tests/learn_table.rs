@@ -103,3 +103,20 @@ fn empty_flow_mapping_token() {
     assert!(b.contains("wind: {sync: t}\n"), "{b}");
     assert_eq!(token_of(b.as_bytes()).as_deref(), Some("t"));
 }
+
+#[test]
+fn bad_lines_and_comments_survive_render_and_materialize() {
+    let src = "---\ncolumns: [code, text, count, last_used]\nwind:\n  escape: true\n...\n# no comment\na\tb\n# note\nc\td\tx\t1\ne\tf\t2\t3\n";
+    let f = parse(LearnKind::Freq, Some(src.as_bytes())).unwrap();
+    let out = String::from_utf8(render(LearnKind::Freq, &f, None, false)).unwrap();
+    assert!(
+        out.ends_with("e\tf\t2\t3\na\tb\n# note\nc\td\tx\t1\n"),
+        "{out}"
+    );
+    // 物化以当前文件为模板：写回时同样保留
+    let m = wind_sync::learn::model::materialize(LearnKind::Freq, &[], &f);
+    let out = String::from_utf8(render(LearnKind::Freq, &m, Some("t"), false)).unwrap();
+    assert!(out.ends_with("a\tb\n# note\nc\td\tx\t1\n"), "{out}");
+    let again = parse(LearnKind::Freq, Some(out.as_bytes())).unwrap();
+    assert_eq!(again.bad_lines, 2);
+}

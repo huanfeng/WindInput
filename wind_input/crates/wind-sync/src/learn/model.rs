@@ -243,7 +243,8 @@ pub fn materialize(kind: LearnKind, all: &[&Contribution], template: &LearnedFil
         head: template.head.clone(),
         columns: template.columns.clone(),
         rows,
-        bad_lines: 0,
+        bad_lines: template.bad_lines,
+        kept: template.kept.clone(),
     }
 }
 

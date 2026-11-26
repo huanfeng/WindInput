@@ -1408,3 +1408,44 @@ fn claim_by_new_device_merges_stats() {
     c.command(Op::ClaimDevice, &json!({"dev": "pc"})).unwrap();
     assert!(!replace_sent(&core));
 }
+
+/// 重置、认领、换库之后新库的首轮学习数据同步不被旧库的节奏或退避推迟。
+#[test]
+fn learn_clock_resets_on_library_change() {
+    let mut p = learn_pair();
+    let stale = |r: &mut Runner| {
+        r.learn_last_ok = now_unix();
+        r.learn_failures = 3;
+        r.learn_retry_at = u64::MAX;
+    };
+    let fresh = |r: &Runner| (r.learn_last_ok, r.learn_failures, r.learn_retry_at) == (0, 0, 0);
+    stale(&mut p.b);
+    p.b.command(Op::ClaimDevice, &json!({"dev": "pc"})).unwrap();
+    assert!(fresh(&p.b), "认领");
+    stale(&mut p.a);
+    p.a.command(Op::ResetRemote, &json!({"confirm": true}))
+        .unwrap();
+    assert!(fresh(&p.a), "重置");
+    stale(&mut p.a);
+    let mut s = p.a.settings.clone();
+    s.backend = Some(test_target("http://example.invalid/other"));
+    p.a.on_settings(s);
+    assert!(fresh(&p.a), "换存储位置即换库");
+}
+
+/// 关掉打字统计时删除本地的他机统计。
+#[test]
+fn stats_off_drops_local_peer_stats() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, _rx) = runner(d.path());
+    let peer = d.path().join("user/data/stats/devices/lap/2026-11.toml");
+    std::fs::create_dir_all(peer.parent().unwrap()).unwrap();
+    std::fs::write(&peer, "version = 1\n").unwrap();
+    let mut s = r.settings.clone();
+    s.content.learned = false;
+    r.on_settings(s.clone());
+    assert!(peer.exists(), "别的开关不动它");
+    s.content.stats = false;
+    r.on_settings(s);
+    assert!(!d.path().join("user/data/stats/devices").exists());
+}
