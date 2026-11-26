@@ -345,7 +345,7 @@ impl FsLocal {
             }
             for (orig, mut v) in olds {
                 let target = dir.join(&orig);
-                v.sort_by(|a, b| b.0.cmp(&a.0));
+                v.sort_by_key(|e| std::cmp::Reverse(e.0));
                 // 已知局限（仅 Windows）：用户手动删掉的扩展文件若留有被占用的 .old，会被还原
                 if std::fs::symlink_metadata(&target).is_err() && !deleted.contains_key(&orig) {
                     let (_, newest) = v.remove(0);
