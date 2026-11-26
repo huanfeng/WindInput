@@ -16,6 +16,7 @@ pub mod runner;
 pub mod secrets;
 mod statefile;
 pub mod testing;
+mod usage;
 mod watch;
 
 pub use backends::{BackendFactory, NetFactory};

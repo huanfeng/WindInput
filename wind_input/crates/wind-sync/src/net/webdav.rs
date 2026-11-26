@@ -1,7 +1,7 @@
 //! WebDAV 后端：Basic 认证；PROPFIND Depth:1 逐层递归列目录；写入前逐级 MKCOL。
 
 use super::{host_of, new_agent, parse_http_date, read_body, send};
-use crate::backend::{Backend, BackendError, ObjMeta};
+use crate::backend::{Backend, BackendError, ObjMeta, ProviderUsage};
 use base64::Engine as _;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
 use quick_xml::Reader;
@@ -177,6 +177,40 @@ fn stat_from_multistatus(
 }
 
 const PROPFIND_BODY: &str = r#"<?xml version="1.0" encoding="utf-8"?><propfind xmlns="DAV:"><prop><resourcetype/><getcontentlength/><getlastmodified/></prop></propfind>"#;
+
+const QUOTA_BODY: &str = r#"<?xml version="1.0" encoding="utf-8"?><propfind xmlns="DAV:"><prop><quota-available-bytes/><quota-used-bytes/></prop></propfind>"#;
+
+/// RFC 4331 配额：`quota-used-bytes` 必须有；`quota-available-bytes` 为负（Nextcloud 的「不限 / 未知」）
+/// 或缺失时总量为 None。不支持的服务端回 404 propstat（空元素），得 None。
+fn parse_quota(xml: &str) -> Option<ProviderUsage> {
+    let mut rd = Reader::from_str(xml);
+    let (mut used, mut avail): (Option<String>, Option<String>) = (None, None);
+    let mut top = String::new();
+    loop {
+        match rd.read_event().ok()? {
+            Event::Start(e) => {
+                top = String::from_utf8_lossy(e.local_name().as_ref()).to_ascii_lowercase();
+            }
+            Event::End(_) => top.clear(),
+            Event::Text(t) => {
+                let v = t.unescape().ok()?.trim().to_string();
+                match top.as_str() {
+                    "quota-used-bytes" if used.is_none() => used = Some(v),
+                    "quota-available-bytes" if avail.is_none() => avail = Some(v),
+                    _ => {}
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    let used: u64 = used?.parse().ok()?;
+    let quota = avail
+        .and_then(|a| a.parse::<i64>().ok())
+        .and_then(|a| u64::try_from(a).ok())
+        .map(|a| used.saturating_add(a));
+    Some(ProviderUsage { used, quota })
+}
 
 impl WebDavBackend {
     pub fn new(cfg: &WebDavConfig) -> Result<Self, BackendError> {
@@ -366,6 +400,24 @@ impl Backend for WebDavBackend {
             Err(e) => Err(e),
         }
     }
+
+    /// PROPFIND 根集合取配额；服务端不支持（404/405 等）返回 None。
+    fn usage(&self) -> Result<Option<ProviderUsage>, BackendError> {
+        let what = "PROPFIND 配额";
+        let req = self
+            .agent
+            .request("PROPFIND", &format!("{}/", self.base))
+            .set("Authorization", &self.auth)
+            .set("Depth", "0")
+            .set("Content-Type", "application/xml; charset=utf-8");
+        let resp = match send(req, Some(QUOTA_BODY.as_bytes()), what) {
+            Ok(r) => r,
+            Err(BackendError::NotFound(_) | BackendError::Fatal(_)) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let body = read_body(resp, what)?;
+        Ok(parse_quota(&String::from_utf8_lossy(&body)))
+    }
 }
 
 #[cfg(test)]
@@ -434,6 +486,38 @@ mod tests {
                 modified: None
             }]
         );
+    }
+
+    #[test]
+    fn parses_rfc4331_quota() {
+        let x = r#"<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"><d:response><d:href>/dav/</d:href>
+<d:propstat><d:prop><d:quota-available-bytes>900</d:quota-available-bytes><d:quota-used-bytes>100</d:quota-used-bytes></d:prop>
+<d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#;
+        assert_eq!(
+            parse_quota(x),
+            Some(ProviderUsage {
+                used: 100,
+                quota: Some(1000)
+            })
+        );
+        // Nextcloud 不限量：可用为负
+        let unlimited = x.replace(">900<", ">-3<");
+        assert_eq!(
+            parse_quota(&unlimited),
+            Some(ProviderUsage {
+                used: 100,
+                quota: None
+            })
+        );
+    }
+
+    #[test]
+    fn unsupported_quota_is_none() {
+        let x = r#"<?xml version="1.0"?><D:multistatus xmlns:D="DAV:"><D:response><D:href>/dav/</D:href>
+<D:propstat><D:prop><D:quota-available-bytes/><D:quota-used-bytes/></D:prop>
+<D:status>HTTP/1.1 404 Not Found</D:status></D:propstat></D:response></D:multistatus>"#;
+        assert_eq!(parse_quota(x), None);
+        assert_eq!(parse_quota("not xml <<"), None);
     }
 
     #[test]

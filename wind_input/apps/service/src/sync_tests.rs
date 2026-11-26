@@ -234,6 +234,49 @@ fn status_carries_removed_devices_with_data() {
 }
 
 #[test]
+fn status_carries_usage() {
+    let mut r = rig();
+    r.stub.send(FromSync::Status(Status {
+        phase: "idle".into(),
+        ..Default::default()
+    }));
+    wait_for(|| phase(&r.host) == "idle");
+    let st = r.host.rpc("sync.status", &Value::Null).unwrap();
+    assert!(st.get("usage").is_none(), "从未统计时省略: {st}");
+    assert!(st.get("usage_busy").is_none() && st.get("usage_error").is_none());
+
+    let usage = wind_sync_ipc::Usage {
+        computed_at: 1_795_000_000,
+        total: 3000,
+        blobs: 2000,
+        blobs_unreferenced: 100,
+        devices: vec![wind_sync_ipc::DeviceUsage {
+            id: "pc".into(),
+            learned: 700,
+            stats: 200,
+        }],
+        other: 100,
+        provider: Some(wind_sync_ipc::ProviderUsage {
+            used: 9000,
+            quota: Some(10_000),
+        }),
+    };
+    r.stub.send(FromSync::Status(Status {
+        phase: "idle".into(),
+        usage: Some(usage.clone()),
+        usage_busy: true,
+        usage_error: Some("超时".into()),
+        ..Default::default()
+    }));
+    wait_for(|| r.host.rpc("sync.status", &Value::Null).unwrap()["usage_busy"] == json!(true));
+    let st = r.host.rpc("sync.status", &Value::Null).unwrap();
+    assert_eq!(st["usage"], serde_json::to_value(&usage).unwrap());
+    assert_eq!(st["usage_error"], "超时");
+    let ev = lock(&r.events).clone();
+    assert_eq!(ev.last().unwrap()["usage"]["total"], 3000);
+}
+
+#[test]
 fn requests_outside_whitelist_are_rejected() {
     let mut r = rig();
     let _hello = r.stub.next();

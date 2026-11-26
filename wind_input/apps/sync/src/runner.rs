@@ -38,6 +38,7 @@ use crate::local::{Echo, FsLocal, RETRY_TAG, local_skips, lock};
 use crate::log::{log, now_unix};
 use crate::secrets::{SecretStore, Secrets};
 use crate::statefile;
+use crate::usage;
 use crate::watch;
 
 mod commands;
@@ -55,6 +56,8 @@ pub enum Input {
     Eof,
     /// 工作线程跑完了一轮同步。
     RoundDone(Box<Round>),
+    /// 手动刷新的空间占用统计完成：(统计时的库, 结果)。
+    UsageDone(Box<(String, Result<wind_sync_ipc::Usage, String>)>),
 }
 
 /// 一轮同步的结果（工作线程 → 主循环）。
@@ -75,6 +78,8 @@ pub struct Round {
     learn: Option<Result<(), String>>,
     /// 学习数据同步成功后查到的已移除但仍有学习数据的设备。
     removed_with_data: Option<Vec<String>>,
+    /// 本轮顺带的空间占用统计：(统计时的库, 结果)；None = 没算。
+    usage: Option<(String, Result<wind_sync_ipc::Usage, String>)>,
 }
 
 impl std::fmt::Debug for Round {
@@ -178,6 +183,11 @@ pub struct Runner {
     skips: Vec<String>,
     /// 已移除但远端仍有学习数据的设备号。
     removed_with_data: Vec<String>,
+    /// 空间占用：缓存、统计中、最近失败原因、失败后下次自动重试的时间（unix 秒）。
+    usage: Option<usage::Cached>,
+    usage_busy: bool,
+    usage_error: Option<String>,
+    usage_retry_at: u64,
     _watch: Option<watch::Watch>,
 }
 
@@ -409,6 +419,7 @@ impl Runner {
         let learn_last_ok = learn_library(&cfg.settings, &secrets)
             .map_or(0, |lib| learn_round::load_last_ok(&cfg.state_dir, &lib));
         let settings = cfg.settings.clone();
+        let cached_usage = usage::load(&cfg.state_dir);
         // 打字统计在本进程没运行时被关掉
         if !settings.content.stats {
             learn_round::clear_peer_stats(&cfg.userdata_dir);
@@ -457,6 +468,10 @@ impl Runner {
             learn_failures: 0,
             learn_retry_at: 0,
             removed_with_data: Vec::new(),
+            usage: cached_usage,
+            usage_busy: false,
+            usage_error: None,
+            usage_retry_at: 0,
             skips,
             _watch: watch.flatten(),
         }
@@ -572,6 +587,46 @@ impl Runner {
             round: self.round_no,
             last_round: self.last_round.clone(),
             removed_with_data: self.removed_with_data.clone(),
+            usage: self.current_usage().cloned(),
+            usage_busy: self.usage_busy,
+            usage_error: self.usage_error.clone(),
+        }
+    }
+
+    /// 属于当前同步库的空间占用缓存。
+    fn current_usage(&self) -> Option<&wind_sync_ipc::Usage> {
+        let lib = learn_library(&self.settings, &self.secrets)?;
+        self.usage
+            .as_ref()
+            .filter(|c| c.library == lib)
+            .map(|c| &c.usage)
+    }
+
+    /// 本轮是否顺带统计 `lib` 的空间占用。
+    fn usage_due(&self, lib: &str, now: u64) -> bool {
+        usage::due(self.usage.as_ref(), lib, now, self.usage_retry_at)
+    }
+
+    /// 记下一次统计结果。失败只记原因、推迟自动重试，不动缓存与统计时间。
+    fn apply_usage(&mut self, lib: String, r: Result<wind_sync_ipc::Usage, String>, now: u64) {
+        match r {
+            Ok(u) => {
+                let c = usage::Cached {
+                    library: lib,
+                    usage: u,
+                };
+                if let Err(e) = usage::save(&self.cfg.state_dir, &c) {
+                    log!("{e}");
+                }
+                self.usage = Some(c);
+                self.usage_error = None;
+                self.usage_retry_at = 0;
+            }
+            Err(e) => {
+                log!("统计空间占用失败: {e}");
+                self.usage_error = Some(e);
+                self.usage_retry_at = now.saturating_add(usage::RETRY_SECS);
+            }
         }
     }
 
@@ -599,7 +654,7 @@ impl Runner {
 
     /// 下一次要跑同步的时刻；不可调度返回 None。
     fn next_wake(&self, now: Instant) -> Option<Instant> {
-        if self.syncing || !self.runnable() {
+        if self.syncing || self.usage_busy || !self.runnable() {
             return None;
         }
         if self.force_now {
@@ -659,6 +714,12 @@ impl Runner {
     fn handle(&mut self, i: Input) {
         match i {
             Input::RoundDone(r) => self.finish_round(*r),
+            Input::UsageDone(d) => {
+                let (lib, r) = *d;
+                self.usage_busy = false;
+                self.apply_usage(lib, r, now_unix());
+                self.report();
+            }
             Input::Core(ToSync::Settings(s)) => self.on_settings(s),
             Input::Core(ToSync::Command { id, op, args }) => {
                 let r = self.command(op, &args);
@@ -768,13 +829,15 @@ impl Runner {
             }
         };
         self.syncing = true;
-        self.report();
         let now = now_unix();
         let mut ctx = SyncCtx::new(now, self.ns());
         ctx.force = force;
         ctx.gc = true;
         ctx.allow_mass_delete = allow_mass;
         let learn_due = self.learn_wanted(now, force);
+        let usage_lib =
+            learn_library(&self.settings, &self.secrets).filter(|lib| self.usage_due(lib, now));
+        self.usage_busy = usage_lib.is_some();
         let echo_before = lock(&self.echo).clone();
         let want = local_info(&self.settings, &self.state, now);
         let info_stale_now = info_stale(self.info_written.as_ref(), &want, true);
@@ -805,12 +868,14 @@ impl Runner {
         let content = self.settings.content;
         let cancel = self.cancel.clone();
         let tx = self.tx.clone();
+        self.report();
         let spawned = std::thread::Builder::new()
             .name("sync-round".into())
             .spawn(move || {
                 let mut info_written = None;
                 let mut learn: Option<Result<(), String>> = None;
                 let mut removed_with_data = None;
+                let mut usage = None;
                 let device = state.device.clone();
                 let lctx = learn_lib.as_deref().map(|lib| {
                     learn_round::LearnCtx::new(
@@ -872,6 +937,13 @@ impl Runner {
                         {
                             retire_old_ids(&*backend, &dek, &mut state);
                         }
+                        // 空间占用在本轮写完之后统计，不影响本轮成败
+                        if let (Some(lib), Ok(rep)) = (usage_lib, &r)
+                            && !rep.skipped
+                            && !cancel.load(Ordering::SeqCst)
+                        {
+                            usage = Some((lib, usage::measure(&*backend, &dek)));
+                        }
                         // 本机 info 被其他设备「移除」后清单可能重新出现，info 却要等跨日才写回，
                         // 期间别人看到的是「无法解密」：每轮 stat 一次，缺了就补写。
                         let missing = || {
@@ -909,11 +981,13 @@ impl Runner {
                     library_id,
                     learn,
                     removed_with_data,
+                    usage,
                 };
                 let _ = tx.send(Input::RoundDone(Box::new(round)));
             });
         if let Err(e) = spawned {
             self.syncing = false;
+            self.usage_busy = false;
             self.round_failed(&format!("无法启动同步线程: {e}"));
         }
     }
@@ -946,6 +1020,10 @@ impl Runner {
 
     fn finish_round(&mut self, r: Round) {
         self.syncing = false;
+        self.usage_busy = false;
+        if let Some((lib, u)) = r.usage {
+            self.apply_usage(lib, u, r.now);
+        }
         self.state = r.state;
         if r.info_written.is_some() {
             self.info_written = r.info_written;
@@ -1106,8 +1184,11 @@ impl Runner {
                 | Op::ClaimDevice
                 | Op::ConfirmIdentity
                 | Op::PurgeDevice
+                | Op::RefreshUsage
         );
-        if self.syncing && mutating {
+        // 统计中再点刷新：不算冲突，回「进行中」
+        let busy = self.syncing || (self.usage_busy && op != Op::RefreshUsage);
+        if busy && mutating {
             return Err(BUSY_MSG.into());
         }
         match op {
@@ -1128,6 +1209,7 @@ impl Runner {
             Op::ClaimDevice => self.cmd_claim_device(args),
             Op::ConfirmIdentity => self.cmd_confirm_identity(),
             Op::PurgeDevice => self.cmd_purge_device(args),
+            Op::RefreshUsage => self.cmd_refresh_usage(),
         }
     }
 }

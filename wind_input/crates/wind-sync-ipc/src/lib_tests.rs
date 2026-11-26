@@ -348,3 +348,38 @@ fn status_omits_empty_removed_with_data() {
     assert_eq!(v["removed_with_data"], json!(["pc"]));
     assert_eq!(serde_json::from_value::<Status>(v).unwrap(), s);
 }
+
+#[test]
+fn status_carries_usage() {
+    let v = serde_json::to_value(Status::default()).unwrap();
+    for k in ["usage", "usage_busy", "usage_error"] {
+        assert!(v.get(k).is_none(), "空时省略 {k}: {v}");
+    }
+    let s = Status {
+        usage: Some(Usage {
+            computed_at: 1_795_000_000,
+            total: 3000,
+            blobs: 2000,
+            blobs_unreferenced: 100,
+            devices: vec![DeviceUsage {
+                id: "pc".into(),
+                learned: 700,
+                stats: 200,
+            }],
+            other: 100,
+            provider: Some(ProviderUsage {
+                used: 5000,
+                quota: None,
+            }),
+        }),
+        usage_busy: true,
+        usage_error: Some("断网".into()),
+        ..Default::default()
+    };
+    roundtrip(FromSync::Status(s.clone()));
+    let v = serde_json::to_value(&s).unwrap();
+    assert_eq!(v["usage"]["devices"][0]["stats"], 200);
+    assert_eq!(v["usage"]["provider"]["used"], 5000);
+    assert_eq!(v["usage_busy"], true);
+    assert_eq!(Op::parse("refresh_usage"), Some(Op::RefreshUsage));
+}

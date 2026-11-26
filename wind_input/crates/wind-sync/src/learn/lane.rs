@@ -359,6 +359,34 @@ pub fn fetch_device(
     Ok(Some((idx, objects)))
 }
 
+/// 打字统计的对象名前缀；其余对象名都是学习数据。
+pub const STATS_PREFIX: &str = "stats/";
+
+/// `dev` 的第 `gens` 代目录里统计对象（[`STATS_PREFIX`]）的远端键。
+/// 缺失或解不开的目录跳过（它的对象按学习数据算）；后端错误向上传。
+pub fn stats_object_keys(
+    b: &dyn Backend,
+    key: &FilesKey,
+    dev: &str,
+    gens: &[u64],
+) -> Result<BTreeSet<String>, SyncError> {
+    let mut out = BTreeSet::new();
+    for &n in gens {
+        let Some(raw) = b.get(&learn_index_key(dev, n))? else {
+            continue;
+        };
+        let Ok(idx) = open_index(key, dev, n, &raw) else {
+            continue;
+        };
+        for (name, hash) in &idx.objects {
+            if name.starts_with(STATS_PREFIX) {
+                out.insert(learn_obj_key(dev, &blob_id(key, hash)));
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// 学习通道下有对象的设备号。
 pub fn learn_devices(b: &dyn Backend) -> Result<BTreeSet<String>, SyncError> {
     Ok(devices_in(&list_learn(b)?))

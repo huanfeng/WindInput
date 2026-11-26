@@ -8,6 +8,7 @@
 //! - [`engine`]：一次同步的编排；[`remote`]：初始化/加入/重置/回收
 //! - [`identity`]：加入/退出设备组、认领设备、改设备号
 //! - [`state`]：可序列化的本机状态与退避
+//! - [`usage`]：远端空间占用
 
 pub mod backend;
 pub mod crypto;
@@ -26,8 +27,9 @@ pub mod plan;
 pub mod remote;
 pub mod scope;
 pub mod state;
+pub mod usage;
 
-pub use backend::{Backend, BackendError, MemBackend, ObjMeta};
+pub use backend::{Backend, BackendError, MemBackend, ObjMeta, ProviderUsage};
 pub use crypto::Dek;
 pub use engine::{SyncCtx, SyncReport, sync_once};
 pub use error::SyncError;

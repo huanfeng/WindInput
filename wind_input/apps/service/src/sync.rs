@@ -717,6 +717,15 @@ impl SyncHost {
         if !inner.status.removed_with_data.is_empty() {
             v["removed_with_data"] = json!(inner.status.removed_with_data);
         }
+        if let Some(u) = &inner.status.usage {
+            v["usage"] = json!(u);
+        }
+        if inner.status.usage_busy {
+            v["usage_busy"] = json!(true);
+        }
+        if let Some(e) = &inner.status.usage_error {
+            v["usage_error"] = json!(e);
+        }
         v
     }
 

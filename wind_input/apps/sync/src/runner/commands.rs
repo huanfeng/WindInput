@@ -1,5 +1,5 @@
 //! 密钥与存储相关的命令：凭据、测试连接、同步密钥（生成 / 导入 / 查看）、立即同步、设备列表、重置远端、
-//! 清除已移除设备的学习数据。
+//! 清除已移除设备的学习数据、刷新空间占用。
 
 use super::*;
 use learn_round::{Joined, LearnCtx};
@@ -374,5 +374,32 @@ impl Runner {
         self.kick();
         log!("已清除设备 {dev} 的学习数据（{n} 个对象）");
         Ok(json!({ "ok": true, "removed": n }))
+    }
+
+    /// 立即在后台重算空间占用，结果经 `Input::UsageDone` 回主循环；统计中再点回 `busy`。
+    pub(super) fn cmd_refresh_usage(&mut self) -> Result<Value, String> {
+        if self.usage_busy {
+            return Ok(json!({ "queued": false, "busy": true }));
+        }
+        if !self.configured() {
+            return Err("同步未启用或尚未配置存储后端".into());
+        }
+        let lib = learn_library(&self.settings, &self.secrets)
+            .ok_or("本机尚未加入加密同步".to_string())?;
+        let dek = self.dek()?;
+        let password = self.secrets.password.clone().ok_or("尚未保存存储凭据")?;
+        let (factory, settings, tx) =
+            (self.factory.clone(), self.settings.clone(), self.tx.clone());
+        std::thread::Builder::new()
+            .name("sync-usage".into())
+            .spawn(move || {
+                let r = factory
+                    .build(&settings, &password)
+                    .and_then(|b| crate::usage::measure(&*b, &dek));
+                let _ = tx.send(Input::UsageDone(Box::new((lib, r))));
+            })
+            .map_err(|e| format!("无法启动统计线程: {e}"))?;
+        self.usage_busy = true;
+        Ok(json!({ "queued": true }))
     }
 }

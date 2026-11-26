@@ -1036,6 +1036,7 @@ fn empty_round(r: &Runner, learn: Option<Result<(), String>>, now: u64) -> Round
         info_written: None,
         learn,
         removed_with_data: None,
+        usage: None,
     }
 }
 
@@ -1448,4 +1449,194 @@ fn stats_off_drops_local_peer_stats() {
     s.content.stats = false;
     r.on_settings(s);
     assert!(!d.path().join("user/data/stats/devices").exists());
+}
+
+// ── 空间占用 ───────────────────────────────────────────
+
+const SYNC_ROOT: &str = "windinput-sync/v1/";
+
+fn usage_runner(d: &std::path::Path, mem: &MemBackend) -> (Runner, Receiver<Input>) {
+    let (mut r, rx) = runner_with(d, Box::new(MemFactory(mem.clone())), None, "pc");
+    setup_pc(&mut r);
+    (r, rx)
+}
+
+fn lib_of(r: &Runner) -> String {
+    learn_library(&r.settings, &r.secrets).unwrap()
+}
+
+fn cached(r: &Runner, computed_at: i64) -> crate::usage::Cached {
+    crate::usage::Cached {
+        library: lib_of(r),
+        usage: wind_sync_ipc::Usage {
+            computed_at,
+            total: 1,
+            ..Default::default()
+        },
+    }
+}
+
+/// 没统计过就到期；距上次成功满 24 小时才再算；换了同步库立即到期；失败后的重试时间之前不算。
+#[test]
+fn usage_due_every_24_hours() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, _rx) = usage_runner(d.path(), &MemBackend::new());
+    let lib = lib_of(&r);
+    let t = 1_000_000;
+    assert!(r.usage_due(&lib, t));
+    r.usage = Some(cached(&r, t as i64));
+    assert!(!r.usage_due(&lib, t + crate::usage::INTERVAL_SECS - 1));
+    assert!(r.usage_due(&lib, t + crate::usage::INTERVAL_SECS));
+    assert!(r.usage_due("另一个库", t + 1));
+    r.usage_retry_at = t + crate::usage::INTERVAL_SECS + 50;
+    assert!(!r.usage_due(&lib, t + crate::usage::INTERVAL_SECS));
+}
+
+/// 首轮顺带统计并落盘；重启后状态里仍带缓存值；24 小时内的下一轮不再列同步根。
+#[test]
+fn round_computes_usage_once_a_day_and_caches_it() {
+    let d = tempfile::tempdir().unwrap();
+    let mem = MemBackend::new();
+    mem.set_provider_usage(Some(wind_sync::ProviderUsage {
+        used: 4096,
+        quota: Some(8192),
+    }));
+    let (mut r, rx) = usage_runner(d.path(), &mem);
+    std::fs::write(d.path().join("user/config.toml"), "a = 1\n").unwrap();
+    assert_eq!(r.status().usage, None);
+    round(&mut r, &rx);
+    let u = r.status().usage.expect("首轮应统计");
+    assert!(u.total > 0 && u.blobs > 0, "{u:?}");
+    assert!(u.computed_at > 0);
+    assert_eq!(
+        u.provider,
+        Some(wind_sync_ipc::ProviderUsage {
+            used: 4096,
+            quota: Some(8192)
+        })
+    );
+    assert!(!r.status().usage_busy);
+
+    mem.reset_calls();
+    round(&mut r, &rx);
+    assert!(
+        !mem.calls().list_prefixes.iter().any(|p| p == SYNC_ROOT),
+        "24 小时内不重算: {:?}",
+        mem.calls().list_prefixes
+    );
+    assert_eq!(r.status().usage.unwrap().computed_at, u.computed_at);
+
+    let dek = r.dek().unwrap();
+    drop(r);
+    let (r2, _rx2) = runner_with(d.path(), Box::new(MemFactory(mem)), Some(dek), "pc");
+    assert_eq!(r2.status().usage, Some(u), "重启后读缓存");
+}
+
+/// 只在列举同步根时失败的后端：文件同步照常成功，统计失败。
+#[derive(Clone)]
+struct RootListFails(MemBackend);
+
+impl Backend for RootListFails {
+    fn list(&self, prefix: &str) -> Result<Vec<ObjMeta>, BackendError> {
+        if prefix == SYNC_ROOT {
+            return Err(BackendError::Transient("超时".into()));
+        }
+        self.0.list(prefix)
+    }
+    fn get(&self, key: &str) -> Result<Option<Vec<u8>>, BackendError> {
+        self.0.get(key)
+    }
+    fn put(&self, key: &str, bytes: &[u8]) -> Result<(), BackendError> {
+        self.0.put(key, bytes)
+    }
+    fn delete(&self, key: &str) -> Result<(), BackendError> {
+        self.0.delete(key)
+    }
+}
+
+struct RootListFailsFactory(MemBackend);
+
+impl BackendFactory for RootListFailsFactory {
+    fn build(&self, _: &SyncSettings, _: &str) -> Result<Box<dyn Backend>, String> {
+        Ok(Box::new(RootListFails(self.0.clone())))
+    }
+}
+
+/// 统计失败：同步轮照常成功、不退避；不更新统计时间，记下原因，一小时内不重试。
+#[test]
+fn failed_usage_does_not_fail_the_round_or_advance_the_clock() {
+    let d = tempfile::tempdir().unwrap();
+    let mem = MemBackend::new();
+    let (mut r, rx) = usage_runner(d.path(), &mem);
+    let old = cached(&r, 5);
+    r.usage = Some(old.clone());
+    r.factory = Arc::new(RootListFailsFactory(mem));
+    r.command(Op::SyncNow, &Value::Null).unwrap();
+    round(&mut r, &rx);
+    let st = r.status();
+    assert!(st.last_round.unwrap().ok, "同步轮不受影响");
+    assert_eq!(r.state.retry.failures, 0);
+    assert_eq!(st.last_error, None);
+    assert_eq!(st.usage, Some(old.usage), "缓存与时间不变");
+    assert!(st.usage_error.unwrap().contains("超时"));
+    assert!(!r.usage_due(&lib_of(&r), now_unix() + 60));
+    assert!(r.usage_due(&lib_of(&r), now_unix() + crate::usage::RETRY_SECS + 1));
+}
+
+fn wait_usage(rx: &Receiver<Input>) -> Input {
+    loop {
+        let i = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        if matches!(i, Input::UsageDone(_)) {
+            return i;
+        }
+    }
+}
+
+/// 手动刷新：后台立即算，期间带「统计中」、不起同步轮、拒绝会改状态的命令；算完写进状态。
+#[test]
+fn refresh_usage_computes_now_and_is_serial_with_rounds() {
+    let d = tempfile::tempdir().unwrap();
+    let mem = MemBackend::new();
+    let (mut r, rx) = usage_runner(d.path(), &mem);
+    r.usage = Some(cached(&r, now_unix() as i64));
+    let rep = r.command(Op::RefreshUsage, &Value::Null).unwrap();
+    assert_eq!(rep["queued"], true);
+    assert!(r.status().usage_busy);
+    assert_eq!(r.next_wake(Instant::now()), None, "统计期间不起同步轮");
+    assert_eq!(
+        r.command(Op::SetGroupName, &json!({ "name": "x" })),
+        Err(BUSY_MSG.to_string())
+    );
+    let again = r.command(Op::RefreshUsage, &Value::Null).unwrap();
+    assert_eq!(again["busy"], true);
+    let done = wait_usage(&rx);
+    r.handle(done);
+    let st = r.status();
+    assert!(!st.usage_busy);
+    assert!(st.usage.unwrap().total > 0, "立即重算，不管 24 小时");
+}
+
+#[test]
+fn refresh_usage_is_rejected_while_syncing() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, rx) = usage_runner(d.path(), &MemBackend::new());
+    r.command(Op::SyncNow, &Value::Null).unwrap();
+    r.start_round();
+    assert_eq!(
+        r.command(Op::RefreshUsage, &Value::Null),
+        Err(BUSY_MSG.to_string())
+    );
+    let x = wait_round(&rx);
+    r.finish_round(*x);
+}
+
+/// 换了同步库：旧库的缓存不再显示。
+#[test]
+fn usage_of_another_library_is_hidden() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, _rx) = usage_runner(d.path(), &MemBackend::new());
+    let mut c = cached(&r, 9);
+    c.library = "旧库".into();
+    r.usage = Some(c);
+    assert_eq!(r.status().usage, None);
 }

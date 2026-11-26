@@ -276,6 +276,8 @@ pub enum Op {
     ConfirmIdentity,
     /// 清除已移除设备留在远端的学习数据：`{device}`，须不在名册里。
     PurgeDevice,
+    /// 立即重算远端空间占用（后台进行，结果见 [`Status::usage`]）。
+    RefreshUsage,
 }
 
 impl Op {
@@ -368,6 +370,52 @@ pub struct Status {
     /// 已移除（不在名册里）但远端仍有学习数据的设备号。
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub removed_with_data: Vec<String>,
+    /// 远端空间占用的缓存；从未统计过（或换了同步库）为 None。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
+    /// 正在统计空间占用。
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub usage_busy: bool,
+    /// 最近一次统计失败的原因；成功后清空。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage_error: Option<String>,
+}
+
+/// 远端空间占用（设计 `docs/design/data-sync.md` §12），单位字节。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Usage {
+    /// 统计完成的 Unix 秒。
+    pub computed_at: i64,
+    /// 同步根之内的合计。
+    pub total: u64,
+    /// 文件数据：各设备共用、按内容去重。
+    pub blobs: u64,
+    /// 其中已不被任何设备清单引用、等待回收的旧版本。
+    pub blobs_unreferenced: u64,
+    /// 各设备的学习数据与打字统计，按设备号排序。
+    pub devices: Vec<DeviceUsage>,
+    /// 其余：设备清单、设备信息、`meta.json`。
+    pub other: u64,
+    /// 服务端给出的用量与配额（WebDAV RFC 4331、官方服务的计费口径）；给不出为 None。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ProviderUsage>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DeviceUsage {
+    pub id: String,
+    pub learned: u64,
+    pub stats: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProviderUsage {
+    pub used: u64,
+    /// 总容量；不限量或给不出为 None。
+    pub quota: Option<u64>,
 }
 
 /// 一轮同步的结果统计。
@@ -387,6 +435,7 @@ pub struct RoundStats {
 /// 同步进程 → core。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)] // 逐帧收发即用即弃，不值得 Box
 pub enum FromSync {
     Status(Status),
     Request {

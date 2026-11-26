@@ -70,18 +70,17 @@ pub fn reset_remote_with(b: &dyn Backend, dek: &Dek) -> Result<(), SyncError> {
     Ok(())
 }
 
-/// 回收：任一设备最新两代清单都不引用、且修改时间早于 `now - min_age_secs` 的 blob。
-/// 返回被删的 blob 键。后端给不出修改时间的 blob 一律保留。
-pub fn gc_blobs(
+/// 各设备最新两代清单引用的 blob 键。`keys` 是列举到的键，只看其中的清单。
+/// 读不出来的清单返回错误：不能确定它引用了什么。
+pub fn referenced_blobs<'a>(
     b: &dyn Backend,
     dek: &Dek,
-    now: u64,
-    min_age_secs: u64,
-) -> Result<Vec<String>, SyncError> {
+    keys: impl IntoIterator<Item = &'a str>,
+) -> Result<BTreeSet<String>, SyncError> {
     let files = dek.files_key();
     let mut gens: std::collections::BTreeMap<String, Vec<u64>> = Default::default();
-    for o in b.list(&manifest::devices_prefix())? {
-        if let Some((d, g)) = manifest::parse_manifest_key(&o.key) {
+    for k in keys {
+        if let Some((d, g)) = manifest::parse_manifest_key(k) {
             gens.entry(d).or_default().push(g);
         }
     }
@@ -92,13 +91,25 @@ pub fn gc_blobs(
             let Some(raw) = b.get(&manifest::manifest_key(&dev, g))? else {
                 continue;
             };
-            // 读不出来的清单：为安全起见中止回收（不能确定它引用了什么）。
             let m = Manifest::decode(&files, &dev, g, &raw)?;
             for e in m.files.values().filter(|e| !e.deleted) {
                 referenced.insert(manifest::blob_key(&crate::crypto::blob_id(&files, &e.hash)));
             }
         }
     }
+    Ok(referenced)
+}
+
+/// 回收：任一设备最新两代清单都不引用、且修改时间早于 `now - min_age_secs` 的 blob。
+/// 返回被删的 blob 键。后端给不出修改时间的 blob 一律保留。
+pub fn gc_blobs(
+    b: &dyn Backend,
+    dek: &Dek,
+    now: u64,
+    min_age_secs: u64,
+) -> Result<Vec<String>, SyncError> {
+    let listed = b.list(&manifest::devices_prefix())?;
+    let referenced = referenced_blobs(b, dek, listed.iter().map(|o| o.key.as_str()))?;
     let mut removed = Vec::new();
     let blobs = manifest::blobs_prefix();
     for o in b.list(&blobs)? {
