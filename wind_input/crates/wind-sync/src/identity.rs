@@ -146,15 +146,21 @@ pub fn claim_device(
     if !valid_id(dev) {
         return Err(SyncError::Local(format!("设备号 {dev} 不可用")));
     }
-    let t = latest_manifests(b, &dek.files_key())?
+    let latest = latest_manifests(b, &dek.files_key())?
         .into_iter()
-        .find(|m| m.device == dev)
-        .ok_or_else(|| SyncError::Local(format!("设备 {dev} 没有可读的清单")))?;
+        .find(|m| m.device == dev);
     let info = devices::read_info(b, &dek.devinfo_key(), dev).ok();
     let mut s = SyncState::new(dev);
-    s.gen_ = t.gen_;
-    s.last_nonce = t.nonce;
-    s.lamport = t.lamport;
+    match latest {
+        Some(t) => {
+            s.gen_ = t.gen_;
+            s.last_nonce = t.nonce;
+            s.lamport = t.lamport;
+        }
+        // 登记过但还没发布过清单（首次同步没成功）：序列从头开始。有清单却读不开时不能这样，会撞号
+        None if info.is_some() && !has_manifests(b, dev)? => {}
+        None => return Err(SyncError::Local(format!("设备 {dev} 没有可读的清单"))),
+    }
     s.identity_confirmed = true;
     match info {
         Some(i) if valid_id(&i.group) => {
@@ -167,6 +173,13 @@ pub fn claim_device(
     let group = s.group.clone();
     *state = s;
     Ok(group)
+}
+
+fn has_manifests(b: &dyn Backend, dev: &str) -> Result<bool, SyncError> {
+    Ok(b.list(&manifest::device_dir_prefix(dev))?
+        .iter()
+        .filter_map(|o| manifest::parse_manifest_key(&o.key))
+        .any(|(d, _)| d == dev))
 }
 
 pub fn rename_device(
