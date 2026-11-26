@@ -402,6 +402,15 @@ pub struct SchemeSettingsSnapshot {
     pub builtin: toml::Table,
 }
 
+/// `migrate_legacy_type_settings` 的结果。
+#[derive(Debug, Clone, Default)]
+pub struct LegacyMigration {
+    /// `(方案 id, 写入的项数)`。
+    pub done: Vec<(String, usize)>,
+    /// 每个同类方案都搬成了（没有读不到、写不进的方案）。
+    pub complete: bool,
+}
+
 /// 引擎管理器（懒加载：仅在需要时构建对应方案引擎，降低启动内存）。
 pub struct EngineManager {
     /// schema_id -> 引擎实例（懒加载，Arc 便于无锁 convert）+ 最后使用时刻
@@ -5564,12 +5573,12 @@ impl EngineManager {
         )
     }
 
-    /// 把用户层残留的类型级全局设置搬进各方案的设置（见 `Config::legacy_type_settings`），
-    /// 返回 `(方案 id, 写入的项数)`。
+    /// 把用户层残留的类型级全局设置搬进各方案的设置（见 `Config::legacy_type_settings`）。
     ///
     /// 写给每个已安装、非 overlay 的同类方案；方案自己已有值的项跳过。这样搬完后每个方案的
     /// 生效值与搬之前逐项相同。幂等：第二次调用时各项都已有值。
-    pub fn migrate_legacy_type_settings(&self, legacy: &toml::Table) -> Vec<(String, usize)> {
+    /// 某个方案读不到定义、设置文件读不了或写盘失败时 [`LegacyMigration::complete`] 为假。
+    pub fn migrate_legacy_type_settings(&self, legacy: &toml::Table) -> LegacyMigration {
         const SECTIONS: [(&str, &str, &str); 4] = [
             ("codetable", "codetable", "engine.codetable"),
             ("pinyin", "pinyin", "engine.pinyin"),
@@ -5577,11 +5586,14 @@ impl EngineManager {
             ("english", "english", "engine.english"),
         ];
         let mut done = Vec::new();
+        let mut complete = true;
         if legacy.is_empty() || self.override_dir.is_none() {
-            return done;
+            return LegacyMigration { done, complete };
         }
         for id in self.installed_schemas() {
             let Some(def) = self.schema_def_cached(&id) else {
+                warn!("方案 {id} 的定义读不到，旧全局设置未搬入");
+                complete = false;
                 continue;
             };
             if def.overlay.is_some() {
@@ -5595,21 +5607,30 @@ impl EngineManager {
                 continue;
             };
             let Ok(current) = def.to_toml_value() else {
+                warn!("方案 {id} 的定义转换失败，旧全局设置未搬入");
+                complete = false;
                 continue;
             };
             let Some(path) = self.schema_override_path(&id) else {
+                complete = false;
                 continue;
             };
-            // 设置文件坏了就跳过这个方案：拿空表起步写回会冲掉里面其它内容。
+            // 设置文件读不了或坏了就跳过这个方案：拿空表起步写回会冲掉里面其它内容。
             let mut ov = match std::fs::read_to_string(&path) {
                 Ok(text) => match toml::from_str::<toml::Table>(&text) {
                     Ok(t) => t,
                     Err(e) => {
                         warn!("方案 {id} 的设置文件解析失败，旧全局设置未搬入：{e}");
+                        complete = false;
                         continue;
                     }
                 },
-                Err(_) => toml::Table::new(),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
+                Err(e) => {
+                    warn!("方案 {id} 的设置文件读取失败，旧全局设置未搬入：{e}");
+                    complete = false;
+                    continue;
+                }
             };
             let shuangpin = def.engine.pinyin.scheme.eq_ignore_ascii_case("shuangpin");
             let mut written = 0;
@@ -5645,7 +5666,10 @@ impl EngineManager {
             }
             match self.persist_schema_override(&id, &toml::Value::Table(ov)) {
                 Ok(()) => done.push((id, written)),
-                Err(e) => warn!("方案 {id} 的旧全局设置搬入失败：{e}"),
+                Err(e) => {
+                    warn!("方案 {id} 的旧全局设置搬入失败：{e}");
+                    complete = false;
+                }
             }
         }
         if !done.is_empty() {
@@ -5658,15 +5682,22 @@ impl EngineManager {
                 .clear();
             info!("旧的类型级全局设置已搬入方案设置：{done:?}");
         }
-        done
+        LegacyMigration { done, complete }
     }
 
-    /// [`Self::migrate_legacy_type_settings`] 之后把用户层里的旧段删掉；配置里没有残留时不做事。
+    /// [`Self::migrate_legacy_type_settings`] 全部搬成后才把用户层里的旧段删掉，否则留到下次启动重试；
+    /// 配置里没有残留时不做事。
     fn settle_legacy_type_settings(&self, config: &Config) {
         if config.legacy_type_settings.is_empty() || self.override_dir.is_none() {
             return;
         }
-        self.migrate_legacy_type_settings(&config.legacy_type_settings);
+        if !self
+            .migrate_legacy_type_settings(&config.legacy_type_settings)
+            .complete
+        {
+            warn!("有方案未搬入旧全局设置，用户配置里的旧段暂不移除（下次启动重试）");
+            return;
+        }
         match Config::clear_legacy_type_settings() {
             Ok(true) => info!("已从用户配置里移除类型级全局设置"),
             Ok(false) => {}
