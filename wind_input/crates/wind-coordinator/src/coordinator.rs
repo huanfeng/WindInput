@@ -8259,6 +8259,30 @@ impl Coordinator {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             if *last == client_token {
+                drop(last);
+                // 上一次获焦挂起等权威坐标，这次获焦恰好带来了（Chrome 切回：先 GUI 坐标、
+                // 随后同宿主的获焦才带 TSF 坐标）：消费挂起并显示，不能被去重吞掉。
+                let source = {
+                    let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                    s.caret_source
+                };
+                if wind_ipc::protocol::caret_source::is_tsf(source)
+                    && self
+                        .pending_focus_tip
+                        .compare_exchange(
+                            true,
+                            false,
+                            std::sync::atomic::Ordering::Relaxed,
+                            std::sync::atomic::Ordering::Relaxed,
+                        )
+                        .is_ok()
+                {
+                    debug!(
+                        "focus_tip → 补显示: 同宿主再次获焦带来权威坐标（token={client_token:#x}）"
+                    );
+                    self.show_tip(&self.status_indicator_text());
+                    return;
+                }
                 debug!("focus_tip → 跳过: 同一宿主内换 docMgr（token={client_token:#x}）");
                 return;
             }

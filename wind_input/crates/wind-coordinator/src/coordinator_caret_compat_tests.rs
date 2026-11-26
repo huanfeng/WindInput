@@ -571,6 +571,32 @@ fn focus_tip_survives_docmgr_jitter() {
     );
 }
 
+/// Chrome 切回：首次获焦坐标非 TSF（挂起），同宿主随后的获焦已带 TSF 坐标。
+/// 去重不能把它吞掉——挂起还在等权威坐标，这次获焦正好带来了。
+#[test]
+fn focus_tip_parked_then_deduped_gain_with_tsf_caret_shows() {
+    use wind_bridge::handler::FocusLostReason::{DocChanged, NoEditCtx};
+    let (c, rx) = coord_focus_tip(true, "follow_caret");
+    set_caret(&c, 0, 0, wind_ipc::protocol::caret_source::GUI_CARET);
+    c.show_focus_status_if_enabled(TOKEN_A);
+    assert!(!got_status_tip(&rx), "非 TSF 坐标：挂起");
+    c.handle_focus_lost(TOKEN_A, DocChanged);
+    c.handle_focus_lost(TOKEN_A, NoEditCtx);
+    set_caret(
+        &c,
+        363,
+        420,
+        wind_ipc::protocol::caret_source::TSF_SELECTION,
+    );
+    c.show_focus_status_if_enabled(TOKEN_A);
+    assert!(
+        got_status_tip(&rx),
+        "同宿主再次获焦带来 TSF 坐标，应消费挂起并显示"
+    );
+    c.show_focus_status_if_enabled(TOKEN_A);
+    assert!(!got_status_tip(&rx), "显示过之后同宿主仍不重复弹");
+}
+
 /// 离开宿主（Thread 级失焦）后再回来，应当重新提示。
 /// 只有 Thread 档清去重记录：CtxLost/DocChanged 是宿主内换 docMgr 的噪声，
 /// 若也清就等于按 docMgr 计数，Excel 下会退回「输入一次闪两下」。
