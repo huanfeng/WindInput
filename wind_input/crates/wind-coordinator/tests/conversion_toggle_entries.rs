@@ -261,6 +261,72 @@ fn last_is_converted_when_s2t_on_from_config_at_startup() {
     assert_eq!(last_text(&c, 1), "漢字", "切回简体不改变已上屏的 last()");
 }
 
+/// 放行首显闸门后，取此后下发的最近一次候选页文本。
+fn pushed_candidate_texts(
+    c: &Coordinator,
+    rx: &std::sync::mpsc::Receiver<wind_ui_types::UiCommand>,
+) -> Option<Vec<String>> {
+    c.handle_caret_update(&wind_bridge::handler::CaretData {
+        x: 100,
+        y: 200,
+        height: 20,
+        composition_start_x: 100,
+        composition_start_y: 200,
+        source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+        composition_rect: None,
+    });
+    rx.try_iter()
+        .filter_map(|cmd| match cmd {
+            wind_ui_types::UiCommand::UpdateCandidates { candidates, .. } => Some(
+                candidates
+                    .iter()
+                    .map(|i| i.text.as_str().to_string())
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .last()
+}
+
+/// 组合中用热键切简繁：候选窗要当场重绘成新的形态，不能等下一次按键。
+#[test]
+fn hotkey_toggle_refreshes_candidate_window_while_composing() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if !has_data() {
+        eprintln!("跳过：缺 build_dev 词库 / opencc 数据");
+        return;
+    }
+    let _ = std::fs::remove_file(root().join("userdata/config.toml"));
+    let mut cfg = Config::default();
+    cfg.schema.active = "pinyin".into();
+    cfg.schema.available = vec!["pinyin".into()];
+    cfg.input.default.chinese_mode = true;
+    let (c, rx) = Coordinator::new_headless_with_ui(cfg, Some(&data_dir()));
+    for ch in "hanzi".chars() {
+        c.handle_key_event(&key((ch.to_ascii_uppercase() as u32) & 0xFF, 0));
+    }
+    let before = pushed_candidate_texts(&c, &rx).expect("前提：组合中应下发候选页");
+    assert!(
+        before.iter().any(|t| t == "汉字"),
+        "前提：简体态: {before:?}"
+    );
+    c.handle_key_event(&key(VK_J, MOD_CTRL | MOD_SHIFT));
+    let after = rx
+        .try_iter()
+        .filter_map(|cmd| match cmd {
+            wind_ui_types::UiCommand::UpdateCandidates { candidates, .. } => Some(
+                candidates
+                    .iter()
+                    .map(|i| i.text.as_str().to_string())
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        })
+        .last()
+        .expect("切换简繁应当场重下发候选页");
+    assert!(after.iter().any(|t| t == "漢字"), "应显示繁体: {after:?}");
+}
+
 /// `cozd` 的提示文本（`汉典:{last(1)}`）显示实际上屏的形态：先上屏「漢字」再切回简体，
 /// 提示仍是「漢字」，与执行时搜索的字一致。
 #[test]

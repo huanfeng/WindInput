@@ -7650,6 +7650,20 @@ impl Coordinator {
         g.is_some()
     }
 
+    /// 简繁切换后重绘正在显示的候选窗：候选文本在显示 / 上屏出口按当前方向转换，开关一变，
+    /// 已下发的那一页就陈旧了，不重绘要等下一次按键才更新。主输入路另要重建候选（1 对多变体
+    /// 候选随方向增删）；overlay 模式只重绘，其候选各有自己的重建入口，按键时自然更新。
+    pub(crate) fn refresh_candidates_after_conversion_toggle(&self) {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if s.candidates.is_empty() && s.input_buffer.is_empty() {
+            return;
+        }
+        if s.active.is_none() && !s.input_buffer.is_empty() {
+            self.update_candidates(&mut s);
+        }
+        self.notify_ui_update(&s);
+    }
+
     /// 切换入口（热键、菜单、工具栏、命令栏）共用：要打开的方向先确保数据在内存，缺数据就提示
     /// 「简繁数据缺失」且不切，免得开关拨上而上屏原样不转。返回是否切了。
     pub(crate) fn try_toggle_conversion(&self, to_traditional: bool) -> bool {
@@ -8481,6 +8495,7 @@ impl Coordinator {
                 if !self.try_toggle_conversion(action == "toggle_s2t") {
                     return true;
                 }
+                self.refresh_candidates_after_conversion_toggle();
                 self.show_status();
                 // 工具栏「繁」格随切即刷（同 toggle_full_width 与菜单路径），否则工具栏滞后到下次刷新。
                 // 关掉 s2t 的那一半同样要刷：互斥让一次按键改动两个方向。
