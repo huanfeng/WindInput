@@ -288,16 +288,11 @@ fn words_begin_creates_missing_file() {
     s.end_edit("wubi86/user.dict.yaml").unwrap();
 }
 
-/// 草稿、联想历史、补全、统计由程序维护，不提供编辑；越界路径拒绝。
+/// 草稿、统计由程序维护，不提供编辑；越界路径拒绝。
 #[test]
 fn machine_files_and_outside_paths_are_rejected() {
     let s = open("reject");
-    for p in [
-        "pinyin/draft.dict.yaml",
-        "pinyin/assoc.table.yaml",
-        "completion.table.yaml",
-        "stats/2026-10.toml",
-    ] {
+    for p in ["pinyin/draft.dict.yaml", "stats/2026-10.toml"] {
         let e = s.begin_edit(p).unwrap_err().to_string();
         assert!(e.contains("自动维护"), "{p}: {e}");
     }
@@ -640,4 +635,132 @@ fn user_dict_libs_reload_and_edit() {
     s.end_edit("pinyin/dicts.toml").unwrap();
     s.set_user_dict_enabled("pinyin", "pinyin", "成语", false)
         .unwrap();
+}
+
+fn assoc_count(s: &Store, context: &str, word: &str) -> u32 {
+    s.assoc_history("pinyin", context, 0)
+        .unwrap()
+        .into_iter()
+        .find(|(w, _)| w == word)
+        .map_or(0, |(_, r)| r.count)
+}
+
+/// 联想历史可编辑：结束时按文件重载，外部改的次数生效。
+#[test]
+fn assoc_edit_session_reloads_file() {
+    let s = open("assoc_reload");
+    s.record_assoc_pick("pinyin", "荷", "荷花").unwrap();
+    let sess = s.begin_edit("pinyin/assoc.table.yaml").unwrap();
+    assert_eq!(sess.kind.as_str(), "assoc");
+    let text = std::fs::read_to_string(&sess.path).unwrap();
+    assert!(text.contains("荷\t荷花\t1\t"), "begin 先折回：{text}");
+    std::fs::write(&sess.path, text.replace("荷\t荷花\t1\t", "荷\t荷花\t5\t")).unwrap();
+    let r = s.end_edit("pinyin/assoc.table.yaml").unwrap();
+    assert!(r.changed);
+    assert_eq!(assoc_count(&s, "荷", "荷花"), 5);
+    assert!(s.held_edit_files().is_empty());
+}
+
+/// 租约期间学到的联想次数不丢：结束后 = 文件值 + 期间增量，并折回文件。
+#[test]
+fn assoc_increments_during_hold_survive() {
+    let s = open("assoc_hold");
+    s.record_assoc_pick("pinyin", "荷", "荷花").unwrap();
+    let sess = s.begin_edit("pinyin/assoc.table.yaml").unwrap();
+    let before = std::fs::read(&sess.path).unwrap();
+    s.record_assoc_pick("pinyin", "荷", "荷花").unwrap();
+    s.record_assoc_pick("pinyin", "荷", "荷花").unwrap();
+    let ud = s.runtime().data();
+    ud.maintain_text_idle(std::time::Duration::ZERO).unwrap();
+    assert_eq!(std::fs::read(&sess.path).unwrap(), before, "租约期间不写回");
+    assert!(
+        s.held_edit_files()
+            .contains(&"pinyin/assoc.table.yaml".to_string())
+    );
+    s.end_edit("pinyin/assoc.table.yaml").unwrap();
+    assert_eq!(assoc_count(&s, "荷", "荷花"), 3);
+    let after = std::fs::read_to_string(&sess.path).unwrap();
+    assert!(after.contains("荷\t荷花\t3\t"), "{after}");
+}
+
+/// 补全历史可编辑：begin 先写盘；租约期间的使用记在内存、结束时在外部改过的文件上重放。
+#[test]
+fn completion_increments_during_hold_survive() {
+    use crate::completion::CompletionKind;
+    let s = open("completion_hold");
+    s.record_completion(CompletionKind::EmailSuffix, "qq.com")
+        .unwrap();
+    s.record_completion(CompletionKind::EmailSuffix, "163.com")
+        .unwrap();
+    let sess = s.begin_edit("completion.table.yaml").unwrap();
+    assert_eq!(sess.kind.as_str(), "completion");
+    assert_eq!(sess.file, "completion.table.yaml");
+    let text = std::fs::read_to_string(&sess.path).unwrap();
+    assert!(
+        text.contains("email_suffix\tqq.com\t1\t"),
+        "begin 先写盘：{text}"
+    );
+    let edited: String = text
+        .lines()
+        .filter(|l| !l.contains("163.com"))
+        .map(|l| format!("{l}\n"))
+        .collect::<String>()
+        .replace("email_suffix\tqq.com\t1\t", "email_suffix\tqq.com\t50\t");
+    std::fs::write(&sess.path, &edited).unwrap();
+    s.record_completion(CompletionKind::EmailSuffix, "qq.com")
+        .unwrap();
+    s.record_completion(CompletionKind::UrlHistory, "example.com")
+        .unwrap();
+    s.flush_completions().unwrap();
+    assert_eq!(std::fs::read_to_string(&sess.path).unwrap(), edited);
+    assert!(
+        s.held_edit_files()
+            .contains(&"completion.table.yaml".to_string())
+    );
+    let r = s.end_edit("completion.table.yaml").unwrap();
+    assert!(r.changed);
+    let get = |k, t| s.get_completion(k, t).unwrap().map(|r| r.count);
+    assert_eq!(get(CompletionKind::EmailSuffix, "qq.com"), Some(51));
+    assert_eq!(get(CompletionKind::UrlHistory, "example.com"), Some(1));
+    assert_eq!(
+        get(CompletionKind::EmailSuffix, "163.com"),
+        None,
+        "删掉的行不复活"
+    );
+    assert!(s.held_edit_files().is_empty());
+    s.flush_completions().unwrap();
+    let after = std::fs::read_to_string(&sess.path).unwrap();
+    assert!(after.contains("email_suffix\tqq.com\t51\t"), "{after}");
+}
+
+/// 租约期间的删除 / 清空 / 裁剪同样在结束时重放到外部改过的文件上。
+#[test]
+fn completion_removals_during_hold_are_replayed() {
+    use crate::completion::CompletionKind;
+    let s = open("completion_hold_rm");
+    for t in ["a.com", "b.com", "c.com"] {
+        s.record_completion(CompletionKind::UrlHistory, t).unwrap();
+    }
+    s.record_completion(CompletionKind::QuickHistory, "q")
+        .unwrap();
+    let sess = s.begin_edit("completion.table.yaml").unwrap();
+    let mut text = std::fs::read_to_string(&sess.path).unwrap();
+    text.push_str("url_history\td.com\t1\t0\nquick_history\tr\t1\t0\n");
+    std::fs::write(&sess.path, &text).unwrap();
+    assert!(
+        s.remove_completion(CompletionKind::UrlHistory, "a.com")
+            .unwrap()
+    );
+    s.clear_completions(CompletionKind::QuickHistory).unwrap();
+    s.end_edit("completion.table.yaml").unwrap();
+    let (urls, _) = s
+        .list_completions(CompletionKind::UrlHistory, "", 0, 0)
+        .unwrap();
+    let mut urls: Vec<String> = urls.into_iter().map(|(t, _)| t).collect();
+    urls.sort();
+    assert_eq!(urls, ["b.com", "c.com", "d.com"]);
+    let (q, _) = s
+        .list_completions(CompletionKind::QuickHistory, "", 0, 0)
+        .unwrap();
+    assert!(q.is_empty(), "清空作用在重载后的全表上：{q:?}");
 }

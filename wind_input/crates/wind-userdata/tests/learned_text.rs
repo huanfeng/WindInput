@@ -495,3 +495,50 @@ fn hold_waits_for_in_flight_whole_file_write() {
     assert!(e.contains("正在外部编辑"), "{e}");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+fn write_with_token(f: &Path) {
+    std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+    std::fs::write(
+        f,
+        "---\ncolumns: [code, text, count, last_used]\nwind:\n  kind: freq\n  escape: true\n  sync: abc\n...\n# no comment\na\t啊\t1\t0\nb\t吧\t1\t0\n",
+    )
+    .unwrap();
+}
+
+/// 文件头 `wind:` 里的未知键（同步令牌）经按行补丁折回后保留。
+#[test]
+fn fold_preserves_unknown_wind_keys() {
+    let d = root("sync_token_fold");
+    let ud = open(&d);
+    let f = d.join("data/s/freq.table.yaml");
+    write_with_token(&f);
+    ud.bind_text(Target::Freq, "s", binding(&f, &codec::FREQ))
+        .unwrap();
+    incr(&ud, Target::Freq, "a", "啊", 1);
+    ud.fold_text(Target::Freq, "s").unwrap();
+    let s = std::fs::read_to_string(&f).unwrap();
+    assert!(s.contains("\n  sync: abc\n"), "{s}");
+    assert!(s.contains("a\t啊\t2\t"), "{s}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// 整文件重写（淘汰 / 清空 / 导入）同样带上原文件头的同步令牌。
+#[test]
+fn whole_file_rewrites_keep_sync_token() {
+    let d = root("sync_token_rewrite");
+    let ud = open(&d);
+    let f = d.join("data/s/freq.table.yaml");
+    write_with_token(&f);
+    ud.bind_text(Target::Freq, "s", binding(&f, &codec::FREQ))
+        .unwrap();
+    ud.fold_with(Target::Freq, "s", &mut |v| {
+        v.into_iter().filter(|e| e.text != "吧").collect()
+    })
+    .unwrap();
+    let s = std::fs::read_to_string(&f).unwrap();
+    assert!(s.contains("\n  sync: abc\n") && !s.contains("吧"), "{s}");
+    ud.clear(Target::Freq, "s").unwrap();
+    let s = std::fs::read_to_string(&f).unwrap();
+    assert!(s.contains("\n  sync: abc\n") && !s.contains("啊"), "{s}");
+    let _ = std::fs::remove_dir_all(&d);
+}

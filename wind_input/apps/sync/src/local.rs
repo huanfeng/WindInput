@@ -81,9 +81,15 @@ fn edit_target(path: &str) -> Option<&str> {
     let rest = path.strip_prefix("data/")?;
     let segs: Vec<&str> = rest.split('/').collect();
     let ok = match segs.as_slice() {
-        ["phrases.dict.yaml"] | ["quick_format.toml"] | ["common_chars.yaml"] => true,
+        ["phrases.dict.yaml"]
+        | ["quick_format.toml"]
+        | ["common_chars.yaml"]
+        | ["completion.table.yaml"] => true,
         ["charsets", f] => f.ends_with(".yaml"),
-        [s, "user.dict.yaml"] | [s, "shadow.dict.yaml"] | [s, "dicts.toml"] => *s != "charsets",
+        [s, "user.dict.yaml"]
+        | [s, "shadow.dict.yaml"]
+        | [s, "dicts.toml"]
+        | [s, "assoc.table.yaml"] => *s != "charsets",
         [s, "dicts", f] => *s != "charsets" && f.ends_with(".dict.yaml"),
         _ => false,
     };

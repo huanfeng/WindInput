@@ -562,3 +562,60 @@ fn flush_does_not_block_readers() {
         "读等了 {waited:?}"
     );
 }
+
+fn token_head(sync: &str) -> String {
+    format!(
+        "---\ncolumns: [kind, text, count, last_used]\nwind: {{kind: completion, escape: true, sync: {sync}}}\n...\n# no comment\nemail_suffix\tqq.com\t3\t100\n"
+    )
+}
+
+/// 外部编辑租约期间去抖写回不落盘。
+#[test]
+fn completion_flush_blocked_during_hold() {
+    let s = store("hold_flush");
+    s.record_completion(CompletionKind::EmailSuffix, "qq.com")
+        .unwrap();
+    s.begin_completion_hold().unwrap();
+    let p = s.completion_path();
+    let before = std::fs::read(&p).unwrap();
+    s.record_completion(CompletionKind::EmailSuffix, "163.com")
+        .unwrap();
+    s.prune_completions(CompletionKind::EmailSuffix, 1, Some("163.com"))
+        .unwrap();
+    s.flush_completions().unwrap();
+    assert_eq!(std::fs::read(&p).unwrap(), before);
+    s.reload_completions();
+    s.release_completion_hold();
+    s.flush_completions().unwrap();
+    let txt = std::fs::read_to_string(&p).unwrap();
+    assert!(txt.contains("163.com") && !txt.contains("qq.com"), "{txt}");
+}
+
+/// 整文件写回保留文件头的同步令牌（同步进程据此判断上次物化是否写成）。
+#[test]
+fn completion_flush_keeps_sync_token() {
+    let s = store("sync_token");
+    let p = s.completion_path();
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(&p, token_head("t-1")).unwrap();
+    s.record_completion(CompletionKind::EmailSuffix, "qq.com")
+        .unwrap();
+    s.flush_completions().unwrap();
+    let txt = std::fs::read_to_string(&p).unwrap();
+    assert!(
+        txt.contains("wind: {kind: completion, escape: true, sync: t-1}"),
+        "{txt}"
+    );
+    assert!(txt.contains("email_suffix\tqq.com\t4\t"), "{txt}");
+    // 租约里同步进程换了令牌：结束重载后跟着新令牌写
+    s.begin_completion_hold().unwrap();
+    std::fs::write(&p, token_head("t-2")).unwrap();
+    s.record_completion(CompletionKind::EmailSuffix, "qq.com")
+        .unwrap();
+    s.reload_completions();
+    s.release_completion_hold();
+    s.flush_completions().unwrap();
+    let txt = std::fs::read_to_string(&p).unwrap();
+    assert!(txt.contains("sync: t-2}"), "{txt}");
+    assert!(txt.contains("email_suffix\tqq.com\t4\t"), "{txt}");
+}

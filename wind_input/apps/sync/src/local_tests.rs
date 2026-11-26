@@ -230,6 +230,14 @@ fn edit_targets() {
         edit_target("data/pinyin/dicts/x.dict.yaml"),
         Some("pinyin/dicts/x.dict.yaml")
     );
+    assert_eq!(
+        edit_target("data/pinyin/assoc.table.yaml"),
+        Some("pinyin/assoc.table.yaml")
+    );
+    assert_eq!(
+        edit_target("data/completion.table.yaml"),
+        Some("completion.table.yaml")
+    );
     assert_eq!(edit_target("config.toml"), None);
 }
 

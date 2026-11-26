@@ -74,7 +74,7 @@ pub struct Decoded {
     pub bad_lines: usize,
 }
 
-fn header(spec: &TableSpec, syllable: bool) -> String {
+fn header(spec: &TableSpec, syllable: bool, sync: Option<&str>) -> String {
     let cols: Vec<&str> = spec.columns.iter().map(|(n, _)| *n).collect();
     let mut h = super::banner::for_kind(spec.kind)
         .map(|b| format!("{b}\n"))
@@ -88,7 +88,11 @@ fn header(spec: &TableSpec, syllable: bool) -> String {
         h.push_str("  code_spacing: syllable\n");
     }
     // 码表方案的码、联想的上文都可能以 `#` 开头：正文一开头就关掉注释
-    h.push_str("  escape: true\n...\n# no comment\n");
+    h.push_str("  escape: true\n");
+    if let Some(t) = sync {
+        h.push_str(&format!("  sync: {t}\n"));
+    }
+    h.push_str("...\n# no comment\n");
     h
 }
 
@@ -228,7 +232,17 @@ fn escape(escape: bool, s: &str) -> String {
 
 /// 整文件渲染：说明行、LF、无 BOM、`escape: true`。
 pub fn render(spec: &TableSpec, syllable: bool, entries: &[SnapshotEntry]) -> String {
-    let mut s = header(spec, syllable);
+    render_with_sync(spec, syllable, entries, None)
+}
+
+/// 同 [`render`]，文件头带上同步令牌（有的话）：整文件重写时沿用原文件的令牌。
+pub fn render_with_sync(
+    spec: &TableSpec,
+    syllable: bool,
+    entries: &[SnapshotEntry],
+    sync: Option<&str>,
+) -> String {
+    let mut s = header(spec, syllable, sync);
     for e in entries {
         let line: Vec<String> = encode_row(spec, e)
             .iter()
@@ -266,7 +280,7 @@ pub fn patch_decoded(
 ) -> Result<(Vec<u8>, Decoded), ParseError> {
     let fresh: std::borrow::Cow<[u8]>;
     let bytes: &[u8] = if bytes.is_empty() {
-        fresh = header(spec, syllable).into_bytes().into();
+        fresh = header(spec, syllable, None).into_bytes().into();
         &fresh
     } else {
         fresh = super::banner::prepend_if_bare(bytes, super::banner::for_kind(spec.kind));
