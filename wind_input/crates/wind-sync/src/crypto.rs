@@ -255,6 +255,8 @@ pub enum ObjKind {
     Manifest,
     Blob,
     DevInfo,
+    /// 学习数据通道的对象与目录。
+    Learn,
 }
 
 fn aad(kind: ObjKind, id: &str) -> Vec<u8> {
@@ -262,6 +264,7 @@ fn aad(kind: ObjKind, id: &str) -> Vec<u8> {
         ObjKind::Manifest => "manifest",
         ObjKind::Blob => "blob",
         ObjKind::DevInfo => "devinfo",
+        ObjKind::Learn => "learn",
     };
     format!("windinput-sync/v1/{k}/{id}").into_bytes()
 }

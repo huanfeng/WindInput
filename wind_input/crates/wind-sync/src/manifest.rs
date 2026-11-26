@@ -49,6 +49,28 @@ pub fn valid_device_id(s: &str) -> bool {
     crate::ids::valid_id(s)
 }
 
+/// 学习数据通道根前缀（含尾部 `/`）。
+pub fn learn_root() -> String {
+    format!("{ROOT}/learn/")
+}
+/// 某设备的学习数据目录前缀（含尾部 `/`）。
+pub fn learn_prefix(dev: &str) -> String {
+    format!("{ROOT}/learn/{dev}/")
+}
+pub fn learn_index_key(dev: &str, n: u64) -> String {
+    format!("{ROOT}/learn/{dev}/index.{n}")
+}
+pub fn learn_obj_key(dev: &str, id: &str) -> String {
+    format!("{ROOT}/learn/{dev}/obj/{id}")
+}
+/// `learn/<dev>/index.<n>` → (dev, n)。
+pub fn parse_learn_index_key(key: &str) -> Option<(String, u64)> {
+    let rest = key.strip_prefix(&learn_root())?;
+    let (dev, file) = rest.split_once('/')?;
+    let n = file.strip_prefix("index.")?.parse().ok()?;
+    valid_device_id(dev).then(|| (dev.to_string(), n))
+}
+
 /// `devices/<dev>/manifest.<gen>` → (dev, gen)。
 pub fn parse_manifest_key(key: &str) -> Option<(String, u64)> {
     let rest = key.strip_prefix(&devices_prefix())?;
