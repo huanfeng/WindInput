@@ -1,5 +1,7 @@
 //! 学习数据（临时词/词频/联想/补全）的同步逻辑（设计 docs/design/sync-learned-data.md §4）。
 
+pub mod format;
+
 use std::collections::BTreeMap;
 
 /// 学习文件种类。
