@@ -2,6 +2,7 @@
 
 pub mod format;
 pub mod model;
+pub mod state;
 pub mod table;
 
 use std::collections::BTreeMap;
