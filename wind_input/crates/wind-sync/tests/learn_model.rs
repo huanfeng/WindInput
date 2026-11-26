@@ -155,8 +155,6 @@ fn repeat_and_reorder_idempotent() {
 #[test]
 fn delete_voids_old_gen_everywhere() {
     let (mut a, mut b) = (Dev::new("a"), Dev::new("b"));
-    // 留一个别的键，否则删掉唯一的键等于清空
-    a.learn("x", "叉", 1, 100);
     a.learn("ni", "你", 10, 100);
     a.commit(1000, &[]);
     b.learn("ni", "你", 10, 100);
@@ -166,7 +164,7 @@ fn delete_voids_old_gen_everywhere() {
 
     a.remove("ni", "你");
     a.commit(2000, &[&b.c]);
-    assert!(!a.c.rows.contains_key(&nk(FREQ, "ni", "你")));
+    assert!(a.c.rows.is_empty());
     assert!(a.c.tombs.contains_key(&nk(FREQ, "ni", "你")));
     assert_eq!(count_of(FREQ, &mat(&[&a.c, &b.c]), "ni", "你"), None);
 
@@ -224,7 +222,6 @@ fn slow_clock_delete_still_wins() {
     let mut b = empty_contrib(FREQ);
     put_tomb(&mut b, "ni", "你", "9000:b");
     put_row(&mut b, "ni", "你", "9000:b", 5, &["100"]);
-    put_row(&mut b, "x", "叉", "0", 1, &["100"]);
     let mut a = Dev::new("a");
     a.sync(&[&b]);
     assert_eq!(count_of(FREQ, &a.f, "ni", "你"), Some(5));
@@ -272,12 +269,12 @@ fn clear_bumps_epoch() {
     let mut b = empty_contrib(FREQ);
     put_row(&mut b, "x", "叉", "0", 7, &["1"]);
     let mut a = Dev::new("a");
-    for (code, text) in [("ni", "你"), ("hao", "好"), ("men", "们")] {
-        a.learn(code, text, 2, 100);
+    for i in 0..CLEAR_MIN_ROWS - 1 {
+        a.learn(&format!("k{i}"), "字", 2, 100);
     }
     a.commit(1000, &[&b]);
     a.sync(&[&b]);
-    assert_eq!(a.f.rows.len(), 4);
+    assert_eq!(a.f.rows.len(), CLEAR_MIN_ROWS);
     let old_epoch = a.c.epoch.clone();
 
     a.f.rows.clear();
@@ -294,11 +291,15 @@ fn clear_epoch_beats_known_peer_generations() {
     let mut b = empty_contrib(FREQ);
     put_tomb(&mut b, "ni", "你", "9000000:b");
     put_row(&mut b, "ni", "你", "9000000:b", 1, &["1"]);
+    for i in 0..CLEAR_MIN_ROWS - 1 {
+        put_row(&mut b, &format!("k{i}"), "字", "0", 1, &["1"]);
+    }
     let mut a = Dev::new("a");
     a.sync(&[&b]);
-    assert_eq!(a.f.rows.len(), 1);
+    assert_eq!(a.f.rows.len(), CLEAR_MIN_ROWS);
     a.f.rows.clear();
     a.commit(1000, &[&b]);
+    assert!(a.c.tombs.is_empty(), "走纪元而非逐条标记");
     assert!(mat(&[&a.c, &b]).rows.is_empty());
 }
 
@@ -391,6 +392,67 @@ fn gc_waits_for_all_peers() {
     assert!(a.tombs.is_empty());
 }
 
+#[test]
+fn few_rows_deleted_use_tombs_not_epoch() {
+    let mut b = empty_contrib(FREQ);
+    put_row(&mut b, "x", "叉", "0", 7, &["1"]);
+    let mut a = Dev::new("a");
+    a.learn("ni", "你", 2, 100);
+    a.commit(1000, &[&b]);
+    a.sync(&[&b]);
+    assert_eq!(a.f.rows.len(), 2);
+
+    a.f.rows.clear();
+    a.commit(2000, &[&b]);
+    assert_eq!(a.c.epoch, Gen::initial());
+    assert_eq!(a.c.tombs.len(), 2);
+    assert!(mat(&[&a.c, &b]).rows.is_empty());
+
+    // b 尚未传来的键不受影响
+    put_row(&mut b, "y", "歪", "0", 3, &["1"]);
+    assert_eq!(count_of(FREQ, &mat(&[&a.c, &b]), "y", "歪"), Some(3));
+}
+
+/// a、b 各 10 后 a 删除；返回已同步的两台设备。
+fn deleted_by_a() -> (Dev, Dev) {
+    let (mut a, mut b) = (Dev::new("a"), Dev::new("b"));
+    a.learn("ni", "你", 10, 100);
+    a.commit(1000, &[]);
+    b.learn("ni", "你", 10, 100);
+    b.commit(1000, &[]);
+    a.sync(&[&b.c]);
+    b.sync(&[&a.c]);
+    (a, b)
+}
+
+#[test]
+fn relearned_row_survives_tomb_gc() {
+    let (mut a, mut b) = deleted_by_a();
+    a.remove("ni", "你");
+    a.commit(2000, &[&b.c]);
+    b.sync(&[&a.c]);
+    b.learn("ni", "你", 1, 300);
+    b.commit(3000, &[&a.c]);
+    assert_eq!(count_of(FREQ, &mat(&[&a.c, &b.c]), "ni", "你"), Some(1));
+
+    gc_tombs(&mut a.c, &[&b.c], 2000 + 31 * DAY_MS);
+    assert!(a.c.tombs.is_empty());
+    assert_eq!(count_of(FREQ, &mat(&[&a.c, &b.c]), "ni", "你"), Some(1));
+}
+
+#[test]
+fn lowered_row_survives_tomb_gc() {
+    let (mut a, mut b) = deleted_by_a();
+    a.set_count("ni", "你", 5);
+    a.commit(2000, &[&b.c]);
+    b.sync(&[&a.c]);
+    assert!(b.c.rows.is_empty());
+
+    gc_tombs(&mut a.c, &[&b.c], 2000 + 31 * DAY_MS);
+    assert!(a.c.tombs.is_empty());
+    assert_eq!(count_of(FREQ, &mat(&[&a.c, &b.c]), "ni", "你"), Some(5));
+}
+
 // ---- 随机化：与按世代逐事件回放的参照实现对拍 ----
 
 struct XorShift(u64);
@@ -410,7 +472,7 @@ impl XorShift {
 }
 
 const DEVS: [&str; 3] = ["a", "b", "c"];
-const KEYS: usize = 6;
+const KEYS: usize = 30;
 
 fn key_of(i: usize) -> Key {
     Key(format!("k{i}"), format!("字{i}"))
@@ -582,8 +644,8 @@ fn run_random(seed: u64) {
             })
             .collect();
         let known = sim.known_events(d);
-        match rng.below(10) {
-            0..=3 => {
+        match rng.below(12) {
+            0..=5 => {
                 let key = rng.below(KEYS as u64) as usize;
                 let n = 1 + rng.below(3);
                 let k = key_of(key);
@@ -592,25 +654,18 @@ fn run_random(seed: u64) {
                 sim.events[d].push(Ev::Learn { key, gen_, n, t });
                 sim.commit(d, now);
             }
-            4 if !present.is_empty() => {
+            6 if !present.is_empty() => {
                 let key = present[rng.below(present.len() as u64) as usize];
                 let k = key_of(key);
                 sim.devs[d].remove(&k.0, &k.1);
-                // 删掉最后一个键时文件变空，按规则就是清空
-                let ev = if present.len() == 1 {
-                    Ev::Clear {
-                        gen_: Gen::next(&ref_max(&known), now, DEVS[d]),
-                    }
-                } else {
-                    Ev::Del {
-                        key,
-                        gen_: Gen::next(&ref_eff(&known, key), now, DEVS[d]),
-                    }
-                };
-                sim.events[d].push(ev);
+                // 删掉最后一个键时文件变空，基线不足门槛，仍是逐键删除
+                sim.events[d].push(Ev::Del {
+                    key,
+                    gen_: Gen::next(&ref_eff(&known, key), now, DEVS[d]),
+                });
                 sim.commit(d, now);
             }
-            5 if !present.is_empty() => {
+            7 if !present.is_empty() => {
                 let key = present[rng.below(present.len() as u64) as usize];
                 let k = key_of(key);
                 let cur = sim.devs[d].f.rows[&norm_key(FREQ, &k)].1;
@@ -629,11 +684,18 @@ fn run_random(seed: u64) {
                 sim.events[d].push(Ev::Learn { key, gen_, n: v, t });
                 sim.commit(d, now);
             }
-            6 if !present.is_empty() && rng.below(3) == 0 => {
+            8 if present.len() >= CLEAR_MIN_ROWS || (!present.is_empty() && rng.below(4) == 0) => {
                 sim.devs[d].f.rows.clear();
-                sim.events[d].push(Ev::Clear {
-                    gen_: Gen::next(&ref_max(&known), now, DEVS[d]),
-                });
+                if present.len() >= CLEAR_MIN_ROWS {
+                    sim.events[d].push(Ev::Clear {
+                        gen_: Gen::next(&ref_max(&known), now, DEVS[d]),
+                    });
+                } else {
+                    for &key in &present {
+                        let gen_ = Gen::next(&ref_eff(&known, key), now, DEVS[d]);
+                        sim.events[d].push(Ev::Del { key, gen_ });
+                    }
+                }
                 sim.commit(d, now);
             }
             _ => {

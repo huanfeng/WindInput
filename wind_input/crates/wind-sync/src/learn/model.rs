@@ -7,7 +7,11 @@ use std::collections::{BTreeMap, BTreeSet};
 /// 删除标记立出满这么久才可回收。
 pub const TOMB_MIN_AGE_SECS: u64 = 2_592_000;
 
-/// 键的有效世代 = max(各设备该键的删除标记, 各设备的分组纪元)。
+/// 文件变空时，基线至少这么多行才视为清空整类（立纪元），否则逐键立标记。
+pub const CLEAR_MIN_ROWS: usize = 20;
+
+/// 键的有效世代 = max(各设备该键的删除标记、`+` 行世代, 各设备的分组纪元)。
+/// 行世代只可能在得知该世代后产生，计入它使标记回收后新世代的行仍然有效。
 pub fn effective_gen(key: &NormKey, all: &[&Contribution]) -> Gen {
     let mut g = Gen::initial();
     for c in all {
@@ -18,6 +22,11 @@ pub fn effective_gen(key: &NormKey, all: &[&Contribution]) -> Gen {
             && *t > g
         {
             g = t.clone();
+        }
+        if let Some((_, r)) = c.rows.get(key)
+            && r.gen_ > g
+        {
+            g = r.gen_.clone();
         }
     }
     g
@@ -108,7 +117,7 @@ pub fn diff(
     peers: &[&Contribution],
 ) {
     let kind = me.kind;
-    if current.rows.is_empty() && !base.rows.is_empty() {
+    if current.rows.is_empty() && base.rows.len() >= CLEAR_MIN_ROWS {
         let mut all: Vec<&Contribution> = vec![&*me];
         all.extend_from_slice(peers);
         me.epoch = Gen::next(&max_known_gen(&all), now_ms, dev);
@@ -184,6 +193,7 @@ fn pick<'a>(vals: impl Iterator<Item = &'a str>, want_max: bool) -> String {
 }
 
 /// 按 §4.3 物化全部设备贡献；头部、列序与已有键的写法取自 `template`。
+/// 每台设备至多一份贡献，去重由调用方保证（重复传入会重复计数）。
 pub fn materialize(kind: LearnKind, all: &[&Contribution], template: &LearnedFile) -> LearnedFile {
     let fcols = kind.field_cols();
     let keys: BTreeSet<&NormKey> = all.iter().flat_map(|c| c.rows.keys()).collect();
