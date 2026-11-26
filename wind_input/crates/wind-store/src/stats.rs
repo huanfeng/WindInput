@@ -142,6 +142,80 @@ impl DailyStats {
             (self.total(), self.active_seconds as u64 * 1000)
         }
     }
+
+    /// 把另一台设备同一天的记录并入自己（多设备「全部」汇总口径见设计 §5）。
+    ///
+    /// 这里解构 `other` 的全部字段：给 `DailyStats` 加字段而忘了合并口径，会直接编译不过。
+    pub fn merge_from(&mut self, other: &DailyStats) {
+        let DailyStats {
+            chinese,
+            english,
+            punct,
+            other: other_chars,
+            hours,
+            commit_count,
+            code_len_sum,
+            code_len_count,
+            code_len_dist,
+            cand_pos_dist,
+            active_seconds,
+            speed_chars,
+            active_millis,
+            speed_v2,
+            by_schema,
+            by_source,
+        } = other;
+        // 字符分类、上屏次数：求和
+        self.chinese = self.chinese.saturating_add(*chinese);
+        self.english = self.english.saturating_add(*english);
+        self.punct = self.punct.saturating_add(*punct);
+        self.other = self.other.saturating_add(*other_chars);
+        self.commit_count = self.commit_count.saturating_add(*commit_count);
+        // 分时、码长分布、选位分布：按下标求和
+        add_arrays(&mut self.hours, hours);
+        add_arrays(&mut self.code_len_dist, code_len_dist);
+        add_arrays(&mut self.cand_pos_dist, cand_pos_dist);
+        // 码长累计量：求和（平均码长 = 合计 ÷ 合计次数，不平均各设备的平均值）
+        self.code_len_sum = self.code_len_sum.saturating_add(*code_len_sum);
+        self.code_len_count = self.code_len_count.saturating_add(*code_len_count);
+        // 速度：分子（字数）与分母（时长）都是可加量，分别求和，速度读取时再除一次。
+        // 两边的记录模型不同（v2 / 旧口径）时，先各自折成 `speed_parts` 的 (字数, 毫秒) 再相加，
+        // 并标成 v2，否则读回时会按旧口径把 speed_chars 当成 0。
+        let (sc, sm) = self.speed_parts();
+        let (oc, om) = other.speed_parts();
+        if self.speed_v2 == *speed_v2 {
+            self.speed_chars = self.speed_chars.saturating_add(*speed_chars);
+            self.active_millis = self.active_millis.saturating_add(*active_millis);
+        } else {
+            self.speed_chars = sc.saturating_add(oc);
+            self.active_millis = sm.saturating_add(om);
+            self.speed_v2 = true;
+        }
+        // 输入时长（秒）：求和，是各设备输入时长的合计
+        self.active_seconds = self.active_seconds.saturating_add(*active_seconds);
+        // 按方案：按键求和
+        for (k, v) in by_schema {
+            let e = self.by_schema.entry(k.clone()).or_default();
+            e.total_chars = e.total_chars.saturating_add(v.total_chars);
+            e.commit_count = e.commit_count.saturating_add(v.commit_count);
+            e.code_len_sum = e.code_len_sum.saturating_add(v.code_len_sum);
+            e.code_len_count = e.code_len_count.saturating_add(v.code_len_count);
+            add_arrays(&mut e.cand_pos_dist, &v.cand_pos_dist);
+        }
+        // 按来源：按下标求和，长度取较长者（旧记录数组较短）
+        if self.by_source.len() < by_source.len() {
+            self.by_source.resize(by_source.len(), 0);
+        }
+        for (i, v) in by_source.iter().enumerate() {
+            self.by_source[i] = self.by_source[i].saturating_add(*v);
+        }
+    }
+}
+
+fn add_arrays<const N: usize>(a: &mut [u32; N], b: &[u32; N]) {
+    for (x, y) in a.iter_mut().zip(b) {
+        *x = x.saturating_add(*y);
+    }
 }
 
 /// 统计全局元数据（对齐 Go `StatsMeta`）。
@@ -316,6 +390,75 @@ impl Store {
             .collect();
         v.sort();
         v
+    }
+
+    /// 他机统计根目录：`<data>/stats/devices/`，每台设备一个子目录（同步进程写，格式同本机月表）。
+    fn devices_dir(&self) -> std::path::PathBuf {
+        self.stats_dir().join("devices")
+    }
+
+    /// 有统计的设备号（升序）。目录名不合法或目录里没有月表的忽略。
+    pub fn list_device_stats(&self) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(self.devices_dir())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .filter_map(|e| {
+                let n = e.file_name().to_string_lossy().into_owned();
+                valid_device_dir(&n).then_some(n)
+            })
+            .filter(|n| !device_months(&self.devices_dir().join(n)).is_empty())
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// 他机某月月表；缺失、读不了、解析失败都当空（只读，不做自愈，文件归同步进程管）。
+    pub fn load_device_month(
+        &self,
+        dev: &str,
+        ym: &str,
+    ) -> std::collections::BTreeMap<String, DailyStats> {
+        if !valid_device_dir(dev) || month_of(&format!("{ym}-01")).is_none() {
+            return Default::default();
+        }
+        let p = self.devices_dir().join(dev).join(format!("{ym}.toml"));
+        let Ok(bytes) = std::fs::read(&p) else {
+            return Default::default();
+        };
+        match std::str::from_utf8(&bytes)
+            .map_err(anyhow::Error::from)
+            .and_then(|t| Ok(toml::from_str::<MonthFile>(t)?))
+        {
+            Ok(f) => f.days,
+            Err(e) => {
+                tracing::warn!("他机统计 {dev}/{ym} 解析失败，跳过：{e:#}");
+                Default::default()
+            }
+        }
+    }
+
+    /// 他机某设备日期区间 [from, to] 的统计（升序）。
+    pub fn device_daily_stats(&self, dev: &str, from: &str, to: &str) -> Vec<(String, DailyStats)> {
+        let (Some(fm), Some(tm)) = (month_of(from), month_of(to)) else {
+            return Vec::new();
+        };
+        if !valid_device_dir(dev) {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for ym in device_months(&self.devices_dir().join(dev)) {
+            if ym.as_str() < fm || ym.as_str() > tm {
+                continue;
+            }
+            for (d, st) in self.load_device_month(dev, &ym) {
+                if d.as_str() >= from && d.as_str() <= to {
+                    out.push((d, st));
+                }
+            }
+        }
+        out
     }
 
     /// 累加某日的中文/英文上屏字符数（读改写）。Stage 1 保留，供现有采集单点使用。
@@ -628,8 +771,29 @@ impl Store {
     }
 }
 
+/// 设备目录名是否合法：ASCII 字母数字与 `-`，长 1–32（与同步侧设备号规则兼容的超集）。
+pub(crate) fn valid_device_dir(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 32 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+/// 某目录下的月表月份（`YYYY-MM`，升序）。
+fn device_months(dir: &std::path::Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let n = e.file_name().to_string_lossy().into_owned();
+            let ym = n.strip_suffix(".toml")?;
+            (ym.len() == 7 && ym.as_bytes()[4] == b'-').then(|| ym.to_string())
+        })
+        .collect();
+    v.sort();
+    v
+}
+
 /// 连续天数计算（对齐 Go `calculateStreaks`）：dates 须按升序。
-fn calculate_streaks(dates: &[String]) -> (u32, u32, String) {
+pub(crate) fn calculate_streaks(dates: &[String]) -> (u32, u32, String) {
     let mut current = 0u32;
     let mut max = 0u32;
     let mut last = String::new();

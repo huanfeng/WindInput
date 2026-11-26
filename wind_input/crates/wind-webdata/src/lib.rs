@@ -750,8 +750,9 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
         "quick.previewImport" => h.web_quick_preview_import(params),
 
         // ── stats.*（输入统计，redb 每日聚合）────────────────
-        "stats.summary" => h.web_stats_summary(),
+        "stats.summary" => h.web_stats_summary(params),
         "stats.daily" => h.web_stats_daily(params),
+        "stats.devices" => h.web_stats_devices(),
         "stats.clear" => h.web_stats_clear(),
         "stats.pruneBefore" => h.web_stats_prune(params),
 
@@ -3753,13 +3754,46 @@ pub trait WebDataRpc: WebDataHost {
         }))
     }
 
-    fn web_stats_summary(&self) -> anyhow::Result<Value> {
+    /// `device` 参数：缺省或 `all` = 全部设备，`self` = 本机，其余须是 `stats.devices` 里的设备号。
+    fn stats_scope(&self, params: &Value) -> anyhow::Result<wind_store::stats_report::StatsScope> {
+        use wind_store::stats_report::StatsScope;
+        let dev = match params.get("device") {
+            None | Some(Value::Null) => "all",
+            Some(v) => v
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("device 须为字符串"))?,
+        };
+        Ok(match dev {
+            "all" => StatsScope::All,
+            "self" => StatsScope::SelfOnly,
+            d => {
+                let known = self
+                    .user_store()
+                    .is_some_and(|s| s.list_device_stats().iter().any(|x| x == d));
+                if !known {
+                    anyhow::bail!("未知设备：{d}");
+                }
+                StatsScope::Device(d.to_string())
+            }
+        })
+    }
+
+    fn web_stats_devices(&self) -> anyhow::Result<Value> {
+        Ok(json!(
+            self.user_store()
+                .map(|s| s.list_device_stats())
+                .unwrap_or_default()
+        ))
+    }
+
+    fn web_stats_summary(&self, params: &Value) -> anyhow::Result<Value> {
+        let scope = self.stats_scope(params)?;
         let (collector, store) = match (self.stat_collector(), self.user_store()) {
             (Some(c), Some(s)) => (c, s),
             _ => return Ok(Self::empty_stats_summary()),
         };
         // 算法在 wind-store（与移动端共用一份），这里只管序列化
-        let s = wind_store::stats_report::summary(store, collector);
+        let s = wind_store::stats_report::summary_for(store, collector, &scope);
         Ok(json!({
             "today_chars": s.today_chars,
             "today_chinese": s.today_chinese,
@@ -3789,7 +3823,14 @@ pub trait WebDataRpc: WebDataHost {
             None => return Ok(json!([])),
         };
         // 区间内连续日期补零值，输出完整 DailyStatItem（便于前端绘图）。
-        let days = wind_store::stats_report::daily_range(store, self.stat_collector(), &from, &to)?;
+        let scope = self.stats_scope(params)?;
+        let days = wind_store::stats_report::daily_range_for(
+            store,
+            self.stat_collector(),
+            &scope,
+            &from,
+            &to,
+        )?;
         Ok(json!(
             days.iter()
                 .map(|(d, r)| Self::daily_item_json(d, r))
