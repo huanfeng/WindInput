@@ -358,3 +358,78 @@ fn cozd_label_shows_committed_form() {
         "提示应是上屏形态「汉典:漢字」: {shown:?}"
     );
 }
+
+/// 命令提示里 `last()` 插进去的那段是搜索目标，不参与简繁转换（否则提示与实际搜的字不一致）；
+/// 提示里的字面文字（「汉典」）照常转换。
+#[test]
+fn cozd_label_keeps_last_text_unconverted_but_converts_literal() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if !has_data() {
+        eprintln!("跳过：缺 build_dev 词库 / opencc 数据");
+        return;
+    }
+    let c = open(&data_dir());
+    assert_eq!(commit_hanzi(&c), "汉字", "前提：简体上屏，历史里是「汉字」");
+    c.debug_run_menu_cmd(MenuCmd::ToggleS2t); // 再开简入繁出
+    c.debug_install_phrases(vec![wind_phrase::PhraseSeed {
+        code: "cozd".into(),
+        text: r#"$CC("汉典:{last(1)}", open("https://www.zdic.net/hans/{url(last(1))}"))"#.into(),
+        weight: 2000,
+        position: 0,
+        is_system: true,
+        category: String::new(),
+    }]);
+    for ch in "cozd".chars() {
+        c.handle_key_event(&key((ch.to_ascii_uppercase() as u32) & 0xFF, 0));
+    }
+    let shown = c.debug_page_display_texts();
+    assert!(
+        shown.iter().any(|t| t == "漢典:汉字"),
+        "字面「汉典」转繁体、last() 的「汉字」保持原样: {shown:?}"
+    );
+}
+
+/// `coll`（`$CC(last(), type(last()))`）重复上次上屏：提示是什么、打出来就是什么，
+/// 不因上屏之后简繁方向变了而再被转一次。
+#[test]
+fn coll_types_exactly_what_its_label_shows() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if !has_data() {
+        eprintln!("跳过：缺 build_dev 词库 / opencc 数据");
+        return;
+    }
+    // (上屏时是否开着 s2t, 之后是否切换方向)
+    for (first_on, toggle_after) in [(false, true), (true, false), (true, true), (false, false)] {
+        let c = open(&data_dir());
+        if first_on {
+            c.debug_run_menu_cmd(MenuCmd::ToggleS2t);
+        }
+        let first = commit_hanzi(&c);
+        if toggle_after {
+            c.debug_run_menu_cmd(MenuCmd::ToggleS2t);
+        }
+        c.debug_install_phrases(vec![wind_phrase::PhraseSeed {
+            code: "coll".into(),
+            text: r#"$CC(last(), type(last()))"#.into(),
+            weight: 2000,
+            position: 0,
+            is_system: true,
+            category: String::new(),
+        }]);
+        for ch in "coll".chars() {
+            c.handle_key_event(&key((ch.to_ascii_uppercase() as u32) & 0xFF, 0));
+        }
+        let label = c.debug_page_display_texts()[0].clone();
+        assert_eq!(
+            label, first,
+            "提示即上屏历史（first_on={first_on}, toggle={toggle_after}）"
+        );
+        match c.handle_key_event(&key(VK_SPACE, 0)) {
+            KeyAction::InsertText { text, .. } => assert_eq!(
+                text, label,
+                "打出来的要和提示一致（first_on={first_on}, toggle={toggle_after}）"
+            ),
+            other => panic!("应上屏 InsertText，实际 {other:?}"),
+        }
+    }
+}

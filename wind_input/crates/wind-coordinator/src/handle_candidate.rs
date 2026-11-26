@@ -4060,8 +4060,15 @@ impl Coordinator {
             let chinese_mode = state.chinese_mode;
             // 记账与 `commit_top_text` 的命令顶码分支同构：来源如实传（短语），`record_selection` 据此
             // 拦掉求值文本；记账文本取 `freq_text`（显示标签），与读端、满码自动上屏同键。
-            let out =
-                self.commit_candidate(state, &text, cand.freq_text(), None, cand.source, &input);
+            let over = self.command_text_override(state, cand, &text);
+            let out = self.commit_candidate(
+                state,
+                &text,
+                cand.freq_text(),
+                over.as_deref(),
+                cand.source,
+                &input,
+            );
             self.notify_ui_hide();
             return Self::commit_action(out, chinese_mode);
         }

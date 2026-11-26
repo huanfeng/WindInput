@@ -5965,16 +5965,19 @@ impl Coordinator {
                         return match self.eval_command_text_only(&cand.phrase_template, &input) {
                             // 求值文本与 `cand.text`（display 标签）无关，变体覆盖对它没有语义 → None，
                             // 走 `commit_top_text` 内的默认转换（同 `AutoCommit` 的命令文本）。
-                            Some(text) => self.commit_top_text(
-                                state,
-                                &prefix,
-                                text,
-                                None,
-                                None,
-                                &remainder,
-                                cand.source,
-                                None, // 命令文本不是候选实体，无从是草稿
-                            ),
+                            Some(text) => {
+                                let over = self.command_text_override(state, &cand, &text);
+                                self.commit_top_text(
+                                    state,
+                                    &prefix,
+                                    text,
+                                    None,
+                                    over.as_deref(),
+                                    &remainder,
+                                    cand.source,
+                                    None, // 命令文本不是候选实体，无从是草稿
+                                )
+                            }
                             None => self.top_commit_command_with_remainder(
                                 state, &cand, &prefix, &remainder,
                             ),
@@ -6036,7 +6039,12 @@ impl Coordinator {
                 // 满码自动上屏 / 空码顶出也是词落了屏，草稿候选同样算用过（判据同 `commit_top_text`：
                 // 开着 `auto_commit_at_full` 时候选栏根本没机会让人按选择键）。
                 self.promote_draft_on_auto_commit(state, &text, &code);
-                let out = self.commit_candidate(state, &text, &freq_text, None, source, &code);
+                let over = state
+                    .candidates
+                    .first()
+                    .and_then(|c| self.command_text_override(state, c, &text));
+                let out =
+                    self.commit_candidate(state, &text, &freq_text, over.as_deref(), source, &code);
                 // 满码自动上屏同样要接联想，出口与手动选词一致。
                 return self.auto_commit_then_assoc(state, out, &text);
             }

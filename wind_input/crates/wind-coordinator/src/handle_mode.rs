@@ -931,6 +931,53 @@ impl Coordinator {
         }
     }
 
+    /// 文本型命令（`$CC(…, type(…))`）同步上屏时的输出覆盖：模板引用了 `last()` 的，历史那段原样保留，
+    /// 只转其余字面文字，与候选提示（[`Self::cand_display_text`]）同一规则，免得提示一个字、打出来另一个。
+    /// 不涉及 `last()` 或没开简繁时返回 `None`，走默认转换。
+    pub(crate) fn command_text_override(
+        &self,
+        state: &State,
+        cand: &Candidate,
+        text: &str,
+    ) -> Option<String> {
+        if !cand.is_command
+            || !cand.phrase_template.contains("last(")
+            || !(state.s2t_enabled || state.t2s_enabled)
+        {
+            return None;
+        }
+        let shown = self.recent_shown_snapshot();
+        Some(Self::convert_around(text, &shown, &|t| {
+            self.maybe_convert(state, t)
+        }))
+    }
+
+    /// 把 `label` 里出现的 `keep` 条目原样保留，其余部分过 `conv`。
+    /// 每一轮取最靠前、同位置取最长的那条；`keep` 里的空串忽略。
+    pub(crate) fn convert_around(
+        label: &str,
+        keep: &[String],
+        conv: &dyn Fn(&str) -> String,
+    ) -> String {
+        let hit = keep
+            .iter()
+            .filter(|k| !k.is_empty())
+            .filter_map(|k| label.find(k.as_str()).map(|pos| (pos, k)))
+            .min_by(|a, b| a.0.cmp(&b.0).then(b.1.len().cmp(&a.1.len())));
+        match hit {
+            None => conv(label),
+            Some((pos, k)) => {
+                let rest = &label[pos + k.len()..];
+                format!(
+                    "{}{}{}",
+                    conv(&label[..pos]),
+                    k,
+                    Self::convert_around(rest, keep, conv)
+                )
+            }
+        }
+    }
+
     /// 候选的显示文本：逆切分次选（带 `display_text`）只显示后段，其余同 [`Self::cand_convert_text`]。
     /// 只给显示出口用（候选窗 / 宿主候选列表 / 移动端拉取），上屏一律走 `cand_convert_text`，
     /// 两者在这里分叉是刻意的（`hfkn` ② 显示「困难」、上屏「很困难」）。
@@ -944,6 +991,12 @@ impl Coordinator {
     /// 智能联想的前缀延伸候选（「中」→「中国」）只显示补出的那一截「国」（见
     /// [`wind_assoc::AssocKind::shows_continuation`]）；`text` 仍是整词，联想历史照旧按它记。
     pub(crate) fn cand_display_text(&self, state: &State, c: &Candidate) -> String {
+        // 命令提示里 `last()` 插进去的是上屏历史（搜索 / 反查的目标）：它本身已是用户上屏的形态，
+        // 再按当前方向转一次，提示就和执行时实际用的字对不上。只转字面文字，历史那段原样保留。
+        if c.is_command && c.phrase_template.contains("last(") {
+            let shown = self.recent_shown_snapshot();
+            return Self::convert_around(&c.text, &shown, &|t| self.maybe_convert(state, t));
+        }
         if c.source == wind_candidate::CandidateSource::Assoc
             && let Some(tail) = &c.commit_override
             && self.assoc_config().kind.shows_continuation()
