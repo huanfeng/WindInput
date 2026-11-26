@@ -619,7 +619,7 @@ fn merge_mixed_speed_models_keeps_both_parts() {
 
 #[test]
 fn invalid_device_dir_ignored() {
-    let s = Store::open(&tmp("wind_st_devdir.redb")).unwrap();
+    let s = Store::open(tmp("wind_st_devdir.redb")).unwrap();
     let day = "version = 1\n[days.2026-01-02]\nchinese = 5\n";
     for name in [
         "pc",
