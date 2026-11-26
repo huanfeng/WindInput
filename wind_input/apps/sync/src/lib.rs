@@ -8,6 +8,7 @@ mod backup;
 mod errors;
 mod fsutil;
 mod hostname;
+pub mod learn_round;
 mod link;
 mod local;
 mod log;

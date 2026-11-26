@@ -31,6 +31,7 @@ use wind_sync_ipc::{Backend as Target, FromSync, Op, RoundStats, Status, SyncSet
 use crate::backends::BackendFactory;
 use crate::backup;
 use crate::errors::{backend_error, crypto_error, sync_error};
+use crate::learn_round;
 use crate::link::CoreLink;
 use crate::local::{Echo, FsLocal, RETRY_TAG, lock};
 use crate::log::{log, now_unix};
@@ -202,6 +203,13 @@ fn library_id(t: Option<&Target>) -> Option<String> {
         Target::S3 { prefix, .. } => Some(format!("{base}\n{}", prefix.trim().trim_matches('/'))),
         _ => Some(base),
     }
+}
+
+/// 学习数据私有状态的库标识：库位置 + 同步密钥校验值。
+fn learn_library(settings: &SyncSettings, secrets: &Secrets) -> Option<String> {
+    let lib = library_id(settings.backend.as_ref())?;
+    let dek = Dek::from_base64(secrets.dek.as_deref()?).ok()?;
+    Some(learn_round::library_key(&lib, &Meta::new(&dek).check))
 }
 
 /// 存储位置是否变了。
@@ -388,6 +396,8 @@ impl Runner {
         }
         let default_id = ids::default_device_id(&display_name(&cfg.settings), cfg.portable);
         let state = statefile::load(&cfg.state_dir, &default_id);
+        let learn_last_ok = learn_library(&cfg.settings, &secrets)
+            .map_or(0, |lib| learn_round::load_last_ok(&cfg.state_dir, &lib));
         let settings = cfg.settings.clone();
         let watch = cfg.watch.then(|| {
             watch::start(&cfg.userdata_dir, tx.clone())
@@ -422,7 +432,7 @@ impl Runner {
             conflicts: Vec::new(),
             last_sent: None,
             info_written: None,
-            learn_last_ok: 0,
+            learn_last_ok,
             _watch: watch.flatten(),
         }
     }
@@ -747,19 +757,62 @@ impl Runner {
         )
         .with_cancel(self.cancel.clone());
         let library_id = library_id(self.settings.backend.as_ref());
+        // 被退避跳过或停止态的轮次不跑学习数据（§4.5 第 1 步）
+        let learn_lib = learn_library(&self.settings, &self.secrets).filter(|_| {
+            learn_due && state.retry.halted.is_none() && (force || state.retry.due(now))
+        });
+        let (userdata, state_dir, link) = (
+            self.cfg.userdata_dir.clone(),
+            self.cfg.state_dir.clone(),
+            self.cfg.link.clone(),
+        );
+        let content = self.settings.content;
+        let cancel = self.cancel.clone();
         let tx = self.tx.clone();
         let spawned = std::thread::Builder::new()
             .name("sync-round".into())
             .spawn(move || {
                 let mut info_written = None;
-                // 学习数据同步的接入点（Task 9）：learn_due 为真时在此用 backend 跑一轮，
-                // 结果写入 learn。目前尚未接入，恒为 None。
-                let _ = learn_due;
-                let learn: Option<Result<(), String>> = None;
+                let mut learn: Option<Result<(), String>> = None;
+                let device = state.device.clone();
+                let lctx = learn_lib.as_deref().map(|lib| {
+                    learn_round::LearnCtx::new(
+                        &userdata, &state_dir, &*link, &device, now, content, lib,
+                    )
+                });
+                // 第 2 步在文件同步之前
+                let mut lstate = None;
+                if let Some(c) = &lctx {
+                    match learn_round::load_state(c)
+                        .and_then(|mut st| learn_round::count_in(c, &mut st).map(|()| st))
+                    {
+                        Ok(st) => lstate = Some(st),
+                        Err(e) => learn = Some(Err(e)),
+                    }
+                }
                 let result = match factory.build(&settings, &password) {
                     Err(m) => Err(m),
                     Ok(backend) => {
                         let r = sync_once(&*backend, &mut local, &mut state, &dek, &ctx);
+                        // 第 3、5 步在文件同步成功之后
+                        if let (Some(c), Some(st), Ok(rep)) = (&lctx, lstate.as_mut(), &r)
+                            && !rep.skipped
+                            && !cancel.load(Ordering::SeqCst)
+                        {
+                            learn = Some(
+                                learn_round::exchange_and_materialize(
+                                    c,
+                                    &*backend,
+                                    &dek.files_key(),
+                                    st,
+                                )
+                                .map(|rep| {
+                                    for w in &rep.warnings {
+                                        log!("学习数据: {w}");
+                                    }
+                                }),
+                            );
+                        }
                         if let Ok(rep) = &r
                             && !rep.skipped
                         {

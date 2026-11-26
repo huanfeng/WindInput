@@ -7,10 +7,12 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use super::lane::Index;
+
 const VERSION: u32 = 1;
 
 /// 一个学习文件组的状态。
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GroupState {
     /// encode(本机完整贡献)
     pub contrib: String,
@@ -43,6 +45,12 @@ pub struct LearnState {
     pub index_gen: u64,
     /// 设备 → 已下载到本地的最新目录编号
     pub peer_seen: BTreeMap<String, u64>,
+    /// 本机上次发布的目录
+    #[serde(default)]
+    pub own_index: Option<Index>,
+    /// 设备 → 已下载到本地的那份目录（`fetch_peers` 的 known）
+    #[serde(default)]
+    pub peer_index: BTreeMap<String, Index>,
 }
 
 impl Default for LearnState {
@@ -55,6 +63,8 @@ impl Default for LearnState {
             last_ok: 0,
             index_gen: 0,
             peer_seen: BTreeMap::new(),
+            own_index: None,
+            peer_index: BTreeMap::new(),
         }
     }
 }

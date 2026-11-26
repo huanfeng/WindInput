@@ -1097,3 +1097,33 @@ fn learn_round_never_runs_when_all_content_off() {
     };
     assert!(!r.learn_wanted(u64::MAX / 2, true));
 }
+
+/// 工作线程跑一轮学习数据：本机贡献发布到学习通道，成功时间记入私有状态，重启后载入。
+#[test]
+fn round_publishes_learned_data_and_restart_loads_last_ok() {
+    let d = tempfile::tempdir().unwrap();
+    let mem = MemBackend::new();
+    let (mut r, rx) = runner_with(d.path(), Box::new(MemFactory(mem.clone())), None, "pc");
+    setup_pc(&mut r);
+    let freq = d.path().join("user/data/pinyin/freq.table.yaml");
+    std::fs::create_dir_all(freq.parent().unwrap()).unwrap();
+    std::fs::write(
+        &freq,
+        "---\ncolumns: [code, text, count, last_used]\nwind:\n  kind: freq\n  escape: true\n...\n# no comment\nni\t你\t3\t1\n",
+    )
+    .unwrap();
+    r.command(Op::SyncNow, &Value::Null).unwrap();
+    round(&mut r, &rx);
+    assert!(r.learn_last_ok > 0);
+    let prefix = wind_sync::manifest::learn_prefix(&r.state.device);
+    assert!(
+        mem.keys(&prefix).iter().any(|k| k.contains("/index.")),
+        "{:?}",
+        mem.keys(&prefix)
+    );
+    let last_ok = r.learn_last_ok;
+    let dek = r.dek().unwrap();
+    drop(r);
+    let (r2, _rx2) = runner_with(d.path(), Box::new(MemFactory(mem)), Some(dek), "pc");
+    assert_eq!(r2.learn_last_ok, last_ok);
+}
