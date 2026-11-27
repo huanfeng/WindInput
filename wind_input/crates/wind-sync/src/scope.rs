@@ -78,6 +78,8 @@ pub fn classify(local: &str) -> Class {
         ["meta.toml", ..] | ["screenshots", ..] | ["charsets", ..] => return Class::Excluded,
         // 本机根顶层的零散文件：macOS 上同样落在用户目录里
         ["user_config.seen"] | ["datadir.conf"] => return Class::Excluded,
+        // 用户库的引擎运行时状态：移动端（及取不到本机状态目录时）落在用户目录里 redb 旁的派生目录
+        ["userdata.redb.state", ..] => return Class::Excluded,
         // 本机目录的子目录与安装目录：macOS 上用户目录与本机目录是同一个，它们会混进来
         ["service" | "state" | "logs" | "cache", ..] => return Class::Excluded,
         // 与远端命名空间前缀同名：能上传却映射不回来
@@ -274,6 +276,8 @@ mod tests {
             "cache/pinyin.wdat",
             "user_config.seen",
             "datadir.conf",
+            "userdata.redb.state/journal/state",
+            "userdata.redb.state/pinyin/freq.meta",
             "schemas/.x.tmp",
             "themes/a.tmp",
             "config.conflict-a-2026-11-24.toml",

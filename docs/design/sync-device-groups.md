@@ -61,6 +61,7 @@
 - 顶层 `service/`、`state/`、`logs/`、`cache/`、`user_config.seen`、`datadir.conf`：macOS 的用户目录与本机目录是同一个，
   安装目录与本机状态会混进来。同步进程另按实际路径跳过落在用户目录内的本机目录与安装目录，引擎当范围外处理：
   远端同路径的对象不下载，本机列举里没有也不判成本地删除。
+- 顶层 `userdata.redb.state/`：用户库的引擎运行时状态。移动端没有独立的本机状态目录，它落在用户目录里。
 - 二期的学习数据：`temp.dict.yaml`、`freq.table.yaml`、`assoc.table.yaml`、`draft.dict.yaml`、`data/stats/`、`completion.table.yaml`。
 
 各类只在该平台的用户目录里有对应文件时才起作用。比如 Android 没有 `extensions/`，移动类别下就没有扩展条目。
