@@ -216,3 +216,25 @@ fn replace_months_rejects_bad_input_without_writing() {
         assert_eq!(s.get_daily_stat("2020-01-01").unwrap().chinese, 10);
     }
 }
+
+/// `device` 参数：`all` 与 `self` 是保留字，其余须是有统计的他机号；没有用户库时只认保留字。
+#[test]
+fn scope_parse_accepts_keywords_and_known_devices() {
+    let s = store("scope_parse");
+    put_device(&s, "phone", "2020-01-01", "chinese = 5");
+    assert_eq!(StatsScope::parse(Some(&s), "all"), Ok(StatsScope::All));
+    assert_eq!(
+        StatsScope::parse(Some(&s), "self"),
+        Ok(StatsScope::SelfOnly)
+    );
+    assert_eq!(
+        StatsScope::parse(Some(&s), "phone"),
+        Ok(StatsScope::Device("phone".into()))
+    );
+    assert_eq!(
+        StatsScope::parse(Some(&s), "tablet"),
+        Err("未知设备：tablet".into())
+    );
+    assert_eq!(StatsScope::parse(None, "all"), Ok(StatsScope::All));
+    assert!(StatsScope::parse(None, "phone").is_err());
+}

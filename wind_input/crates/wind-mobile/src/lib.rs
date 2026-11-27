@@ -977,35 +977,76 @@ impl MobileCore {
     //
     // 算法与桌面设置页同一份（`wind_store::stats_report`），本层只做取句柄与形状转换。
 
-    /// 概览汇总。没有用户库（只读降级、无库的测试壳）时为 `None`。
+    /// 概览汇总（全部设备合计）。没有用户库（只读降级、无库的测试壳）时为 `None`。
     pub fn stats_summary(&self) -> Option<StatsSummary> {
-        use wind_coordinator::web_host::WebDataHost;
-        let store = self.coord.user_store()?;
-        let collector = self.coord.stat_collector()?;
-        Some(wind_store::stats_report::summary(store, collector))
+        self.stats_summary_for("all").ok().flatten()
     }
 
-    /// `[from, to]`（`YYYY-MM-DD`，含首尾）每一天的字数，缺的日子补零，今天取内存最新值。
+    /// `[from, to]`（`YYYY-MM-DD`，含首尾）每一天的字数（全部设备合计），缺的日子补零，今天取内存最新值。
     pub fn stats_daily(&self, from: &str, to: &str) -> Vec<DailyTotal> {
+        self.stats_daily_for(from, to, "all").unwrap_or_else(|e| {
+            tracing::warn!("{e}");
+            Vec::new()
+        })
+    }
+
+    /// 有他机统计（经同步下载）的设备号，升序。为空时设置页不显示设备选择。
+    pub fn stats_devices(&self) -> Vec<String> {
         use wind_coordinator::web_host::WebDataHost;
-        let Some(store) = self.coord.user_store() else {
-            return Vec::new();
+        self.coord
+            .user_store()
+            .map(|s| s.list_device_stats())
+            .unwrap_or_default()
+    }
+
+    fn stats_scope(&self, device: &str) -> Result<wind_store::stats_report::StatsScope, String> {
+        use wind_coordinator::web_host::WebDataHost;
+        wind_store::stats_report::StatsScope::parse(self.coord.user_store().map(|s| &**s), device)
+    }
+
+    /// 按设备口径的概览汇总：`device` 为 `all`（全部设备）、`self`（本机）或 [`Self::stats_devices`] 里的设备号，
+    /// 未知设备报错。没有用户库时为 `Ok(None)`。
+    pub fn stats_summary_for(&self, device: &str) -> Result<Option<StatsSummary>, String> {
+        use wind_coordinator::web_host::WebDataHost;
+        let scope = self.stats_scope(device)?;
+        let (Some(store), Some(collector)) = (self.coord.user_store(), self.coord.stat_collector())
+        else {
+            return Ok(None);
         };
-        match wind_store::stats_report::daily_range(store, self.coord.stat_collector(), from, to) {
-            Ok(days) => days
-                .into_iter()
-                .map(|(date, r)| DailyTotal {
-                    total: r.total(),
-                    chinese: r.chinese,
-                    english: r.english,
-                    date,
-                })
-                .collect(),
-            Err(e) => {
-                tracing::warn!("读每日统计失败: {e}");
-                Vec::new()
-            }
-        }
+        Ok(Some(wind_store::stats_report::summary_for(
+            store, collector, &scope,
+        )))
+    }
+
+    /// 按设备口径（同 [`Self::stats_summary_for`]）的每日字数。没有用户库时为空。
+    pub fn stats_daily_for(
+        &self,
+        from: &str,
+        to: &str,
+        device: &str,
+    ) -> Result<Vec<DailyTotal>, String> {
+        use wind_coordinator::web_host::WebDataHost;
+        let scope = self.stats_scope(device)?;
+        let Some(store) = self.coord.user_store() else {
+            return Ok(Vec::new());
+        };
+        let days = wind_store::stats_report::daily_range_for(
+            store,
+            self.coord.stat_collector(),
+            &scope,
+            from,
+            to,
+        )
+        .map_err(|e| format!("读每日统计失败: {e}"))?;
+        Ok(days
+            .into_iter()
+            .map(|(date, r)| DailyTotal {
+                total: r.total(),
+                chinese: r.chinese,
+                english: r.english,
+                date,
+            })
+            .collect())
     }
 
     /// 清空全部输入统计（历史 + 今日内存）。

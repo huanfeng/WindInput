@@ -399,3 +399,52 @@ fn status_carries_removed_devices_and_usage() {
     assert_eq!(v["phase"], "disabled");
     let _ = std::fs::remove_dir_all(user);
 }
+
+/// 按设备看统计：设备列表即有他机统计的设备号；`all`/`self`/设备号三种口径，未知设备报错；原接口即 `all`。
+#[test]
+fn stats_by_device() {
+    let (core, user) = core("stats_dev");
+    let store = core.coord.user_store().unwrap().clone();
+    assert!(core.stats_devices().is_empty());
+    store
+        .put_daily_stat(
+            "2020-01-05",
+            &wind_store::stats::DailyStats {
+                chinese: 7,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let d = store.stats_dir().join("devices/phone");
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(
+        d.join("2020-01.toml"),
+        "version = 1\n[days.\"2020-01-05\"]\nchinese = 3\n",
+    )
+    .unwrap();
+    assert_eq!(core.stats_devices(), ["phone"]);
+    let total = |dev: &str| {
+        core.stats_summary_for(dev)
+            .unwrap()
+            .map(|s| s.total_chars)
+            .unwrap()
+    };
+    assert_eq!(total("phone"), 3);
+    assert_eq!(total("all"), core.stats_summary().unwrap().total_chars);
+    assert!(core.stats_summary_for("tablet").is_err());
+    let day = |dev: &str| {
+        core.stats_daily_for("2020-01-05", "2020-01-05", dev)
+            .unwrap()[0]
+            .total
+    };
+    assert_eq!(day("phone"), 3);
+    assert_eq!(
+        day("all"),
+        core.stats_daily("2020-01-05", "2020-01-05")[0].total
+    );
+    assert!(
+        core.stats_daily_for("2020-01-05", "2020-01-05", "tablet")
+            .is_err()
+    );
+    let _ = std::fs::remove_dir_all(user);
+}

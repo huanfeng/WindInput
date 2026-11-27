@@ -49,6 +49,23 @@ pub enum StatsScope {
     Device(String),
 }
 
+impl StatsScope {
+    /// 设置页的设备参数：`all` = 全部设备，`self` = 本机，其余须是 [`Store::list_device_stats`] 里的设备号。
+    pub fn parse(store: Option<&Store>, device: &str) -> Result<StatsScope, String> {
+        Ok(match device {
+            "all" => StatsScope::All,
+            "self" => StatsScope::SelfOnly,
+            d => {
+                let known = store.is_some_and(|s| s.list_device_stats().iter().any(|x| x == d));
+                if !known {
+                    return Err(format!("未知设备：{d}"));
+                }
+                StatsScope::Device(d.to_string())
+            }
+        })
+    }
+}
+
 type Days = Vec<(String, DailyStats)>;
 
 /// 按口径取 [from, to] 的按天数据（不含采集器内存）。`All` 把各设备同日记录并入本机。

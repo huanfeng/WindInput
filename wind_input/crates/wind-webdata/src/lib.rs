@@ -3758,26 +3758,14 @@ pub trait WebDataRpc: WebDataHost {
 
     /// `device` 参数：缺省或 `all` = 全部设备，`self` = 本机，其余须是 `stats.devices` 里的设备号。
     fn stats_scope(&self, params: &Value) -> anyhow::Result<wind_store::stats_report::StatsScope> {
-        use wind_store::stats_report::StatsScope;
         let dev = match params.get("device") {
             None | Some(Value::Null) => "all",
             Some(v) => v
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("device 须为字符串"))?,
         };
-        Ok(match dev {
-            "all" => StatsScope::All,
-            "self" => StatsScope::SelfOnly,
-            d => {
-                let known = self
-                    .user_store()
-                    .is_some_and(|s| s.list_device_stats().iter().any(|x| x == d));
-                if !known {
-                    anyhow::bail!("未知设备：{d}");
-                }
-                StatsScope::Device(d.to_string())
-            }
-        })
+        wind_store::stats_report::StatsScope::parse(self.user_store().map(|s| &**s), dev)
+            .map_err(anyhow::Error::msg)
     }
 
     fn web_stats_devices(&self) -> anyhow::Result<Value> {
