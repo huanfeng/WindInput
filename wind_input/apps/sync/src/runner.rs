@@ -162,6 +162,8 @@ pub struct Runner {
     force_now: bool,
     /// 宿主自动触发（`sync_now` 带 `auto`）排的一轮：不强制，学习数据间隔与退避照常生效。
     auto_now: bool,
+    /// 进行中的这一轮由 auto 触发（且未被强制）：此时来的手动立即同步要在本轮后补一轮强制轮。
+    round_auto: bool,
     /// 已结束的轮次数与最近一轮结果。
     round_no: u64,
     last_round: Option<RoundStats>,
@@ -457,6 +459,7 @@ impl Runner {
             clear_halt_after_round: false,
             force_now: false,
             auto_now: false,
+            round_auto: false,
             round_no: 0,
             last_round: None,
             round_forced: false,
@@ -821,7 +824,7 @@ impl Runner {
     /// 起工作线程跑一轮；结果经 `Input::RoundDone` 回主循环。
     fn start_round(&mut self) {
         let force = std::mem::take(&mut self.force_now);
-        self.auto_now = false;
+        self.round_auto = std::mem::take(&mut self.auto_now) && !force;
         self.round_forced |= force;
         let allow_mass = std::mem::take(&mut self.allow_mass_once);
         self.debounce_until = None;

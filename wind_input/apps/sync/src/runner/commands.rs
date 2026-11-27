@@ -218,7 +218,10 @@ impl Runner {
     }
 
     /// 立即同步。`{"auto": true}` 是宿主的自动触发（如手机键盘弹出）：排一轮但不强制、不解除停止态，
-    /// 同步中或停止态时直接不排。
+    /// 同步中或停止态时直接不排。退避期内的 auto 轮被跳过、不计轮次，回执里的票号要等下一轮跑完才兑现。
+    ///
+    /// 手动请求赶上进行中的强制轮或周期轮，并入那一轮；赶上 auto 轮则本轮后补一轮强制轮，
+    /// 票号取补的那一轮（auto 轮被跳过时同样晚一轮兑现）。
     pub(super) fn cmd_sync_now(&mut self, args: &Value) -> Result<Value, String> {
         let auto = args.get("auto").and_then(Value::as_bool).unwrap_or(false);
         if !self.configured() {
@@ -238,10 +241,16 @@ impl Runner {
         }
         let ticket = self.round_no + 1;
         if self.syncing {
-            // 进行中的这一轮结束即算完成，不再另排一轮
-            if !auto {
-                self.clear_halt_after_round = true;
+            if auto {
+                return Ok(json!({ "queued": false, "busy": true, "ticket": ticket }));
             }
+            self.clear_halt_after_round = true;
+            if self.round_auto {
+                // auto 轮不强制：学习数据可能不交换、退避期会跳过，手动要的是一次真正的同步
+                self.force_now = true;
+                return Ok(json!({ "queued": true, "ticket": ticket + 1 }));
+            }
+            // 进行中的这一轮结束即算完成，不再另排一轮
             return Ok(json!({ "queued": false, "busy": true, "ticket": ticket }));
         }
         if auto {

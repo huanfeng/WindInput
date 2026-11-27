@@ -661,6 +661,37 @@ fn auto_sync_now_runs_learn_only_when_due() {
     assert!(r.status().last_round.unwrap().forced);
 }
 
+/// auto 轮进行中来手动立即同步：本轮后补一轮强制轮（学习数据照样交换），并照旧在本轮后解除停止态。
+#[test]
+fn manual_sync_now_during_auto_round_queues_forced_round() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, rx) = runner_with(
+        d.path(),
+        Box::new(MemFactory(MemBackend::new())),
+        None,
+        "pc",
+    );
+    setup_pc(&mut r);
+    write_freq(d.path(), 3);
+    let recent = now_unix() - 60;
+    r.learn_last_ok = recent;
+    r.command(Op::SyncNow, &json!({"auto": true})).unwrap();
+    r.start_round();
+    let rep = r.command(Op::SyncNow, &Value::Null).unwrap();
+    assert_eq!(rep["queued"], true);
+    assert_eq!(rep["ticket"], r.status().round + 2);
+    assert!(r.clear_halt_after_round);
+    let x = wait_round(&rx);
+    r.finish_round(*x);
+    assert_eq!(r.learn_last_ok, recent, "auto 轮本身不跑学习轮");
+    assert!(r.next_wake(Instant::now()).is_some(), "应补排一轮");
+    round(&mut r, &rx);
+    let st = r.status();
+    assert_eq!(st.round, 2);
+    assert!(st.last_round.unwrap().forced);
+    assert!(r.learn_last_ok > recent, "补的强制轮交换学习数据");
+}
+
 /// auto 轮受文件同步的失败退避约束：退避期内跳过，不上传。
 #[test]
 fn auto_sync_now_respects_backoff() {
