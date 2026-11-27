@@ -217,7 +217,10 @@ impl Runner {
         Ok(json!({ "key": dek.to_key_string() }))
     }
 
-    pub(super) fn cmd_sync_now(&mut self) -> Result<Value, String> {
+    /// 立即同步。`{"auto": true}` 是宿主的自动触发（如手机键盘弹出）：排一轮但不强制、不解除停止态，
+    /// 同步中或停止态时直接不排。
+    pub(super) fn cmd_sync_now(&mut self, args: &Value) -> Result<Value, String> {
+        let auto = args.get("auto").and_then(Value::as_bool).unwrap_or(false);
         if !self.configured() {
             return Err("同步未启用或尚未配置存储后端".into());
         }
@@ -236,8 +239,17 @@ impl Runner {
         let ticket = self.round_no + 1;
         if self.syncing {
             // 进行中的这一轮结束即算完成，不再另排一轮
-            self.clear_halt_after_round = true;
+            if !auto {
+                self.clear_halt_after_round = true;
+            }
             return Ok(json!({ "queued": false, "busy": true, "ticket": ticket }));
+        }
+        if auto {
+            if self.state.retry.halted.is_some() {
+                return Ok(json!({ "queued": false, "halted": true }));
+            }
+            self.auto_now = true;
+            return Ok(json!({ "queued": true, "ticket": ticket }));
         }
         self.clear_halt();
         self.force_now = true;

@@ -326,7 +326,8 @@ impl MobileSync {
 
     /// 已启用并配置好、距上次成功或上次尝试已超过 `min_interval_secs` 时，起一轮后台同步并立即返回 `true`；
     /// 其余情况（未配置、缺机密、身份未确认、正在同步、停在错误态、间隔未到）返回 `false`。
-    /// 键盘弹出时调用，耗时可忽略。
+    /// 键盘弹出时调用，耗时可忽略。这一轮不强制（与手动「立即同步」不同）：不解除停止态，
+    /// 学习数据最多每 30 分钟交换一次。
     pub fn sync_if_due(&self, min_interval_secs: u64) -> bool {
         {
             let s = lock(&self.settings);
@@ -345,13 +346,13 @@ impl MobileSync {
             return false;
         }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        // 不等回执：被拒（缺机密等）会体现在状态里
+        // 不等回执：被拒（缺机密等）会体现在状态里。`auto` 不强制：学习数据仍守 30 分钟间隔，失败退避照常
         let sent = self
             .tx
             .send(Input::Core(ToSync::Command {
                 id,
                 op: Op::SyncNow,
-                args: Value::Null,
+                args: json!({ "auto": true }),
             }))
             .is_ok();
         if sent {

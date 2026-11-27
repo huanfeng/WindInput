@@ -293,3 +293,79 @@ fn replace_months_request_swaps_stats() {
     );
     let _ = std::fs::remove_dir_all(user);
 }
+
+/// Runner 已结束的轮次数（状态帧里有，门面 JSON 不透出）。
+fn rounds(s: &MobileSync) -> u64 {
+    lock(&s.shared.status).round
+}
+
+/// 等 `before` 之后的一轮结束。
+fn wait_round_after(s: &MobileSync, before: u64) {
+    let t = Instant::now();
+    while rounds(s) <= before || phase(s)["phase"] == "syncing" {
+        assert!(t.elapsed() < WAIT, "等待一轮结束超时: {}", s.status());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// 手动立即同步一轮并等它结束。
+fn manual_round(s: &MobileSync) {
+    let before = rounds(s);
+    s.command("sync_now", "").unwrap();
+    wait_round_after(s, before);
+}
+
+fn record(core: &MobileCore, n: u32) {
+    let store = core.coord.user_store().unwrap();
+    for _ in 0..n {
+        store.record_freq("pinyin", "ni", "你").unwrap();
+    }
+    store.flush_user_data().unwrap();
+}
+
+fn freq(core: &MobileCore) -> u32 {
+    let store = core.coord.user_store().unwrap();
+    store
+        .get_freq("pinyin", "ni", "你")
+        .unwrap()
+        .map_or(0, |r| r.count)
+}
+
+/// 两台手机同库：学习数据经同步到达对方并计数相加，且进入核心内存（`data.beginEdit/endEdit` 对学习文件可用）。
+/// 键盘弹出触发的一轮（`sync_if_due`）不强制：30 分钟内不再交换学习数据，手动立即同步仍交换。
+#[test]
+fn learned_data_syncs_between_phones_and_popup_round_is_not_forced() {
+    let remote = MemBackend::new();
+    let (a, core_a, user_a) = mobile("lrn_a", &remote);
+    join(&a, None);
+    record(&core_a, 3);
+    manual_round(&a);
+    let key: Value = serde_json::from_str(&a.command("export_key", "").unwrap()).unwrap();
+    let key = key["key"].as_str().unwrap().to_string();
+
+    let (b, core_b, user_b) = mobile("lrn_b", &remote);
+    join(&b, Some(&key));
+    b.command("confirm_identity", "{}").unwrap();
+    wait("b 已确认", &b, |v| v["needs_identity"] == false);
+    record(&core_b, 2);
+    manual_round(&b);
+    assert_eq!(freq(&core_b), 5, "{}", b.status());
+    manual_round(&a);
+    assert_eq!(freq(&core_a), 5, "{}", a.status());
+
+    record(&core_a, 1);
+    let before = rounds(&a);
+    assert!(a.sync_if_due(0));
+    wait_round_after(&a, before);
+    manual_round(&b);
+    assert_eq!(freq(&core_b), 5, "弹出触发的一轮不该提前交换学习数据");
+
+    manual_round(&a);
+    manual_round(&b);
+    assert_eq!(freq(&core_b), 6, "手动立即同步强制交换");
+
+    a.shutdown();
+    b.shutdown();
+    let _ = std::fs::remove_dir_all(user_a);
+    let _ = std::fs::remove_dir_all(user_b);
+}

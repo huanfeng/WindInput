@@ -141,7 +141,7 @@ pub struct Config {
     pub class: DeviceClass,
     /// 绿色版：默认设备号加 `-portable`。
     pub portable: bool,
-    /// 只在被要求时（`sync_now` / 确认大批量删除）才跑一轮，不按间隔与设置变更自行调度。
+    /// 只在被要求时（`sync_now`，含 `auto` / 确认大批量删除）才跑一轮，不按间隔与设置变更自行调度。
     /// 进程内运行的手机端由宿主决定何时同步。
     pub on_demand: bool,
 }
@@ -160,6 +160,8 @@ pub struct Runner {
     /// 同步进行中用户改了设置：本轮结束后再解除停止态。
     clear_halt_after_round: bool,
     force_now: bool,
+    /// 宿主自动触发（`sync_now` 带 `auto`）排的一轮：不强制，学习数据间隔与退避照常生效。
+    auto_now: bool,
     /// 已结束的轮次数与最近一轮结果。
     round_no: u64,
     last_round: Option<RoundStats>,
@@ -454,6 +456,7 @@ impl Runner {
             syncing: false,
             clear_halt_after_round: false,
             force_now: false,
+            auto_now: false,
             round_no: 0,
             last_round: None,
             round_forced: false,
@@ -657,7 +660,7 @@ impl Runner {
         if self.syncing || self.usage_busy || !self.runnable() {
             return None;
         }
-        if self.force_now {
+        if self.force_now || self.auto_now {
             return Some(now);
         }
         if self.cfg.on_demand {
@@ -818,6 +821,7 @@ impl Runner {
     /// 起工作线程跑一轮；结果经 `Input::RoundDone` 回主循环。
     fn start_round(&mut self) {
         let force = std::mem::take(&mut self.force_now);
+        self.auto_now = false;
         self.round_forced |= force;
         let allow_mass = std::mem::take(&mut self.allow_mass_once);
         self.debounce_until = None;
@@ -1199,7 +1203,7 @@ impl Runner {
             Op::CreateKey => self.cmd_create_key(),
             Op::ImportKey => self.cmd_import_key(args),
             Op::ExportKey => self.cmd_export_key(),
-            Op::SyncNow => self.cmd_sync_now(),
+            Op::SyncNow => self.cmd_sync_now(args),
             Op::ResetRemote => self.cmd_reset_remote(args),
             Op::ListDevices => self.cmd_list_devices(),
             Op::RemoveDevice => self.cmd_remove_device(args),

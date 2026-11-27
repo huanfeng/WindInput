@@ -629,6 +629,98 @@ fn sync_now_returns_ticket_and_round_advances() {
     assert_eq!(last.error, None);
 }
 
+/// 宿主自动触发（`auto`）排一轮但不强制：学习数据守 30 分钟间隔，到期才跑；手动仍强制。
+#[test]
+fn auto_sync_now_runs_learn_only_when_due() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, rx) = runner_with(
+        d.path(),
+        Box::new(MemFactory(MemBackend::new())),
+        None,
+        "pc",
+    );
+    setup_pc(&mut r);
+    write_freq(d.path(), 3);
+    let auto = json!({"auto": true});
+    assert_eq!(r.command(Op::SyncNow, &auto).unwrap()["queued"], true);
+    assert!(!r.force_now, "auto 不强制");
+    assert!(r.next_wake(Instant::now()).is_some(), "auto 也要排上一轮");
+    round(&mut r, &rx);
+    assert!(r.learn_last_ok > 0, "首轮学习数据到期，应跑");
+    assert!(!r.status().last_round.unwrap().forced);
+
+    let recent = now_unix() - 60;
+    r.learn_last_ok = recent;
+    r.command(Op::SyncNow, &auto).unwrap();
+    round(&mut r, &rx);
+    assert_eq!(r.learn_last_ok, recent, "未满 30 分钟的学习轮不跑");
+
+    r.command(Op::SyncNow, &Value::Null).unwrap();
+    round(&mut r, &rx);
+    assert!(r.learn_last_ok > recent, "手动立即同步强制跑学习轮");
+    assert!(r.status().last_round.unwrap().forced);
+}
+
+/// auto 轮受文件同步的失败退避约束：退避期内跳过，不上传。
+#[test]
+fn auto_sync_now_respects_backoff() {
+    let d = tempfile::tempdir().unwrap();
+    let mem = MemBackend::new();
+    let (mut r, rx) = runner_with(d.path(), Box::new(MemFactory(mem.clone())), None, "pc");
+    setup_pc(&mut r);
+    r.state.retry.failures = 1;
+    r.state.retry.next_at = now_unix() + 3600;
+    std::fs::write(d.path().join("user/config.toml"), "a = 1\n").unwrap();
+    r.command(Op::SyncNow, &json!({"auto": true})).unwrap();
+    round(&mut r, &rx);
+    assert!(
+        mem.raw_get(&manifest::manifest_key("pc", 1)).is_none(),
+        "退避期内不应同步"
+    );
+}
+
+/// auto 不解除停止态，也不排轮；手动立即同步照旧解除。
+#[test]
+fn auto_sync_now_keeps_halt() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, _rx) = runner_with(
+        d.path(),
+        Box::new(MemFactory(MemBackend::new())),
+        None,
+        "pc",
+    );
+    setup_pc(&mut r);
+    r.state.retry.halted = Some("出错了".into());
+    let rep = r.command(Op::SyncNow, &json!({"auto": true})).unwrap();
+    assert_eq!(rep["queued"], false);
+    assert_eq!(r.state.retry.halted.as_deref(), Some("出错了"));
+    assert!(r.next_wake(Instant::now()).is_none());
+    r.command(Op::SyncNow, &Value::Null).unwrap();
+    assert!(r.state.retry.halted.is_none());
+    assert!(r.force_now);
+}
+
+/// 同步进行中再来 auto：不另排、也不在本轮结束后解除停止态。
+#[test]
+fn auto_sync_now_while_syncing_is_dropped() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, rx) = runner_with(
+        d.path(),
+        Box::new(MemFactory(MemBackend::new())),
+        None,
+        "pc",
+    );
+    setup_pc(&mut r);
+    r.command(Op::SyncNow, &Value::Null).unwrap();
+    r.start_round();
+    let rep = r.command(Op::SyncNow, &json!({"auto": true})).unwrap();
+    assert_eq!(rep["busy"], true);
+    assert!(!r.clear_halt_after_round);
+    let x = wait_round(&rx);
+    r.finish_round(*x);
+    assert!(!r.auto_now && !r.force_now, "不应再排一轮");
+}
+
 #[test]
 fn sync_now_while_syncing_reports_busy() {
     let d = tempfile::tempdir().unwrap();
