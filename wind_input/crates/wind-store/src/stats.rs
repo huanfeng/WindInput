@@ -165,6 +165,8 @@ impl DailyStats {
             by_schema,
             by_source,
         } = other;
+        // 旧口径的速度分子是 total()，要在字数累加前取，否则会把 other 的字数再算一遍
+        let (sc, sm) = self.speed_parts();
         // 字符分类、上屏次数：求和
         self.chinese = self.chinese.saturating_add(*chinese);
         self.english = self.english.saturating_add(*english);
@@ -181,7 +183,6 @@ impl DailyStats {
         // 速度：分子（字数）与分母（时长）都是可加量，分别求和，速度读取时再除一次。
         // 两边的记录模型不同（v2 / 旧口径）时，先各自折成 `speed_parts` 的 (字数, 毫秒) 再相加，
         // 并标成 v2，否则读回时会按旧口径把 speed_chars 当成 0。
-        let (sc, sm) = self.speed_parts();
         let (oc, om) = other.speed_parts();
         if self.speed_v2 == *speed_v2 {
             self.speed_chars = self.speed_chars.saturating_add(*speed_chars);

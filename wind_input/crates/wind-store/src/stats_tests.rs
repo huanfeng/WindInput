@@ -618,6 +618,21 @@ fn merge_mixed_speed_models_keeps_both_parts() {
 }
 
 #[test]
+fn merge_into_empty_day_does_not_double_count_speed_chars() {
+    // 只有他机有数据的日期从缺省（旧口径）记录开始合并
+    let other = DailyStats {
+        chinese: 50,
+        speed_v2: true,
+        speed_chars: 50,
+        active_millis: 30_000,
+        ..Default::default()
+    };
+    let mut m = DailyStats::default();
+    m.merge_from(&other);
+    assert_eq!(m.speed_parts(), (50, 30_000));
+}
+
+#[test]
 fn invalid_device_dir_ignored() {
     let s = Store::open(tmp("wind_st_devdir.redb")).unwrap();
     let day = "version = 1\n[days.2026-01-02]\nchinese = 5\n";
