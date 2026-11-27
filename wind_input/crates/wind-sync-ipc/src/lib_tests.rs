@@ -387,3 +387,46 @@ fn status_carries_usage() {
     assert!(v.get("blobs_unreferenced").is_none(), "无法确定时省略: {v}");
     assert_eq!(Op::parse("refresh_usage"), Some(Op::RefreshUsage));
 }
+
+/// 设置页状态视图：宿主字段由参数给出，`last_error` 用宿主判定的值；四个可选字段空时省略。
+#[test]
+fn status_view_fields_and_omission() {
+    let host = StatusHost {
+        installed: true,
+        enabled: true,
+        running: false,
+        phase: "idle",
+        last_error: Some("宿主的错误"),
+    };
+    let st = Status {
+        phase: "syncing".into(),
+        last_error: Some("进程的错误".into()),
+        device: "pc".into(),
+        round: 3,
+        ..Default::default()
+    };
+    let v = status_view(&st, &host);
+    assert_eq!(v["phase"], "idle");
+    assert_eq!(v["last_error"], "宿主的错误");
+    assert_eq!(v["running"], false);
+    assert_eq!(v["device"], "pc");
+    assert!(v.get("round").is_none(), "{v}");
+    for k in ["removed_with_data", "usage", "usage_busy", "usage_error"] {
+        assert!(v.get(k).is_none(), "空时省略 {k}: {v}");
+    }
+    let st = Status {
+        removed_with_data: vec!["old".into()],
+        usage: Some(Usage {
+            total: 9,
+            ..Default::default()
+        }),
+        usage_busy: true,
+        usage_error: Some("断网".into()),
+        ..Default::default()
+    };
+    let v = status_view(&st, &host);
+    assert_eq!(v["removed_with_data"], json!(["old"]));
+    assert_eq!(v["usage"]["total"], 9);
+    assert_eq!(v["usage_busy"], true);
+    assert_eq!(v["usage_error"], "断网");
+}

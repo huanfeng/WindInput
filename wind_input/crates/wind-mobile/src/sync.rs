@@ -255,37 +255,26 @@ impl MobileSync {
         Ok(json!({ "ok": true }).to_string())
     }
 
-    /// 同桌面 `sync.status`：`{installed, enabled, running, phase, last_ok, last_error, pending,
-    /// conflicts, conflict_paths, has_secret, joined}`。
+    /// 同桌面 `sync.status`（[`wind_sync_ipc::status_view`]）。
     pub fn status(&self) -> String {
         let enabled = lock(&self.settings).enabled;
         let st = lock(&self.shared.status).clone();
         let running = lock(&self.handle).is_some();
         let phase = if !enabled {
-            "disabled".to_string()
+            "disabled"
         } else if st.phase.is_empty() {
-            "starting".to_string()
+            "starting"
         } else {
-            st.phase.clone()
+            st.phase.as_str()
         };
-        json!({
-            "installed": true,
-            "enabled": enabled,
-            "running": running,
-            "phase": phase,
-            "last_ok": st.last_ok,
-            "last_error": st.last_error,
-            "pending": st.pending,
-            "conflicts": st.conflicts,
-            "conflict_paths": st.conflict_paths,
-            "has_secret": st.has_secret,
-            "joined": st.joined,
-            "device": st.device,
-            "group": st.group,
-            "group_name": st.group_name,
-            "needs_identity": st.needs_identity,
-        })
-        .to_string()
+        let host = wind_sync_ipc::StatusHost {
+            installed: true,
+            enabled,
+            running,
+            phase,
+            last_error: st.last_error.as_deref(),
+        };
+        wind_sync_ipc::status_view(&st, &host).to_string()
     }
 
     /// 同桌面 `sync.command`：`op` 为 `sync_now` / `test_connection` / `create_key` / `import_key` /

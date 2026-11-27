@@ -369,3 +369,33 @@ fn learned_data_syncs_between_phones_and_popup_round_is_not_forced() {
     let _ = std::fs::remove_dir_all(user_a);
     let _ = std::fs::remove_dir_all(user_b);
 }
+
+/// 门面状态与桌面 `sync.status` 同形：已移除设备、空间占用与统计中/失败原因都透出，空时省略。
+#[test]
+fn status_carries_removed_devices_and_usage() {
+    let remote = MemBackend::new();
+    let (sync, _core, user) = mobile("st_usage", &remote);
+    let v = phase(&sync);
+    for k in ["removed_with_data", "usage", "usage_busy", "usage_error"] {
+        assert!(v.get(k).is_none(), "空时省略 {k}: {v}");
+    }
+    // 先停 Runner，免得它的状态帧覆盖下面手填的状态
+    sync.shutdown();
+    {
+        let mut st = lock(&sync.shared.status);
+        st.removed_with_data = vec!["old".into()];
+        st.usage = Some(wind_sync_ipc::Usage {
+            total: 42,
+            ..Default::default()
+        });
+        st.usage_busy = true;
+        st.usage_error = Some("断网".into());
+    }
+    let v = phase(&sync);
+    assert_eq!(v["removed_with_data"], json!(["old"]));
+    assert_eq!(v["usage"]["total"], 42);
+    assert_eq!(v["usage_busy"], true);
+    assert_eq!(v["usage_error"], "断网");
+    assert_eq!(v["phase"], "disabled");
+    let _ = std::fs::remove_dir_all(user);
+}

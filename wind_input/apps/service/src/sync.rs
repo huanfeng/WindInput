@@ -693,40 +693,15 @@ impl SyncHost {
     }
 
     fn view(&self, inner: &Inner) -> Value {
-        let installed = (self.installed)();
-        let running = inner.link.is_some();
         let (phase, last_error) = self.phase_of(inner);
-        let mut v = json!({
-            "installed": installed,
-            "enabled": inner.settings.enabled,
-            "running": running,
-            "phase": phase,
-            "last_ok": inner.status.last_ok,
-            "last_error": last_error,
-            "pending": inner.status.pending,
-            "conflicts": inner.status.conflicts,
-            "conflict_paths": inner.status.conflict_paths,
-            "has_secret": inner.status.has_secret,
-            "joined": inner.status.joined,
-            "device": inner.status.device,
-            "group": inner.status.group,
-            "group_name": inner.status.group_name,
-            "needs_identity": inner.status.needs_identity,
-        });
-        // 与 ipc 的序列化一致：空时省略
-        if !inner.status.removed_with_data.is_empty() {
-            v["removed_with_data"] = json!(inner.status.removed_with_data);
-        }
-        if let Some(u) = &inner.status.usage {
-            v["usage"] = json!(u);
-        }
-        if inner.status.usage_busy {
-            v["usage_busy"] = json!(true);
-        }
-        if let Some(e) = &inner.status.usage_error {
-            v["usage_error"] = json!(e);
-        }
-        v
+        let host = wind_sync_ipc::StatusHost {
+            installed: (self.installed)(),
+            enabled: inner.settings.enabled,
+            running: inner.link.is_some(),
+            phase: &phase,
+            last_error: last_error.as_deref(),
+        };
+        wind_sync_ipc::status_view(&inner.status, &host)
     }
 
     fn emit_status(&self) {

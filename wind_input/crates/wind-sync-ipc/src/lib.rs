@@ -381,6 +381,49 @@ pub struct Status {
     pub usage_error: Option<String>,
 }
 
+/// [`status_view`] 里由宿主判定的字段：同步是否装了、开了、进程是否在跑、对外的阶段与错误。
+pub struct StatusHost<'a> {
+    pub installed: bool,
+    pub enabled: bool,
+    pub running: bool,
+    pub phase: &'a str,
+    pub last_error: Option<&'a str>,
+}
+
+/// 设置页的 `sync.status` 视图，桌面 RPC 与手机门面共用。可选字段的省略规则与 [`Status`] 的序列化一致。
+pub fn status_view(st: &Status, host: &StatusHost) -> Value {
+    let mut v = serde_json::json!({
+        "installed": host.installed,
+        "enabled": host.enabled,
+        "running": host.running,
+        "phase": host.phase,
+        "last_ok": st.last_ok,
+        "last_error": host.last_error,
+        "pending": st.pending,
+        "conflicts": st.conflicts,
+        "conflict_paths": st.conflict_paths,
+        "has_secret": st.has_secret,
+        "joined": st.joined,
+        "device": st.device,
+        "group": st.group,
+        "group_name": st.group_name,
+        "needs_identity": st.needs_identity,
+    });
+    if !st.removed_with_data.is_empty() {
+        v["removed_with_data"] = serde_json::json!(st.removed_with_data);
+    }
+    if let Some(u) = &st.usage {
+        v["usage"] = serde_json::json!(u);
+    }
+    if st.usage_busy {
+        v["usage_busy"] = Value::Bool(true);
+    }
+    if let Some(e) = &st.usage_error {
+        v["usage_error"] = serde_json::json!(e);
+    }
+    v
+}
+
 /// 远端空间占用（设计 `docs/design/data-sync.md` §12），单位字节。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
