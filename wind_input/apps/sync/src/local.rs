@@ -53,7 +53,30 @@ pub struct FsLocal {
     read_hashes: Mutex<HashMap<String, Option<String>>>,
     /// 置位后写入流程在各步之间收手（先释放已开的编辑会话）。
     cancel: Arc<AtomicBool>,
+    /// 用户目录下属于本机目录或安装目录的相对路径前缀，见 [`local_skips`]。
+    skips: Vec<String>,
 }
+
+/// 用户目录下要跳过的本机目录（`state`/`cache`/`logs`）与安装目录，相对用户目录。
+/// 本机根取 `state_dir`（`<本机根>/state/sync`）的祖父目录；不在用户目录下或就是用户目录本身的不算。
+pub fn local_skips(userdata: &Path, state_dir: &Path, exe_dir: Option<&Path>) -> Vec<String> {
+    let local_root = state_dir.parent().and_then(Path::parent);
+    let mut dirs: Vec<PathBuf> = local_root
+        .map(|r| ["state", "cache", "logs"].map(|n| r.join(n)).to_vec())
+        .unwrap_or_default();
+    dirs.extend(exe_dir.map(Path::to_path_buf));
+    let mut out = Vec::new();
+    for d in dirs {
+        if let Some(rel) = rel_of(userdata, &d)
+            && !out.contains(&rel)
+        {
+            out.push(rel);
+        }
+    }
+    out
+}
+
+pub use wind_sync::local::under_skip as skipped;
 
 /// 不含 `..`、绝对路径、反斜杠、空段：写入前的最后一道闸，冲突副本等范围外路径也要过它。
 fn safe_rel(path: &str) -> bool {
@@ -81,9 +104,15 @@ fn edit_target(path: &str) -> Option<&str> {
     let rest = path.strip_prefix("data/")?;
     let segs: Vec<&str> = rest.split('/').collect();
     let ok = match segs.as_slice() {
-        ["phrases.dict.yaml"] | ["quick_format.toml"] | ["common_chars.yaml"] => true,
+        ["phrases.dict.yaml"]
+        | ["quick_format.toml"]
+        | ["common_chars.yaml"]
+        | ["completion.table.yaml"] => true,
         ["charsets", f] => f.ends_with(".yaml"),
-        [s, "user.dict.yaml"] | [s, "shadow.dict.yaml"] | [s, "dicts.toml"] => *s != "charsets",
+        [s, "user.dict.yaml"]
+        | [s, "shadow.dict.yaml"]
+        | [s, "dicts.toml"]
+        | [s, "assoc.table.yaml"] => *s != "charsets",
         [s, "dicts", f] => *s != "charsets" && f.ends_with(".dict.yaml"),
         _ => false,
     };
@@ -165,7 +194,13 @@ impl FsLocal {
             echo,
             read_hashes: Mutex::new(HashMap::new()),
             cancel: Arc::new(AtomicBool::new(false)),
+            skips: Vec::new(),
         }
+    }
+
+    pub fn with_skips(mut self, skips: Vec<String>) -> FsLocal {
+        self.skips = skips;
+        self
     }
 
     pub fn with_cancel(mut self, cancel: Arc<AtomicBool>) -> FsLocal {
@@ -345,7 +380,7 @@ impl FsLocal {
             }
             for (orig, mut v) in olds {
                 let target = dir.join(&orig);
-                v.sort_by(|a, b| b.0.cmp(&a.0));
+                v.sort_by_key(|e| std::cmp::Reverse(e.0));
                 // 已知局限（仅 Windows）：用户手动删掉的扩展文件若留有被占用的 .old，会被还原
                 if std::fs::symlink_metadata(&target).is_err() && !deleted.contains_key(&orig) {
                     let (_, newest) = v.remove(0);
@@ -614,13 +649,16 @@ impl FsLocal {
 }
 
 impl LocalStore for FsLocal {
+    fn skip_prefixes(&self) -> Vec<String> {
+        self.skips.clone()
+    }
     fn list(&self) -> Result<Vec<String>, LocalError> {
         // 先还原崩溃留下的 .old：否则目标缺失会被判成本地删除并推给全组
         self.sweep_aside();
         let mut v: Vec<String> = self
             .all_files()
             .into_iter()
-            .filter(|p| in_scope(p))
+            .filter(|p| in_scope(p) && !skipped(&self.skips, p))
             .collect();
         v.sort();
         Ok(v)

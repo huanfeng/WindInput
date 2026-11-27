@@ -475,9 +475,9 @@ fn reset_remote_issues_a_new_key_and_old_one_stops_working() {
     let fresh = r["key"].as_str().unwrap().to_string();
     assert_ne!(fresh, old);
     // 重置后立即写回本机设备信息，清单要等下一轮
-    assert_eq!(remote.keys("windinput-sync/v2/devices/").len(), 1);
+    assert_eq!(remote.keys("windinput-sync/v1/devices/").len(), 1);
     assert_eq!(a.sync().phase, "idle");
-    assert_eq!(remote.keys("windinput-sync/v2/devices/").len(), 2);
+    assert_eq!(remote.keys("windinput-sync/v1/devices/").len(), 2);
     // 旧密钥不能再加入，新密钥可以
     let mut c = Node::new(&remote, false);
     c.cmd(Op::SetSecret, json!({"password": "pw"})).unwrap();
@@ -1105,7 +1105,7 @@ fn half_finished_join_halts_until_retried() {
     b.setup();
     b.sync();
     let old_group = b.status().group;
-    let gen_keys = remote.keys("windinput-sync/v2/devices/").len();
+    let gen_keys = remote.keys("windinput-sync/v1/devices/").len();
 
     let dir = b.user().join("data/x");
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
@@ -1141,7 +1141,7 @@ fn half_finished_join_halts_until_retried() {
     b.wait_status("设置已生效", |s| s.phase == "halted");
     assert!(b.cmd(Op::SyncNow, Value::Null).is_err());
     assert_eq!(
-        remote.keys("windinput-sync/v2/devices/").len(),
+        remote.keys("windinput-sync/v1/devices/").len(),
         gen_keys,
         "没有新清单"
     );

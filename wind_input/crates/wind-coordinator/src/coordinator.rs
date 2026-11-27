@@ -1722,6 +1722,12 @@ pub struct Coordinator {
     pub(crate) self_weak: std::sync::OnceLock<std::sync::Weak<Coordinator>>,
     /// 上屏历史环形缓冲（index 0 = 最近）：供命令栏 `last(n)` 取最近上屏文本。
     pub(crate) recent_commits: Mutex<std::collections::VecDeque<String>>,
+    /// 与 `recent_commits` 逐条对齐的「实际上屏形态」（简繁转换后）。`recent_commits` 记转换前
+    /// 的简体，供重复上屏 / 加词 / 联想再过一次转换；命令栏 `last(n)` 要的是屏幕上那个字，读这份。
+    pub(crate) recent_shown: Mutex<std::collections::VecDeque<String>>,
+    /// 简繁方向的无锁镜像（0 无 / 1 简入繁出 / 2 繁入简出），随 `State` 里两个开关同步写。
+    /// 上屏历史在持 state 锁的出口里记账，不能回头再取 state 锁判方向。
+    pub(crate) conv_dir_mirror: std::sync::atomic::AtomicU8,
     /// 下一词学习的上文：最近一次选词整体上屏的词（简体）。默认断开：任何上屏记账
     /// （`record_commit`）、焦点变化、宿主自行出字 / 挪光标、取消、撤销上屏都清空，只有
     /// `commit_selected` 接得上——只记真正相邻的两个词，见 [`Self::learn_next_word`]。
@@ -2842,6 +2848,10 @@ impl Coordinator {
             host_services: std::sync::OnceLock::new(),
             self_weak: std::sync::OnceLock::new(),
             recent_commits: Mutex::new(std::collections::VecDeque::new()),
+            recent_shown: Mutex::new(std::collections::VecDeque::new()),
+            conv_dir_mirror: std::sync::atomic::AtomicU8::new(Self::conv_dir_code(
+                conv_s2t, conv_t2s,
+            )),
             next_word_prev: Mutex::new(None),
             preceding_text: Mutex::new(String::new()),
             last_commit_len: std::sync::atomic::AtomicUsize::new(1),
@@ -2965,6 +2975,39 @@ impl Coordinator {
             .iter()
             .cloned()
             .collect()
+    }
+
+    /// 上屏历史的「实际上屏形态」快照（index 0 = 最近），供命令栏 `last(n)`。
+    /// 与 `recent_commits` 条数对不上时（只有测试会直接改后者）退回转换前形态。
+    pub(crate) fn recent_shown_snapshot(&self) -> Vec<String> {
+        let raw = self.recent_commits_snapshot();
+        let shown: Vec<String> = self
+            .recent_shown
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .cloned()
+            .collect();
+        if shown.len() == raw.len() { shown } else { raw }
+    }
+
+    /// 把 `State` 里的简繁开关同步到无锁镜像；改动两个开关的地方都要调。
+    pub(crate) fn sync_conv_dir_mirror(&self, s2t: bool, t2s: bool) {
+        self.conv_dir_mirror.store(
+            Self::conv_dir_code(s2t, t2s),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    /// 镜像编码：0 无 / 1 简入繁出 / 2 繁入简出。构造与同步共用，初值与后续写入口径一致。
+    pub(crate) fn conv_dir_code(s2t: bool, t2s: bool) -> u8 {
+        if s2t {
+            1
+        } else if t2s {
+            2
+        } else {
+            0
+        }
     }
 
     /// 前台上下文快照 `(app, title, sel)`，供命令栏 `app()/title()/sel()` 读取。
@@ -4734,6 +4777,7 @@ impl Coordinator {
                     s.toolbar_visible = new_cfg.ui.toolbar.visible;
                     s.s2t_enabled = s2t_on;
                     s.t2s_enabled = t2s_on;
+                    self.sync_conv_dir_mirror(s.s2t_enabled, s.t2s_enabled);
                     let new_mode =
                         wind_candidate::FilterMode::from_config(&new_cfg.input.filter_mode);
                     let changed = s.filter_mode != new_mode;
@@ -5620,7 +5664,9 @@ impl Coordinator {
                 keymap::NavAction::HighlightUp => self.move_up(state),
                 keymap::NavAction::HighlightDown => self.move_down(state),
                 keymap::NavAction::PagePrev => self.page_prev(state),
-                keymap::NavAction::PageNext => self.try_expand_grid(state) || self.page_next(state),
+                keymap::NavAction::PageNext => {
+                    self.expand_on_page_next(state) || self.page_next(state)
+                }
             }
         };
         if changed {
@@ -5934,16 +5980,19 @@ impl Coordinator {
                         return match self.eval_command_text_only(&cand.phrase_template, &input) {
                             // 求值文本与 `cand.text`（display 标签）无关，变体覆盖对它没有语义 → None，
                             // 走 `commit_top_text` 内的默认转换（同 `AutoCommit` 的命令文本）。
-                            Some(text) => self.commit_top_text(
-                                state,
-                                &prefix,
-                                text,
-                                None,
-                                None,
-                                &remainder,
-                                cand.source,
-                                None, // 命令文本不是候选实体，无从是草稿
-                            ),
+                            Some(text) => {
+                                let over = self.command_text_override(state, &cand, &text);
+                                self.commit_top_text(
+                                    state,
+                                    &prefix,
+                                    text,
+                                    None,
+                                    over.as_deref(),
+                                    &remainder,
+                                    cand.source,
+                                    None, // 命令文本不是候选实体，无从是草稿
+                                )
+                            }
                             None => self.top_commit_command_with_remainder(
                                 state, &cand, &prefix, &remainder,
                             ),
@@ -6005,7 +6054,12 @@ impl Coordinator {
                 // 满码自动上屏 / 空码顶出也是词落了屏，草稿候选同样算用过（判据同 `commit_top_text`：
                 // 开着 `auto_commit_at_full` 时候选栏根本没机会让人按选择键）。
                 self.promote_draft_on_auto_commit(state, &text, &code);
-                let out = self.commit_candidate(state, &text, &freq_text, None, source, &code);
+                let over = state
+                    .candidates
+                    .first()
+                    .and_then(|c| self.command_text_override(state, c, &text));
+                let out =
+                    self.commit_candidate(state, &text, &freq_text, over.as_deref(), source, &code);
                 // 满码自动上屏同样要接联想，出口与手动选词一致。
                 return self.auto_commit_then_assoc(state, out, &text);
             }
@@ -7619,6 +7673,20 @@ impl Coordinator {
         g.is_some()
     }
 
+    /// 简繁切换后重绘正在显示的候选窗：候选文本在显示 / 上屏出口按当前方向转换，开关一变，
+    /// 已下发的那一页就陈旧了，不重绘要等下一次按键才更新。主输入路另要重建候选（1 对多变体
+    /// 候选随方向增删）；overlay 模式只重绘，其候选各有自己的重建入口，按键时自然更新。
+    pub(crate) fn refresh_candidates_after_conversion_toggle(&self) {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if s.candidates.is_empty() && s.input_buffer.is_empty() {
+            return;
+        }
+        if s.active.is_none() && !s.input_buffer.is_empty() {
+            self.update_candidates(&mut s);
+        }
+        self.notify_ui_update(&s);
+    }
+
     /// 切换入口（热键、菜单、工具栏、命令栏）共用：要打开的方向先确保数据在内存，缺数据就提示
     /// 「简繁数据缺失」且不切，免得开关拨上而上屏原样不转。返回是否切了。
     pub(crate) fn try_toggle_conversion(&self, to_traditional: bool) -> bool {
@@ -7690,6 +7758,7 @@ impl Coordinator {
                 if s.s2t_enabled {
                     s.t2s_enabled = false;
                 }
+                self.sync_conv_dir_mirror(s.s2t_enabled, s.t2s_enabled);
                 (s.s2t_enabled, other_off)
             } else {
                 s.t2s_enabled = !s.t2s_enabled;
@@ -7697,6 +7766,7 @@ impl Coordinator {
                 if s.t2s_enabled {
                     s.s2t_enabled = false;
                 }
+                self.sync_conv_dir_mirror(s.s2t_enabled, s.t2s_enabled);
                 (s.t2s_enabled, other_off)
             }
         };
@@ -7792,7 +7862,7 @@ impl Coordinator {
         } else if dir < 0 {
             self.page_prev(&mut state)
         } else {
-            self.try_expand_grid(&mut state) || self.page_next(&mut state)
+            self.expand_on_page_next(&mut state) || self.page_next(&mut state)
         };
         if changed {
             self.notify_ui_update(&state);
@@ -8151,12 +8221,24 @@ impl Coordinator {
             .unwrap_or_else(|e| e.into_inner()) = text.to_string();
     }
 
-    /// 隐藏状态提示气泡（常驻模式失焦时调用）。
+    /// 隐藏状态提示气泡（常驻模式失焦、真正离开宿主、切模式时调用）。
+    ///
+    /// 临时模式下 docMgr 级失焦（DocChanged / NoEditCtx，Edge 切回时毫秒级连发）不走这里，
+    /// 见 `handle_focus_lost`：否则刚弹出或挂起中的焦点气泡会被立刻作废。
     pub(crate) fn hide_tip(&self) {
         // 挂起中的焦点气泡一并作废：焦点都走了，那次挂起等来的权威坐标也已经属于别的上下文，
         // 补显示出来就是「切走之后气泡才姗姗弹出」。
-        self.pending_focus_tip
-            .store(false, std::sync::atomic::Ordering::Relaxed);
+        // 挂起的气泡从没弹出过，去重记录（`last_focus_tip_token`）要一起作废，否则同宿主紧接着的
+        // 下一次获焦被当成「已提示过」跳过，气泡永远不出（Edge 切回时 DocMgr 抖动即如此）。
+        if self
+            .pending_focus_tip
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            *self
+                .last_focus_tip_token
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = 0;
+        }
         let _ = self.ui_tx.send(UiCommand::HideStatusTip);
         // 清空去重缓存：否则重新获焦时"常驻显示"会因文本与隐藏前相同而不弹。
         self.last_status_text
@@ -8195,6 +8277,36 @@ impl Coordinator {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             if *last == client_token {
+                drop(last);
+                // 上一次获焦挂起等权威坐标，这次获焦恰好带来了（Chrome 切回：先 GUI 坐标、
+                // 随后同宿主的获焦才带 TSF 坐标）：消费挂起并显示，不能被去重吞掉。
+                // 坐标也要有效：`handle_caret_update` 先写来源再判有效性，(0,0) 哨兵的 TSF 更新会留下
+                // 「来源是 TSF、坐标无效」的缓存。
+                let (source, caret_ok) = {
+                    let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                    (
+                        s.caret_source,
+                        Self::caret_is_valid(s.caret_x, s.caret_y, s.caret_height),
+                    )
+                };
+                if caret_ok
+                    && wind_ipc::protocol::caret_source::is_tsf(source)
+                    && self
+                        .pending_focus_tip
+                        .compare_exchange(
+                            true,
+                            false,
+                            std::sync::atomic::Ordering::Relaxed,
+                            std::sync::atomic::Ordering::Relaxed,
+                        )
+                        .is_ok()
+                {
+                    debug!(
+                        "focus_tip → 补显示: 同宿主再次获焦带来权威坐标（token={client_token:#x}）"
+                    );
+                    self.show_tip(&self.status_indicator_text());
+                    return;
+                }
                 debug!("focus_tip → 跳过: 同一宿主内换 docMgr（token={client_token:#x}）");
                 return;
             }
@@ -8439,6 +8551,7 @@ impl Coordinator {
                 if !self.try_toggle_conversion(action == "toggle_s2t") {
                     return true;
                 }
+                self.refresh_candidates_after_conversion_toggle();
                 self.show_status();
                 // 工具栏「繁」格随切即刷（同 toggle_full_width 与菜单路径），否则工具栏滞后到下次刷新。
                 // 关掉 s2t 的那一半同样要刷：互斥让一次按键改动两个方向。

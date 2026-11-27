@@ -1323,7 +1323,7 @@ impl PinyinEngine {
                             start,
                             h.text,
                             abbr_code.clone(),
-                            fuzzy_penalized(h.weight, edits),
+                            fuzzy_penalized(h.weight, self.fuzzy_config.penalty_edits(edits)),
                             h.boundary,
                             edits > 0,
                         );
@@ -1374,7 +1374,7 @@ impl PinyinEngine {
                             start,
                             h.text,
                             abbr_code.clone(),
-                            fuzzy_penalized(h.weight, edits),
+                            fuzzy_penalized(h.weight, self.fuzzy_config.penalty_edits(edits)),
                             h.boundary,
                             edits > 0,
                         );
@@ -1409,7 +1409,7 @@ impl PinyinEngine {
                 let Some(edits) = [plain_edits, mixed_edits].into_iter().flatten().min() else {
                     continue;
                 };
-                let w = fuzzy_penalized(c.weight, edits);
+                let w = fuzzy_penalized(c.weight, self.fuzzy_config.penalty_edits(edits));
                 // 同文已在（本切点或更早切点的系统词）：合并，不丢弃（见 merge_store_abbrev_hit）。
                 if let Some(existing) = cands.iter_mut().find(|x| x.text == c.text) {
                     merge_store_abbrev_hit(existing, &c, w, edits > 0);
@@ -2010,7 +2010,7 @@ impl PinyinEngine {
                         text: h.text,
                         // 按变体自带的改动处数罚：单音节也可能声母、韵母同时模糊
                         // （`sen`→`sheng` 计 2 处），多音节按各音节处数累加。
-                        weight: fuzzy_penalized(h.weight, edits),
+                        weight: fuzzy_penalized(h.weight, self.fuzzy_config.penalty_edits(edits)),
                         order: h.order,
                         // 双拼同键音节计 0 处：不罚、也不标模糊（各处「非模糊」准入照常放行）。
                         is_fuzzy: edits > 0,
@@ -2122,7 +2122,7 @@ impl PinyinEngine {
                 c.meta.learn_code = Some((std::mem::take(&mut c.code), c.boundary));
                 c.code = code.to_string();
                 c.boundary = 0;
-                c.weight = fuzzy_penalized(c.weight, edits);
+                c.weight = fuzzy_penalized(c.weight, self.fuzzy_config.penalty_edits(edits));
                 c.is_fuzzy = edits > 0;
                 out.push(c);
             }
@@ -3682,26 +3682,57 @@ impl Engine for PinyinEngine {
         // 下面按权重排序目前与上游返回序重复，但「名额按权重发」是本逻辑的要求，不寄存在上游
         // 的实现细节上。
         // 单音节整音节输入下本步注定只剩精确匹配（step 1 已给），整段跳过，见该函数。
+        // 双拼里 z/c/s 键只管 z/c/s 声母，是封闭声母，zh/ch/sh 另占 v/i/u 键。全拼的尾部 `z` 可能续成
+        // `zh`，query 域里却写成同一个 `z`，按字符前缀查会把 zh* 一并扫进来。这里把封闭声母展开成
+        // 「声母 + 元音」五个前缀（z 后只能接 a/e/i/o/u），天然不含 zh*。开了对应模糊音则 zh 本就算 z，
+        // 照常按单前缀查。以引擎解出的 `partial_initial` 为准，不从 query 上切尾巴。
+        let closed_initial = trailing_partial
+            && sp_result
+                .as_ref()
+                .filter(|r| r.has_partial)
+                .and_then(|r| r.partial_initial.as_deref())
+                .is_some_and(|init| match init {
+                    "z" => !self.fuzzy_config.zh_z,
+                    "c" => !self.fuzzy_config.ch_c,
+                    "s" => !self.fuzzy_config.sh_s,
+                    _ => false,
+                });
         let prefix_hits: Vec<_> = if prefix_completion_is_exact_only(trailing_partial, syllable_cap)
         {
             Vec::new()
         } else {
             #[cfg(test)]
             test_hooks::note_step4_prefix_scan();
-            dict.search_prefix_with_boundary_syllable_capped(
-                query,
-                completion_limit,
-                syllable_cap,
-                completed_len,
-            )
-            .into_iter()
-            .map(|h| {
-                let distance = effective_boundary(&h.code, h.boundary, trie)
-                    .count_ones()
-                    .saturating_sub(completed_syls);
-                (h, distance)
-            })
-            .collect()
+            let mut raw = if closed_initial {
+                let mut all = Vec::new();
+                for v in ["a", "e", "i", "o", "u"] {
+                    all.extend(dict.search_prefix_with_boundary_syllable_capped(
+                        &format!("{query}{v}"),
+                        completion_limit,
+                        syllable_cap,
+                        completed_len,
+                    ));
+                }
+                // 五路前缀互不相交；合并后按权重发名额，与单路返回序一致。
+                all.sort_by_key(|h| std::cmp::Reverse(h.weight));
+                all.truncate(completion_limit);
+                all
+            } else {
+                dict.search_prefix_with_boundary_syllable_capped(
+                    query,
+                    completion_limit,
+                    syllable_cap,
+                    completed_len,
+                )
+            };
+            raw.drain(..)
+                .map(|h| {
+                    let distance = effective_boundary(&h.code, h.boundary, trie)
+                        .count_ones()
+                        .saturating_sub(completed_syls);
+                    (h, distance)
+                })
+                .collect()
         };
         // 够得着无条件上浮的那批（`w > 0` 那条门槛见下方 `demote_to_prefix_layer`），
         // 按权重降序取前 N 个名额；其余沉回前缀层。
@@ -3796,7 +3827,7 @@ impl Engine for PinyinEngine {
                             &mut candidates,
                             h.text,
                             abbr_code.clone(),
-                            fuzzy_penalized(h.weight, edits),
+                            fuzzy_penalized(h.weight, self.fuzzy_config.penalty_edits(edits)),
                             999999,
                             edits > 0,
                             // is_prefix=false：简拼不是前缀补全，层级由 is_abbrev 表达（见下）。
@@ -3864,7 +3895,7 @@ impl Engine for PinyinEngine {
                             &mut candidates,
                             h.text,
                             abbr_code.clone(),
-                            fuzzy_penalized(h.weight, edits),
+                            fuzzy_penalized(h.weight, self.fuzzy_config.penalty_edits(edits)),
                             999999,
                             edits > 0,
                             false,
@@ -4076,7 +4107,7 @@ impl Engine for PinyinEngine {
                     // 同文已在（系统简拼候选）：合并，不丢弃。判据要先过——没过判据的命中
                     // 不是这串击键的解释，不该给同文候选提权。
                     if let Some(existing) = candidates.iter_mut().find(|x| x.text == c.text) {
-                        let w = fuzzy_penalized(c.weight, edits);
+                        let w = fuzzy_penalized(c.weight, self.fuzzy_config.penalty_edits(edits));
                         merge_store_abbrev_hit(existing, &c, w, edits > 0);
                         continue;
                     }
@@ -4091,7 +4122,8 @@ impl Engine for PinyinEngine {
                     // 模糊命中的折扣与来源标记：纯简拼也可能是变体键命中，不罚会压过同一投影键下
                     // 精确命中的用户词。
                     if edits > 0 {
-                        c.weight = fuzzy_penalized(c.weight, edits);
+                        c.weight =
+                            fuzzy_penalized(c.weight, self.fuzzy_config.penalty_edits(edits));
                         c.is_fuzzy = true;
                     }
                     candidates.push(c);
@@ -4205,7 +4237,14 @@ impl Engine for PinyinEngine {
         // 的顶部锚定据此豁免，否则本处降权会被整个顶回去。
         let mut demote_targets: Vec<String> = synthesized_sentence.iter().cloned().collect();
         for c in candidates.iter() {
-            if c.is_sentence && c.is_fuzzy && !demote_targets.contains(&c.text) {
+            // `equal_rank`：模糊整句与精确整词统一词频，不让位。此处还分不出纠错整句（`is_corrected` 要到
+            // 正确拼音对齐才置位，晚于本步），所以纠错整句也一并不让位；它的罚分不受影响，且要求键入串
+            // 同时是某个精确整词的码，真实输入下极少。
+            if c.is_sentence
+                && c.is_fuzzy
+                && !self.fuzzy_config.equal_rank
+                && !demote_targets.contains(&c.text)
+            {
                 demote_targets.push(c.text.clone());
             }
         }
@@ -4685,7 +4724,10 @@ impl Engine for PinyinEngine {
         // 必须在截断之后置位、再稳定重排：截断前置位的话，腾位时从尾部先挤掉的就是它们，词频
         // 重排救不回来。位置也须在下方 preedit 读 `candidates.first()` 之前。
         let mut any_zero_weight = false;
+        // 统一词频：模糊命中（纠错除外）不被混输的来源分档挡在拼音精确档外。
+        let equal_rank = self.fuzzy_config.equal_rank;
         for c in candidates.iter_mut() {
+            c.meta.fuzzy_equal_rank = equal_rank && c.is_fuzzy && !c.is_corrected;
             c.is_zero_weight_reading = c.weight == 0
                 && c.code == completed
                 && c.text.chars().count() == 1

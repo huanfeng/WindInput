@@ -9,6 +9,7 @@
 //! 同步进行中也要能收到回执，否则 `data.beginEdit` 会自己等死自己。
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -31,12 +32,17 @@ use wind_sync_ipc::{Backend as Target, FromSync, Op, RoundStats, Status, SyncSet
 use crate::backends::BackendFactory;
 use crate::backup;
 use crate::errors::{backend_error, crypto_error, sync_error};
+use crate::learn_round;
 use crate::link::CoreLink;
-use crate::local::{Echo, FsLocal, RETRY_TAG, lock};
+use crate::local::{Echo, FsLocal, RETRY_TAG, local_skips, lock};
 use crate::log::{log, now_unix};
 use crate::secrets::{SecretStore, Secrets};
 use crate::statefile;
+use crate::usage;
 use crate::watch;
+
+mod commands;
+mod groups;
 
 /// 主循环的输入。
 #[derive(Debug)]
@@ -50,6 +56,8 @@ pub enum Input {
     Eof,
     /// 工作线程跑完了一轮同步。
     RoundDone(Box<Round>),
+    /// 手动刷新的空间占用统计完成：(统计时的库, 结果)。
+    UsageDone(Box<(String, Result<wind_sync_ipc::Usage, String>)>),
 }
 
 /// 一轮同步的结果（工作线程 → 主循环）。
@@ -66,6 +74,12 @@ pub struct Round {
     library_id: Option<String>,
     /// 本轮成功写出的设备信息。
     info_written: Option<DeviceInfo>,
+    /// 学习数据同步结果：None = 本轮没跑。
+    learn: Option<Result<(), String>>,
+    /// 学习数据同步成功后查到的已移除但仍有学习数据的设备。
+    removed_with_data: Option<Vec<String>>,
+    /// 本轮顺带的空间占用统计：(统计时的库, 结果)；None = 没算。
+    usage: Option<(String, Result<wind_sync_ipc::Usage, String>)>,
 }
 
 impl std::fmt::Debug for Round {
@@ -73,6 +87,9 @@ impl std::fmt::Debug for Round {
         f.write_str("Round")
     }
 }
+
+/// 学习数据同步的最短间隔（强制轮次不受限）。
+pub const LEARN_INTERVAL_SECS: u64 = 1800;
 
 /// 同步中拒绝会改状态的命令时的提示。
 const BUSY_MSG: &str = "正在同步，请稍后再试";
@@ -124,7 +141,7 @@ pub struct Config {
     pub class: DeviceClass,
     /// 绿色版：默认设备号加 `-portable`。
     pub portable: bool,
-    /// 只在被要求时（`sync_now` / 确认大批量删除）才跑一轮，不按间隔与设置变更自行调度。
+    /// 只在被要求时（`sync_now`，含 `auto` / 确认大批量删除）才跑一轮，不按间隔与设置变更自行调度。
     /// 进程内运行的手机端由宿主决定何时同步。
     pub on_demand: bool,
 }
@@ -143,6 +160,10 @@ pub struct Runner {
     /// 同步进行中用户改了设置：本轮结束后再解除停止态。
     clear_halt_after_round: bool,
     force_now: bool,
+    /// 宿主自动触发（`sync_now` 带 `auto`）排的一轮：不强制，学习数据间隔与退避照常生效。
+    auto_now: bool,
+    /// 进行中的这一轮由 auto 触发（且未被强制）：此时来的手动立即同步要在本轮后补一轮强制轮。
+    round_auto: bool,
     /// 已结束的轮次数与最近一轮结果。
     round_no: u64,
     last_round: Option<RoundStats>,
@@ -157,6 +178,20 @@ pub struct Runner {
     last_sent: Option<Status>,
     /// 最近一次写到远端名册的本机信息；换远端、进程重启后为空（下次必写）。
     info_written: Option<DeviceInfo>,
+    /// 学习数据上次同步成功的时间（unix 秒）。
+    learn_last_ok: u64,
+    /// 学习数据轮连续失败次数与下次允许自动重试的时间（unix 秒），退避同文件同步。
+    learn_failures: u32,
+    learn_retry_at: u64,
+    /// 用户目录下属于本机目录或安装目录的前缀，扫描与监听都跳过。
+    skips: Vec<String>,
+    /// 已移除但远端仍有学习数据的设备号。
+    removed_with_data: Vec<String>,
+    /// 空间占用：缓存、统计中、最近失败原因、失败后下次自动重试的时间（unix 秒）。
+    usage: Option<usage::Cached>,
+    usage_busy: bool,
+    usage_error: Option<String>,
+    usage_retry_at: u64,
     _watch: Option<watch::Watch>,
 }
 
@@ -192,6 +227,13 @@ fn library_id(t: Option<&Target>) -> Option<String> {
         Target::S3 { prefix, .. } => Some(format!("{base}\n{}", prefix.trim().trim_matches('/'))),
         _ => Some(base),
     }
+}
+
+/// 学习数据私有状态的库标识：库位置 + 同步密钥校验值。
+fn learn_library(settings: &SyncSettings, secrets: &Secrets) -> Option<String> {
+    let lib = library_id(settings.backend.as_ref())?;
+    let dek = Dek::from_base64(secrets.dek.as_deref()?).ok()?;
+    Some(learn_round::library_key(&lib, &Meta::new(&dek).check))
 }
 
 /// 存储位置是否变了。
@@ -378,9 +420,23 @@ impl Runner {
         }
         let default_id = ids::default_device_id(&display_name(&cfg.settings), cfg.portable);
         let state = statefile::load(&cfg.state_dir, &default_id);
+        let learn_last_ok = learn_library(&cfg.settings, &secrets)
+            .map_or(0, |lib| learn_round::load_last_ok(&cfg.state_dir, &lib));
         let settings = cfg.settings.clone();
+        let cached_usage = usage::load(&cfg.state_dir);
+        // 打字统计在本进程没运行时被关掉
+        if !settings.content.stats {
+            learn_round::clear_peer_stats(&cfg.userdata_dir);
+        }
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(Path::to_path_buf));
+        let skips = local_skips(&cfg.userdata_dir, &cfg.state_dir, exe_dir.as_deref());
+        if !skips.is_empty() {
+            log!("用户目录下的本机目录不同步: {skips:?}");
+        }
         let watch = cfg.watch.then(|| {
-            watch::start(&cfg.userdata_dir, tx.clone())
+            watch::start(&cfg.userdata_dir, skips.clone(), tx.clone())
                 .map_err(|e| log!("{e}；仅靠定时同步"))
                 .ok()
         });
@@ -402,6 +458,8 @@ impl Runner {
             syncing: false,
             clear_halt_after_round: false,
             force_now: false,
+            auto_now: false,
+            round_auto: false,
             round_no: 0,
             last_round: None,
             round_forced: false,
@@ -412,6 +470,15 @@ impl Runner {
             conflicts: Vec::new(),
             last_sent: None,
             info_written: None,
+            learn_last_ok,
+            learn_failures: 0,
+            learn_retry_at: 0,
+            removed_with_data: Vec::new(),
+            usage: cached_usage,
+            usage_busy: false,
+            usage_error: None,
+            usage_retry_at: 0,
+            skips,
             _watch: watch.flatten(),
         }
     }
@@ -525,6 +592,47 @@ impl Runner {
             needs_identity: self.needs_identity(),
             round: self.round_no,
             last_round: self.last_round.clone(),
+            removed_with_data: self.removed_with_data.clone(),
+            usage: self.current_usage().cloned(),
+            usage_busy: self.usage_busy,
+            usage_error: self.usage_error.clone(),
+        }
+    }
+
+    /// 属于当前同步库的空间占用缓存。
+    fn current_usage(&self) -> Option<&wind_sync_ipc::Usage> {
+        let lib = learn_library(&self.settings, &self.secrets)?;
+        self.usage
+            .as_ref()
+            .filter(|c| c.library == lib)
+            .map(|c| &c.usage)
+    }
+
+    /// 本轮是否顺带统计 `lib` 的空间占用。
+    fn usage_due(&self, lib: &str, now: u64) -> bool {
+        usage::due(self.usage.as_ref(), lib, now, self.usage_retry_at)
+    }
+
+    /// 记下一次统计结果。失败只记原因、推迟自动重试，不动缓存与统计时间。
+    fn apply_usage(&mut self, lib: String, r: Result<wind_sync_ipc::Usage, String>, now: u64) {
+        match r {
+            Ok(u) => {
+                let c = usage::Cached {
+                    library: lib,
+                    usage: u,
+                };
+                if let Err(e) = usage::save(&self.cfg.state_dir, &c) {
+                    log!("{e}");
+                }
+                self.usage = Some(c);
+                self.usage_error = None;
+                self.usage_retry_at = 0;
+            }
+            Err(e) => {
+                log!("统计空间占用失败: {e}");
+                self.usage_error = Some(e);
+                self.usage_retry_at = now.saturating_add(usage::RETRY_SECS);
+            }
         }
     }
 
@@ -552,10 +660,10 @@ impl Runner {
 
     /// 下一次要跑同步的时刻；不可调度返回 None。
     fn next_wake(&self, now: Instant) -> Option<Instant> {
-        if self.syncing || !self.runnable() {
+        if self.syncing || self.usage_busy || !self.runnable() {
             return None;
         }
-        if self.force_now {
+        if self.force_now || self.auto_now {
             return Some(now);
         }
         if self.cfg.on_demand {
@@ -612,6 +720,12 @@ impl Runner {
     fn handle(&mut self, i: Input) {
         match i {
             Input::RoundDone(r) => self.finish_round(*r),
+            Input::UsageDone(d) => {
+                let (lib, r) = *d;
+                self.usage_busy = false;
+                self.apply_usage(lib, r, now_unix());
+                self.report();
+            }
             Input::Core(ToSync::Settings(s)) => self.on_settings(s),
             Input::Core(ToSync::Command { id, op, args }) => {
                 let r = self.command(op, &args);
@@ -636,9 +750,18 @@ impl Runner {
             }
         }
         let moved = backend_changed(self.settings.backend.as_ref(), s.backend.as_ref());
+        let old_library = learn_library(&self.settings, &self.secrets);
+        let stats_off = self.settings.content.stats && !s.content.stats;
         self.settings = s;
         if moved {
             self.info_written = None;
+        }
+        if learn_library(&self.settings, &self.secrets) != old_library {
+            self.reload_learn_clock();
+        }
+        // 关掉打字统计：他机统计不再更新，删掉免得统计页把陈旧数据当作当前合计；重新打开后下一轮重新下载
+        if stats_off {
+            learn_round::clear_peer_stats(&self.cfg.userdata_dir);
         }
         // 用户改了设置：解除停止态，稍后按新设置跑一轮
         if self.syncing {
@@ -688,9 +811,20 @@ impl Runner {
 
     // ── 同步 ───────────────────────────────────────────────
 
+    /// 本轮是否该同步学习数据：强制，或距上次成功已满 30 分钟且不在失败退避期。
+    fn learn_due(&self, now: u64, force: bool) -> bool {
+        force || (now >= self.learn_last_ok + LEARN_INTERVAL_SECS && now >= self.learn_retry_at)
+    }
+
+    /// 学习数据轮的最终判定：三项内容任一开启，且到期。
+    fn learn_wanted(&self, now: u64, force: bool) -> bool {
+        self.settings.content.any() && self.learn_due(now, force)
+    }
+
     /// 起工作线程跑一轮；结果经 `Input::RoundDone` 回主循环。
     fn start_round(&mut self) {
         let force = std::mem::take(&mut self.force_now);
+        self.round_auto = std::mem::take(&mut self.auto_now) && !force;
         self.round_forced |= force;
         let allow_mass = std::mem::take(&mut self.allow_mass_once);
         self.debounce_until = None;
@@ -702,12 +836,15 @@ impl Runner {
             }
         };
         self.syncing = true;
-        self.report();
         let now = now_unix();
         let mut ctx = SyncCtx::new(now, self.ns());
         ctx.force = force;
         ctx.gc = true;
         ctx.allow_mass_delete = allow_mass;
+        let learn_due = self.learn_wanted(now, force);
+        let usage_lib =
+            learn_library(&self.settings, &self.secrets).filter(|lib| self.usage_due(lib, now));
+        self.usage_busy = usage_lib.is_some();
         let echo_before = lock(&self.echo).clone();
         let want = local_info(&self.settings, &self.state, now);
         let info_stale_now = info_stale(self.info_written.as_ref(), &want, true);
@@ -723,17 +860,85 @@ impl Runner {
             self.cfg.link.clone(),
             self.echo.clone(),
         )
-        .with_cancel(self.cancel.clone());
+        .with_cancel(self.cancel.clone())
+        .with_skips(self.skips.clone());
         let library_id = library_id(self.settings.backend.as_ref());
+        // 被退避跳过或停止态的轮次不跑学习数据（§4.5 第 1 步）
+        let learn_lib = learn_library(&self.settings, &self.secrets).filter(|_| {
+            learn_due && state.retry.halted.is_none() && (force || state.retry.due(now))
+        });
+        let (userdata, state_dir, link) = (
+            self.cfg.userdata_dir.clone(),
+            self.cfg.state_dir.clone(),
+            self.cfg.link.clone(),
+        );
+        let content = self.settings.content;
+        let cancel = self.cancel.clone();
         let tx = self.tx.clone();
+        self.report();
         let spawned = std::thread::Builder::new()
             .name("sync-round".into())
             .spawn(move || {
                 let mut info_written = None;
+                let mut learn: Option<Result<(), String>> = None;
+                let mut removed_with_data = None;
+                let mut usage = None;
+                let device = state.device.clone();
+                let lctx = learn_lib.as_deref().map(|lib| {
+                    learn_round::LearnCtx::new(
+                        &userdata, &state_dir, &*link, &device, now, content, lib,
+                    )
+                });
                 let result = match factory.build(&settings, &password) {
                     Err(m) => Err(m),
                     Ok(backend) => {
+                        // 第 2 步在文件同步之前；私有状态缺失时先按 §4.7 初始化
+                        let mut lstate = None;
+                        if let Some(c) = &lctx {
+                            match learn_round::ensure_state(c, &*backend, &dek.files_key())
+                                .and_then(|mut st| {
+                                    learn_round::count_in(c, &mut st).map(|skip| (st, skip))
+                                }) {
+                                Ok(st) => lstate = Some(st),
+                                Err(e) => learn = Some(Err(e)),
+                            }
+                        }
                         let r = sync_once(&*backend, &mut local, &mut state, &dek, &ctx);
+                        // 第 3、5 步在文件同步成功之后
+                        if let (Some(c), Some((st, skip)), Ok(rep)) = (&lctx, lstate.as_mut(), &r)
+                            && !rep.skipped
+                            && !cancel.load(Ordering::SeqCst)
+                        {
+                            let mut devs = None;
+                            learn = Some(
+                                learn_round::exchange_and_materialize(
+                                    c,
+                                    &*backend,
+                                    &dek.files_key(),
+                                    st,
+                                    skip,
+                                )
+                                .map(|rep| {
+                                    for w in &rep.warnings {
+                                        log!("学习数据: {w}");
+                                    }
+                                    devs = Some(rep.devices);
+                                }),
+                            );
+                            if let Some(devs) = devs {
+                                match list_devices(&*backend, &dek.devinfo_key()) {
+                                    Ok(r) => {
+                                        removed_with_data = Some(
+                                            learn_round::removed_devices_in(&devs, &r)
+                                                .into_iter()
+                                                .filter(|d| *d != device)
+                                                .collect(),
+                                        )
+                                    }
+                                    Err(e) => log!("查询已移除设备失败: {}", sync_error(&e)),
+                                }
+                            }
+                        }
                         if let Ok(rep) = &r
                             && !rep.skipped
                         {
@@ -762,6 +967,14 @@ impl Runner {
                                 Err(e) => log!("写设备信息失败: {}", sync_error(&e)),
                             }
                         }
+                        // 空间占用放在本轮全部写入之后，不影响本轮成败；中途可被取消
+                        if let (Some(lib), Ok(rep)) = (usage_lib, &r)
+                            && !rep.skipped
+                            && !cancel.load(Ordering::SeqCst)
+                        {
+                            let stop = || cancel.load(Ordering::SeqCst);
+                            usage = Some((lib, usage::measure(&*backend, &dek, &stop)));
+                        }
                         Ok(r)
                     }
                 };
@@ -774,11 +987,15 @@ impl Runner {
                     echo_before,
                     failures_before,
                     library_id,
+                    learn,
+                    removed_with_data,
+                    usage,
                 };
                 let _ = tx.send(Input::RoundDone(Box::new(round)));
             });
         if let Err(e) = spawned {
             self.syncing = false;
+            self.usage_busy = false;
             self.round_failed(&format!("无法启动同步线程: {e}"));
         }
     }
@@ -811,6 +1028,10 @@ impl Runner {
 
     fn finish_round(&mut self, r: Round) {
         self.syncing = false;
+        self.usage_busy = false;
+        if let Some((lib, u)) = r.usage {
+            self.apply_usage(lib, u, r.now);
+        }
         self.state = r.state;
         if r.info_written.is_some() {
             self.info_written = r.info_written;
@@ -819,6 +1040,23 @@ impl Runner {
             self.clear_halt();
         }
         self.conflicts = r.conflicts;
+        if let Some(v) = r.removed_with_data {
+            self.removed_with_data = v;
+        }
+        match &r.learn {
+            Some(Ok(())) => {
+                self.learn_last_ok = r.now;
+                self.learn_failures = 0;
+                self.learn_retry_at = 0;
+            }
+            Some(Err(e)) => {
+                self.learn_failures = self.learn_failures.saturating_add(1);
+                let wait = backoff_secs(self.learn_failures);
+                self.learn_retry_at = r.now.saturating_add(wait);
+                log!("学习数据同步失败（{wait} 秒后重试）: {e}");
+            }
+            None => {}
+        }
         // 本轮扫描已完成：上一轮写下的回声记录用完，清掉（本轮重新写过的保留）
         lock(&self.echo).retain(|k, v| r.echo_before.get(k) != Some(v));
         let now = Instant::now();
@@ -953,8 +1191,12 @@ impl Runner {
                 | Op::LeaveGroup
                 | Op::ClaimDevice
                 | Op::ConfirmIdentity
+                | Op::PurgeDevice
+                | Op::RefreshUsage
         );
-        if self.syncing && mutating {
+        // 统计中再点刷新：不算冲突，回「进行中」
+        let busy = self.syncing || (self.usage_busy && op != Op::RefreshUsage);
+        if busy && mutating {
             return Err(BUSY_MSG.into());
         }
         match op {
@@ -964,7 +1206,7 @@ impl Runner {
             Op::CreateKey => self.cmd_create_key(),
             Op::ImportKey => self.cmd_import_key(args),
             Op::ExportKey => self.cmd_export_key(),
-            Op::SyncNow => self.cmd_sync_now(),
+            Op::SyncNow => self.cmd_sync_now(args),
             Op::ResetRemote => self.cmd_reset_remote(args),
             Op::ListDevices => self.cmd_list_devices(),
             Op::RemoveDevice => self.cmd_remove_device(args),
@@ -974,564 +1216,9 @@ impl Runner {
             Op::LeaveGroup => self.cmd_leave_group(args),
             Op::ClaimDevice => self.cmd_claim_device(args),
             Op::ConfirmIdentity => self.cmd_confirm_identity(),
+            Op::PurgeDevice => self.cmd_purge_device(args),
+            Op::RefreshUsage => self.cmd_refresh_usage(),
         }
-    }
-
-    /// 用户处理完问题（改凭据 / 同步密钥）后：解除停止态、丢旧连接、稍后同步。
-    fn after_user_fix(&mut self) {
-        self.clear_halt();
-        self.save_state();
-        self.kick();
-    }
-
-    fn cmd_set_secret(&mut self, args: &Value) -> Result<Value, String> {
-        match args.get("password") {
-            Some(Value::String(p)) => {
-                self.secrets.password = Some(p.clone());
-                self.secrets.backend_id = backend_fingerprint(self.settings.backend.as_ref());
-            }
-            Some(Value::Null) => {
-                self.secrets.password = None;
-                self.secrets.backend_id = None;
-            }
-            _ => return Err("缺少参数 password（字符串；null 表示清除）".into()),
-        }
-        self.save_secrets()?;
-        self.after_user_fix();
-        Ok(json!({ "ok": true }))
-    }
-
-    /// 不经缓存、可带临时密码地建后端：测试连接与同步密钥命令都用它。
-    fn fresh_backend(&self, password: Option<&str>) -> Result<Box<dyn Backend>, String> {
-        if self.settings.backend.is_none() {
-            return Err("尚未配置存储后端".into());
-        }
-        let pw = password
-            .map(str::to_string)
-            .or_else(|| self.secrets.password.clone())
-            .ok_or("尚未保存存储凭据（密码或访问密钥）")?;
-        self.factory.build(&self.settings, &pw)
-    }
-
-    fn read_meta(b: &dyn Backend) -> Result<Option<Meta>, String> {
-        match b
-            .get(&manifest::meta_key())
-            .map_err(|e| backend_error(&e))?
-        {
-            None => Ok(None),
-            Some(raw) => Meta::from_json(&raw)
-                .map(Some)
-                .map_err(|e| crypto_error(&e)),
-        }
-    }
-
-    fn cmd_test_connection(&mut self, args: &Value) -> Result<Value, String> {
-        let b = self.fresh_backend(str_arg(args, "password"))?;
-        b.test_connection().map_err(|e| backend_error(&e))?;
-        let meta = Self::read_meta(&*b)?;
-        let joined = match (&meta, self.dek()) {
-            (Some(m), Ok(d)) => m.verify(&d),
-            _ => false,
-        };
-        if joined {
-            self.mark_verified(library_id(self.settings.backend.as_ref()));
-        } else {
-            self.invalidate_verified();
-        }
-        Ok(json!({ "ok": true, "remote_initialized": meta.is_some(), "joined": joined }))
-    }
-
-    /// 本机先存下密钥（发布远端 meta 之前），返回旧值供回滚。保存失败则不改动。
-    fn store_dek(&mut self, dek: &Dek) -> Result<Option<String>, String> {
-        let prev = self.secrets.dek.replace(dek.to_base64());
-        if let Err(e) = self.save_secrets() {
-            self.secrets.dek = prev;
-            return Err(e);
-        }
-        Ok(prev)
-    }
-
-    /// 远端发布失败：把本机密钥退回原值。
-    fn rollback_dek(&mut self, prev: Option<String>) {
-        self.secrets.dek = prev;
-        if let Err(e) = self.save_secrets() {
-            log!("回滚本机同步密钥失败: {e}");
-        }
-    }
-
-    /// DEK 变了说明换了同步库：旧的清单基线对新远端没有意义，重建（沿用设备号，回到单机组）。
-    /// 密钥变了：只有初始化（`init`）直接确认身份，其余一律按加入处理、待确认；密钥没变则保持原有身份。
-    fn finish_adopt(&mut self, changed: bool, init: bool) {
-        if changed {
-            let device = self.state.device.clone();
-            self.state = SyncState::new(device.clone());
-            self.state.group = device;
-            self.state.identity_confirmed = init;
-            self.info_written = None;
-        }
-        self.mark_verified(library_id(self.settings.backend.as_ref()));
-        self.after_user_fix();
-        self.publish_info(false);
-    }
-
-    fn adopt_dek(&mut self, dek: &Dek, init: bool) -> Result<(), String> {
-        let prev = self.store_dek(dek)?;
-        let changed = prev.as_deref() != Some(dek.to_base64().as_str());
-        self.finish_adopt(changed, init);
-        Ok(())
-    }
-
-    /// 远端还没有同步库：生成同步密钥并建库，本机身份自动确认；远端已有则拒绝。
-    fn cmd_create_key(&mut self) -> Result<Value, String> {
-        let b = self.fresh_backend(None)?;
-        if Self::read_meta(&*b)?.is_some() {
-            return Err(sync_error(&SyncError::AlreadyInitialized));
-        }
-        let dek = Dek::generate();
-        // 先存本机再发布：本机存不下就不建库，免得远端有库而用户没拿到密钥
-        let prev = self.store_dek(&dek)?;
-        let published = remote::init_remote_with(&*b, &dek).map_err(|e| sync_error(&e));
-        // 已知局限：回读与此处复核之间仍有极小的并发创建窗口
-        let verified = published.and_then(|_| match Self::read_meta(&*b)? {
-            Some(m) if m.verify(&dek) => Ok(()),
-            _ => Err(sync_error(&SyncError::AlreadyInitialized)),
-        });
-        if let Err(e) = verified {
-            self.rollback_dek(prev);
-            return Err(e);
-        }
-        let changed = prev.as_deref() != Some(dek.to_base64().as_str());
-        self.finish_adopt(changed, true);
-        log!("已生成同步密钥");
-        Ok(json!({ "ok": true, "key": dek.to_key_string() }))
-    }
-
-    /// 粘贴同步密钥加入已有同步库；身份待确认。
-    fn cmd_import_key(&mut self, args: &Value) -> Result<Value, String> {
-        let key = str_arg(args, "key").unwrap_or_default();
-        let b = self.fresh_backend(None)?;
-        if Self::read_meta(&*b)?.is_none() {
-            return Err(sync_error(&SyncError::NotInitialized));
-        }
-        let dek = remote::join_with_key(&*b, key).map_err(|e| sync_error(&e))?;
-        self.adopt_dek(&dek, false)?;
-        Ok(json!({ "ok": true }))
-    }
-
-    fn cmd_export_key(&self) -> Result<Value, String> {
-        let dek = self
-            .dek()
-            .map_err(|_| "本机尚未加入加密同步，没有可导出的同步密钥".to_string())?;
-        Ok(json!({ "key": dek.to_key_string() }))
-    }
-
-    fn cmd_sync_now(&mut self) -> Result<Value, String> {
-        if !self.configured() {
-            return Err("同步未启用或尚未配置存储后端".into());
-        }
-        if self.secrets.password.is_none() {
-            return Err("尚未保存存储凭据".into());
-        }
-        if self.secrets.dek.is_none() {
-            return Err("尚未生成或粘贴同步密钥".into());
-        }
-        if !self.state.identity_confirmed {
-            return Err(IDENTITY_MSG.into());
-        }
-        if self.join_incomplete() {
-            return Err(JOIN_INCOMPLETE.into());
-        }
-        let ticket = self.round_no + 1;
-        if self.syncing {
-            // 进行中的这一轮结束即算完成，不再另排一轮
-            self.clear_halt_after_round = true;
-            return Ok(json!({ "queued": false, "busy": true, "ticket": ticket }));
-        }
-        self.clear_halt();
-        self.force_now = true;
-        Ok(json!({ "queued": true, "ticket": ticket }))
-    }
-
-    /// 大批量删除护栏停止后，用户确认「这些删除是真的」：解除停止态，下一轮放行一次。
-    fn cmd_confirm_mass_delete(&mut self) -> Result<Value, String> {
-        let pending = self.state.retry.halted.as_deref().is_some_and(|h| {
-            h.contains(MASS_MARK) || h.starts_with(wind_sync::error::MASS_DELETION_PREFIX)
-        });
-        if !pending {
-            return Err("当前没有等待确认的大批量删除".into());
-        }
-        self.state.retry.clear_halt();
-        self.allow_mass_once = true;
-        self.force_now = true;
-        self.save_state();
-        Ok(json!({ "queued": true }))
-    }
-
-    fn cmd_list_devices(&mut self) -> Result<Value, String> {
-        let dek = self.dek().map_err(|_| "本机尚未加入加密同步".to_string())?;
-        let b = self.fresh_backend(None)?;
-        let list = list_devices(&*b, &dek.devinfo_key()).map_err(|e| sync_error(&e))?;
-        let before = self.state.group_name_at;
-        adopt_group_name(&mut self.state, &list);
-        if self.state.group_name_at != before {
-            self.save_state();
-        }
-        let devices: Vec<Value> = list
-            .iter()
-            .map(|(id, info)| {
-                let is_self = *id == self.state.device;
-                match info {
-                    Ok(i) => json!({
-                        "id": id, "name": i.name, "platform": i.platform,
-                        "app_version": i.app_version, "caps": i.caps,
-                        "last_seen": i.last_seen, "is_self": is_self, "readable": true,
-                        "group": i.group,
-                        "group_name": wind_sync::devices::group_name_of(&list, &i.group)
-                            .unwrap_or_default(),
-                    }),
-                    Err(_) => json!({
-                        "id": id, "name": "", "platform": "", "app_version": "",
-                        "caps": [], "last_seen": 0, "is_self": is_self, "readable": false,
-                        "group": "", "group_name": "",
-                    }),
-                }
-            })
-            .collect();
-        Ok(json!({ "devices": devices }))
-    }
-
-    /// 删除某设备在远端的清单与设备信息。它若仍在运行，下次同步会重新出现。
-    fn cmd_remove_device(&mut self, args: &Value) -> Result<Value, String> {
-        if args.get("confirm").and_then(Value::as_bool) != Some(true) {
-            return Err("移除设备须明确确认（confirm=true）".into());
-        }
-        let dev = str_arg(args, "dev")
-            .filter(|d| !d.is_empty())
-            .ok_or("缺少参数 dev")?;
-        if dev == self.state.device {
-            return Err("不能移除本机".into());
-        }
-        let b = self.fresh_backend(None)?;
-        let removed = remove_device(&*b, dev).map_err(|e| sync_error(&e))?;
-        log!("已移除设备 {dev}（{removed} 个对象）");
-        Ok(json!({ "ok": true, "removed": removed }))
-    }
-
-    // ── 设备组与身份 ───────────────────────────────────────
-
-    /// 身份操作的前提：已持有密钥与存储凭据。
-    fn identity_ctx(&self) -> Result<(Dek, Box<dyn Backend>), String> {
-        let dek = self.dek().map_err(|_| "本机尚未加入加密同步".to_string())?;
-        Ok((dek, self.fresh_backend(None)?))
-    }
-
-    /// 身份变更之后：存状态、重写名册、解除停止态、稍后同步。
-    fn after_identity_change(&mut self) {
-        self.info_written = None;
-        self.after_user_fix();
-        self.publish_info(false);
-    }
-
-    /// 覆盖本机设置用的本地存储：与 `join_group` 一致。
-    fn local_all(&self) -> FsLocal {
-        FsLocal::new(
-            self.cfg.userdata_dir.clone(),
-            self.cfg.link.clone(),
-            self.echo.clone(),
-        )
-    }
-
-    /// 用组的设置覆盖本机前备份本机设置。
-    fn backup_local(&self, local: &FsLocal) -> Result<std::path::PathBuf, String> {
-        let paths = local.list().map_err(|e| e.0)?;
-        let dir = backup::backup_settings(&self.cfg.userdata_dir, &paths, now_unix())?;
-        log!("已备份本机设置");
-        Ok(dir)
-    }
-
-    /// 本机设置文件的（路径, 内容摘要），判断覆盖是否已经动过本机。
-    fn settings_digest(&self) -> Vec<(String, String)> {
-        let mut v: Vec<(String, String)> = self
-            .local_all()
-            .list()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|p| kind(p) == Kind::Setting)
-            .map(|p| {
-                let h = std::fs::read(self.abs(&p))
-                    .map(|b| content_hash(&b))
-                    .unwrap_or_default();
-                (p, h)
-            })
-            .collect();
-        v.sort();
-        v
-    }
-
-    /// 覆盖本机设置失败：本机已被改动一部分则进停止态，免得半成品被当本机修改同步进旧组。
-    fn join_failed(&mut self, before: &[(String, String)], msg: String) -> String {
-        if self.settings_digest() == before {
-            return msg;
-        }
-        log!("加入设备组中途失败，本机设置已部分改写: {msg}");
-        self.state.retry.halted = Some(JOIN_INCOMPLETE.into());
-        self.state.retry.last_error = Some(JOIN_INCOMPLETE.into());
-        self.save_state();
-        format!("{JOIN_INCOMPLETE}（{msg}）")
-    }
-
-    /// 本机号已被远端他人占用时改用首个空闲的 `<号>-<n>`。只用于未确认身份时：本机从未以这个号发布过。
-    fn ensure_free_id(&mut self, b: &dyn Backend) -> Result<(), String> {
-        let se = |e: SyncError| sync_error(&e);
-        let base = self.state.device.clone();
-        if !id_taken(b, &base).map_err(se)? {
-            return Ok(());
-        }
-        for n in 2..1000 {
-            let id = ids::with_suffix(&base, n);
-            if !id_taken(b, &id).map_err(se)? {
-                identity::rename_device(b, &mut self.state, &id).map_err(se)?;
-                // 旧号属于别的设备，不能当本机旧号删除
-                self.state.retired_ids.retain(|x| x.id != base);
-                log!("设备号 {base} 已被占用，本机改用 {id}");
-                return Ok(());
-            }
-        }
-        Err(format!("找不到空闲的设备号（{base}-n）"))
-    }
-
-    /// 以当前设备号新建单机组并确认身份。
-    fn cmd_confirm_identity(&mut self) -> Result<Value, String> {
-        // 已确认则不动（不把已在组里的设备拉回单机组）
-        if self.state.identity_confirmed {
-            let (device, group) = (self.state.device.clone(), group_of(&self.state));
-            return Ok(json!({ "ok": true, "device": device, "group": group }));
-        }
-        let (dek, b) = self.identity_ctx()?;
-        self.ensure_free_id(&*b)?;
-        let device = self.state.device.clone();
-        let roster = list_devices(&*b, &dek.devinfo_key()).map_err(|e| sync_error(&e))?;
-        let group = free_group(&roster, &device, &[&device], None)?;
-        identity::leave_group(&mut self.state, &group);
-        self.state.group_name.clear();
-        self.state.group_name_at = 0;
-        self.state.identity_confirmed = true;
-        self.after_identity_change();
-        log!("已确认本机身份（单机组 {group}）");
-        Ok(json!({ "ok": true, "device": device, "group": group }))
-    }
-
-    fn cmd_rename_device(&mut self, args: &Value) -> Result<Value, String> {
-        let id = str_arg(args, "id")
-            .filter(|s| !s.is_empty())
-            .ok_or("缺少参数 id")?;
-        if id == self.state.device {
-            return Err("新设备号与当前相同".into());
-        }
-        let (_, b) = self.identity_ctx()?;
-        let old = self.state.device.clone();
-        // 撞号时旧号另有主人，未确认身份时本机从未以旧号发布过：这两种情况旧号都不能删
-        let retire = self.state.identity_confirmed && !self.id_conflict();
-        if self.state.group.is_empty() {
-            self.state.group = old.clone();
-        }
-        identity::rename_device(&*b, &mut self.state, id).map_err(|e| sync_error(&e))?;
-        if !retire {
-            self.state.retired_ids.retain(|x| x.id != old);
-        }
-        self.after_identity_change();
-        log!("设备号已改为 {id}");
-        Ok(json!({ "ok": true, "device": id }))
-    }
-
-    fn cmd_set_group_name(&mut self, args: &Value) -> Result<Value, String> {
-        let name = str_arg(args, "name").ok_or("缺少参数 name")?.trim();
-        if name.chars().count() > wind_sync_ipc::MAX_DEVICE_NAME_CHARS {
-            return Err(format!(
-                "组名不能超过 {} 个字符",
-                wind_sync_ipc::MAX_DEVICE_NAME_CHARS
-            ));
-        }
-        if self.state.group.is_empty() {
-            self.state.group = self.state.device.clone();
-        }
-        self.state.group_name = name.to_string();
-        // 时钟回拨时也要比本机旧值新，才能在名册里胜出
-        self.state.group_name_at = now_unix().max(self.state.group_name_at + 1);
-        self.save_state();
-        self.publish_info(false);
-        Ok(json!({ "ok": true }))
-    }
-
-    fn cmd_join_group(&mut self, args: &Value) -> Result<Value, String> {
-        let group = str_arg(args, "group").unwrap_or_default();
-        if !ids::valid_id(group) {
-            return Err(format!("组号 {group} 不可用"));
-        }
-        let mode = match str_arg(args, "mode") {
-            Some("theirs") => Overwrite::Theirs,
-            Some("mine") => Overwrite::Mine,
-            _ => return Err("参数 mode 须为 theirs 或 mine".into()),
-        };
-        let (dek, b) = self.identity_ctx()?;
-        let roster = list_devices(&*b, &dek.devinfo_key()).map_err(|e| sync_error(&e))?;
-        let class = self.cfg.class;
-        // 未确认身份时本机从未发布过，名册里同号的条目是别人的
-        let me = self
-            .state
-            .identity_confirmed
-            .then_some(self.state.device.as_str());
-        let exists = roster.iter().any(|(d, r)| {
-            Some(d.as_str()) != me
-                && r.as_ref()
-                    .is_ok_and(|i| i.group == group && class_of_platform(&i.platform) == class)
-        });
-        if !exists {
-            return Err(format!(
-                "设备组 {group} 不存在，或其成员与本机不是同一类设备（桌面与手机不能同组）"
-            ));
-        }
-        if !self.state.identity_confirmed {
-            self.ensure_free_id(&*b)?;
-        }
-        let mut local = self.local_all();
-        if mode == Overwrite::Theirs {
-            self.backup_local(&local)?;
-        }
-        let before = self.settings_digest();
-        let ns = Namespace::new(self.cfg.class, group);
-        let mut state = self.state.clone();
-        let rep = match identity::join_group(&*b, &mut local, &mut state, &dek, &ns, mode) {
-            Ok(r) => r,
-            Err(e) => return Err(self.join_failed(&before, sync_error(&e))),
-        };
-        state.group_name.clear();
-        state.group_name_at = 0;
-        adopt_group_name(&mut state, &roster);
-        state.identity_confirmed = true;
-        clear_join_halt(&mut state);
-        self.state = state;
-        self.after_identity_change();
-        log!(
-            "已加入设备组 {group}：写入 {}，删除 {}",
-            rep.written.len(),
-            rep.deleted.len()
-        );
-        Ok(json!({
-            "ok": true, "group": group,
-            "written": rep.written.len(), "deleted": rep.deleted.len(),
-        }))
-    }
-
-    /// 以本机设置新建单机组；组号取设备号，已被占用（含当前组）则加序号。
-    fn cmd_leave_group(&mut self, args: &Value) -> Result<Value, String> {
-        if !self.state.identity_confirmed {
-            return Err(IDENTITY_MSG.into());
-        }
-        let name = str_arg(args, "name").map(str::trim).unwrap_or_default();
-        if name.chars().count() > wind_sync_ipc::MAX_DEVICE_NAME_CHARS {
-            return Err(format!(
-                "组名不能超过 {} 个字符",
-                wind_sync_ipc::MAX_DEVICE_NAME_CHARS
-            ));
-        }
-        let (dek, b) = self.identity_ctx()?;
-        let roster = list_devices(&*b, &dek.devinfo_key()).map_err(|e| sync_error(&e))?;
-        let device = self.state.device.clone();
-        let current = group_of(&self.state).to_string();
-        let group = free_group(&roster, &device, &[&device], Some(&current))?;
-        identity::leave_group(&mut self.state, &group);
-        self.state.group_name = name.to_string();
-        self.state.group_name_at = if name.is_empty() { 0 } else { now_unix() };
-        self.after_identity_change();
-        log!("已退出设备组 {current}，新建单机组 {group}");
-        Ok(json!({ "ok": true, "group": group }))
-    }
-
-    /// 认领已有设备：沿用它的号与组，用组的设置覆盖本机（先备份）。
-    fn cmd_claim_device(&mut self, args: &Value) -> Result<Value, String> {
-        let dev = str_arg(args, "dev")
-            .filter(|d| !d.is_empty())
-            .ok_or("缺少参数 dev")?;
-        if self.state.identity_confirmed && dev == self.state.device {
-            return Err("不能认领本机".into());
-        }
-        let (dek, b) = self.identity_ctx()?;
-        let se = |e: SyncError| sync_error(&e);
-        let mut local = self.local_all();
-        self.backup_local(&local)?;
-        let roster = list_devices(&*b, &dek.devinfo_key()).map_err(se)?;
-        let mut state = self.state.clone();
-        let mut group = identity::claim_device(&*b, &mut state, &dek, dev).map_err(se)?;
-        let from_roster = roster
-            .iter()
-            .any(|(d, r)| d == dev && r.as_ref().is_ok_and(|i| i.group == group));
-        if from_roster {
-            let before = self.settings_digest();
-            let ns = Namespace::new(self.cfg.class, group.clone());
-            if let Err(e) =
-                identity::join_group(&*b, &mut local, &mut state, &dek, &ns, Overwrite::Theirs)
-            {
-                return Err(self.join_failed(&before, sync_error(&e)));
-            }
-        } else {
-            // 名册没给出组号（缺失或不合法）：回退的组号与他人查重；组未知就不覆盖本机设置
-            let fallback = free_group(&roster, dev, &[dev], None)?;
-            if fallback == group {
-                let before = self.settings_digest();
-                let ns = Namespace::new(self.cfg.class, group.clone());
-                if let Err(e) =
-                    identity::join_group(&*b, &mut local, &mut state, &dek, &ns, Overwrite::Theirs)
-                {
-                    return Err(self.join_failed(&before, sync_error(&e)));
-                }
-            } else {
-                identity::leave_group(&mut state, &fallback);
-                group = fallback;
-            }
-        }
-        state.identity_confirmed = true;
-        clear_join_halt(&mut state);
-        // 已确认过身份的设备改认领别的号：原号与待删旧号都归入待删（撞号时原号另有主人，不删）
-        if self.state.identity_confirmed && !self.id_conflict() {
-            state.retired_ids = std::mem::take(&mut self.state.retired_ids);
-            state.retired_ids.push(wind_sync::state::RetiredId {
-                id: self.state.device.clone(),
-                nonce: self.state.last_nonce.clone(),
-                gen_: self.state.gen_,
-            });
-        }
-        self.state = state;
-        self.after_identity_change();
-        log!("已认领设备 {dev}（组 {group}）");
-        Ok(json!({ "ok": true, "device": dev, "group": group }))
-    }
-
-    /// 清空远端后以本机为准重新上传。需 `confirm: true`；生成新的同步密钥并回执，其他设备须用新密钥重新加入。
-    fn cmd_reset_remote(&mut self, args: &Value) -> Result<Value, String> {
-        if args.get("confirm").and_then(Value::as_bool) != Some(true) {
-            return Err("重置远端会清空其中全部同步数据，须明确确认（confirm=true）".into());
-        }
-        let b = self.fresh_backend(None)?;
-        let dek = Dek::generate();
-        let prev = self.store_dek(&dek)?;
-        if let Err(e) = remote::reset_remote_with(&*b, &dek) {
-            self.rollback_dek(prev);
-            return Err(sync_error(&e));
-        }
-        // 远端已空：旧基线作废，所有本地文件当作新增上传；本机就是新库的首台设备
-        let mut fresh = SyncState::new(self.state.device.clone());
-        fresh.group = group_of(&self.state).to_string();
-        fresh.group_name = std::mem::take(&mut self.state.group_name);
-        fresh.group_name_at = self.state.group_name_at;
-        fresh.identity_confirmed = true;
-        self.state = fresh;
-        self.info_written = None;
-        self.mark_verified(library_id(self.settings.backend.as_ref()));
-        self.after_user_fix();
-        self.publish_info(false);
-        log!("远端已重置");
-        Ok(json!({ "ok": true, "key": dek.to_key_string() }))
     }
 }
 

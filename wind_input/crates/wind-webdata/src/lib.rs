@@ -750,10 +750,13 @@ fn web_data_dispatch<H: WebDataRpc + ?Sized>(
         "quick.previewImport" => h.web_quick_preview_import(params),
 
         // ── stats.*（输入统计，redb 每日聚合）────────────────
-        "stats.summary" => h.web_stats_summary(),
+        "stats.summary" => h.web_stats_summary(params),
         "stats.daily" => h.web_stats_daily(params),
+        "stats.devices" => h.web_stats_devices(),
         "stats.clear" => h.web_stats_clear(),
         "stats.pruneBefore" => h.web_stats_prune(params),
+        // 同步认领另一台设备的身份时，本机统计换成那台设备的
+        "stats.replaceMonths" => h.web_stats_replace_months(params),
 
         // ── appearance.*（设置页预览，text-span-colors.md §11）──
         "appearance.previewTemplate" => h.web_appearance_preview_template(params),
@@ -3753,13 +3756,34 @@ pub trait WebDataRpc: WebDataHost {
         }))
     }
 
-    fn web_stats_summary(&self) -> anyhow::Result<Value> {
+    /// `device` 参数：缺省或 `all` = 全部设备，`self` = 本机，其余须是 `stats.devices` 里的设备号。
+    fn stats_scope(&self, params: &Value) -> anyhow::Result<wind_store::stats_report::StatsScope> {
+        let dev = match params.get("device") {
+            None | Some(Value::Null) => "all",
+            Some(v) => v
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("device 须为字符串"))?,
+        };
+        wind_store::stats_report::StatsScope::parse(self.user_store().map(|s| &**s), dev)
+            .map_err(anyhow::Error::msg)
+    }
+
+    fn web_stats_devices(&self) -> anyhow::Result<Value> {
+        Ok(json!(
+            self.user_store()
+                .map(|s| s.list_device_stats())
+                .unwrap_or_default()
+        ))
+    }
+
+    fn web_stats_summary(&self, params: &Value) -> anyhow::Result<Value> {
+        let scope = self.stats_scope(params)?;
         let (collector, store) = match (self.stat_collector(), self.user_store()) {
             (Some(c), Some(s)) => (c, s),
             _ => return Ok(Self::empty_stats_summary()),
         };
         // 算法在 wind-store（与移动端共用一份），这里只管序列化
-        let s = wind_store::stats_report::summary(store, collector);
+        let s = wind_store::stats_report::summary_for(store, collector, &scope);
         Ok(json!({
             "today_chars": s.today_chars,
             "today_chinese": s.today_chinese,
@@ -3789,7 +3813,14 @@ pub trait WebDataRpc: WebDataHost {
             None => return Ok(json!([])),
         };
         // 区间内连续日期补零值，输出完整 DailyStatItem（便于前端绘图）。
-        let days = wind_store::stats_report::daily_range(store, self.stat_collector(), &from, &to)?;
+        let scope = self.stats_scope(params)?;
+        let days = wind_store::stats_report::daily_range_for(
+            store,
+            self.stat_collector(),
+            &scope,
+            &from,
+            &to,
+        )?;
         Ok(json!(
             days.iter()
                 .map(|(d, r)| Self::daily_item_json(d, r))
@@ -3800,6 +3831,22 @@ pub trait WebDataRpc: WebDataHost {
     fn web_stats_clear(&self) -> anyhow::Result<Value> {
         wind_store::stats_report::clear(self.user_store().map(|s| &**s), self.stat_collector())?;
         Ok(json!({ "ok": true }))
+    }
+
+    /// 参数 `months`：`{"YYYY-MM": "月表原文", ...}`，整体替换本机每日统计（没给出的月份删除）。
+    fn web_stats_replace_months(&self, params: &Value) -> anyhow::Result<Value> {
+        let months: std::collections::BTreeMap<String, String> = serde_json::from_value(
+            params
+                .get("months")
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("缺少参数 months"))?,
+        )
+        .map_err(|e| anyhow::anyhow!("months 须为「月份 → 月表原文」的对象：{e}"))?;
+        let store = self
+            .user_store()
+            .ok_or_else(|| anyhow::anyhow!("用户数据未就绪"))?;
+        let n = wind_store::stats_report::replace_months(store, self.stat_collector(), &months)?;
+        Ok(json!({ "written": n }))
     }
 
     fn web_stats_prune(&self, params: &Value) -> anyhow::Result<Value> {

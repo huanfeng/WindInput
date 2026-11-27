@@ -58,6 +58,10 @@
 - `meta.toml`：本机目录的格式版本与 `dir_id`，后者用来识别目录被复制，同步过去会误判。
 - `screenshots/`、`data/.backup/`、`*.sys_hash`、旧版遗留的顶层 `charsets/`。
 - 隐藏文件、`*.tmp`、`*.bak-*`。
+- 顶层 `service/`、`state/`、`logs/`、`cache/`、`user_config.seen`、`datadir.conf`：macOS 的用户目录与本机目录是同一个，
+  安装目录与本机状态会混进来。同步进程另按实际路径跳过落在用户目录内的本机目录与安装目录，引擎当范围外处理：
+  远端同路径的对象不下载，本机列举里没有也不判成本地删除。
+- 顶层 `userdata.redb.state/`：用户库的引擎运行时状态。移动端没有独立的本机状态目录，它落在用户目录里。
 - 二期的学习数据：`temp.dict.yaml`、`freq.table.yaml`、`assoc.table.yaml`、`draft.dict.yaml`、`data/stats/`、`completion.table.yaml`。
 
 各类只在该平台的用户目录里有对应文件时才起作用。比如 Android 没有 `extensions/`，移动类别下就没有扩展条目。
@@ -256,7 +260,7 @@ toast：
 | §4 清单条目 | 加 `exec`（§5） |
 | §8 同步范围白名单 | §3 的分类 + 排除清单 + 归类守卫 |
 | P1 平台类别命名空间（配置/兼容按桌面与移动分开） | 设置按组（§4.3）；主题、扩展按类别 |
-| §4 远端根 `windinput-sync/v1/` | 改为 `windinput-sync/v2/`。v1 只在开发和靶机上用过，不迁移、不检测，留在远端由用户自行删除 |
+| §4 远端根 `windinput-sync/v1/` | 保持 v1。同步尚未发布，开发期的旧格式数据不迁移、不检测，测试存储清空重建 |
 
 data-sync.md 在对应位置加一行指向本文。
 

@@ -29,6 +29,10 @@ pub enum EditKind {
     Temp,
     /// 词频（`<数据方案>/freq.table.yaml`）。
     Freq,
+    /// 联想历史（`<数据方案>/assoc.table.yaml`）。
+    Assoc,
+    /// 补全历史（`completion.table.yaml`）。
+    Completion,
 }
 
 impl EditKind {
@@ -43,6 +47,8 @@ impl EditKind {
             EditKind::UserDicts => "user_dicts",
             EditKind::Temp => "temp",
             EditKind::Freq => "freq",
+            EditKind::Assoc => "assoc",
+            EditKind::Completion => "completion",
         }
     }
 
@@ -57,9 +63,9 @@ impl EditKind {
             TextPath::UserDicts(_) => Some(EditKind::UserDicts),
             TextPath::Learned(Target::Temp, _) => Some(EditKind::Temp),
             TextPath::Learned(Target::Freq, _) => Some(EditKind::Freq),
-            TextPath::Learned(..) | TextPath::Completion | TextPath::Stats | TextPath::Misread => {
-                None
-            }
+            TextPath::Learned(Target::Assoc, _) => Some(EditKind::Assoc),
+            TextPath::Completion => Some(EditKind::Completion),
+            TextPath::Learned(..) | TextPath::Stats | TextPath::Misread => None,
         }
     }
 }
@@ -156,11 +162,12 @@ impl Store {
                     _ => crate::user_dicts::meta_path(root, s),
                 }
             }
-            TextPath::Learned(t @ (Target::Temp | Target::Freq), s) => {
+            TextPath::Learned(t @ (Target::Temp | Target::Freq | Target::Assoc), s) => {
                 wind_userdata::engine::check_schema_id(s)?;
                 self.learned_path(*t, s)
             }
-            TextPath::Learned(..) | TextPath::Completion | TextPath::Stats => {
+            TextPath::Completion => self.completion_path(),
+            TextPath::Learned(..) | TextPath::Stats => {
                 anyhow::bail!("{} 由程序自动维护，不提供编辑", self.data_rel(&abs))
             }
             TextPath::Misread => {
@@ -232,7 +239,8 @@ impl Store {
                 }
             }
             TextPath::Learned(t, s) => self.prepare_learned_edit(*t, s)?,
-            TextPath::Completion | TextPath::Stats | TextPath::Misread => {}
+            TextPath::Completion => self.begin_completion_hold()?,
+            TextPath::Stats | TextPath::Misread => {}
         }
         sessions.insert(
             path.clone(),
@@ -268,7 +276,7 @@ impl Store {
         Ok(())
     }
 
-    /// 学到的数据（临时词 / 词频）：同用户词——先折回，没有文件就按空表新建，再暂停写回。
+    /// 学到的数据（临时词 / 词频 / 联想历史）：同用户词——先折回，没有文件就按空表新建，再暂停写回。
     fn prepare_learned_edit(&self, target: Target, schema: &str) -> anyhow::Result<()> {
         let ud = self.runtime().data();
         ud.bind_by_rule(target, schema)?;
@@ -292,7 +300,7 @@ impl Store {
         Ok(())
     }
 
-    /// 临时词 / 词频的文件路径。
+    /// 临时词 / 词频 / 联想历史的文件路径。
     fn learned_path(&self, target: Target, schema: &str) -> PathBuf {
         crate::learned_text::learned_binding(self.user_text_dir(), target, schema)
             .map(|b| b.path)
@@ -329,11 +337,12 @@ impl Store {
         self.release_hold(tp);
     }
 
-    /// 恢复该类文件的写回（用户词 / 临时词 / 词频；别的没有暂停）。
+    /// 恢复该类文件的写回（用户词 / 学到的数据 / 补全历史；别的没有暂停）。
     fn release_hold(&self, tp: &TextPath) {
         match tp {
             TextPath::Words(s) => self.runtime().data().release_text(Target::User, s),
             TextPath::Learned(t, s) => self.runtime().data().release_text(*t, s),
+            TextPath::Completion => self.release_completion_hold(),
             _ => {}
         }
     }
@@ -355,6 +364,8 @@ impl Store {
                     vec![format!("{}{ds}", crate::user_words::USER_DICTS_CHANGED)]
                 }
             }
+            // 租约中按文件重载失败 ⇒ end 失败，会话与暂停保留，留给重试 / 租约到期兜底
+            TextPath::Completion if self.reload_held_completions()? => vec!["completion".into()],
             _ => self.reload_user_text_paths(&[path.to_string_lossy().into_owned()])?,
         };
         let issues: Vec<_> = self
@@ -390,7 +401,7 @@ impl Store {
             .collect()
     }
 
-    /// 暂停写回中的文件（用户词 / 临时词 / 词频；`dict.flush` 据此报哪些没写回）。
+    /// 暂停写回中的文件（用户词 / 学到的数据 / 补全历史；`dict.flush` 据此报哪些没写回）。
     pub fn held_edit_files(&self) -> Vec<String> {
         self.runtime()
             .data()
@@ -398,9 +409,10 @@ impl Store {
             .into_iter()
             .filter_map(|(t, s)| match t {
                 Target::User => Some(self.user_text_path(&s)),
-                Target::Temp | Target::Freq => Some(self.learned_path(t, &s)),
+                Target::Temp | Target::Freq | Target::Assoc => Some(self.learned_path(t, &s)),
                 _ => None,
             })
+            .chain(self.completion_held().then(|| self.completion_path()))
             .map(|p| self.data_rel(&p))
             .collect()
     }
@@ -437,7 +449,7 @@ impl Store {
         Ok(())
     }
 
-    /// 临时词 / 词频正在外部编辑（暂停写回）⇒ Err：界面的删除 / 清空 / 转正 / 导入先挡住。
+    /// 临时词 / 词频 / 联想历史正在外部编辑（暂停写回）⇒ Err：界面的删除 / 清空 / 转正 / 导入先挡住。
     pub(crate) fn check_learned_not_held(
         &self,
         target: Target,

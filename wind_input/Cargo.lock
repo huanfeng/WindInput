@@ -3289,8 +3289,10 @@ dependencies = [
  "getrandom 0.2.17",
  "hkdf",
  "hmac",
+ "miniz_oxide",
  "percent-encoding",
  "quick-xml 0.37.5",
+ "rustls",
  "rusty-s3",
  "serde",
  "serde_json",
@@ -3299,6 +3301,7 @@ dependencies = [
  "toml 0.8.23",
  "ureq",
  "url",
+ "wind-utils",
 ]
 
 [[package]]
@@ -3522,6 +3525,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "toml 0.8.23",
  "tracing",
  "wind-supervise",
  "wind-sync",

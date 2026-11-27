@@ -1848,6 +1848,64 @@ fn shadow_add_rule_routes_pin_and_hide() {
 }
 
 #[test]
+fn rpc_device_param() {
+    let c = coord("stats_dev");
+    let store = c.user_store().unwrap().clone();
+    store
+        .put_daily_stat(
+            "2020-01-01",
+            &wind_store::stats::DailyStats {
+                chinese: 10,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let d = store.stats_dir().join("devices/phone");
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(
+        d.join("2020-01.toml"),
+        "version = 1\n[days.2020-01-02]\nchinese = 5\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(store.stats_dir().join("devices/bad name")).unwrap();
+
+    let devs = c.web_data_rpc("stats.devices", &json!({})).unwrap();
+    assert_eq!(devs, json!(["phone"]));
+    let q = |dev: Option<&str>| {
+        let mut p = json!({ "from": "2020-01-01", "to": "2020-01-02" });
+        if let Some(d) = dev {
+            p["device"] = json!(d);
+        }
+        c.web_data_rpc("stats.daily", &p).unwrap()
+    };
+    let tc = |v: &Value| (v[0]["tc"].as_u64().unwrap(), v[1]["tc"].as_u64().unwrap());
+    assert_eq!(tc(&q(None)), (10, 5));
+    assert_eq!(tc(&q(Some("all"))), (10, 5));
+    assert_eq!(tc(&q(Some("self"))), (10, 0));
+    assert_eq!(tc(&q(Some("phone"))), (0, 5));
+    let sum = |dev: &str| {
+        c.web_data_rpc("stats.summary", &json!({ "device": dev }))
+            .unwrap()["total_chars"]
+            .as_u64()
+            .unwrap()
+    };
+    assert_eq!(sum("phone"), 5);
+    assert_eq!(
+        sum("all"),
+        5 + c.stat_collector().unwrap().get_meta().total_chars
+    );
+    let err = c.web_data_rpc("stats.summary", &json!({ "device": "nope" }));
+    assert!(err.is_err());
+    assert!(
+        c.web_data_rpc(
+            "stats.daily",
+            &json!({ "from": "2020-01-01", "to": "2020-01-02", "device": "bad name" })
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn stats_summary_daily_shape() {
     let c = coord("stats");
     let today = wind_store::stats_report::today_str();
@@ -1900,6 +1958,22 @@ fn stats_summary_daily_shape() {
     let sum2 = c.web_data_rpc("stats.summary", &json!({})).unwrap();
     assert_eq!(sum2["today_chars"], 0);
     assert_eq!(sum2["total_chars"], 0);
+
+    // replaceMonths：整体换成给定月表，累计随之重算；格式不对的拒绝
+    let months =
+        json!({ "months": { "2020-01": "version = 1\n[days.\"2020-01-05\"]\nchinese = 7\n" } });
+    let r = c.web_data_rpc("stats.replaceMonths", &months).unwrap();
+    assert_eq!(r["written"], 1);
+    let sum3 = c.web_data_rpc("stats.summary", &json!({})).unwrap();
+    assert_eq!(sum3["total_chars"], 7);
+    assert!(
+        c.web_data_rpc(
+            "stats.replaceMonths",
+            &json!({ "months": { "2020-1": "" } })
+        )
+        .is_err()
+    );
+    assert!(c.web_data_rpc("stats.replaceMonths", &json!({})).is_err());
 }
 
 #[test]

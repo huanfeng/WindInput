@@ -3659,6 +3659,7 @@ STDAPI CTextService::OnChange(REFGUID rguid)
 
         EndComposition();
         ResetComposingState(TRUE);  // 中英切换保留配对状态：光标与已插入的右符号都没变
+        NotifyCandidatesVisibilityChanged(FALSE);  // 同 _ApplyModeSwitch：收口候选 UIElement
 
         BOOL newChineseMode = bWantChinese;
         if (_pIPCClient != nullptr && _pIPCClient->IsConnected())
@@ -3825,6 +3826,9 @@ HRESULT CTextService::_ApplyModeSwitch(BOOL requestedMode, BOOL compartmentAlrea
     // End any active composition since we're switching modes
     EndComposition();
     ResetComposingState(TRUE);  // 中英切换保留配对状态：光标与已插入的右符号都没变
+    // 候选 UIElement 也要收口：_SetChineseMode 切到英文只会经 OnModeReevaluate 卸候选热键，不会 EndUIElement，
+    // 宿主（Chrome 地址栏）会一直当输入法候选窗还开着而压住自己的联想，直到下次上屏才恢复。
+    NotifyCandidatesVisibilityChanged(FALSE);
 
     // 通知服务端模式切换（同步：可能回带待定输入的 CommitText）
     if (_pIPCClient != nullptr && _pIPCClient->IsConnected())
@@ -6146,6 +6150,7 @@ void CTextService::ToggleInputMode()
 
     // 本地切换模式（服务端不可用时的兜底；正常切换走按键 → 服务端 → 状态推送）
     EndComposition();
+    NotifyCandidatesVisibilityChanged(FALSE);  // 同 _ApplyModeSwitch：收口候选 UIElement
     _SetChineseMode(!_bChineseMode);
 
     WIND_LOG_INFO_FMT(L"Switched to %s mode\n", _bChineseMode ? L"Chinese" : L"English");

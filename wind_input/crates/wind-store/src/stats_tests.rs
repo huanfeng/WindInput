@@ -512,3 +512,158 @@ fn malformed_dates_never_panic() {
     assert!(s.record_stat("x", 1, 0).is_err());
     assert_eq!(s.prune_stats_before("２０２６-01-01").unwrap(), 0);
 }
+
+fn arr24(v: u32) -> [u32; 24] {
+    [v; 24]
+}
+
+#[test]
+fn merge_sums_counts_and_arrays() {
+    let mut a = DailyStats {
+        chinese: 10,
+        english: 1,
+        punct: 2,
+        other: 3,
+        hours: arr24(1),
+        commit_count: 4,
+        code_len_sum: 20,
+        code_len_count: 5,
+        code_len_dist: [1, 2, 3, 4, 5, 6],
+        cand_pos_dist: [5, 4, 3, 2, 1],
+        active_seconds: 30,
+        by_source: vec![1, 2],
+        ..Default::default()
+    };
+    a.by_schema.insert(
+        "pinyin".into(),
+        SchemaStats {
+            total_chars: 5,
+            commit_count: 2,
+            code_len_sum: 6,
+            code_len_count: 2,
+            cand_pos_dist: [1, 0, 0, 0, 0],
+        },
+    );
+    let mut b = a.clone();
+    b.by_source = vec![10, 20, 30]; // 较长的来源数组
+    b.by_schema.insert("wubi".into(), SchemaStats::default());
+    a.merge_from(&b);
+    assert_eq!((a.chinese, a.english, a.punct, a.other), (20, 2, 4, 6));
+    assert_eq!(a.hours, arr24(2));
+    assert_eq!(a.commit_count, 8);
+    assert_eq!((a.code_len_sum, a.code_len_count), (40, 10));
+    assert_eq!(a.code_len_dist, [2, 4, 6, 8, 10, 12]);
+    assert_eq!(a.cand_pos_dist, [10, 8, 6, 4, 2]);
+    assert_eq!(a.active_seconds, 60);
+    assert_eq!(a.by_source, vec![11, 22, 30]);
+    assert_eq!(a.by_schema["pinyin"].total_chars, 10);
+    assert_eq!(a.by_schema["pinyin"].cand_pos_dist[0], 2);
+    assert!(a.by_schema.contains_key("wubi"));
+}
+
+#[test]
+fn speed_is_total_chars_over_total_time() {
+    let fast = DailyStats {
+        speed_v2: true,
+        speed_chars: 600,
+        active_millis: 60_000, // 600 字/分
+        ..Default::default()
+    };
+    let slow = DailyStats {
+        speed_v2: true,
+        speed_chars: 100,
+        active_millis: 60_000, // 100 字/分
+        ..Default::default()
+    };
+    let mut m = fast.clone();
+    m.merge_from(&slow);
+    let (c, ms) = m.speed_parts();
+    // 700 字 / 2 分钟
+    assert_eq!(speed_per_minute_ms(c as u64, ms, 1.0), 350);
+    let mut m2 = fast.clone();
+    m2.merge_from(&DailyStats {
+        speed_v2: true,
+        speed_chars: 100,
+        active_millis: 180_000,
+        ..Default::default()
+    });
+    let (c, ms) = m2.speed_parts();
+    assert_eq!(speed_per_minute_ms(c as u64, ms, 1.0), 175); // 700 字 / 4 分钟
+}
+
+#[test]
+fn merge_mixed_speed_models_keeps_both_parts() {
+    let v2 = DailyStats {
+        speed_v2: true,
+        speed_chars: 50,
+        active_millis: 30_000,
+        ..Default::default()
+    };
+    let legacy = DailyStats {
+        chinese: 100,
+        active_seconds: 60,
+        ..Default::default()
+    };
+    let mut m = v2.clone();
+    m.merge_from(&legacy);
+    assert_eq!(m.speed_parts(), (150, 90_000));
+    let mut m2 = legacy.clone();
+    m2.merge_from(&v2);
+    assert_eq!(m2.speed_parts(), (150, 90_000));
+    // 两边都是旧口径：仍是旧口径
+    let mut m3 = legacy.clone();
+    m3.merge_from(&legacy);
+    assert!(!m3.speed_v2);
+    assert_eq!(m3.speed_parts(), (200, 120_000));
+}
+
+#[test]
+fn merge_into_empty_day_does_not_double_count_speed_chars() {
+    // 只有他机有数据的日期从缺省（旧口径）记录开始合并
+    let other = DailyStats {
+        chinese: 50,
+        speed_v2: true,
+        speed_chars: 50,
+        active_millis: 30_000,
+        ..Default::default()
+    };
+    let mut m = DailyStats::default();
+    m.merge_from(&other);
+    assert_eq!(m.speed_parts(), (50, 30_000));
+}
+
+#[test]
+fn invalid_device_dir_ignored() {
+    let s = Store::open(tmp("wind_st_devdir.redb")).unwrap();
+    let day = "version = 1\n[days.2026-01-02]\nchinese = 5\n";
+    for name in [
+        "pc",
+        "phone-2",
+        "Phone-2",
+        "-ab",
+        "ab-",
+        "all",
+        "self",
+        "bad name",
+        "a.b",
+        &"x".repeat(33),
+    ] {
+        let d = s.stats_dir().join("devices").join(name);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("2026-01.toml"), day).unwrap();
+    }
+    // 空目录与散落的文件也不算设备
+    std::fs::create_dir_all(s.stats_dir().join("devices/empty")).unwrap();
+    std::fs::write(s.stats_dir().join("devices/stray.toml"), day).unwrap();
+    assert_eq!(s.list_device_stats(), vec!["pc", "phone-2"]);
+    assert!(
+        s.device_daily_stats("bad name", "2026-01-01", "2026-01-31")
+            .is_empty()
+    );
+    assert_eq!(
+        s.device_daily_stats("pc", "2026-01-01", "2026-01-31")[0]
+            .1
+            .chinese,
+        5
+    );
+}

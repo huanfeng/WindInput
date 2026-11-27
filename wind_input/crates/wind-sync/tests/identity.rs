@@ -323,6 +323,41 @@ fn claim_ignores_invalid_group_in_roster() {
     assert_eq!(claim_device(&b, &mut st, &dek, "c").unwrap(), "c");
 }
 
+fn info_in(group: &str) -> DeviceInfo {
+    DeviceInfo {
+        name: "n".into(),
+        platform: "android".into(),
+        app_version: "0".into(),
+        caps: vec![],
+        last_seen: T0,
+        group: group.into(),
+        group_name: String::new(),
+        group_name_at: 0,
+    }
+}
+
+/// 登记过但首次同步没成功的设备（只有信息、没有清单）：照样能恢复为它，序列从头开始。
+#[test]
+fn claim_device_that_never_published_starts_fresh() {
+    let (b, dek, _a, _bb, _c) = three();
+    put_device_info(&b, &dek.devinfo_key(), "p", &info_in("pg")).unwrap();
+    let mut st = SyncState::new("x");
+    assert_eq!(claim_device(&b, &mut st, &dek, "p").unwrap(), "pg");
+    assert_eq!((st.device.as_str(), st.gen_), ("p", 0));
+    let mut n = Dev::new("p", "pg", &dek);
+    n.state = st;
+    n.local.set("config.toml", "p=1");
+    n.sync(&b);
+}
+
+/// 设备号根本不存在（没有信息也没有清单）：不能凭空认领。
+#[test]
+fn claim_unknown_device_is_rejected() {
+    let (b, dek, _a, _bb, _c) = three();
+    let mut st = SyncState::new("x");
+    assert!(claim_device(&b, &mut st, &dek, "nobody").is_err());
+}
+
 /// 旧号在改号后被别处继续发布：不删；归属未变则删。
 #[test]
 fn retire_checks_ownership_by_nonce() {

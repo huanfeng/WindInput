@@ -42,6 +42,46 @@ fn default_interval() -> u32 {
     DEFAULT_INTERVAL_MIN
 }
 
+fn on() -> bool {
+    true
+}
+
+/// 同步内容开关：各类内容是否参与同步，缺省全开。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SyncContent {
+    /// 学习数据（用户词频、造词等）。
+    #[serde(default = "on")]
+    pub learned: bool,
+    /// 补全数据。
+    #[serde(default = "on")]
+    pub completion: bool,
+    /// 输入统计。
+    #[serde(default = "on")]
+    pub stats: bool,
+}
+
+impl Default for SyncContent {
+    fn default() -> Self {
+        SyncContent {
+            learned: true,
+            completion: true,
+            stats: true,
+        }
+    }
+}
+
+impl SyncContent {
+    /// 三项内容是否有任一开启。
+    pub fn any(&self) -> bool {
+        self.learned || self.completion || self.stats
+    }
+
+    fn is_all_on(&self) -> bool {
+        *self == SyncContent::default()
+    }
+}
+
 /// 同步设置（设备本地，不进 config.toml）。**不含任何密码 / secret。**
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -53,6 +93,13 @@ pub struct SyncSettings {
     pub interval_min: u32,
     /// 本机在设备名册里的名字；空则由同步进程取主机名。不随同步传播。
     pub device_name: String,
+    /// 不校验存储服务的 HTTPS 证书（自建服务用自签名证书时由用户显式打开）。
+    /// 不算换存储：切换它不影响已保存的密码。
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub skip_cert_verify: bool,
+    /// 同步哪些内容；全开时不写出。
+    #[serde(skip_serializing_if = "SyncContent::is_all_on")]
+    pub content: SyncContent,
 }
 
 impl Default for SyncSettings {
@@ -62,6 +109,8 @@ impl Default for SyncSettings {
             backend: None,
             interval_min: DEFAULT_INTERVAL_MIN,
             device_name: String::new(),
+            skip_cert_verify: false,
+            content: SyncContent::default(),
         }
     }
 }
@@ -225,6 +274,10 @@ pub enum Op {
     ClaimDevice,
     /// 加入同步后确认身份：以当前设备号新建单机组。
     ConfirmIdentity,
+    /// 清除已移除设备留在远端的学习数据：`{device}`，须不在名册里。
+    PurgeDevice,
+    /// 立即重算远端空间占用（后台进行，结果见 [`Status::usage`]）。
+    RefreshUsage,
 }
 
 impl Op {
@@ -314,6 +367,102 @@ pub struct Status {
     pub round: u64,
     /// 最近一轮的结果。
     pub last_round: Option<RoundStats>,
+    /// 已移除（不在名册里）但远端仍有学习数据的设备号。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub removed_with_data: Vec<String>,
+    /// 远端空间占用的缓存；从未统计过（或换了同步库）为 None。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
+    /// 正在统计空间占用。
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub usage_busy: bool,
+    /// 最近一次统计失败的原因；成功后清空。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage_error: Option<String>,
+}
+
+/// [`status_view`] 里由宿主判定的字段：同步是否装了、开了、进程是否在跑、对外的阶段与错误。
+pub struct StatusHost<'a> {
+    pub installed: bool,
+    pub enabled: bool,
+    pub running: bool,
+    pub phase: &'a str,
+    pub last_error: Option<&'a str>,
+}
+
+/// 设置页的 `sync.status` 视图，桌面 RPC 与手机门面共用。可选字段的省略规则与 [`Status`] 的序列化一致。
+pub fn status_view(st: &Status, host: &StatusHost) -> Value {
+    let mut v = serde_json::json!({
+        "installed": host.installed,
+        "enabled": host.enabled,
+        "running": host.running,
+        "phase": host.phase,
+        "last_ok": st.last_ok,
+        "last_error": host.last_error,
+        "pending": st.pending,
+        "conflicts": st.conflicts,
+        "conflict_paths": st.conflict_paths,
+        "has_secret": st.has_secret,
+        "joined": st.joined,
+        "device": st.device,
+        "group": st.group,
+        "group_name": st.group_name,
+        "needs_identity": st.needs_identity,
+    });
+    if !st.removed_with_data.is_empty() {
+        v["removed_with_data"] = serde_json::json!(st.removed_with_data);
+    }
+    if let Some(u) = &st.usage {
+        v["usage"] = serde_json::json!(u);
+    }
+    if st.usage_busy {
+        v["usage_busy"] = Value::Bool(true);
+    }
+    if let Some(e) = &st.usage_error {
+        v["usage_error"] = serde_json::json!(e);
+    }
+    v
+}
+
+/// 远端空间占用（设计 `docs/design/data-sync.md` §12），单位字节。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Usage {
+    /// 统计完成的 Unix 秒。
+    pub computed_at: i64,
+    /// 同步根之内的合计。
+    pub total: u64,
+    /// 文件数据：各设备共用、按内容去重。
+    pub blobs: u64,
+    /// 其中已不被任何设备最新两代清单引用的旧版本；有清单解不开时无法确定，为 None。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blobs_unreferenced: Option<u64>,
+    /// 各设备的学习数据与打字统计，按设备号排序。
+    pub devices: Vec<DeviceUsage>,
+    /// 其余：`meta.json`、设备清单与设备信息，以及同步根下不认识的对象。
+    pub other: u64,
+    /// 服务端给出的用量与配额（WebDAV RFC 4331、官方服务的计费口径）；给不出为 None。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ProviderUsage>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DeviceUsage {
+    pub id: String,
+    pub learned: u64,
+    pub stats: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProviderUsage {
+    /// 服务端口径的已用（WebDAV 只是同步目录的用量）。
+    pub used: u64,
+    /// 剩余可用；不限量或给不出为 None。
+    pub available: Option<u64>,
+    /// 总容量；只有能给出账户配额的服务（官方同步服务）才有。
+    pub quota: Option<u64>,
 }
 
 /// 一轮同步的结果统计。
@@ -333,6 +482,7 @@ pub struct RoundStats {
 /// 同步进程 → core。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)] // 逐帧收发即用即弃；只 Box 用量仍超阈值，不值得
 pub enum FromSync {
     Status(Status),
     Request {

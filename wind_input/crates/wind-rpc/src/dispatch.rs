@@ -90,9 +90,10 @@ pub fn dispatch(state: &DispatchState, req: Request) -> Response {
 /// 拒绝文案：不可信调用方（AppContainer / 低完整性 / 他人 uid）碰机密相关方法时返回。
 pub const DENY_UNTRUSTED: &str = "拒绝：调用方权限不足";
 
-/// 需要「可信调用方」才能调用的方法：同步（含导出密钥、改后端）。
+/// 需要「可信调用方」才能调用的方法：同步（含导出密钥、改后端），以及只有同步进程经进程内
+/// 可信通道才调用的整表替换统计。
 fn requires_trusted(method: &str) -> bool {
-    method.starts_with("sync.")
+    method.starts_with("sync.") || method == "stats.replaceMonths"
 }
 
 /// 带调用方可信度的分发。`trusted=false` 来自传输层对连接对端的核验（见各 transport）；

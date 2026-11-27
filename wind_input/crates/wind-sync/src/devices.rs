@@ -112,10 +112,11 @@ pub fn remove_device(b: &dyn Backend, dev: &str) -> Result<usize, SyncError> {
         return Err(SyncError::Local(format!("非法设备号: {dev}")));
     }
     // 先删清单（代次升序、最新最后），最后删 info：中途失败时剩下的仍能认出是同一个号
+    let prefix = manifest::device_dir_prefix(dev);
     let mut objs: Vec<_> = b
-        .list(&manifest::device_dir_prefix(dev))?
+        .list(&prefix)?
         .into_iter()
-        .filter(|o| manifest::safe_key(&o.key))
+        .filter(|o| manifest::listed_within(&o.key, &prefix))
         .map(|o| {
             let gen_ = manifest::parse_manifest_key(&o.key).map(|(_, g)| g);
             (gen_.is_none(), gen_.unwrap_or(0), o.key)

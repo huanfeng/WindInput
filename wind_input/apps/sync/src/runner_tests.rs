@@ -467,6 +467,24 @@ fn put_info(mem: &MemBackend, dek: &Dek, id: &str, group: &str, platform: &str) 
     put_device_info(mem, &dek.devinfo_key(), id, &info).unwrap();
 }
 
+/// 不能恢复为另一类设备（桌面认领手机）：报错、不备份、不动本机。
+#[test]
+fn claim_rejects_cross_class_device() {
+    let d = tempfile::tempdir().unwrap();
+    let mem = MemBackend::new();
+    let dek = remote::init_remote(&mem).unwrap();
+    put_info(&mem, &dek, "phone", "phones", "android");
+    let (mut r, _rx) = runner_with(d.path(), Box::new(MemFactory(mem)), None, "pc");
+    r.command(Op::ImportKey, &json!({"key": dek.to_key_string()}))
+        .unwrap();
+    let e = r
+        .command(Op::ClaimDevice, &json!({"dev": "phone"}))
+        .unwrap_err();
+    assert!(e.contains("不是同一类设备"), "{e}");
+    assert!(r.status().needs_identity);
+    assert!(!d.path().join("user/data/.backup").exists());
+}
+
 /// 加入不存在或跨类别的组：报错且不动本机。
 #[test]
 fn join_group_rejects_missing_or_cross_class_groups() {
@@ -609,6 +627,129 @@ fn sync_now_returns_ticket_and_round_advances() {
     assert!(last.ok && last.forced, "{last:?}");
     assert_eq!(last.uploaded, 1);
     assert_eq!(last.error, None);
+}
+
+/// 宿主自动触发（`auto`）排一轮但不强制：学习数据守 30 分钟间隔，到期才跑；手动仍强制。
+#[test]
+fn auto_sync_now_runs_learn_only_when_due() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, rx) = runner_with(
+        d.path(),
+        Box::new(MemFactory(MemBackend::new())),
+        None,
+        "pc",
+    );
+    setup_pc(&mut r);
+    write_freq(d.path(), 3);
+    let auto = json!({"auto": true});
+    assert_eq!(r.command(Op::SyncNow, &auto).unwrap()["queued"], true);
+    assert!(!r.force_now, "auto 不强制");
+    assert!(r.next_wake(Instant::now()).is_some(), "auto 也要排上一轮");
+    round(&mut r, &rx);
+    assert!(r.learn_last_ok > 0, "首轮学习数据到期，应跑");
+    assert!(!r.status().last_round.unwrap().forced);
+
+    let recent = now_unix() - 60;
+    r.learn_last_ok = recent;
+    r.command(Op::SyncNow, &auto).unwrap();
+    round(&mut r, &rx);
+    assert_eq!(r.learn_last_ok, recent, "未满 30 分钟的学习轮不跑");
+
+    r.command(Op::SyncNow, &Value::Null).unwrap();
+    round(&mut r, &rx);
+    assert!(r.learn_last_ok > recent, "手动立即同步强制跑学习轮");
+    assert!(r.status().last_round.unwrap().forced);
+}
+
+/// auto 轮进行中来手动立即同步：本轮后补一轮强制轮（学习数据照样交换），并照旧在本轮后解除停止态。
+#[test]
+fn manual_sync_now_during_auto_round_queues_forced_round() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, rx) = runner_with(
+        d.path(),
+        Box::new(MemFactory(MemBackend::new())),
+        None,
+        "pc",
+    );
+    setup_pc(&mut r);
+    write_freq(d.path(), 3);
+    let recent = now_unix() - 60;
+    r.learn_last_ok = recent;
+    r.command(Op::SyncNow, &json!({"auto": true})).unwrap();
+    r.start_round();
+    let rep = r.command(Op::SyncNow, &Value::Null).unwrap();
+    assert_eq!(rep["queued"], true);
+    assert_eq!(rep["ticket"], r.status().round + 2);
+    assert!(r.clear_halt_after_round);
+    let x = wait_round(&rx);
+    r.finish_round(*x);
+    assert_eq!(r.learn_last_ok, recent, "auto 轮本身不跑学习轮");
+    assert!(r.next_wake(Instant::now()).is_some(), "应补排一轮");
+    round(&mut r, &rx);
+    let st = r.status();
+    assert_eq!(st.round, 2);
+    assert!(st.last_round.unwrap().forced);
+    assert!(r.learn_last_ok > recent, "补的强制轮交换学习数据");
+}
+
+/// auto 轮受文件同步的失败退避约束：退避期内跳过，不上传。
+#[test]
+fn auto_sync_now_respects_backoff() {
+    let d = tempfile::tempdir().unwrap();
+    let mem = MemBackend::new();
+    let (mut r, rx) = runner_with(d.path(), Box::new(MemFactory(mem.clone())), None, "pc");
+    setup_pc(&mut r);
+    r.state.retry.failures = 1;
+    r.state.retry.next_at = now_unix() + 3600;
+    std::fs::write(d.path().join("user/config.toml"), "a = 1\n").unwrap();
+    r.command(Op::SyncNow, &json!({"auto": true})).unwrap();
+    round(&mut r, &rx);
+    assert!(
+        mem.raw_get(&manifest::manifest_key("pc", 1)).is_none(),
+        "退避期内不应同步"
+    );
+}
+
+/// auto 不解除停止态，也不排轮；手动立即同步照旧解除。
+#[test]
+fn auto_sync_now_keeps_halt() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, _rx) = runner_with(
+        d.path(),
+        Box::new(MemFactory(MemBackend::new())),
+        None,
+        "pc",
+    );
+    setup_pc(&mut r);
+    r.state.retry.halted = Some("出错了".into());
+    let rep = r.command(Op::SyncNow, &json!({"auto": true})).unwrap();
+    assert_eq!(rep["queued"], false);
+    assert_eq!(r.state.retry.halted.as_deref(), Some("出错了"));
+    assert!(r.next_wake(Instant::now()).is_none());
+    r.command(Op::SyncNow, &Value::Null).unwrap();
+    assert!(r.state.retry.halted.is_none());
+    assert!(r.force_now);
+}
+
+/// 同步进行中再来 auto：不另排、也不在本轮结束后解除停止态。
+#[test]
+fn auto_sync_now_while_syncing_is_dropped() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, rx) = runner_with(
+        d.path(),
+        Box::new(MemFactory(MemBackend::new())),
+        None,
+        "pc",
+    );
+    setup_pc(&mut r);
+    r.command(Op::SyncNow, &Value::Null).unwrap();
+    r.start_round();
+    let rep = r.command(Op::SyncNow, &json!({"auto": true})).unwrap();
+    assert_eq!(rep["busy"], true);
+    assert!(!r.clear_halt_after_round);
+    let x = wait_round(&rx);
+    r.finish_round(*x);
+    assert!(!r.auto_now && !r.force_now, "不应再排一轮");
 }
 
 #[test]
@@ -819,14 +960,14 @@ fn reset_remote_keeps_old_local_key_when_publish_fails() {
 fn reset_remote_does_not_touch_remote_when_local_save_fails() {
     let d = tempfile::tempdir().unwrap();
     let (mem, _key) = initialized_remote();
-    mem.raw_put("windinput-sync/v2/blobs/x", vec![1]);
+    mem.raw_put("windinput-sync/v1/blobs/x", vec![1]);
     let (mut r, _rx) = runner_with(d.path(), Box::new(MemFactory(mem.clone())), None, "pc");
     r.cfg.secrets = Box::new(FailingStore);
     assert!(
         r.command(Op::ResetRemote, &json!({"confirm": true}))
             .is_err()
     );
-    assert!(mem.raw_get("windinput-sync/v2/blobs/x").is_some());
+    assert!(mem.raw_get("windinput-sync/v1/blobs/x").is_some());
 }
 
 /// 停用期间改了存储地址：下次启动丢弃旧凭据，且不会拿它去连新地址；磁盘上也已清掉。
@@ -1004,4 +1145,648 @@ fn verified_flag_is_invalidated_by_missing_or_foreign_remote() {
     round(&mut r2, &rx2);
     assert!(!r2.joined());
     let _ = rx;
+}
+
+fn empty_round(r: &Runner, learn: Option<Result<(), String>>, now: u64) -> Round {
+    Round {
+        state: r.state.clone(),
+        result: Err("x".into()),
+        conflicts: Vec::new(),
+        now,
+        echo_before: HashMap::new(),
+        failures_before: 0,
+        library_id: None,
+        info_written: None,
+        learn,
+        removed_with_data: None,
+        usage: None,
+    }
+}
+
+#[test]
+fn learn_skipped_within_30min() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, _rx) = runner(d.path());
+    r.learn_last_ok = 10_000;
+    assert!(!r.learn_due(10_000 + LEARN_INTERVAL_SECS - 1, false));
+    assert!(r.learn_due(10_000 + LEARN_INTERVAL_SECS, false));
+}
+
+#[test]
+fn forced_round_runs_learn() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, _rx) = runner(d.path());
+    r.learn_last_ok = 10_000;
+    assert!(r.learn_due(10_001, true));
+}
+
+#[test]
+fn failed_learn_does_not_advance_last_ok() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, _rx) = runner(d.path());
+    r.learn_last_ok = 5;
+    let x = empty_round(&r, Some(Err("boom".into())), 9_999);
+    r.finish_round(x);
+    assert_eq!(r.learn_last_ok, 5);
+}
+
+#[test]
+fn failed_learn_backs_off_instead_of_retrying_every_round() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, _rx) = runner(d.path());
+    let t = 100_000;
+    r.finish_round(empty_round(&r, Some(Err("boom".into())), t));
+    assert!(!r.learn_due(t + 1, false), "失败后不在下一轮立刻重跑");
+    assert!(r.learn_due(t + backoff_secs(1), false));
+    assert!(r.learn_due(t + 1, true), "强制不受退避限制");
+    let t2 = t + backoff_secs(1);
+    r.finish_round(empty_round(&r, Some(Err("boom".into())), t2));
+    assert!(
+        !r.learn_due(t2 + backoff_secs(1), false),
+        "连续失败退避加长"
+    );
+    assert!(r.learn_due(t2 + backoff_secs(2), false));
+    r.finish_round(empty_round(&r, Some(Ok(())), t2 + backoff_secs(2)));
+    assert_eq!((r.learn_failures, r.learn_retry_at), (0, 0));
+}
+
+#[test]
+fn ok_learn_advances_last_ok() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, _rx) = runner(d.path());
+    let x = empty_round(&r, Some(Ok(())), 9_999);
+    r.finish_round(x);
+    assert_eq!(r.learn_last_ok, 9_999);
+}
+
+#[test]
+fn learn_round_runs_when_any_content_on() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, _rx) = runner(d.path());
+    r.settings.content = wind_sync_ipc::SyncContent {
+        learned: false,
+        completion: true,
+        stats: false,
+    };
+    assert!(r.learn_wanted(LEARN_INTERVAL_SECS, false));
+}
+
+#[test]
+fn learn_round_never_runs_when_all_content_off() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, _rx) = runner(d.path());
+    r.settings.content = wind_sync_ipc::SyncContent {
+        learned: false,
+        completion: false,
+        stats: false,
+    };
+    assert!(!r.learn_wanted(u64::MAX / 2, true));
+}
+
+/// 工作线程跑一轮学习数据：本机贡献发布到学习通道，成功时间记入私有状态，重启后载入。
+#[test]
+fn round_publishes_learned_data_and_restart_loads_last_ok() {
+    let d = tempfile::tempdir().unwrap();
+    let mem = MemBackend::new();
+    let (mut r, rx) = runner_with(d.path(), Box::new(MemFactory(mem.clone())), None, "pc");
+    setup_pc(&mut r);
+    let freq = d.path().join("user/data/pinyin/freq.table.yaml");
+    std::fs::create_dir_all(freq.parent().unwrap()).unwrap();
+    std::fs::write(
+        &freq,
+        "---\ncolumns: [code, text, count, last_used]\nwind:\n  kind: freq\n  escape: true\n...\n# no comment\nni\t你\t3\t1\n",
+    )
+    .unwrap();
+    r.command(Op::SyncNow, &Value::Null).unwrap();
+    round(&mut r, &rx);
+    assert!(r.learn_last_ok > 0);
+    let prefix = wind_sync::manifest::learn_prefix(&r.state.device);
+    assert!(
+        mem.keys(&prefix).iter().any(|k| k.contains("/index.")),
+        "{:?}",
+        mem.keys(&prefix)
+    );
+    let last_ok = r.learn_last_ok;
+    let dek = r.dek().unwrap();
+    drop(r);
+    let (r2, _rx2) = runner_with(d.path(), Box::new(MemFactory(mem)), Some(dek), "pc");
+    assert_eq!(r2.learn_last_ok, last_ok);
+}
+
+// ── 学习数据：改号、移除、清除 ─────────────────────────
+
+const FREQ_FILE: &str = "user/data/pinyin/freq.table.yaml";
+
+fn write_freq(dir: &std::path::Path, n: u64) {
+    let p = dir.join(FREQ_FILE);
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(
+        &p,
+        format!("---\ncolumns: [code, text, count, last_used]\nwind:\n  kind: freq\n  escape: true\n...\n# no comment\nni\t你\t{n}\t1\n"),
+    )
+    .unwrap();
+}
+
+fn read_freq(dir: &std::path::Path) -> Option<u64> {
+    use wind_sync::learn::{Key, LearnKind, norm_key, table};
+    let b = std::fs::read(dir.join(FREQ_FILE)).ok()?;
+    let f = table::parse(LearnKind::Freq, Some(&b)).unwrap();
+    let nk = norm_key(LearnKind::Freq, &Key("ni".into(), "你".into()));
+    f.rows.get(&nk).map(|r| r.1)
+}
+
+fn forced_round(r: &mut Runner, rx: &Receiver<Input>) {
+    r.command(Op::SyncNow, &Value::Null).unwrap();
+    round(r, rx);
+}
+
+fn has_learn(mem: &MemBackend, dev: &str) -> bool {
+    !mem.keys(&wind_sync::manifest::learn_prefix(dev)).is_empty()
+}
+
+#[test]
+fn rename_moves_prefix() {
+    let d = tempfile::tempdir().unwrap();
+    let mem = MemBackend::new();
+    let (mut r, rx) = runner_with(d.path(), Box::new(MemFactory(mem.clone())), None, "pc");
+    setup_pc(&mut r);
+    write_freq(d.path(), 3);
+    forced_round(&mut r, &rx);
+    assert!(has_learn(&mem, "pc"));
+    r.command(Op::RenameDevice, &json!({"id": "home"})).unwrap();
+    assert!(
+        !has_learn(&mem, "pc"),
+        "{:?}",
+        mem.keys("windinput-sync/v1/learn/")
+    );
+    assert!(has_learn(&mem, "home"));
+    forced_round(&mut r, &rx);
+    assert!(!has_learn(&mem, "pc"));
+    assert_eq!(read_freq(d.path()), Some(3));
+}
+
+/// pc 3、lap 4 同步到 7。
+struct Pair {
+    da: tempfile::TempDir,
+    a: Runner,
+    rxa: Receiver<Input>,
+    db: tempfile::TempDir,
+    mem: MemBackend,
+    b: Runner,
+    rxb: Receiver<Input>,
+}
+
+fn learn_pair() -> Pair {
+    let mem = MemBackend::new();
+    let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (mut a, rxa) = runner_with(da.path(), Box::new(MemFactory(mem.clone())), None, "pc");
+    setup_pc(&mut a);
+    write_freq(da.path(), 3);
+    forced_round(&mut a, &rxa);
+    let (mut b, rxb) = runner_with(db.path(), Box::new(MemFactory(mem.clone())), None, "lap");
+    let key = a.dek().unwrap().to_key_string();
+    b.command(Op::ImportKey, &json!({"key": key})).unwrap();
+    b.command(Op::ConfirmIdentity, &Value::Null).unwrap();
+    write_freq(db.path(), 4);
+    forced_round(&mut b, &rxb);
+    forced_round(&mut a, &rxa);
+    assert_eq!(read_freq(da.path()), Some(7));
+    assert_eq!(read_freq(db.path()), Some(7));
+    Pair {
+        da,
+        a,
+        rxa,
+        db,
+        mem,
+        b,
+        rxb,
+    }
+}
+
+#[test]
+fn remove_keeps_learn_data_and_counts() {
+    let mut p = learn_pair();
+    p.b.command(Op::RemoveDevice, &json!({"dev": "pc", "confirm": true}))
+        .unwrap();
+    assert!(has_learn(&p.mem, "pc"));
+    assert_eq!(p.b.status().removed_with_data, ["pc"]);
+    forced_round(&mut p.b, &p.rxb);
+    assert_eq!(read_freq(p.db.path()), Some(7));
+    assert_eq!(p.b.status().removed_with_data, ["pc"]);
+}
+
+#[test]
+fn purge_drops_device_and_counts_fall() {
+    let mut p = learn_pair();
+    let e =
+        p.b.command(Op::PurgeDevice, &json!({"device": "pc"}))
+            .unwrap_err();
+    assert!(e.contains("名册"), "{e}");
+    p.b.command(Op::RemoveDevice, &json!({"dev": "pc", "confirm": true}))
+        .unwrap();
+    assert!(
+        p.b.command(Op::PurgeDevice, &json!({"device": "lap"}))
+            .is_err()
+    );
+    p.b.command(Op::PurgeDevice, &json!({"device": "pc"}))
+        .unwrap();
+    assert!(!has_learn(&p.mem, "pc"));
+    assert!(p.b.status().removed_with_data.is_empty());
+    forced_round(&mut p.b, &p.rxb);
+    assert_eq!(read_freq(p.db.path()), Some(4));
+}
+
+#[test]
+fn reset_remote_then_rejoin_keeps_totals() {
+    let mut p = learn_pair();
+    let key =
+        p.a.command(Op::ResetRemote, &json!({"confirm": true}))
+            .unwrap()["key"]
+            .as_str()
+            .unwrap()
+            .to_string();
+    forced_round(&mut p.a, &p.rxa);
+    write_freq(p.db.path(), 9);
+    p.b.command(Op::ImportKey, &json!({"key": key})).unwrap();
+    p.b.command(Op::ConfirmIdentity, &Value::Null).unwrap();
+    forced_round(&mut p.b, &p.rxb);
+    forced_round(&mut p.a, &p.rxa);
+    assert_eq!(read_freq(p.da.path()), Some(9));
+    assert_eq!(read_freq(p.db.path()), Some(9));
+}
+
+#[test]
+fn create_key_fails_when_learn_state_cannot_be_written() {
+    let d = tempfile::tempdir().unwrap();
+    let mem = MemBackend::new();
+    let (mut r, _rx) = runner_with(d.path(), Box::new(MemFactory(mem.clone())), None, "pc");
+    std::fs::write(d.path().join("state/learn"), "x").unwrap();
+    let e = r.command(Op::CreateKey, &Value::Null).unwrap_err();
+    assert!(e.contains("学习数据"), "{e}");
+    assert!(mem.raw_get(&manifest::meta_key()).is_none(), "不建库");
+    assert!(r.secrets.dek.is_none(), "本机密钥回滚");
+}
+
+#[test]
+fn reset_failure_leaves_no_new_library_state() {
+    let d = tempfile::tempdir().unwrap();
+    let flaky = Flaky {
+        inner: MemBackend::new(),
+        fail_delete: Arc::new(Mutex::new(None)),
+    };
+    let (mut r, rx) = runner_with(d.path(), Box::new(FlakyFactory(flaky.clone())), None, "pc");
+    setup_pc(&mut r);
+    write_freq(d.path(), 3);
+    forced_round(&mut r, &rx);
+    let dirs = || -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(d.path().join("state/learn"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    };
+    let before = dirs();
+    *lock(&flaky.fail_delete) = Some("windinput-sync/".into());
+    assert!(
+        r.command(Op::ResetRemote, &json!({"confirm": true}))
+            .is_err()
+    );
+    assert_eq!(dirs(), before);
+}
+
+#[test]
+fn ids_with_learn_data_count_as_taken() {
+    let mut p = learn_pair();
+    p.b.command(Op::RemoveDevice, &json!({"dev": "pc", "confirm": true}))
+        .unwrap();
+    let e =
+        p.b.command(Op::RenameDevice, &json!({"id": "pc"}))
+            .unwrap_err();
+    assert!(e.contains("不可用"), "{e}");
+    let dc = tempfile::tempdir().unwrap();
+    let (mut c, _rxc) = runner_with(dc.path(), Box::new(MemFactory(p.mem.clone())), None, "pc");
+    let key = p.b.dek().unwrap().to_key_string();
+    c.command(Op::ImportKey, &json!({"key": key})).unwrap();
+    c.command(Op::ConfirmIdentity, &Value::Null).unwrap();
+    assert_eq!(c.status().device, "pc-2");
+}
+
+#[test]
+fn interrupted_reset_does_not_drop_devices() {
+    let mem = MemBackend::new();
+    let flaky = Flaky {
+        inner: mem.clone(),
+        fail_delete: Arc::new(Mutex::new(None)),
+    };
+    let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (mut a, rxa) = runner_with(da.path(), Box::new(FlakyFactory(flaky.clone())), None, "pc");
+    setup_pc(&mut a);
+    write_freq(da.path(), 3);
+    forced_round(&mut a, &rxa);
+    let (mut b, rxb) = runner_with(db.path(), Box::new(MemFactory(mem.clone())), None, "lap");
+    let key = a.dek().unwrap().to_key_string();
+    b.command(Op::ImportKey, &json!({"key": key})).unwrap();
+    b.command(Op::ConfirmIdentity, &Value::Null).unwrap();
+    write_freq(db.path(), 4);
+    forced_round(&mut b, &rxb);
+    forced_round(&mut a, &rxa);
+    assert_eq!(read_freq(db.path()), Some(7));
+    // 重置删到 learn/pc 之后、meta 之前的某个对象时失败
+    mem.raw_put("windinput-sync/v1/learn/zz/obj/x", vec![1]);
+    *lock(&flaky.fail_delete) = Some("/learn/zz/".into());
+    assert!(
+        a.command(Op::ResetRemote, &json!({"confirm": true}))
+            .is_err()
+    );
+    assert!(!has_learn(&mem, "pc"));
+    b.command(Op::SyncNow, &Value::Null).unwrap();
+    round(&mut b, &rxb);
+    assert_eq!(read_freq(db.path()), Some(7), "半毁的远端上不应丢设备");
+}
+
+fn replace_sent(core: &FakeCore) -> bool {
+    core.methods().iter().any(|m| m == "stats.replaceMonths")
+}
+
+/// 已确认身份、原号有学习通道的设备认领别的号：本机统计换成被认领号的（原号继续作为他机计入）。
+#[test]
+fn claim_by_device_with_learn_lane_replaces_stats() {
+    let mut p = learn_pair();
+    let core = Arc::new(FakeCore::default());
+    p.b.cfg.link = core.clone();
+    p.b.command(Op::ClaimDevice, &json!({"dev": "pc"})).unwrap();
+    assert!(replace_sent(&core));
+}
+
+/// 新装的设备（未确认身份）认领：本机统计按天合并，不整体替换。
+#[test]
+fn claim_by_new_device_merges_stats() {
+    let p = learn_pair();
+    let dc = tempfile::tempdir().unwrap();
+    let (mut c, _rxc) = runner_with(dc.path(), Box::new(MemFactory(p.mem.clone())), None, "new");
+    let core = Arc::new(FakeCore::default());
+    c.cfg.link = core.clone();
+    let key = p.a.dek().unwrap().to_key_string();
+    c.command(Op::ImportKey, &json!({"key": key})).unwrap();
+    c.command(Op::ClaimDevice, &json!({"dev": "pc"})).unwrap();
+    assert!(!replace_sent(&core));
+}
+
+/// 重置、认领、换库之后新库的首轮学习数据同步不被旧库的节奏或退避推迟。
+#[test]
+fn learn_clock_resets_on_library_change() {
+    let mut p = learn_pair();
+    let stale = |r: &mut Runner| {
+        r.learn_last_ok = now_unix();
+        r.learn_failures = 3;
+        r.learn_retry_at = u64::MAX;
+    };
+    let fresh = |r: &Runner| (r.learn_last_ok, r.learn_failures, r.learn_retry_at) == (0, 0, 0);
+    stale(&mut p.b);
+    p.b.command(Op::ClaimDevice, &json!({"dev": "pc"})).unwrap();
+    assert!(fresh(&p.b), "认领");
+    stale(&mut p.a);
+    p.a.command(Op::ResetRemote, &json!({"confirm": true}))
+        .unwrap();
+    assert!(fresh(&p.a), "重置");
+    stale(&mut p.a);
+    let mut s = p.a.settings.clone();
+    s.backend = Some(test_target("http://example.invalid/other"));
+    p.a.on_settings(s);
+    assert!(fresh(&p.a), "换存储位置即换库");
+}
+
+/// 关掉打字统计时删除本地的他机统计。
+#[test]
+fn stats_off_drops_local_peer_stats() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, _rx) = runner(d.path());
+    let peer = d.path().join("user/data/stats/devices/lap/2026-11.toml");
+    std::fs::create_dir_all(peer.parent().unwrap()).unwrap();
+    std::fs::write(&peer, "version = 1\n").unwrap();
+    let mut s = r.settings.clone();
+    s.content.learned = false;
+    r.on_settings(s.clone());
+    assert!(peer.exists(), "别的开关不动它");
+    s.content.stats = false;
+    r.on_settings(s);
+    assert!(!d.path().join("user/data/stats/devices").exists());
+}
+
+// ── 空间占用 ───────────────────────────────────────────
+
+const SYNC_ROOT: &str = "windinput-sync/v1/";
+
+fn usage_runner(d: &std::path::Path, mem: &MemBackend) -> (Runner, Receiver<Input>) {
+    let (mut r, rx) = runner_with(d, Box::new(MemFactory(mem.clone())), None, "pc");
+    setup_pc(&mut r);
+    (r, rx)
+}
+
+fn lib_of(r: &Runner) -> String {
+    learn_library(&r.settings, &r.secrets).unwrap()
+}
+
+fn cached(r: &Runner, computed_at: i64) -> crate::usage::Cached {
+    crate::usage::Cached {
+        library: lib_of(r),
+        usage: wind_sync_ipc::Usage {
+            computed_at,
+            total: 1,
+            ..Default::default()
+        },
+    }
+}
+
+/// 没统计过就到期；距上次成功满 24 小时才再算；换了同步库立即到期；失败后的重试时间之前不算。
+#[test]
+fn usage_due_every_24_hours() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, _rx) = usage_runner(d.path(), &MemBackend::new());
+    let lib = lib_of(&r);
+    let t = 1_000_000;
+    assert!(r.usage_due(&lib, t));
+    r.usage = Some(cached(&r, t as i64));
+    assert!(!r.usage_due(&lib, t + crate::usage::INTERVAL_SECS - 1));
+    assert!(r.usage_due(&lib, t + crate::usage::INTERVAL_SECS));
+    assert!(r.usage_due("另一个库", t + 1));
+    r.usage_retry_at = t + crate::usage::INTERVAL_SECS + 50;
+    assert!(!r.usage_due(&lib, t + crate::usage::INTERVAL_SECS));
+}
+
+/// 首轮顺带统计并落盘；重启后状态里仍带缓存值；24 小时内的下一轮不再列同步根。
+#[test]
+fn round_computes_usage_once_a_day_and_caches_it() {
+    let d = tempfile::tempdir().unwrap();
+    let mem = MemBackend::new();
+    mem.set_provider_usage(Some(wind_sync::ProviderUsage {
+        used: 4096,
+        available: Some(1024),
+        quota: None,
+    }));
+    let (mut r, rx) = usage_runner(d.path(), &mem);
+    std::fs::write(d.path().join("user/config.toml"), "a = 1\n").unwrap();
+    assert_eq!(r.status().usage, None);
+    round(&mut r, &rx);
+    let u = r.status().usage.expect("首轮应统计");
+    assert!(u.total > 0 && u.blobs > 0, "{u:?}");
+    assert!(u.computed_at > 0);
+    assert_eq!(
+        u.provider,
+        Some(wind_sync_ipc::ProviderUsage {
+            used: 4096,
+            available: Some(1024),
+            quota: None,
+        })
+    );
+    assert!(!r.status().usage_busy);
+
+    mem.reset_calls();
+    round(&mut r, &rx);
+    assert!(
+        !mem.calls().list_prefixes.iter().any(|p| p == SYNC_ROOT),
+        "24 小时内不重算: {:?}",
+        mem.calls().list_prefixes
+    );
+    assert_eq!(r.status().usage.unwrap().computed_at, u.computed_at);
+
+    let dek = r.dek().unwrap();
+    drop(r);
+    let (r2, _rx2) = runner_with(d.path(), Box::new(MemFactory(mem)), Some(dek), "pc");
+    assert_eq!(r2.status().usage, Some(u), "重启后读缓存");
+}
+
+/// 只在列举同步根时失败的后端：文件同步照常成功，统计失败。
+#[derive(Clone)]
+struct RootListFails(MemBackend);
+
+impl Backend for RootListFails {
+    fn list(&self, prefix: &str) -> Result<Vec<ObjMeta>, BackendError> {
+        if prefix == SYNC_ROOT {
+            return Err(BackendError::Transient("超时".into()));
+        }
+        self.0.list(prefix)
+    }
+    fn get(&self, key: &str) -> Result<Option<Vec<u8>>, BackendError> {
+        self.0.get(key)
+    }
+    fn put(&self, key: &str, bytes: &[u8]) -> Result<(), BackendError> {
+        self.0.put(key, bytes)
+    }
+    fn delete(&self, key: &str) -> Result<(), BackendError> {
+        self.0.delete(key)
+    }
+}
+
+struct RootListFailsFactory(MemBackend);
+
+impl BackendFactory for RootListFailsFactory {
+    fn build(&self, _: &SyncSettings, _: &str) -> Result<Box<dyn Backend>, String> {
+        Ok(Box::new(RootListFails(self.0.clone())))
+    }
+}
+
+/// 统计失败：同步轮照常成功、不退避；不更新统计时间，记下原因，一小时内不重试。
+#[test]
+fn failed_usage_does_not_fail_the_round_or_advance_the_clock() {
+    let d = tempfile::tempdir().unwrap();
+    let mem = MemBackend::new();
+    let (mut r, rx) = usage_runner(d.path(), &mem);
+    let old = cached(&r, 5);
+    r.usage = Some(old.clone());
+    r.factory = Arc::new(RootListFailsFactory(mem));
+    r.command(Op::SyncNow, &Value::Null).unwrap();
+    round(&mut r, &rx);
+    let st = r.status();
+    assert!(st.last_round.unwrap().ok, "同步轮不受影响");
+    assert_eq!(r.state.retry.failures, 0);
+    assert_eq!(st.last_error, None);
+    assert_eq!(st.usage, Some(old.usage), "缓存与时间不变");
+    assert!(st.usage_error.unwrap().contains("超时"));
+    assert!(!r.usage_due(&lib_of(&r), now_unix() + 60));
+    assert!(r.usage_due(&lib_of(&r), now_unix() + crate::usage::RETRY_SECS + 1));
+}
+
+fn wait_usage(rx: &Receiver<Input>) -> Input {
+    loop {
+        let i = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        if matches!(i, Input::UsageDone(_)) {
+            return i;
+        }
+    }
+}
+
+/// 手动刷新：后台立即算，期间带「统计中」、不起同步轮、拒绝会改状态的命令；算完写进状态。
+#[test]
+fn refresh_usage_computes_now_and_is_serial_with_rounds() {
+    let d = tempfile::tempdir().unwrap();
+    let mem = MemBackend::new();
+    let (mut r, rx) = usage_runner(d.path(), &mem);
+    r.usage = Some(cached(&r, now_unix() as i64));
+    let rep = r.command(Op::RefreshUsage, &Value::Null).unwrap();
+    assert_eq!(rep["queued"], true);
+    assert!(r.status().usage_busy);
+    assert_eq!(r.next_wake(Instant::now()), None, "统计期间不起同步轮");
+    assert_eq!(
+        r.command(Op::SetGroupName, &json!({ "name": "x" })),
+        Err(BUSY_MSG.to_string())
+    );
+    let again = r.command(Op::RefreshUsage, &Value::Null).unwrap();
+    assert_eq!(again["busy"], true);
+    let done = wait_usage(&rx);
+    r.handle(done);
+    let st = r.status();
+    assert!(!st.usage_busy);
+    assert!(st.usage.unwrap().total > 0, "立即重算，不管 24 小时");
+}
+
+#[test]
+fn refresh_usage_is_rejected_while_syncing() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, rx) = usage_runner(d.path(), &MemBackend::new());
+    r.command(Op::SyncNow, &Value::Null).unwrap();
+    r.start_round();
+    assert_eq!(
+        r.command(Op::RefreshUsage, &Value::Null),
+        Err(BUSY_MSG.to_string())
+    );
+    let x = wait_round(&rx);
+    r.finish_round(*x);
+}
+
+/// 换了同步库：旧库的缓存不再显示。
+#[test]
+fn usage_of_another_library_is_hidden() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, _rx) = usage_runner(d.path(), &MemBackend::new());
+    let mut c = cached(&r, 9);
+    c.library = "旧库".into();
+    r.usage = Some(c);
+    assert_eq!(r.status().usage, None);
+}
+
+struct PanicFactory;
+
+impl BackendFactory for PanicFactory {
+    fn build(&self, _: &SyncSettings, _: &str) -> Result<Box<dyn Backend>, String> {
+        panic!("统计线程里出错");
+    }
+}
+
+/// 手动统计线程 panic：仍回一条失败，「统计中」清掉，同步轮照常能起。
+#[test]
+fn panicking_refresh_still_clears_busy() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut r, rx) = usage_runner(d.path(), &MemBackend::new());
+    r.factory = Arc::new(PanicFactory);
+    r.command(Op::RefreshUsage, &Value::Null).unwrap();
+    assert!(r.usage_busy);
+    let done = wait_usage(&rx);
+    r.handle(done);
+    let st = r.status();
+    assert!(!st.usage_busy);
+    assert_eq!(st.usage_error.as_deref(), Some(commands::USAGE_ABORTED));
+    r.force_now = true;
+    assert!(r.next_wake(Instant::now()).is_some(), "同步不停摆");
 }

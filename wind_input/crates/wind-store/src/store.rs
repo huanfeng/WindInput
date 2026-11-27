@@ -245,6 +245,7 @@ pub struct Store {
 impl Drop for Store {
     /// 释放前把还没落盘的小文件写掉（进程正常退出、测试、工具不起落盘线程时靠它）。
     fn drop(&mut self) {
+        self.settle_held_completions();
         if let Err(e) = self.flush_small_files() {
             warn!("释放时小文件落盘失败：{e:#}");
         }

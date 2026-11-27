@@ -47,6 +47,12 @@ use super::viterbi::{ViterbiResult, WordNode};
 use crate::engine::AuxCharLookup;
 use crate::prof::{self, Counter, Stage};
 
+/// 节点打分用的惩罚处数：`equal_rank` 开着时剥掉模糊组的处数，见 [`FuzzyConfig::penalty_edits`]。
+/// 选读法的代价（`pick_shape` / `cost`）不走这里：那是在同一节点的几种读法里挑改动最少的，与排序无关。
+fn penalty_edits(fuzzy: Option<&FuzzyConfig>, edits: usize) -> usize {
+    fuzzy.map_or(edits, |f| f.penalty_edits(edits))
+}
+
 /// 每个辅码字母扣的分（对数概率轴，与 [`FUZZY_SYLLABLE_LOG_PENALTY`] 同轴）：1 位扣 2.0，2 位扣 4.0。
 pub(crate) const AUX_LETTER_LOG_PENALTY: f64 = 2.0;
 
@@ -808,7 +814,8 @@ impl LatticeBuilder {
                         continue;
                     };
                     let log_prob = score_node(&hit.text, code, hit.weight)
-                        - FUZZY_SYLLABLE_LOG_PENALTY * shape.edits as f64
+                        - FUZZY_SYLLABLE_LOG_PENALTY
+                            * penalty_edits(fuzzy_config, shape.edits) as f64
                         - aux_cost(shape);
                     let is_fuzzy = !shape.exact;
                     if let Some((at, existing_fuzzy, existing_aux)) =
@@ -910,7 +917,8 @@ impl LatticeBuilder {
                     };
                     let weight = cand.weight.min(USER_NODE_WEIGHT_CAP);
                     let log_prob = score_node(&cand.text, code, weight)
-                        - FUZZY_SYLLABLE_LOG_PENALTY * shape.edits as f64
+                        - FUZZY_SYLLABLE_LOG_PENALTY
+                            * penalty_edits(fuzzy_config, shape.edits) as f64
                         - aux_cost(shape)
                         + USER_NODE_BONUS;
                     if let Some(existing) = nodes[q]

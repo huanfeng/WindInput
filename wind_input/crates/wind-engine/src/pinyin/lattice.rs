@@ -537,7 +537,7 @@ impl LatticeBuilder {
                     // 模糊命中同样按所选切分计歧义罚：惩罚是**切分**的属性（该路径是否踩在
                     // 歧义接缝上），与词条来源无关。
                     let log_prob = score_node(&hit.text, variant, hit.weight)
-                        - FUZZY_SYLLABLE_LOG_PENALTY * *fuzzy_edits as f64
+                        - FUZZY_SYLLABLE_LOG_PENALTY * fuzzy.penalty_edits(*fuzzy_edits) as f64
                         - AMBIGUOUS_PENALTY * graph.ambiguous_count(p, q, offsets) as f64;
                     // 规范边界取变体边界：词条有边界时上面已验过两者相等，没有时只能用它。
                     let canon_mask = *variant_mask;
@@ -890,7 +890,7 @@ impl LatticeBuilder {
                 };
                 let weight = cand.weight.min(USER_NODE_WEIGHT_CAP);
                 let log_prob = score_node(&cand.text, variant, weight)
-                    - FUZZY_SYLLABLE_LOG_PENALTY * *edits as f64
+                    - FUZZY_SYLLABLE_LOG_PENALTY * fuzzy.penalty_edits(*edits) as f64
                     - AMBIGUOUS_PENALTY * graph.ambiguous_count(p, q, offsets) as f64
                     + USER_NODE_BONUS;
                 // 约束 3。赢了连切分一起换：被替换的切分同样是图上的合法路径，

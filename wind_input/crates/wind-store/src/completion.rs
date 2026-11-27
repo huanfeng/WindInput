@@ -136,6 +136,64 @@ pub(crate) struct CompletionState {
     unreadable: bool,
     /// 最近一次读到 / 写出的文件指纹：重载时据此分辨文件是不是被手改过。
     fp: Option<String>,
+    /// 文件头的同步令牌：整文件写回时原样带上。
+    sync: Option<String>,
+    /// 外部编辑租约中：不写回，改动另记进 `replay`，结束时在重载后的文件内容上重放。
+    held: bool,
+    replay: Vec<Change>,
+}
+
+/// 对内存表的一次改动。租约期间记下来，按文件重载后逐条重放。
+#[derive(Debug, Clone)]
+enum Change {
+    /// 用了一次：count + 1、last_used = 当时。
+    Use(&'static str, String, i64),
+    Remove(&'static str, String),
+    Clear(&'static str),
+    /// 导入：取 max(count) / max(last_used)。
+    Merge(&'static str, String, CompletionRecord),
+}
+
+impl CompletionState {
+    /// 改内存表；租约中另记下待重放。返回表变没变。
+    fn change(&mut self, c: Change) -> bool {
+        let changed = apply_change(&mut self.map, &c);
+        if self.held {
+            self.replay.push(c);
+        }
+        self.dirty |= changed;
+        self.generation += 1;
+        changed
+    }
+}
+
+fn apply_change(map: &mut CompletionMap, c: &Change) -> bool {
+    match c {
+        Change::Use(k, t, ts) => {
+            let r = map.entry((*k, t.clone())).or_insert(CompletionRecord {
+                count: 0,
+                last_used: 0,
+            });
+            r.count = r.count.saturating_add(1);
+            r.last_used = *ts;
+            true
+        }
+        Change::Remove(k, t) => map.remove(&(*k, t.clone())).is_some(),
+        Change::Clear(k) => {
+            let before = map.len();
+            map.retain(|(kk, _), _| kk != k);
+            map.len() != before
+        }
+        Change::Merge(k, t, rec) => {
+            let r = map.entry((*k, t.clone())).or_insert(CompletionRecord {
+                count: 0,
+                last_used: 0,
+            });
+            r.count = r.count.max(rec.count);
+            r.last_used = r.last_used.max(rec.last_used);
+            true
+        }
+    }
 }
 
 fn file_fp(p: &std::path::Path) -> Option<String> {
@@ -148,11 +206,11 @@ pub(crate) const COMPLETION_COLUMNS: [&str; 4] = ["kind", "text", "count", "last
 
 type CompletionMap = std::collections::BTreeMap<(&'static str, String), CompletionRecord>;
 
-/// 解析补全表：坏行（未知类别、空文本、数字坏）跳过并计数。
+/// 解析补全表：坏行（未知类别、空文本、数字坏）跳过并计数；另带回文件头的同步令牌。
 fn parse_completion_table(
     bytes: &[u8],
     path: &std::path::Path,
-) -> anyhow::Result<(CompletionMap, usize)> {
+) -> anyhow::Result<(CompletionMap, usize, Option<String>)> {
     let doc = wind_userdata::text::table::parse_table(bytes, path)
         .map_err(|e| anyhow::anyhow!("{e:?}"))?;
     let mut map = CompletionMap::new();
@@ -170,11 +228,11 @@ fn parse_completion_table(
             _ => bad += 1,
         }
     }
-    Ok((map, bad))
+    Ok((map, bad, wind_userdata::text::table::sync_token(bytes)))
 }
 
-/// 补全表的整文件渲染。
-pub(crate) fn render_completion_table(map: &CompletionMap) -> String {
+/// 补全表的整文件渲染（`sync`：文件头的同步令牌）。
+pub(crate) fn render_completion_table(map: &CompletionMap, sync: Option<&str>) -> String {
     let rows: Vec<Vec<String>> = map
         .iter()
         .map(|((k, t), r)| {
@@ -186,7 +244,12 @@ pub(crate) fn render_completion_table(map: &CompletionMap) -> String {
             ]
         })
         .collect();
-    wind_userdata::text::table::render_table(&COMPLETION_COLUMNS, "completion", &rows)
+    wind_userdata::text::table::render_table_with_sync(
+        &COMPLETION_COLUMNS,
+        "completion",
+        &rows,
+        sync,
+    )
 }
 
 impl Store {
@@ -195,41 +258,169 @@ impl Store {
         self.user_text_dir().join("completion.table.yaml")
     }
 
-    /// 取内存表（首次访问时从文件载入）。
+    /// 取内存表（首次访问时从文件载入；读不了 ⇒ 本次运行不写回）。
     fn completions(&self) -> std::sync::MutexGuard<'_, CompletionState> {
         let mut g = self.completions.lock().unwrap_or_else(|e| e.into_inner());
         if !g.loaded {
             g.loaded = true;
-            let path = self.completion_path();
-            let parse = |b: &[u8]| parse_completion_table(b, &path);
-            match crate::machine_file::load_machine_file(&path, &parse) {
-                Ok(None) => {}
-                Ok(Some((map, bad))) => {
-                    wind_userdata::issues::report_parse(&path, bad);
+            match self.read_completion_file() {
+                Ok((map, sync)) => {
                     g.map = map;
+                    g.sync = sync;
                 }
                 Err(e) => {
                     tracing::warn!("读不了补全历史文件：{e:#}（本次运行不写回）");
                     g.unreadable = true;
                 }
             }
-            g.fp = file_fp(&path);
+            g.fp = file_fp(&self.completion_path());
         }
         g
+    }
+
+    /// 读补全历史文件：(表, 文件头令牌)；不存在 ⇒ 空表。坏行登记问题，解析失败按机写文件自愈。
+    fn read_completion_file(&self) -> anyhow::Result<(CompletionMap, Option<String>)> {
+        let path = self.completion_path();
+        let parse = |b: &[u8]| parse_completion_table(b, &path);
+        Ok(
+            match crate::machine_file::load_machine_file(&path, &parse)? {
+                Some((map, bad, sync)) => {
+                    wind_userdata::issues::report_parse(&path, bad);
+                    (map, sync)
+                }
+                None => Default::default(),
+            },
+        )
+    }
+
+    /// 开始外部编辑租约：先把内存表写盘（没有文件就建空表），再暂停写回。之后的改动照常进内存，
+    /// 另记待重放。快照与置暂停在同一把锁里，二者之间的改动不会漏记。
+    pub(crate) fn begin_completion_hold(&self) -> anyhow::Result<()> {
+        let _io = self.completion_io.lock().unwrap_or_else(|e| e.into_inner());
+        let path = self.completion_path();
+        let bytes = {
+            let mut g = self.completions();
+            if g.unreadable {
+                anyhow::bail!("补全历史文件读不了，本次运行不能编辑");
+            }
+            if g.held {
+                return Ok(());
+            }
+            let bytes = if g.dirty || !path.is_file() {
+                Some(Self::completion_bytes(&g)?)
+            } else {
+                None
+            };
+            g.held = true;
+            bytes
+        };
+        let Some(bytes) = bytes else {
+            return Ok(());
+        };
+        let written = wind_userdata::text::fold::commit_text(&path, &bytes, None);
+        let mut g = self.completions.lock().unwrap_or_else(|e| e.into_inner());
+        match written {
+            Ok(()) => {
+                g.fp = Some(wind_userdata::text::fold::fingerprint(Some(&bytes)));
+                g.dirty = !g.replay.is_empty();
+                Ok(())
+            }
+            Err(e) => {
+                g.held = false;
+                g.replay.clear();
+                Err(e)
+            }
+        }
+    }
+
+    /// 结束租约：恢复写回。期间的改动此前已由 [`Self::reload_held_completions`] 重放进内存表，
+    /// 标脏后交给去抖写回。
+    pub(crate) fn release_completion_hold(&self) {
+        let mut g = self.completions.lock().unwrap_or_else(|e| e.into_inner());
+        if !g.held {
+            return;
+        }
+        g.held = false;
+        if !std::mem::take(&mut g.replay).is_empty() {
+            g.dirty = true;
+            g.generation += 1;
+        }
+    }
+
+    /// 补全历史在外部编辑租约中（暂停写回）。
+    pub(crate) fn completion_held(&self) -> bool {
+        self.completions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .held
+    }
+
+    /// 租约中按文件重载，再重放租约期间的改动（仍暂停写回）。不在租约中 ⇒ `Ok(false)`。
+    /// 读不了 ⇒ `Err`，内存表与状态都不动（不置「读不了」，之后还能再试、照常写回）。
+    pub(crate) fn reload_held_completions(&self) -> anyhow::Result<bool> {
+        let _io = self.completion_io.lock().unwrap_or_else(|e| e.into_inner());
+        self.reload_held_io()
+    }
+
+    /// 同 [`Self::reload_held_completions`]，调用方已持 `completion_io`。文件在数据锁外读。
+    fn reload_held_io(&self) -> anyhow::Result<bool> {
+        if !self.completion_held() {
+            return Ok(false);
+        }
+        let (map, sync) = self.read_completion_file()?;
+        let fp = file_fp(&self.completion_path());
+        let mut g = self.completions.lock().unwrap_or_else(|e| e.into_inner());
+        // 读文件期间租约已结束（release 已把增量交给写回）⇒ 放弃本次重载
+        if !g.held {
+            return Ok(false);
+        }
+        g.map = map;
+        g.sync = sync;
+        g.fp = fp;
+        let replay = g.replay.clone();
+        for c in &replay {
+            apply_change(&mut g.map, c);
+        }
+        g.dirty = !replay.is_empty();
+        g.generation += 1;
+        tracing::info!("补全历史按文件重载，重放租约期间的 {} 处改动", replay.len());
+        Ok(true)
+    }
+
+    /// `Store` 释放时仍在租约中：按文件重载、重放、写盘，租约期间的改动不随进程退出丢掉。
+    /// 读不了就放弃（WARN）。
+    pub(crate) fn settle_held_completions(&self) {
+        let _io = self.completion_io.lock().unwrap_or_else(|e| e.into_inner());
+        let r = self
+            .reload_held_io()
+            .and_then(|held| if held { self.flush_io(true) } else { Ok(()) });
+        if let Err(e) = r {
+            tracing::warn!("释放时补全历史租约期间的改动未能落盘：{e:#}");
+        }
     }
 
     /// 文件被手改 / 换掉（`dict.reload` 指名）：丢掉内存表，下次访问重读。
     ///
     /// 文件被手改过（指纹与最近一次读写的不同）⇒ 以文件为准，内存里未落盘的改动丢弃，不先落盘
-    /// 盖掉手改。
+    /// 盖掉手改。租约中 ⇒ 按文件重载并重放（[`Self::reload_held_completions`]），读不了返回 false。
+    /// 整段持 `completion_io`，与开始租约互斥。
     pub fn reload_completions(&self) -> bool {
+        let _io = self.completion_io.lock().unwrap_or_else(|e| e.into_inner());
+        match self.reload_held_io() {
+            Ok(true) => return true,
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!("租约中重载补全历史失败，内存表保留：{e:#}");
+                return false;
+            }
+        }
         let edited = {
             let g = self.completions.lock().unwrap_or_else(|e| e.into_inner());
             g.loaded && g.fp != file_fp(&self.completion_path())
         };
         if edited {
             tracing::info!("补全历史文件被改过，以文件为准重新载入");
-        } else if let Err(e) = self.flush_completions() {
+        } else if let Err(e) = self.flush_io(false) {
             tracing::warn!("补全历史落盘失败：{e:#}");
         }
         let mut g = self.completions.lock().unwrap_or_else(|e| e.into_inner());
@@ -243,9 +434,14 @@ impl Store {
     /// 读写不陪等。并发的两次落盘由 `completion_io` 串行。
     pub(crate) fn flush_completions(&self) -> anyhow::Result<()> {
         let _io = self.completion_io.lock().unwrap_or_else(|e| e.into_inner());
+        self.flush_io(false)
+    }
+
+    /// 落盘本体，调用方已持 `completion_io`。`through_hold`：租约中也写（仅释放时收尾用）。
+    fn flush_io(&self, through_hold: bool) -> anyhow::Result<()> {
         let (bytes, generation) = {
             let g = self.completions.lock().unwrap_or_else(|e| e.into_inner());
-            if !g.dirty || g.unreadable {
+            if !g.dirty || g.unreadable || (g.held && !through_hold) {
                 return Ok(());
             }
             (Self::completion_bytes(&g)?, g.generation)
@@ -260,7 +456,7 @@ impl Store {
     }
 
     fn completion_bytes(g: &CompletionState) -> anyhow::Result<Vec<u8>> {
-        Ok(render_completion_table(&g.map).into_bytes())
+        Ok(render_completion_table(&g.map, g.sync.as_deref()).into_bytes())
     }
 
     /// 记录一次使用：count++、last_used=now（只改内存，去抖落盘）。
@@ -271,19 +467,8 @@ impl Store {
         if text.is_empty() || text.chars().count() > COMPLETION_TEXT_MAX_CHARS {
             return Ok(false);
         }
-        let now = now_secs();
-        let mut g = self.completions();
-        let r = g
-            .map
-            .entry((kind.as_str(), text.to_string()))
-            .or_insert(CompletionRecord {
-                count: 0,
-                last_used: 0,
-            });
-        r.count = r.count.saturating_add(1);
-        r.last_used = now;
-        g.dirty = true;
-        g.generation += 1;
+        self.completions()
+            .change(Change::Use(kind.as_str(), text.to_string(), now_secs()));
         Ok(true)
     }
 
@@ -332,11 +517,9 @@ impl Store {
 
     /// 删一条。返回它本来在不在。
     pub fn remove_completion(&self, kind: CompletionKind, text: &str) -> anyhow::Result<bool> {
-        let mut g = self.completions();
-        let existed = g.map.remove(&(kind.as_str(), text.to_string())).is_some();
-        g.dirty |= existed;
-        g.generation += 1;
-        Ok(existed)
+        Ok(self
+            .completions()
+            .change(Change::Remove(kind.as_str(), text.to_string())))
     }
 
     /// 一批 [`Self::remove_completion`]：一次取锁。返回本来在的条数。
@@ -349,13 +532,10 @@ impl Store {
             return Ok(0);
         }
         let mut g = self.completions();
-        let mut n = 0;
-        for t in texts {
-            n += usize::from(g.map.remove(&(kind.as_str(), t.clone())).is_some());
-        }
-        g.dirty |= n > 0;
-        g.generation += 1;
-        Ok(n)
+        Ok(texts
+            .iter()
+            .filter(|t| g.change(Change::Remove(kind.as_str(), t.to_string())))
+            .count())
     }
 
     /// 清空某 kind 的全部记录，返回删除条数。
@@ -364,11 +544,8 @@ impl Store {
     pub fn clear_completions(&self, kind: CompletionKind) -> anyhow::Result<usize> {
         let mut g = self.completions();
         let before = g.map.len();
-        g.map.retain(|(k, _), _| *k != kind.as_str());
-        let removed = before - g.map.len();
-        g.dirty |= removed > 0;
-        g.generation += 1;
-        Ok(removed)
+        g.change(Change::Clear(kind.as_str()));
+        Ok(before - g.map.len())
     }
 
     /// 裁剪到只保留排序最靠前的 `max` 条，返回删除条数。`max = 0` 表示不限（不裁剪）。
@@ -398,15 +575,11 @@ impl Store {
             all.insert(0, item);
         }
         let mut g = self.completions();
-        let mut removed = 0usize;
-        for (text, _) in all.into_iter().skip(max) {
-            if g.map.remove(&(kind.as_str(), text)).is_some() {
-                removed += 1;
-            }
-        }
-        g.dirty |= removed > 0;
-        g.generation += 1;
-        Ok(removed)
+        Ok(all
+            .into_iter()
+            .skip(max)
+            .filter(|(text, _)| g.change(Change::Remove(kind.as_str(), text.clone())))
+            .count())
     }
 
     /// 导出**全部** kind 为 jsonl（每行 `{"kind","text","count","last_used"}`）。
@@ -464,17 +637,11 @@ impl Store {
                 }
                 let count = v.get("count").and_then(|x| x.as_u64()).unwrap_or(1) as u32;
                 let last_used = v.get("last_used").and_then(|x| x.as_i64()).unwrap_or(0);
-                let r =
-                    g.map
-                        .entry((kind.as_str(), word.to_string()))
-                        .or_insert(CompletionRecord {
-                            count: 0,
-                            last_used: 0,
-                        });
-                r.count = r.count.max(count);
-                r.last_used = r.last_used.max(last_used);
-                g.dirty = true;
-                g.generation += 1;
+                g.change(Change::Merge(
+                    kind.as_str(),
+                    word.to_string(),
+                    CompletionRecord { count, last_used },
+                ));
                 imported += 1;
             }
         }

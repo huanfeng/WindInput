@@ -1,7 +1,7 @@
 //! WebDAV 后端：Basic 认证；PROPFIND Depth:1 逐层递归列目录；写入前逐级 MKCOL。
 
 use super::{host_of, new_agent, parse_http_date, read_body, send};
-use crate::backend::{Backend, BackendError, ObjMeta};
+use crate::backend::{Backend, BackendError, ObjMeta, ProviderUsage};
 use base64::Engine as _;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
 use quick_xml::Reader;
@@ -17,6 +17,8 @@ pub struct WebDavConfig {
     pub password: String,
     /// 是否读取环境代理（`HTTP_PROXY` / `HTTPS_PROXY`）。
     pub proxy_from_env: bool,
+    /// 不校验服务器证书（自签名证书的自建服务）。
+    pub skip_cert_verify: bool,
 }
 
 pub struct WebDavBackend {
@@ -176,13 +178,50 @@ fn stat_from_multistatus(
 
 const PROPFIND_BODY: &str = r#"<?xml version="1.0" encoding="utf-8"?><propfind xmlns="DAV:"><prop><resourcetype/><getcontentlength/><getlastmodified/></prop></propfind>"#;
 
+const QUOTA_BODY: &str = r#"<?xml version="1.0" encoding="utf-8"?><propfind xmlns="DAV:"><prop><quota-available-bytes/><quota-used-bytes/></prop></propfind>"#;
+
+/// RFC 4331：`quota-used-bytes` 必须有；`quota-available-bytes` 为负（Nextcloud 的「不限 / 未知」）、
+/// 超出 u64 或缺失时剩余为 None。总容量不合成（`used` 只是此目录的，与可用相加不是账户配额）。
+/// 不支持的服务端回 404 propstat（空元素），得 None。
+fn parse_quota(xml: &str) -> Option<ProviderUsage> {
+    let mut rd = Reader::from_str(xml);
+    let (mut used, mut avail): (Option<String>, Option<String>) = (None, None);
+    let mut top = String::new();
+    loop {
+        match rd.read_event().ok()? {
+            Event::Start(e) => {
+                top = String::from_utf8_lossy(e.local_name().as_ref()).to_ascii_lowercase();
+            }
+            Event::End(_) => top.clear(),
+            Event::Text(t) => {
+                let v = t.unescape().ok()?.trim().to_string();
+                match top.as_str() {
+                    "quota-used-bytes" if used.is_none() => used = Some(v),
+                    "quota-available-bytes" if avail.is_none() => avail = Some(v),
+                    _ => {}
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    let used: u64 = used?.parse().ok()?;
+    // 先按 u64 解析：负数（-1/-2/-3）与超大值都解析失败，即「不限 / 未知」
+    let available = avail.and_then(|a| a.parse::<u64>().ok());
+    Some(ProviderUsage {
+        used,
+        available,
+        quota: None,
+    })
+}
+
 impl WebDavBackend {
     pub fn new(cfg: &WebDavConfig) -> Result<Self, BackendError> {
         let base = cfg.url.trim().trim_end_matches('/').to_string();
         if !(base.starts_with("http://") || base.starts_with("https://")) {
             return Err(BackendError::Fatal(format!("WebDAV 地址无效: {}", cfg.url)));
         }
-        let agent = new_agent(cfg.proxy_from_env, &host_of(&base));
+        let agent = new_agent(cfg.proxy_from_env, cfg.skip_cert_verify, &host_of(&base));
         let cred = format!("{}:{}", cfg.username, cfg.password);
         Ok(Self {
             base_path: decode(url_path(&base)).trim_matches('/').to_string(),
@@ -364,6 +403,24 @@ impl Backend for WebDavBackend {
             Err(e) => Err(e),
         }
     }
+
+    /// PROPFIND 根集合取配额；服务端不支持（404/405 等）返回 None。
+    fn usage(&self) -> Result<Option<ProviderUsage>, BackendError> {
+        let what = "PROPFIND 配额";
+        let req = self
+            .agent
+            .request("PROPFIND", &format!("{}/", self.base))
+            .set("Authorization", &self.auth)
+            .set("Depth", "0")
+            .set("Content-Type", "application/xml; charset=utf-8");
+        let resp = match send(req, Some(QUOTA_BODY.as_bytes()), what) {
+            Ok(r) => r,
+            Err(BackendError::NotFound(_) | BackendError::Fatal(_)) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let body = read_body(resp, what)?;
+        Ok(parse_quota(&String::from_utf8_lossy(&body)))
+    }
 }
 
 #[cfg(test)]
@@ -435,6 +492,38 @@ mod tests {
     }
 
     #[test]
+    fn parses_rfc4331_quota() {
+        let x = r#"<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"><d:response><d:href>/dav/</d:href>
+<d:propstat><d:prop><d:quota-available-bytes>900</d:quota-available-bytes><d:quota-used-bytes>100</d:quota-used-bytes></d:prop>
+<d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#;
+        assert_eq!(
+            parse_quota(x),
+            Some(ProviderUsage {
+                used: 100,
+                available: Some(900),
+                quota: None,
+            }),
+            "不合成总容量"
+        );
+        // Nextcloud 不限量为负；超出 u64 的也当不知道
+        for bad in [">-3<", ">99999999999999999999999<"] {
+            let v = parse_quota(&x.replace(">900<", bad)).unwrap();
+            assert_eq!((v.used, v.available, v.quota), (100, None, None), "{bad}");
+        }
+        let max = parse_quota(&x.replace(">900<", ">18446744073709551615<")).unwrap();
+        assert_eq!(max.available, Some(u64::MAX));
+    }
+
+    #[test]
+    fn unsupported_quota_is_none() {
+        let x = r#"<?xml version="1.0"?><D:multistatus xmlns:D="DAV:"><D:response><D:href>/dav/</D:href>
+<D:propstat><D:prop><D:quota-available-bytes/><D:quota-used-bytes/></D:prop>
+<D:status>HTTP/1.1 404 Not Found</D:status></D:propstat></D:response></D:multistatus>"#;
+        assert_eq!(parse_quota(x), None);
+        assert_eq!(parse_quota("not xml <<"), None);
+    }
+
+    #[test]
     fn href_normalization() {
         assert_eq!(href_to_key("/dav/a%20b/c", "dav"), Some("a b/c".into()));
         assert_eq!(href_to_key("https://x/dav/", "dav"), Some("".into()));
@@ -461,6 +550,7 @@ mod tests {
             username: "u".into(),
             password: "p".into(),
             proxy_from_env: false,
+            skip_cert_verify: false,
         })
         .unwrap();
         assert_eq!(b.base_path, "dav/wind input");
@@ -474,7 +564,8 @@ mod tests {
                 url: "ftp://x".into(),
                 username: "".into(),
                 password: "".into(),
-                proxy_from_env: false
+                proxy_from_env: false,
+                skip_cert_verify: false,
             })
             .is_err()
         );

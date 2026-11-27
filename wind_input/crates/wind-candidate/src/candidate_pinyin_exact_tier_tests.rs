@@ -159,3 +159,16 @@ fn same_tier_is_undecided() {
         Ordering::Equal
     );
 }
+
+/// 模糊命中默认不进档；引擎按统一词频标记后才进，且仍须满足其余条件（常用字、整串消费）。
+#[test]
+fn fuzzy_hit_enters_tier_only_when_marked_equal_rank() {
+    let mut c = pinyin_exact();
+    c.is_fuzzy = true;
+    assert!(!is_pinyin_exact_tier(&c, XU_LEN), "模糊命中默认不进档");
+    c.meta.fuzzy_equal_rank = true;
+    assert!(is_pinyin_exact_tier(&c, XU_LEN), "标了统一词频就进档");
+    assert_eq!(source_tier(&c, "xu"), 1);
+    c.is_common = false;
+    assert!(!is_pinyin_exact_tier(&c, XU_LEN), "标记不替代常用字条件");
+}

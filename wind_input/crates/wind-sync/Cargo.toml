@@ -18,15 +18,26 @@ hkdf = { workspace = true }
 getrandom = { workspace = true }
 base64 = { workspace = true }
 data-encoding = { workspace = true }
+miniz_oxide = "0.8"
+wind-utils = { path = "../wind-utils" }
 # 真实后端（feature `net`，默认关闭，同步进程启用）
 ureq = { version = "2", default-features = false, features = ["tls", "socks-proxy"], optional = true }
 rusty-s3 = { version = "0.8", optional = true }
 quick-xml = { version = "0.37", optional = true }
 percent-encoding = { version = "2", optional = true }
 url = { version = "2", optional = true }
+# 与 ureq 同一份 rustls（同 ring 特性）：只为「跳过证书验证」构造 ClientConfig
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 
 [features]
-net = ["dep:ureq", "dep:rusty-s3", "dep:quick-xml", "dep:percent-encoding", "dep:url"]
+net = [
+    "dep:ureq",
+    "dep:rusty-s3",
+    "dep:quick-xml",
+    "dep:percent-encoding",
+    "dep:url",
+    "dep:rustls",
+]
 
 [lints]
 workspace = true

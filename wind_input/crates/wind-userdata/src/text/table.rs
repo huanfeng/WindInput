@@ -133,13 +133,71 @@ pub fn parse_table(bytes: &[u8], _path: &Path) -> Result<TableDoc, ParseError> {
     })
 }
 
+/// 文件头 `wind:` 映射里的同步令牌 `sync`（块 / 流映射均可）。按文本取、不经 YAML 类型转换，
+/// 写回时逐字一致。只认 `wind:` 下一层的 `sync:`（块映射里与首个键同缩进的行）；令牌由同步进程
+/// 生成，不得含 `,`、`}`（流映射按它们切分）。
+pub fn sync_token(bytes: &[u8]) -> Option<String> {
+    let s = std::str::from_utf8(bytes).ok()?;
+    let normalized = wind_utils::text::normalize_input(s);
+    let s = normalized.as_ref();
+    let (body_offset, _) = wind_dict::rime_body_layout(s)?;
+    let mut lines = s[..body_offset].lines();
+    while let Some(line) = lines.next() {
+        let Some(rest) = line.strip_prefix("wind:") else {
+            continue;
+        };
+        let rest = rest.trim();
+        if let Some(inner) = rest.strip_prefix('{') {
+            let inner = inner.split('}').next().unwrap_or("");
+            return inner
+                .split(',')
+                .find_map(|kv| kv.trim().strip_prefix("sync:"))
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty());
+        }
+        if !rest.is_empty() {
+            return None;
+        }
+        // 块映射：缩进以首个非空行为准，更深的是嵌套值
+        let mut indent: Option<&str> = None;
+        for l in lines.by_ref() {
+            if l.trim().is_empty() {
+                continue;
+            }
+            let pad = &l[..l.len() - l.trim_start_matches([' ', '\t']).len()];
+            if pad.is_empty() {
+                return None;
+            }
+            if *indent.get_or_insert(pad) != pad {
+                continue;
+            }
+            if let Some(v) = l[pad.len()..].strip_prefix("sync:") {
+                return Some(v.trim().to_string()).filter(|v| !v.is_empty());
+            }
+        }
+        return None;
+    }
+    None
+}
+
 /// 整文件渲染：按种类的说明行、LF、无 BOM、`escape: true`，正文以 `# no comment` 开头（首列可以 `#` 开头）。
 pub fn render_table(columns: &[&str], kind: &str, rows: &[Vec<String>]) -> String {
+    render_table_with_sync(columns, kind, rows, None)
+}
+
+/// 同 [`render_table`]，文件头带上同步令牌（有的话）。
+pub fn render_table_with_sync(
+    columns: &[&str],
+    kind: &str,
+    rows: &[Vec<String>],
+    sync: Option<&str>,
+) -> String {
     let mut s = super::banner::for_kind(kind)
         .map(|b| format!("{b}\n"))
         .unwrap_or_default();
+    let sync = sync.map(|t| format!(", sync: {t}")).unwrap_or_default();
     s.push_str(&format!(
-        "---\ncolumns: [{}]\nwind: {{kind: {kind}, escape: true}}\n...\n# no comment\n",
+        "---\ncolumns: [{}]\nwind: {{kind: {kind}, escape: true{sync}}}\n...\n# no comment\n",
         columns.join(", ")
     ));
     for r in rows {

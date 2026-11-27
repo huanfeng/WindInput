@@ -364,6 +364,12 @@ impl Coordinator {
         self.run_menu_cmd(cmd);
     }
 
+    /// 求值一条纯文本的 `$CC` 命令源，返回拼出的文本（测试用）。与按键线程上的
+    /// 顶码求值同一条路径，用来观察 `last(n)` 等取值函数实际看到的上屏历史。
+    pub fn debug_eval_cc_text(&self, src: &str) -> Option<String> {
+        self.eval_command_text_only(src, "")
+    }
+
     /// 简繁两方向：`((s2t 开, t2s 开), (s2t 转换器已加载, t2s 转换器已加载))`（测试/诊断用）。
     pub fn debug_conversion(&self) -> ((bool, bool), (bool, bool)) {
         let on = {

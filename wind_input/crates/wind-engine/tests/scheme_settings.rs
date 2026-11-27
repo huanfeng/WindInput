@@ -292,12 +292,13 @@ fn legacy(text: &str) -> toml::Table {
 #[test]
 fn legacy_settings_spread_to_every_scheme_of_the_type() {
     let m = mgr("legacy_spread", "wubi86", &[]);
-    let done = m.migrate_legacy_type_settings(&legacy(
+    let r = m.migrate_legacy_type_settings(&legacy(
         "[codetable]\nwildcard = true\n[codetable.frequency]\nenabled = true\n\
          [pinyin]\nsentence_count = 2\n[pinyin.aux_code]\nenabled = true\n\
          [mix]\nenable_english = true\n[english]\ncommit_space = true\n",
     ));
-    let ids: Vec<&str> = done.iter().map(|(id, _)| id.as_str()).collect();
+    assert!(r.complete);
+    let ids: Vec<&str> = r.done.iter().map(|(id, _)| id.as_str()).collect();
     assert_eq!(
         ids,
         [
@@ -347,6 +348,7 @@ fn legacy_settings_skip_what_the_scheme_already_sets() {
         m.migrate_legacy_type_settings(&legacy(
             "[codetable]\nwildcard = true\n[pinyin]\nsentence_count = 2\n"
         ))
+        .done
         .is_empty()
     );
 }

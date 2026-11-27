@@ -33,6 +33,17 @@ pub struct ObjMeta {
     pub modified: Option<u64>,
 }
 
+/// 服务端给出的空间用量（WebDAV 配额、官方服务的计费口径）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderUsage {
+    /// 服务端口径的已用（WebDAV 是同步目录的 `quota-used-bytes`）。
+    pub used: u64,
+    /// 剩余可用；服务端不给或不限量为 None。
+    pub available: Option<u64>,
+    /// 总容量；只有能给出账户配额的服务（官方同步服务）才填。
+    pub quota: Option<u64>,
+}
+
 /// 键为 `/` 分隔的相对路径。删除不存在的键视为成功。
 pub trait Backend {
     fn list(&self, prefix: &str) -> Result<Vec<ObjMeta>, BackendError>;
@@ -57,6 +68,11 @@ pub trait Backend {
         }
         self.delete(PROBE)
     }
+
+    /// 服务端的空间用量；给不出（不支持）返回 `Ok(None)`。
+    fn usage(&self) -> Result<Option<ProviderUsage>, BackendError> {
+        Ok(None)
+    }
 }
 
 #[derive(Default)]
@@ -69,6 +85,7 @@ struct MemInner {
     /// (还剩几次 put 后失败, 错误)：计到 1 时这一次 put 失败，且只失败一次。
     fail_put: Option<(u64, BackendError)>,
     fail_all: Option<BackendError>,
+    provider: Option<ProviderUsage>,
 }
 
 /// 各方法的调用计数。
@@ -107,6 +124,10 @@ impl MemBackend {
     /// 所有操作都返回该错误，传 None 取消。
     pub fn fail_all(&self, err: Option<BackendError>) {
         self.g().fail_all = err;
+    }
+    /// `usage()` 的返回值。
+    pub fn set_provider_usage(&self, u: Option<ProviderUsage>) {
+        self.g().provider = u;
     }
     /// 方法调用计数快照。
     pub fn calls(&self) -> Calls {
@@ -200,5 +221,32 @@ impl Backend for MemBackend {
         }
         g.objs.remove(key);
         Ok(())
+    }
+    fn usage(&self) -> Result<Option<ProviderUsage>, BackendError> {
+        let g = self.g();
+        if let Some(e) = &g.fail_all {
+            return Err(e.clone());
+        }
+        Ok(g.provider)
+    }
+}
+
+/// 列举时无视前缀、把全部对象都返回的后端（测试用）：模拟实现有误或被篡改的服务端。
+#[cfg(test)]
+pub struct ListIgnoresPrefix(pub MemBackend);
+
+#[cfg(test)]
+impl Backend for ListIgnoresPrefix {
+    fn list(&self, _prefix: &str) -> Result<Vec<ObjMeta>, BackendError> {
+        self.0.list("")
+    }
+    fn get(&self, key: &str) -> Result<Option<Vec<u8>>, BackendError> {
+        self.0.get(key)
+    }
+    fn put(&self, key: &str, bytes: &[u8]) -> Result<(), BackendError> {
+        self.0.put(key, bytes)
+    }
+    fn delete(&self, key: &str) -> Result<(), BackendError> {
+        self.0.delete(key)
     }
 }

@@ -4,7 +4,7 @@ use crate::crypto::{self, CryptoError, FilesKey, ObjKind};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const ROOT: &str = "windinput-sync/v2";
+pub const ROOT: &str = "windinput-sync/v1";
 /// 每设备保留的清单代数。
 pub const KEEP_GENS: u64 = 2;
 
@@ -44,9 +44,40 @@ pub fn safe_key(key: &str) -> bool {
             .all(|seg| !seg.is_empty() && seg != "." && seg != "..")
 }
 
+/// 列举结果里的键确实在 `prefix` 之下且安全：后端不按前缀过滤时也不误删别处的对象。
+pub fn listed_within(key: &str, prefix: &str) -> bool {
+    if key.starts_with(prefix) && safe_key(key) {
+        return true;
+    }
+    eprintln!("[wind-sync] 列举 {prefix} 返回了范围外的键 {key:?}，已跳过");
+    false
+}
+
 /// 设备号规则见 [`crate::ids::valid_id`]：它会拼进远端键。
 pub fn valid_device_id(s: &str) -> bool {
     crate::ids::valid_id(s)
+}
+
+/// 学习数据通道根前缀（含尾部 `/`）。
+pub fn learn_root() -> String {
+    format!("{ROOT}/learn/")
+}
+/// 某设备的学习数据目录前缀（含尾部 `/`）。
+pub fn learn_prefix(dev: &str) -> String {
+    format!("{ROOT}/learn/{dev}/")
+}
+pub fn learn_index_key(dev: &str, n: u64) -> String {
+    format!("{ROOT}/learn/{dev}/index.{n}")
+}
+pub fn learn_obj_key(dev: &str, id: &str) -> String {
+    format!("{ROOT}/learn/{dev}/obj/{id}")
+}
+/// `learn/<dev>/index.<n>` → (dev, n)。
+pub fn parse_learn_index_key(key: &str) -> Option<(String, u64)> {
+    let rest = key.strip_prefix(&learn_root())?;
+    let (dev, file) = rest.split_once('/')?;
+    let n = file.strip_prefix("index.")?.parse().ok()?;
+    valid_device_id(dev).then(|| (dev.to_string(), n))
 }
 
 /// `devices/<dev>/manifest.<gen>` → (dev, gen)。
@@ -177,11 +208,11 @@ mod tests {
             Some(("dev-1".into(), 7))
         );
         assert_eq!(
-            parse_manifest_key("windinput-sync/v2/devices/a/other"),
+            parse_manifest_key("windinput-sync/v1/devices/a/other"),
             None
         );
         assert_eq!(
-            parse_manifest_key("windinput-sync/v2/devices/a b/manifest.1"),
+            parse_manifest_key("windinput-sync/v1/devices/a b/manifest.1"),
             None
         );
     }

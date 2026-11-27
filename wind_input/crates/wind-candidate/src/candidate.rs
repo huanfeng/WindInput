@@ -88,6 +88,10 @@ pub struct CandidateMeta {
     /// 不是 `maximum_match` 的 `pi|nan`。只服务编码栏切分（见 `preedit_split`），排序/造词/边界核对一律不读。
     #[serde(skip)]
     pub fuzzy_typed_boundary: u64,
+    /// 模糊命中按统一词频排序（`input.fuzzy.equal_rank`）：混输的来源分档不再因模糊把它挡在拼音精确档外。
+    /// 由拼音引擎在开关开着时给非纠错的模糊命中置位；只服务 [`is_pinyin_exact_tier`]。
+    #[serde(skip)]
+    pub fuzzy_equal_rank: bool,
     /// 「纠错音节 + 简拼尾」候选的编码栏切分：**整串所打击键**的各段起点 bitmask（纠错前缀的
     /// 各音节起点、外加尾巴的起点）。`0` = 不是这类候选。候选 `code` 是词典码、与所打击键不同域，
     /// 取 `boundary` 切不对（`yogny` 显示成 `yo'gny`）。只服务编码栏切分。
@@ -743,7 +747,7 @@ pub fn cmp_exact_first(a: &Candidate, b: &Candidate) -> std::cmp::Ordering {
 /// - 消费整串（`consumed_length` 为 0 即未标注，按整串算）。必须直接问 `consumed_length`，
 ///   不能拿 `!is_partial` 代替：整句只解释部分输入时 `is_partial` 仍为 false（`aaw` →「啊啊」）；
 /// - `is_prefix`/`is_partial`/`is_abbrev` 全假，即音节精确对齐；
-/// - `is_fuzzy` 假：这里是提档准入条件，不是层级键；
+/// - `is_fuzzy` 假，或已被引擎标为统一词频（[`CandidateMeta::fuzzy_equal_rank`]）：这里是提档准入条件，不是层级键；
 /// - `is_common` 真：单音节同音字动辄上百条，用检索范围而非固定条数把关。依赖协调器
 ///   `mark_common` 已在排序前无条件跑过（它不能放回 `apply_filter`，那里 Gb18030 档会提前返回）。
 ///
@@ -754,7 +758,7 @@ pub fn is_pinyin_exact_tier(c: &Candidate, input_len: usize) -> bool {
         && !c.is_prefix
         && !c.is_partial
         && !c.is_abbrev
-        && !c.is_fuzzy
+        && (!c.is_fuzzy || c.meta.fuzzy_equal_rank)
         && (c.consumed_length == 0 || c.consumed_length >= input_len)
 }
 

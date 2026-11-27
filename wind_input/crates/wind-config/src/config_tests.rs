@@ -3225,6 +3225,12 @@ fn grid_expand_defaults_off_and_cell_truncation_takes_the_tighter_limit() {
     assert_eq!(c.grid_rows(), 10, "可见行数夹进合法范围");
 }
 
+/// 首次翻页展开时高亮下移一行：出厂开。
+#[test]
+fn grid_expand_advance_defaults_on() {
+    assert!(Config::default().ui.candidate.grid_expand_advance);
+}
+
 #[test]
 fn comment_above_defaults_off_and_round_trips() {
     let cfg = Config::default();

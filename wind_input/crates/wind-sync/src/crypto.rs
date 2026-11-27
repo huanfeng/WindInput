@@ -255,6 +255,8 @@ pub enum ObjKind {
     Manifest,
     Blob,
     DevInfo,
+    /// 学习数据通道的对象与目录。
+    Learn,
 }
 
 fn aad(kind: ObjKind, id: &str) -> Vec<u8> {
@@ -262,6 +264,7 @@ fn aad(kind: ObjKind, id: &str) -> Vec<u8> {
         ObjKind::Manifest => "manifest",
         ObjKind::Blob => "blob",
         ObjKind::DevInfo => "devinfo",
+        ObjKind::Learn => "learn",
     };
     format!("windinput-sync/v1/{k}/{id}").into_bytes()
 }
@@ -329,7 +332,7 @@ impl Meta {
         serde_json::to_vec_pretty(self).expect("Meta 可序列化")
     }
 
-    /// 旧口令格式（含 `kdf_alg` 等）或未知版本一律报「不受支持」。
+    /// 解析不了或版本不对一律报「不受支持」。
     pub fn from_json(b: &[u8]) -> Result<Meta, CryptoError> {
         let m: Meta = serde_json::from_slice(b).map_err(|_| CryptoError::UnsupportedMeta)?;
         if m.format != META_FORMAT {

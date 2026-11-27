@@ -18,6 +18,19 @@ use std::path::{Path, PathBuf};
 /// 加条目之前先问：这个文件按行解析的是不是用户能拿到、能编辑、能从别的系统
 /// 搬过来的文本？是的话就该修，不是加白名单。
 const ALLOWED: &[(&str, &str)] = &[
+    // ---- 数据同步：学习数据通道 ----
+    (
+        "apps/sync/src/learn_round.rs",
+        "只从 core 机写的统计月表开头取注释行，正文走 toml 解析",
+    ),
+    (
+        "crates/wind-sync/src/learn/format.rs",
+        "解析同步进程自己生成的贡献格式（加密对象里），不是用户文件",
+    ),
+    (
+        "crates/wind-sync/src/learn/table.rs",
+        "入口 parse / token_of 已过 normalize_input，parse_columns 只收归一后的头部",
+    ),
     // ---- 构建期工具：读的是我们从上游拉下来的数据，不是用户文件 ----
     // 上游（rime / opencc / unicode 数据）用 LF 或 CRLF，不会是孤立 \r；
     // 且构建期解析异常会当场让构建失败或产出明显异常，不存在「运行时静默」。

@@ -562,3 +562,115 @@ fn flush_does_not_block_readers() {
         "读等了 {waited:?}"
     );
 }
+
+fn token_head(sync: &str) -> String {
+    format!(
+        "---\ncolumns: [kind, text, count, last_used]\nwind: {{kind: completion, escape: true, sync: {sync}}}\n...\n# no comment\nemail_suffix\tqq.com\t3\t100\n"
+    )
+}
+
+/// 外部编辑租约期间去抖写回不落盘。
+#[test]
+fn completion_flush_blocked_during_hold() {
+    let s = store("hold_flush");
+    s.record_completion(CompletionKind::EmailSuffix, "qq.com")
+        .unwrap();
+    s.begin_completion_hold().unwrap();
+    let p = s.completion_path();
+    let before = std::fs::read(&p).unwrap();
+    s.record_completion(CompletionKind::EmailSuffix, "163.com")
+        .unwrap();
+    s.prune_completions(CompletionKind::EmailSuffix, 1, Some("163.com"))
+        .unwrap();
+    s.flush_completions().unwrap();
+    assert_eq!(std::fs::read(&p).unwrap(), before);
+    s.reload_completions();
+    s.release_completion_hold();
+    s.flush_completions().unwrap();
+    let txt = std::fs::read_to_string(&p).unwrap();
+    assert!(txt.contains("163.com") && !txt.contains("qq.com"), "{txt}");
+}
+
+/// 整文件写回保留文件头的同步令牌（同步进程据此判断上次物化是否写成）。
+#[test]
+fn completion_flush_keeps_sync_token() {
+    let s = store("sync_token");
+    let p = s.completion_path();
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(&p, token_head("t-1")).unwrap();
+    s.record_completion(CompletionKind::EmailSuffix, "qq.com")
+        .unwrap();
+    s.flush_completions().unwrap();
+    let txt = std::fs::read_to_string(&p).unwrap();
+    assert!(
+        txt.contains("wind: {kind: completion, escape: true, sync: t-1}"),
+        "{txt}"
+    );
+    assert!(txt.contains("email_suffix\tqq.com\t4\t"), "{txt}");
+    // 租约里同步进程换了令牌：结束重载后跟着新令牌写
+    s.begin_completion_hold().unwrap();
+    std::fs::write(&p, token_head("t-2")).unwrap();
+    s.record_completion(CompletionKind::EmailSuffix, "qq.com")
+        .unwrap();
+    s.reload_completions();
+    s.release_completion_hold();
+    s.flush_completions().unwrap();
+    let txt = std::fs::read_to_string(&p).unwrap();
+    assert!(txt.contains("sync: t-2}"), "{txt}");
+    assert!(txt.contains("email_suffix\tqq.com\t4\t"), "{txt}");
+}
+
+fn email_count(s: &Store, text: &str) -> Option<u32> {
+    s.get_completion(CompletionKind::EmailSuffix, text)
+        .unwrap()
+        .map(|r| r.count)
+}
+
+/// 重载后、解除租约前又记一次：不丢也不重复。
+#[test]
+fn completion_use_between_reload_and_release_counts_once() {
+    let s = store("hold_between");
+    s.begin_completion_hold().unwrap();
+    let p = s.completion_path();
+    std::fs::write(&p, token_head("t")).unwrap();
+    s.record_completion(CompletionKind::EmailSuffix, "qq.com")
+        .unwrap();
+    s.reload_completions();
+    s.record_completion(CompletionKind::EmailSuffix, "qq.com")
+        .unwrap();
+    s.release_completion_hold();
+    assert_eq!(email_count(&s, "qq.com"), Some(5));
+    s.flush_completions().unwrap();
+    let s = reopen("hold_between", s);
+    assert_eq!(email_count(&s, "qq.com"), Some(5));
+}
+
+/// 租约中途按名重载两次：重放不重复计数。
+#[test]
+fn completion_double_reload_during_hold_counts_once() {
+    let s = store("hold_twice");
+    s.begin_completion_hold().unwrap();
+    std::fs::write(s.completion_path(), token_head("t")).unwrap();
+    s.record_completion(CompletionKind::EmailSuffix, "qq.com")
+        .unwrap();
+    assert!(s.reload_completions());
+    assert!(s.reload_completions());
+    s.release_completion_hold();
+    assert_eq!(email_count(&s, "qq.com"), Some(4));
+}
+
+/// 租约中直接释放 Store：按文件重载、重放后写盘，重开能看到文件值 + 期间增量。
+#[test]
+fn completion_hold_settles_on_drop() {
+    let s = store("hold_drop");
+    s.begin_completion_hold().unwrap();
+    std::fs::write(s.completion_path(), token_head("t")).unwrap();
+    s.record_completion(CompletionKind::EmailSuffix, "qq.com")
+        .unwrap();
+    s.record_completion(CompletionKind::EmailSuffix, "qq.com")
+        .unwrap();
+    let s = reopen("hold_drop", s);
+    assert_eq!(email_count(&s, "qq.com"), Some(5));
+    let txt = std::fs::read_to_string(s.completion_path()).unwrap();
+    assert!(txt.contains("sync: t}"), "{txt}");
+}

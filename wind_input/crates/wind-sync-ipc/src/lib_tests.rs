@@ -76,7 +76,6 @@ fn wire_names_are_stable() {
     assert_eq!(v["backend"]["type"], "s3");
     assert_eq!(Op::parse("export_key"), Some(Op::ExportKey));
     assert_eq!(Op::parse("create_key"), Some(Op::CreateKey));
-    assert_eq!(Op::parse("set_passphrase"), None);
     assert_eq!(Op::parse("nope"), None);
 }
 
@@ -97,6 +96,21 @@ fn old_settings_with_scope_key_still_load() {
     assert!(j.enabled);
     let t: SyncSettings = toml::from_str("enabled = true\n[scope]\nconfig = false\n").unwrap();
     assert!(t.enabled);
+}
+
+#[test]
+fn skip_cert_verify_defaults_off_and_is_written_only_when_on() {
+    let s = SyncSettings::default();
+    assert!(!s.skip_cert_verify);
+    assert!(!toml::to_string(&s).unwrap().contains("skip_cert_verify"));
+    let on = SyncSettings {
+        skip_cert_verify: true,
+        ..Default::default()
+    };
+    let text = toml::to_string(&on).unwrap();
+    assert!(text.contains("skip_cert_verify = true"), "{text}");
+    let back: SyncSettings = toml::from_str(&text).unwrap();
+    assert!(back.skip_cert_verify);
 }
 
 #[test]
@@ -232,6 +246,7 @@ fn group_ops_wire_names() {
         ("leave_group", Op::LeaveGroup),
         ("claim_device", Op::ClaimDevice),
         ("confirm_identity", Op::ConfirmIdentity),
+        ("purge_device", Op::PurgeDevice),
     ] {
         assert_eq!(Op::parse(name), Some(op), "{name}");
         assert_eq!(serde_json::to_value(op).unwrap(), json!(name));
@@ -294,4 +309,124 @@ fn status_without_round_fields_still_decodes() {
         }),
         ..Default::default()
     });
+}
+
+#[test]
+fn content_defaults_all_on() {
+    let s: SyncSettings = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
+    assert_eq!(s.content, SyncContent::default());
+    assert!(s.content.learned && s.content.completion && s.content.stats);
+    let s: SyncSettings = serde_json::from_str(r#"{"content":{"stats":false}}"#).unwrap();
+    assert!(s.content.learned && s.content.completion && !s.content.stats);
+}
+
+#[test]
+fn content_all_on_is_omitted_when_serialized() {
+    let v = serde_json::to_value(SyncSettings::default()).unwrap();
+    assert!(v.get("content").is_none());
+    let s = SyncSettings {
+        content: SyncContent {
+            learned: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let v = serde_json::to_value(&s).unwrap();
+    assert_eq!(v["content"]["learned"], false);
+    assert_eq!(serde_json::from_value::<SyncSettings>(v).unwrap(), s);
+}
+
+#[test]
+fn status_omits_empty_removed_with_data() {
+    let v = serde_json::to_value(Status::default()).unwrap();
+    assert!(v.get("removed_with_data").is_none(), "{v}");
+    let s = Status {
+        removed_with_data: vec!["pc".into()],
+        ..Default::default()
+    };
+    let v = serde_json::to_value(&s).unwrap();
+    assert_eq!(v["removed_with_data"], json!(["pc"]));
+    assert_eq!(serde_json::from_value::<Status>(v).unwrap(), s);
+}
+
+#[test]
+fn status_carries_usage() {
+    let v = serde_json::to_value(Status::default()).unwrap();
+    for k in ["usage", "usage_busy", "usage_error"] {
+        assert!(v.get(k).is_none(), "空时省略 {k}: {v}");
+    }
+    let s = Status {
+        usage: Some(Usage {
+            computed_at: 1_795_000_000,
+            total: 3000,
+            blobs: 2000,
+            blobs_unreferenced: Some(100),
+            devices: vec![DeviceUsage {
+                id: "pc".into(),
+                learned: 700,
+                stats: 200,
+            }],
+            other: 100,
+            provider: Some(ProviderUsage {
+                used: 5000,
+                available: Some(10),
+                quota: None,
+            }),
+        }),
+        usage_busy: true,
+        usage_error: Some("断网".into()),
+        ..Default::default()
+    };
+    roundtrip(FromSync::Status(s.clone()));
+    let v = serde_json::to_value(&s).unwrap();
+    assert_eq!(v["usage"]["devices"][0]["stats"], 200);
+    assert_eq!(v["usage"]["provider"]["used"], 5000);
+    assert_eq!(v["usage_busy"], true);
+    let unknown = Usage::default();
+    let v = serde_json::to_value(&unknown).unwrap();
+    assert!(v.get("blobs_unreferenced").is_none(), "无法确定时省略: {v}");
+    assert_eq!(Op::parse("refresh_usage"), Some(Op::RefreshUsage));
+}
+
+/// 设置页状态视图：宿主字段由参数给出，`last_error` 用宿主判定的值；四个可选字段空时省略。
+#[test]
+fn status_view_fields_and_omission() {
+    let host = StatusHost {
+        installed: true,
+        enabled: true,
+        running: false,
+        phase: "idle",
+        last_error: Some("宿主的错误"),
+    };
+    let st = Status {
+        phase: "syncing".into(),
+        last_error: Some("进程的错误".into()),
+        device: "pc".into(),
+        round: 3,
+        ..Default::default()
+    };
+    let v = status_view(&st, &host);
+    assert_eq!(v["phase"], "idle");
+    assert_eq!(v["last_error"], "宿主的错误");
+    assert_eq!(v["running"], false);
+    assert_eq!(v["device"], "pc");
+    assert!(v.get("round").is_none(), "{v}");
+    for k in ["removed_with_data", "usage", "usage_busy", "usage_error"] {
+        assert!(v.get(k).is_none(), "空时省略 {k}: {v}");
+    }
+    let st = Status {
+        removed_with_data: vec!["old".into()],
+        usage: Some(Usage {
+            total: 9,
+            ..Default::default()
+        }),
+        usage_busy: true,
+        usage_error: Some("断网".into()),
+        ..Default::default()
+    };
+    let v = status_view(&st, &host);
+    assert_eq!(v["removed_with_data"], json!(["old"]));
+    assert_eq!(v["usage"]["total"], 9);
+    assert_eq!(v["usage_busy"], true);
+    assert_eq!(v["usage_error"], "断网");
 }

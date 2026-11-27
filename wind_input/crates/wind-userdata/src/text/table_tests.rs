@@ -201,3 +201,21 @@ fn cmdbar_text_roundtrips_byte_exact() {
     let t2 = TextTable::open(path, COLS, "shadow");
     assert_eq!(t2.doc().rows[0].fields[1], txt);
 }
+
+#[test]
+fn sync_token_reads_block_and_flow_heads() {
+    let flow = render_table_with_sync(&["a", "b"], "completion", &[], Some("t-1"));
+    assert_eq!(sync_token(flow.as_bytes()).as_deref(), Some("t-1"));
+    assert!(parse_table(flow.as_bytes(), Path::new("x")).is_ok());
+    let block =
+        "---\ncolumns: [a, b]\nwind:\n  kind: freq\n  sync: 0012\n...\n# no comment\nx\tsync: no\n";
+    assert_eq!(sync_token(block.as_bytes()).as_deref(), Some("0012"));
+    let none = render_table(&["a", "b"], "completion", &[]);
+    assert_eq!(sync_token(none.as_bytes()), None);
+    assert_eq!(sync_token(b"---\ncolumns: [a]\nsync: x\n...\n"), None);
+    let nested =
+        "---\ncolumns: [a, b]\nwind:\n  kind: freq\n  extra:\n    sync: deep\n  sync: top\n...\n";
+    assert_eq!(sync_token(nested.as_bytes()).as_deref(), Some("top"));
+    let only_nested = "---\ncolumns: [a, b]\nwind:\n  kind: freq\n  extra:\n    sync: deep\n...\n";
+    assert_eq!(sync_token(only_nested.as_bytes()), None);
+}

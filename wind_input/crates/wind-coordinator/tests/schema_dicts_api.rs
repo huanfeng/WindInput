@@ -84,6 +84,7 @@ fn lists_extra_dicts_in_file_order_without_main() {
             ("wubi86_extra", true),
             ("wubi86_emoji", true),
             ("wubi86_xzqy", false),
+            ("wubi86_frost", false),
         ],
         "没翻过的取方案 default_enabled"
     );

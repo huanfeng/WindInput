@@ -35,6 +35,20 @@ pub trait LocalStore {
     fn set_exec(&mut self, _paths: &[String]) -> Result<(), LocalError> {
         Ok(())
     }
+    /// 不参与同步的本机路径前缀（本机目录、安装目录落在用户目录里时）：引擎当范围外处理，
+    /// 远端同路径的对象不下载，列举里没有也不判成本地删除。
+    fn skip_prefixes(&self) -> Vec<String> {
+        Vec::new()
+    }
+}
+
+/// 本机路径 `local` 是否落在某个跳过前缀之内。
+pub fn under_skip(skips: &[String], local: &str) -> bool {
+    skips.iter().any(|s| {
+        local
+            .strip_prefix(s.as_str())
+            .is_some_and(|r| r.is_empty() || r.starts_with('/'))
+    })
 }
 
 /// `apply` 的默认拆法：写入、补可执行位、删除依次各调一次。
@@ -141,6 +155,9 @@ impl NsLocal<'_> {
 }
 
 impl LocalStore for NsLocal<'_> {
+    fn skip_prefixes(&self) -> Vec<String> {
+        self.inner.skip_prefixes()
+    }
     fn list(&self) -> Result<Vec<String>, LocalError> {
         Ok(self
             .inner

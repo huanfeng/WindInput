@@ -445,6 +445,17 @@ impl Coordinator {
     /// 与 [`Self::record_selection`] 分开：快捷输入数字透镜的上屏（计算结果、日期）没有编码、
     /// 不记词频，却同样是一次上屏，历史若只挂在选词上就取不到刚算的结果。
     pub(crate) fn push_commit_history(&self, text: &str) {
+        self.push_commit_history_as(text, None);
+    }
+
+    /// 同 [`Self::push_commit_history`]，候选自带 `s2t_override`（用户明选的 1 对多变体）时，
+    /// 实际上屏形态取那个变体而不是默认转换。
+    pub(crate) fn push_commit_history_cand(&self, cand: &Candidate) {
+        self.push_commit_history_as(&cand.text, cand.s2t_override.as_deref());
+    }
+
+    /// `shown`：实际上屏形态的显式值（变体覆盖文本）；`None` 按当前简繁方向转换 `text`。
+    pub(crate) fn push_commit_history_as(&self, text: &str, shown: Option<&str>) {
         // 暂停学习也不记：经重复上屏、加词推荐会把无痕框里打的字带到别处，隐私上与落库无异。
         if text.is_empty() || self.learning_suspended() {
             return;
@@ -456,6 +467,34 @@ impl Coordinator {
         h.push_front(text.to_string());
         if h.len() > 16 {
             h.truncate(16);
+        }
+        drop(h);
+        // 两条队列同长度地推进：`recent_shown_snapshot` 靠条数对齐判断是否可信。
+        let shown = match shown {
+            Some(t) => t.to_string(),
+            None => self.history_shown_form(text),
+        };
+        let mut sh = self.recent_shown.lock().unwrap_or_else(|e| e.into_inner());
+        sh.push_front(shown);
+        if sh.len() > 16 {
+            sh.truncate(16);
+        }
+    }
+
+    /// 历史文本在屏幕上实际呈现的形态：按当前简繁方向转换一次（与上屏出口同一转换器）。
+    /// 一对多变体由调用方经 `shown` 显式给出，不走这里。
+    fn history_shown_form(&self, text: &str) -> String {
+        let conv = match self
+            .conv_dir_mirror
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            1 => &self.s2t,
+            2 => &self.t2s,
+            _ => return text.to_string(),
+        };
+        match conv.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            Some(c) => c.convert(text),
+            None => text.to_string(),
         }
     }
 
@@ -490,7 +529,7 @@ impl Coordinator {
                 let freq_code = self.freq_code(code, &word);
                 return self.record_selection_cand_in(None, &freq_code, &word);
             }
-            self.push_commit_history(&cand.text);
+            self.push_commit_history_cand(cand);
             // 头部候选找不到词库词：英文自动造词的信号。`english_head_dict_word` 在不记词频时
             // 恒 None，所以「是不是词库词」由 `learn_english_raw` 自己再问一遍引擎。
             self.learn_english_raw(&active, &cand.text);
@@ -555,15 +594,16 @@ impl Coordinator {
     ) {
         if cand.is_emoji_suggestion {
             // 只跳词频，历史照记。
-            self.push_commit_history(&cand.text);
+            self.push_commit_history_cand(cand);
             return;
         }
         // 词频记投影前的词库原文、历史记实际上屏的形态，理由见 `record_selection_cased_in`。
-        self.record_selection_cased_in(
+        self.record_selection_shown_in(
             schema_override,
             code,
             cand.freq_text(),
             &cand.text,
+            cand.s2t_override.as_deref(),
             cand.source,
         );
     }
@@ -595,9 +635,22 @@ impl Coordinator {
         history_text: &str,
         source: CandidateSource,
     ) {
+        self.record_selection_shown_in(schema_override, code, freq_text, history_text, None, source)
+    }
+
+    /// 同 [`Self::record_selection_cased_in`]，另带实际上屏形态（1 对多变体候选的覆盖文本）。
+    pub(crate) fn record_selection_shown_in(
+        &self,
+        schema_override: Option<&str>,
+        code: &str,
+        freq_text: &str,
+        history_text: &str,
+        shown: Option<&str>,
+        source: CandidateSource,
+    ) {
         // 历史先记、与词频文本空不空无关：两条通路独立。空显示标签的 `$CC` 纯文本命令就是
         // `freq_text` 空而上屏文本非空的例子。
-        self.push_commit_history(history_text);
+        self.push_commit_history_as(history_text, shown);
         self.record_freq_only(schema_override, code, freq_text, source);
     }
 
@@ -1107,7 +1160,8 @@ impl Coordinator {
             return raw;
         }
         let now = chrono::Local::now();
-        let recent = self.recent_commits_snapshot();
+        // 标签里的 `last()` 显示用户看到的上屏形态，与执行时取的值一致。
+        let recent = self.recent_shown_snapshot();
         // 走 _cached：本闭包在每次按键的候选构建期求值，不能卡按键线程（阻塞版打不开剪贴板时会
         // sleep 重试）。真正执行动作时另用非缓存版取值。
         let clip = |_n: i64| -> String { self.host_services().clipboard_get_text_cached() };
@@ -1389,7 +1443,7 @@ impl Coordinator {
         // 求值为空或出错的条目被 `lookup` 整条丢弃，照那个判据会把切分候选也删掉，候选窗全空。
         let mut exact_phrase_shown = false;
         if wildcard_pattern.is_none() && !phrases.is_empty() && !phrase_scope.is_closed() {
-            let recent = self.recent_commits_snapshot();
+            let recent = self.recent_shown_snapshot();
             // 精确码命令 display 含 {clip()} 时按需读取；非 Windows 返回空。走 _cached：这里每次按键
             // 都经过、只为拼 display 标签，不能用会 sleep 重试的阻塞版。
             let clip = |_n: i64| -> String {
@@ -3223,7 +3277,7 @@ impl Coordinator {
         // 满码 / 唯一候选自动上屏不经选词，这里是下一词学习的断点。不能只靠顶层兜底统计去清：
         // 移动端直调 `handle_key_event`，不走那道兜底。
         self.note_word_boundary();
-        self.record_selection_cased_in(None, freq_code, freq_text, text, source);
+        self.record_selection_shown_in(None, freq_code, freq_text, text, s2t_override, source);
         let mut out = match s2t_override {
             Some(t) => t.to_string(),
             None => self.maybe_convert(state, text),
@@ -4013,8 +4067,15 @@ impl Coordinator {
             let chinese_mode = state.chinese_mode;
             // 记账与 `commit_top_text` 的命令顶码分支同构：来源如实传（短语），`record_selection` 据此
             // 拦掉求值文本；记账文本取 `freq_text`（显示标签），与读端、满码自动上屏同键。
-            let out =
-                self.commit_candidate(state, &text, cand.freq_text(), None, cand.source, &input);
+            let over = self.command_text_override(state, cand, &text);
+            let out = self.commit_candidate(
+                state,
+                &text,
+                cand.freq_text(),
+                over.as_deref(),
+                cand.source,
+                &input,
+            );
             self.notify_ui_hide();
             return Self::commit_action(out, chinese_mode);
         }
@@ -4114,11 +4175,12 @@ impl Coordinator {
         draft_boundary: Option<u64>,
     ) -> KeyAction {
         if !top_text.is_empty() {
-            self.record_selection_cased_in(
+            self.record_selection_shown_in(
                 None,
                 prefix,
                 freq_text.unwrap_or(&top_text),
                 &top_text,
+                s2t_override,
                 source,
             );
             // 顶码即上屏首选（pos=0），code_len=被顶出的前缀码长。

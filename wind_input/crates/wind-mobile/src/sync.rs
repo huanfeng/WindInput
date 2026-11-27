@@ -5,7 +5,7 @@
 //! - 设置文件、同步状态、机密都在 `<状态目录>/sync/`（机密为 0600 文件，由宿主排除出系统备份）。
 //! - 不监听文件、不按间隔自行调度（`on_demand`）：何时同步由宿主定，见 [`MobileSync::sync_if_due`]。
 //! - 设备类别固定为 `mobile`：主题只与别的手机互通，词库与方案与桌面共用；设置按设备组同步。
-//! - 还没有身份界面：加入已有同步库后自动确认身份（新建独立组）。
+//! - 加入已有同步库后与桌面一样等宿主确认身份（`claim_device` / `join_group` / `confirm_identity`），确认前不同步。
 //! - 同步写入文件后的重载走 [`InProcLink`]，直接调核心（与桌面 RPC 共用 `external_files`）。
 
 use std::collections::HashMap;
@@ -119,6 +119,17 @@ impl CoreLink for InProcLink {
             "softkeyboard.reload" | "extensions.suspend" | "extensions.resume" => {
                 Ok(json!({ "ok": true }))
             }
+            "stats.replaceMonths" => {
+                use wind_coordinator::web_host::WebDataHost;
+                let months: std::collections::BTreeMap<String, String> =
+                    serde_json::from_value(params.get("months").cloned().unwrap_or_default())
+                        .map_err(|x| format!("months 须为「月份 → 月表原文」的对象：{x}"))?;
+                let store = c.user_store().ok_or("用户数据未就绪")?;
+                let n =
+                    wind_store::stats_report::replace_months(store, c.stat_collector(), &months)
+                        .map_err(|x| e(&x))?;
+                Ok(json!({ "written": n }))
+            }
             "schema.reloadFiles" => {
                 let ids = external_files::reload_schema_files(c, ids_param(&params)?);
                 Ok(json!({ "ok": true, "reloaded": ids }))
@@ -163,12 +174,14 @@ pub struct MobileSync {
 
 impl MobileSync {
     /// - `user_dir`：用户目录（与构造 [`MobileCore`] 的 `user_root` 同一个）
-    /// - `state_dir`：本地状态目录；同步文件放在其下 `sync/`
+    /// - `state_dir`：本地状态目录；同步文件（状态、机密、学习数据基线）放在其下 `sync/`。
+    ///   **不得位于 `user_dir` 之内**：同步按桌面布局推算要跳过的本机目录，推不出 `state_dir`，
+    ///   放进用户目录会把私有状态与机密当用户文件同步出去。
     pub fn new(user_dir: &Path, state_dir: &Path, core: Arc<MobileCore>) -> Arc<MobileSync> {
         Self::with_parts(user_dir, state_dir, core, Box::new(NetFactory))
     }
 
-    /// 可替换存储后端（测试用内存后端）。
+    /// 可替换存储后端（测试用内存后端）。目录要求同 [`Self::new`]：`state_dir` 不得位于 `user_dir` 之内。
     pub fn with_parts(
         user_dir: &Path,
         state_dir: &Path,
@@ -244,42 +257,31 @@ impl MobileSync {
         Ok(json!({ "ok": true }).to_string())
     }
 
-    /// 同桌面 `sync.status`：`{installed, enabled, running, phase, last_ok, last_error, pending,
-    /// conflicts, conflict_paths, has_secret, joined}`。
+    /// 同桌面 `sync.status`（[`wind_sync_ipc::status_view`]）。
     pub fn status(&self) -> String {
         let enabled = lock(&self.settings).enabled;
         let st = lock(&self.shared.status).clone();
         let running = lock(&self.handle).is_some();
         let phase = if !enabled {
-            "disabled".to_string()
+            "disabled"
         } else if st.phase.is_empty() {
-            "starting".to_string()
+            "starting"
         } else {
-            st.phase.clone()
+            st.phase.as_str()
         };
-        json!({
-            "installed": true,
-            "enabled": enabled,
-            "running": running,
-            "phase": phase,
-            "last_ok": st.last_ok,
-            "last_error": st.last_error,
-            "pending": st.pending,
-            "conflicts": st.conflicts,
-            "conflict_paths": st.conflict_paths,
-            "has_secret": st.has_secret,
-            "joined": st.joined,
-            "device": st.device,
-            "group": st.group,
-            "group_name": st.group_name,
-            "needs_identity": st.needs_identity,
-        })
-        .to_string()
+        let host = wind_sync_ipc::StatusHost {
+            installed: true,
+            enabled,
+            running,
+            phase,
+            last_error: st.last_error.as_deref(),
+        };
+        wind_sync_ipc::status_view(&st, &host).to_string()
     }
 
     /// 同桌面 `sync.command`：`op` 为 `sync_now` / `test_connection` / `create_key` / `import_key` /
     /// `export_key` / `reset_remote` / `set_secret` / `confirm_mass_delete` / `list_devices` /
-    /// `remove_device`，`args_json` 为参数对象（空串当无参数）。阻塞到有回执（最多 60 秒），
+    /// `remove_device` 与设备组、身份类命令，`args_json` 为参数对象（空串当无参数）。阻塞到有回执（最多 60 秒），
     /// 宿主应在后台线程调用。回执 JSON 可能含同步密钥（`create_key` / `export_key` / `reset_remote`），不要记日志。
     pub fn command(&self, op: &str, args_json: &str) -> Result<String, String> {
         let op = Op::parse(op).ok_or_else(|| format!("未知的同步命令: {op}"))?;
@@ -288,12 +290,7 @@ impl MobileSync {
         } else {
             serde_json::from_str(args_json).map_err(|e| format!("命令参数不是 JSON: {e}"))?
         };
-        let r = self.send_command(op, args)?;
-        // 粘贴密钥加入后待确认身份；已确认时确认身份是空操作。生成密钥已自动确认。
-        if op == Op::ImportKey {
-            self.send_command(Op::ConfirmIdentity, Value::Null)?;
-        }
-        Ok(r.to_string())
+        Ok(self.send_command(op, args)?.to_string())
     }
 
     fn send_command(&self, op: Op, args: Value) -> Result<Value, String> {
@@ -319,8 +316,9 @@ impl MobileSync {
     }
 
     /// 已启用并配置好、距上次成功或上次尝试已超过 `min_interval_secs` 时，起一轮后台同步并立即返回 `true`；
-    /// 其余情况（未配置、缺机密、正在同步、停在错误态、间隔未到）返回 `false`。
-    /// 键盘弹出时调用，耗时可忽略。
+    /// 其余情况（未配置、缺机密、身份未确认、正在同步、停在错误态、间隔未到）返回 `false`。
+    /// 键盘弹出时调用，耗时可忽略。这一轮不强制（与手动「立即同步」不同）：不解除停止态，
+    /// 学习数据最多每 30 分钟交换一次。
     pub fn sync_if_due(&self, min_interval_secs: u64) -> bool {
         {
             let s = lock(&self.settings);
@@ -329,7 +327,7 @@ impl MobileSync {
             }
         }
         let st = lock(&self.shared.status).clone();
-        if !matches!(st.phase.as_str(), "idle" | "error") {
+        if st.needs_identity || !matches!(st.phase.as_str(), "idle" | "error") {
             return false;
         }
         let now = now_unix();
@@ -338,23 +336,14 @@ impl MobileSync {
         if now.saturating_sub(last) < min_interval_secs as i64 {
             return false;
         }
-        // 身份未确认（加入时补确认失败等）：先排一条确认身份，同一线程按序处理，确认后再同步
-        if st.needs_identity {
-            let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-            let _ = self.tx.send(Input::Core(ToSync::Command {
-                id,
-                op: Op::ConfirmIdentity,
-                args: Value::Null,
-            }));
-        }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        // 不等回执：被拒（缺机密等）会体现在状态里
+        // 不等回执：被拒（缺机密等）会体现在状态里。`auto` 不强制：学习数据仍守 30 分钟间隔，失败退避照常
         let sent = self
             .tx
             .send(Input::Core(ToSync::Command {
                 id,
                 op: Op::SyncNow,
-                args: Value::Null,
+                args: json!({ "auto": true }),
             }))
             .is_ok();
         if sent {

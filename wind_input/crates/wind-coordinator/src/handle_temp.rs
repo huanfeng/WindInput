@@ -1323,7 +1323,7 @@ impl Coordinator {
             head_word.as_ref()
         };
         let Some(freq_cand) = freq_cand else {
-            self.push_commit_history(&cand.text);
+            self.push_commit_history_cand(cand);
             // 纯原文（不是词库词）：英文自动造词的信号（开关与判据都在 `learn_english_raw` 里）。
             self.learn_temp_english_raw(state, &cand.text);
             return;
@@ -1338,11 +1338,12 @@ impl Coordinator {
         }
         // 词频记 `freq_text()` 而非 `text`：读端排在大小写投影之前、看到的是词库原文。
         // 历史记实际上屏的 `cand.text`（先记历史、再看开关，关着也记）。
-        self.record_selection_cased_in(
+        self.record_selection_shown_in(
             Some(ENGLISH_SCHEMA),
             &self.freq_code(&code, freq_cand),
             freq_cand.freq_text(),
             &cand.text,
+            cand.s2t_override.as_deref(),
             freq_cand.source,
         );
     }

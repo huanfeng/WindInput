@@ -22,7 +22,7 @@ fn user_emoji_file_edit_takes_effect_on_reload() {
     let table = root.join("userdata/emoji/mine.txt");
     std::fs::write(&table, "苹果\t苹果 🍎\n").unwrap();
 
-    let store = Arc::new(wind_store::Store::open(&root.join("s.redb")).unwrap());
+    let store = Arc::new(wind_store::Store::open(root.join("s.redb")).unwrap());
     let mut cfg = Config::default();
     cfg.input.emoji.enabled = true;
     cfg.input.emoji.modules.insert("mine".into(), true);

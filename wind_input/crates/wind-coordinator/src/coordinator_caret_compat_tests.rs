@@ -534,6 +534,95 @@ fn focus_tip_shows_again_for_different_host() {
     assert!(got_status_tip(&rx), "换宿主必须重新提示一次");
 }
 
+/// Edge 切回时的抖动序列：获焦（非 TSF 坐标，挂起）→ DocChanged / NoEditCtx 连发 → 获焦（去重跳过）→
+/// TSF 坐标到达。docMgr 级失焦不得作废挂起，否则气泡永远补不出；补出之后再来的噪声
+/// 也不得把它收掉（毫秒级闪没）。
+#[test]
+fn focus_tip_survives_docmgr_jitter() {
+    use wind_bridge::handler::FocusLostReason::{DocChanged, NoEditCtx};
+    let (c, rx) = coord_focus_tip(true, "follow_caret");
+    set_caret(&c, 0, 0, wind_ipc::protocol::caret_source::UNKNOWN);
+    c.show_focus_status_if_enabled(TOKEN_A);
+    c.handle_focus_lost(TOKEN_A, DocChanged);
+    c.handle_focus_lost(TOKEN_A, NoEditCtx);
+    c.show_focus_status_if_enabled(TOKEN_A);
+    assert!(!got_status_tip(&rx), "TSF 坐标未到，仍在挂起");
+
+    c.handle_caret_update(&CaretData {
+        x: 473,
+        y: 217,
+        height: 28,
+        composition_start_x: 0,
+        composition_start_y: 0,
+        source: wind_ipc::protocol::caret_source::TSF_SELECTION,
+        composition_rect: None,
+    });
+    c.handle_focus_lost(TOKEN_A, DocChanged);
+    c.handle_focus_lost(TOKEN_A, NoEditCtx);
+    let cmds: Vec<_> = rx.try_iter().collect();
+    assert!(
+        cmds.iter()
+            .any(|c| matches!(c, UiCommand::ShowStatusTip { .. })),
+        "挂起应在 TSF 坐标到达时补显示"
+    );
+    assert!(
+        !cmds.iter().any(|c| matches!(c, UiCommand::HideStatusTip)),
+        "docMgr 级失焦不得收掉气泡"
+    );
+}
+
+/// Chrome 切回：首次获焦坐标非 TSF（挂起），同宿主随后的获焦已带 TSF 坐标。
+/// 去重不能把它吞掉——挂起还在等权威坐标，这次获焦正好带来了。
+#[test]
+fn focus_tip_parked_then_deduped_gain_with_tsf_caret_shows() {
+    use wind_bridge::handler::FocusLostReason::{DocChanged, NoEditCtx};
+    let (c, rx) = coord_focus_tip(true, "follow_caret");
+    set_caret(&c, 0, 0, wind_ipc::protocol::caret_source::GUI_CARET);
+    c.show_focus_status_if_enabled(TOKEN_A);
+    assert!(!got_status_tip(&rx), "非 TSF 坐标：挂起");
+    c.handle_focus_lost(TOKEN_A, DocChanged);
+    c.handle_focus_lost(TOKEN_A, NoEditCtx);
+    set_caret(
+        &c,
+        363,
+        420,
+        wind_ipc::protocol::caret_source::TSF_SELECTION,
+    );
+    c.show_focus_status_if_enabled(TOKEN_A);
+    assert!(
+        got_status_tip(&rx),
+        "同宿主再次获焦带来 TSF 坐标，应消费挂起并显示"
+    );
+    c.show_focus_status_if_enabled(TOKEN_A);
+    assert!(!got_status_tip(&rx), "显示过之后同宿主仍不重复弹");
+}
+
+/// 同宿主再次获焦时，来源虽是 TSF 但坐标是无效的 (0,0) 哨兵：不能拿它定位气泡，挂起继续等。
+#[test]
+fn focus_tip_parked_stays_pending_when_tsf_caret_is_invalid() {
+    let (c, rx) = coord_focus_tip(true, "follow_caret");
+    set_caret(&c, 0, 0, wind_ipc::protocol::caret_source::GUI_CARET);
+    c.show_focus_status_if_enabled(TOKEN_A);
+    assert!(!got_status_tip(&rx), "非 TSF 坐标：挂起");
+    {
+        let mut st = c.state.lock().unwrap();
+        st.caret_x = 0;
+        st.caret_y = 0;
+        st.caret_height = 0;
+        st.caret_source = wind_ipc::protocol::caret_source::TSF_SELECTION;
+    }
+    c.show_focus_status_if_enabled(TOKEN_A);
+    assert!(!got_status_tip(&rx), "坐标无效不得显示");
+    set_caret(
+        &c,
+        363,
+        420,
+        wind_ipc::protocol::caret_source::TSF_SELECTION,
+    );
+    c.show_focus_status_if_enabled(TOKEN_A);
+    assert!(got_status_tip(&rx), "有效的 TSF 坐标到了才显示");
+}
+
 /// 离开宿主（Thread 级失焦）后再回来，应当重新提示。
 /// 只有 Thread 档清去重记录：CtxLost/DocChanged 是宿主内换 docMgr 的噪声，
 /// 若也清就等于按 docMgr 计数，Excel 下会退回「输入一次闪两下」。

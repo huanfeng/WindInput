@@ -852,7 +852,7 @@ impl UserData {
             schema,
             upto,
         );
-        let content = Self::render_text(b, &entries);
+        let content = Self::render_text(b, &entries, None);
         crate::text::fold::commit_text(
             &b.path,
             content.as_bytes(),
@@ -868,8 +868,8 @@ impl UserData {
         self.install_text_segment(target, schema, entries, upto, Some(upto), fp, Some(upto))
     }
 
-    /// 整文件渲染（按绑定的格式）。
-    fn render_text(b: &TextBinding, entries: &[SnapshotEntry]) -> String {
+    /// 整文件渲染（按绑定的格式）；表格文本带上 `sync`（原文件头的同步令牌）。
+    fn render_text(b: &TextBinding, entries: &[SnapshotEntry], sync: Option<&str>) -> String {
         match b.format {
             TextFormat::Words => {
                 let rows: Vec<(String, String, u64, i32)> = entries
@@ -878,7 +878,9 @@ impl UserData {
                     .collect();
                 crate::text::render(&b.name, b.syllable_codes, &rows)
             }
-            TextFormat::Table(spec) => crate::text::codec::render(spec, b.syllable_codes, entries),
+            TextFormat::Table(spec) => {
+                crate::text::codec::render_with_sync(spec, b.syllable_codes, entries, sync)
+            }
         }
     }
 
@@ -948,7 +950,11 @@ impl UserData {
             (a.code.as_str(), a.text.as_str()).cmp(&(b.code.as_str(), b.text.as_str()))
         });
         out.dedup_by(|a, b| a.code == b.code && a.text == b.text);
-        let content = crate::text::codec::render(spec, b.syllable_codes, &out);
+        let sync = cur
+            .as_ref()
+            .and_then(|(x, _)| crate::text::table::sync_token(x));
+        let content =
+            crate::text::codec::render_with_sync(spec, b.syllable_codes, &out, sync.as_deref());
         crate::text::fold::commit_text(&b.path, content.as_bytes(), Some(&fp_before))?;
         let entries = Self::text_entries(content.as_bytes(), b)?;
         let fp = crate::text::fold::fingerprint(Some(content.as_bytes()));
@@ -1001,13 +1007,18 @@ impl UserData {
             .ok_or_else(|| anyhow::anyhow!("目标未绑定文本"))?;
         let _f = self.fold_lock.lock().unwrap_or_else(|e| e.into_inner());
         self.check_not_held(&b, target, schema)?;
+        // 整体替换也沿用原文件头的同步令牌：令牌只说明同步进程上次写成了哪一版，与内容无关
+        let sync = crate::text::fold::read_text(&b.path)
+            .ok()
+            .flatten()
+            .and_then(|(x, _)| crate::text::table::sync_token(&x));
         Self::preserve_if_corrupt(&b)?;
         let (upto, _) = self.upto_and_view()?;
         entries.sort_by(|a, b| {
             (a.code.as_str(), a.text.as_str()).cmp(&(b.code.as_str(), b.text.as_str()))
         });
         entries.dedup_by(|a, b| a.code == b.code && a.text == b.text);
-        let content = Self::render_text(&b, &entries);
+        let content = Self::render_text(&b, &entries, sync.as_deref());
         crate::text::fold::commit_text(&b.path, content.as_bytes(), None)?;
         let entries = Self::text_entries(content.as_bytes(), &b)?;
         let fp = crate::text::fold::fingerprint(Some(content.as_bytes()));

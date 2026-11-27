@@ -2767,6 +2767,10 @@ pub struct PinyinFuzzy {
     pub un_ong: bool,
     #[serde(default)]
     pub eng_ong: bool,
+    /// 与精确拼音统一词频排序：模糊命中不再按处数打折，也不让模糊整句让位于精确整词，
+    /// 精确与模糊的词都按原词频竞争（出厂关：精确优先）。纠错（错拼）不受影响。
+    #[serde(default)]
+    pub equal_rank: bool,
 }
 
 /// 拼音纠错与正确拼音提示（`[input.correction]`）。
@@ -6126,6 +6130,10 @@ pub struct UiCandidateConfig {
     /// 关掉后 PageUp/PageDown 也逐行。
     #[serde(default = "default_true")]
     pub grid_pageupdown_screen: bool,
+    /// 翻页键 / 翻页箭头首次展开时，高亮同时下移一行（出厂开；关则只展开、高亮不动）。
+    /// 想翻页就说明首行没有要的字，下移省掉几乎必按的一次 ↓。设置端不提供入口，留作备用。
+    #[serde(default = "default_true")]
+    pub grid_expand_advance: bool,
     /// 展开态的分类标签：`all` 全部 / `single` 单字 / `phrase` 词组 / `rare` 生僻 / `symbol` 符号。
     /// 只决定有哪些，顺序固定按上面这个次序（「全部」恒在首位）。少于两个时不显示标签栏。
     /// 未知名字忽略。
@@ -6314,6 +6322,7 @@ impl Default for UiCandidateConfig {
             grid_cell_max_chars: default_grid_cell_max_chars(),
             grid_index_fill: default_grid_index_fill(),
             grid_pageupdown_screen: true,
+            grid_expand_advance: true,
             grid_categories: default_grid_categories(),
             comment_above: false,
             auto_comment_dicts: true,
