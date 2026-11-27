@@ -174,12 +174,14 @@ pub struct MobileSync {
 
 impl MobileSync {
     /// - `user_dir`：用户目录（与构造 [`MobileCore`] 的 `user_root` 同一个）
-    /// - `state_dir`：本地状态目录；同步文件放在其下 `sync/`
+    /// - `state_dir`：本地状态目录；同步文件（状态、机密、学习数据基线）放在其下 `sync/`。
+    ///   **不得位于 `user_dir` 之内**：同步按桌面布局推算要跳过的本机目录，推不出 `state_dir`，
+    ///   放进用户目录会把私有状态与机密当用户文件同步出去。
     pub fn new(user_dir: &Path, state_dir: &Path, core: Arc<MobileCore>) -> Arc<MobileSync> {
         Self::with_parts(user_dir, state_dir, core, Box::new(NetFactory))
     }
 
-    /// 可替换存储后端（测试用内存后端）。
+    /// 可替换存储后端（测试用内存后端）。目录要求同 [`Self::new`]：`state_dir` 不得位于 `user_dir` 之内。
     pub fn with_parts(
         user_dir: &Path,
         state_dir: &Path,

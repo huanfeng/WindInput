@@ -41,9 +41,23 @@ fn settings_json() -> String {
     .to_string()
 }
 
+/// 本地目录放在用户目录之外，与 Android 的 `localRoot` / `userRoot` 布局一致（见 [`MobileSync::with_parts`]）。
+fn local_dir(user: &Path) -> PathBuf {
+    let mut s = user.as_os_str().to_os_string();
+    s.push("_local");
+    PathBuf::from(s)
+}
+
+/// 删掉测试的用户目录与它的本地目录。
+fn cleanup(user: &Path) {
+    let _ = std::fs::remove_dir_all(local_dir(user));
+    let _ = std::fs::remove_dir_all(user);
+}
+
 fn mobile(tag: &str, remote: &MemBackend) -> (Arc<MobileSync>, Arc<MobileCore>, PathBuf) {
     let (core, user) = core(tag);
-    let state = user.join("_state");
+    let state = local_dir(&user);
+    let _ = std::fs::remove_dir_all(&state);
     let sync = MobileSync::with_parts(
         &user,
         &state,
@@ -156,7 +170,7 @@ fn desktop_dict_reaches_mobile_core_and_config_stays_apart() {
         "桌面的 config.toml 不得落到手机"
     );
     sync.shutdown();
-    let _ = std::fs::remove_dir_all(user);
+    cleanup(&user);
 }
 
 #[test]
@@ -176,7 +190,7 @@ fn mobile_config_is_not_applied_on_desktop() {
         "别的类别的条目不进本机状态"
     );
     sync.shutdown();
-    let _ = std::fs::remove_dir_all(user);
+    cleanup(&user);
 }
 
 #[test]
@@ -197,7 +211,7 @@ fn sync_if_due_respects_interval_and_configuration() {
     sync.shutdown();
     assert!(!sync.sync_if_due(0), "关闭后不再起");
     assert!(sync.command("sync_now", "").is_err());
-    let _ = std::fs::remove_dir_all(user);
+    cleanup(&user);
 }
 
 #[test]
@@ -212,10 +226,10 @@ fn settings_round_trip_and_validation() {
     let got: Value = serde_json::from_str(&sync.get_settings()).unwrap();
     assert_eq!(got["settings"]["enabled"], true);
     assert_eq!(got["has_secret"], false);
-    assert!(user.join("_state/sync/settings.toml").is_file());
+    assert!(local_dir(&user).join("sync/settings.toml").is_file());
     assert!(sync.command("nope", "").is_err());
     sync.shutdown();
-    let _ = std::fs::remove_dir_all(user);
+    cleanup(&user);
 }
 
 /// 粘贴密钥加入后不自动确认身份，确认前不同步；不能恢复为桌面设备。
@@ -251,7 +265,7 @@ fn joined_mobile_waits_for_identity_and_cannot_claim_desktop() {
     wait("已确认", &sync, |v| v["needs_identity"] == false);
     assert!(sync.sync_if_due(0));
     sync.shutdown();
-    let _ = std::fs::remove_dir_all(user);
+    cleanup(&user);
 }
 
 /// 手机没有软键盘文件重载路径与扩展：这几个请求是成功的空操作（同步写入扩展 / 软键盘文件时会发）。
@@ -269,7 +283,7 @@ fn desktop_only_reload_requests_are_noops_on_mobile() {
     ] {
         assert!(link.request(m, json!({ "ids": ["k"] })).is_ok(), "{m}");
     }
-    let _ = std::fs::remove_dir_all(user);
+    cleanup(&user);
 }
 
 /// 认领另一台设备时同步进程发 `stats.replaceMonths`：本机统计换成给定月表，累计随之重算。
@@ -291,7 +305,7 @@ fn replace_months_request_swaps_stats() {
         link.request("stats.replaceMonths", json!({ "months": { "2020-1": "" } }))
             .is_err()
     );
-    let _ = std::fs::remove_dir_all(user);
+    cleanup(&user);
 }
 
 /// Runner 已结束的轮次数（状态帧里有，门面 JSON 不透出）。
@@ -363,11 +377,15 @@ fn learned_data_syncs_between_phones_and_popup_round_is_not_forced() {
     manual_round(&a);
     manual_round(&b);
     assert_eq!(freq(&core_b), 6, "手动立即同步强制交换");
+    // 引擎状态与同步私有状态都不该当用户文件互传：两机首次配对也不出冲突副本
+    for s in [&a, &b] {
+        assert_eq!(phase(s)["conflicts"], 0, "{}", s.status());
+    }
 
     a.shutdown();
     b.shutdown();
-    let _ = std::fs::remove_dir_all(user_a);
-    let _ = std::fs::remove_dir_all(user_b);
+    cleanup(&user_a);
+    cleanup(&user_b);
 }
 
 /// 门面状态与桌面 `sync.status` 同形：已移除设备、空间占用与统计中/失败原因都透出，空时省略。
@@ -397,7 +415,7 @@ fn status_carries_removed_devices_and_usage() {
     assert_eq!(v["usage_busy"], true);
     assert_eq!(v["usage_error"], "断网");
     assert_eq!(v["phase"], "disabled");
-    let _ = std::fs::remove_dir_all(user);
+    cleanup(&user);
 }
 
 /// 按设备看统计：设备列表即有他机统计的设备号；`all`/`self`/设备号三种口径，未知设备报错；原接口即 `all`。
@@ -446,5 +464,38 @@ fn stats_by_device() {
         core.stats_daily_for("2020-01-05", "2020-01-05", "tablet")
             .is_err()
     );
-    let _ = std::fs::remove_dir_all(user);
+    cleanup(&user);
+}
+
+/// 撞号停止时状态是 `error`，`sync_if_due` 的阶段闸门会放行；弹出触发的 auto 不得解除这个停止态、也不起轮。
+#[test]
+fn popup_sync_does_not_clear_device_id_conflict() {
+    let remote = MemBackend::new();
+    let (sync, _core, user) = mobile("halt", &remote);
+    join(&sync, None);
+    manual_round(&sync);
+    let dev = phase(&sync)["device"].as_str().unwrap().to_string();
+    let key: Value = serde_json::from_str(&sync.command("export_key", "").unwrap()).unwrap();
+    let dek = wind_sync::Dek::from_key_string(key["key"].as_str().unwrap()).unwrap();
+    // 另一处用同一个设备号连写两代清单，本机的清单链就接不上了
+    let mut other = SyncState::new(&dev);
+    let ns = wind_sync::scope::Namespace::new(wind_sync::DeviceClass::Mobile, &dev);
+    for _ in 0..2 {
+        let mut ctx = SyncCtx::new(T0, ns.clone());
+        ctx.force = true;
+        sync_once(&remote, &mut MemLocal::new(), &mut other, &dek, &ctx).unwrap();
+    }
+    manual_round(&sync);
+    let v = phase(&sync);
+    assert_eq!(v["phase"], "error", "{v}");
+    let before = rounds(&sync);
+    assert!(sync.sync_if_due(0), "阶段闸门放行，交给 Runner 判停止态");
+    // 命令按序处理：这条回来时 auto 已处理完
+    sync.command("export_key", "").unwrap();
+    assert_eq!(phase(&sync)["phase"], "error", "停止态下 auto 不起轮");
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(rounds(&sync), before, "停止态下 auto 不起轮");
+    assert_eq!(phase(&sync)["last_error"], v["last_error"]);
+    sync.shutdown();
+    cleanup(&user);
 }
